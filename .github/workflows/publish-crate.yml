@@ -1,16 +1,18 @@
 name: Publish Crates to crates.io
 
-# Publishes three of the six workspace crates when a GitHub Release is
-# published: samyama-gpu, samyama-optimization, samyama-graph-algorithms.
+# Publishes all six workspace crates when a GitHub Release is published, in
+# dependency order (leaves first):
 #
-# samyama, samyama-sdk and samyama-cli are deliberately NOT published here.
-# crates.io names cannot be released once claimed — only yanked — and none of
-# the three have external consumers today (0 reverse dependencies on the two
-# crates that do exist; see samyama-cloud#146). samyama-gpu is not optional:
-# samyama-graph-algorithms carries a path dependency on it, and cargo resolves
-# path dependency `version`s against the real index even when the feature
-# gating them is off, so algorithms cannot be *packaged* until gpu is on the
-# registry.
+#   samyama-gpu -> samyama-graph-algorithms, samyama-optimization
+#               -> samyama -> samyama-sdk -> samyama-cli
+#
+# Until #1056 only the first three were published. The engine, the SDK and the
+# CLI were held back because `samyama` carried a *versioned* dev-dependency on
+# `samyama-sdk`, which itself depends on `samyama` — a cycle no publish order
+# satisfies. That dev-dependency is now path-only, which `cargo publish` strips
+# from the packaged manifest, so the order above exists. crates.io names cannot
+# be released once claimed — only yanked — so merging the change that added
+# them here is the decision to publish them on the next v* release.
 #
 # Why `published` and not `created`: `created` also fires for drafts, so a
 # half-written release note could ship a version. `published` is the one
@@ -36,6 +38,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Dependency order, leaves first. Every step below walks this one list, so the
+  # order is stated once. A crate may only appear after everything it depends
+  # on (normal and build dependencies; path-only dev-dependencies are stripped
+  # at packaging and do not count).
+  CRATES: samyama-gpu samyama-graph-algorithms samyama-optimization samyama samyama-sdk samyama-cli
 
 jobs:
   publish:
@@ -44,7 +51,9 @@ jobs:
     # every one of them failed this workflow. Only a v* tag is an engine release.
     if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The engine's full test suite runs before anything is uploaded (see
+    # "Test every crate"), and CI gives that suite 45 minutes on its own.
+    timeout-minutes: 120
 
     # No secret lives here — Trusted Publishing authenticates via OIDC, scoped
     # to this exact repo, workflow file and environment name. The environment
@@ -52,6 +61,10 @@ jobs:
     # matches against, and because it can still carry reviewer/wait-timer
     # protection independently of ordinary CI.
     environment: crates
+    env:
+      # Read by the tag check and by every step after it. A release is always a
+      # real upload; only a dispatch can ask for a dry run.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
     permissions:
       id-token: write   # crates-io-auth-action exchanges this for a 30-minute crates.io token
       contents: read
@@ -66,6 +79,13 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
+      # The engine now ships from here, and building it needs libclang
+      # (zstd-sys). Same list as ci.yml's test job.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake pkg-config libssl-dev clang libclang-dev
+
       # crates.io rejects a re-publish of an existing version, so the tag and
       # the manifests must agree before anything is uploaded. sdk/python lives
       # outside the cargo workspace (see `exclude` in the root Cargo.toml) and
@@ -78,7 +98,6 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
           set -euo pipefail
 
@@ -133,117 +152,93 @@ jobs:
           fi
           echo "tag $TAG matches all manifests"
 
+      # A crate that passes CI inside the workspace can still be broken for
+      # anyone who depends on it, so each crate's own tests run before
+      # anything ships. This runs before authentication so the engine's suite
+      # does not spend the 30-minute crates.io token, and in dry-run mode too,
+      # so a validate-only dispatch still catches a real test failure.
+      - name: Test every crate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for crate in $CRATES; do
+            echo "::group::test $crate"
+            cargo test -p "$crate"
+            echo "::endgroup::"
+          done
+
+      # Packages all six in one invocation and builds each .crate from its
+      # unpacked contents — exactly what crates.io will serve. Given several
+      # `-p`, cargo (>= 1.90) orders them itself and resolves each crate's
+      # workspace siblings from a local overlay of the ones it has just
+      # packaged, so this validates the whole chain before a single upload,
+      # without needing crate N-1 to be on the index first. It is also where a
+      # reintroduced cycle fails: cargo cannot order the list and the dependent
+      # crate's sibling will not resolve.
+      - name: Package and verify every crate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARGS=()
+          for crate in $CRATES; do ARGS+=(-p "$crate"); done
+          cargo package "${ARGS[@]}"
+
       # Exchanges this job's GitHub OIDC identity for a 30-minute crates.io
       # token, scoped to the crates whose trusted-publisher settings name this
       # repo + workflow file + `crates` environment. Nothing is written to
       # disk or logged; the action's post step revokes the token when the job
       # ends, so nothing outlives this run either way.
       #
-      # 30 minutes covers the 3-crate sequence with room to spare — each
-      # `cargo publish` blocks until crates.io's index confirms the upload
-      # before returning, which is the slow part, and there are only three of
-      # them. If a future crate list makes that tight, re-run this step mid-job
-      # rather than widening the token lifetime — crates.io does not offer one.
+      # Only uploads happen inside the token's lifetime: the tests and the
+      # verification builds ran above. Each `cargo publish` blocks until the
+      # index confirms the upload, so six crates is six short waits. If that
+      # ever grows tight, re-run this step mid-job rather than widening the
+      # token lifetime — crates.io does not offer one.
+      #
+      # Each crate needs its own trusted-publisher entry on crates.io, and
+      # samyama, samyama-sdk and samyama-cli do not exist there yet. If
+      # crates.io will not accept that configuration for a name that has never
+      # been published, their first upload is a maintainer's, with an API
+      # token; every release after it runs through here.
       - name: Authenticate with crates.io
         id: auth
+        if: env.DRY_RUN != 'true'
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: Publish to crates.io
+        if: env.DRY_RUN != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         shell: bash
         run: |
           set -uo pipefail
 
-          # Dependency order. samyama-graph-algorithms carries a path
-          # dependency on samyama-gpu, and cargo resolves a path dependency's
-          # `version` against the real index before it will even *package* the
-          # dependent crate — so gpu has to land first regardless of whether
-          # its feature is enabled. samyama-optimization has no such
-          # dependency; it is listed first because it is cheap and independent.
-          CRATES=(
-            samyama-gpu
-            samyama-optimization
-            samyama-graph-algorithms
-          )
+          # --no-verify: the step above already built every one of these
+          # packages from its unpacked .crate, from this same checkout in this
+          # same job. Verifying again would rebuild the engine twice more on
+          # the token's clock and prove nothing new.
+          for crate in $CRATES; do
+            echo "::group::publish $crate"
+            TMPLOG=$(mktemp)
+            cargo publish -p "$crate" --no-verify 2>&1 | tee "$TMPLOG"
+            EXIT_CODE=${PIPESTATUS[0]}
+            OUTPUT=$(cat "$TMPLOG"); rm -f "$TMPLOG"
 
-          # Three, not six. The engine (`samyama`), the Rust SDK and the CLI are
-          # absent because a dev-dependency cycle blocks their publish order
-          # (#1056) — not because they are unwanted. A reader who counts the array
-          # against the sentence below should not have to guess which is stale.
-          #
-          # For the same reason as the chaining, the dry run cannot be hoisted into
-          # a separate up-front pass over the three: crate N's dry run only resolves once
-          # crate N-1 is genuinely on the index. So each crate is validated
-          # immediately before it is uploaded, and the chain advances one at a
-          # time. cargo waits for each publish to appear on the index before
-          # returning, so no manual sleep is needed between iterations.
-          publish_crate() {
-              local CRATE=$1
-              echo "::group::$CRATE"
-
-              local TMPLOG EXIT_CODE OUTPUT
-              TMPLOG=$(mktemp)
-
-              echo "--- dry run: $CRATE"
-              cargo publish -p "$CRATE" --dry-run 2>&1 | tee "$TMPLOG"
-              EXIT_CODE=${PIPESTATUS[0]}
-              OUTPUT=$(cat "$TMPLOG")
-
-              # A dry run of an already-published version fails on the duplicate,
-              # which is a no-op for us rather than an error.
-              if [ "$EXIT_CODE" -ne 0 ]; then
-                  if echo "$OUTPUT" | grep -qE "already exists|already uploaded|is already published"; then
-                      echo "already on crates.io — skipping"
-                      rm -f "$TMPLOG"; echo "::endgroup::"; return 0
-                  fi
-                  echo "::error::dry run failed for $CRATE (exit $EXIT_CODE)"
-                  rm -f "$TMPLOG"; echo "::endgroup::"; return "$EXIT_CODE"
-              fi
-
-              # The dry run above only proves $CRATE compiles standalone — cargo
-              # resolves its dependencies from the registry for packaging, but
-              # this still runs from the workspace checkout with local path
-              # deps. A crate that passes CI inside the workspace can still be
-              # broken for anyone who actually depends on it; this is the
-              # closest check to that without unpacking the real .crate and
-              # testing it in isolation, and it is cheap enough to run on
-              # every crate before it ships. Runs in dry-run mode too, so a
-              # validate-only dispatch still catches a real test failure.
-              echo "--- test: $CRATE"
-              cargo test -p "$CRATE" 2>&1 | tee "$TMPLOG"
-              EXIT_CODE=${PIPESTATUS[0]}
-              if [ "$EXIT_CODE" -ne 0 ]; then
-                  echo "::error::tests failed for $CRATE (exit $EXIT_CODE) — refusing to publish"
-                  rm -f "$TMPLOG"; echo "::endgroup::"; return "$EXIT_CODE"
-              fi
-
-              if [ "$DRY_RUN" = "true" ]; then
-                  echo "DRY_RUN set — validated, not uploading"
-                  rm -f "$TMPLOG"; echo "::endgroup::"; return 0
-              fi
-
-              echo "--- publish: $CRATE"
-              cargo publish -p "$CRATE" 2>&1 | tee "$TMPLOG"
-              EXIT_CODE=${PIPESTATUS[0]}
-              OUTPUT=$(cat "$TMPLOG")
-              rm -f "$TMPLOG"
-
-              if [ "$EXIT_CODE" -eq 0 ]; then
-                  echo "published $CRATE"
-              elif echo "$OUTPUT" | grep -qE "already exists|already uploaded|is already published"; then
-                  echo "already on crates.io — skipping"
-              else
-                  echo "::error::failed to publish $CRATE (exit $EXIT_CODE)"
-                  echo "::endgroup::"; return "$EXIT_CODE"
-              fi
-
-              echo "::endgroup::"
-          }
-
-          for crate in "${CRATES[@]}"; do
-            publish_crate "$crate" || exit $?
+            if [ "$EXIT_CODE" -eq 0 ]; then
+              echo "published $crate"
+            elif echo "$OUTPUT" | grep -qE "already exists|already uploaded|is already published"; then
+              # A re-run after a partial release: the earlier crates are
+              # already up, which is a no-op rather than an error.
+              echo "already on crates.io — skipping"
+            else
+              echo "::error::failed to publish $crate (exit $EXIT_CODE)"
+              echo "::endgroup::"; exit "$EXIT_CODE"
+            fi
+            echo "::endgroup::"
           done
 
-          echo "all crates processed (DRY_RUN=$DRY_RUN)"
+          echo "all crates published"
+
+      - name: Dry run summary
+        if: env.DRY_RUN == 'true'
+        run: echo "DRY_RUN set — every crate tested, packaged and verified; nothing uploaded"

@@ -186,7 +186,14 @@ default-features = false
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5"
-samyama-sdk = { path = "crates/samyama-sdk", version = "1.10.0" }
+# Path only, deliberately no `version` (#1056). samyama-sdk depends on this
+# crate, so a versioned edge here is a cycle that no publish order satisfies:
+# publishing `samyama` would need `samyama-sdk` on crates.io first, and the SDK
+# needs `samyama`. `cargo publish` strips a path-only dev-dependency from the
+# packaged manifest, which breaks the loop for publication while local test,
+# bench and example builds keep using the SDK. The edge itself remains in the
+# workspace graph; moving these tests out of this crate is the full fix.
+samyama-sdk = { path = "crates/samyama-sdk" }
 http-body-util = "0.1"
 # Reads the GraphML we write back, so the tests check the file against an XML
 # parser rather than against the writer that produced it.
