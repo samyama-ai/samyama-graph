@@ -61,14 +61,33 @@ fn implemented_function_names(src: &str) -> Vec<String> {
     }
     let body = &src[open..end];
     let mut names = Vec::new();
+    // Brace depth at the start of each line, relative to the match's own
+    // brace. Only depth 1 is an arm of *this* match. A nested match inside an
+    // arm -- `toboolean`'s `"true" => ...` -- names a string it parses, not a
+    // function, and reading it put `true` and `false` into `KNOWN_FUNCTIONS`
+    // to keep this test green (#1456).
+    let mut line_depth = 0i32;
+    // An arm's pattern can span lines:
+    //     "date.truncate" | "time.truncate"
+    //     | "datetime.truncate" => {
+    // so pattern lines are gathered until the `=>`.
+    let mut pattern = String::new();
     for line in body.lines() {
-        let t = line.trim_start();
-        // An arm looks like: "a" | "b" => {   — quoted, lowercase, then `=>`.
-        let Some(arrow) = t.find("=>") else { continue };
-        let head = &t[..arrow];
-        if !head.starts_with('"') {
+        let depth_here = line_depth;
+        line_depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if depth_here != 1 {
             continue;
         }
+        let t = line.trim_start();
+        if !(t.starts_with('"') || (t.starts_with('|') && !pattern.is_empty())) {
+            pattern.clear();
+            continue;
+        }
+        pattern.push_str(t);
+        pattern.push(' ');
+        // An arm looks like: "a" | "b" => {   — quoted, lowercase, then `=>`.
+        let Some(arrow) = pattern.find("=>") else { continue };
+        let head = std::mem::take(&mut pattern)[..arrow].to_string();
         for piece in head.split('|') {
             let p = piece.trim();
             if p.len() >= 2 && p.starts_with('"') && p.ends_with('"') {
@@ -118,6 +137,37 @@ fn every_implemented_function_can_be_named_in_cypher() {
     );
 }
 
+/// `KNOWN_FUNCTIONS` is exactly the dispatcher's arms -- no more, no fewer.
+///
+/// The test above catches a function the list is missing (refused at compile
+/// time although it works). This one also catches the opposite: a name the
+/// list accepts that no scalar call can execute. About a hundred algorithm
+/// procedure names sat in the list that way, so `RETURN pagerank()` passed the
+/// compile-time check and failed only at run time (#1456).
+#[test]
+fn known_functions_is_exactly_the_dispatcher() {
+    use samyama::query::executor::operator::KNOWN_FUNCTIONS;
+    use std::collections::BTreeSet;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/query/executor/operator.rs");
+    let src = std::fs::read_to_string(&path).expect("read the dispatcher");
+    let dispatched: BTreeSet<String> = implemented_function_names(&src).into_iter().collect();
+    assert!(dispatched.len() > 50, "extracted only {} names", dispatched.len());
+    let listed: BTreeSet<String> = KNOWN_FUNCTIONS.iter().map(|s| s.to_string()).collect();
+
+    let not_dispatched: Vec<_> = listed.difference(&dispatched).collect();
+    let not_listed: Vec<_> = dispatched.difference(&listed).collect();
+    assert!(
+        not_dispatched.is_empty(),
+        "in KNOWN_FUNCTIONS but no scalar call can execute them: {not_dispatched:?}\n\
+         A procedure is reached as `CALL algo.<name>(...)` and does not belong here."
+    );
+    assert!(
+        not_listed.is_empty(),
+        "dispatched but missing from KNOWN_FUNCTIONS (refused at compile time): {not_listed:?}"
+    );
+}
+
 /// The extractor finds the names it is supposed to find.
 ///
 /// Without this, a change that broke the parsing above would make the real
@@ -128,7 +178,13 @@ fn the_extractor_actually_extracts() {
     match lowered.as_str() {
         "abs" => { }
         "duration.between" | "duration_between" => { }
-        "tostring" => { }
+        "date.truncate"
+        | "time.truncate" => { }
+        "tostring" => {
+            match x {
+                "nested" => { }
+            }
+        }
         other => { }
     }
     "#;
@@ -137,4 +193,6 @@ fn the_extractor_actually_extracts() {
     assert!(got.contains(&"duration.between".to_string()), "{got:?}");
     assert!(got.contains(&"duration_between".to_string()), "{got:?}");
     assert!(!got.contains(&"other".to_string()), "bare identifiers are not names: {got:?}");
+    assert!(got.contains(&"time.truncate".to_string()), "multi-line arm: {got:?}");
+    assert!(!got.contains(&"nested".to_string()), "a nested match's arms are not functions: {got:?}");
 }

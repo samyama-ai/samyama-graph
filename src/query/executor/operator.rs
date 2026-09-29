@@ -2582,54 +2582,37 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
 /// so over an empty graph the call never ran and the query "succeeded". A
 /// compile-time check does not depend on the data.
 ///
-/// **One list, cross-checked.** `tests/function_reachability.rs` extracts the
-/// arms straight from this file's dispatcher and asserts every one can be
-/// named in Cypher, so this list and the dispatcher cannot drift into
-/// rejecting a function that works -- which is much worse than accepting one
-/// that does not.
+/// **One list, cross-checked both ways.** `tests/function_reachability.rs`
+/// extracts the top-level arms straight from this file's dispatcher and
+/// asserts the two sets are equal, so this list cannot drift into rejecting a
+/// function that works, nor into accepting one that cannot run.
+/// `tests/unknown_function.rs` also calls every name here and fails if any
+/// reaches the dispatcher's `Unknown function` fallback.
 ///
-/// `true` and `false` are here because they are dispatcher *arms*, not because
-/// `true()` is a function anybody should write. Leaving them out made that
-/// reachability test fail, and narrowing an existing guard to keep a new check
-/// green is the wrong way round.
+/// **Only scalar functions.** Graph algorithms (`pagerank`, `wcc`, `pca`, ...)
+/// are *procedures*, reached as `CALL algo.<name>(...)` and dispatched by
+/// `AlgorithmOperator`, never by `eval_function`. They used to be listed here
+/// as well, so `RETURN pagerank()` passed this check and failed only at run
+/// time -- and over an empty graph, not at all, which is the case #947 exists
+/// to prevent (#1456). The procedure surface does not need them:
+/// `is_known_function` lets every dotted name through.
 pub const KNOWN_FUNCTIONS: &[&str] = &[
-    "abs", "acos", "adamicadar", "allshortestpaths", "articlerank", "articulationpoints",
-    "hits", "hubsandauthorities", "katz", "katzcentrality", "personalisedpagerank",
-    "personalizedpagerank", "voterank", "bellmanford", "allpairsshortestpath", "allpairs",
-    "wienerindex", "daglongestpath", "longestpath", "transitiveclosure", "bipartite",
-    "bipartitesets", "maximalmatching", "matching", "colouring", "coloring",
-    "greedycolouring", "dominatingset", "ktruss", "truss", "transitivity",
-    "globalefficiency", "squareclustering", "richclub", "richclubcoefficient",
-    "biconnectedcomponents", "biconnected", "nodesimilarity", "overlap",
-    "overlapcoefficient", "cosine", "cosinesimilarity", "effectivesize", "constraint",
-    "burtconstraint", "reciprocity",
-    "asin", "astar", "atan", "atan2", "averageneighbordegree", "averageneighbourdegree",
-    "betweenness", "betweennesscentrality", "bfs", "breadthfirstsearch", "bridges", "cdlp",
-    "ceil", "closeness", "closenesscentrality", "coalesce", "commonneighbors",
-    "commonneighbours", "components", "connectedcomponents", "corenumber", "cos", "cosh",
-    "cosine", "cot", "cycledetection", "date", "date.truncate", "datetime",
-    "datetime.fromepoch", "datetime.fromepochmillis", "datetime.truncate", "degree",
-    "degreeassortativity", "degreecentrality", "degrees", "diameter", "dijkstra",
-    "duration", "duration.between", "duration.indays", "duration.inmonths",
-    "duration.inseconds", "duration_between", "e", "eccentricity", "eigenvector",
-    "eigenvectorcentrality", "elementid", "endnode", "exists", "exp", "false", "findcycle",
-    "distance", "floor", "harmonic", "harmoniccentrality", "haslabels", "haversin", "head",
-    "hierarchy_lca", "hierarchy_rollup", "id", "isempty", "isnan", "jaccard", "kcore",
-    "keys", "l2", "labelpropagation", "labels", "last", "lcc", "left", "length",
-    "localdatetime", "localdatetime.truncate", "localtime", "localtime.truncate", "log",
-    "log10", "louvain", "ltrim", "maxflow", "modularity", "mst", "nodes", "or.solve",
-    "pagerank", "pagerank2", "pca", "percentilecont", "percentiledisc", "pi", "point",
-    "point.distance", "point.withinbbox", "prank",
-    "propagationranking", "properties", "radians", "radius", "rand", "randomuuid",
-    "randomwalk", "range", "relationships", "rels", "replace", "reverse", "right", "round",
-    "rtrim", "scc", "shortestpath", "shortestpathweighted", "sign", "sin", "sinh", "size",
-    "split", "sqrt", "startnode", "stdev", "stdevp", "substring", "subsumes",
-    "symptomexplanation", "tail", "tan", "tanh", "temporalreachability",
-    "temporalshortestpath", "time", "time.truncate", "timestamp", "toboolean",
-    "tobooleanornull", "tofloat", "tofloatornull", "toint", "tointeger", "tointegerornull",
-    "tolower", "tolowercase", "topologicalsort", "toposort", "tostring", "tostringornull",
-    "toupper", "touppercase", "trianglecount", "trim", "true", "type", "valuetype", "wcc",
-    "weightedpath", "yens",
+    "abs", "acos", "asin", "atan", "atan2", "ceil", "coalesce", "cos", "cosh", "cot",
+    "date", "date.truncate", "datetime", "datetime.fromepoch",
+    "datetime.fromepochmillis", "datetime.truncate", "degrees", "distance", "duration",
+    "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
+    "duration_between", "e", "elementid", "endnode", "exists", "exp", "floor",
+    "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id",
+    "isempty", "isnan", "keys", "labels", "last", "left", "length", "localdatetime",
+    "localdatetime.truncate", "localtime", "localtime.truncate", "log", "log10",
+    "ltrim", "nodes", "percentilecont", "percentiledisc", "pi", "point",
+    "point.distance", "point.withinbbox", "properties", "radians", "rand", "randomuuid",
+    "range", "relationships", "rels", "replace", "reverse", "right", "round", "rtrim",
+    "sign", "sin", "sinh", "size", "split", "sqrt", "startnode", "stdev", "stdevp",
+    "substring", "subsumes", "tail", "tan", "tanh", "time", "time.truncate",
+    "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint",
+    "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
+    "tostringornull", "toupper", "touppercase", "trim", "type", "valuetype",
 ];
 
 /// Is `name` a function this engine implements?

@@ -22,7 +22,9 @@
 //! typo — the one that costs a debugging session.
 
 use samyama::query::executor::operator::{is_known_function, KNOWN_FUNCTIONS};
+use samyama::graph::GraphStore;
 use samyama::query::parser::parse_query;
+use samyama::query::QueryEngine;
 
 fn refused(cypher: &str) -> bool {
     parse_query(cypher).is_err()
@@ -64,6 +66,78 @@ fn every_implemented_function_is_accepted() {
     for name in KNOWN_FUNCTIONS {
         assert!(is_known_function(name), "{name}");
         assert!(is_known_function(&name.to_uppercase()), "{name} uppercased");
+    }
+}
+
+#[test]
+fn every_accepted_function_can_actually_execute() {
+    // The other half (#1456). A name that passes the compile-time check but
+    // reaches the dispatcher's `Unknown function` fallback has the check's
+    // guarantee silently switched off: it fails only on a row that reaches the
+    // call, so over an empty graph it "succeeds". About a hundred algorithm
+    // names were in the list this way.
+    //
+    // Non-null arguments, because null short-circuits before dispatch; 0 to 3
+    // of them, because the arity guard also runs first.
+    let mut unreachable = Vec::new();
+    for name in KNOWN_FUNCTIONS {
+        for argc in 0..=3usize {
+            let args = vec!["1"; argc].join(", ");
+            let q = format!("RETURN {name}({args}) AS r");
+            let mut store = GraphStore::new();
+            if let Err(e) = QueryEngine::new().execute_mut(&q, &mut store, "default") {
+                if e.to_string().contains("Unknown function") {
+                    unreachable.push(q);
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        unreachable.is_empty(),
+        "accepted at compile time, unknown at run time: {unreachable:?}"
+    );
+}
+
+#[test]
+fn an_algorithm_name_called_as_a_function_is_refused_at_compile_time() {
+    // These are procedures, reached as `CALL algo.<name>(...)`. As scalar
+    // calls they used to pass validation and fail with "Runtime error: Unknown
+    // function" -- or, with no row to evaluate, not fail at all (#1456).
+    for name in ["pagerank", "wcc", "pca", "louvain", "shortestPath", "degree", "jaccard"] {
+        let err = parse_query(&format!("RETURN {name}() AS r"))
+            .expect_err(&format!("{name}() is not a scalar function"));
+        let text = format!("{err:?}");
+        assert!(text.contains("UnknownFunction"), "{name}: {text}");
+        assert!(text.contains(name), "{name}: {text}");
+
+        // Over an empty match nothing is evaluated -- this is the case the
+        // compile-time check exists for.
+        let mut store = GraphStore::new();
+        let q = format!("MATCH (n) RETURN {name}(n) AS r");
+        assert!(
+            QueryEngine::new().execute_mut(&q, &mut store, "default").is_err(),
+            "{q} succeeded over an empty graph"
+        );
+    }
+}
+
+#[test]
+fn the_same_names_still_work_as_procedures() {
+    // Removing them from the scalar list must not touch the procedure surface.
+    let mut store = GraphStore::new();
+    let engine = QueryEngine::new();
+    engine
+        .execute_mut("CREATE (:N)-[:R]->(:N)", &mut store, "default")
+        .expect("seed");
+    for q in [
+        "CALL algo.pageRank() YIELD node, score RETURN count(*)",
+        "CALL algo.wcc() YIELD node RETURN count(*)",
+        "CALL algo.louvain() YIELD node RETURN count(*)",
+    ] {
+        engine
+            .execute_mut(q, &mut store, "default")
+            .unwrap_or_else(|e| panic!("{q}: {e}"));
     }
 }
 
