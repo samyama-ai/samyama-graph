@@ -1,10 +1,14 @@
 {
   "suite": "CH-REGRESS",
-  "status": "fail",
+  "status": "pass",
+  "scope": [
+    "PERF-18"
+  ],
   "envelope_status": "fail",
-  "measured_at": "2026-09-28T05:16:52Z",
-  "run_id": "2026-09-28T05:16:52Z-cbb2f8e",
+  "envelope_verdict": "fail",
+  "measured_at": "2026-09-29T04:41:23Z",
+  "run_id": "2026-09-29T04:41:23Z-0cdea7f",
   "host": "vultr-voc-m-16c-128gb",
-  "engine_commit": "cbb2f8e",
+  "engine_commit": "0cdea7f",
   "note": "Compares against a stored baseline on the same host; refuses to compare across hosts."
 }
