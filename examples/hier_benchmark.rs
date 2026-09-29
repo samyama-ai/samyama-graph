@@ -25,6 +25,8 @@
 
 #[path = "../benches/hier_common/mod.rs"]
 mod hier_common;
+#[path = "../benches/hier_common/skip.rs"]
+mod skip;
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -34,6 +36,7 @@ use samyama::query::executor::record::Value;
 use samyama::query::{QueryEngine, RecordBatch};
 
 use hier_common::{HierScale, HIER_DECLARATIONS, SETUP_DECLARATIONS};
+use skip::{classify, describe_failure, parse_skip, Skip};
 
 /// One corpus entry.
 #[derive(Debug)]
@@ -48,7 +51,9 @@ struct Query {
     baseline: Option<String>,
     /// Set when the query is specified but cannot run on this engine today. The corpus
     /// keeps it — a class that silently vanished from the table would read as "covered".
-    skip: Option<String>,
+    /// The query is still run: the skip holds only while it fails with `skip.error`
+    /// (samyama-graph#444), so a skip cannot outlive the gap it describes.
+    skip: Option<Skip>,
 }
 
 fn main() {
@@ -127,9 +132,17 @@ fn main() {
     let mut uncontrolled: Vec<String> = Vec::new();
 
     let mut skipped: Vec<(&str, &str)> = Vec::new();
+    // Skips whose probe no longer fails the way they say it should: stale or mis-stated.
+    let mut broken_skips: Vec<String> = Vec::new();
     for q in &corpus {
-        if let Some(reason) = &q.skip {
-            skipped.push((q.id.as_str(), reason.as_str()));
+        if let Some(s) = &q.skip {
+            // Run it anyway. A skip is a claim about the engine; check the claim.
+            let outcome = engine.execute(&q.cypher, &indexed).map(|_| ()).map_err(|e| e.to_string());
+            let verdict = classify(s, outcome);
+            if let Some(msg) = describe_failure(&q.id, s, &verdict) {
+                broken_skips.push(msg);
+            }
+            skipped.push((q.id.as_str(), s.reason.as_str()));
             rows.push(format!("{},{},\"{}\",,,,,skipped", q.id, q.class, q.name));
             continue;
         }
@@ -362,12 +375,26 @@ fn main() {
         );
     }
 
+    if !broken_skips.is_empty() {
+        eprintln!();
+        eprintln!(
+            "[hier] {} SKIPS NO LONGER HOLD — the reported total excludes queries for a reason that is not true:",
+            broken_skips.len()
+        );
+        for b in &broken_skips {
+            eprintln!("  {b}");
+        }
+    }
+
     if !mismatches.is_empty() {
         eprintln!();
         eprintln!("[hier] {} DISAGREEMENTS — the index is wrong, not fast:", mismatches.len());
         for m in mismatches.iter().take(20) {
             eprintln!("  {m}");
         }
+        std::process::exit(1);
+    }
+    if !broken_skips.is_empty() {
         std::process::exit(1);
     }
     println!();
@@ -505,7 +532,8 @@ fn load_corpus(path: &str) -> Vec<Query> {
             name: q["name"].as_str().unwrap_or("").to_string(),
             cypher: q["cypher"].as_str().unwrap().to_string(),
             baseline: q["baseline"].as_str().map(|s| s.to_string()),
-            skip: q["skip"].as_str().map(|s| s.to_string()),
+            skip: parse_skip(q["id"].as_str().unwrap_or("?"), &q["skip"])
+                .unwrap_or_else(|e| panic!("bad corpus entry: {e}")),
         })
         .collect()
 }

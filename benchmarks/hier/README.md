@@ -54,7 +54,9 @@ Where the baseline is not simply the same query with the index off, it is one of
 2. **Traversal** — a variable-length expansion, used where the code is not a prefix
    (calendar quarters) and on the DAG axis.
 
-**Latest run: 108 / 108 agree.** 4 further queries are specified but blocked (below).
+**Latest run: 108 / 108 agree.** The 4 H9 queries also run, but read an approximate
+(HNSW) index built separately on each store, so they are reported as *uncontrolled* and
+excluded from the gate rather than counted as agreement.
 
 ## Results
 
@@ -195,9 +197,9 @@ Found while building the corpus; all pre-date ADR-035 and none are caused by it.
    `NOT (x STARTS WITH "y")` is correct. A precedence bug.
 4. **[#348] `CALL … YIELD` variables are not in scope for a following `WHERE`**
    (`Variable not found: node`); a `WHERE` directly after `YIELD` is a parse error. This
-   blocks class **H9**, hierarchy-filtered vector search. The four H9 queries are kept in
-   `queries.json` with a `skip` reason so the class stays visible rather than quietly
-   vanishing from the table.
+   blocked class **H9**, hierarchy-filtered vector search, until #439 fixed it; #443
+   enabled the four H9 queries. They had been kept with a static `skip` string that
+   nothing re-checked, so the skip outlived the gap (#444) — see *Skips expire* below.
 
 ## Corpus
 
@@ -214,8 +216,17 @@ the generator; the JSON is committed so a run needs no Python.
 | H6 | 10 | anti-subsumption and subtree set difference |
 | H7 | 10 | lowest common ancestor |
 | H8 | 8 | top-k over roll-up (roll-up in a loop) |
-| H9 | 4 | hierarchy-filtered vector search — **blocked**, see above |
+| H9 | 4 | hierarchy-filtered vector search (runs; uncontrolled, see above) |
 | H10 | 10 | temporal roll-up windows |
+
+## Skips expire
+
+A corpus entry may carry `"skip": {"reason": "...", "error": "..."}` when the engine cannot
+run it today. A skip is a probe, not a note: the runner executes the query anyway, and so
+does `cargo test --test hier_corpus_skips_expire`. If the query now **runs**, the skip is
+stale; if it fails with an error not containing `error`, the stated reason is wrong. Either
+fails the run and the test, so the reported denominator cannot silently shrink. A bare
+string `skip` is rejected at load time. The corpus currently has no skips.
 
 ## Not yet covered
 

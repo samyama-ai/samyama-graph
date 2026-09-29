@@ -25,10 +25,17 @@ Q = []
 
 
 def add(qid, cls, name, cypher, baseline=None, skip=None):
+    """`skip`, when a query cannot run today, is a probe and not a note (samyama-graph#444):
+    {"reason": "...", "error": "<substring of the engine error>"}. The runner and
+    tests/hier_corpus_skips_expire.rs execute the query anyway and fail if it runs, or if
+    it fails with a different error — so a skip expires when the engine gains the capability.
+    """
     q = {"id": qid, "class": cls, "name": name, "cypher": cypher}
     if baseline:
         q["baseline"] = baseline
     if skip:
+        assert isinstance(skip, dict) and skip.get("reason") and skip.get("error"), (
+            f"{qid}: skip must be {{'reason': ..., 'error': ...}}, not {skip!r} (#444)")
         q["skip"] = skip
     Q.append(q)
 
