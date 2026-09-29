@@ -440,6 +440,17 @@ impl CommandHandler {
             ));
         }
 
+        // Dropping a graph is a write whatever else is on the line. Checked
+        // before `drop_graph`: after it, a refusal would come too late for the disk.
+        if let Some(user) = auth {
+            if let Err(e) = user
+                .authorize_graph(&graph_name)
+                .and_then(|()| user.authorize_role(crate::auth::Role::Write))
+            {
+                return RespValue::Error(format!("ERR {e}"));
+            }
+        }
+
         // Disk first, then memory. The other order leaves a window where a
         // concurrent write is journalled against ids the drop is about to reuse.
         if let Some(ref persist_mgr) = self.persistence {
@@ -454,16 +465,6 @@ impl CommandHandler {
         // persistence: the durable half is `drop_graph` above, which removes the
         // rows outright. `clear()` journals nothing and does not need to -- one
         // journal entry per node of a dropped graph is the wrong shape for it.
-        // Dropping a graph is a write whatever else is on the line.
-        if let Some(user) = auth {
-            if let Err(e) = user
-                .authorize_graph(&graph_name)
-                .and_then(|()| user.authorize_role(crate::auth::Role::Write))
-            {
-                return RespValue::Error(format!("ERR {e}"));
-            }
-        }
-
         let mut store_guard = store.write().await;
         store_guard.clear();
         let _ = store_guard.take_write_log();

@@ -503,9 +503,19 @@ mod tests {
     /// path a write can take -- a query, a transaction, and GRAPH.DELETE.
     #[tokio::test]
     async fn a_read_credential_cannot_write_by_any_command() {
+        // With persistence, so a refused GRAPH.DELETE is shown to leave the
+        // disk alone as well as memory. The check used to sit after
+        // `drop_graph`, so the refusal came after the disk was already cleared.
+        let dir = tempfile::tempdir().unwrap();
+        let pm = Arc::new(PersistenceManager::new(dir.path()).unwrap());
         let store = Arc::new(RwLock::new(GraphStore::new()));
-        store.write().await.create_node("Keep");
-        let handler = CommandHandler::new(None);
+        let handler = CommandHandler::new(Some(Arc::clone(&pm)));
+        let mut setup = ConnTxn::default();
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:Keep)"]), &store, &mut setup, None).await;
+        assert!(!is_error(&r), "{r:?}");
+        let keep = store.read().await.get_nodes_by_label(&crate::graph::Label::new("Keep"))[0].id;
+        assert!(pm.storage().get_node("default", keep.as_u64()).unwrap().is_some(), "setup did not persist");
+
         let c = creds(&[&format!("ro:{TEST_DIGEST}:roles=read")]);
         let mut txn = ConnTxn::default();
         assert!(!is_error(&respond(&handler, &cmd(&["AUTH", "ro", "test"]), &store, &mut txn, Some(&c)).await));
@@ -524,6 +534,10 @@ mod tests {
         assert!(is_error(&r), "a write ran inside a transaction: {r:?}");
         respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, Some(&c)).await;
         assert_eq!(store.read().await.node_count(), 1, "the store changed under a read-only credential");
+        assert!(
+            pm.storage().get_node("default", keep.as_u64()).unwrap().is_some(),
+            "a refused GRAPH.DELETE still dropped the graph on disk"
+        );
     }
 
     #[tokio::test]
