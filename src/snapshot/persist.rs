@@ -30,8 +30,12 @@ fn snapshot_dir(data_path: &str) -> PathBuf {
 /// 3. Rename tmp → `default.sgsnap`.
 /// 4. Drop empty marker file `default.sgsnap.committed`, fsync.
 ///
-/// A crash between steps leaves either no marker (ignored on boot) or a
-/// fully-written file with marker (replayed on boot).
+/// The marker is never removed. Because the rename is atomic,
+/// `default.sgsnap` is always a whole file — the previous snapshot or the new
+/// one — so a marker left in place from an earlier persist still describes a
+/// whole file. A failure or crash anywhere before the rename leaves the
+/// previous committed snapshot exactly as it was (#1520); a crash between the
+/// rename and the marker on a first persist leaves no marker (ignored on boot).
 pub fn persist_snapshot(data_path: &str, bytes: &[u8]) -> std::io::Result<()> {
     let dir = snapshot_dir(data_path);
     fs::create_dir_all(&dir)?;
@@ -40,14 +44,16 @@ pub fn persist_snapshot(data_path: &str, bytes: &[u8]) -> std::io::Result<()> {
     let tmp_path = dir.join(format!("{}{}", DEFAULT_SNAPSHOT_NAME, TMP_SUFFIX));
     let marker_path = dir.join(format!("{}{}", DEFAULT_SNAPSHOT_NAME, COMMITTED_SUFFIX));
 
-    // Remove stale marker before writing so a crash mid-write can't be mistaken
-    // for a valid previous snapshot.
-    let _ = fs::remove_file(&marker_path);
-
-    {
+    let written = (|| {
         let mut f = File::create(&tmp_path)?;
         f.write_all(bytes)?;
-        f.sync_all()?;
+        f.sync_all()
+    })();
+    if let Err(e) = written {
+        // Best effort: don't leave a partial tmp file behind. The committed
+        // snapshot, if any, is untouched.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
     }
     fs::rename(&tmp_path, &final_path)?;
 
@@ -56,6 +62,8 @@ pub fn persist_snapshot(data_path: &str, bytes: &[u8]) -> std::io::Result<()> {
         let f = File::create(&marker_path)?;
         f.sync_all()?;
     }
+    // Make the rename and the marker's directory entry durable.
+    File::open(&dir)?.sync_all()?;
 
     Ok(())
 }
@@ -102,6 +110,51 @@ mod tests {
         persist_snapshot(&tmp.path().to_string_lossy(), b"not-a-real-snap").unwrap();
         let dir = tmp.path().join("snapshots");
         assert!(dir.join("default.sgsnap").exists());
+        assert!(dir.join("default.sgsnap.committed").exists());
+        assert!(!dir.join("default.sgsnap.tmp").exists());
+    }
+
+    /// #1520: a persist that fails before the rename must leave the previous
+    /// committed snapshot restorable. It used to remove the marker first, so
+    /// the server booted empty from a directory holding a complete snapshot.
+    #[test]
+    fn a_failed_persist_keeps_the_last_good_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_path = tmp.path().to_string_lossy().to_string();
+
+        let mut src = GraphStore::new();
+        let a = src.create_node("Person");
+        let b = src.create_node("Person");
+        src.create_edge(a, b, "KNOWS").unwrap();
+        let mut good = Vec::new();
+        crate::snapshot::export_tenant(&src, &mut good).unwrap();
+        persist_snapshot(&data_path, &good).unwrap();
+
+        // A directory where the tmp file goes makes File::create fail with
+        // EISDIR — a write failure that also fires when the tests run as root,
+        // where a read-only file would not.
+        let dir = tmp.path().join("snapshots");
+        fs::create_dir(dir.join("default.sgsnap.tmp")).unwrap();
+        assert!(persist_snapshot(&data_path, b"never-written").is_err());
+
+        assert!(dir.join("default.sgsnap.committed").exists());
+        assert_eq!(fs::read(dir.join("default.sgsnap")).unwrap(), good);
+        let mut restored = GraphStore::new();
+        let stats = restore_persisted_snapshots(&data_path, &mut restored)
+            .unwrap()
+            .expect("the previous committed snapshot must still restore");
+        assert_eq!(stats.node_count, 2);
+        assert_eq!(stats.edge_count, 1);
+    }
+
+    #[test]
+    fn a_second_persist_replaces_the_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_path = tmp.path().to_string_lossy().to_string();
+        persist_snapshot(&data_path, b"first").unwrap();
+        persist_snapshot(&data_path, b"second").unwrap();
+        let dir = tmp.path().join("snapshots");
+        assert_eq!(fs::read(dir.join("default.sgsnap")).unwrap(), b"second");
         assert!(dir.join("default.sgsnap.committed").exists());
         assert!(!dir.join("default.sgsnap.tmp").exists());
     }
