@@ -140,7 +140,23 @@ impl RespValue {
     }
 
     /// Parse RESP value from buffer
+    ///
+    /// A frame that has not fully arrived is left in `buf` untouched, so the
+    /// next call sees it whole once the rest is read. The decoders below run on
+    /// a cursor over the bytes and `buf` is advanced only by what a complete
+    /// value (or a protocol error, as before) consumed.
     pub fn decode(buf: &mut BytesMut) -> RespResult<Option<RespValue>> {
+        let mut cursor: &[u8] = &buf[..];
+        let result = Self::decode_from(&mut cursor);
+        let consumed = buf.len() - cursor.len();
+        match &result {
+            Ok(None) | Err(RespError::Incomplete) => {}
+            Ok(Some(_)) | Err(_) => buf.advance(consumed),
+        }
+        result
+    }
+
+    fn decode_from(buf: &mut &[u8]) -> RespResult<Option<RespValue>> {
         if buf.is_empty() {
             return Ok(None);
         }
@@ -160,7 +176,7 @@ impl RespValue {
         }
     }
 
-    fn decode_simple_string(buf: &mut BytesMut) -> RespResult<Option<RespValue>> {
+    fn decode_simple_string(buf: &mut &[u8]) -> RespResult<Option<RespValue>> {
         if let Some(line) = Self::read_line(buf)? {
             let s = String::from_utf8(line[1..].to_vec())
                 .map_err(|e| RespError::InvalidEncoding(e.to_string()))?;
@@ -170,7 +186,7 @@ impl RespValue {
         }
     }
 
-    fn decode_error(buf: &mut BytesMut) -> RespResult<Option<RespValue>> {
+    fn decode_error(buf: &mut &[u8]) -> RespResult<Option<RespValue>> {
         if let Some(line) = Self::read_line(buf)? {
             let s = String::from_utf8(line[1..].to_vec())
                 .map_err(|e| RespError::InvalidEncoding(e.to_string()))?;
@@ -180,7 +196,7 @@ impl RespValue {
         }
     }
 
-    fn decode_integer(buf: &mut BytesMut) -> RespResult<Option<RespValue>> {
+    fn decode_integer(buf: &mut &[u8]) -> RespResult<Option<RespValue>> {
         if let Some(line) = Self::read_line(buf)? {
             let s = String::from_utf8(line[1..].to_vec())
                 .map_err(|e| RespError::InvalidEncoding(e.to_string()))?;
@@ -192,7 +208,7 @@ impl RespValue {
         }
     }
 
-    fn decode_bulk_string(buf: &mut BytesMut) -> RespResult<Option<RespValue>> {
+    fn decode_bulk_string(buf: &mut &[u8]) -> RespResult<Option<RespValue>> {
         // First, read the length line
         if let Some(len_line) = Self::read_line(buf)? {
             let len_str = String::from_utf8(len_line[1..].to_vec())
@@ -208,7 +224,7 @@ impl RespValue {
 
             // Check if we have enough data for the bulk string + \r\n
             if buf.len() < len + 2 {
-                // Put the length line back and wait for more data
+                // Wait for more data; `decode` leaves the frame in the buffer
                 return Err(RespError::Incomplete);
             }
 
@@ -228,7 +244,7 @@ impl RespValue {
         }
     }
 
-    fn decode_array(buf: &mut BytesMut) -> RespResult<Option<RespValue>> {
+    fn decode_array(buf: &mut &[u8]) -> RespResult<Option<RespValue>> {
         // Read array length
         if let Some(len_line) = Self::read_line(buf)? {
             let len_str = String::from_utf8(len_line[1..].to_vec())
@@ -239,7 +255,7 @@ impl RespValue {
             // Read array elements
             let mut elements = Vec::with_capacity(len);
             for _ in 0..len {
-                match Self::decode(buf)? {
+                match Self::decode_from(buf)? {
                     Some(val) => elements.push(val),
                     None => return Err(RespError::Incomplete),
                 }
@@ -251,7 +267,7 @@ impl RespValue {
         }
     }
 
-    fn decode_null(buf: &mut BytesMut) -> RespResult<Option<RespValue>> {
+    fn decode_null(buf: &mut &[u8]) -> RespResult<Option<RespValue>> {
         if let Some(line) = Self::read_line(buf)? {
             if line.len() == 1 && line[0] == b'_' {
                 Ok(Some(RespValue::Null))
@@ -266,7 +282,7 @@ impl RespValue {
     /// Decode inline command (plain text, not RESP formatted)
     /// Example: GRAPH.QUERY graphname "CREATE (n:Person {name: 'Alice'})"
     /// Converts to Array of BulkStrings for uniform handling
-    fn decode_inline_command(buf: &mut BytesMut) -> RespResult<Option<RespValue>> {
+    fn decode_inline_command(buf: &mut &[u8]) -> RespResult<Option<RespValue>> {
         if let Some(line) = Self::read_line(buf)? {
             let line_str = String::from_utf8(line)
                 .map_err(|e| RespError::InvalidEncoding(e.to_string()))?;
@@ -343,7 +359,7 @@ impl RespValue {
     }
 
     /// Read a CRLF-terminated line from the buffer
-    fn read_line(buf: &mut BytesMut) -> RespResult<Option<Vec<u8>>> {
+    fn read_line(buf: &mut &[u8]) -> RespResult<Option<Vec<u8>>> {
         // Find \r\n
         if let Some(pos) = buf.windows(2).position(|w| w == b"\r\n") {
             let line = buf[..pos].to_vec();
@@ -1267,13 +1283,21 @@ mod tests {
     }
 
     /// A command split across two TCP reads must decode as the command once
-    /// the rest arrives. `decode_array` consumes the `*1` header and
-    /// `decode_bulk_string` the `$4` length line before finding the payload
-    /// short, then return `Incomplete` without putting them back -- so the
-    /// server's next attempt parses `PING\r\n` as an inline command, and a
-    /// longer split frame (`$5\r\nhello`) turns into garbage.
+    /// the rest arrives. `decode` used to consume the `*N` header and `$N`
+    /// length line before finding the payload short, so the next attempt
+    /// parsed the remainder as an inline command (#1566).
     #[test]
-    #[ignore = "bug: RespValue::decode consumes the header of an incomplete array/bulk frame, so a frame split across reads is misparsed"]
+    fn a_protocol_error_still_consumes_the_bad_line() {
+        // Otherwise the server would decode the same bad bytes on every read.
+        let mut buf = BytesMut::from(&b":nope\r\n+OK\r\n"[..]);
+        assert!(RespValue::decode(&mut buf).is_err());
+        assert_eq!(
+            RespValue::decode(&mut buf).unwrap(),
+            Some(RespValue::SimpleString("OK".into()))
+        );
+    }
+
+    #[test]
     fn an_incomplete_frame_is_left_in_the_buffer_until_it_is_complete() {
         let mut buf = BytesMut::from(&b"*2\r\n$4\r\nECHO\r\n$5\r\nhel"[..]);
         let first = RespValue::decode(&mut buf);

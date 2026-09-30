@@ -616,7 +616,37 @@ impl CommandHandler {
                     crate::graph::PropertyValue::Boolean(b) => {
                         RespValue::BulkString(Some(b.to_string().into_bytes()))
                     }
-                    _ => RespValue::BulkString(Some(format!("{:?}", prop).into_bytes())),
+                    // Lists and maps are RESP arrays, as `Value::List`/`Value::Map`
+                    // are, not Rust debug text (#1567). A map's keys are sorted:
+                    // it is a `HashMap`, and the reply must not depend on its order.
+                    crate::graph::PropertyValue::Array(items) => RespValue::Array(
+                        items
+                            .iter()
+                            .map(|p| self.format_value(&Value::Property(p.clone())))
+                            .collect(),
+                    ),
+                    crate::graph::PropertyValue::Map(entries) => {
+                        let mut keys: Vec<&String> = entries.keys().collect();
+                        keys.sort();
+                        RespValue::Array(
+                            keys.into_iter()
+                                .flat_map(|k| {
+                                    [
+                                        RespValue::BulkString(Some(k.clone().into_bytes())),
+                                        self.format_value(&Value::Property(entries[k].clone())),
+                                    ]
+                                })
+                                .collect(),
+                        )
+                    }
+                    crate::graph::PropertyValue::Vector(v) => RespValue::Array(
+                        v.iter()
+                            .map(|f| RespValue::BulkString(Some(f.to_string().into_bytes())))
+                            .collect(),
+                    ),
+                    crate::graph::PropertyValue::Null => RespValue::Null,
+                    // Temporal values and durations in their Cypher form.
+                    _ => RespValue::BulkString(Some(prop.to_string().into_bytes())),
                 }
             }
             Value::Path { nodes, edges } => {
@@ -1887,11 +1917,10 @@ mod tests {
         }
 
         /// A list or map *literal* reaches `format_value` as
-        /// `Value::Property(PropertyValue::Array/Map)`, not `Value::List/Map`,
-        /// and falls through to the `{:?}` arm, so the client receives Rust
-        /// debug text such as `Array([Integer(1), Integer(2)])`.
+        /// `Value::Property(PropertyValue::Array/Map)`, not `Value::List/Map`.
+        /// It used to fall through to a `{:?}` arm, so the client received Rust
+        /// debug text such as `Array([Integer(1), Integer(2)])` (#1567).
         #[tokio::test]
-        #[ignore = "bug: GRAPH.QUERY returns list/map literals as Rust Debug strings (\"Array([Integer(1), ...])\") instead of RESP arrays"]
         async fn a_query_returning_a_map_and_list_round_trips_through_resp() {
             let handler = CommandHandler::new(None);
             let r = handler
