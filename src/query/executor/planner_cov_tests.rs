@@ -1424,6 +1424,286 @@ fn triangles_and_co_neighbours() {
     assert_eq!(ints(&b, "c"), vec![1]);
 }
 
+#[test]
+fn shortest_path_targets_are_anchored_by_id_index_or_inline_property() {
+    let mut s = people();
+    let id_d = ints(&read(&s, "MATCH (p:Person {name: 'D'}) RETURN id(p) AS i"), "i")[0];
+    let query = format!(
+        "MATCH p = shortestPath((a:Person {{name: 'A'}})-[:KNOWS*]->(d:Person)) WHERE id(d) = {id_d} RETURN length(p) AS len"
+    );
+    assert_eq!(ints(&read(&s, &query), "len"), vec![2]);
+    // No index yet: the inline target property is a filter over a label scan.
+    let b = read(&s, "MATCH p = shortestPath((a:Person {name: 'A'})-[:KNOWS*]->(d:Person {name: 'D'})) RETURN length(p) AS len");
+    assert_eq!(ints(&b, "len"), vec![2]);
+    run(&mut s, "CREATE INDEX ON :Person(name)");
+    let b = read(&s, "MATCH p = shortestPath((a:Person {name: 'A'})-[:KNOWS*]->(d:Person)) WHERE d.name = 'D' RETURN length(p) AS len");
+    assert_eq!(ints(&b, "len"), vec![2]);
+    let b = read(&s, "MATCH p = shortestPath((a:Person {name: 'A'})-[:KNOWS*]->(d:Person {name: 'D'})) RETURN length(p) AS len");
+    assert_eq!(ints(&b, "len"), vec![2]);
+    let b = read(&s, "MATCH p = allShortestPaths((a:Person {name: 'B'})-[:KNOWS*]-(d:Person {name: 'A'})) RETURN length(p) AS len");
+    assert_eq!(ints(&b, "len"), vec![1]);
+    let b = read(&s, "MATCH p = shortestPath((a:Person {name: 'A'})-[*]->(d {name: 'D'})) RETURN length(p) AS len");
+    assert_eq!(ints(&b, "len"), vec![2]);
+}
+
+#[test]
+fn var_length_from_the_start_binds_relationships_and_prunes_targets() {
+    let mut s = people();
+    let b = read(&s, "MATCH (a:Person {name: 'A'})-[rs:KNOWS*1..2 {since: 2000}]->(b) RETURN b.name AS n, size(rs) AS k");
+    assert_eq!(strs(&b, "n"), vec!["B"]);
+    assert_eq!(ints(&b, "k"), vec![1]);
+    // Pinned single target, reachable within one or two hops.
+    let b = read(&s, "MATCH (a:Person)-[:KNOWS*1..2]->(d:Person) WHERE a.name = 'A' AND d.name = 'D' RETURN count(*) AS c");
+    assert_eq!(ints(&b, "c"), vec![1]);
+    // Target properties resolved to ids through a label scan, then an index.
+    let query = "MATCH (a:Person {name: 'A'})-[:KNOWS*1..3]->(b:Person {city: 'Y'}) RETURN DISTINCT b.name AS n ORDER BY n";
+    assert_eq!(strs(&read(&s, query), "n"), vec!["C", "D"]);
+    run(&mut s, "CREATE INDEX ON :Person(city)");
+    assert_eq!(strs(&read(&s, query), "n"), vec!["C", "D"]);
+    // Unlabelled target: compared by property.
+    let b = read(&s, "MATCH (a:Person {name: 'A'})-[:KNOWS*1..3]->(b {city: 'Y'}) RETURN DISTINCT b.name AS n ORDER BY n");
+    assert_eq!(strs(&b, "n"), vec!["C", "D"]);
+    // A var-length segment followed by a fixed one: edges are kept distinct.
+    let b = read(&s, "MATCH (a:Person {name: 'A'})-[r:KNOWS*1..1]->(b)-[:KNOWS]->(c) RETURN b.name AS b, c.name AS c ORDER BY b");
+    assert_eq!(strs(&b, "b"), vec!["B", "C"]);
+    assert_eq!(strs(&b, "c"), vec!["C", "D"]);
+}
+
+#[test]
+fn single_path_triangle_uses_co_neighbour_pruning() {
+    let mut s = GraphStore::new();
+    run(
+        &mut s,
+        "CREATE (a:T {n: 1}), (b:T {n: 2}), (c:T {n: 3}), (d:T {n: 4}), (a)-[:E]->(b), (b)-[:E]->(c), (c)-[:E]->(a), (b)-[:E]->(d)",
+    );
+    let b = read(&s, "MATCH (x:T {n: 1})-[:E]->(y)-[:E]->(z)-[:E]->(x) RETURN y.n AS y, z.n AS z");
+    assert_eq!(ints(&b, "y"), vec![2]);
+    assert_eq!(ints(&b, "z"), vec![3]);
+    let b = read(&s, "MATCH (x:T)-[:E]->(y)-[:E]->(z)-[:E]->(x) RETURN count(*) AS c");
+    assert_eq!(ints(&b, "c"), vec![3]);
+}
+
+#[test]
+fn predicates_on_path_variables_and_across_paths() {
+    let s = people();
+    let b = read(&s, "MATCH p = (a:Person {name: 'A'})-[:KNOWS]->(b) WHERE length(p) = 1 AND b.age > 30 AND b.city = 'Y' RETURN b.name AS n");
+    assert_eq!(strs(&b, "n"), vec!["C"]);
+    let b = read(&s, "MATCH (a:Person {name: 'A'}), (b:Person) WHERE a.age < b.age RETURN b.name AS n ORDER BY n");
+    assert_eq!(strs(&b, "n"), vec!["C", "D"]);
+    let b = read(&s, "MATCH (a:Person {name: 'A'})-[:KNOWS]->(x), (x)-[:KNOWS]->(y) WHERE y.age > a.age RETURN y.name AS n ORDER BY n");
+    assert_eq!(strs(&b, "n"), vec!["C", "D"]);
+}
+
+// ---------------------------------------------------------------------------
+// Clause pipeline (queries the by-kind grammar cannot express)
+// ---------------------------------------------------------------------------
+
+fn assert_pipeline(s: &str) {
+    assert!(q(s).needs_clause_pipeline, "expected a clause-pipeline parse: {s}");
+}
+
+#[test]
+fn pipeline_prefix_with_where_and_two_unwinds() {
+    let mut s = people();
+    let query = "MATCH (p:Person) WHERE p.age > 30 UNWIND [1, 2] AS k UNWIND [10] AS j CREATE (z:Z {v: k + j}) WITH count(z) AS made RETURN made";
+    assert_pipeline(query);
+    assert_eq!(ints(&run(&mut s, query), "made"), vec![4]);
+    assert_eq!(sorted_ints(&read(&s, "MATCH (z:Z) RETURN z.v AS v"), "v"), vec![11, 11, 12, 12]);
+    let query = "UNWIND [1, 2] AS a UNWIND [10] AS b CREATE (:U {v: a + b}) WITH count(*) AS c RETURN c";
+    assert_pipeline(query);
+    assert_eq!(ints(&run(&mut s, query), "c"), vec![2]);
+}
+
+#[test]
+fn pipeline_prefix_binds_relationships_and_creates_edges() {
+    let mut s = people();
+    let query = "MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b) CREATE (b)-[:SEEN]->(l:Log) WITH r, b, l RETURN count(*) AS c";
+    assert_pipeline(query);
+    assert_eq!(ints(&run(&mut s, query), "c"), vec![2]);
+    assert_eq!(ints(&read(&s, "MATCH (:Person)-[:SEEN]->(l:Log) RETURN count(l) AS c"), "c"), vec![2]);
+    let query = "CREATE (a:Q {k: 1})-[r:REL]->(b:Q {k: 2}) WITH a, r, b RETURN type(r) AS t, b.k AS k";
+    assert_pipeline(query);
+    let b = run(&mut s, query);
+    assert_eq!(strs(&b, "t"), vec!["REL"]);
+    assert_eq!(ints(&b, "k"), vec![2]);
+    // Created from a bound node with an incoming relationship.
+    let query = "MATCH (e:Person {name: 'E'}) CREATE (e)<-[:POINTS]-(x:Ptr) WITH e, x RETURN count(*) AS c";
+    assert_eq!(ints(&run(&mut s, query), "c"), vec![1]);
+    assert_eq!(strs(&read(&s, "MATCH (:Ptr)-[:POINTS]->(p) RETURN p.name AS n"), "n"), vec!["E"]);
+}
+
+#[test]
+fn pipeline_match_after_a_write_joins_on_shared_variables() {
+    let mut s = people();
+    let query = "CREATE (t:T {k: 1}) WITH t OPTIONAL MATCH (t)-[:NOPE]->(x) RETURN t.k AS k, x AS x";
+    assert_pipeline(query);
+    let b = run(&mut s, query);
+    assert_eq!(ints(&b, "k"), vec![1]);
+    assert_eq!(col(&b, "x"), vec![PropertyValue::Null]);
+    let query = "CREATE (t:T {k: 2}) WITH t MATCH (t:T) RETURN t.k AS k";
+    assert_eq!(ints(&run(&mut s, query), "k"), vec![2]);
+}
+
+#[test]
+fn pipeline_call_merge_unwind_and_set_labels() {
+    let mut s = people();
+    let query = "CREATE (t:T) WITH t CALL db.labels() YIELD label RETURN count(*) AS c";
+    assert_pipeline(query);
+    // Labels: Person and T.
+    assert_eq!(ints(&run(&mut s, query), "c"), vec![2]);
+    let query = "CREATE (t:T2) WITH t CALL db.labels() YIELD label AS t RETURN count(*) AS c";
+    assert_eq!(ints(&run(&mut s, query), "c"), vec![0], "a node never equals a label name");
+
+    let query = "CREATE (t:T {k: 9}) WITH t MERGE (m:M {k: 1}) ON CREATE SET m.c = 1, m:Fresh ON MATCH SET m.c = 2, m:Seen WITH m RETURN m.c AS c";
+    assert_pipeline(query);
+    assert_eq!(ints(&run(&mut s, query), "c"), vec![1]);
+    assert_eq!(ints(&run(&mut s, query), "c"), vec![2]);
+    assert_eq!(ints(&read(&s, "MATCH (m:M:Fresh:Seen) RETURN count(m) AS c"), "c"), vec![1]);
+
+    let query = "CREATE (t:T) WITH t MERGE p = (x:MP {k: 1})-[:R]->(y:MP {k: 2}) WITH p RETURN length(p) AS len";
+    assert_eq!(ints(&run(&mut s, query), "len"), vec![1]);
+
+    let query = "CREATE (t:T) WITH t UNWIND [1, 2, 3] AS x RETURN sum(x) AS total";
+    assert_eq!(ints(&run(&mut s, query), "total"), vec![6]);
+
+    let query = "CREATE (t:Tag {k: 1}) WITH t SET t:Extra, t.z = 5 WITH t RETURN t.z AS z";
+    assert_eq!(ints(&run(&mut s, query), "z"), vec![5]);
+    assert_eq!(ints(&read(&s, "MATCH (t:Tag:Extra) RETURN count(t) AS c"), "c"), vec![1]);
+}
+
+#[test]
+fn pipeline_remove_delete_and_return_shapes() {
+    let mut s = GraphStore::new();
+    let query = "CREATE (t:R1:R2 {k: 1, j: 2}) WITH t REMOVE t.k, t:R2 WITH t RETURN t.k AS k, t.j AS j";
+    assert_pipeline(query);
+    let b = run(&mut s, query);
+    assert_eq!(col(&b, "k"), vec![PropertyValue::Null]);
+    assert_eq!(ints(&b, "j"), vec![2]);
+    assert_eq!(ints(&read(&s, "MATCH (t:R2) RETURN count(t) AS c"), "c"), vec![0]);
+
+    let query = "CREATE (t:Tmp) WITH t DELETE t WITH count(*) AS c RETURN c";
+    assert_pipeline(query);
+    assert_eq!(ints(&run(&mut s, query), "c"), vec![1]);
+    assert_eq!(ints(&read(&s, "MATCH (t:Tmp) RETURN count(t) AS c"), "c"), vec![0]);
+
+    let query = "CREATE (t:X {k: 1}) WITH t UNWIND [3, 1, 2, 3] AS x RETURN x ORDER BY x DESC SKIP 1 LIMIT 2";
+    assert_eq!(ints(&run(&mut s, query), "x"), vec![3, 2]);
+    let query = "CREATE (t:X {k: 1}) WITH t UNWIND [3, 1, 2, 3] AS x RETURN x % 2 AS parity, count(*) AS c ORDER BY parity";
+    let b = run(&mut s, query);
+    assert_eq!(ints(&b, "parity"), vec![0, 1]);
+    assert_eq!(ints(&b, "c"), vec![1, 3]);
+    let query = "CREATE (t:X {k: 1}) WITH t UNWIND [3, 1, 3] AS x RETURN DISTINCT x ORDER BY x";
+    assert_eq!(ints(&run(&mut s, query), "x"), vec![1, 3]);
+    let query = "CREATE (t:X {k: 7}) WITH t RETURN t.k ORDER BY t.k";
+    let b = run(&mut s, query);
+    assert_eq!(b.columns, vec!["t.k".to_string()]);
+}
+
+#[test]
+fn pipeline_load_csv_plans_in_either_position() {
+    let s = GraphStore::new();
+    let query = "LOAD CSV FROM 'x.csv' AS row CREATE (:N {v: row[0]}) WITH row RETURN count(*) AS c";
+    assert_pipeline(query);
+    let plan = plan_of(&s, query);
+    assert!(plan.is_write);
+    assert_eq!(plan.output_columns, vec!["c".to_string()]);
+    let plan = plan_of(&s, "CREATE (t:T) WITH t LOAD CSV FROM 'x.csv' AS row RETURN count(*) AS c");
+    assert!(op_names(&plan).contains(&"LoadCsv".to_string()), "{:?}", op_names(&plan));
+    assert!(plan.is_write);
+}
+
+#[test]
+fn pipeline_foreach_is_refused_with_the_query_shape() {
+    let s = GraphStore::new();
+    // The parser already refuses this order; the planner refuses it too.
+    let e = parse_query("CREATE (t:T) WITH t FOREACH (i IN [1] | SET t.k = i) WITH t RETURN t").unwrap_err();
+    assert!(format!("{e:?}").contains("FOREACH"), "{e:?}");
+    let mut query = q("CREATE (t:T) WITH t RETURN t");
+    query.clauses = vec![
+        Clause::Create(q("CREATE (t:T) RETURN t").create_clause.unwrap()),
+        Clause::Foreach(q("FOREACH (i IN [1] | CREATE (:F))").foreach_clause.unwrap()),
+    ];
+    query.needs_clause_pipeline = true;
+    let e = QueryPlanner::new().plan(&query, &s).err().unwrap().to_string();
+    assert!(e.contains("is not yet supported in this clause position") && e.contains("FOREACH"), "{e}");
+}
+
+#[test]
+fn with_where_splits_conjuncts_around_the_barrier() {
+    let s = GraphStore::new();
+    let b = read(
+        &s,
+        "UNWIND [0, 1, 2] AS i UNWIND [0, 1, 2] AS j WITH ['a', 'b', 'c'][i] AS lhs, ['a', 'b', 'c'][j] AS rhs \
+         WHERE i <> j AND i < 2 AND lhs <> 'z' RETURN count(*) AS c",
+    );
+    // Ordered pairs with i != j and i in {0, 1}: 4.
+    assert_eq!(ints(&b, "c"), vec![4]);
+}
+
+// ---------------------------------------------------------------------------
+// Writes attached to a MATCH
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_only_named_paths_and_anonymous_elements() {
+    let mut s = GraphStore::new();
+    let b = run(&mut s, "CREATE p = (a:C1)-[:R]->(:C2)<-[:S]-(c:C3) RETURN length(p) AS len");
+    assert_eq!(ints(&b, "len"), vec![2]);
+    let b = read(&s, "MATCH (x:C3)-[:S]->(y:C2) RETURN count(*) AS c");
+    assert_eq!(ints(&b, "c"), vec![1], "the <- segment points at the earlier node");
+    let b = run(&mut s, "CREATE (a:D1)-[:R]->(b:D2), (a)-[:R2]->(b) RETURN a, b");
+    assert_eq!(b.records.len(), 1);
+    assert_eq!(ints(&read(&s, "MATCH (a:D1)-[r]->(b:D2) RETURN count(r) AS c"), "c"), vec![2]);
+}
+
+#[test]
+fn set_labels_and_entity_items_after_match() {
+    let mut s = people();
+    run(&mut s, "MATCH (p:Person {name: 'E'}) SET p:VIP, p += {tier: 3}");
+    let b = read(&s, "MATCH (p:VIP) RETURN p.name AS n, p.tier AS t");
+    assert_eq!(strs(&b, "n"), vec!["E"]);
+    assert_eq!(ints(&b, "t"), vec![3]);
+}
+
+#[test]
+fn merge_after_match_between_bound_endpoints_binds_a_path() {
+    let mut s = people();
+    let b = run(
+        &mut s,
+        "MATCH (a:Person {name: 'D'}), (b:Person {name: 'E'}) MERGE p = (a)-[:MENTORS]->(b) RETURN length(p) AS len",
+    );
+    assert_eq!(ints(&b, "len"), vec![1]);
+    let b = run(
+        &mut s,
+        "MATCH (a:Person {name: 'D'}), (b:Person {name: 'E'}) MERGE p = (a)-[:MENTORS]->(b) RETURN length(p) AS len",
+    );
+    assert_eq!(ints(&b, "len"), vec![1]);
+    assert_eq!(ints(&read(&s, "MATCH ()-[r:MENTORS]->() RETURN count(r) AS c"), "c"), vec![1]);
+    // One endpoint unbound: a whole-pattern merge per row, with a named path.
+    let b = run(
+        &mut s,
+        "MATCH (a:Person {name: 'E'}) MERGE p = (a)-[:HAS]->(x:Badge {k: 1}) ON CREATE SET x:New RETURN length(p) AS len",
+    );
+    assert_eq!(ints(&b, "len"), vec![1]);
+}
+
+#[test]
+fn foreach_bodies_after_a_match() {
+    let mut s = people();
+    run(
+        &mut s,
+        "MATCH (p:Person {name: 'A'}) FOREACH (i IN [1, 2] | CREATE (p)-[:HAS]->(:Item {i: i}) MERGE (p)-[:TAG]->(:Tag {k: 'x'}) \
+         FOREACH (j IN [i] | SET p.last = j))",
+    );
+    assert_eq!(sorted_ints(&read(&s, "MATCH (:Person {name: 'A'})-[:HAS]->(i:Item) RETURN i.i AS i"), "i"), vec![1, 2]);
+    assert_eq!(ints(&read(&s, "MATCH (p:Person {name: 'A'}) RETURN p.last AS l"), "l"), vec![2]);
+    assert_eq!(ints(&read(&s, "MATCH (:Person {name: 'A'})-[:TAG]->(t:Tag) RETURN count(t) AS c"), "c"), vec![1]);
+    run(&mut s, "MATCH (p:Person {name: 'A'}) FOREACH (x IN [1] | REMOVE p.last)");
+    assert_eq!(col(&read(&s, "MATCH (p:Person {name: 'A'}) RETURN p.last AS l"), "l"), vec![PropertyValue::Null]);
+    run(&mut s, "MATCH (i:Item) FOREACH (x IN [1] | DETACH DELETE i)");
+    assert_eq!(ints(&read(&s, "MATCH (i:Item) RETURN count(i) AS c"), "c"), vec![0]);
+}
+
 // ---------------------------------------------------------------------------
 // Post-WITH stages
 // ---------------------------------------------------------------------------
