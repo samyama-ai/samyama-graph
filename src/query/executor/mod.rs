@@ -8036,3 +8036,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mod_cov_tests.rs"]
+mod cov_tests;

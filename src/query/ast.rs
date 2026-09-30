@@ -1333,3 +1333,7 @@ mod tests {
         assert!(matches!(lit, Expression::Literal(_)));
     }
 }
+
+#[cfg(test)]
+#[path = "ast_cov_tests.rs"]
+mod cov_tests;

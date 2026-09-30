@@ -952,3 +952,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "hierarchy_detector_cov_tests.rs"]
+mod cov_tests;

@@ -288,3 +288,7 @@ pub fn expand_stars(query: &mut Query) {
     }
     query.star_expanded_to_nothing |= empty_star;
 }
+
+#[cfg(test)]
+#[path = "star_cov_tests.rs"]
+mod cov_tests;

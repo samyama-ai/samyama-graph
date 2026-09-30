@@ -176,4 +176,34 @@ mod tests {
 
         set_import_root(None).unwrap();
     }
+
+    #[test]
+    fn every_error_explains_itself() {
+        assert!(CsvSourceError::NoImportRoot
+            .to_string()
+            .contains("--import-dir"));
+        assert_eq!(
+            CsvSourceError::UnsupportedScheme("http".into()).to_string(),
+            "LOAD CSV cannot read 'http' sources; only file:// and plain paths \
+             under the import directory are supported"
+        );
+        assert_eq!(
+            CsvSourceError::OutsideImportRoot {
+                path: "../x.csv".into(),
+                root: "/data".into()
+            }
+            .to_string(),
+            "LOAD CSV refused '../x.csv': it resolves outside the import directory '/data'"
+        );
+        assert_eq!(
+            CsvSourceError::Unreadable("a.csv".into(), "gone".into()).to_string(),
+            "LOAD CSV cannot read 'a.csv': gone"
+        );
+        assert_eq!(
+            CsvSourceError::UnreadableRoot("/nope".into(), "missing".into()).to_string(),
+            "import directory '/nope' cannot be used: missing"
+        );
+        let as_error: &dyn std::error::Error = &CsvSourceError::NoImportRoot;
+        assert!(as_error.source().is_none());
+    }
 }

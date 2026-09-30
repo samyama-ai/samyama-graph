@@ -581,3 +581,7 @@ impl PhysicalOperator for HierarchyDescendantScanOperator {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "hierarchy_ops_cov_tests.rs"]
+mod cov_tests;

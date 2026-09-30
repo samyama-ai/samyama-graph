@@ -465,3 +465,7 @@ mod tests {
         assert_eq!(got, DEFAULT_ROW_BUDGET);
     }
 }
+
+#[cfg(test)]
+#[path = "budget_cov_tests.rs"]
+mod cov_tests;

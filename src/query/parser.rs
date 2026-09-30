@@ -5067,3 +5067,7 @@ mod tests {
         assert_eq!(call.yield_items[1].alias, Some("level".to_string()));
     }
 }
+
+#[cfg(test)]
+#[path = "parser_cov_tests.rs"]
+mod cov_tests;

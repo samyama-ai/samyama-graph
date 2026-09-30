@@ -127,3 +127,7 @@ impl PhysicalOperator for AnalyzeOperator {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "analyze_ops_cov_tests.rs"]
+mod cov_tests;

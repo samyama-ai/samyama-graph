@@ -269,4 +269,19 @@ mod tests {
         // fix for those is a better message, not a guessed span.
         assert!(annotate("Type error: Add requires numeric or string", "RETURN 1 + {a: 1}").is_none());
     }
+
+    #[test]
+    fn locating_an_empty_needle_finds_nothing() {
+        assert_eq!(locate("MATCH (n) RETURN n", ""), None);
+    }
+
+    #[test]
+    fn locate_skips_matches_inside_longer_identifiers() {
+        // The first two `n`s are inside `name` and `nn`; the whole token is on line 2.
+        let q = "RETURN name, nn\nWITH n";
+        let span = locate(q, "n").unwrap();
+        assert_eq!((span.line, span.column), (2, 6));
+        assert_eq!(&q[span.offset..span.offset + span.len], "n");
+        assert_eq!(locate("RETURN name", "n"), None);
+    }
 }
