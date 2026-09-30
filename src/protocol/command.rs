@@ -1401,4 +1401,385 @@ mod tests {
         let result = handler.format_value(&value);
         assert_eq!(result, RespValue::BulkString(Some(b"hello".to_vec())));
     }
+
+    /// Edge cases of argument parsing, parameters, transactions and
+    /// authorisation that the tests above do not reach.
+    mod coverage {
+        use super::*;
+        use crate::graph::PropertyValue;
+
+        /// sha256("test"), as a credential file stores it.
+        const D: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+        fn bulk(s: &str) -> RespValue {
+            RespValue::BulkString(Some(s.as_bytes().to_vec()))
+        }
+
+        fn cmd(parts: &[&str]) -> RespValue {
+            RespValue::Array(parts.iter().map(|p| bulk(p)).collect())
+        }
+
+        fn cred(line: &str) -> crate::auth::Credential {
+            crate::auth::Credential::parse(line).unwrap().unwrap()
+        }
+
+        fn err_text(v: &RespValue) -> &str {
+            match v {
+                RespValue::Error(e) => e,
+                other => panic!("expected an error, got {other:?}"),
+            }
+        }
+
+        fn store() -> Arc<RwLock<GraphStore>> {
+            Arc::new(RwLock::new(GraphStore::new()))
+        }
+
+        #[tokio::test]
+        async fn a_handler_built_with_shared_tenants_lists_them() {
+            let tm = Arc::new(TenantManager::new());
+            let handler = CommandHandler::new_with_tenants(None, Arc::clone(&tm));
+            assert!(Arc::ptr_eq(&handler.tenant_manager(), &tm));
+            tm.create_tenant("zeta".into(), "Zeta".into(), None).unwrap();
+            tm.create_tenant("alpha".into(), "Alpha".into(), None).unwrap();
+            let r = handler.handle_command(&cmd(&["GRAPH.LIST"]), &store(), None).await;
+            assert_eq!(
+                r,
+                RespValue::Array(vec![bulk("alpha"), bulk("default"), bulk("zeta")]),
+                "sorted, and including the tenants created on the shared registry"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_persistent_handler_shares_the_persistence_tenant_registry() {
+            let dir = tempfile::tempdir().unwrap();
+            let pm = Arc::new(PersistenceManager::new(dir.path()).unwrap());
+            let handler = CommandHandler::new(Some(Arc::clone(&pm)));
+            assert!(Arc::ptr_eq(&handler.tenant_manager(), &pm.tenants_arc()));
+            let default = CommandHandler::default();
+            assert!(!Arc::ptr_eq(&default.tenant_manager(), &pm.tenants_arc()));
+        }
+
+        #[test]
+        fn begin_twice_and_rollback_or_commit_with_none_open_are_errors() {
+            let handler = CommandHandler::new(None);
+            let mut s = GraphStore::new();
+            assert!(matches!(handler.begin_transaction_on(&mut s), RespValue::Integer(_)));
+            assert!(err_text(&handler.begin_transaction_on(&mut s)).starts_with("ERR "));
+            assert_eq!(
+                handler.rollback_transaction_on(&mut s),
+                RespValue::SimpleString("OK".into())
+            );
+            assert!(err_text(&handler.rollback_transaction_on(&mut s)).starts_with("ERR "));
+            assert!(err_text(&handler.commit_transaction_on(&mut s)).starts_with("ERR "));
+        }
+
+        #[test]
+        fn a_persistent_transaction_commits_through_the_persistence_manager() {
+            let dir = tempfile::tempdir().unwrap();
+            let pm = Arc::new(PersistenceManager::new(dir.path()).unwrap());
+            let handler = CommandHandler::new(Some(Arc::clone(&pm)));
+            let mut s = GraphStore::new();
+            assert!(matches!(handler.begin_transaction_on(&mut s), RespValue::Integer(_)));
+            let r = handler.query_in_transaction(
+                &[bulk("GRAPH.QUERY"), bulk("default"), bulk("CREATE (:Tx {v: 1})")],
+                &mut s,
+                false,
+                None,
+            );
+            assert!(matches!(r, RespValue::Array(_)), "{r:?}");
+            assert!(matches!(handler.commit_transaction_on(&mut s), RespValue::Integer(_)));
+            let (nodes, _) = pm.recover("default").unwrap();
+            assert_eq!(nodes.len(), 1, "the committed node did not reach disk");
+        }
+
+        #[test]
+        fn query_in_transaction_refuses_malformed_arguments() {
+            let handler = CommandHandler::new(None);
+            let mut s = GraphStore::new();
+            let q = |args: Vec<RespValue>, s: &mut GraphStore| {
+                handler.query_in_transaction(&args, s, false, None)
+            };
+            let r = q(vec![bulk("GRAPH.QUERY"), bulk("default")], &mut s);
+            assert!(err_text(&r).contains("wrong number of arguments"));
+            let r = q(vec![bulk("GRAPH.QUERY"), RespValue::BulkString(None), bulk("RETURN 1")], &mut s);
+            assert_eq!(err_text(&r), "ERR null graph name");
+            let r = q(vec![bulk("GRAPH.QUERY"), RespValue::Integer(1), bulk("RETURN 1")], &mut s);
+            assert!(err_text(&r).contains("Expected bulk string"), "{r:?}");
+            let r = q(vec![bulk("GRAPH.QUERY"), bulk("other"), bulk("RETURN 1")], &mut s);
+            assert!(err_text(&r).contains("graph 'other' does not exist"), "{r:?}");
+            let r = q(vec![bulk("GRAPH.QUERY"), bulk("default"), RespValue::BulkString(None)], &mut s);
+            assert_eq!(err_text(&r), "ERR null query");
+            let r = q(vec![bulk("GRAPH.QUERY"), bulk("default"), RespValue::Integer(3)], &mut s);
+            assert!(err_text(&r).contains("Expected bulk string"), "{r:?}");
+            let r = q(vec![bulk("GRAPH.QUERY"), bulk("default"), bulk("RETURN $x"), bulk("x")], &mut s);
+            assert!(err_text(&r).contains("key/value pairs"), "{r:?}");
+        }
+
+        #[test]
+        fn query_in_transaction_reads_writes_and_reports_errors() {
+            let handler = CommandHandler::new(None);
+            let mut s = GraphStore::new();
+            handler.begin_transaction_on(&mut s);
+            let w = handler.query_in_transaction(
+                &[bulk("GRAPH.QUERY"), bulk("default"), bulk("CREATE (:P {n: $n})"), bulk("n"), bulk("7")],
+                &mut s,
+                false,
+                None,
+            );
+            assert!(matches!(w, RespValue::Array(_)), "{w:?}");
+            let r = handler.query_in_transaction(
+                &[bulk("GRAPH.RO_QUERY"), bulk("default"), bulk("MATCH (p:P) RETURN p.n AS n")],
+                &mut s,
+                true,
+                None,
+            );
+            assert_eq!(
+                r,
+                RespValue::Array(vec![
+                    RespValue::Array(vec![bulk("n")]),
+                    RespValue::Array(vec![RespValue::Integer(7)]),
+                ])
+            );
+            let ro_write = handler.query_in_transaction(
+                &[bulk("GRAPH.RO_QUERY"), bulk("default"), bulk("CREATE (:P)")],
+                &mut s,
+                true,
+                None,
+            );
+            assert!(err_text(&ro_write).contains("RO_QUERY was given a write"));
+            let bad = handler.query_in_transaction(
+                &[bulk("GRAPH.QUERY"), bulk("default"), bulk("MATCH (n RETURN n")],
+                &mut s,
+                false,
+                None,
+            );
+            assert!(err_text(&bad).starts_with("ERR "));
+        }
+
+        #[test]
+        fn query_in_transaction_holds_a_credential_to_its_tenant() {
+            let handler = CommandHandler::new(None);
+            let mut s = GraphStore::new();
+            handler.begin_transaction_on(&mut s);
+            let bound = cred(&format!("b:{D}:tenant=acme"));
+            let r = handler.query_in_transaction(
+                &[bulk("GRAPH.QUERY"), bulk("default"), bulk("RETURN 1")],
+                &mut s,
+                false,
+                Some(&bound),
+            );
+            assert!(err_text(&r).contains("bound to tenant 'acme'"), "{r:?}");
+        }
+
+        #[test]
+        fn parameters_must_come_in_pairs_and_be_used() {
+            let one = CommandHandler::params_from_args("RETURN $a", &[bulk("a")]).unwrap_err();
+            assert!(one.contains("got 1 trailing argument after"), "{one}");
+            let three =
+                CommandHandler::params_from_args("RETURN $a", &[bulk("a"), bulk("1"), bulk("b")])
+                    .unwrap_err();
+            assert!(three.contains("got 3 trailing arguments after"), "{three}");
+            let unused =
+                CommandHandler::params_from_args("RETURN 1", &[bulk("a"), bulk("1")]).unwrap_err();
+            assert!(unused.contains('a'), "{unused}");
+        }
+
+        #[test]
+        fn parameter_names_must_be_strings_and_null_values_bind_null() {
+            let e = CommandHandler::params_from_args(
+                "RETURN $a",
+                &[RespValue::BulkString(None), bulk("1")],
+            )
+            .unwrap_err();
+            assert_eq!(e, "null parameter name");
+            let e = CommandHandler::params_from_args("RETURN $a", &[RespValue::Integer(1), bulk("1")])
+                .unwrap_err();
+            assert!(e.contains("Expected bulk string"), "{e}");
+            let e = CommandHandler::params_from_args("RETURN $a", &[bulk("a"), RespValue::Integer(1)])
+                .unwrap_err();
+            assert!(e.contains("Expected bulk string"), "{e}");
+            let p = CommandHandler::params_from_args("RETURN $a", &[bulk("a"), RespValue::BulkString(None)])
+                .unwrap();
+            assert_eq!(p.get("a"), Some(&PropertyValue::Null));
+        }
+
+        #[tokio::test]
+        async fn a_bound_parameter_is_a_value_not_query_text() {
+            let handler = CommandHandler::new(None);
+            let st = store();
+            let r = handler
+                .handle_command(
+                    &cmd(&["GRAPH.QUERY", "default", "RETURN $v AS v", "v", "1 RETURN 2"]),
+                    &st,
+                    None,
+                )
+                .await;
+            assert_eq!(
+                r,
+                RespValue::Array(vec![
+                    RespValue::Array(vec![bulk("v")]),
+                    RespValue::Array(vec![bulk("1 RETURN 2")]),
+                ])
+            );
+        }
+
+        #[tokio::test]
+        async fn graph_query_refuses_non_string_arguments_and_bad_params() {
+            let handler = CommandHandler::new(None);
+            let st = store();
+            let r = handler
+                .handle_command(
+                    &RespValue::Array(vec![bulk("GRAPH.QUERY"), RespValue::Integer(1), bulk("RETURN 1")]),
+                    &st,
+                    None,
+                )
+                .await;
+            assert!(err_text(&r).contains("Expected bulk string"), "{r:?}");
+            let r = handler
+                .handle_command(
+                    &RespValue::Array(vec![bulk("GRAPH.QUERY"), bulk("default"), RespValue::Integer(1)]),
+                    &st,
+                    None,
+                )
+                .await;
+            assert!(err_text(&r).contains("Expected bulk string"), "{r:?}");
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.QUERY", "default", "RETURN 1", "dangling"]), &st, None)
+                .await;
+            assert!(err_text(&r).contains("key/value pairs"), "{r:?}");
+        }
+
+        #[tokio::test]
+        async fn a_read_that_fails_to_parse_is_an_error_reply() {
+            let handler = CommandHandler::new(None);
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.QUERY", "default", "MATCH (n RETURN n"]), &store(), None)
+                .await;
+            assert!(err_text(&r).starts_with("ERR "), "{r:?}");
+        }
+
+        #[tokio::test]
+        async fn a_write_by_a_credential_bound_elsewhere_is_refused_before_it_runs() {
+            let handler = CommandHandler::new(None);
+            let st = store();
+            let bound = cred(&format!("b:{D}:tenant=acme"));
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.QUERY", "default", "CREATE (:X)"]), &st, Some(&bound))
+                .await;
+            assert!(err_text(&r).contains("bound to tenant 'acme'"), "{r:?}");
+            assert_eq!(st.read().await.node_count(), 0);
+        }
+
+        #[tokio::test]
+        async fn ro_query_refuses_a_write_and_runs_a_read() {
+            let handler = CommandHandler::new(None);
+            let st = store();
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.RO_QUERY", "default", "CREATE (:X)"]), &st, None)
+                .await;
+            assert_eq!(err_text(&r), "ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY");
+            assert_eq!(st.read().await.node_count(), 0);
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.RO_QUERY", "default", "RETURN 5 AS five"]), &st, None)
+                .await;
+            assert_eq!(
+                r,
+                RespValue::Array(vec![
+                    RespValue::Array(vec![bulk("five")]),
+                    RespValue::Array(vec![RespValue::Integer(5)]),
+                ])
+            );
+        }
+
+        #[tokio::test]
+        async fn graph_delete_refuses_foreign_and_non_string_names_and_keeps_the_data() {
+            let handler = CommandHandler::new(None);
+            let st = store();
+            st.write().await.create_node("Keep");
+            let r = handler.handle_command(&cmd(&["GRAPH.DELETE", "analytics"]), &st, None).await;
+            assert!(err_text(&r).contains("graph 'analytics' does not exist"), "{r:?}");
+            let r = handler
+                .handle_command(
+                    &RespValue::Array(vec![bulk("GRAPH.DELETE"), RespValue::Integer(0)]),
+                    &st,
+                    None,
+                )
+                .await;
+            assert!(err_text(&r).contains("Expected bulk string"), "{r:?}");
+            let bound = cred(&format!("b:{D}:tenant=acme"));
+            let r = handler.handle_command(&cmd(&["GRAPH.DELETE", "default"]), &st, Some(&bound)).await;
+            assert!(err_text(&r).contains("bound to tenant"), "{r:?}");
+            assert_eq!(st.read().await.node_count(), 1, "a refused delete cleared the store");
+        }
+
+        #[tokio::test]
+        async fn graph_delete_with_persistence_clears_memory_and_disk() {
+            let dir = tempfile::tempdir().unwrap();
+            let pm = Arc::new(PersistenceManager::new(dir.path()).unwrap());
+            let handler = CommandHandler::new(Some(Arc::clone(&pm)));
+            let st = store();
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.QUERY", "default", "CREATE (:A), (:B)"]), &st, None)
+                .await;
+            assert!(matches!(r, RespValue::Array(_)), "{r:?}");
+            assert_eq!(pm.recover("default").unwrap().0.len(), 2);
+            let admin = cred(&format!("ops:{D}"));
+            let r = handler.handle_command(&cmd(&["GRAPH.DELETE", "default"]), &st, Some(&admin)).await;
+            assert_eq!(r, RespValue::SimpleString("OK".into()));
+            assert_eq!(st.read().await.node_count(), 0);
+            assert_eq!(pm.recover("default").unwrap().0.len(), 0, "the drop did not reach disk");
+        }
+
+        #[test]
+        fn lists_and_maps_are_formatted_recursively() {
+            let handler = CommandHandler::new(None);
+            let list = Value::List(vec![
+                Value::Property(PropertyValue::Integer(1)),
+                Value::Null,
+                Value::List(vec![Value::Property(PropertyValue::String("x".into()))]),
+            ]);
+            assert_eq!(
+                handler.format_value(&list),
+                RespValue::Array(vec![
+                    RespValue::Integer(1),
+                    RespValue::Null,
+                    RespValue::Array(vec![bulk("x")]),
+                ])
+            );
+            let map = Value::Map(vec![
+                ("k".to_string(), Value::Property(PropertyValue::Boolean(true))),
+            ].into_iter().collect());
+            assert_eq!(
+                handler.format_value(&map),
+                RespValue::Array(vec![bulk("k"), bulk("true")])
+            );
+        }
+
+        /// A list or map *literal* reaches `format_value` as
+        /// `Value::Property(PropertyValue::Array/Map)`, not `Value::List/Map`,
+        /// and falls through to the `{:?}` arm, so the client receives Rust
+        /// debug text such as `Array([Integer(1), Integer(2)])`.
+        #[tokio::test]
+        #[ignore = "bug: GRAPH.QUERY returns list/map literals as Rust Debug strings (\"Array([Integer(1), ...])\") instead of RESP arrays"]
+        async fn a_query_returning_a_map_and_list_round_trips_through_resp() {
+            let handler = CommandHandler::new(None);
+            let r = handler
+                .handle_command(
+                    &cmd(&["GRAPH.QUERY", "default", "RETURN [1, 2] AS l, {a: 'b'} AS m"]),
+                    &store(),
+                    None,
+                )
+                .await;
+            assert_eq!(
+                r,
+                RespValue::Array(vec![
+                    RespValue::Array(vec![bulk("l"), bulk("m")]),
+                    RespValue::Array(vec![
+                        RespValue::Array(vec![RespValue::Integer(1), RespValue::Integer(2)]),
+                        RespValue::Array(vec![bulk("a"), bulk("b")]),
+                    ]),
+                ])
+            );
+        }
+    }
 }

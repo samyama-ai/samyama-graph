@@ -262,3 +262,7 @@ pub fn router(
         )
         .with_state(state)
 }
+
+#[cfg(test)]
+#[path = "tenants_cov_tests.rs"]
+mod cov_tests;

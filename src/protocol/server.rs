@@ -1139,4 +1139,239 @@ mod tests {
             assert_eq!(config.port, port);
         }
     }
+
+    /// Construction variants, AUTH edge cases, the accept loop and sharded
+    /// forwarding.
+    mod coverage {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        fn resp_cmd(parts: &[&str]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            cmd(parts).encode(&mut buf).unwrap();
+            buf
+        }
+
+        /// Send `bytes` on `stream` and read one reply.
+        async fn ask(stream: &mut tokio::net::TcpStream, bytes: &[u8]) -> String {
+            stream.write_all(bytes).await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).into_owned()
+        }
+
+        /// A port nothing is listening on right now.
+        fn free_port() -> u16 {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        }
+
+        async fn connect_when_up(port: u16) -> tokio::net::TcpStream {
+            for _ in 0..200 {
+                if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    return s;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("the server never started listening on {port}");
+        }
+
+        fn config(port: u16) -> ServerConfig {
+            ServerConfig {
+                address: "127.0.0.1".to_string(),
+                port,
+                max_connections: 8,
+                data_path: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn a_server_built_with_shared_tenants_exposes_that_registry() {
+            let tm = Arc::new(crate::persistence::TenantManager::new());
+            let store = Arc::new(RwLock::new(GraphStore::new()));
+            let server = RespServer::new_with_tenants(config(0), store, None, Arc::clone(&tm));
+            assert!(Arc::ptr_eq(&server.tenant_manager(), &tm));
+            assert!(server.persistence.is_none());
+            assert!(server.credentials.is_none());
+
+            let dir = tempfile::tempdir().unwrap();
+            let pm = Arc::new(PersistenceManager::new(dir.path()).unwrap());
+            let store = Arc::new(RwLock::new(GraphStore::new()));
+            let server =
+                RespServer::new_with_tenants(config(0), store, Some(Arc::clone(&pm)), Arc::clone(&tm));
+            assert!(server.persistence.is_some());
+            assert!(Arc::ptr_eq(&server.tenant_manager(), &tm), "the given registry wins");
+        }
+
+        #[tokio::test]
+        async fn auth_with_the_wrong_arity_or_no_credentials_configured_is_refused() {
+            let store = Arc::new(RwLock::new(GraphStore::new()));
+            let handler = CommandHandler::new(None);
+            let c = creds(&[&format!("svc:{TEST_DIGEST}")]);
+            let mut txn = ConnTxn::default();
+            let r = respond(&handler, &cmd(&["AUTH", "test"]), &store, &mut txn, Some(&c)).await;
+            assert_eq!(r, RespValue::Error("ERR wrong number of arguments for 'auth' command".into()));
+            let r = respond(&handler, &cmd(&["AUTH", "svc", "test"]), &store, &mut txn, None).await;
+            assert_eq!(r, RespValue::Error("ERR Client sent AUTH, but no password is set".into()));
+            assert!(txn.authenticated_as.is_none());
+        }
+
+        #[tokio::test]
+        async fn start_serves_connections_until_stopped() {
+            let port = free_port();
+            let store = Arc::new(RwLock::new(GraphStore::new()));
+            let server = RespServer::new(config(port), store);
+            let task = tokio::spawn(async move { server.start().await.map_err(|e| e.to_string()) });
+
+            let mut s = connect_when_up(port).await;
+            assert_eq!(ask(&mut s, b"PING\r\n").await, "+PONG\r\n");
+            let reply = ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "default", "RETURN 1 AS one"])).await;
+            assert_eq!(reply, "*2\r\n*1\r\n$3\r\none\r\n*1\r\n:1\r\n");
+            drop(s);
+            task.abort();
+        }
+
+        #[tokio::test]
+        async fn a_server_with_credentials_refuses_an_unauthenticated_connection() {
+            let port = free_port();
+            let store = Arc::new(RwLock::new(GraphStore::new()));
+            let server = RespServer::new(config(port), store)
+                .with_credentials(Arc::new(creds(&[&format!("svc:{TEST_DIGEST}")])));
+            let task = tokio::spawn(async move { server.start().await.map_err(|e| e.to_string()) });
+
+            let mut s = connect_when_up(port).await;
+            let r = ask(&mut s, &resp_cmd(&["GRAPH.LIST"])).await;
+            assert_eq!(r, "-NOAUTH Authentication required.\r\n");
+            assert_eq!(ask(&mut s, &resp_cmd(&["AUTH", "svc", "test"])).await, "+OK\r\n");
+            let r = ask(&mut s, &resp_cmd(&["GRAPH.LIST"])).await;
+            assert_eq!(r, "*1\r\n$7\r\ndefault\r\n");
+            drop(s);
+            task.abort();
+        }
+
+        #[tokio::test]
+        async fn an_incomplete_frame_gets_no_reply_before_the_client_closes() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let store = Arc::new(RwLock::new(GraphStore::new()));
+            let handler = Arc::new(CommandHandler::new(None));
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                handle_connection(socket, store, handler, None, None, None, None)
+                    .await
+                    .map_err(|e| e.to_string())
+            });
+
+            let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+            s.write_all(b"*1\r\n$4\r\nPI").await.unwrap();
+            s.shutdown().await.unwrap();
+            let mut rest = Vec::new();
+            s.read_to_end(&mut rest).await.unwrap();
+            assert!(rest.is_empty(), "an incomplete frame was answered: {rest:?}");
+            assert_eq!(server.await.unwrap(), Ok(()));
+        }
+
+        /// A single-shot stand-in for another node: answers whatever it is
+        /// sent with `reply` and closes.
+        async fn fake_node(reply: &'static [u8]) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap().to_string();
+            let h = tokio::spawn(async move {
+                let (mut sock, _) = l.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap();
+                sock.write_all(reply).await.unwrap();
+                buf.truncate(n);
+                buf
+            });
+            (addr, h)
+        }
+
+        async fn sharded_connection(
+            router: Arc<Router>,
+            cluster: Arc<ClusterManager>,
+        ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let store = Arc::new(RwLock::new(GraphStore::new()));
+            let handler = Arc::new(CommandHandler::new(None));
+            let proxy = Arc::new(Proxy::new());
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let _ = handle_connection(
+                    socket,
+                    store,
+                    handler,
+                    Some(router),
+                    Some(proxy),
+                    Some(cluster),
+                    None,
+                )
+                .await;
+            });
+            (tokio::net::TcpStream::connect(addr).await.unwrap(), server)
+        }
+
+        fn cluster_with(nodes: &[(u64, String)]) -> Arc<ClusterManager> {
+            let mut cfg = crate::raft::ClusterConfig::new("test".into(), 1);
+            for (id, addr) in nodes {
+                cfg.add_node(*id, addr.clone(), true);
+            }
+            Arc::new(ClusterManager::new(cfg).unwrap())
+        }
+
+        #[tokio::test]
+        async fn a_command_for_a_remote_tenant_is_forwarded_and_its_reply_relayed() {
+            let (remote_addr, remote) = fake_node(b"+FROM-REMOTE\r\n").await;
+            let router = Arc::new(Router::new(1));
+            router.update_route("remote".into(), 2);
+            let cluster = cluster_with(&[(1, "127.0.0.1:1".into()), (2, remote_addr)]);
+            let (mut s, server) = sharded_connection(router, cluster).await;
+
+            let sent = resp_cmd(&["GRAPH.QUERY", "remote", "RETURN 1"]);
+            assert_eq!(ask(&mut s, &sent).await, "+FROM-REMOTE\r\n");
+            assert_eq!(remote.await.unwrap(), sent, "the command was re-encoded unchanged");
+
+            // Not routed: a non-GRAPH command, and a tenant with no route, are local.
+            assert_eq!(ask(&mut s, &resp_cmd(&["ECHO", "remote"])).await, "$6\r\nremote\r\n");
+            let r = ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "default", "RETURN 2 AS two"])).await;
+            assert_eq!(r, "*2\r\n*1\r\n$3\r\ntwo\r\n*1\r\n:2\r\n");
+            drop(s);
+            server.await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_route_to_an_unreachable_node_is_an_error_reply() {
+            let router = Arc::new(Router::new(1));
+            router.update_route("remote".into(), 2);
+            // Nothing listens on node 2's address.
+            let dead = format!("127.0.0.1:{}", free_port());
+            let cluster = cluster_with(&[(1, "127.0.0.1:1".into()), (2, dead)]);
+            let (mut s, server) = sharded_connection(router, cluster).await;
+
+            let r = ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "remote", "RETURN 1"])).await;
+            assert!(r.starts_with("-ERR routing failed: Failed to connect"), "{r}");
+            drop(s);
+            server.await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_route_to_a_node_missing_from_the_cluster_is_served_locally() {
+            let router = Arc::new(Router::new(1));
+            router.update_route("ghost".into(), 9);
+            router.update_route("default".into(), 1);
+            let cluster = cluster_with(&[(1, "127.0.0.1:1".into())]);
+            let (mut s, server) = sharded_connection(router, cluster).await;
+
+            // Node 9 has no address, so the command is handled here -- and
+            // this build refuses the graph name.
+            let r = ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "ghost", "RETURN 1"])).await;
+            assert!(r.starts_with("-ERR this build serves a single graph"), "{r}");
+            // A tenant routed to this node is local too.
+            let r = ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "default", "RETURN 3 AS t"])).await;
+            assert_eq!(r, "*2\r\n*1\r\n$1\r\nt\r\n*1\r\n:3\r\n");
+            drop(s);
+            server.await.unwrap();
+        }
+    }
 }

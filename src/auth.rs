@@ -350,4 +350,168 @@ mod tests {
         let c = parse(&format!("svc:{D}"));
         assert!(!format!("{c:?}").contains(&D[..16]));
     }
+
+    /// An argon2 PHC string for `password`, made the way an operator would.
+    fn argon2_phc(password: &str) -> String {
+        use argon2::password_hash::{PasswordHasher, SaltString};
+        let salt = SaltString::encode_b64(b"samyama-test-salt").unwrap();
+        argon2::Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn role_names_parse_case_insensitively_and_render_capitalised() {
+        assert_eq!(Role::parse("ADMIN"), Some(Role::Admin));
+        assert_eq!(Role::parse("Read"), Some(Role::Read));
+        assert_eq!(Role::parse("wRiTe"), Some(Role::Write));
+        assert_eq!(Role::parse("owner"), None);
+        assert_eq!(Role::Read.as_str(), "Read");
+        assert_eq!(Role::Write.as_str(), "Write");
+        assert_eq!(Role::Admin.as_str(), "Admin");
+        assert!(Role::Read < Role::Write && Role::Write < Role::Admin);
+    }
+
+    #[test]
+    fn blank_lines_and_comments_are_not_credentials() {
+        assert!(Credential::parse("").is_none());
+        assert!(Credential::parse("   ").is_none());
+        assert!(Credential::parse("# ops:deadbeef").is_none());
+        assert!(Credential::parse("   # indented comment").is_none());
+    }
+
+    #[test]
+    fn a_line_without_a_colon_is_an_error_naming_the_line() {
+        let err = Credential::parse("justaname").unwrap().unwrap_err();
+        assert!(err.contains("no `:`"), "{err}");
+        assert!(err.contains("justaname"), "{err}");
+    }
+
+    #[test]
+    fn a_secret_that_is_neither_digest_nor_argon2_is_refused() {
+        let short = Credential::parse("svc:abc123").unwrap().unwrap_err();
+        assert!(short.contains("64-character"), "{short}");
+        assert!(short.contains("got 6 characters"), "{short}");
+        assert!(short.contains("\"svc\""), "names the credential: {short}");
+
+        let not_hex = "z".repeat(64);
+        let err = Credential::parse(&format!("svc:{not_hex}")).unwrap().unwrap_err();
+        assert!(err.contains("not hexadecimal"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_trailing_field_is_kept_as_part_of_the_secret() {
+        // `foo=bar` is not a key this format knows, so peeling stops there and
+        // the secret becomes `<digest>:foo=bar`, which is not a valid digest.
+        let err = Credential::parse(&format!("svc:{D}:foo=bar")).unwrap().unwrap_err();
+        assert!(err.contains("64-character"), "{err}");
+    }
+
+    #[test]
+    fn roles_list_may_hold_several_and_ignores_blank_entries() {
+        let c = parse(&format!("svc:{D}:roles=read, ,write"));
+        assert_eq!(c.roles, vec![Role::Read, Role::Write]);
+        assert!(c.has_role(Role::Write) && !c.has_role(Role::Admin));
+    }
+
+    #[test]
+    fn an_argon2_line_is_a_password_verified_with_argon2() {
+        let phc = argon2_phc("hunter2");
+        let c = parse(&format!("alice:{phc}:roles=write"));
+        assert!(matches!(c.secret, Secret::Password(_)));
+        assert_eq!(format!("{:?}", c.secret), "Password(..)");
+        assert!(!format!("{c:?}").contains(&phc), "debug leaked the hash");
+        assert!(c.verify("hunter2"));
+        assert!(!c.verify("hunter3"));
+        assert!(authenticate_user(&[c.clone()], "alice", "hunter2").is_some());
+        assert!(authenticate_user(&[c.clone()], "alice", "wrong").is_none());
+        assert!(authenticate_user(&[c], "bob", "hunter2").is_none(), "wrong user");
+    }
+
+    #[test]
+    fn a_malformed_argon2_string_never_verifies() {
+        let c = parse("alice:$argon2id$not-a-real-hash");
+        assert!(!c.verify("anything"));
+        assert!(!c.verify(""));
+    }
+
+    #[test]
+    fn a_token_debug_hides_the_digest() {
+        let c = parse(&format!("svc:{D}"));
+        assert_eq!(format!("{:?}", c.secret), "Token(..)");
+    }
+
+    #[test]
+    fn authorize_role_names_the_missing_role() {
+        let r = parse(&format!("r:{D}:roles=read"));
+        assert!(r.authorize_role(Role::Read).is_ok());
+        assert_eq!(
+            r.authorize_role(Role::Admin).unwrap_err(),
+            "unauthorized: missing Admin role"
+        );
+        let e = r.authorize_graph("other");
+        assert!(e.is_ok(), "an unbound credential may address any graph");
+        let bound = parse(&format!("b:{D}:tenant=acme"));
+        assert_eq!(
+            bound.authorize_graph("other").unwrap_err(),
+            "unauthorized: credential is bound to tenant 'acme'"
+        );
+        assert!(bound.authorize_graph("acme").is_ok());
+    }
+
+    #[test]
+    fn digests_match_only_when_every_byte_does() {
+        let a = [7u8; 32];
+        let mut b = a;
+        assert!(digests_match(&a, &b));
+        b[31] ^= 1;
+        assert!(!digests_match(&a, &b));
+        b = a;
+        b[0] = 0;
+        assert!(!digests_match(&a, &b));
+    }
+
+    #[test]
+    fn a_credential_file_is_read_line_by_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds");
+        std::fs::write(
+            &path,
+            format!("# operators\n\nops:{D}\nro:{D}:roles=read:tenant=acme\n"),
+        )
+        .unwrap();
+        let creds = read_credentials(&path).unwrap();
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds[0].name, "ops");
+        assert_eq!(creds[1].name, "ro");
+        assert_eq!(creds[1].tenant.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn a_bad_line_in_the_file_is_an_error_with_its_line_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds");
+        std::fs::write(&path, format!("ops:{D}\n# fine\nbroken\n")).unwrap();
+        let err = read_credentials(&path).unwrap_err();
+        assert!(err.ends_with(&format!("{}:3: no `:` in \"broken\"", path.display())), "{err}");
+    }
+
+    #[test]
+    fn a_file_with_no_credentials_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("creds");
+        std::fs::write(&path, "# nobody\n\n").unwrap();
+        let err = read_credentials(&path).unwrap_err();
+        assert!(err.contains("names no credentials"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_file_is_an_error_naming_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent");
+        let err = read_credentials(&path).unwrap_err();
+        assert!(err.starts_with("cannot read "), "{err}");
+        assert!(err.contains("absent"), "{err}");
+    }
 }

@@ -1087,3 +1087,7 @@ mod tests {
             "Static handler should return HTML content");
     }
 }
+
+#[cfg(test)]
+#[path = "server_cov_tests.rs"]
+mod cov_tests;
