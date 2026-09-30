@@ -173,6 +173,7 @@ pub fn export_tenant_with_compression(
         created_at: chrono::Utc::now().to_rfc3339(),
         samyama_version: crate::VERSION.to_string(),
         dropped: dropped.clone(),
+        queries: None,
     };
     let header_json = serde_json::to_string(&header)?;
     gz.write_all(header_json.as_bytes())?;
@@ -474,6 +475,68 @@ pub fn peek_header_maybe_encrypted(
         "this snapshot is encrypted and no key was given: pass --snapshot-key",
     )?;
     peek_header(encryption::DecryptingReader::new(reader, key, head)?)
+}
+
+/// Rewrite a snapshot's header to reference its query catalog, or to stop
+/// referencing one (#1154).
+///
+/// Only line 0 changes. Every later line -- index catalog, hierarchies, nodes,
+/// edges -- is copied through as decompressed bytes, so the graph a restore
+/// produces is the graph it produced before. The catalog is built *from* the
+/// snapshot, so the header cannot name it at export time; linking is the step
+/// after the catalog exists.
+///
+/// The header is edited as a JSON object rather than round-tripped through
+/// `SnapshotHeader`, so a field written by a newer build survives a relink by
+/// an older one -- the header grows additively, and a rewrite that dropped what
+/// it did not recognise would be a silent loss of its own.
+///
+/// Refuses an encrypted snapshot: re-sealing needs the key and would be a
+/// second place that writes ciphertext. Link before encrypting.
+pub fn relink_queries(
+    mut reader: impl Read,
+    writer: impl Write,
+    queries: Option<format::QueriesRef>,
+) -> Result<SnapshotHeader, Box<dyn std::error::Error>> {
+    let mut head = [0u8; 12];
+    let mut filled = 0usize;
+    while filled < head.len() {
+        match reader.read(&mut head[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    let head = &head[..filled];
+    if encryption::looks_encrypted(head) {
+        return Err("this snapshot is encrypted; link its catalog before encrypting it".into());
+    }
+
+    let mut src = BufReader::new(GzDecoder::new(head.chain(reader)));
+    let mut header_line = String::new();
+    if src.read_line(&mut header_line)? == 0 {
+        return Err("empty snapshot file: missing header".into());
+    }
+    let mut obj: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(header_line.trim_end())?;
+    let format = obj.get("format").cloned().unwrap_or_default();
+    if format != "sgsnap" {
+        return Err(format!("invalid snapshot format: expected \"sgsnap\", got {format}").into());
+    }
+    match &queries {
+        Some(q) => obj.insert("queries".to_string(), serde_json::to_value(q)?),
+        None => obj.remove("queries"),
+    };
+    let header_json = serde_json::to_string(&obj)?;
+    let header: SnapshotHeader = serde_json::from_str(&header_json)?;
+
+    let mut gz = GzEncoder::new(writer, Compression::new(DEFAULT_SNAPSHOT_COMPRESSION));
+    gz.write_all(header_json.as_bytes())?;
+    gz.write_all(b"\n")?;
+    // Reading to the end also checks the gzip trailer, so a truncated source
+    // fails here instead of being relinked into a well-formed partial file.
+    std::io::copy(&mut src, &mut gz)?;
+    gz.finish()?;
+    Ok(header)
 }
 
 /// The dedup keys a store node already carries, as `(key, normalized value)` in the order
@@ -1787,6 +1850,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             samyama_version: "0.6.1".to_string(),
             dropped: Vec::new(),
+            queries: None,
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();
@@ -1814,6 +1878,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             samyama_version: "0.6.1".to_string(),
             dropped: Vec::new(),
+            queries: None,
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();

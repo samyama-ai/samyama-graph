@@ -346,6 +346,7 @@ fn well_formed_queries_pass_validation() {
         "WITH {k: 1} AS m RETURN m.k AS k",
         // Binders in every shape the scope analysis walks.
         "CREATE (a) WITH a LOAD CSV FROM 'file:///x.csv' AS row RETURN row",
+        "CREATE (a) WITH a LOAD PARQUET FROM 'file:///x.parquet' AS row RETURN row",
         "CREATE (a) WITH a CALL db.labels() YIELD label AS l RETURN l",
         "CREATE (a) WITH a CALL db.labels() YIELD label RETURN label",
         "CREATE (a) WITH a MERGE (b:B) WITH a, b UNWIND [1] AS x RETURN a, b, x",
@@ -370,6 +371,8 @@ fn well_formed_queries_pass_validation() {
         "UNWIND [1] AS x UNWIND [2] AS y MATCH (n) DELETE n",
         "MATCH (n) WITH n UNWIND [1] AS x WITH n, x UNWIND [2] AS y MATCH (m) DELETE m",
         "LOAD CSV FROM 'file:///x.csv' AS row MATCH (n) DELETE n",
+        "LOAD PARQUET FROM 'file:///x.parquet' AS row MATCH (n) DELETE n",
+        "CREATE (a) WITH a LOAD PARQUET FROM 'file:///x.parquet' AS row UNWIND [1] AS x MERGE (m:M) DELETE m",
         "CREATE (a) WITH a LOAD CSV FROM 'file:///x.csv' AS row UNWIND [1] AS x MERGE (m:M) DELETE m",
         "WITH {key: 1} AS nodes MATCH (n) DELETE nodes.key",
         // A COUNT {} is a value and may be stored.

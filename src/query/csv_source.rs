@@ -8,6 +8,9 @@
 //! Resolution is done on the **canonical** path, after symlinks. A check on the
 //! textual path is not a check: `<root>/../../etc/passwd` and a symlink inside the
 //! root both pass it.
+//!
+//! `LOAD PARQUET` (#1098) goes through the same gate and the same [`resolve`]: one
+//! import directory, one set of rules, whichever format the file is in.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -51,30 +54,48 @@ pub enum CsvSourceError {
     UnreadableRoot(String, String),
 }
 
-impl std::fmt::Display for CsvSourceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl CsvSourceError {
+    /// The message, naming the clause that was refused — `LOAD CSV` or
+    /// `LOAD PARQUET` — so an error does not send the reader to the wrong one.
+    pub fn message_for(&self, clause: &str) -> String {
+        struct For<'a>(&'a CsvSourceError, &'a str);
+        impl std::fmt::Display for For<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt_for(self.1, f)
+            }
+        }
+        For(self, clause).to_string()
+    }
+
+    fn fmt_for(&self, clause: &str, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CsvSourceError::NoImportRoot => write!(
                 f,
-                "LOAD CSV is disabled: no import directory is configured. Start the \
+                "{clause} is disabled: no import directory is configured. Start the \
                  server with --import-dir <path> to enable it; every source must \
                  resolve inside that directory"
             ),
             CsvSourceError::UnsupportedScheme(s) => write!(
                 f,
-                "LOAD CSV cannot read '{s}' sources; only file:// and plain paths \
+                "{clause} cannot read '{s}' sources; only file:// and plain paths \
                  under the import directory are supported"
             ),
             CsvSourceError::OutsideImportRoot { path, root } => write!(
                 f,
-                "LOAD CSV refused '{path}': it resolves outside the import directory \
+                "{clause} refused '{path}': it resolves outside the import directory \
                  '{root}'"
             ),
-            CsvSourceError::Unreadable(p, e) => write!(f, "LOAD CSV cannot read '{p}': {e}"),
+            CsvSourceError::Unreadable(p, e) => write!(f, "{clause} cannot read '{p}': {e}"),
             CsvSourceError::UnreadableRoot(p, e) => {
                 write!(f, "import directory '{p}' cannot be used: {e}")
             }
         }
+    }
+}
+
+impl std::fmt::Display for CsvSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.fmt_for("LOAD CSV", f)
     }
 }
 
@@ -202,6 +223,11 @@ mod tests {
         assert_eq!(
             CsvSourceError::UnreadableRoot("/nope".into(), "missing".into()).to_string(),
             "import directory '/nope' cannot be used: missing"
+        );
+        assert_eq!(
+            CsvSourceError::Unreadable("a.parquet".into(), "gone".into())
+                .message_for("LOAD PARQUET"),
+            "LOAD PARQUET cannot read 'a.parquet': gone"
         );
         let as_error: &dyn std::error::Error = &CsvSourceError::NoImportRoot;
         assert!(as_error.source().is_none());

@@ -3664,6 +3664,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         .collect();
                     Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
                 }
+                // keys() over a map *value* -- the row `LOAD CSV WITH HEADERS` and
+                // `LOAD PARQUET` bind, or a map literal holding a variable.
+                Value::Map(m) => {
+                    let keys: Vec<PropertyValue> =
+                        m.keys().map(|k| PropertyValue::String(k.clone())).collect();
+                    Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
+                }
                 // keys() over a map property. Cypher defines keys() on maps as
                 // well as nodes and edges, and without this a map property can
                 // be stored and read whole but never enumerated (#452).
@@ -10729,8 +10736,9 @@ impl PhysicalOperator for AggregateOperator {
 /// borrows `self.aggregates` immutably across the loop and a cursor needs
 /// `&mut` to memoise its column.
 enum RowReader {
-    /// `x.prop` — the column is located once (#557).
-    Cursor(PropertyCursor),
+    /// `x.prop` — the column is located once (#557). The names are kept for a
+    /// row where `x` is a map value rather than an entity.
+    Cursor(PropertyCursor, String, String),
     /// Anything else: a literal, an arithmetic expression, a function call.
     General(Expression),
 }
@@ -10738,16 +10746,27 @@ enum RowReader {
 impl RowReader {
     fn for_expression(expr: &Expression) -> Self {
         match expr {
-            Expression::Property { variable, property } => {
-                RowReader::Cursor(PropertyCursor::new(variable.as_str(), property.as_str()))
-            }
+            Expression::Property { variable, property } => RowReader::Cursor(
+                PropertyCursor::new(variable.as_str(), property.as_str()),
+                variable.clone(),
+                property.clone(),
+            ),
             other => RowReader::General(other.clone()),
         }
     }
 
     fn read(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
         match self {
-            RowReader::Cursor(cursor) => Ok(Value::Property(cursor.read(record, store))),
+            // A map value -- the row `LOAD CSV WITH HEADERS` / `LOAD PARQUET`
+            // binds, or `WITH {k: x} AS m` -- has no column. The cursor reads
+            // it as null, so `sum(row.amount)` was silently 0; read it the way
+            // the general evaluator does instead.
+            RowReader::Cursor(_, variable, property)
+                if matches!(record.get(variable), Some(Value::Map(_))) =>
+            {
+                read_property(record, variable, property, store, true)
+            }
+            RowReader::Cursor(cursor, ..) => Ok(Value::Property(cursor.read(record, store))),
             RowReader::General(expr) => AggregateOperator::evaluate_expression(expr, record, store),
         }
     }
@@ -19412,6 +19431,200 @@ impl PhysicalOperator for LoadCsvOperator {
                 format_expression(&self.clause.source),
                 self.clause.variable,
                 if self.clause.with_headers { " (with headers)" } else { "" }
+            ),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
+/// `LOAD PARQUET` — one row per Parquet record, bound as a map of column name to
+/// value (LANG-09, #1098).
+///
+/// Streams the same way [`LoadCsvOperator`] does: it holds a
+/// `ParquetRecordBatchReader` and one decoded record batch at a time, never the
+/// file. The reader is opened lazily, on the first `next()`, behind the same import
+/// gate as `LOAD CSV` ([`crate::query::csv_source::resolve`]).
+///
+/// Cells convert exactly as `/api/import/parquet` converts them
+/// ([`crate::export::import::cell`]), so a file means the same thing through either
+/// door. A null cell binds its key to `null`. A column whose Arrow type has no
+/// `PropertyValue` is refused by name when the file is opened: the HTTP importer
+/// names such a column in its response, and a query has nowhere to put that, so
+/// the loud equivalent is an error rather than a column that silently does not
+/// arrive.
+///
+/// This adds the clause, not a speedup: ingest is bound by the single-core
+/// `&mut GraphStore` write path (#503), not by parsing, so a Parquet source loads
+/// at the same rate a CSV one does.
+pub struct LoadParquetOperator {
+    input: OperatorBox,
+    clause: crate::query::ast::LoadParquetClause,
+    /// The row this file is being read for, as in [`LoadCsvOperator`].
+    current: Option<Record>,
+    reader: Option<parquet::arrow::arrow_reader::ParquetRecordBatchReader>,
+    /// The record batch being read from, and the next row in it.
+    batch: Option<arrow::record_batch::RecordBatch>,
+    row: usize,
+    columns: Vec<String>,
+    exhausted: bool,
+}
+
+impl LoadParquetOperator {
+    pub fn new(input: OperatorBox, clause: crate::query::ast::LoadParquetClause) -> Self {
+        Self {
+            input,
+            clause,
+            current: None,
+            reader: None,
+            batch: None,
+            row: 0,
+            columns: Vec::new(),
+            exhausted: false,
+        }
+    }
+
+    fn open(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let source = match eval_expression(&self.clause.source, record, store)? {
+            Value::Property(PropertyValue::String(s)) => s,
+            other => {
+                return Err(ExecutionError::TypeError(format!(
+                    "LOAD PARQUET FROM expects a string path, got {other:?}"
+                )))
+            }
+        };
+        let path = crate::query::csv_source::resolve(&source)
+            .map_err(|e| ExecutionError::RuntimeError(e.message_for("LOAD PARQUET")))?;
+        let file = std::fs::File::open(&path).map_err(|e| {
+            ExecutionError::RuntimeError(format!(
+                "LOAD PARQUET cannot open '{}': {e}",
+                path.display()
+            ))
+        })?;
+        let not_parquet = |e: parquet::errors::ParquetError| {
+            ExecutionError::RuntimeError(format!(
+                "LOAD PARQUET cannot read '{}' as Parquet: {e}",
+                path.display()
+            ))
+        };
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(not_parquet)?;
+
+        let unsupported: Vec<String> = builder
+            .schema()
+            .fields()
+            .iter()
+            .filter(|f| !crate::export::import::converts(f.data_type()))
+            .map(|f| format!("{} ({})", f.name(), f.data_type()))
+            .collect();
+        if !unsupported.is_empty() {
+            return Err(ExecutionError::RuntimeError(format!(
+                "LOAD PARQUET cannot read '{}': no property type for column {}",
+                path.display(),
+                unsupported.join(", ")
+            )));
+        }
+
+        self.columns = builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        self.reader = Some(builder.build().map_err(not_parquet)?);
+        self.batch = None;
+        self.row = 0;
+        Ok(())
+    }
+}
+
+impl PhysicalOperator for LoadParquetOperator {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
+        drain_input_for_write(&mut self.input, store, tenant_id)?;
+        self.next(store)
+    }
+
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        loop {
+            if self.reader.is_none() {
+                if self.exhausted {
+                    return Ok(None);
+                }
+                let record = match self.input.next(store)? {
+                    Some(r) => r,
+                    None => {
+                        self.exhausted = true;
+                        return Ok(None);
+                    }
+                };
+                self.open(&record, store)?;
+                self.current = Some(record);
+            }
+
+            let has_row = matches!(&self.batch, Some(b) if self.row < b.num_rows());
+            if !has_row {
+                let reader = self.reader.as_mut().expect("opened above");
+                match reader.next() {
+                    Some(batch) => {
+                        self.batch = Some(batch.map_err(|e| {
+                            ExecutionError::RuntimeError(format!("LOAD PARQUET: {e}"))
+                        })?);
+                        self.row = 0;
+                        continue;
+                    }
+                    None => {
+                        // This file is done; the next input row, if any, opens the next one.
+                        self.reader = None;
+                        self.batch = None;
+                        self.current = None;
+                        continue;
+                    }
+                }
+            }
+
+            let batch = self.batch.as_ref().expect("checked above");
+            let mut map = std::collections::BTreeMap::new();
+            for (i, name) in self.columns.iter().enumerate() {
+                let value = match crate::export::import::cell(batch.column(i).as_ref(), self.row) {
+                    Some(v) => Value::Property(v),
+                    // Every column's type was checked on open, so `None` is a null.
+                    None => Value::Null,
+                };
+                map.insert(name.clone(), value);
+            }
+            self.row += 1;
+
+            let mut out = self.current.clone().unwrap_or_default();
+            out.bind(self.clause.variable.clone(), Value::Map(map));
+            return Ok(Some(out));
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.reader = None;
+        self.batch = None;
+        self.row = 0;
+        self.current = None;
+        self.columns.clear();
+        self.exhausted = false;
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "LoadParquet".to_string(),
+            details: format!(
+                "{} AS {}",
+                format_expression(&self.clause.source),
+                self.clause.variable
             ),
             children: vec![self.input.describe()],
         }

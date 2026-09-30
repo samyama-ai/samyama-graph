@@ -89,6 +89,9 @@ Two other routes:
 - **CSV.** `LOAD CSV WITH HEADERS FROM 'file:///…'` is supported. `http` and
   `https` are deliberately not — a server that fetches arbitrary URLs on a
   client's behalf is an SSRF primitive — so stage the file locally.
+- **Parquet.** `LOAD PARQUET FROM 'file:///…' AS row` binds each record as a
+  map of column to value, behind the same `--import-dir` gate. Not a Neo4j
+  clause; see `docs/CYPHER_COMPATIBILITY.md` for the types it reads.
 
 ## 4. What you should know before you commit
 

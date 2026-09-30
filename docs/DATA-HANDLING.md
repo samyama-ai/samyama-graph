@@ -83,9 +83,10 @@ key reaches Google's request logs by their design, not ours.
 - **The web search tool** (`src/agent/tools.rs:147`) is a stub: it returns two
   hardcoded results and makes no request. It does print the search string to
   the server's stdout.
-- **`LOAD CSV` cannot fetch a URL.** `http` and `https` are excluded from the
-  allowed schemes on purpose, so a query cannot be used to make your server
-  fetch something (`src/query/csv_source.rs:45`).
+- **`LOAD CSV` and `LOAD PARQUET` cannot fetch a URL.** `http` and `https` are
+  excluded from the allowed schemes on purpose, so a query cannot be used to
+  make your server fetch something (`src/query/csv_source.rs:114`). Both
+  clauses read only under `--import-dir`, through the same gate.
 - **Raft and sharding** talk only to the peers you configured.
 
 ## Personal identifiers in what we publish (TRUST-10)

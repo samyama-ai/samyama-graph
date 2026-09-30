@@ -308,30 +308,103 @@ fn cmd_auth_token(argv: &[String]) -> i32 {
     0
 }
 
-/// `samyama verify <snapshot.sgsnap> --queries <catalog.json>`
+/// `samyama verify <snapshot.sgsnap> [--queries <catalog>]`
 ///
 /// Restores the snapshot into a fresh store and runs its shipped catalog. Exits
 /// non-zero on any mismatch, naming the entries that failed and the probable
 /// class -- not a diff, which tells the reader what changed rather than what
 /// broke (#1157).
+///
+/// When the snapshot's header names its catalog (`catalog-build --link`,
+/// #1154), `--queries` may be left out and the named file beside the snapshot
+/// is used. Either way the catalog's SHA-256 must match the header's, or the
+/// run is refused before any query executes: a catalog from another build
+/// checks another graph's answers. A snapshot whose header names no catalog
+/// verifies exactly as before.
 fn cmd_verify(argv: &[String]) -> i32 {
     let flag = |name: &str| argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1));
     let Some(snapshot) = argv.get(2).filter(|s| !s.starts_with("--")) else {
-        eprintln!("usage: samyama verify <snapshot.sgsnap> --queries <catalog.json>");
+        eprintln!("usage: samyama verify <snapshot.sgsnap> [--queries <catalog>]");
         return 64;
     };
-    let Some(catalog_path) = flag("--queries") else {
-        eprintln!("verify needs --queries <catalog.json>");
+    if argv.iter().any(|a| a == "--queries") && flag("--queries").is_none() {
+        eprintln!("verify: --queries needs a catalog file");
         return 64;
+    }
+
+    // An explicit catalog is read first, so an unreadable one is reported as
+    // such whatever state the snapshot is in.
+    let explicit: Option<(String, Vec<u8>)> = match flag("--queries") {
+        None => None,
+        Some(p) => match std::fs::read(p) {
+            Ok(b) => Some((p.clone(), b)),
+            Err(e) => {
+                eprintln!("could not read catalog {p}: {e}");
+                return 65;
+            }
+        },
     };
 
-    let catalog: samyama::snapshot::verify::QueryCatalog = match std::fs::File::open(catalog_path)
-        .map_err(|e| e.to_string())
-        .and_then(|f| serde_json::from_reader(f).map_err(|e| e.to_string()))
-    {
-        Ok(c) => c,
-        Err(e) => { eprintln!("could not read catalog {catalog_path}: {e}"); return 65; }
+    let header = match std::fs::File::open(snapshot) {
+        Ok(f) => samyama::snapshot::peek_header(f),
+        Err(e) => {
+            eprintln!("could not open {snapshot}: {e}");
+            return 66;
+        }
     };
+    let header = match header {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("restore failed before any query ran: {e}");
+            return 1;
+        }
+    };
+
+    let (catalog_path, catalog_bytes) = match (explicit, &header.queries) {
+        (Some(pair), _) => pair,
+        (None, None) => {
+            eprintln!(
+                "verify needs --queries <catalog>: {snapshot} names no catalog in its header"
+            );
+            return 64;
+        }
+        (None, Some(link)) => {
+            let beside = std::path::Path::new(snapshot)
+                .parent()
+                .unwrap_or(std::path::Path::new(""))
+                .join(&link.file);
+            let shown = beside.display().to_string();
+            // Refused, not skipped: the header promises this file, and a verify
+            // that quietly ran nothing would read as a restore that passed.
+            match std::fs::read(&beside) {
+                Ok(b) => (shown, b),
+                Err(e) => {
+                    eprintln!(
+                        "{snapshot} names its catalog {:?}, but {shown} cannot be read: \
+                         {e}. The pair was published together; fetch the catalog or \
+                         pass one with --queries.",
+                        link.file
+                    );
+                    return 66;
+                }
+            }
+        }
+    };
+    if let Some(link) = &header.queries {
+        if let Err(e) = samyama::snapshot::verify::check_queries_ref(link, &catalog_bytes) {
+            eprintln!("refusing catalog {catalog_path}: {e}");
+            return 1;
+        }
+    }
+
+    let catalog: samyama::snapshot::verify::QueryCatalog =
+        match serde_json::from_slice(&catalog_bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("could not read catalog {catalog_path}: {e}");
+                return 65;
+            }
+        };
 
     let mut store = GraphStore::new();
     let file = match std::fs::File::open(snapshot) {
@@ -354,6 +427,9 @@ fn cmd_verify(argv: &[String]) -> i32 {
     let failed: Vec<_> = report.failed().collect();
     println!("verify {snapshot}");
     println!("  catalog {catalog_path}: {total} entries");
+    if header.queries.is_some() {
+        println!("  catalog sha256 matches the snapshot header");
+    }
     for r in &failed {
         let class = r.failure.expect("failed entries carry a class");
         println!("  FAIL {}  expected {} rows, got {}{}",
@@ -375,17 +451,24 @@ fn cmd_verify(argv: &[String]) -> i32 {
     }
 }
 
-/// `samyama catalog-build <snapshot.sgsnap> --sql <queries.json> --out <catalog.json>`
+/// `samyama catalog-build <snapshot.sgsnap> --queries <queries.json> --out <catalog> [--link]`
 ///
 /// Runs a list of queries against a snapshot and records what they returned, so
 /// the snapshot can later prove it still returns it.
+///
+/// `--link` then rewrites the snapshot's header to name the catalog and its
+/// SHA-256 (#1154), so `verify` can find it and refuse any other. Only line 0
+/// changes; the snapshot is rewritten beside itself and renamed into place.
+/// Rebuild with `--link` whenever the catalog changes -- the old digest no
+/// longer matches, which is the point.
 fn cmd_catalog_build(argv: &[String]) -> i32 {
     let flag = |name: &str| argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1));
     let Some(snapshot) = argv.get(2).filter(|s| !s.starts_with("--")) else {
         eprintln!("usage: samyama catalog-build <snapshot.sgsnap> --queries <queries.json> \
-                   --out <catalog.json>");
+                   --out <catalog.sgqueries> [--link]");
         return 64;
     };
+    let link = argv.iter().any(|a| a == "--link");
     let (Some(queries_path), Some(out)) = (flag("--queries"), flag("--out")) else {
         eprintln!("catalog-build needs --queries <queries.json> and --out <catalog.json>");
         return 64;
@@ -415,37 +498,115 @@ fn cmd_catalog_build(argv: &[String]) -> i32 {
         Err(e) => { eprintln!("{e}"); 1 }
         Ok(catalog) => {
             let json = serde_json::to_string_pretty(&catalog).expect("serialize");
-            if let Err(e) = std::fs::write(out, json) {
+            if let Err(e) = std::fs::write(out, &json) {
                 eprintln!("could not write {out}: {e}");
                 return 74;
             }
             println!("wrote {out}: {} entries", catalog.entries.len());
+            if link {
+                return link_catalog(snapshot, out, json.as_bytes());
+            }
             0
         }
     }
 }
 
-/// `samyama catalog-gate <catalog.json> [--allow-observed]`
+/// Record `catalog` in `snapshot`'s header by name and SHA-256 (#1154).
+fn link_catalog(snapshot: &str, catalog: &str, bytes: &[u8]) -> i32 {
+    use std::path::Path;
+    let Some(file) = Path::new(catalog).file_name().and_then(|f| f.to_str()) else {
+        eprintln!("cannot link {catalog}: it has no file name");
+        return 64;
+    };
+    let dir_of = |p: &str| {
+        let parent = Path::new(p).parent().unwrap_or(Path::new(""));
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::canonicalize(parent).ok()
+    };
+    if dir_of(snapshot) != dir_of(catalog) {
+        // The header records a bare name, resolved beside the snapshot. Linked
+        // from elsewhere it still checks a catalog passed with --queries, but
+        // verify cannot find it on its own until the two are side by side.
+        eprintln!(
+            "note: {catalog} is not beside {snapshot}; publish them together, \
+             or verify will need --queries"
+        );
+    }
+    let queries = samyama::snapshot::format::QueriesRef {
+        file: file.to_string(),
+        sha256: samyama::snapshot::verify::queries_sha256(bytes),
+    };
+
+    let tmp = format!("{snapshot}.link.tmp");
+    let result = std::fs::File::open(snapshot)
+        .map_err(|e| e.to_string())
+        .and_then(|src| {
+            let dst = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+            let mut dst = std::io::BufWriter::new(dst);
+            samyama::snapshot::relink_queries(BufReader::new(src), &mut dst, Some(queries.clone()))
+                .map_err(|e| e.to_string())?;
+            use std::io::Write;
+            dst.flush().map_err(|e| e.to_string())
+        })
+        .and_then(|()| std::fs::rename(&tmp, snapshot).map_err(|e| e.to_string()));
+    match result {
+        Ok(()) => {
+            println!("linked {snapshot} -> {file} (sha256 {})", queries.sha256);
+            0
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            eprintln!("could not link {catalog} into {snapshot}: {e}");
+            74
+        }
+    }
+}
+
+/// `samyama catalog-gate <catalog> [--allow-observed] [--kg08] [--snapshot <snapshot.sgsnap>]`
 ///
 /// Refuses to publish a catalog drawn from traffic without an explicit flag,
 /// and scans every question and every parameter sample for personal data
 /// (#1159). A parameter sample is a data excerpt: it exists so the build-time
 /// execution gate has something to run, and on a KG holding personal data it is
 /// a real value about to be published.
+///
+/// With `--snapshot`, also refuses a pair that does not match: the snapshot's
+/// header must name this catalog's SHA-256 (#1154). A pair published unlinked
+/// is one whose mismatch nothing downstream can detect.
 fn cmd_catalog_gate(argv: &[String]) -> i32 {
     use samyama::snapshot::publish_gate::gate;
     let Some(path) = argv.get(2).filter(|s| !s.starts_with("--")) else {
-        eprintln!("usage: samyama catalog-gate <catalog.json> [--allow-observed]");
+        eprintln!("usage: samyama catalog-gate <catalog> [--allow-observed] [--kg08] \
+                   [--snapshot <snapshot.sgsnap>]");
         return 64;
     };
     let allow_observed = argv.iter().any(|a| a == "--allow-observed");
+    let snapshot = argv
+        .iter()
+        .position(|a| a == "--snapshot")
+        .map(|i| argv.get(i + 1));
+    if snapshot == Some(None) {
+        eprintln!("catalog-gate: --snapshot needs a snapshot file");
+        return 64;
+    }
 
-    let catalog: samyama::snapshot::verify::QueryCatalog = match std::fs::File::open(path)
-        .map_err(|e| e.to_string())
-        .and_then(|f| serde_json::from_reader(f).map_err(|e| e.to_string()))
-    {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("could not read {path}: {e}");
+            return 65;
+        }
+    };
+    let catalog: samyama::snapshot::verify::QueryCatalog = match serde_json::from_slice(&bytes) {
         Ok(c) => c,
-        Err(e) => { eprintln!("could not read {path}: {e}"); return 65; }
+        Err(e) => {
+            eprintln!("could not read {path}: {e}");
+            return 65;
+        }
     };
 
     let mut texts: Vec<(String, String)> = Vec::new();
@@ -461,6 +622,34 @@ fn cmd_catalog_gate(argv: &[String]) -> i32 {
     println!("  provenance: {:?}, {} entries", catalog.provenance, catalog.entries.len());
     println!("  digest: {}", samyama::snapshot::verify::catalog_digest(
         &serde_json::to_string(&catalog).unwrap_or_default()));
+    println!(
+        "  sha256: {}",
+        samyama::snapshot::verify::queries_sha256(&bytes)
+    );
+    let mut pair_refusal: Option<String> = None;
+    if let Some(Some(snap)) = snapshot {
+        let header = match std::fs::File::open(snap) {
+            Ok(f) => samyama::snapshot::peek_header(f),
+            Err(e) => {
+                eprintln!("could not open {snap}: {e}");
+                return 66;
+            }
+        };
+        let linked = match header {
+            Err(e) => Err(format!("cannot read the header of {snap}: {e}")),
+            Ok(h) => match h.queries {
+                None => Err(format!(
+                    "{snap} names no catalog in its header, so a mismatched pair would go \
+                     undetected. Link them with `samyama catalog-build ... --link`."
+                )),
+                Some(link) => samyama::snapshot::verify::check_queries_ref(&link, &bytes),
+            },
+        };
+        match linked {
+            Ok(()) => println!("  snapshot {snap} names this catalog"),
+            Err(e) => pair_refusal = Some(e),
+        }
+    }
 
     // KG-08 conformance, reported always and enforced on request. Reported
     // always because a catalog that does not meet it is still worth publishing
@@ -478,10 +667,10 @@ fn cmd_catalog_gate(argv: &[String]) -> i32 {
     for f in &v.findings {
         println!("  FINDING {:<16} in {}  {}", f.kind, f.where_, f.excerpt);
     }
-    for r in &v.reasons {
+    for r in v.reasons.iter().chain(&pair_refusal) {
         println!("  REFUSED {r}");
     }
-    if v.publishable {
+    if v.publishable && pair_refusal.is_none() {
         println!("  OK  publishable");
         0
     } else {
@@ -1079,7 +1268,8 @@ async fn start_server() {
         config.data_path = Some(path);
     }
 
-    // Parse --import-dir <dir>: the directory `LOAD CSV` may read under (LANG-09).
+    // Parse --import-dir <dir>: the directory `LOAD CSV` and `LOAD PARQUET` may read
+    // under (LANG-09).
     //
     // Absent by default, and absent means the clause is refused rather than reading
     // from the working directory. `LOAD CSV FROM 'file:///etc/passwd'` on a server

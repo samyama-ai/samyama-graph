@@ -199,7 +199,7 @@ not need them.
 | `feature_matrix` | API-02 — capability x surface parity across the HTTP API, RESP, the Rust/Python/TypeScript SDKs and the MCP server, generated from source. | Built-in; `--out`. |
 | `gds_aliases` | INT-04 — does a `gds.*` procedure name reach our implementation with matching semantics, which is a different question from whether dispatch resolves it? | Built-in; `--json`. |
 | `import_invariants` | CH-IMPORT (LANG-15, REL-06) — the same graph built by Cypher, by snapshot restore and through the store API must be the same graph. The failure they share is partial agreement. | Built-in; `--json`. |
-| `language_features` | LANG-09, LANG-11, LANG-13, LANG-16, NDS-11 — `LOAD CSV`, `ANALYZE`, index DDL and the rest that the TCK has no scenario for, so the suite that owned them could not see them. | Built-in; `--json`. |
+| `language_features` | LANG-09, LANG-11, LANG-13, LANG-16, NDS-11 — `LOAD CSV`, `LOAD PARQUET`, `ANALYZE`, index DDL and the rest that the TCK has no scenario for, so the suite that owned them could not see them. | Built-in; `--json`. |
 | `nds_probes` | NDS-03, 03b, 04, 05, 06, 07, 08, 09, 10, 13 — which native data structures exist, asked of the query surface. Ten requirements that read `unmeasured` because nothing could run them. | Built-in; `--json`. |
 | `optimization_determinism` | OPT-08 — is every solver deterministic given a seed? One stray `thread_rng()` makes the promise false while the API still looks right. | Built-in; `--json`. |
 | `optimization_survey` | OPT-01, OPT-02, OPT-12, OPT-13 — what the optimizer ships, what a user can actually call (measured by calling, not by counting files), and how each solver does. | Built-in; `--json`. |
