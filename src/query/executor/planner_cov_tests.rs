@@ -1150,3 +1150,343 @@ fn zero_length_named_path_binds_one_node() {
     let b = read(&s, "MATCH p = (a:Person {name: 'A'}) WITH p RETURN length(p) AS len");
     assert_eq!(ints(&b, "len"), vec![0]);
 }
+
+// ---------------------------------------------------------------------------
+// Count fast paths and their guards
+// ---------------------------------------------------------------------------
+
+#[test]
+fn edge_count_fast_paths_and_their_exclusions() {
+    let mut s = people();
+    run(&mut s, "MATCH (e:Person {name: 'E'}) CREATE (e)-[:LIKES]->(e)");
+    // count(*) over an anonymous directed pattern: the store's edge count.
+    let query = "MATCH ()-[r]->() RETURN count(*) AS c";
+    assert!(has_op(&s, query, "EdgeCount"), "{:?}", op_names(&plan_of(&s, query)));
+    assert_eq!(ints(&read(&s, query), "c"), vec![5]);
+    // Named, distinct endpoints counting the relationship.
+    let query = "MATCH (a)-[r:KNOWS]->(b) RETURN count(r) AS c";
+    assert!(has_op(&s, query, "EdgeCount"));
+    assert_eq!(ints(&read(&s, query), "c"), vec![4]);
+    // Self-loop pattern: not the edge count.
+    let query = "MATCH (a)-[r]->(a) RETURN count(r) AS c";
+    assert!(!has_op(&s, query, "EdgeCount"));
+    assert_eq!(ints(&read(&s, query), "c"), vec![1]);
+    // Counting a property is not a row count.
+    let query = "MATCH (a)-[r:KNOWS]->(b) RETURN count(a.age) AS c";
+    assert!(!has_op(&s, query, "EdgeCount"));
+    assert_eq!(ints(&read(&s, query), "c"), vec![4]);
+}
+
+#[test]
+fn edge_type_count_fast_path_with_order_by() {
+    let mut s = people();
+    run(&mut s, "MATCH (e:Person {name: 'E'}), (a:Person {name: 'A'}) CREATE (e)-[:LIKES]->(a)");
+    let query = "MATCH (x)-[r]->(y) RETURN type(r) AS t, count(r) AS c ORDER BY t";
+    assert!(has_op(&s, query, "EdgeTypeCount"), "{:?}", op_names(&plan_of(&s, query)));
+    let b = read(&s, query);
+    assert_eq!(strs(&b, "t"), vec!["KNOWS", "LIKES"]);
+    assert_eq!(ints(&b, "c"), vec![4, 1]);
+    // A self-loop pattern is not answered from the type counts.
+    let query = "MATCH (x)-[r]->(x) RETURN type(r) AS t, count(r) AS c";
+    assert!(!has_op(&s, query, "EdgeTypeCount"));
+    assert!(read(&s, query).records.is_empty());
+}
+
+#[test]
+fn label_count_fast_path_guards() {
+    let s = people();
+    let query = "MATCH (p:Person) RETURN count(p) AS c";
+    assert!(has_op(&s, query, "LabelCount"));
+    assert_eq!(ints(&read(&s, query), "c"), vec![5]);
+    // count of a property counts non-null values.
+    let query = "MATCH (p:Person) RETURN count(p.age) AS c";
+    assert!(!has_op(&s, query, "LabelCount"));
+    assert_eq!(ints(&read(&s, query), "c"), vec![5]);
+    // DISTINCT, inline properties, a write: not the label count.
+    assert!(!has_op(&s, "MATCH (p:Person) RETURN count(DISTINCT p) AS c", "LabelCount"));
+    assert!(!has_op(&s, "MATCH (p:Person {city: 'X'}) RETURN count(p) AS c", "LabelCount"));
+    assert_eq!(ints(&read(&s, "MATCH (p:Person {city: 'X'}) RETURN count(p) AS c"), "c"), vec![2]);
+}
+
+// ---------------------------------------------------------------------------
+// Adjacency-count aggregation plans (ADR-017)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn adjacency_count_with_prefilter_order_skip_limit() {
+    let s = people();
+    // In-degree on KNOWS: B 1, C 2, D 1.
+    let query = "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name AS n, count(a) AS c ORDER BY c DESC, n SKIP 1 LIMIT 1";
+    assert!(has_op(&s, query, "AdjacencyCountAggregate"), "{:?}", op_names(&plan_of(&s, query)));
+    let b = read(&s, query);
+    assert_eq!(strs(&b, "n"), vec!["B"]);
+    assert_eq!(ints(&b, "c"), vec![1]);
+    let query = "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age > 30 RETURN b.name AS n, count(DISTINCT a) AS c ORDER BY n";
+    let b = read(&s, query);
+    assert_eq!(strs(&b, "n"), vec!["C", "D"]);
+    assert_eq!(ints(&b, "c"), vec![2, 1]);
+    // Out-degree, grouped on the node itself.
+    let query = "MATCH (a:Person)-[:KNOWS]->(b) RETURN a, count(b) AS c";
+    let b = read(&s, query);
+    let mut counts = ints(&b, "c");
+    counts.sort();
+    // Only people with an outgoing KNOWS match the pattern at all.
+    assert_eq!(counts, vec![1, 1, 2]);
+}
+
+#[test]
+fn adjacency_count_with_binding_skip_limit_where_and_distinct() {
+    let s = people();
+    let query = "MATCH (p:Person) WHERE p.city = 'Y' WITH p SKIP 1 LIMIT 5 \
+                 MATCH (p)-[:KNOWS]->(f) RETURN p.name AS n, count(DISTINCT f) AS c ORDER BY n";
+    assert!(has_op(&s, query, "AdjacencyCountAggregate"), "{:?}", op_names(&plan_of(&s, query)));
+    let b = read(&s, query);
+    // City Y scanned in node order C, D, E; SKIP 1 leaves D, E.
+    let names = strs(&b, "n");
+    assert_eq!(names.len(), 2);
+    assert!(ints(&b, "c").iter().all(|c| *c == 0 || *c == 1));
+    let query = "MATCH (p:Person) WITH p LIMIT 10 MATCH (f)-[:KNOWS]->(p) RETURN p.name AS n, count(f) AS c ORDER BY c DESC, n LIMIT 1";
+    let b = read(&s, query);
+    assert_eq!(strs(&b, "n"), vec!["C"]);
+    assert_eq!(ints(&b, "c"), vec![2]);
+    let b = read(&s, "MATCH (p:Person) WITH p MATCH (p)-[:KNOWS]->(f) RETURN p.name AS n, count(f) AS c ORDER BY n SKIP 1");
+    assert_eq!(strs(&b, "n"), vec!["B", "C"]);
+    assert_eq!(ints(&b, "c"), vec![1, 1]);
+}
+
+/// Five people in a ring, each knowing exactly one other: every WITH row
+/// that survives the SKIP/LIMIT is a group of its own.
+fn ring() -> GraphStore {
+    let mut s = GraphStore::new();
+    run(
+        &mut s,
+        "CREATE (a:Person {name: 'A'}), (b:Person {name: 'B'}), (c:Person {name: 'C'}), (d:Person {name: 'D'}), (e:Person {name: 'E'}), \
+         (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c), (c)-[:KNOWS]->(d), (d)-[:KNOWS]->(e), (e)-[:KNOWS]->(a)",
+    );
+    s
+}
+
+#[test]
+fn adjacency_count_with_binding_applies_skip_after_a_prefilter() {
+    let s = ring();
+    let query = "MATCH (p:Person) WHERE p.name <> 'Z' WITH p SKIP 3 LIMIT 5 MATCH (p)-[:KNOWS]->(f) RETURN p.name AS n, count(f) AS c";
+    assert!(has_op(&s, query, "AdjacencyCountAggregate"));
+    assert_eq!(read(&s, query).records.len(), 2, "five rows, three skipped");
+    // Without a prefilter a LIMIT alone is pushed into the scan.
+    let query = "MATCH (p:Person) WITH p LIMIT 2 MATCH (p)-[:KNOWS]->(f) RETURN p.name AS n, count(f) AS c";
+    assert_eq!(read(&s, query).records.len(), 2);
+}
+
+#[test]
+#[ignore = "bug: WITH-bound adjacency count ignores the WITH's SKIP when there is no WHERE (planner.rs plan_adjacency_count_aggregate_with_binding)"]
+fn adjacency_count_with_binding_applies_skip_without_a_prefilter() {
+    let s = ring();
+    // Correct answer: 5 people, 3 skipped, each remaining one knows one person.
+    let query = "MATCH (p:Person) WITH p SKIP 3 MATCH (p)-[:KNOWS]->(f) RETURN p.name AS n, count(f) AS c";
+    assert_eq!(read(&s, query).records.len(), 2);
+    let query = "MATCH (p:Person) WITH p SKIP 1 LIMIT 2 MATCH (p)-[:KNOWS]->(f) RETURN p.name AS n, count(f) AS c";
+    assert_eq!(read(&s, query).records.len(), 2);
+}
+
+#[test]
+fn aggregate_then_expand_plans_filter_order_skip_limit() {
+    let s = people();
+    // Group people by in-degree, keep those with at least one, expand to who they know.
+    let query = "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH b, count(a) AS c \
+                 ORDER BY c DESC SKIP 0 LIMIT 2 WHERE c >= 1 MATCH (b)-[:KNOWS]->(x) RETURN b.name AS b, c, x.name AS x ORDER BY b";
+    let b = read(&s, query);
+    // Top two by in-degree: C (2) then one of B/D (1). C knows D; B knows C; D knows nobody.
+    assert!(strs(&b, "b").contains(&"C".to_string()));
+    let query = "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH b, count(DISTINCT a) AS c \
+                 MATCH (x)-[:KNOWS]->(b) RETURN b.name AS b, c, x.name AS x ORDER BY b, x";
+    let b = read(&s, query);
+    assert_eq!(strs(&b, "b"), vec!["B", "C", "C", "D"]);
+    assert_eq!(strs(&b, "x"), vec!["A", "A", "B", "C"]);
+    assert_eq!(ints(&b, "c"), vec![1, 2, 2, 1]);
+    // One group survives SKIP 1 LIMIT 1; walking back its in-edges yields `c` rows.
+    let query = "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH b, count(a) AS c SKIP 1 LIMIT 1 \
+                 MATCH (b)<-[:KNOWS]-(x) RETURN b.name AS b, c, x.name AS x SKIP 0 LIMIT 10";
+    let b = read(&s, query);
+    let groups: HashSet<String> = strs(&b, "b").into_iter().collect();
+    assert_eq!(groups.len(), 1);
+    let c = ints(&b, "c");
+    assert_eq!(c.len() as i64, c[0]);
+}
+
+#[test]
+#[ignore = "bug: aggregate-then-expand plan projects RETURN items verbatim, so an aggregate in the final RETURN fails with 'Unknown function: count' (planner.rs plan_aggregate_then_expand)"]
+fn aggregate_then_expand_supports_an_aggregate_in_the_final_return() {
+    let s = people();
+    // In-degrees: B 1, C 2, D 1; walking back those in-edges gives 4 rows.
+    let query = "MATCH (a:Person)-[:KNOWS]->(b:Person) WITH b, count(a) AS c \
+                 MATCH (b)<-[:KNOWS]-(x) RETURN count(*) AS n";
+    assert_eq!(ints(&read(&s, query), "n"), vec![4]);
+}
+
+// ---------------------------------------------------------------------------
+// Variable-length and fixed-length expansion from a chosen anchor
+// ---------------------------------------------------------------------------
+
+#[test]
+fn var_length_walks_backwards_from_a_selective_end() {
+    let mut s = people();
+    run(&mut s, "CREATE INDEX ON :Person(name)");
+    // The pinned end is the cheap anchor, so the walk is reversed.
+    let b = read(&s, "MATCH (a:Person)-[:KNOWS*1..2]->(d:Person {name: 'D'}) RETURN a.name AS n ORDER BY n");
+    assert_eq!(strs(&b, "n"), vec!["A", "B", "C"]);
+    let b = read(&s, "MATCH (a:Person)-[r:KNOWS*1..3 {since: 2002}]->(d:Person {name: 'D'}) RETURN a.name AS n");
+    assert_eq!(strs(&b, "n"), vec!["C"]);
+    let b = read(&s, "MATCH (d:Person {name: 'D'})<-[:KNOWS*2..2]-(a:Person) RETURN a.name AS n ORDER BY n");
+    assert_eq!(strs(&b, "n"), vec!["A", "B"]);
+    let b = read(&s, "MATCH (a:Person {city: 'X'})-[:KNOWS*]-(d:Person {name: 'D'}) RETURN DISTINCT a.name AS n ORDER BY n");
+    assert_eq!(strs(&b, "n"), vec!["A", "B"]);
+}
+
+#[test]
+fn var_length_from_a_middle_anchor_both_ways() {
+    let mut s = people();
+    run(&mut s, "CREATE INDEX ON :Person(name)");
+    let b = read(
+        &s,
+        "MATCH (a:Person)-[:KNOWS]->(c:Person {name: 'C'})-[r:KNOWS*1..2]->(d) RETURN a.name AS a, d.name AS d ORDER BY a",
+    );
+    assert_eq!(strs(&b, "a"), vec!["A", "B"]);
+    assert_eq!(strs(&b, "d"), vec!["D", "D"]);
+    let b = read(
+        &s,
+        "MATCH (x)-[:KNOWS*1..2 {since: 2001}]->(c:Person {name: 'C'})-[:KNOWS]->(d:Person) RETURN x.name AS x",
+    );
+    assert_eq!(strs(&b, "x"), vec!["B"]);
+    let b = read(
+        &s,
+        "MATCH (x:Person {age: 30})-[:KNOWS*1..2]->(c:Person {name: 'C'})-[:KNOWS*1..1]->(d:Person {age: 40}) RETURN count(*) AS c",
+    );
+    assert_eq!(ints(&b, "c"), vec![2]);
+}
+
+#[test]
+fn var_length_self_loop_target_and_named_path() {
+    let mut s = GraphStore::new();
+    run(&mut s, "CREATE (a:R {n: 1})-[:K]->(b:R {n: 2})-[:K]->(c:R {n: 3})-[:K]->(a)");
+    let b = read(&s, "MATCH (a:R {n: 1})-[:K*1..3]->(a) RETURN count(*) AS c");
+    assert_eq!(ints(&b, "c"), vec![1]);
+    let b = read(&s, "MATCH p = (a:R {n: 1})-[:K*1..3]->(x:R {n: 3}) RETURN length(p) AS len");
+    assert_eq!(ints(&b, "len"), vec![2]);
+    let b = read(&s, "MATCH (x)-[rs:K*2..2]->(y:R {n: 3}) RETURN x.n AS x, size(rs) AS k");
+    assert_eq!(ints(&b, "x"), vec![1]);
+    assert_eq!(ints(&b, "k"), vec![2]);
+    let b = read(&s, "MATCH (x:R)-[:K]->(y)-[:K]->(x) RETURN count(*) AS c");
+    assert_eq!(ints(&b, "c"), vec![0]);
+    // y = 3 reaches 2 through 3->1->2, but then cannot reuse 3->1 for the last hop.
+    let b = read(&s, "MATCH (x:R {n: 2})<-[:K*1..2]-(y)-[:K]->(z:R {n: 1}) RETURN y.n AS y");
+    assert!(b.records.is_empty());
+    let b = read(&s, "MATCH (x:R {n: 3})<-[:K*1..1]-(y)-[:K]->(z:R {n: 1}) RETURN y.n AS y");
+    assert!(b.records.is_empty());
+    let b = read(&s, "MATCH (x:R {n: 1})<-[:K*1..1]-(y)<-[:K]-(z:R {n: 2}) RETURN y.n AS y");
+    assert_eq!(ints(&b, "y"), vec![3]);
+}
+
+#[test]
+fn fixed_length_expansion_from_a_middle_anchor() {
+    let mut s = people();
+    run(&mut s, "CREATE INDEX ON :Person(name)");
+    // Anchor at C; expand both ways with relationship variables and properties.
+    let b = read(
+        &s,
+        "MATCH (a:Person)-[r1:KNOWS {since: 2003}]->(c:Person {name: 'C'})-[r2:KNOWS]->(d:Person {age: 40}) \
+         RETURN a.name AS a, r2.since AS s, d.name AS d",
+    );
+    assert_eq!(strs(&b, "a"), vec!["A"]);
+    assert_eq!(ints(&b, "s"), vec![2002]);
+    let b = read(&s, "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c:Person {name: 'C'}) RETURN a.name AS a");
+    assert_eq!(strs(&b, "a"), vec!["A"]);
+    let b = read(&s, "MATCH (a:Person)-[:KNOWS]->(b:Person)<-[:KNOWS]-(c:Person {name: 'A'}) RETURN a.name AS a, b.name AS b ORDER BY a, b");
+    // The two relationships must differ, so A->B cannot pair with itself.
+    assert_eq!(strs(&b, "a"), vec!["B"]);
+    assert_eq!(strs(&b, "b"), vec!["C"]);
+}
+
+#[test]
+fn triangles_and_co_neighbours() {
+    let mut s = GraphStore::new();
+    run(
+        &mut s,
+        "CREATE (a:T {n: 1}), (b:T {n: 2}), (c:T {n: 3}), (a)-[:E]->(b), (b)-[:E]->(c), (a)-[:E]->(c)",
+    );
+    let b = read(&s, "MATCH (x:T)-[:E]->(y:T)-[:E]->(z:T), (x)-[:E]->(z) RETURN x.n AS x, y.n AS y, z.n AS z");
+    assert_eq!(ints(&b, "x"), vec![1]);
+    assert_eq!(ints(&b, "y"), vec![2]);
+    assert_eq!(ints(&b, "z"), vec![3]);
+    let b = read(&s, "MATCH (x:T {n: 1})-[:E]->(y)<-[:E]-(z) RETURN count(*) AS c");
+    // y=2: z in {1}; y=3: z in {1, 2}; minus relationship reuse: (1->2,1->2) no, (1->3, 2->3) yes, (1->3,1->3) no.
+    assert_eq!(ints(&b, "c"), vec![1]);
+    let b = native(&s, "MATCH (x:T)-[:E]->(y:T)-[:E]->(z:T)<-[:E]-(x) RETURN count(*) AS c");
+    assert_eq!(ints(&b, "c"), vec![1]);
+}
+
+// ---------------------------------------------------------------------------
+// Post-WITH stages
+// ---------------------------------------------------------------------------
+
+#[test]
+fn post_with_match_predicates_are_decomposed_per_clause() {
+    let s = people();
+    let b = read(
+        &s,
+        "MATCH (p:Person {name: 'A'}) WITH p MATCH (x:Person), (y:Person) \
+         WHERE x.age > 30 AND x.city = 'Y' AND y.age < x.age AND y.name = 'E' RETURN x.name AS x, y.name AS y ORDER BY x",
+    );
+    assert_eq!(strs(&b, "x"), vec!["C", "D"]);
+    assert_eq!(strs(&b, "y"), vec!["E", "E"]);
+    let b = read(
+        &s,
+        "MATCH (p:Person {name: 'A'}) WITH p MATCH (x:Person) WHERE x.age > p.age AND x.age < 40 RETURN x.name AS x",
+    );
+    assert_eq!(strs(&b, "x"), vec!["C"]);
+}
+
+#[test]
+fn post_with_optional_match_with_two_join_conditions() {
+    let s = people();
+    let b = read(
+        &s,
+        "MATCH (p:Person) WITH p OPTIONAL MATCH (p)-[:KNOWS]->(f) WHERE f.age > p.age AND f.city <> p.city \
+         RETURN p.name AS p, f.name AS f ORDER BY p",
+    );
+    // A(X)->C(Y,35>30) yes; B(X)->C(Y) yes; C(Y)->D(Y) same city no.
+    assert_eq!(strs(&b, "f"), vec!["C", "C", "<null>", "<null>", "<null>"]);
+}
+
+#[test]
+fn post_with_index_lookup_and_unwind_stage() {
+    let mut s = people();
+    run(&mut s, "CREATE INDEX ON :Person(name)");
+    let b = read(
+        &s,
+        "MATCH (a:Person {name: 'A'}) WITH a.name AS nm MATCH (x:Person) WHERE x.name = nm RETURN x.age AS age",
+    );
+    assert_eq!(ints(&b, "age"), vec![30]);
+    let b = read(
+        &s,
+        "MATCH (a:Person {name: 'A'}) WITH a UNWIND [1, 2] AS k WITH a, k MATCH (a)-[:KNOWS]->(f) RETURN count(*) AS c",
+    );
+    assert_eq!(ints(&b, "c"), vec![4]);
+}
+
+#[test]
+fn match_with_create_uses_the_with_scope() {
+    let mut s = people();
+    run(&mut s, "MATCH (n:Person {name: 'A'}) WITH n AS a CREATE (a)-[:OWNS]->(t:Thing {k: 1})");
+    let b = read(&s, "MATCH (p:Person)-[:OWNS]->(t:Thing) RETURN p.name AS n");
+    assert_eq!(strs(&b, "n"), vec!["A"]);
+    run(&mut s, "MATCH (n:Person {name: 'B'}) WITH n MATCH (m:Person {name: 'E'}) CREATE (n)-[:OWES]->(m)");
+    let b = read(&s, "MATCH (x)-[:OWES]->(y) RETURN x.name AS x, y.name AS y");
+    assert_eq!(strs(&b, "x"), vec!["B"]);
+    assert_eq!(strs(&b, "y"), vec!["E"]);
+    run(&mut s, "MATCH (a:Person {name: 'C'})-[:KNOWS]->(d) CREATE (d)-[:MET]->(z:Thing {k: 2})");
+    let b = read(&s, "MATCH (d:Person)-[:MET]->(z:Thing) RETURN d.name AS d, z.k AS k");
+    assert_eq!(strs(&b, "d"), vec!["D"]);
+    assert_eq!(ints(&b, "k"), vec![2]);
+    // Total node count: 5 people + 2 things.
+    assert_eq!(ints(&read(&s, "MATCH (n) RETURN count(n) AS c"), "c"), vec![7]);
+}
