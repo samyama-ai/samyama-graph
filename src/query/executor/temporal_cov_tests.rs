@@ -363,13 +363,15 @@ fn malformed_iso_dates_are_errors() {
 }
 
 #[test]
-#[ignore = "bug: parse_iso_date panics (string slice out of range) on a week date with fewer than two week digits, e.g. '2015-W3'"]
 fn a_one_digit_week_is_an_error_not_a_panic() {
-    let r = std::panic::catch_unwind(|| parse_iso_date("2015-W3"));
-    assert!(
-        matches!(r, Ok(Err(_))),
-        "expected an error result, got a panic or a value"
-    );
+    // #1570. Non-ASCII tails used to reach the same byte slicing.
+    for s in ["2015-W3", "2015-W", "2015-Wé1", "2015-é1", "2015-0é"] {
+        let r = std::panic::catch_unwind(|| parse_iso_date(s));
+        assert!(
+            matches!(r, Ok(Err(_))),
+            "{s}: expected an error result, got a panic or a value"
+        );
+    }
 }
 
 #[test]

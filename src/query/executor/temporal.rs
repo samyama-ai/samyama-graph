@@ -531,11 +531,20 @@ pub fn parse_iso_date(s: &str) -> Result<i32, ExecutionError> {
         NaiveDate::from_ymd_opt(year, 1, 1)
     } else if let Some(w) = tail.strip_prefix('W').or_else(|| tail.strip_prefix('w')) {
         let w = w.replace('-', "");
+        // Two week digits and an optional weekday digit. Checked before
+        // slicing: `2015-W3` used to panic on `w[..2]` (#1570).
+        if !matches!(w.len(), 2 | 3) || !w.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(err(format!("bad week in {s}")));
+        }
         let week: u32 = w[..2].parse().map_err(|_| err(format!("bad week in {s}")))?;
         let dow: u32 = if w.len() > 2 { w[2..3].parse().unwrap_or(1) } else { 1 };
         NaiveDate::from_isoywd_opt(year, week, weekday_from_iso(dow))
     } else {
         let d = tail.replace('-', "");
+        // Byte-sliced below, so a multi-byte character is refused first.
+        if !d.is_ascii() {
+            return Err(err(format!("cannot parse date: {s}")));
+        }
         match d.len() {
             // Ordinal day: three digits.
             3 => NaiveDate::from_yo_opt(year, d.parse().map_err(|_| err("bad ordinal"))?),
