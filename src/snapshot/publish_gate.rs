@@ -182,7 +182,7 @@ pub fn gate(
     if provenance == Provenance::Observed && !allow_observed {
         reasons.push(
             "the catalog is derived from observed traffic, so its questions are \
-             user text. Publishing needs --allow-observed and a recorded sign-off."
+             user text. Publishing needs --allow-observed and --signoff <text>."
                 .to_string(),
         );
     }
@@ -202,6 +202,53 @@ pub fn gate(
     GateVerdict { publishable: reasons.is_empty(), reasons, findings }
 }
 
+/// Why a catalog's own release stamp forbids publishing it, if it does (#1159).
+///
+/// Private by default: a catalog is publishable only when it was built with
+/// `catalog-build --release`. The rule is an explicit decision at build time,
+/// never an inference from the tenant it was built on -- the open-source
+/// server has no notion of a public tenant, and a name that looks public is
+/// not a licence to publish what was asked of it.
+///
+/// A catalog without the stamp predates it and is refused too. Nothing in such
+/// a file says whether anyone meant to release it, and treating silence as
+/// consent is the failure this issue is about; the cost is one rebuild.
+pub fn release_refusal(publishable: Option<bool>) -> Option<String> {
+    match publishable {
+        Some(true) => None,
+        Some(false) => Some(
+            "the catalog was not built for release, so it is private by default. \
+             Rebuild it with `samyama catalog-build ... --release` to publish it."
+                .to_string(),
+        ),
+        None => Some(
+            "the catalog carries no `publishable` stamp: it predates #1159, and \
+             nothing in it says it was meant for release. Rebuild it with \
+             `samyama catalog-build ... --release` to publish it."
+                .to_string(),
+        ),
+    }
+}
+
+/// The written sign-off that must accompany `--allow-observed` (#1159).
+///
+/// Returns the trimmed text, or why there is none. Blank text is refused: a
+/// sign-off that says nothing records nothing.
+pub fn signoff_text(signoff: Option<&str>) -> Result<String, String> {
+    match signoff.map(str::trim) {
+        Some(t) if !t.is_empty() => Ok(t.to_string()),
+        Some(_) => Err("--signoff is empty; it must say who approved publishing \
+                        the observed questions, and why"
+            .to_string()),
+        None => Err(
+            "--allow-observed needs --signoff <text>: publishing observed \
+             questions requires a written sign-off, recorded with the gate's \
+             verdict"
+                .to_string(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +258,30 @@ mod tests {
         assert_eq!(redact(""), "");
         assert_eq!(redact("abcd"), "****");
         assert_eq!(redact("abcdef"), "ab**ef");
+    }
+
+    #[test]
+    fn only_a_catalog_stamped_for_release_is_publishable() {
+        assert_eq!(release_refusal(Some(true)), None);
+        let not = release_refusal(Some(false)).unwrap();
+        assert!(
+            not.contains("private by default") && not.contains("--release"),
+            "{not}"
+        );
+        let old = release_refusal(None).unwrap();
+        assert!(
+            old.contains("predates #1159") && old.contains("--release"),
+            "{old}"
+        );
+    }
+
+    #[test]
+    fn a_signoff_must_say_something() {
+        assert_eq!(
+            signoff_text(Some("  ok by A. Person, #1159 ")).unwrap(),
+            "ok by A. Person, #1159"
+        );
+        assert!(signoff_text(Some("   ")).unwrap_err().contains("empty"));
+        assert!(signoff_text(None).unwrap_err().contains("--signoff"));
     }
 }

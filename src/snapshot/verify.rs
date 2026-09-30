@@ -179,6 +179,17 @@ pub struct QueryCatalog {
     /// an explicit flag.
     #[serde(default = "default_provenance")]
     pub provenance: crate::snapshot::publish_gate::Provenance,
+    /// The tenant the source snapshot was exported from, as its header records
+    /// it (#1159). Informational: publishability is never inferred from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// Whether this catalog was built for release (#1159). `catalog-build`
+    /// writes `false` unless given `--release`, so a catalog is private by
+    /// default; `catalog-gate` refuses anything but `true`. Absent in a catalog
+    /// that predates the field, and refused as such (see
+    /// `publish_gate::release_refusal`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publishable: Option<bool>,
     pub entries: Vec<CatalogEntry>,
 }
 
@@ -437,6 +448,9 @@ pub fn build_catalog(
         format: CATALOG_FORMAT.to_string(),
         generated_by: format!("samyama {}", crate::VERSION),
         provenance: crate::snapshot::publish_gate::Provenance::Authored,
+        tenant: None,
+        // Private by default (#1159): only `catalog-build --release` says otherwise.
+        publishable: Some(false),
         entries,
     })
 }
@@ -664,6 +678,30 @@ mod tests {
     }
 
     #[test]
+    fn a_catalog_from_before_the_release_stamp_still_parses_and_reserialises_unchanged() {
+        let old = json!({
+            "format": CATALOG_FORMAT,
+            "generated_by": "hand",
+            "provenance": "authored",
+            "entries": []
+        });
+        let cat: QueryCatalog = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(cat.publishable, None);
+        assert_eq!(cat.tenant, None);
+        // Absent stays absent, so `catalog_digest` of an old catalog is what it was.
+        assert_eq!(serde_json::to_value(&cat).unwrap(), old);
+    }
+
+    #[test]
+    fn a_built_catalog_is_private_until_stamped_for_release() {
+        let cat = build_catalog(&GraphStore::new(), &[], &[]).unwrap();
+        assert_eq!(cat.publishable, Some(false));
+        let v = serde_json::to_value(&cat).unwrap();
+        assert_eq!(v["publishable"], json!(false));
+        assert!(v.get("tenant").is_none());
+    }
+
+    #[test]
     fn every_failure_class_explains_itself() {
         for (class, word) in [
             (FailureClass::EmptyResult, "no rows"),
@@ -726,6 +764,8 @@ mod tests {
             format: "other/9".into(),
             generated_by: String::new(),
             provenance: crate::snapshot::publish_gate::Provenance::Authored,
+            tenant: None,
+            publishable: None,
             entries: vec![],
         };
         let err = verify(&GraphStore::new(), &catalog).unwrap_err();

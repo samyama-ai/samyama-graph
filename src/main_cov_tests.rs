@@ -105,9 +105,11 @@ fn write_catalog(dir: &Path, name: &str, catalog: &QueryCatalog) -> PathBuf {
     write_json(dir, name, catalog)
 }
 
+/// An authored catalog stamped for release, as `catalog-build --release` writes.
 fn authored_catalog() -> QueryCatalog {
     let mut c = build_catalog(&things(), &thing_queries(), &[]).unwrap();
     c.provenance = Provenance::Authored;
+    c.publishable = Some(true);
     c
 }
 
@@ -474,6 +476,41 @@ fn catalog_build_writes_a_catalog_that_verify_accepts() {
 }
 
 #[test]
+fn catalog_build_stamps_the_tenant_and_is_private_without_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = write_snapshot(dir.path(), "things.sgsnap", &things());
+    let queries = write_json(dir.path(), "q.json", &specs_json(&thing_queries()));
+    let build = |out: &Path, release: bool| {
+        let mut args = vec![
+            "catalog-build",
+            s(&snap),
+            "--queries",
+            s(&queries),
+            "--out",
+            s(out),
+        ];
+        if release {
+            args.push("--release");
+        }
+        assert_eq!(cmd_catalog_build(&argv(&args)), 0);
+        serde_json::from_reader::<_, QueryCatalog>(File::open(out).unwrap()).unwrap()
+    };
+
+    let private = dir.path().join("private.json");
+    let c = build(&private, false);
+    assert_eq!(c.publishable, Some(false));
+    assert_eq!(c.tenant.as_deref(), Some("default"));
+    // Private by default: the gate refuses it however clean it is.
+    assert_eq!(cmd_catalog_gate(&argv(&["catalog-gate", s(&private)])), 1);
+
+    let released = dir.path().join("released.json");
+    let c = build(&released, true);
+    assert_eq!(c.publishable, Some(true));
+    assert_eq!(c.tenant.as_deref(), Some("default"));
+    assert_eq!(cmd_catalog_gate(&argv(&["catalog-gate", s(&released)])), 0);
+}
+
+#[test]
 fn catalog_build_reports_unreadable_queries() {
     let dir = tempfile::tempdir().unwrap();
     let snap = write_snapshot(dir.path(), "things.sgsnap", &things());
@@ -582,7 +619,8 @@ fn linked_pair(dir: &Path) -> (PathBuf, PathBuf) {
             s(&queries),
             "--out",
             s(&out),
-            "--link"
+            "--link",
+            "--release"
         ])),
         0
     );
@@ -750,9 +788,47 @@ fn catalog_gate_refuses_an_observed_catalog_without_the_flag() {
     c.provenance = Provenance::Observed;
     let cat = write_catalog(dir.path(), "c.json", &c);
     assert_eq!(cmd_catalog_gate(&argv(&["catalog-gate", s(&cat)])), 1);
+    let allow = |extra: &[&str]| {
+        let mut args = vec!["catalog-gate", s(&cat), "--allow-observed"];
+        args.extend_from_slice(extra);
+        cmd_catalog_gate(&argv(&args))
+    };
+    // The flag alone is not a sign-off, and neither is a blank one.
+    assert_eq!(allow(&[]), 64);
+    assert_eq!(allow(&["--signoff"]), 64);
+    assert_eq!(allow(&["--signoff", "  "]), 64);
+    assert_eq!(allow(&["--signoff", "approved by the KG owner, #1159"]), 0);
+}
+
+#[test]
+fn catalog_gate_refuses_a_catalog_not_stamped_for_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = authored_catalog();
+    c.publishable = Some(false);
+    let private = write_catalog(dir.path(), "private.json", &c);
+    assert_eq!(cmd_catalog_gate(&argv(&["catalog-gate", s(&private)])), 1);
+
+    // A catalog from before the stamp parses, and is refused rather than
+    // assumed publishable.
+    c.publishable = None;
+    let old = write_catalog(dir.path(), "old.json", &c);
+    assert!(!std::fs::read_to_string(&old)
+        .unwrap()
+        .contains("publishable"));
+    assert_eq!(cmd_catalog_gate(&argv(&["catalog-gate", s(&old)])), 1);
+
+    // No gate flag overrides it; the decision is made at build time.
+    c.provenance = Provenance::Observed;
+    let old_observed = write_catalog(dir.path(), "old_observed.json", &c);
     assert_eq!(
-        cmd_catalog_gate(&argv(&["catalog-gate", s(&cat), "--allow-observed"])),
-        0
+        cmd_catalog_gate(&argv(&[
+            "catalog-gate",
+            s(&old_observed),
+            "--allow-observed",
+            "--signoff",
+            "ok"
+        ])),
+        1
     );
 }
 
@@ -767,7 +843,13 @@ fn catalog_gate_refuses_personal_data_in_a_parameter_sample_even_with_the_flag()
     let cat = write_catalog(dir.path(), "c.json", &c);
     assert_eq!(cmd_catalog_gate(&argv(&["catalog-gate", s(&cat)])), 1);
     assert_eq!(
-        cmd_catalog_gate(&argv(&["catalog-gate", s(&cat), "--allow-observed"])),
+        cmd_catalog_gate(&argv(&[
+            "catalog-gate",
+            s(&cat),
+            "--allow-observed",
+            "--signoff",
+            "questions approved"
+        ])),
         1
     );
 }

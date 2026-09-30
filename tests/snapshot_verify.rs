@@ -100,6 +100,8 @@ fn an_all_empty_run_fails_even_when_expectations_match() {
         format: CATALOG_FORMAT.to_string(),
         generated_by: "test".into(),
         provenance: samyama::snapshot::publish_gate::Provenance::Authored,
+        tenant: None,
+        publishable: None,
         entries: vec![CatalogEntry {
             id: "q_none".into(),
             question: "a question with no answer".into(),
@@ -216,6 +218,8 @@ fn an_unknown_catalog_format_is_refused() {
         format: "samyama.queries/99".into(),
         generated_by: "test".into(),
         provenance: samyama::snapshot::publish_gate::Provenance::Authored,
+        tenant: None,
+        publishable: None,
         entries: vec![],
     };
     let err = verify(&store, &bad).expect_err("unknown format must be refused");

@@ -151,6 +151,40 @@ scan — which is what the scan is for. Four of the eighteen entries are marked
 (a twelve-digit run that satisfies Verhoeff, a drug code shaped like a PAN),
 pinned at one occurrence so a second still fails.
 
+### Question catalogs (`.sgqueries`, #1159)
+
+A question catalog is text somebody wrote, and if it was derived from traffic
+that somebody is a user. `samyama catalog-gate <catalog>` is the check a
+catalog passes before it is published beside a snapshot, and it refuses:
+
+- **A catalog not built for release.** Private by default: `samyama
+  catalog-build` stamps every catalog `"publishable": false` unless it is given
+  `--release`, and the gate refuses anything not stamped `true`. The decision
+  is explicit and made at build time; it is **never inferred from the tenant**.
+  The open-source server has no notion of a public tenant, and a tenant name
+  that looks public says nothing about what was asked of it. The catalog also
+  records the source snapshot's `tenant`, for the reader; the gate prints it
+  and does not decide on it. No gate flag overrides the stamp.
+- **A catalog from before the stamp** (no `publishable` key). It still parses
+  and still verifies, but nothing in it says anyone meant to release it, so the
+  gate refuses it with `rebuild with catalog-build ... --release`. Treating
+  silence as consent is the failure this gate exists to prevent; the cost is a
+  rebuild.
+- **An observed catalog** (`"provenance": "observed"`, or no provenance at all)
+  without `--allow-observed --signoff "<who approved it, and why>"`. The flag
+  without a non-blank sign-off is a usage error. The gate prints the sign-off
+  as a `SIGNOFF` line bound to the catalog file's SHA-256, for the release log
+  to keep. It is not written into the catalog, because that would change the
+  bytes a linked snapshot's header vouches for (ADR-022).
+- **Personal identifiers** in any query or parameter sample — email, Luhn-valid
+  card numbers, `NNN-NN-NNNN` SSNs, `+`-prefixed phones. `--allow-observed`
+  does not silence this: agreeing to publish the questions is not agreeing to
+  publish a card number inside one.
+
+Not yet checked: whether a parameter sample comes from a source whose licence
+permits redistribution (TRUST-03). A sample is a data excerpt, and should fail
+the same check an export from a non-redistributable source does.
+
 ## What we would have to change for this page to stop being true
 
 A new outbound call, a default provider, telemetry of any kind, or a feature

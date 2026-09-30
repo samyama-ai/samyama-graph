@@ -309,12 +309,33 @@ fn catalog_build_verify_and_gate_work_end_to_end() {
         &[],
     )
     .assert_code(0)
-    .out_has("1 entries");
+    .out_has("1 entries, private (not built with --release)");
     run(&["verify", s(&snap), "--queries", s(&catalog)], &[])
         .assert_code(0)
         .out_has("OK  1 entries reproduced");
+    // Private by default (#1159): without --release the gate refuses it.
+    run(&["catalog-gate", s(&catalog)], &[])
+        .assert_code(1)
+        .out_has("release: private, tenant: default")
+        .out_has("REFUSED the catalog was not built for release");
+
+    run(
+        &[
+            "catalog-build",
+            s(&snap),
+            "--queries",
+            s(&queries),
+            "--out",
+            s(&catalog),
+            "--release",
+        ],
+        &[],
+    )
+    .assert_code(0)
+    .out_has("publishable (--release)");
     run(&["catalog-gate", s(&catalog)], &[])
         .assert_code(0)
+        .out_has("release: publishable, tenant: default")
         .out_has("KG-08")
         .out_has("OK  publishable");
 
@@ -356,6 +377,7 @@ fn a_linked_catalog_is_found_by_verify_and_a_swapped_one_is_refused() {
         "--out",
         s(&catalog),
         "--link",
+        "--release",
     ];
     run(&args, &[]).assert_code(0).out_has("linked");
     run(&["verify", s(&snap)], &[])
@@ -417,10 +439,48 @@ fn catalog_gate_prints_its_findings_and_refusals() {
         panic!("fixture catalog did not parse: {}", r.stderr);
     }
     r.assert_code(1).out_has("FINDING").out_has("REFUSED");
+    // It predates the release stamp, and is refused for that too.
+    r.out_has("release: unstamped").out_has("predates #1159");
 
     run(&["catalog-gate", s(&cat), "--kg08"], &[])
         .assert_code(1)
         .out_has("KG-08 problem(s), and --kg08 was given");
+}
+
+#[test]
+fn an_observed_catalog_is_published_only_with_a_recorded_signoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let cat = dir.path().join("c.json");
+    std::fs::write(
+        &cat,
+        r#"{"format":"samyama.queries/1","generated_by":"test","provenance":"observed",
+            "publishable":true,
+            "entries":[{"id":"q1","cypher":"MATCH (t:Thing) RETURN t","rows":1,"hash":"x"}]}"#,
+    )
+    .unwrap();
+    run(&["catalog-gate", s(&cat)], &[])
+        .assert_code(1)
+        .out_has("REFUSED the catalog is derived from observed traffic");
+    run(&["catalog-gate", s(&cat), "--allow-observed"], &[])
+        .assert_code(64)
+        .err_has("--allow-observed needs --signoff <text>");
+
+    let sha = samyama::snapshot::verify::queries_sha256(&std::fs::read(&cat).unwrap());
+    run(
+        &[
+            "catalog-gate",
+            s(&cat),
+            "--allow-observed",
+            "--signoff",
+            "approved by the KG owner",
+        ],
+        &[],
+    )
+    .assert_code(0)
+    .out_has(&format!(
+        "SIGNOFF Observed catalog sha256 {sha}: approved by the KG owner"
+    ))
+    .out_has("OK  publishable");
 }
 
 // ───────────────────────────────────────────────────────────── start-up refusals

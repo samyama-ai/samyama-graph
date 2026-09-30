@@ -451,10 +451,15 @@ fn cmd_verify(argv: &[String]) -> i32 {
     }
 }
 
-/// `samyama catalog-build <snapshot.sgsnap> --queries <queries.json> --out <catalog> [--link]`
+/// `samyama catalog-build <snapshot.sgsnap> --queries <queries.json> --out <catalog> [--link] [--release]`
 ///
 /// Runs a list of queries against a snapshot and records what they returned, so
 /// the snapshot can later prove it still returns it.
+///
+/// The catalog is stamped with the snapshot's tenant and with `publishable`,
+/// which is `true` only under `--release` (#1159). Private by default:
+/// `catalog-gate` refuses any other catalog for publication, and whether to
+/// release is decided here, explicitly, never inferred from the tenant's name.
 ///
 /// `--link` then rewrites the snapshot's header to name the catalog and its
 /// SHA-256 (#1154), so `verify` can find it and refuse any other. Only line 0
@@ -465,10 +470,11 @@ fn cmd_catalog_build(argv: &[String]) -> i32 {
     let flag = |name: &str| argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1));
     let Some(snapshot) = argv.get(2).filter(|s| !s.starts_with("--")) else {
         eprintln!("usage: samyama catalog-build <snapshot.sgsnap> --queries <queries.json> \
-                   --out <catalog.sgqueries> [--link]");
+                   --out <catalog.sgqueries> [--link] [--release]");
         return 64;
     };
     let link = argv.iter().any(|a| a == "--link");
+    let release = argv.iter().any(|a| a == "--release");
     let (Some(queries_path), Some(out)) = (flag("--queries"), flag("--out")) else {
         eprintln!("catalog-build needs --queries <queries.json> and --out <catalog.json>");
         return 64;
@@ -493,16 +499,32 @@ fn cmd_catalog_build(argv: &[String]) -> i32 {
         eprintln!("could not restore {snapshot}: {e}");
         return 1;
     }
+    // The snapshot restored, so its header reads; a failure here only loses
+    // the informational tenant stamp.
+    let tenant = std::fs::File::open(snapshot)
+        .ok()
+        .and_then(|f| samyama::snapshot::peek_header(f).ok())
+        .map(|h| h.tenant);
 
     match samyama::snapshot::verify::build_catalog(&store, &queries, &[]) {
         Err(e) => { eprintln!("{e}"); 1 }
-        Ok(catalog) => {
+        Ok(mut catalog) => {
+            catalog.tenant = tenant;
+            catalog.publishable = Some(release);
             let json = serde_json::to_string_pretty(&catalog).expect("serialize");
             if let Err(e) = std::fs::write(out, &json) {
                 eprintln!("could not write {out}: {e}");
                 return 74;
             }
-            println!("wrote {out}: {} entries", catalog.entries.len());
+            println!(
+                "wrote {out}: {} entries, {}",
+                catalog.entries.len(),
+                if release {
+                    "publishable (--release)"
+                } else {
+                    "private (not built with --release)"
+                }
+            );
             if link {
                 return link_catalog(snapshot, out, json.as_bytes());
             }
@@ -566,11 +588,18 @@ fn link_catalog(snapshot: &str, catalog: &str, bytes: &[u8]) -> i32 {
     }
 }
 
-/// `samyama catalog-gate <catalog> [--allow-observed] [--kg08] [--snapshot <snapshot.sgsnap>]`
+/// `samyama catalog-gate <catalog> [--allow-observed --signoff <text>] [--kg08] [--snapshot <snapshot.sgsnap>]`
 ///
 /// Refuses to publish a catalog drawn from traffic without an explicit flag,
 /// and scans every question and every parameter sample for personal data
-/// (#1159). A parameter sample is a data excerpt: it exists so the build-time
+/// (#1159). `--allow-observed` is a usage error without `--signoff`; the text
+/// is printed as a `SIGNOFF` line bound to the catalog's SHA-256, so the
+/// release log records who approved which file. It is not written into the
+/// catalog: that would change the bytes a linked snapshot's header vouches for.
+///
+/// Refuses, too, a catalog not stamped `publishable` by `catalog-build
+/// --release`, including one that predates the stamp. No flag here overrides
+/// that; the decision to release is made when the catalog is built. A parameter sample is a data excerpt: it exists so the build-time
 /// execution gate has something to run, and on a KG holding personal data it is
 /// a real value about to be published.
 ///
@@ -580,11 +609,30 @@ fn link_catalog(snapshot: &str, catalog: &str, bytes: &[u8]) -> i32 {
 fn cmd_catalog_gate(argv: &[String]) -> i32 {
     use samyama::snapshot::publish_gate::gate;
     let Some(path) = argv.get(2).filter(|s| !s.starts_with("--")) else {
-        eprintln!("usage: samyama catalog-gate <catalog> [--allow-observed] [--kg08] \
-                   [--snapshot <snapshot.sgsnap>]");
+        eprintln!("usage: samyama catalog-gate <catalog> [--allow-observed --signoff <text>] \
+                   [--kg08] [--snapshot <snapshot.sgsnap>]");
         return 64;
     };
     let allow_observed = argv.iter().any(|a| a == "--allow-observed");
+    let signoff_arg = argv
+        .iter()
+        .position(|a| a == "--signoff")
+        .map(|i| argv.get(i + 1).map(String::as_str));
+    if signoff_arg == Some(None) {
+        eprintln!("catalog-gate: --signoff needs the sign-off text");
+        return 64;
+    }
+    let signoff = if allow_observed {
+        match samyama::snapshot::publish_gate::signoff_text(signoff_arg.flatten()) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("catalog-gate: {e}");
+                return 64;
+            }
+        }
+    } else {
+        None
+    };
     let snapshot = argv
         .iter()
         .position(|a| a == "--snapshot")
@@ -617,15 +665,32 @@ fn cmd_catalog_gate(argv: &[String]) -> i32 {
         }
     }
 
-    let v = gate(catalog.provenance, &texts, allow_observed);
+    let mut v = gate(catalog.provenance, &texts, allow_observed);
+    if let Some(r) = samyama::snapshot::publish_gate::release_refusal(catalog.publishable) {
+        v.reasons.push(r);
+        v.publishable = false;
+    }
     println!("catalog-gate {path}");
     println!("  provenance: {:?}, {} entries", catalog.provenance, catalog.entries.len());
     println!("  digest: {}", samyama::snapshot::verify::catalog_digest(
         &serde_json::to_string(&catalog).unwrap_or_default()));
+    let sha256 = samyama::snapshot::verify::queries_sha256(&bytes);
+    println!("  sha256: {sha256}");
     println!(
-        "  sha256: {}",
-        samyama::snapshot::verify::queries_sha256(&bytes)
+        "  release: {}, tenant: {}",
+        match catalog.publishable {
+            Some(true) => "publishable",
+            Some(false) => "private",
+            None => "unstamped",
+        },
+        catalog.tenant.as_deref().unwrap_or("unrecorded")
     );
+    if let Some(t) = &signoff {
+        println!(
+            "  SIGNOFF {:?} catalog sha256 {sha256}: {t}",
+            catalog.provenance
+        );
+    }
     let mut pair_refusal: Option<String> = None;
     if let Some(Some(snap)) = snapshot {
         let header = match std::fs::File::open(snap) {

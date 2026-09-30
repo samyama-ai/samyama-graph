@@ -58,6 +58,11 @@ published, so `sha256sum` on the release asset gives the same string.
 - **Editing the catalog means re-linking.** That rewrites the header (a
   recompression pass, not a re-import); the old digest no longer matching is
   the point of the field.
+- **The catalog, not the header, says whether it may be published** (#1159).
+  `catalog-build` stamps it with the snapshot's `tenant` and `publishable`
+  (`true` only under `--release`), and `catalog-gate` refuses anything else.
+  Stamped in the catalog because the stamp is about the questions, and the
+  header's SHA-256 already binds the two; see `docs/DATA-HANDLING.md`.
 
 **The file carries the index catalog** (`"t":"i"`, added 2026-09-29 for #1506).
 One line right after the header, holding every property index, unique
