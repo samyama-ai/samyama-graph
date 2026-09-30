@@ -2677,3 +2677,7 @@ mod dedup_scoped_scan_tests {
         assert_eq!((merged, visits), (1, 1));
     }
 }
+
+#[cfg(test)]
+#[path = "snapshot_cov_tests.rs"]
+mod cov_tests;

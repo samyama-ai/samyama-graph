@@ -65,4 +65,36 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to connect"));
     }
+
+    #[tokio::test]
+    async fn forward_writes_the_command_and_returns_the_reply() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 64];
+            let n = sock.read(&mut buf).await.unwrap();
+            sock.write_all(b"+PONG\r\n").await.unwrap();
+            buf[..n].to_vec()
+        });
+        let proxy = Proxy::new();
+        let reply = proxy.forward(&addr, b"PING\r\n").await.unwrap();
+        assert_eq!(reply, b"+PONG\r\n");
+        assert_eq!(server.await.unwrap(), b"PING\r\n");
+    }
+
+    #[tokio::test]
+    async fn forward_to_a_peer_that_closes_returns_an_empty_reply() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 64];
+            let _ = sock.read(&mut buf).await.unwrap();
+            // closed without replying
+        });
+        let reply = Proxy::new().forward(&addr, b"PING\r\n").await.unwrap();
+        assert!(reply.is_empty());
+        server.await.unwrap();
+    }
 }

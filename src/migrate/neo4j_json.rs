@@ -466,4 +466,142 @@ mod tests {
             "the array is one property"
         );
     }
+
+    use crate::graph::{EdgeType, Label};
+
+    fn find(store: &GraphStore, label: &str, key: &str, value: &str) -> NodeId {
+        *store
+            .node_ids_by_label(&Label::new(label), None)
+            .iter()
+            .find(|&&id| store.node_property(id, key) == Some(PropertyValue::String(value.into())))
+            .expect("node present")
+    }
+
+    #[test]
+    fn json_lines_import_counts_every_kind_of_record() {
+        let text = r#"
+{"type":"relationship","id":"9","label":"KNOWS","start":{"id":"0","labels":["Person"]},"end":{"id":"1","labels":["Person"]},"properties":{"since":2019,"note":null}}
+{"type":"node","id":"0","labels":["Person"],"properties":{"name":"Alice","born":"1990-01-02","home":{"crs":"wgs-84","x":1.0},"gone":null}}
+{"type":"node","id":1,"labels":["Person","Admin"],"properties":{"name":"Bob","big":18446744073709551615}}
+{"type":"node","id":"2","labels":[],"properties":{}}
+{"type":"relationship","id":"10","start":"1","end":"2","properties":{}}
+{"type":"relationship","id":"11","label":"KNOWS","start":{"id":"0"},"end":{"id":"404"}}
+{"type":"relationship","id":"12","label":"KNOWS","start":{},"end":"0"}
+{"type":"constraint","name":"c"}
+{"type":"constraint","name":"d"}
+{"labels":["NoType"]}
+{"labels":["NoTypeAgain"]}
+this line is not json
+"#;
+        let mut store = GraphStore::new();
+        let report = import_str(text, &mut store, "default").unwrap();
+        assert_eq!(report.records_read, 12);
+        assert_eq!(report.nodes_created, 3);
+        assert_eq!(report.labels_applied, 3);
+        assert_eq!(report.edges_created, 2);
+        assert_eq!(report.node_properties_set, 5);
+        assert_eq!(report.edge_properties_set, 1);
+        assert_eq!(report.null_properties_dropped, 2);
+        assert_eq!(report.values_that_look_temporal, 1);
+        assert_eq!(report.values_that_look_spatial, 1);
+        assert_eq!(report.dangling_edges, 2);
+        assert_eq!(
+            report.missing_endpoints,
+            vec!["(no id)".to_string(), "404".to_string()]
+        );
+        assert_eq!(
+            report.unknown_record_types,
+            vec!["constraint".to_string(), "(no `type` field)".to_string()]
+        );
+        assert_eq!(report.unparseable_lines.len(), 1);
+        assert_eq!(report.unparseable_lines[0].0, 12);
+        assert!(!report.lossless());
+
+        let alice = find(&store, "Person", "name", "Alice");
+        let bob = find(&store, "Person", "name", "Bob");
+        assert_eq!(
+            store.node_property(bob, "big"),
+            Some(PropertyValue::Float(18446744073709551615.0))
+        );
+        let knows = store
+            .edge_between(alice, bob, Some(&EdgeType::new("KNOWS")))
+            .unwrap();
+        assert_eq!(
+            store.edge_property(knows, "since"),
+            Some(PropertyValue::Integer(2019))
+        );
+        assert_eq!(
+            store.get_edges_by_type(&EdgeType::new("RELATED_TO")).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_array_form_supplies_the_record_type() {
+        let text = r#"{
+        "nodes": [
+            {"id": "a", "labels": ["City"], "properties": {"name": "Pune"}},
+            {"id": "b", "labels": ["City"], "properties": {"name": "Delhi"}},
+            {"type": "node", "id": "c", "labels": ["City"], "properties": {"name": "Agra"}},
+            "not an object"
+        ],
+        "relationships": [
+            {"id": "r1", "label": "ROAD", "start": "a", "end": "b"}
+        ]
+    }"#;
+        let mut store = GraphStore::new();
+        let report = import_str(text, &mut store, "default").unwrap();
+        assert_eq!(report.records_read, 5);
+        assert_eq!(report.nodes_created, 3);
+        assert_eq!(report.edges_created, 1);
+        assert_eq!(
+            report.unknown_record_types,
+            vec!["(no `type` field)".to_string()]
+        );
+        let pune = find(&store, "City", "name", "Pune");
+        let delhi = find(&store, "City", "name", "Delhi");
+        assert!(store
+            .edge_between(pune, delhi, Some(&EdgeType::new("ROAD")))
+            .is_some());
+    }
+
+    #[test]
+    fn an_empty_file_is_an_empty_lossless_import() {
+        let mut store = GraphStore::new();
+        let report = import_str("   \n  ", &mut store, "default").unwrap();
+        assert_eq!(report, ImportReport::default());
+        assert!(report.lossless());
+    }
+
+    #[test]
+    fn a_file_with_no_json_line_is_refused() {
+        let mut store = GraphStore::new();
+        let err = import_str("hello\nworld", &mut store, "default").unwrap_err();
+        assert!(matches!(err, ImportError::UnrecognizedShape(_)));
+        let text = err.to_string();
+        assert!(text.starts_with("not an apoc.export.json file"), "{text}");
+        assert!(text.contains("first error on line 1"), "{text}");
+    }
+
+    #[test]
+    fn a_property_the_store_refuses_stops_the_import_as_a_graph_error() {
+        let text = r#"{"type":"node","id":"0","labels":["X"],"properties":{"bad":[{"a":1}]}}"#;
+        let mut store = GraphStore::new();
+        let err = import_str(text, &mut store, "default").unwrap_err();
+        assert!(matches!(
+            err,
+            ImportError::Graph(crate::graph::GraphError::ConstraintViolation(_))
+        ));
+        assert!(
+            err.to_string().starts_with("graph error during import"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn json_ids_are_strings_or_numbers_only() {
+        assert_eq!(json_id(&serde_json::json!("7")), Some("7".to_string()));
+        assert_eq!(json_id(&serde_json::json!(7)), Some("7".to_string()));
+        assert_eq!(json_id(&serde_json::json!(true)), None);
+    }
 }
