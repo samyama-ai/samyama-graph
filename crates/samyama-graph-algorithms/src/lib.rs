@@ -77,3 +77,7 @@ pub use temporal::{
     TemporalPath,
 };
 pub use embeddings::{fastrp, node2vec, FastRpConfig, Node2VecConfig};
+
+#[cfg(test)]
+#[path = "lib_cov_tests.rs"]
+mod cov_tests;

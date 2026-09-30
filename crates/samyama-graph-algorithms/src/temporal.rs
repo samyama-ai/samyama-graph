@@ -1032,4 +1032,13 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn walk_forward_without_a_hop_explains_nothing() {
+        let (v, t) = view(2, &[(0, 1, 5)]);
+        assert_eq!(walk_forward(&v, &t, &[None, None], 0, 5), None);
+        let hop = walk_forward(&v, &t, &[Some((1, 0)), None], 0, 5).unwrap();
+        assert_eq!(hop.edge_times, vec![5]);
+        assert_eq!(hop.arrival, 5);
+    }
 }
