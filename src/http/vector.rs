@@ -775,7 +775,10 @@ mod tests {
     }
 
     async fn list(state: AppState) -> serde_json::Value {
-        let req = Request::builder().uri("/api/vector/indexes").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/api/vector/indexes")
+            .body(Body::empty())
+            .unwrap();
         let resp = test_app(state).oneshot(req).await.unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
@@ -799,7 +802,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|i| (i["label"].as_str().unwrap().into(), i["metric"].as_str().unwrap().into()))
+            .map(|i| {
+                (
+                    i["label"].as_str().unwrap().into(),
+                    i["metric"].as_str().unwrap().into(),
+                )
+            })
             .collect();
         metrics.sort();
         assert_eq!(
@@ -829,7 +837,12 @@ mod tests {
     async fn a_label_with_indexes_on_two_properties_needs_a_property_key() {
         let state = test_state();
         for p in ["emb_a", "emb_b"] {
-            state.store.read().await.create_vector_index("Doc", p, 2, DistanceMetric::L2).unwrap();
+            state
+                .store
+                .read()
+                .await
+                .create_vector_index("Doc", p, 2, DistanceMetric::L2)
+                .unwrap();
         }
         let (status, body) = post_json(
             test_app(state),
@@ -847,7 +860,9 @@ mod tests {
         let state = test_state();
         {
             let mut store = state.store.write().await;
-            store.create_vector_index("Doc", "emb", 2, DistanceMetric::L2).unwrap();
+            store
+                .create_vector_index("Doc", "emb", 2, DistanceMetric::L2)
+                .unwrap();
             let id = store.create_node("Doc");
             let _ = store.set_node_property(
                 "default",
@@ -855,7 +870,10 @@ mod tests {
                 "title".to_string(),
                 crate::graph::PropertyValue::String("t".into()),
             );
-            store.vector_index.add_vector("Doc", "emb", id, &vec![1.0_f32, 0.0]).unwrap();
+            store
+                .vector_index
+                .add_vector("Doc", "emb", id, &vec![1.0_f32, 0.0])
+                .unwrap();
             let _ = store.set_node_property(
                 "default",
                 id,
@@ -875,7 +893,10 @@ mod tests {
         let node = &body["results"][0]["node"];
         assert_eq!(node["labels"], json!(["Doc"]));
         assert_eq!(node["properties"]["title"], "t");
-        assert!(node["properties"].get("emb").is_none(), "the vector is hidden: {node}");
+        assert!(
+            node["properties"].get("emb").is_none(),
+            "the vector is hidden: {node}"
+        );
         assert_eq!(body["results"][0]["score"], 1.0);
 
         let (_, body) = post_json(
@@ -884,7 +905,10 @@ mod tests {
             json!({ "query_vector": [1.0, 0.0], "label": "Doc", "k": 1, "include_vectors": true }),
         )
         .await;
-        assert!(body["results"][0]["node"]["properties"]["emb"].is_array(), "{body}");
+        assert!(
+            body["results"][0]["node"]["properties"]["emb"].is_array(),
+            "{body}"
+        );
     }
 
     #[tokio::test]
@@ -902,7 +926,12 @@ mod tests {
     #[tokio::test]
     async fn a_query_of_the_wrong_dimension_is_a_400_naming_the_index() {
         let state = test_state();
-        state.store.read().await.create_vector_index("Doc", "vec", 2, DistanceMetric::L2).unwrap();
+        state
+            .store
+            .read()
+            .await
+            .create_vector_index("Doc", "vec", 2, DistanceMetric::L2)
+            .unwrap();
         let (status, body) = post_json(
             test_app(state),
             "/api/vector-search",
@@ -915,7 +944,10 @@ mod tests {
         assert!(e.contains("label 'Doc' property 'vec'"), "{e}");
     }
 
-    fn tenant_config(provider: crate::persistence::tenant::LLMProvider, model: &str) -> crate::persistence::tenant::AutoEmbedConfig {
+    fn tenant_config(
+        provider: crate::persistence::tenant::LLMProvider,
+        model: &str,
+    ) -> crate::persistence::tenant::AutoEmbedConfig {
         crate::persistence::tenant::AutoEmbedConfig {
             provider,
             embedding_model: model.to_string(),
@@ -934,7 +966,10 @@ mod tests {
         let tm = Arc::new(crate::persistence::TenantManager::new());
         tm.update_embed_config(
             "default",
-            Some(tenant_config(crate::persistence::tenant::LLMProvider::Mock, "tenant-model")),
+            Some(tenant_config(
+                crate::persistence::tenant::LLMProvider::Mock,
+                "tenant-model",
+            )),
         )
         .unwrap();
         let mut state = test_state();
@@ -954,11 +989,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tenant_config_that_cannot_build_falls_back_to_the_global_pipeline() {
+        // Azure needs a base URL, so this config cannot become a pipeline.
+        let tm = Arc::new(crate::persistence::TenantManager::new());
+        tm.update_embed_config(
+            "default",
+            Some(tenant_config(
+                crate::persistence::tenant::LLMProvider::AzureOpenAI,
+                "azure-model",
+            )),
+        )
+        .unwrap();
+        let mut state = state_with_model(Some("model-a"));
+        state.tenant_manager = Some(tm);
+        seed_doc_index(&state, Some("model-a")).await;
+        let (status, body) = text_search(&state, Some("Doc")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(
+            state.embed_cache.read().await.is_empty(),
+            "nothing was built to cache"
+        );
+    }
+
+    #[tokio::test]
     async fn an_embedding_failure_is_a_400_naming_it() {
         let tm = Arc::new(crate::persistence::TenantManager::new());
         tm.update_embed_config(
             "default",
-            Some(tenant_config(crate::persistence::tenant::LLMProvider::Anthropic, "some-model")),
+            Some(tenant_config(
+                crate::persistence::tenant::LLMProvider::Anthropic,
+                "some-model",
+            )),
         )
         .unwrap();
         let mut state = test_state();
@@ -966,7 +1027,10 @@ mod tests {
         let (status, body) = text_search(&state, Some("Doc")).await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(
-            body["error"].as_str().unwrap().starts_with("Embedding generation failed"),
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Embedding generation failed"),
             "{body}"
         );
     }
@@ -978,8 +1042,12 @@ mod tests {
         let state = state_with_model(Some("model-b"));
         {
             let store = state.store.read().await;
-            store.create_vector_index("Small", "embedding", 32, DistanceMetric::Cosine).unwrap();
-            store.vector_index.set_model_id("Small", "embedding", "model-a");
+            store
+                .create_vector_index("Small", "embedding", 32, DistanceMetric::Cosine)
+                .unwrap();
+            store
+                .vector_index
+                .set_model_id("Small", "embedding", "model-a");
         }
         let (status, body) = text_search(&state, None).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{body}");

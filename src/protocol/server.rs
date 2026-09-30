@@ -1200,7 +1200,28 @@ mod tests {
             let server =
                 RespServer::new_with_tenants(config(0), store, Some(Arc::clone(&pm)), Arc::clone(&tm));
             assert!(server.persistence.is_some());
-            assert!(Arc::ptr_eq(&server.tenant_manager(), &tm), "the given registry wins");
+            assert!(
+                Arc::ptr_eq(&server.tenant_manager(), &tm),
+                "the given registry wins"
+            );
+        }
+
+        #[tokio::test]
+        async fn with_sharding_installs_the_router_proxy_and_cluster() {
+            let store = Arc::new(RwLock::new(GraphStore::new()));
+            let router = Arc::new(Router::new(1));
+            let cluster = cluster_with(&[(1, "127.0.0.1:1".into())]);
+            let server = RespServer::new(config(0), store).with_sharding(
+                Arc::clone(&router),
+                Arc::new(Proxy::new()),
+                Arc::clone(&cluster),
+            );
+            assert!(Arc::ptr_eq(server.router.as_ref().unwrap(), &router));
+            assert!(server.proxy.is_some());
+            assert!(Arc::ptr_eq(
+                server.cluster_manager.as_ref().unwrap(),
+                &cluster
+            ));
         }
 
         #[tokio::test]
@@ -1209,10 +1230,30 @@ mod tests {
             let handler = CommandHandler::new(None);
             let c = creds(&[&format!("svc:{TEST_DIGEST}")]);
             let mut txn = ConnTxn::default();
-            let r = respond(&handler, &cmd(&["AUTH", "test"]), &store, &mut txn, Some(&c)).await;
-            assert_eq!(r, RespValue::Error("ERR wrong number of arguments for 'auth' command".into()));
-            let r = respond(&handler, &cmd(&["AUTH", "svc", "test"]), &store, &mut txn, None).await;
-            assert_eq!(r, RespValue::Error("ERR Client sent AUTH, but no password is set".into()));
+            let r = respond(
+                &handler,
+                &cmd(&["AUTH", "test"]),
+                &store,
+                &mut txn,
+                Some(&c),
+            )
+            .await;
+            assert_eq!(
+                r,
+                RespValue::Error("ERR wrong number of arguments for 'auth' command".into())
+            );
+            let r = respond(
+                &handler,
+                &cmd(&["AUTH", "svc", "test"]),
+                &store,
+                &mut txn,
+                None,
+            )
+            .await;
+            assert_eq!(
+                r,
+                RespValue::Error("ERR Client sent AUTH, but no password is set".into())
+            );
             assert!(txn.authenticated_as.is_none());
         }
 
@@ -1225,7 +1266,11 @@ mod tests {
 
             let mut s = connect_when_up(port).await;
             assert_eq!(ask(&mut s, b"PING\r\n").await, "+PONG\r\n");
-            let reply = ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "default", "RETURN 1 AS one"])).await;
+            let reply = ask(
+                &mut s,
+                &resp_cmd(&["GRAPH.QUERY", "default", "RETURN 1 AS one"]),
+            )
+            .await;
             assert_eq!(reply, "*2\r\n*1\r\n$3\r\none\r\n*1\r\n:1\r\n");
             drop(s);
             task.abort();
@@ -1242,7 +1287,10 @@ mod tests {
             let mut s = connect_when_up(port).await;
             let r = ask(&mut s, &resp_cmd(&["GRAPH.LIST"])).await;
             assert_eq!(r, "-NOAUTH Authentication required.\r\n");
-            assert_eq!(ask(&mut s, &resp_cmd(&["AUTH", "svc", "test"])).await, "+OK\r\n");
+            assert_eq!(
+                ask(&mut s, &resp_cmd(&["AUTH", "svc", "test"])).await,
+                "+OK\r\n"
+            );
             let r = ask(&mut s, &resp_cmd(&["GRAPH.LIST"])).await;
             assert_eq!(r, "*1\r\n$7\r\ndefault\r\n");
             drop(s);
@@ -1267,7 +1315,10 @@ mod tests {
             s.shutdown().await.unwrap();
             let mut rest = Vec::new();
             s.read_to_end(&mut rest).await.unwrap();
-            assert!(rest.is_empty(), "an incomplete frame was answered: {rest:?}");
+            assert!(
+                rest.is_empty(),
+                "an incomplete frame was answered: {rest:?}"
+            );
             assert_eq!(server.await.unwrap(), Ok(()));
         }
 
@@ -1330,11 +1381,22 @@ mod tests {
 
             let sent = resp_cmd(&["GRAPH.QUERY", "remote", "RETURN 1"]);
             assert_eq!(ask(&mut s, &sent).await, "+FROM-REMOTE\r\n");
-            assert_eq!(remote.await.unwrap(), sent, "the command was re-encoded unchanged");
+            assert_eq!(
+                remote.await.unwrap(),
+                sent,
+                "the command was re-encoded unchanged"
+            );
 
             // Not routed: a non-GRAPH command, and a tenant with no route, are local.
-            assert_eq!(ask(&mut s, &resp_cmd(&["ECHO", "remote"])).await, "$6\r\nremote\r\n");
-            let r = ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "default", "RETURN 2 AS two"])).await;
+            assert_eq!(
+                ask(&mut s, &resp_cmd(&["ECHO", "remote"])).await,
+                "$6\r\nremote\r\n"
+            );
+            let r = ask(
+                &mut s,
+                &resp_cmd(&["GRAPH.QUERY", "default", "RETURN 2 AS two"]),
+            )
+            .await;
             assert_eq!(r, "*2\r\n*1\r\n$3\r\ntwo\r\n*1\r\n:2\r\n");
             drop(s);
             server.await.unwrap();
@@ -1350,7 +1412,10 @@ mod tests {
             let (mut s, server) = sharded_connection(router, cluster).await;
 
             let r = ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "remote", "RETURN 1"])).await;
-            assert!(r.starts_with("-ERR routing failed: Failed to connect"), "{r}");
+            assert!(
+                r.starts_with("-ERR routing failed: Failed to connect"),
+                "{r}"
+            );
             drop(s);
             server.await.unwrap();
         }
@@ -1366,9 +1431,16 @@ mod tests {
             // Node 9 has no address, so the command is handled here -- and
             // this build refuses the graph name.
             let r = ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "ghost", "RETURN 1"])).await;
-            assert!(r.starts_with("-ERR this build serves a single graph"), "{r}");
+            assert!(
+                r.starts_with("-ERR this build serves a single graph"),
+                "{r}"
+            );
             // A tenant routed to this node is local too.
-            let r = ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "default", "RETURN 3 AS t"])).await;
+            let r = ask(
+                &mut s,
+                &resp_cmd(&["GRAPH.QUERY", "default", "RETURN 3 AS t"]),
+            )
+            .await;
             assert_eq!(r, "*2\r\n*1\r\n$1\r\nt\r\n*1\r\n:3\r\n");
             drop(s);
             server.await.unwrap();

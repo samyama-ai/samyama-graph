@@ -12,7 +12,10 @@ fn app() -> Router {
 }
 
 fn cfg() -> SolverConfig {
-    SolverConfig { population_size: 6, max_iterations: 3 }
+    SolverConfig {
+        population_size: 6,
+        max_iterations: 3,
+    }
 }
 
 async fn get_json(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -61,10 +64,16 @@ async fn stream_events(app: Router, job: &str) -> (StatusCode, Vec<(String, serd
         let mut name = None;
         let mut data = None;
         for line in block.lines() {
-            if let Some(n) = line.strip_prefix("event: ").or_else(|| line.strip_prefix("event:")) {
+            if let Some(n) = line
+                .strip_prefix("event: ")
+                .or_else(|| line.strip_prefix("event:"))
+            {
                 name = Some(n.trim().to_string());
             }
-            if let Some(d) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) {
+            if let Some(d) = line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
+            {
                 data = Some(serde_json::from_str(d.trim()).unwrap_or(serde_json::Value::Null));
             }
         }
@@ -116,16 +125,31 @@ async fn the_benchmark_catalogue_describes_each_problem() {
 
 #[tokio::test]
 async fn an_unknown_field_benchmark_or_algorithm_is_a_400() {
-    let (s, m) = post(app(), "/optimize/solve", r#"{"algorithm":"jaya","benchmark":"sphere","n_var":3}"#).await;
+    let (s, m) = post(
+        app(),
+        "/optimize/solve",
+        r#"{"algorithm":"jaya","benchmark":"sphere","n_var":3}"#,
+    )
+    .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert!(m.starts_with("invalid solve request:"), "{m}");
     assert!(m.contains("n_var"), "the field is named: {m}");
 
-    let (s, m) = post(app(), "/optimize/solve", r#"{"algorithm":"jaya","benchmark":"moon"}"#).await;
+    let (s, m) = post(
+        app(),
+        "/optimize/solve",
+        r#"{"algorithm":"jaya","benchmark":"moon"}"#,
+    )
+    .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert_eq!(m, "unknown benchmark: moon");
 
-    let (s, m) = post(app(), "/optimize/solve", r#"{"algorithm":"magic","benchmark":"sphere"}"#).await;
+    let (s, m) = post(
+        app(),
+        "/optimize/solve",
+        r#"{"algorithm":"magic","benchmark":"sphere"}"#,
+    )
+    .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert_eq!(m, "unknown algorithm: magic");
 
@@ -156,9 +180,15 @@ async fn a_single_objective_solve_streams_iterations_then_done_with_its_seed() {
     assert_eq!(last["seed"], 42);
     assert!(last["final_pareto"].is_null());
     let iterations: Vec<_> = events.iter().filter(|(n, _)| n == "iteration").collect();
-    assert_eq!(iterations.len() as u64, last["iterations"].as_u64().unwrap());
+    assert_eq!(
+        iterations.len() as u64,
+        last["iterations"].as_u64().unwrap()
+    );
     assert_eq!(iterations[0].1["iter"], 0);
-    assert!(last["final_fitness"].as_f64().unwrap() >= 0.0, "sphere is non-negative");
+    assert!(
+        last["final_fitness"].as_f64().unwrap() >= 0.0,
+        "sphere is non-negative"
+    );
 
     // The receiver has been taken: a second stream of the same job is refused.
     let resp = app
@@ -192,11 +222,17 @@ async fn a_multi_objective_solve_stamps_the_pareto_front_on_the_last_iteration()
     assert_eq!(name, "done");
     let front = done["final_pareto"].as_array().expect("a pareto front");
     assert!(!front.is_empty());
-    assert!(front.iter().all(|p| p.as_array().unwrap().len() == 2), "ZDT1 has two objectives");
+    assert!(
+        front.iter().all(|p| p.as_array().unwrap().len() == 2),
+        "ZDT1 has two objectives"
+    );
     let iters: Vec<_> = events.iter().filter(|(n, _)| n == "iteration").collect();
     assert!(iters.last().unwrap().1["pareto_front"].is_array());
     if iters.len() > 1 {
-        assert!(iters[0].1["pareto_front"].is_null(), "only the last carries the front");
+        assert!(
+            iters[0].1["pareto_front"].is_null(),
+            "only the last carries the front"
+        );
     }
 }
 
@@ -219,7 +255,10 @@ async fn a_solver_error_is_streamed_as_an_error_event() {
     let (_, events) = stream_events(app, &job).await;
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0].0, "error");
-    assert_eq!(events[0].1["message"], "benchmark sphere is not multi-objective");
+    assert_eq!(
+        events[0].1["message"],
+        "benchmark sphere is not multi-objective"
+    );
 }
 
 #[tokio::test]
@@ -256,7 +295,12 @@ async fn cancel_or_stream_of_an_unknown_job_says_so() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body, r#"{"cancelled":false}"#);
     let resp = app()
-        .oneshot(Request::builder().uri("/optimize/solve/nope/stream").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/optimize/solve/nope/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -269,7 +313,11 @@ async fn cancel_of_a_job_without_a_cancel_handle_reports_false() {
     let state = Arc::new(OptimizeState::default());
     state.jobs.lock().await.insert(
         "bare".into(),
-        JobHandle { cancel_tx: None, cancel_flag: None, event_rx: None },
+        JobHandle {
+            cancel_tx: None,
+            cancel_flag: None,
+            event_rx: None,
+        },
     );
     let app = router().with_state(Arc::clone(&state));
     let (_, body) = post(app, "/optimize/solve/bare/cancel", "").await;
@@ -279,15 +327,34 @@ async fn cancel_of_a_job_without_a_cancel_handle_reports_false() {
 #[test]
 fn every_single_objective_solver_runs_on_every_single_objective_benchmark() {
     let algos = [
-        "jaya", "rao1", "rao2", "rao3", "tlbo", "itlbo", "qojaya", "gotlbo", "bmr", "bwr",
-        "bmwr", "samp_jaya", "qo_rao", "ehrjaya", "saphr", "pso", "de", "ga",
+        "jaya",
+        "rao1",
+        "rao2",
+        "rao3",
+        "tlbo",
+        "itlbo",
+        "qojaya",
+        "gotlbo",
+        "bmr",
+        "bwr",
+        "bmwr",
+        "samp_jaya",
+        "qo_rao",
+        "ehrjaya",
+        "saphr",
+        "pso",
+        "de",
+        "ga",
     ];
     for algo in algos {
         let out = run_solver(algo, false, "sphere", 1, 2, cfg(), Some(3))
             .unwrap_or_else(|e| panic!("{algo}: {e}"));
         assert!(out.final_pareto.is_none(), "{algo}");
         assert!(!out.history.is_empty(), "{algo}");
-        assert!(out.final_fitness.is_finite() && out.final_fitness >= 0.0, "{algo}");
+        assert!(
+            out.final_fitness.is_finite() && out.final_fitness >= 0.0,
+            "{algo}"
+        );
     }
     for bench in ["rastrigin", "ackley", "rosenbrock"] {
         let out = run_solver("jaya", false, bench, 1, 0, cfg(), None).unwrap();
@@ -314,12 +381,21 @@ fn every_multi_objective_solver_runs_on_every_multi_objective_benchmark() {
 #[test]
 fn a_single_objective_solver_on_a_multi_objective_benchmark_is_refused() {
     for bench in ["zdt1", "uc2_dosing", "dtlz1"] {
-        let e = run_solver("jaya", true, bench, 2, 0, cfg(), None).err().unwrap();
+        let e = run_solver("jaya", true, bench, 2, 0, cfg(), None)
+            .err()
+            .unwrap();
         assert_eq!(e, "algorithm jaya not multi-objective");
     }
-    let e = run_solver("nsga2", false, "sphere", 1, 0, cfg(), None).err().unwrap();
-    assert_eq!(e, "algorithm nsga2 not supported on single-objective benchmarks");
-    let e = run_solver("jaya", false, "moon", 1, 0, cfg(), None).err().unwrap();
+    let e = run_solver("nsga2", false, "sphere", 1, 0, cfg(), None)
+        .err()
+        .unwrap();
+    assert_eq!(
+        e,
+        "algorithm nsga2 not supported on single-objective benchmarks"
+    );
+    let e = run_solver("jaya", false, "moon", 1, 0, cfg(), None)
+        .err()
+        .unwrap();
     assert_eq!(e, "unknown benchmark: moon");
 }
 
@@ -349,7 +425,10 @@ fn zdt_objectives_follow_their_definitions() {
     for (variant, f2) in [
         (1u8, 1.0 - 0.25f64.sqrt()),
         (2, 1.0 - 0.25f64.powi(2)),
-        (3, 1.0 - 0.25f64.sqrt() - 0.25 * (10.0 * std::f64::consts::PI * 0.25).sin()),
+        (
+            3,
+            1.0 - 0.25f64.sqrt() - 0.25 * (10.0 * std::f64::consts::PI * 0.25).sin(),
+        ),
         (9, 1.0 - 0.25f64.sqrt()),
     ] {
         let p = ZDT { variant, dim: 30 };
@@ -394,4 +473,23 @@ async fn a_body_without_a_json_content_type_is_a_400_that_says_so() {
     let m = String::from_utf8_lossy(&bytes);
     assert!(m.starts_with("invalid solve request:"), "{m}");
     assert!(m.to_lowercase().contains("content-type"), "{m}");
+}
+
+#[tokio::test]
+async fn the_test_router_serves_the_optimizer_alone() {
+    let store = Arc::new(tokio::sync::RwLock::new(crate::graph::GraphStore::new()));
+    let app = crate::http::build_router_for_tests(store);
+    let (status, json) = get_json(app.clone(), "/optimize/benchmarks").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json.as_array().unwrap().len(), 9);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "no graph routes");
 }

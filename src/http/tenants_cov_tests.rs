@@ -25,7 +25,10 @@ async fn call(
         req = req.header("content-type", "application/json");
     }
     let resp = app
-        .oneshot(req.body(Body::from(body.unwrap_or("").to_string())).unwrap())
+        .oneshot(
+            req.body(Body::from(body.unwrap_or("").to_string()))
+                .unwrap(),
+        )
         .await
         .unwrap();
     let status = resp.status();
@@ -79,7 +82,12 @@ async fn create_then_get_returns_the_tenant_without_an_embed_config() {
 async fn creating_a_tenant_twice_is_a_conflict() {
     let (app, _, _) = app();
     let body = r#"{"id":"dup","name":"Dup"}"#;
-    assert_eq!(call(app.clone(), "POST", "/api/tenants", Some(body)).await.0, StatusCode::CREATED);
+    assert_eq!(
+        call(app.clone(), "POST", "/api/tenants", Some(body))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
     let (status, err) = call(app, "POST", "/api/tenants", Some(body)).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(err["error"], "Tenant 'dup' already exists");
@@ -136,18 +144,33 @@ async fn the_default_tenant_cannot_be_deleted() {
 #[tokio::test]
 async fn delete_removes_the_tenant_with_no_content() {
     let (app, tm, _) = app();
-    call(app.clone(), "POST", "/api/tenants", Some(r#"{"id":"gone","name":"Gone"}"#)).await;
+    call(
+        app.clone(),
+        "POST",
+        "/api/tenants",
+        Some(r#"{"id":"gone","name":"Gone"}"#),
+    )
+    .await;
     let (status, body) = call(app.clone(), "DELETE", "/api/tenants/gone", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(body.is_null(), "a 204 has no body: {body}");
     assert!(tm.get_tenant("gone").is_err());
-    assert_eq!(call(app, "GET", "/api/tenants/gone", None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        call(app, "GET", "/api/tenants/gone", None).await.0,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
 async fn patch_sets_the_embed_config_and_redacts_the_key() {
     let (app, tm, cache) = app();
-    call(app.clone(), "POST", "/api/tenants", Some(r#"{"id":"t","name":"T"}"#)).await;
+    call(
+        app.clone(),
+        "POST",
+        "/api/tenants",
+        Some(r#"{"id":"t","name":"T"}"#),
+    )
+    .await;
     // A stale pipeline for this tenant must be dropped by the PATCH.
     let stale: AutoEmbedConfig = serde_json::from_value(mock_config_json()).unwrap();
     cache
@@ -167,15 +190,27 @@ async fn patch_sets_the_embed_config_and_redacts_the_key() {
     assert_eq!(cfg["chunk_overlap"], 10);
     assert_eq!(cfg["embedding_property"], "embedding");
     assert_eq!(cfg["embedding_policies"]["Doc"][0], "body");
-    assert!(!json.to_string().contains("sk-secret"), "the key leaked: {json}");
+    assert!(
+        !json.to_string().contains("sk-secret"),
+        "the key leaked: {json}"
+    );
     assert!(tm.get_tenant("t").unwrap().embed_config.is_some());
-    assert!(cache.read().await.get("t").is_none(), "the cached pipeline survived");
+    assert!(
+        cache.read().await.get("t").is_none(),
+        "the cached pipeline survived"
+    );
 }
 
 #[tokio::test]
 async fn patch_without_the_field_leaves_the_config_alone() {
     let (app, tm, _) = app();
-    call(app.clone(), "POST", "/api/tenants", Some(r#"{"id":"t","name":"T"}"#)).await;
+    call(
+        app.clone(),
+        "POST",
+        "/api/tenants",
+        Some(r#"{"id":"t","name":"T"}"#),
+    )
+    .await;
     let set = json!({ "embed_config": mock_config_json() }).to_string();
     call(app.clone(), "PATCH", "/api/tenants/t", Some(&set)).await;
 
@@ -188,12 +223,23 @@ async fn patch_without_the_field_leaves_the_config_alone() {
 #[tokio::test]
 async fn patch_with_null_clears_the_config() {
     let (app, tm, _) = app();
-    call(app.clone(), "POST", "/api/tenants", Some(r#"{"id":"t","name":"T"}"#)).await;
+    call(
+        app.clone(),
+        "POST",
+        "/api/tenants",
+        Some(r#"{"id":"t","name":"T"}"#),
+    )
+    .await;
     let set = json!({ "embed_config": mock_config_json() }).to_string();
     call(app.clone(), "PATCH", "/api/tenants/t", Some(&set)).await;
 
-    let (status, json) =
-        call(app, "PATCH", "/api/tenants/t", Some(r#"{"embed_config":null}"#)).await;
+    let (status, json) = call(
+        app,
+        "PATCH",
+        "/api/tenants/t",
+        Some(r#"{"embed_config":null}"#),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(json["embed_config"].is_null());
     assert!(tm.get_tenant("t").unwrap().embed_config.is_none());
@@ -202,8 +248,13 @@ async fn patch_with_null_clears_the_config() {
 #[tokio::test]
 async fn patch_with_a_misspelled_field_is_a_400_naming_it() {
     let (app, _, _) = app();
-    let (status, json) =
-        call(app, "PATCH", "/api/tenants/default", Some(r#"{"embedconfig":{}}"#)).await;
+    let (status, json) = call(
+        app,
+        "PATCH",
+        "/api/tenants/default",
+        Some(r#"{"embedconfig":{}}"#),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let e = json["error"].as_str().unwrap();
     assert!(e.starts_with("invalid tenant patch:"), "{e}");

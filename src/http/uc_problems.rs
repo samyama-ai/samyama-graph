@@ -226,8 +226,14 @@ mod tests {
         // and interact with severity 0.1.
         let x = Array1::from(vec![0.5, 0.5, 0.0, 0.0, 0.0, 0.0]);
         let obj = p.objectives(&x);
-        assert!((obj[0] - (-1.0)).abs() < 1e-9, "efficacy is 0.5*1 + 0.5*1: {obj:?}");
-        assert!((obj[1] - 0.025).abs() < 1e-9, "risk is 0.1*0.5*0.5: {obj:?}");
+        assert!(
+            (obj[0] - (-1.0)).abs() < 1e-9,
+            "efficacy is 0.5*1 + 0.5*1: {obj:?}"
+        );
+        assert!(
+            (obj[1] - 0.025).abs() < 1e-9,
+            "risk is 0.1*0.5*0.5: {obj:?}"
+        );
         assert!((obj[2] - 1.0).abs() < 1e-9, "total dose: {obj:?}");
     }
 

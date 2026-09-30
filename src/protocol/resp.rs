@@ -1224,7 +1224,9 @@ mod tests {
     #[test]
     fn a_simple_string_with_a_bare_cr_is_escaped() {
         let mut buf = Vec::new();
-        RespValue::SimpleString("a\rb".to_string()).encode(&mut buf).unwrap();
+        RespValue::SimpleString("a\rb".to_string())
+            .encode(&mut buf)
+            .unwrap();
         assert_eq!(buf, b"+a\\rb\r\n");
     }
 

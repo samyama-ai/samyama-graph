@@ -1439,9 +1439,13 @@ mod tests {
             let tm = Arc::new(TenantManager::new());
             let handler = CommandHandler::new_with_tenants(None, Arc::clone(&tm));
             assert!(Arc::ptr_eq(&handler.tenant_manager(), &tm));
-            tm.create_tenant("zeta".into(), "Zeta".into(), None).unwrap();
-            tm.create_tenant("alpha".into(), "Alpha".into(), None).unwrap();
-            let r = handler.handle_command(&cmd(&["GRAPH.LIST"]), &store(), None).await;
+            tm.create_tenant("zeta".into(), "Zeta".into(), None)
+                .unwrap();
+            tm.create_tenant("alpha".into(), "Alpha".into(), None)
+                .unwrap();
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.LIST"]), &store(), None)
+                .await;
             assert_eq!(
                 r,
                 RespValue::Array(vec![bulk("alpha"), bulk("default"), bulk("zeta")]),
@@ -1463,7 +1467,10 @@ mod tests {
         fn begin_twice_and_rollback_or_commit_with_none_open_are_errors() {
             let handler = CommandHandler::new(None);
             let mut s = GraphStore::new();
-            assert!(matches!(handler.begin_transaction_on(&mut s), RespValue::Integer(_)));
+            assert!(matches!(
+                handler.begin_transaction_on(&mut s),
+                RespValue::Integer(_)
+            ));
             assert!(err_text(&handler.begin_transaction_on(&mut s)).starts_with("ERR "));
             assert_eq!(
                 handler.rollback_transaction_on(&mut s),
@@ -1479,15 +1486,25 @@ mod tests {
             let pm = Arc::new(PersistenceManager::new(dir.path()).unwrap());
             let handler = CommandHandler::new(Some(Arc::clone(&pm)));
             let mut s = GraphStore::new();
-            assert!(matches!(handler.begin_transaction_on(&mut s), RespValue::Integer(_)));
+            assert!(matches!(
+                handler.begin_transaction_on(&mut s),
+                RespValue::Integer(_)
+            ));
             let r = handler.query_in_transaction(
-                &[bulk("GRAPH.QUERY"), bulk("default"), bulk("CREATE (:Tx {v: 1})")],
+                &[
+                    bulk("GRAPH.QUERY"),
+                    bulk("default"),
+                    bulk("CREATE (:Tx {v: 1})"),
+                ],
                 &mut s,
                 false,
                 None,
             );
             assert!(matches!(r, RespValue::Array(_)), "{r:?}");
-            assert!(matches!(handler.commit_transaction_on(&mut s), RespValue::Integer(_)));
+            assert!(matches!(
+                handler.commit_transaction_on(&mut s),
+                RespValue::Integer(_)
+            ));
             let (nodes, _) = pm.recover("default").unwrap();
             assert_eq!(nodes.len(), 1, "the committed node did not reach disk");
         }
@@ -1501,17 +1518,51 @@ mod tests {
             };
             let r = q(vec![bulk("GRAPH.QUERY"), bulk("default")], &mut s);
             assert!(err_text(&r).contains("wrong number of arguments"));
-            let r = q(vec![bulk("GRAPH.QUERY"), RespValue::BulkString(None), bulk("RETURN 1")], &mut s);
+            let r = q(
+                vec![
+                    bulk("GRAPH.QUERY"),
+                    RespValue::BulkString(None),
+                    bulk("RETURN 1"),
+                ],
+                &mut s,
+            );
             assert_eq!(err_text(&r), "ERR null graph name");
-            let r = q(vec![bulk("GRAPH.QUERY"), RespValue::Integer(1), bulk("RETURN 1")], &mut s);
+            let r = q(
+                vec![bulk("GRAPH.QUERY"), RespValue::Integer(1), bulk("RETURN 1")],
+                &mut s,
+            );
             assert!(err_text(&r).contains("Expected bulk string"), "{r:?}");
-            let r = q(vec![bulk("GRAPH.QUERY"), bulk("other"), bulk("RETURN 1")], &mut s);
-            assert!(err_text(&r).contains("graph 'other' does not exist"), "{r:?}");
-            let r = q(vec![bulk("GRAPH.QUERY"), bulk("default"), RespValue::BulkString(None)], &mut s);
+            let r = q(
+                vec![bulk("GRAPH.QUERY"), bulk("other"), bulk("RETURN 1")],
+                &mut s,
+            );
+            assert!(
+                err_text(&r).contains("graph 'other' does not exist"),
+                "{r:?}"
+            );
+            let r = q(
+                vec![
+                    bulk("GRAPH.QUERY"),
+                    bulk("default"),
+                    RespValue::BulkString(None),
+                ],
+                &mut s,
+            );
             assert_eq!(err_text(&r), "ERR null query");
-            let r = q(vec![bulk("GRAPH.QUERY"), bulk("default"), RespValue::Integer(3)], &mut s);
+            let r = q(
+                vec![bulk("GRAPH.QUERY"), bulk("default"), RespValue::Integer(3)],
+                &mut s,
+            );
             assert!(err_text(&r).contains("Expected bulk string"), "{r:?}");
-            let r = q(vec![bulk("GRAPH.QUERY"), bulk("default"), bulk("RETURN $x"), bulk("x")], &mut s);
+            let r = q(
+                vec![
+                    bulk("GRAPH.QUERY"),
+                    bulk("default"),
+                    bulk("RETURN $x"),
+                    bulk("x"),
+                ],
+                &mut s,
+            );
             assert!(err_text(&r).contains("key/value pairs"), "{r:?}");
         }
 
@@ -1521,14 +1572,24 @@ mod tests {
             let mut s = GraphStore::new();
             handler.begin_transaction_on(&mut s);
             let w = handler.query_in_transaction(
-                &[bulk("GRAPH.QUERY"), bulk("default"), bulk("CREATE (:P {n: $n})"), bulk("n"), bulk("7")],
+                &[
+                    bulk("GRAPH.QUERY"),
+                    bulk("default"),
+                    bulk("CREATE (:P {n: $n})"),
+                    bulk("n"),
+                    bulk("7"),
+                ],
                 &mut s,
                 false,
                 None,
             );
             assert!(matches!(w, RespValue::Array(_)), "{w:?}");
             let r = handler.query_in_transaction(
-                &[bulk("GRAPH.RO_QUERY"), bulk("default"), bulk("MATCH (p:P) RETURN p.n AS n")],
+                &[
+                    bulk("GRAPH.RO_QUERY"),
+                    bulk("default"),
+                    bulk("MATCH (p:P) RETURN p.n AS n"),
+                ],
                 &mut s,
                 true,
                 None,
@@ -1548,7 +1609,11 @@ mod tests {
             );
             assert!(err_text(&ro_write).contains("RO_QUERY was given a write"));
             let bad = handler.query_in_transaction(
-                &[bulk("GRAPH.QUERY"), bulk("default"), bulk("MATCH (n RETURN n")],
+                &[
+                    bulk("GRAPH.QUERY"),
+                    bulk("default"),
+                    bulk("MATCH (n RETURN n"),
+                ],
                 &mut s,
                 false,
                 None,
@@ -1598,8 +1663,11 @@ mod tests {
             let e = CommandHandler::params_from_args("RETURN $a", &[bulk("a"), RespValue::Integer(1)])
                 .unwrap_err();
             assert!(e.contains("Expected bulk string"), "{e}");
-            let p = CommandHandler::params_from_args("RETURN $a", &[bulk("a"), RespValue::BulkString(None)])
-                .unwrap();
+            let p = CommandHandler::params_from_args(
+                "RETURN $a",
+                &[bulk("a"), RespValue::BulkString(None)],
+            )
+            .unwrap();
             assert_eq!(p.get("a"), Some(&PropertyValue::Null));
         }
 
@@ -1609,7 +1677,13 @@ mod tests {
             let st = store();
             let r = handler
                 .handle_command(
-                    &cmd(&["GRAPH.QUERY", "default", "RETURN $v AS v", "v", "1 RETURN 2"]),
+                    &cmd(&[
+                        "GRAPH.QUERY",
+                        "default",
+                        "RETURN $v AS v",
+                        "v",
+                        "1 RETURN 2",
+                    ]),
                     &st,
                     None,
                 )
@@ -1629,7 +1703,11 @@ mod tests {
             let st = store();
             let r = handler
                 .handle_command(
-                    &RespValue::Array(vec![bulk("GRAPH.QUERY"), RespValue::Integer(1), bulk("RETURN 1")]),
+                    &RespValue::Array(vec![
+                        bulk("GRAPH.QUERY"),
+                        RespValue::Integer(1),
+                        bulk("RETURN 1"),
+                    ]),
                     &st,
                     None,
                 )
@@ -1637,14 +1715,22 @@ mod tests {
             assert!(err_text(&r).contains("Expected bulk string"), "{r:?}");
             let r = handler
                 .handle_command(
-                    &RespValue::Array(vec![bulk("GRAPH.QUERY"), bulk("default"), RespValue::Integer(1)]),
+                    &RespValue::Array(vec![
+                        bulk("GRAPH.QUERY"),
+                        bulk("default"),
+                        RespValue::Integer(1),
+                    ]),
                     &st,
                     None,
                 )
                 .await;
             assert!(err_text(&r).contains("Expected bulk string"), "{r:?}");
             let r = handler
-                .handle_command(&cmd(&["GRAPH.QUERY", "default", "RETURN 1", "dangling"]), &st, None)
+                .handle_command(
+                    &cmd(&["GRAPH.QUERY", "default", "RETURN 1", "dangling"]),
+                    &st,
+                    None,
+                )
                 .await;
             assert!(err_text(&r).contains("key/value pairs"), "{r:?}");
         }
@@ -1653,7 +1739,11 @@ mod tests {
         async fn a_read_that_fails_to_parse_is_an_error_reply() {
             let handler = CommandHandler::new(None);
             let r = handler
-                .handle_command(&cmd(&["GRAPH.QUERY", "default", "MATCH (n RETURN n"]), &store(), None)
+                .handle_command(
+                    &cmd(&["GRAPH.QUERY", "default", "MATCH (n RETURN n"]),
+                    &store(),
+                    None,
+                )
                 .await;
             assert!(err_text(&r).starts_with("ERR "), "{r:?}");
         }
@@ -1664,7 +1754,11 @@ mod tests {
             let st = store();
             let bound = cred(&format!("b:{D}:tenant=acme"));
             let r = handler
-                .handle_command(&cmd(&["GRAPH.QUERY", "default", "CREATE (:X)"]), &st, Some(&bound))
+                .handle_command(
+                    &cmd(&["GRAPH.QUERY", "default", "CREATE (:X)"]),
+                    &st,
+                    Some(&bound),
+                )
                 .await;
             assert!(err_text(&r).contains("bound to tenant 'acme'"), "{r:?}");
             assert_eq!(st.read().await.node_count(), 0);
@@ -1675,12 +1769,23 @@ mod tests {
             let handler = CommandHandler::new(None);
             let st = store();
             let r = handler
-                .handle_command(&cmd(&["GRAPH.RO_QUERY", "default", "CREATE (:X)"]), &st, None)
+                .handle_command(
+                    &cmd(&["GRAPH.RO_QUERY", "default", "CREATE (:X)"]),
+                    &st,
+                    None,
+                )
                 .await;
-            assert_eq!(err_text(&r), "ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY");
+            assert_eq!(
+                err_text(&r),
+                "ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY"
+            );
             assert_eq!(st.read().await.node_count(), 0);
             let r = handler
-                .handle_command(&cmd(&["GRAPH.RO_QUERY", "default", "RETURN 5 AS five"]), &st, None)
+                .handle_command(
+                    &cmd(&["GRAPH.RO_QUERY", "default", "RETURN 5 AS five"]),
+                    &st,
+                    None,
+                )
                 .await;
             assert_eq!(
                 r,
@@ -1696,8 +1801,13 @@ mod tests {
             let handler = CommandHandler::new(None);
             let st = store();
             st.write().await.create_node("Keep");
-            let r = handler.handle_command(&cmd(&["GRAPH.DELETE", "analytics"]), &st, None).await;
-            assert!(err_text(&r).contains("graph 'analytics' does not exist"), "{r:?}");
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.DELETE", "analytics"]), &st, None)
+                .await;
+            assert!(
+                err_text(&r).contains("graph 'analytics' does not exist"),
+                "{r:?}"
+            );
             let r = handler
                 .handle_command(
                     &RespValue::Array(vec![bulk("GRAPH.DELETE"), RespValue::Integer(0)]),
@@ -1707,9 +1817,15 @@ mod tests {
                 .await;
             assert!(err_text(&r).contains("Expected bulk string"), "{r:?}");
             let bound = cred(&format!("b:{D}:tenant=acme"));
-            let r = handler.handle_command(&cmd(&["GRAPH.DELETE", "default"]), &st, Some(&bound)).await;
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.DELETE", "default"]), &st, Some(&bound))
+                .await;
             assert!(err_text(&r).contains("bound to tenant"), "{r:?}");
-            assert_eq!(st.read().await.node_count(), 1, "a refused delete cleared the store");
+            assert_eq!(
+                st.read().await.node_count(),
+                1,
+                "a refused delete cleared the store"
+            );
         }
 
         #[tokio::test]
@@ -1719,15 +1835,25 @@ mod tests {
             let handler = CommandHandler::new(Some(Arc::clone(&pm)));
             let st = store();
             let r = handler
-                .handle_command(&cmd(&["GRAPH.QUERY", "default", "CREATE (:A), (:B)"]), &st, None)
+                .handle_command(
+                    &cmd(&["GRAPH.QUERY", "default", "CREATE (:A), (:B)"]),
+                    &st,
+                    None,
+                )
                 .await;
             assert!(matches!(r, RespValue::Array(_)), "{r:?}");
             assert_eq!(pm.recover("default").unwrap().0.len(), 2);
             let admin = cred(&format!("ops:{D}"));
-            let r = handler.handle_command(&cmd(&["GRAPH.DELETE", "default"]), &st, Some(&admin)).await;
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.DELETE", "default"]), &st, Some(&admin))
+                .await;
             assert_eq!(r, RespValue::SimpleString("OK".into()));
             assert_eq!(st.read().await.node_count(), 0);
-            assert_eq!(pm.recover("default").unwrap().0.len(), 0, "the drop did not reach disk");
+            assert_eq!(
+                pm.recover("default").unwrap().0.len(),
+                0,
+                "the drop did not reach disk"
+            );
         }
 
         #[test]
@@ -1746,9 +1872,14 @@ mod tests {
                     RespValue::Array(vec![bulk("x")]),
                 ])
             );
-            let map = Value::Map(vec![
-                ("k".to_string(), Value::Property(PropertyValue::Boolean(true))),
-            ].into_iter().collect());
+            let map = Value::Map(
+                vec![(
+                    "k".to_string(),
+                    Value::Property(PropertyValue::Boolean(true)),
+                )]
+                .into_iter()
+                .collect(),
+            );
             assert_eq!(
                 handler.format_value(&map),
                 RespValue::Array(vec![bulk("k"), bulk("true")])
@@ -1765,7 +1896,11 @@ mod tests {
             let handler = CommandHandler::new(None);
             let r = handler
                 .handle_command(
-                    &cmd(&["GRAPH.QUERY", "default", "RETURN [1, 2] AS l, {a: 'b'} AS m"]),
+                    &cmd(&[
+                        "GRAPH.QUERY",
+                        "default",
+                        "RETURN [1, 2] AS l, {a: 'b'} AS m",
+                    ]),
                     &store(),
                     None,
                 )

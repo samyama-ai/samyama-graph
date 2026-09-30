@@ -396,7 +396,9 @@ mod tests {
         assert!(short.contains("\"svc\""), "names the credential: {short}");
 
         let not_hex = "z".repeat(64);
-        let err = Credential::parse(&format!("svc:{not_hex}")).unwrap().unwrap_err();
+        let err = Credential::parse(&format!("svc:{not_hex}"))
+            .unwrap()
+            .unwrap_err();
         assert!(err.contains("not hexadecimal"), "{err}");
     }
 
@@ -404,7 +406,9 @@ mod tests {
     fn an_unknown_trailing_field_is_kept_as_part_of_the_secret() {
         // `foo=bar` is not a key this format knows, so peeling stops there and
         // the secret becomes `<digest>:foo=bar`, which is not a valid digest.
-        let err = Credential::parse(&format!("svc:{D}:foo=bar")).unwrap().unwrap_err();
+        let err = Credential::parse(&format!("svc:{D}:foo=bar"))
+            .unwrap()
+            .unwrap_err();
         assert!(err.contains("64-character"), "{err}");
     }
 
@@ -426,7 +430,10 @@ mod tests {
         assert!(!c.verify("hunter3"));
         assert!(authenticate_user(&[c.clone()], "alice", "hunter2").is_some());
         assert!(authenticate_user(&[c.clone()], "alice", "wrong").is_none());
-        assert!(authenticate_user(&[c], "bob", "hunter2").is_none(), "wrong user");
+        assert!(
+            authenticate_user(&[c], "bob", "hunter2").is_none(),
+            "wrong user"
+        );
     }
 
     #[test]
@@ -494,7 +501,10 @@ mod tests {
         let path = dir.path().join("creds");
         std::fs::write(&path, format!("ops:{D}\n# fine\nbroken\n")).unwrap();
         let err = read_credentials(&path).unwrap_err();
-        assert!(err.ends_with(&format!("{}:3: no `:` in \"broken\"", path.display())), "{err}");
+        assert!(
+            err.ends_with(&format!("{}:3: no `:` in \"broken\"", path.display())),
+            "{err}"
+        );
     }
 
     #[test]

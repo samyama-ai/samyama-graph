@@ -18,7 +18,11 @@ fn b64(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         for i in 0..4 {
             if i <= chunk.len() {
@@ -49,7 +53,11 @@ async fn send(app: Router, req: Request<Body>) -> (StatusCode, axum::http::Heade
     let status = resp.status();
     let headers = resp.headers().clone();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, headers, String::from_utf8_lossy(&bytes).into_owned())
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
 }
 
 fn get(uri: &str, auth: Option<&str>) -> Request<Body> {
@@ -79,19 +87,41 @@ fn base64_decodes_standard_payloads_and_stops_at_padding() {
     assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
     assert_eq!(base64_decode("TWE=").unwrap(), b"Ma");
     assert_eq!(base64_decode("TQ==").unwrap(), b"M");
-    assert_eq!(base64_decode(&b64("alice:s3cret/+")).unwrap(), b"alice:s3cret/+");
-    assert!(base64_decode("TW*u").is_none(), "an invalid character is refused");
+    assert_eq!(
+        base64_decode(&b64("alice:s3cret/+")).unwrap(),
+        b"alice:s3cret/+"
+    );
+    assert!(
+        base64_decode("TW*u").is_none(),
+        "an invalid character is refused"
+    );
 }
 
 #[test]
 fn a_bearer_token_authenticates_by_its_digest_and_only_then() {
-    let creds = vec![cred(&format!("svc:{D}")), cred(&format!("other:{}", "a".repeat(64)))];
+    let creds = vec![
+        cred(&format!("svc:{D}")),
+        cred(&format!("other:{}", "a".repeat(64))),
+    ];
     assert_eq!(authenticate(&creds, "Bearer test").unwrap().name, "svc");
-    assert_eq!(authenticate(&creds, "bearer   test  ").unwrap().name, "svc", "scheme is case-insensitive, token trimmed");
+    assert_eq!(
+        authenticate(&creds, "bearer   test  ").unwrap().name,
+        "svc",
+        "scheme is case-insensitive, token trimmed"
+    );
     assert!(authenticate(&creds, "Bearer nope").is_none());
-    assert!(authenticate(&creds, &format!("Bearer {D}")).is_none(), "the digest is not the token");
-    assert!(authenticate(&creds, "Bearer").is_none(), "no space, no credential");
-    assert!(authenticate(&creds, "Token test").is_none(), "an unknown scheme");
+    assert!(
+        authenticate(&creds, &format!("Bearer {D}")).is_none(),
+        "the digest is not the token"
+    );
+    assert!(
+        authenticate(&creds, "Bearer").is_none(),
+        "no space, no credential"
+    );
+    assert!(
+        authenticate(&creds, "Token test").is_none(),
+        "an unknown scheme"
+    );
 }
 
 #[test]
@@ -119,13 +149,28 @@ fn a_basic_credential_with_a_corrupt_hash_never_matches() {
 fn required_role_is_admin_for_management_and_write_for_imports() {
     use crate::auth::Role;
     assert_eq!(required_role(&Method::GET, "/api/tenants"), Role::Admin);
-    assert_eq!(required_role(&Method::DELETE, "/api/tenants/x"), Role::Admin);
-    assert_eq!(required_role(&Method::POST, "/api/snapshot/import"), Role::Admin);
-    assert_eq!(required_role(&Method::POST, "/api/enrich/policy"), Role::Admin);
+    assert_eq!(
+        required_role(&Method::DELETE, "/api/tenants/x"),
+        Role::Admin
+    );
+    assert_eq!(
+        required_role(&Method::POST, "/api/snapshot/import"),
+        Role::Admin
+    );
+    assert_eq!(
+        required_role(&Method::POST, "/api/enrich/policy"),
+        Role::Admin
+    );
     assert_eq!(required_role(&Method::POST, "/api/import/csv"), Role::Write);
     assert_eq!(required_role(&Method::POST, "/api/enrich"), Role::Write);
-    assert_eq!(required_role(&Method::POST, "/api/vector/indexes"), Role::Write);
-    assert_eq!(required_role(&Method::GET, "/api/vector/indexes"), Role::Read);
+    assert_eq!(
+        required_role(&Method::POST, "/api/vector/indexes"),
+        Role::Write
+    );
+    assert_eq!(
+        required_role(&Method::GET, "/api/vector/indexes"),
+        Role::Read
+    );
     assert_eq!(required_role(&Method::POST, "/api/query"), Role::Read);
     assert_eq!(required_role(&Method::GET, "/api/status"), Role::Read);
 }
@@ -198,13 +243,21 @@ async fn a_read_credential_may_run_a_read_but_not_a_write_query() {
         .router();
     let (status, _, body) = send(
         app.clone(),
-        post_json("/api/query", r#"{"query":"RETURN 1 AS x"}"#, Some("Bearer test")),
+        post_json(
+            "/api/query",
+            r#"{"query":"RETURN 1 AS x"}"#,
+            Some("Bearer test"),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let (status, _, body) = send(
         app,
-        post_json("/api/query", r#"{"query":"CREATE (:X)"}"#, Some("Bearer test")),
+        post_json(
+            "/api/query",
+            r#"{"query":"CREATE (:X)"}"#,
+            Some("Bearer test"),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
@@ -227,14 +280,24 @@ async fn the_audit_log_records_writes_with_their_subject_and_skips_reads() {
     send(app.clone(), get("/api/status", Some("Bearer test"))).await;
     send(
         app.clone(),
-        post_json("/api/query", r#"{"query":"CREATE (:A)"}"#, Some("Bearer test")),
+        post_json(
+            "/api/query",
+            r#"{"query":"CREATE (:A)"}"#,
+            Some("Bearer test"),
+        ),
     )
     .await;
-    send(app, post_json("/api/query", r#"{"query":"CREATE (:B)"}"#, None)).await;
+    send(
+        app,
+        post_json("/api/query", r#"{"query":"CREATE (:B)"}"#, None),
+    )
+    .await;
 
     let text = std::fs::read_to_string(&path).unwrap();
-    let lines: Vec<serde_json::Value> =
-        text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
     assert_eq!(lines.len(), 2, "the GET is not audited: {text}");
     assert_eq!(lines[0]["subject"], "svc");
     assert_eq!(lines[0]["method"], "POST");
@@ -273,7 +336,10 @@ async fn pna_is_echoed_only_to_an_allowed_origin_and_bad_origins_are_skipped() {
             .unwrap()
     };
     let (_, h, _) = send(app.clone(), preflight("https://studio.example")).await;
-    assert_eq!(h.get("access-control-allow-private-network").unwrap(), "true");
+    assert_eq!(
+        h.get("access-control-allow-private-network").unwrap(),
+        "true"
+    );
     assert_eq!(
         h.get("access-control-allow-origin").unwrap(),
         "https://studio.example"
@@ -295,7 +361,10 @@ fn a_tls_acceptor_needs_a_certificate_and_a_usable_key() {
     assert!(tls_acceptor(&cert.pem(), &key.serialize_pem()).is_ok());
 
     let err = tls_acceptor("", &key.serialize_pem()).err().unwrap();
-    assert_eq!(err.to_string(), "the certificate file contains no certificate");
+    assert_eq!(
+        err.to_string(),
+        "the certificate file contains no certificate"
+    );
     assert!(tls_acceptor(&cert.pem(), "not a key").is_err());
 
     // A key that does not belong to the certificate is refused too.
@@ -330,8 +399,17 @@ async fn the_shipped_router_serves_the_ui_and_the_optimizer() {
         .router();
     let (status, headers, body) = send(app.clone(), get("/", None)).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(headers.get("content-type").unwrap().to_str().unwrap().starts_with("text/html"));
-    assert!(body.to_lowercase().contains("<html"), "{}", &body[..body.len().min(80)]);
+    assert!(headers
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    assert!(
+        body.to_lowercase().contains("<html"),
+        "{}",
+        &body[..body.len().min(80)]
+    );
     let (status, _, body) = send(app, get("/optimize/benchmarks", None)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("sphere"));
@@ -363,7 +441,11 @@ async fn a_server_with_persistence_writes_through_to_disk() {
     let app = HttpServer::new(store(), 0)
         .with_persistence(Arc::clone(&pm))
         .router();
-    let (status, _, body) = send(app, post_json("/api/query", r#"{"query":"CREATE (:P), (:P)"}"#, None)).await;
+    let (status, _, body) = send(
+        app,
+        post_json("/api/query", r#"{"query":"CREATE (:P), (:P)"}"#, None),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(pm.recover("default").unwrap().0.len(), 2);
 }
@@ -382,10 +464,16 @@ async fn a_global_embed_pipeline_serves_text_search() {
         embedding_property: "embedding".into(),
     };
     let pipeline = Arc::new(EmbedPipeline::new(cfg).unwrap());
-    let app = HttpServer::new(store(), 0).with_embed_pipeline(pipeline).router();
+    let app = HttpServer::new(store(), 0)
+        .with_embed_pipeline(pipeline)
+        .router();
     let (status, _, body) = send(
         app,
-        post_json("/api/vector-search", r#"{"query_text":"hello","k":3}"#, None),
+        post_json(
+            "/api/vector-search",
+            r#"{"query_text":"hello","k":3}"#,
+            None,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -432,7 +520,11 @@ fn quota_refuses_names_the_resource_that_would_overflow() {
         )
         .unwrap();
     let s = state(Some(pm));
-    assert_eq!(s.quota_refuses("default", 2, 1), None, "exactly at the limit fits");
+    assert_eq!(
+        s.quota_refuses("default", 2, 1),
+        None,
+        "exactly at the limit fits"
+    );
     assert_eq!(
         s.quota_refuses("default", 3, 0).as_deref(),
         Some("quota exceeded: nodes (3/2)")
@@ -442,6 +534,88 @@ fn quota_refuses_names_the_resource_that_would_overflow() {
         Some("quota exceeded: edges (2/1)")
     );
     assert_eq!(s.quota_refuses("no-such-tenant", 99, 99), None);
+}
+
+#[test]
+fn a_quota_on_edges_alone_leaves_nodes_unbounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let pm = Arc::new(crate::persistence::PersistenceManager::new(dir.path()).unwrap());
+    pm.tenants()
+        .update_quotas(
+            "default",
+            crate::persistence::ResourceQuotas {
+                max_edges: Some(1),
+                ..crate::persistence::ResourceQuotas::unlimited()
+            },
+        )
+        .unwrap();
+    let s = state(Some(pm));
+    assert_eq!(s.quota_refuses("default", u64::MAX / 2, 1), None);
+    assert_eq!(
+        s.quota_refuses("default", 0, 5).as_deref(),
+        Some("quota exceeded: edges (5/1)")
+    );
+}
+
+#[tokio::test]
+async fn an_audit_log_on_a_full_disk_does_not_fail_the_request() {
+    // `/dev/full` accepts the open and fails every write with ENOSPC.
+    let full = std::path::Path::new("/dev/full");
+    if !full.exists() {
+        return;
+    }
+    let log = Arc::new(AuditLog::open(full).unwrap());
+    let s = store();
+    let app = HttpServer::new(Arc::clone(&s), 0)
+        .with_audit_log(log)
+        .router();
+    let (status, _, body) = send(
+        app,
+        post_json("/api/query", r#"{"query":"CREATE (:Kept)"}"#, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(s.read().await.node_count(), 1);
+}
+
+#[tokio::test]
+async fn a_server_on_a_routable_address_still_serves_after_warning() {
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let server = HttpServer::new(store(), port).with_bind_host("0.0.0.0");
+    let task = tokio::spawn(async move { server.start().await.map_err(|e| e.to_string()) });
+
+    let mut stream = None;
+    for _ in 0..200 {
+        if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+            stream = Some(s);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut stream = stream.expect("the server never accepted a connection");
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    stream
+        .write_all(b"GET /api/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8_lossy(&buf);
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(text.contains("\"healthy\""), "{text}");
+    task.abort();
+}
+
+#[tokio::test]
+async fn a_server_that_cannot_bind_reports_the_error() {
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+    let err = HttpServer::new(store(), port).start().await.unwrap_err();
+    assert!(!err.to_string().is_empty());
+    drop(held);
 }
 
 #[tokio::test]
