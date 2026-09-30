@@ -1310,6 +1310,10 @@ async fn agent_trigger_runs_for_a_labelled_node_with_a_policy() {
             tenants.clone(),
         )
         .await;
+        // Let the spawned agent tasks run to completion against the mock model.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
         // Text properties are never vectors, whatever the agent does.
         assert!(vi.list_indices().is_empty());
     }
@@ -2074,4 +2078,250 @@ fn create_node_with_properties_reuses_a_freed_id() {
     let c = store.create_node_stub("P");
     store.delete_node("default", c).unwrap();
     assert_eq!(store.create_node_stub("P"), c);
+}
+
+// ------------------------------------------------------------------
+// Further edge cases
+// ------------------------------------------------------------------
+
+#[test]
+fn selectivity_without_most_common_values_is_the_uniform_estimate() {
+    let label = Label::new("P");
+    let mut property_stats = HashMap::new();
+    property_stats.insert(
+        (label.clone(), "k".to_string()),
+        PropertyStats {
+            null_fraction: 0.0,
+            distinct_count: 4,
+            selectivity: 0.25,
+            most_common: vec![],
+        },
+    );
+    let stats = GraphStatistics {
+        total_nodes: 4,
+        total_edges: 0,
+        label_counts: HashMap::new(),
+        edge_type_counts: HashMap::new(),
+        avg_out_degree: 0.0,
+        property_stats,
+    };
+    assert_eq!(
+        stats.estimate_equality_selectivity_for_value(&label, "k", &s("x")),
+        0.25
+    );
+    assert_eq!(
+        stats.estimate_equality_selectivity_for_value(&label, "other", &s("x")),
+        0.1
+    );
+}
+
+#[test]
+fn a_constrained_write_to_a_missing_node_is_not_found() {
+    let mut store = GraphStore::new();
+    let label = Label::new("U");
+    let a = store.create_node("U");
+    store
+        .set_node_property("default", a, "email", "a@x")
+        .unwrap();
+    store.create_unique_constraint(&label, "email").unwrap();
+    let missing = NodeId::new(999);
+    assert_eq!(
+        store.set_node_property("default", missing, "email", "b@x"),
+        Err(GraphError::NodeNotFound(missing))
+    );
+}
+
+#[test]
+fn create_unique_constraint_skips_a_null_held_in_the_row() {
+    let mut store = GraphStore::new();
+    let label = Label::new("U");
+    for _ in 0..2 {
+        let n = store.create_node("U");
+        store
+            .get_node_mut(n)
+            .unwrap()
+            .set_property("email", PropertyValue::Null);
+    }
+    assert_eq!(store.create_unique_constraint(&label, "email"), Ok(0));
+}
+
+#[test]
+fn schema_summary_skips_a_type_whose_edges_were_all_deleted() {
+    let mut store = GraphStore::new();
+    let a = store.create_node("A");
+    let b = store.create_node("B");
+    let gone = store.create_edge(a, b, "GONE").unwrap();
+    store.create_edge(a, b, "KEPT").unwrap();
+    store.delete_edge(gone).unwrap();
+    let summary = store.schema_summary();
+    assert!(summary.contains("(A)-[:KEPT]->(B)"), "{summary}");
+    assert!(!summary.contains("GONE"), "{summary}");
+}
+
+#[test]
+fn create_fulltext_index_backfills_only_string_values() {
+    let mut store = GraphStore::new();
+    let a = store.create_node("Doc");
+    let b = store.create_node("Doc");
+    store
+        .set_node_property("default", a, "body", "graph text")
+        .unwrap();
+    store
+        .set_node_property("default", b, "body", 42i64)
+        .unwrap();
+    assert_eq!(store.create_fulltext_index("ft", "Doc", "body"), 1);
+}
+
+#[test]
+fn node_properties_full_merges_row_and_column_with_the_column_winning() {
+    let mut store = GraphStore::new();
+    let n = store.create_node("P");
+    store
+        .get_node_mut(n)
+        .unwrap()
+        .set_property("row_only", 1i64);
+    store.get_node_mut(n).unwrap().set_property("both", "row");
+    store.set_column_property(n, "both", s("column"));
+    let full = store.node_properties_full(n);
+    assert_eq!(full.get("row_only"), Some(&PropertyValue::Integer(1)));
+    assert_eq!(full.get("both"), Some(&s("column")));
+    assert!(store.node_properties_full(NodeId::new(404)).is_empty());
+}
+
+#[test]
+fn a_recovered_edge_keeps_its_properties() {
+    let mut store = GraphStore::new();
+    let a = store.create_node("P");
+    let b = store.create_node("P");
+    let mut edge = Edge::new(EdgeId::new(40), a, b, "R");
+    edge.properties
+        .insert("w".to_string(), PropertyValue::Integer(3));
+    store.insert_recovered_edge(edge).unwrap();
+    assert_eq!(
+        store.edge_property(EdgeId::new(40), "w"),
+        Some(PropertyValue::Integer(3))
+    );
+    assert_eq!(
+        store.create_edge(a, b, "R").unwrap(),
+        EdgeId::new(41),
+        "ids continue past it"
+    );
+}
+
+#[test]
+fn a_read_committed_transaction_reads_the_latest_edge() {
+    let mut store = GraphStore::new();
+    let a = store.create_node("P");
+    let e = store.create_edge(a, a, "R").unwrap();
+    let t = store.begin_transaction(IsolationLevel::ReadCommitted);
+    store.set_edge_property(e, "k", 1i64).unwrap();
+    let seen = store.get_edge_for_txn(t, e).unwrap();
+    assert_eq!(seen.properties.get("k"), Some(&PropertyValue::Integer(1)));
+}
+
+#[test]
+fn a_failed_commit_restores_every_key_whatever_order_it_applied_them_in() {
+    // The buffered writes are a HashMap, so the order they are applied in, and
+    // therefore how much is applied before the failing one, varies per store.
+    for _ in 0..32 {
+        let mut store = GraphStore::new();
+        let label = Label::new("U");
+        let holder = store.create_node("U");
+        store
+            .set_node_property("default", holder, "email", "taken")
+            .unwrap();
+        store.create_unique_constraint(&label, "email").unwrap();
+        let other = store.create_node("U");
+        store
+            .set_node_property("default", other, "name", "before")
+            .unwrap();
+
+        let t = store.begin_transaction(IsolationLevel::SnapshotIsolation);
+        store
+            .txn_set_node_property(t, other, "fresh", 1i64)
+            .unwrap();
+        store
+            .txn_set_node_property(t, other, "name", "after")
+            .unwrap();
+        store
+            .txn_set_node_property(t, other, "email", "taken")
+            .unwrap();
+        assert!(store.commit_transaction(t).is_err());
+        assert_eq!(store.node_property(other, "fresh"), None);
+        assert_eq!(store.node_property(other, "name"), Some(s("before")));
+        assert_eq!(store.node_property(other, "email"), None);
+    }
+}
+
+#[test]
+fn gc_drops_the_birth_record_of_an_old_relationship() {
+    let mut store = GraphStore::new();
+    let a = store.create_node("P");
+    store.begin_session_transaction().unwrap();
+    let e = store.create_edge(a, a, "R").unwrap();
+    store.commit_session_transaction().unwrap();
+    assert!(
+        store.get_edge_at_version(e, 1).is_none(),
+        "born at version 2"
+    );
+    assert!(!store.edge_history.is_empty());
+    store.gc_versions(2);
+    assert!(store.edge_history.is_empty());
+    assert!(
+        store.get_edge_at_version(e, 1).is_some(),
+        "history below the watermark is gone"
+    );
+}
+
+#[tokio::test]
+async fn auto_embed_into_an_index_of_the_wrong_dimension_stores_nothing() {
+    let tenants = Arc::new(crate::persistence::TenantManager::new());
+    tenants
+        .update_embed_config(
+            "default",
+            Some(mock_embed_config(&[("Bad", "text"), ("Doc", "text")])),
+        )
+        .unwrap();
+    let vector_index = Arc::new(VectorIndexManager::new());
+    vector_index
+        .create_index("Bad", "embedding", 3, DistanceMetric::Cosine)
+        .unwrap();
+    vector_index
+        .create_index("Doc", "embedding", 64, DistanceMetric::Cosine)
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tx.send(IndexEvent::NodeCreated {
+        tenant_id: "default".into(),
+        id: NodeId::new(5),
+        labels: vec![Label::new("Bad"), Label::new("Doc")],
+        properties: props(&[("text", s("some words"))]),
+    })
+    .unwrap();
+    drop(tx);
+    GraphStore::start_background_indexer(
+        rx,
+        vector_index.clone(),
+        Arc::new(IndexManager::new()),
+        tenants,
+    )
+    .await;
+    let vi = vector_index.clone();
+    let doc_done = eventually(move || {
+        vi.get_index("Doc", "embedding")
+            .map(|i| i.read().unwrap().len())
+            .unwrap_or(0)
+            == 1
+    })
+    .await;
+    assert!(doc_done);
+    assert_eq!(
+        vector_index
+            .get_index("Bad", "embedding")
+            .unwrap()
+            .read()
+            .unwrap()
+            .len(),
+        0
+    );
 }

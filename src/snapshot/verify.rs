@@ -549,3 +549,148 @@ pub fn catalog_digest(serialized: &str) -> String {
     }
     format!("fnv1a64:{h:016x}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::PropertyValue;
+    use serde_json::json;
+
+    fn spec(name: &str, kind: &str, sample: serde_json::Value) -> ParamSpec {
+        ParamSpec {
+            name: name.into(),
+            kind: kind.into(),
+            sample,
+            enum_values: None,
+        }
+    }
+
+    fn people() -> GraphStore {
+        let mut store = GraphStore::new();
+        for (name, active) in [("Ann", true), ("Bob", false), ("Cy", true)] {
+            let n = store.create_node("Person");
+            store.set_node_property("default", n, "name", name).unwrap();
+            store
+                .set_node_property("default", n, "active", active)
+                .unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn a_sample_that_contradicts_its_declared_type_is_named() {
+        let cases = [
+            (spec("p", "int", json!("30")), "sample is a string"),
+            (spec("p", "string", json!(true)), "sample is a bool"),
+            (spec("p", "string", json!(1.5)), "sample is a float"),
+            (spec("p", "bool", json!(3)), "sample is a int"),
+            (spec("p", "int", json!(null)), "sample is a other"),
+            (spec("p", "int", json!(1.5)), "p: sample is not an integer"),
+        ];
+        for (p, want) in cases {
+            let err = p.to_property().unwrap_err();
+            assert!(err.contains(want), "{err}");
+        }
+        assert_eq!(
+            spec("p", "bool", json!(false)).to_property(),
+            Ok(PropertyValue::Boolean(false))
+        );
+        assert_eq!(
+            spec("p", "float", json!(2)).to_property(),
+            Ok(PropertyValue::Float(2.0))
+        );
+    }
+
+    #[test]
+    fn a_bare_dollar_is_not_a_parameter() {
+        assert_eq!(
+            referenced_params("RETURN $ + $a_1, $a_1, $b"),
+            vec!["a_1", "b"]
+        );
+        assert!(referenced_params("RETURN '$'").is_empty());
+    }
+
+    #[test]
+    fn a_catalog_without_provenance_is_treated_as_observed() {
+        let cat: QueryCatalog = serde_json::from_value(json!({
+            "format": CATALOG_FORMAT,
+            "generated_by": "hand",
+            "entries": []
+        }))
+        .unwrap();
+        assert_eq!(
+            cat.provenance,
+            crate::snapshot::publish_gate::Provenance::Observed
+        );
+    }
+
+    #[test]
+    fn every_failure_class_explains_itself() {
+        for (class, word) in [
+            (FailureClass::EmptyResult, "no rows"),
+            (FailureClass::PartialResult, "fewer rows"),
+            (FailureClass::ExtraRows, "more rows"),
+            (FailureClass::ValuesDiffer, "wrong values"),
+            (FailureClass::QueryError, "query failed"),
+        ] {
+            assert!(class.explain().contains(word), "{class:?}");
+        }
+    }
+
+    #[test]
+    fn a_sample_outside_its_declared_enum_is_refused() {
+        let mut p = spec("s", "string", json!("x"));
+        p.enum_values = Some(vec![json!("a"), json!("b")]);
+        let err =
+            validate_entry_shape("q1", "MATCH (n) WHERE n.k = $s RETURN n", &[p]).unwrap_err();
+        assert!(err.contains("not in the declared enum"), "{err}");
+    }
+
+    #[test]
+    fn verify_classifies_errors_and_row_count_changes() {
+        let store = people();
+        let queries: Vec<QuerySpec> = serde_json::from_value(json!([
+        { "id": "all", "cypher": "MATCH (p:Person) RETURN p.name AS name" },
+        { "id": "active", "cypher": "MATCH (p:Person) WHERE p.active = $a RETURN p.name AS name",
+          "params": [{ "name": "a", "type": "bool", "sample": true }] }
+    ]))
+    .unwrap();
+        let mut catalog = build_catalog(&store, &queries, &[]).unwrap();
+        assert!(verify(&store, &catalog).unwrap().is_ok());
+
+        // Pretend the snapshot had fewer and more rows than it does now.
+        catalog.entries[0].rows = 5;
+        catalog.entries[1].rows = 1;
+        let report = verify(&store, &catalog).unwrap();
+        let classes: Vec<Option<FailureClass>> =
+            report.results.iter().map(|r| r.failure).collect();
+        assert_eq!(
+            classes,
+            vec![
+                Some(FailureClass::PartialResult),
+                Some(FailureClass::ExtraRows)
+            ]
+        );
+        assert_eq!(report.results[0].detail, "3 of 5 rows");
+        assert_eq!(report.results[1].detail, "2 rows, expected 1");
+
+        // A query that no longer parses is a query error, not a crash.
+        catalog.entries[0].cypher = "MATCH (p:Person RETURN p".into();
+        let report = verify(&store, &catalog).unwrap();
+        assert_eq!(report.results[0].failure, Some(FailureClass::QueryError));
+        assert_eq!(report.failed().count(), 2);
+        assert!(!report.is_ok());
+    }
+
+    #[test]
+    fn verify_refuses_an_unknown_catalog_format() {
+        let catalog = QueryCatalog {
+            format: "other/9".into(),
+            generated_by: String::new(),
+            provenance: crate::snapshot::publish_gate::Provenance::Authored,
+            entries: vec![],
+        };
+        let err = verify(&GraphStore::new(), &catalog).unwrap_err();
+        assert!(err.contains("refusing to guess"), "{err}");
+    }
+}
