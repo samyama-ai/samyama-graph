@@ -488,3 +488,7 @@ mod tests {
         assert!(text.contains("no operators instrumented"), "{text}");
     }
 }
+
+#[cfg(test)]
+#[path = "profile_cov_tests.rs"]
+mod cov_tests;

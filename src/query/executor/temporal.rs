@@ -605,3 +605,7 @@ pub fn parse_iso_time(s: &str) -> Result<i64, ExecutionError> {
 pub fn parse_datetime_offset(t: &str) -> Result<(&str, Option<i32>), ExecutionError> {
     split_offset(t)
 }
+
+#[cfg(test)]
+#[path = "temporal_cov_tests.rs"]
+mod cov_tests;

@@ -261,4 +261,20 @@ mod tests {
         p.insert("name".to_string(), PropertyValue::Integer(1));
         assert!(reject_unused("RETURN $name", &p).is_ok());
     }
+
+    #[test]
+    fn a_parameter_that_cannot_be_bound_exactly_is_named_in_the_error() {
+        let mut params = HashMap::new();
+        params.insert("ok".to_string(), json!(1));
+        params.insert("big".to_string(), json!(u64::MAX));
+        let err = properties_from_json(&params).unwrap_err();
+        assert!(err.starts_with("parameter $big: "), "{err}");
+        assert!(err.contains("no exact i64 or f64 representation"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_value_nested_in_a_list_or_map_is_refused() {
+        assert!(property_from_json(&json!([1, u64::MAX])).is_err());
+        assert!(property_from_json(&json!({"a": {"b": u64::MAX}})).is_err());
+    }
 }

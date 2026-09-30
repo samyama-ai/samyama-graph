@@ -1102,3 +1102,7 @@ mod tests {
         assert_eq!(engine.cache_stats().misses(), 4);
     }
 }
+
+#[cfg(test)]
+#[path = "mod_cov_tests.rs"]
+mod cov_tests;

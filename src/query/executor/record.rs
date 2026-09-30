@@ -1668,3 +1668,7 @@ fn entity_id(v: &Value) -> (u64, usize) {
         _ => (0, 0),
     }
 }
+
+#[cfg(test)]
+#[path = "record_cov_tests.rs"]
+mod cov_tests;

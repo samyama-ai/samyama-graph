@@ -368,3 +368,7 @@ mod tests {
         assert_eq!(cost, 10.0); // fixed assumption for index lookups
     }
 }
+
+#[cfg(test)]
+#[path = "cost_model_cov_tests.rs"]
+mod cov_tests;

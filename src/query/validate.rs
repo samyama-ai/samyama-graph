@@ -3197,3 +3197,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "validate_cov_tests.rs"]
+mod cov_tests;
