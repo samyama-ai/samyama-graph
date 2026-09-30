@@ -224,20 +224,46 @@ mod tests {
         assert_eq!(node.get_leader().await, Some(1));
     }
 
+    /// A write before `initialize` is refused by name, and nothing of it is
+    /// applied: no node reaches the store and the log index does not move.
+    /// Was `assert!(result.is_err())` alone, with a read-only request that
+    /// could not have written anything either way (#1311).
     #[tokio::test]
     async fn test_raft_node_write_before_init() {
         let temp_dir = TempDir::new().unwrap();
         let persistence = Arc::new(PersistenceManager::new(temp_dir.path()).unwrap());
-        let sm = GraphStateMachine::new(persistence);
-        let node = RaftNode::new(1, sm);
+        let sm = GraphStateMachine::new(persistence.clone());
+        let mut node = RaftNode::new(1, sm);
 
-        let request = Request::ExecuteQuery {
+        let create = || Request::CreateNode {
             tenant: "default".to_string(),
-            query: "MATCH (n) RETURN n".to_string(),
+            node_id: 7,
+            labels: vec!["Person".to_string()],
+            properties: crate::graph::PropertyMap::new(),
         };
 
-        let result = node.write(request).await;
-        assert!(result.is_err());
+        match node.write(create()).await {
+            Err(RaftError::Raft(msg)) => assert_eq!(msg, "Raft not initialized"),
+            other => panic!("expected RaftError::Raft(\"Raft not initialized\"), got {other:?}"),
+        }
+        let metrics = node.metrics().await;
+        assert_eq!((metrics.last_log_index, metrics.last_applied), (0, 0));
+        assert_eq!(metrics.current_leader, None);
+        let (nodes, _) = persistence.recover("default").unwrap();
+        assert!(
+            nodes.is_empty(),
+            "the refused write reached the store: {nodes:?}"
+        );
+
+        // The same request after `initialize` does land, so the empty store
+        // above is the refusal and not a request that writes nothing.
+        node.initialize(vec![]).await.unwrap();
+        assert!(matches!(
+            node.write(create()).await,
+            Ok(Response::NodeCreated { node_id: 7 })
+        ));
+        let (nodes, _) = persistence.recover("default").unwrap();
+        assert_eq!(nodes.len(), 1);
     }
 
     #[tokio::test]

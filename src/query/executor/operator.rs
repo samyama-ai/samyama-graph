@@ -7257,6 +7257,24 @@ impl<'a> CoCursor<'a> {
     }
 }
 
+/// A comparison between a property of an expand's target and a value already
+/// bound on the input row -- `b.p < a.p` in `MATCH (a)-[:R]->(b)` -- applied
+/// during the walk. See `ExpandOperator::target_comparisons` (#1069).
+#[derive(Debug, Clone)]
+pub struct TargetComparison {
+    /// The target's property.
+    pub property: String,
+    /// One of `=`, `<>`, `<`, `<=`, `>`, `>=`.
+    pub op: BinaryOp,
+    /// The other operand. Reads only variables bound before this expand, so
+    /// it is evaluated once per input row rather than once per edge.
+    pub bound: Expression,
+    /// Whether the target's property is the left operand, as written. Kept
+    /// rather than flipping `op`, so the comparison is handed its operands in
+    /// the order the filter hands them.
+    pub target_on_left: bool,
+}
+
 pub struct ExpandOperator {
     /// Input operator
     input: OperatorBox,
@@ -7286,6 +7304,20 @@ pub struct ExpandOperator {
     /// the PERF-01 target. Applied here, a non-matching employer never
     /// becomes a row (#656).
     target_props: Vec<(String, PropertyValue)>,
+    /// Comparisons between the target and a variable already bound, checked
+    /// during the walk like `target_props`.
+    ///
+    /// `target_props` holds equalities against a literal, which cannot say
+    /// `b.id < c.id` with `b` bound upstream. That shape built a record for
+    /// every neighbour and a filter then read `b.id` again for each one -- on
+    /// LDBC BI-17 before its cyclic prune, 25M records to keep 8.5M, and the
+    /// filter was 48% of the query (#1069).
+    ///
+    /// **Pruning only.** An edge is rejected when `eval_binary_op` -- the
+    /// function the filter itself calls -- answers false or null for it, and
+    /// kept on anything else, errors included. The planner's filter stays in
+    /// place and decides every row kept here.
+    target_comparisons: Vec<TargetComparison>,
     /// The variables to bind to null when a source record matches nothing.
     ///
     /// `Some` marks this expand as an `OPTIONAL MATCH`: a source row that finds
@@ -7417,6 +7449,7 @@ impl ExpandOperator {
             edge_types,
             target_labels: Vec::new(),
             target_props: Vec::new(),
+            target_comparisons: Vec::new(),
             target_ids: None,
             rows_seen: 0,
             type_index: None,
@@ -7453,6 +7486,13 @@ impl ExpandOperator {
     /// only reduce what is materialised, never change what is returned.
     pub fn with_target_props(mut self, props: Vec<(String, PropertyValue)>) -> Self {
         self.target_props = props;
+        self
+    }
+
+    /// Comparisons against already-bound values the target must not fail,
+    /// applied during the walk. Additive like `with_target_props`.
+    pub fn with_target_comparisons(mut self, comparisons: Vec<TargetComparison>) -> Self {
+        self.target_comparisons = comparisons;
         self
     }
 
@@ -7829,6 +7869,14 @@ impl ExpandOperator {
             }
             _ => Vec::new(),
         };
+        // The bound side of each target comparison, read once for this row
+        // rather than once per edge. One that cannot be evaluated is dropped
+        // here and left to the filter, which raises whatever it raises.
+        let comparisons: Vec<(&TargetComparison, Value)> = self
+            .target_comparisons
+            .iter()
+            .filter_map(|c| Some((c, eval_expression(&c.bound, record, store).ok()?)))
+            .collect();
         let keeps = |target: NodeId, eid: crate::graph::EdgeId| -> bool {
             // A closing hop can only land on the node it closes onto.
             if let Some(p) = pinned_target {
@@ -7866,15 +7914,37 @@ impl ExpandOperator {
             // produces them, which is what lets it advance a cursor instead of
             // binary-searching per candidate (#1082). `keeps` is called from
             // the unsorted walks too, where no cursor is possible.
-            if target_props.is_empty() {
-                return true;
+            if !target_props.is_empty() {
+                let props_ok = match store.get_node(target) {
+                    Some(node) => target_props
+                        .iter()
+                        .all(|(k, v)| store.node_property(node.id, k).as_ref() == Some(v)),
+                    None => false,
+                };
+                if !props_ok {
+                    return false;
+                }
             }
-            match store.get_node(target) {
-                Some(node) => target_props
-                    .iter()
-                    .all(|(k, v)| store.node_property(node.id, k).as_ref() == Some(v)),
-                None => false,
+            // Read and compared exactly as the filter does -- `resolve_property`
+            // is what `read_property` returns for a node -- so a row is dropped
+            // here only when the filter would drop it too.
+            for (c, bound) in &comparisons {
+                let own =
+                    Value::Property(Value::NodeRef(target).resolve_property(&c.property, store));
+                let (l, r) = if c.target_on_left {
+                    (own, bound.clone())
+                } else {
+                    (bound.clone(), own)
+                };
+                if matches!(
+                    eval_binary_op(&c.op, l, r),
+                    Ok(Value::Null
+                        | Value::Property(PropertyValue::Null | PropertyValue::Boolean(false)))
+                ) {
+                    return false;
+                }
             }
+            true
         };
 
         // One cursor per record, shared by both lists an undirected walk reads.
@@ -24141,6 +24211,67 @@ mod filter_sort_single_read {
         // Read inside a comprehension, where `n` may be bound to something else.
         assert!(!FilterOperator::new(input(), cypher_expr("any(n IN [1] WHERE n.p > 1)"))
             .retain_property_reads("n", "p"));
+    }
+}
+
+/// A comparison against an already-bound variable reads the bound side once
+/// per input row, not once per edge (#1069).
+#[cfg(test)]
+mod expand_bound_comparison_reads {
+    use super::*;
+    use crate::graph::storage::columnar::COLUMN_READS;
+    use crate::query::executor::QueryExecutor;
+    use crate::query::parser::parse_query;
+
+    /// `(count, column reads)` for a `RETURN count(*) AS n` query, warmed once.
+    fn run(store: &GraphStore, cypher: &str) -> (i64, u64) {
+        let q = parse_query(cypher).unwrap_or_else(|e| panic!("`{cypher}`: {e}"));
+        QueryExecutor::new(store).execute(&q).unwrap();
+        let before = COLUMN_READS.with(|c| c.get());
+        let out = QueryExecutor::new(store).execute(&q).unwrap();
+        let reads = COLUMN_READS.with(|c| c.get()) - before;
+        match out.records[0].get("n") {
+            Some(Value::Property(PropertyValue::Integer(n))) => (*n, reads),
+            other => panic!("a count expected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_bound_side_is_read_once_per_row_and_the_target_once_per_edge() {
+        const NODES: u64 = 300;
+        const DEGREE: u64 = 8;
+        let mut store = GraphStore::new();
+        let ns: Vec<NodeId> = (0..NODES).map(|_| store.create_node("N")).collect();
+        for (i, &n) in ns.iter().enumerate() {
+            store
+                .set_node_property("default", n, "p", ((i * 7919) % 300) as i64)
+                .unwrap();
+        }
+        for i in 0..ns.len() {
+            for d in 1..=DEGREE as usize {
+                store
+                    .create_edge(ns[i], ns[(i + d * 11) % ns.len()], "R")
+                    .unwrap();
+            }
+        }
+        let edges = NODES * DEGREE;
+
+        let (kept, pushed) = run(
+            &store,
+            "MATCH (a:N)-[:R]->(b:N) WHERE b.p < a.p RETURN count(*) AS n",
+        );
+        let (same, unpushed) = run(
+            &store,
+            "MATCH (a:N)-[:R]->(b:N) WITH a, b WHERE b.p < a.p RETURN count(*) AS n",
+        );
+        assert_eq!(kept, same);
+        let kept = kept as u64;
+        eprintln!("{edges} edges, {kept} kept: {unpushed} reads unpushed, {pushed} pushed");
+        // Unpushed: the filter reads both sides for every edge.
+        assert_eq!(unpushed, 2 * edges);
+        // Pushed: `a.p` once per `a`, `b.p` once per edge during the walk, and
+        // the residual filter reads both again for the rows that survive.
+        assert_eq!(pushed, NODES + edges + 2 * kept);
     }
 }
 

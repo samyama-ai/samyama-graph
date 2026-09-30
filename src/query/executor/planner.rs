@@ -59,7 +59,7 @@
 //! (`execute_cached`, #1153), which returns the rows and never reaches the
 //! planner at all: 14.8x on that same selective read.
 
-use crate::query::executor::operator::{CreateFullTextIndexOperator, DropFullTextIndexOperator, FullTextSearchOperator};
+use crate::query::executor::operator::{CreateFullTextIndexOperator, DropFullTextIndexOperator, FullTextSearchOperator, TargetComparison};
 use crate::graph::GraphStore;
 use crate::graph::{Label, PropertyValue};  // Added for CREATE support
 use crate::query::ast::*;
@@ -4393,6 +4393,16 @@ impl QueryPlanner {
                         }
                         expand = expand.with_target_props(pushed);
                     }
+                    // `c.id > b.id` with `b` already bound: the same idea
+                    // against a value that changes per row (#1069). Not for a
+                    // self-reference, whose target is the synthetic name.
+                    if !self_ref {
+                        let compared =
+                            Self::target_bound_comparisons(&deferred_predicates, &target_var, &bound);
+                        if !compared.is_empty() {
+                            expand = expand.with_target_comparisons(compared);
+                        }
+                    }
 
                     // CY-04: Set path variable for named path materialization
                     if let Some(ref pv) = path.path_variable {
@@ -4634,6 +4644,68 @@ impl QueryPlanner {
                         }
                     }
                 }
+            }
+        }
+        out
+    }
+
+    /// Comparisons of the form `<var>.<prop> <op> <bound>.<prop>`, either way
+    /// round, where `<bound>` is a variable in `bound` other than `var` --
+    /// read out of the deferred set **without removing them**, like
+    /// `target_equality_props`.
+    ///
+    /// Only top-level conjuncts, so a row one of these fails is a row the
+    /// whole predicate fails: false or null in a conjunct makes the conjunction
+    /// false or null, and `WHERE` keeps neither (#1069).
+    fn target_bound_comparisons(
+        deferred: &[Expression],
+        var: &str,
+        bound: &HashSet<String>,
+    ) -> Vec<TargetComparison> {
+        let mut out = Vec::new();
+        for pred in deferred {
+            for part in flatten_and_predicates(pred) {
+                let Expression::Binary { left, op, right } = &part else {
+                    continue;
+                };
+                if !matches!(
+                    op,
+                    BinaryOp::Eq
+                        | BinaryOp::Ne
+                        | BinaryOp::Lt
+                        | BinaryOp::Le
+                        | BinaryOp::Gt
+                        | BinaryOp::Ge
+                ) {
+                    continue;
+                }
+                let (
+                    Expression::Property {
+                        variable: lv,
+                        property: lp,
+                    },
+                    Expression::Property {
+                        variable: rv,
+                        property: rp,
+                    },
+                ) = (left.as_ref(), right.as_ref())
+                else {
+                    continue;
+                };
+                let is_bound = |v: &String| v != var && bound.contains(v);
+                let (property, other, target_on_left) = if lv == var && is_bound(rv) {
+                    (lp, right, true)
+                } else if rv == var && is_bound(lv) {
+                    (rp, left, false)
+                } else {
+                    continue;
+                };
+                out.push(TargetComparison {
+                    property: property.clone(),
+                    op: op.clone(),
+                    bound: other.as_ref().clone(),
+                    target_on_left,
+                });
             }
         }
         out
@@ -8104,6 +8176,15 @@ impl QueryPlanner {
 
             if let Some(ref pv) = path.path_variable {
                 expand = expand.with_path_variable(pv.clone());
+            }
+            // The builder IC3, IC6 and IC9 reach (see below), so the
+            // comparison pushdown has to be here too (#1069).
+            if !vars.contains(&target_var) {
+                let compared =
+                    Self::target_bound_comparisons(&deferred_predicates, &target_var, &vars);
+                if !compared.is_empty() {
+                    expand = expand.with_target_comparisons(compared);
+                }
             }
 
             path_operator = if !segment.node.labels.is_empty() {

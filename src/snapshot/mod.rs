@@ -2492,6 +2492,39 @@ mod temporal_snapshot_tests {
     fn a_malformed_temporal_tag_does_not_become_a_plausible_value() {
         let broken = serde_json::json!({"__type": "Date"});          // no `days`
         assert_ne!(json_to_property(&broken), P::Date(0), "must not default to the epoch");
+
+        // What it does become (#1311): nothing refuses it. The object is kept
+        // as the map it is, `__type` and all, so the corrupt value is still
+        // visible as corrupt -- not a `Date`, not `Null`, not dropped. The same
+        // holds for every tag whose required field is missing.
+        let as_map = |tag: &str| {
+            P::Map(std::collections::HashMap::from([(
+                "__type".to_string(),
+                P::String(tag.to_string()),
+            )]))
+        };
+        let tags = [
+            "Date",
+            "DateTime",
+            "LocalTime",
+            "Time",
+            "LocalDateTime",
+            "ZonedDateTime",
+        ];
+        for tag in tags {
+            let broken = serde_json::json!({ "__type": tag });
+            let back = json_to_property(&broken);
+            assert_eq!(back, as_map(tag), "{tag} with no value");
+        }
+        // A required field of the wrong type is the same case, not a zero.
+        let wrong = serde_json::json!({"__type": "Date", "days": "12"});
+        match json_to_property(&wrong) {
+            P::Map(m) => {
+                assert_eq!(m.get("__type"), Some(&P::String("Date".into())));
+                assert_eq!(m.get("days"), Some(&P::String("12".into())));
+            }
+            other => panic!("a Date with a string `days` became {other:?}"),
+        }
     }
 }
 
