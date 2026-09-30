@@ -1119,4 +1119,109 @@ mod tests {
         let keys99 = store.get_property_keys(99);
         assert!(keys99.is_empty());
     }
+
+    #[test]
+    fn heap_bytes_of_a_sparse_column_counts_string_contents() {
+        let mut col = Column::new_string();
+        col.set(3, PropertyValue::String("hello".to_string()));
+        assert!(!col.is_dense());
+        let with_one = col.heap_bytes();
+        assert!(with_one >= 5, "{with_one}");
+        let mut longer = Column::new_string();
+        longer.set(3, PropertyValue::String("hello world, longer".to_string()));
+        assert_eq!(
+            longer.heap_bytes() - with_one,
+            "hello world, longer".len() - 5
+        );
+    }
+
+    #[test]
+    fn heap_bytes_for_float_and_bool_columns() {
+        let mut f = Column::new_float();
+        let mut b = Column::new_bool();
+        assert_eq!(f.heap_bytes(), 0);
+        assert_eq!(b.heap_bytes(), 0);
+        for i in 0..DENSE_N {
+            f.set(i, PropertyValue::Float(i as f64));
+            b.set(i, PropertyValue::Boolean(i % 2 == 0));
+        }
+        assert!(f.is_dense() && b.is_dense());
+        assert!(f.heap_bytes() >= DENSE_N * 8);
+        assert!(b.heap_bytes() >= DENSE_N);
+        assert_eq!(f.len(), DENSE_N);
+        assert_eq!(b.len(), DENSE_N);
+    }
+
+    #[test]
+    fn property_value_heap_follows_owned_data() {
+        assert_eq!(property_value_heap(&PropertyValue::Integer(1)), 0);
+        assert_eq!(property_value_heap(&PropertyValue::String("abc".into())), 3);
+        let zoned = PropertyValue::ZonedDateTime {
+            secs: 0,
+            nanos: 0,
+            offset_seconds: 0,
+            zone: Some("UTC".into()),
+        };
+        assert_eq!(property_value_heap(&zoned), 3);
+        let v: Vec<f32> = Vec::with_capacity(2);
+        assert_eq!(property_value_heap(&PropertyValue::Vector(v)), 8);
+        let mut items = Vec::with_capacity(1);
+        items.push(PropertyValue::String("xy".into()));
+        assert_eq!(
+            property_value_heap(&PropertyValue::Array(items)),
+            std::mem::size_of::<PropertyValue>() + 2
+        );
+        let mut m = HashMap::new();
+        m.insert("key".to_string(), PropertyValue::String("val".into()));
+        let cap = m.capacity();
+        assert_eq!(
+            property_value_heap(&PropertyValue::Map(m)),
+            cap * (std::mem::size_of::<String>() + std::mem::size_of::<PropertyValue>() + 1) + 6
+        );
+    }
+
+    #[test]
+    fn an_untyped_column_reports_its_heap() {
+        let mut col = Column::for_value(&PropertyValue::Array(vec![]));
+        assert_eq!(col.heap_bytes(), 0);
+        col.set(1, PropertyValue::String("abcd".into()));
+        assert!(col.heap_bytes() >= 4);
+        assert_eq!(col.len(), 1);
+    }
+
+    #[test]
+    fn a_bool_column_promotes_and_removes() {
+        let mut col = Column::new_bool();
+        col.set(1, PropertyValue::Boolean(true));
+        col.set(2, PropertyValue::Boolean(false));
+        col.remove(2);
+        assert!(!col.has(2));
+        assert_eq!(col.len(), 1);
+        col.set(3, PropertyValue::Integer(7));
+        assert!(matches!(col, Column::Other(_)));
+        assert_eq!(col.get(1), PropertyValue::Boolean(true));
+        assert_eq!(col.get(3), PropertyValue::Integer(7));
+        assert_eq!(col.get_str(1), None, "not a string column");
+    }
+
+    #[test]
+    fn column_store_reports_heap_and_resolves_ids() {
+        let mut store = ColumnStore::new();
+        assert_eq!(store.heap_bytes(), 0);
+        store.set_property(0, "name", PropertyValue::String("Alice".into()));
+        let one = store.heap_bytes();
+        assert!(one > "name".len());
+        store.set_property(0, "age", PropertyValue::Integer(3));
+        assert!(store.heap_bytes() > one);
+
+        let id = store.column_id("name").unwrap();
+        assert!(store.is_str_column(id));
+        assert_eq!(store.get_str_by_id(id, 0), Some("Alice"));
+        assert_eq!(store.get_by_id(ColumnId(99), 0), PropertyValue::Null);
+        assert_eq!(store.get_str_by_id(ColumnId(99), 0), None);
+        assert!(!store.is_str_column(ColumnId(99)));
+        assert!(store.get_column("name").is_some());
+        assert!(store.get_column("missing").is_none());
+        assert_eq!(store.get_property(0, "missing"), PropertyValue::Null);
+    }
 }

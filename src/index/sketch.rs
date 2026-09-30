@@ -534,4 +534,44 @@ mod tests {
         assert_eq!(d.quantile(0.5), None);
         assert!(d.is_empty());
     }
+
+    #[test]
+    fn value_bytes_tags_each_type() {
+        assert_eq!(value_bytes(&PropertyValue::Null), vec![0]);
+        assert_eq!(value_bytes(&PropertyValue::Boolean(true)), vec![1, 1]);
+        assert_eq!(
+            value_bytes(&PropertyValue::Float(1.0)),
+            value_bytes(&PropertyValue::Integer(1))
+        );
+        let half = value_bytes(&PropertyValue::Float(0.5));
+        assert_eq!(half[0], 3);
+        assert_eq!(&half[1..], &0.5f64.to_bits().to_le_bytes());
+        let date = value_bytes(&PropertyValue::Date(0));
+        assert_eq!(date[0], 5);
+        assert_eq!(&date[1..], b"1970-01-01");
+        assert_ne!(
+            value_bytes(&PropertyValue::Integer(1)),
+            value_bytes(&PropertyValue::String("1".into()))
+        );
+    }
+
+    #[test]
+    fn defaults_ignore_nulls_and_non_finite_values() {
+        let mut h = HyperLogLog::default();
+        assert_eq!(h.estimate(), 0);
+        h.add(&PropertyValue::Null);
+        assert_eq!(h.estimate(), 0, "null is not counted");
+        h.add(&PropertyValue::Boolean(false));
+        h.add(&PropertyValue::Boolean(true));
+        h.add(&PropertyValue::Boolean(true));
+        assert_eq!(h.estimate(), 2);
+
+        let mut d = TDigest::default();
+        d.add(f64::NAN);
+        d.add(f64::INFINITY);
+        assert!(d.is_empty());
+        d.add(3.0);
+        assert_eq!(d.len(), 1.0);
+        assert_eq!(d.quantile(0.5), Some(3.0));
+    }
 }

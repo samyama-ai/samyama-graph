@@ -328,4 +328,15 @@ mod tests {
         assert!(!edge.has_property("temp"));
         assert_eq!(edge.property_count(), 0);
     }
+
+    #[test]
+    fn edges_hash_by_id_only() {
+        use std::collections::HashSet;
+        let a = Edge::new(EdgeId::new(1), NodeId::new(1), NodeId::new(2), "A");
+        let b = Edge::new(EdgeId::new(1), NodeId::new(5), NodeId::new(6), "B");
+        let c = Edge::new(EdgeId::new(2), NodeId::new(1), NodeId::new(2), "A");
+        let set: HashSet<Edge> = [a, b, c].into_iter().collect();
+        assert_eq!(set.len(), 2);
+        assert!(set.iter().any(|e| e.id == EdgeId::new(2)));
+    }
 }

@@ -406,4 +406,24 @@ mod tests {
         assert_eq!(node1, node2); // Same ID
         assert_ne!(node1, node3); // Different ID
     }
+
+    #[test]
+    fn get_labels_lists_every_label() {
+        let mut node = Node::new(NodeId::new(1), "Person");
+        node.add_label("Employee");
+        let mut labels: Vec<&str> = node.get_labels().iter().map(|l| l.as_str()).collect();
+        labels.sort();
+        assert_eq!(labels, vec!["Employee", "Person"]);
+    }
+
+    #[test]
+    fn nodes_hash_by_id_only() {
+        use std::collections::HashSet;
+        let mut a = Node::new(NodeId::new(3), "A");
+        a.set_property("k", 1i64);
+        let b = Node::new(NodeId::new(3), "B");
+        let c = Node::new(NodeId::new(4), "A");
+        let set: HashSet<Node> = [a, b, c].into_iter().collect();
+        assert_eq!(set.len(), 2, "same id collapses whatever the contents");
+    }
 }

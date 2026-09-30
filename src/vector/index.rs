@@ -668,4 +668,160 @@ mod tests {
         // Dot product = 0
         assert!((inner.eval(&v1, &v2) - 1.0).abs() < 1e-6); // 1.0 - 0.0
     }
+
+    /// `n` distinct unit-ish vectors of dimension 8, deterministic.
+    fn spread(n: usize) -> Vec<Vec<f32>> {
+        (0..n)
+            .map(|i| {
+                (0..8)
+                    .map(|d| {
+                        (((i * 31 + d * 17) % 97) as f32 / 97.0)
+                            + if d == i % 8 { 1.0 } else { 0.0 }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn zero_vectors_are_at_distance_one() {
+        assert_eq!(CosineDistance.eval(&[0.0, 0.0], &[1.0, 0.0]), 1.0);
+        let z = [f16::from_f32(0.0), f16::from_f32(0.0)];
+        let x = [f16::from_f32(1.0), f16::from_f32(0.0)];
+        assert_eq!(CosineDistanceF16.eval(&z, &x), 1.0);
+        assert_eq!(CosineDistanceF16.eval(&x, &x), 0.0);
+        let y = [f16::from_f32(0.0), f16::from_f32(1.0)];
+        assert!((CosineDistanceF16.eval(&x, &y) - 1.0).abs() < 1e-6);
+        assert!((InnerProductDistance.eval(&[1.0, 0.0], &[1.0, 0.0])).abs() < 1e-6);
+    }
+
+    #[test]
+    fn quantization_parse_and_width() {
+        assert_eq!(Quantization::parse("F32"), Some(Quantization::None));
+        assert_eq!(Quantization::parse("none"), Some(Quantization::None));
+        assert_eq!(Quantization::parse("half"), Some(Quantization::Fp16));
+        assert_eq!(Quantization::parse("fp16"), Some(Quantization::Fp16));
+        assert_eq!(Quantization::parse("int8"), None);
+        assert_eq!(Quantization::None.bytes_per_value(), 4);
+        assert_eq!(Quantization::Fp16.bytes_per_value(), 2);
+    }
+
+    #[test]
+    fn dimension_mismatch_is_reported_on_add_and_search() {
+        let mut index = VectorIndex::new(3, DistanceMetric::Cosine);
+        match index.add(NodeId::new(1), &vec![1.0, 2.0]) {
+            Err(VectorError::DimensionMismatch {
+                expected: 3,
+                got: 2,
+            }) => {}
+            other => panic!("expected a dimension mismatch, got {other:?}"),
+        }
+        assert!(matches!(
+            index.search(&[1.0], 1),
+            Err(VectorError::DimensionMismatch {
+                expected: 3,
+                got: 1
+            })
+        ));
+        assert!(
+            index.search(&[1.0, 0.0, 0.0], 3).unwrap().is_empty(),
+            "empty index"
+        );
+    }
+
+    #[test]
+    fn fp16_index_stores_half_the_bytes_and_searches_exactly_when_small() {
+        let mut q = VectorIndex::with_quantization(4, DistanceMetric::Cosine, Quantization::Fp16);
+        let mut f = VectorIndex::new(4, DistanceMetric::Cosine);
+        for (i, v) in [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ]
+        .iter()
+        .enumerate()
+        {
+            q.add(NodeId::new(i as u64 + 1), &v.to_vec()).unwrap();
+            f.add(NodeId::new(i as u64 + 1), &v.to_vec()).unwrap();
+        }
+        assert_eq!(q.quantization(), Quantization::Fp16);
+        assert_eq!(q.vector_bytes() * 2, f.vector_bytes());
+        assert_eq!(f.vector_bytes(), 2 * 3 * 4 * 4);
+        let hits = q.search(&[0.0, 1.0, 0.0, 0.0], 2).unwrap();
+        assert_eq!(hits[0].0, NodeId::new(2));
+        assert_eq!(hits.len(), 2);
+        let text = format!("{q:?}");
+        assert!(text.contains("Fp16") && text.contains("len: 3"), "{text}");
+    }
+
+    #[test]
+    fn large_indexes_search_the_graph_and_find_stored_vectors_exactly() {
+        for quant in [Quantization::None, Quantization::Fp16] {
+            let vectors = spread(200);
+            let mut index = VectorIndex::with_quantization(8, DistanceMetric::Cosine, quant);
+            for (i, v) in vectors.iter().enumerate() {
+                index.add(NodeId::new(i as u64), v).unwrap();
+            }
+            assert_eq!(index.len(), 200);
+            // A query that is a stored vector finds that vector first, at distance ~0.
+            for probe in [0usize, 57, 199] {
+                let hits = index.search(&vectors[probe], 5).unwrap();
+                assert_eq!(
+                    hits[0].0,
+                    NodeId::new(probe as u64),
+                    "{quant:?} probe {probe}"
+                );
+                assert!(hits[0].1 < 1e-3, "{quant:?}: {}", hits[0].1);
+                assert!(hits.len() <= 5);
+                assert!(hits.windows(2).all(|w| w[0].1 <= w[1].1));
+            }
+            // A query that is not stored still returns neighbours.
+            let off: Vec<f32> = vectors[3].iter().map(|x| x + 0.01).collect();
+            assert!(!index.search(&off, 3).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn load_of_a_missing_file_is_an_empty_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx =
+            VectorIndex::load(&dir.path().join("absent.hnsw"), 3, DistanceMetric::Cosine).unwrap();
+        assert!(idx.is_empty());
+        assert_eq!(idx.dimensions(), 3);
+    }
+
+    #[test]
+    fn a_quantized_dump_reloads_at_either_precision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("q.hnsw");
+        let mut q = VectorIndex::with_quantization(2, DistanceMetric::Cosine, Quantization::Fp16);
+        q.add(NodeId::new(7), &vec![0.5, 0.25]).unwrap();
+        q.dump(&path).unwrap();
+
+        let full = VectorIndex::load(&path, 2, DistanceMetric::Cosine).unwrap();
+        assert_eq!(full.quantization(), Quantization::None);
+        assert_eq!(full.len(), 1);
+        assert_eq!(full.search(&[0.5, 0.25], 1).unwrap()[0].0, NodeId::new(7));
+
+        let half = VectorIndex::load_with_quantization(
+            &path,
+            2,
+            DistanceMetric::Cosine,
+            Quantization::Fp16,
+        )
+        .unwrap();
+        assert_eq!(half.quantization(), Quantization::Fp16);
+        assert_eq!(half.search(&[0.5, 0.25], 1).unwrap()[0].0, NodeId::new(7));
+    }
+
+    #[test]
+    fn loading_a_corrupt_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.hnsw");
+        std::fs::write(&path, b"\xff\xff\xff\xff\xff\xff\xff\xff\xff").unwrap();
+        match VectorIndex::load(&path, 2, DistanceMetric::Cosine) {
+            Err(VectorError::IndexError(msg)) => assert!(msg.contains("deserialization"), "{msg}"),
+            other => panic!("expected a deserialization error, got {other:?}"),
+        }
+    }
 }

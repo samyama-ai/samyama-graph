@@ -735,4 +735,54 @@ mod tests {
         assert!(p.is_tree());
         assert_eq!(p.roots().len(), 2);
     }
+
+    #[test]
+    fn error_messages_name_what_went_wrong() {
+        assert_eq!(
+            HierarchyError::NotATree.to_string(),
+            "nested-set encoding requires a tree poset"
+        );
+        assert!(HierarchyError::UnknownNode(nid(4))
+            .to_string()
+            .contains("is not in this hierarchy"));
+        assert_eq!(
+            HierarchyError::NoSuchIndex("x".into()).to_string(),
+            "no hierarchy index named 'x'"
+        );
+        assert_eq!(
+            HierarchyError::DuplicateIndex("x".into()).to_string(),
+            "hierarchy index 'x' already exists"
+        );
+        assert!(HierarchyError::Stale("x".into())
+            .to_string()
+            .contains("'x' is stale"));
+        let wide = HierarchyError::WidthTooHigh {
+            width: 9,
+            cap: 4,
+            nodes: 16,
+        };
+        assert!(wide.to_string().contains("chain width 9 exceeds cap 4"));
+    }
+
+    #[test]
+    fn more_than_five_cycles_are_summarised() {
+        let edges: Vec<(NodeId, NodeId)> = (0..6u64)
+            .flat_map(|i| [(nid(2 * i), nid(2 * i + 1)), (nid(2 * i + 1), nid(2 * i))])
+            .collect();
+        let err = Poset::from_edges(edges, std::iter::empty()).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("has 6 cycle(s)"), "{text}");
+        assert!(text.contains("; ... and 1 more"), "{text}");
+    }
+
+    #[test]
+    fn parents_of_lists_direct_parents() {
+        let p = Poset::from_edges(vec![(nid(2), nid(0)), (nid(2), nid(1))], std::iter::empty())
+            .unwrap();
+        let child = p.idx(nid(2)).unwrap();
+        let mut parents: Vec<NodeId> = p.parents_of(child).iter().map(|&i| p.node_at(i)).collect();
+        parents.sort();
+        assert_eq!(parents, vec![nid(0), nid(1)]);
+        assert!(p.parents_of(p.idx(nid(0)).unwrap()).is_empty());
+    }
 }

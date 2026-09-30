@@ -646,4 +646,57 @@ mod tests {
         assert_eq!(idx.distinct_terms(), 1);
         assert_eq!(idx.documents(), 1);
     }
+
+    #[test]
+    fn phrase_search_misses_when_any_word_is_absent() {
+        let mut idx = FullTextIndex::new("Doc", "body");
+        idx.insert(NodeId::new(1), "graph database engine");
+        assert_eq!(idx.search("\"graph database\"", 10).len(), 1);
+        assert!(
+            idx.search("\"missing graph\"", 10).is_empty(),
+            "first word absent"
+        );
+        assert!(
+            idx.search("\"graph missing\"", 10).is_empty(),
+            "later word absent"
+        );
+        let mut scores = HashMap::new();
+        idx.score_phrase(&[], 1.0, &mut scores);
+        assert!(scores.is_empty(), "an empty phrase scores nothing");
+    }
+
+    #[test]
+    fn registry_lookups_and_maintenance_hooks() {
+        let reg = FullTextIndexes::default();
+        // With no index at all every hook is a no-op.
+        reg.on_property_removed("Doc", "body", NodeId::new(1));
+        reg.on_node_deleted(NodeId::new(1));
+        assert_eq!(
+            reg.rebuild("nope", vec![(NodeId::new(1), "x".to_string())]),
+            0
+        );
+        assert!(reg.names().is_empty());
+
+        reg.create("b_idx", "Doc", "body");
+        reg.create("a_idx", "Doc", "title");
+        assert_eq!(reg.names(), vec!["a_idx".to_string(), "b_idx".to_string()]);
+        assert_eq!(
+            reg.covers("a_idx"),
+            Some(("Doc".to_string(), "title".to_string()))
+        );
+        assert_eq!(reg.covers("zzz"), None);
+
+        reg.on_property_set("Doc", "body", NodeId::new(1), "hello world");
+        reg.on_property_set("Doc", "title", NodeId::new(2), "hello");
+        reg.on_property_set("Other", "body", NodeId::new(3), "hello");
+        assert_eq!(reg.stats("b_idx"), Some((1, 2)));
+        assert_eq!(reg.stats("a_idx"), Some((1, 1)));
+        assert_eq!(reg.stats("zzz"), None);
+
+        reg.on_property_removed("Doc", "title", NodeId::new(2));
+        assert_eq!(reg.stats("a_idx"), Some((0, 0)));
+        reg.on_node_deleted(NodeId::new(1));
+        assert_eq!(reg.stats("b_idx"), Some((0, 0)));
+        assert!(reg.search("b_idx", "hello", 10).unwrap().is_empty());
+    }
 }

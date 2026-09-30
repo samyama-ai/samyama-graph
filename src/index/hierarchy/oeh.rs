@@ -1518,4 +1518,137 @@ mod tests {
         // and the split is still reported separately, which is what makes it checkable
         assert!(with_max.rollup_bytes() > sum_only.rollup_bytes());
     }
+
+    fn diamond() -> Poset {
+        Poset::from_edges(
+            vec![
+                (nid(3), nid(1)),
+                (nid(3), nid(2)),
+                (nid(1), nid(0)),
+                (nid(2), nid(0)),
+            ],
+            std::iter::empty(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn encoding_names_are_stable() {
+        assert_eq!(Encoding::NestedSet.name(), "nested-set");
+        assert_eq!(Encoding::Chain.name(), "chain");
+        assert_eq!(Encoding::NearTree.name(), "near-tree");
+    }
+
+    #[test]
+    fn forcing_nested_set_on_a_dag_is_refused() {
+        assert_eq!(
+            OehIndex::build_forced(diamond(), Encoding::NestedSet).unwrap_err(),
+            HierarchyError::NotATree
+        );
+    }
+
+    #[test]
+    fn forced_encodings_update_and_report_like_a_rebuild() {
+        for enc in [Encoding::NearTree, Encoding::Chain] {
+            let oracle_poset = diamond();
+            let n = oracle_poset.n();
+            let mut idx = OehIndex::build_forced(diamond(), enc).unwrap();
+            assert_eq!(idx.encoding(), enc);
+            assert!(idx.structural_bytes() > 0, "{enc:?}");
+            assert!(
+                !idx.update_measure(nid(3), Some(RollupValue::Int(1))),
+                "no measure attached yet"
+            );
+
+            let ops = [RollupOp::Sum, RollupOp::Max];
+            let mut measure = unit_measure(n);
+            idx.set_measure(measure.clone(), &ops);
+            let leaf = oracle_poset.idx(nid(3)).unwrap();
+            assert!(idx.update_measure(nid(3), Some(RollupValue::Int(10))));
+            measure[leaf as usize] = Some(RollupValue::Int(10));
+            for op in ops {
+                for y in 0..n as u32 {
+                    assert_eq!(
+                        idx.rollup(y, op),
+                        Some(oracle::rollup(&oracle_poset, y, &measure, op)),
+                        "{op:?} at {y} in {enc:?}"
+                    );
+                }
+            }
+            match enc {
+                // Near-tree folds the measure at query time and holds no range structure.
+                Encoding::NearTree => assert_eq!(idx.rollup_bytes(), 0),
+                _ => assert!(idx.rollup_bytes() > 0),
+            }
+            assert!(idx.bytes_per_node() > 0.0);
+        }
+    }
+
+    #[test]
+    fn lca_by_node_id() {
+        let idx = OehIndex::build_forced(diamond(), Encoding::NearTree).unwrap();
+        assert_eq!(
+            idx.lowest_common_ancestors_ids(nid(1), nid(2)),
+            Some(vec![nid(0)])
+        );
+        assert_eq!(
+            idx.lowest_common_ancestors_ids(nid(3), nid(3)),
+            Some(vec![nid(3)])
+        );
+        assert_eq!(idx.lowest_common_ancestors_ids(nid(1), nid(42)), None);
+    }
+
+    #[test]
+    fn float_measures_update_through_the_fenwick_tree() {
+        let p = balanced_tree(2, 2);
+        let n = p.n();
+        let oracle_poset = p.clone();
+        let mut measure: Vec<Option<RollupValue>> = (0..n)
+            .map(|i| Some(RollupValue::Float(i as f64 + 0.5)))
+            .collect();
+        let mut idx = OehIndex::build(p).unwrap();
+        idx.set_measure(measure.clone(), &[RollupOp::Sum]);
+        let changes = [
+            (1u32, Some(RollupValue::Float(10.25))),
+            (2u32, None),
+            (3u32, Some(RollupValue::Int(4))),
+        ];
+        for (i, v) in changes {
+            assert!(idx.update_measure(oracle_poset.node_at(i), v));
+            measure[i as usize] = v;
+        }
+        for y in 0..n as u32 {
+            let want = oracle::rollup(&oracle_poset, y, &measure, RollupOp::Sum)
+                .as_f64()
+                .unwrap();
+            let got = idx.rollup(y, RollupOp::Sum).unwrap().as_f64().unwrap();
+            assert!((got - want).abs() < 1e-9, "sum at {y}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    #[ignore = "bug: a Float measure written into an index built from Int measures is truncated (Fenwick::add casts the delta to i128), so SUM roll-ups lose the fraction"]
+    fn a_float_update_to_an_integer_index_is_not_truncated() {
+        let p = balanced_tree(2, 2);
+        let n = p.n();
+        let oracle_poset = p.clone();
+        let mut measure = unit_measure(n);
+        let mut idx = OehIndex::build(p).unwrap();
+        idx.set_measure(measure.clone(), &[RollupOp::Sum]);
+        assert!(idx.update_measure(oracle_poset.node_at(1), Some(RollupValue::Float(2.5))));
+        measure[1] = Some(RollupValue::Float(2.5));
+        let root = oracle_poset.idx(nid(0)).unwrap();
+        let want = oracle::rollup(&oracle_poset, root, &measure, RollupOp::Sum)
+            .as_f64()
+            .unwrap();
+        let got = idx.rollup(root, RollupOp::Sum).unwrap().as_f64().unwrap();
+        assert!((got - want).abs() < 1e-9, "sum at root: {got} vs {want}");
+    }
+
+    #[test]
+    fn an_empty_poset_reports_zero_bytes_per_node() {
+        let p = Poset::from_edges(Vec::<(NodeId, NodeId)>::new(), std::iter::empty()).unwrap();
+        let idx = OehIndex::build(p).unwrap();
+        assert_eq!(idx.bytes_per_node(), 0.0);
+    }
 }

@@ -500,4 +500,69 @@ mod tests {
         // a sparse table over the same input would hold ~n*log2(n) = 4096*13 = 53,248
         assert!(cells * 6 < 4096 * 13, "at least 6x smaller: {cells}");
     }
+
+    #[test]
+    fn rollup_value_display_and_numeric_view() {
+        assert_eq!(RollupValue::Int(3).to_string(), "3");
+        assert_eq!(RollupValue::Float(1.5).to_string(), "1.5");
+        assert_eq!(RollupValue::Null.to_string(), "NULL");
+        assert_eq!(RollupValue::Int(3).as_f64(), Some(3.0));
+        assert_eq!(RollupValue::Float(2.5).as_f64(), Some(2.5));
+        assert_eq!(RollupValue::Null.as_f64(), None);
+    }
+
+    #[test]
+    fn op_names_parse_back() {
+        for op in [RollupOp::Sum, RollupOp::Count, RollupOp::Min, RollupOp::Max] {
+            assert_eq!(RollupOp::parse(op.name()), Some(op));
+        }
+        assert_eq!(RollupOp::parse("MAX"), Some(RollupOp::Max));
+        assert_eq!(RollupOp::parse("avg"), None);
+    }
+
+    #[test]
+    fn combine_promotes_mixed_domains() {
+        use RollupValue::*;
+        assert_eq!(RollupOp::Sum.combine(Int(1), Float(0.5)), Float(1.5));
+        assert_eq!(RollupOp::Count.combine(Float(1.0), Int(2)), Float(3.0));
+        assert_eq!(RollupOp::Min.combine(Float(2.0), Int(1)), Int(1));
+        assert_eq!(RollupOp::Min.combine(Int(1), Float(2.0)), Int(1));
+        assert_eq!(RollupOp::Max.combine(Float(2.5), Int(1)), Float(2.5));
+        assert_eq!(RollupOp::Max.combine(Int(1), Float(2.5)), Float(2.5));
+        assert_eq!(RollupOp::Max.combine(Null, Int(4)), Int(4));
+        assert_eq!(RollupOp::Min.combine(Int(4), Null), Int(4));
+    }
+
+    #[test]
+    fn fenwick_point_updates_in_both_domains() {
+        use RollupValue::*;
+        let mut f = Fenwick::build(&[Int(1), Null, Int(3)]);
+        assert_eq!(f.range(0, 2), Int(4), "null contributes nothing");
+        f.add(1, Int(5));
+        assert_eq!(f.range(0, 2), Int(9));
+        f.add(1, Null);
+        assert_eq!(f.range(0, 2), Int(9), "a null delta is ignored");
+        assert_eq!(f.range(2, 1), Int(0), "an inverted range is empty");
+        assert_eq!(f.size_bytes(), 4 * std::mem::size_of::<i128>());
+
+        let mut g = Fenwick::build(&[Float(0.5), Int(1)]);
+        g.add(1, Int(2));
+        assert_eq!(g.range(0, 1), Float(3.5));
+        g.add(0, Null);
+        assert_eq!(g.range(0, 0), Float(0.5));
+        assert_eq!(g.size_bytes(), 3 * std::mem::size_of::<f64>());
+    }
+
+    #[test]
+    fn segment_tree_set_and_out_of_range_queries() {
+        use RollupValue::*;
+        let mut t = SegmentTree::build(&ints(&[5, 3, 9]), RollupOp::Min);
+        t.set(10, Int(0));
+        assert_eq!(t.range(0, 2), Int(3), "an out-of-range set is ignored");
+        t.set(1, Int(7));
+        assert_eq!(t.range(0, 2), Int(5));
+        assert_eq!(t.range(5, 6), Null, "a range past the end is the identity");
+        assert_eq!(t.range(0, 99), Int(5), "the upper bound is clamped");
+        assert!(t.size_bytes() >= 8 * std::mem::size_of::<RollupValue>() / 2);
+    }
 }

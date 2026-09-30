@@ -1819,3 +1819,7 @@ mod tests {
         assert_ne!(d1, d3);
     }
 }
+
+#[cfg(test)]
+#[path = "property_cov_tests.rs"]
+mod cov_tests;
