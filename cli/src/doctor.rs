@@ -274,6 +274,73 @@ mod tests {
     }
 
     #[test]
+    fn verdicts_print_as_their_short_labels() {
+        let shown: Vec<String> = [Verdict::Pass, Verdict::Warn, Verdict::Fail, Verdict::Skipped]
+            .iter()
+            .map(|v| v.to_string())
+            .collect();
+        assert_eq!(shown, vec!["ok", "warn", "FAIL", "skip"]);
+    }
+
+    #[test]
+    fn a_missing_data_directory_is_judged_by_its_parent() {
+        let base =
+            std::env::temp_dir().join(format!("samyama-doctor-parent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Writable parent: the directory can be created later.
+        let c = check_data_dir(&base.join("data"));
+        assert_eq!(c.verdict, Verdict::Pass);
+        assert!(c.detail.contains("does not exist yet"), "{}", c.detail);
+
+        // Parent that does not exist either: nothing to stat.
+        let c = check_data_dir(&base.join("no").join("data"));
+        assert_eq!(c.verdict, Verdict::Skipped);
+        assert!(c.detail.contains("cannot stat parent"), "{}", c.detail);
+
+        // Read-only parent (by its permission bits, which is what is checked).
+        let ro = base.join("ro");
+        std::fs::create_dir_all(&ro).unwrap();
+        let mut p = std::fs::metadata(&ro).unwrap().permissions();
+        p.set_readonly(true);
+        std::fs::set_permissions(&ro, p).unwrap();
+        let c = check_data_dir(&ro.join("data"));
+        assert_eq!(c.verdict, Verdict::Fail);
+        assert!(c.detail.contains("is read-only"), "{}", c.detail);
+        let mut p = std::fs::metadata(&ro).unwrap().permissions();
+        p.set_readonly(false);
+        let _ = std::fs::set_permissions(&ro, p);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_url_check_names_the_host_and_port_it_parsed() {
+        let c = check_url("https://example.test");
+        assert_eq!(c.verdict, Verdict::Pass);
+        assert!(
+            c.detail.contains("host example.test, port 443"),
+            "{}",
+            c.detail
+        );
+        let c = check_url("ftp://example.test");
+        assert!(c.detail.contains("scheme 'ftp'"), "{}", c.detail);
+        let c = check_url("not a url");
+        assert!(c.detail.contains("is not a URL"), "{}", c.detail);
+    }
+
+    #[test]
+    fn memory_check_reads_proc_meminfo_when_present() {
+        let c = check_memory();
+        if std::path::Path::new("/proc/meminfo").exists() {
+            assert_ne!(c.verdict, Verdict::Skipped);
+            assert!(c.detail.contains("MiB available of"), "{}", c.detail);
+        } else {
+            assert_eq!(c.verdict, Verdict::Skipped);
+        }
+    }
+
+    #[test]
     fn local_checks_never_return_an_empty_report() {
         let cs = local_checks("http://localhost:8080", std::path::Path::new("."));
         assert!(cs.len() >= 4, "a doctor that checks nothing reports a clean bill of health");
