@@ -160,16 +160,85 @@ Reporting only H2 would be dishonest. Two classes are **slower** with the index:
    available on Gene Ontology or GeoNames — it is available here only because the generator
    makes codes paths. Against Neo4j, which has no such shortcut, H1 is **9.1×**.
 
-**H4 (cross-hierarchy conjunction), 1.1×** — the remaining half of #350. At this scale the 5,000-row fact scan dominates
-both plans, so a three-axis conjunction costs about the same either way. The result worth
-reporting for H4 is not speed but *expressibility*: one query ranges over ontology, time
-and geography with three O(1) predicates, which no per-silo hierarchy index answers at all.
-A time-series engine's continuous aggregate cannot express it; a 2-hop reachability index
-has no roll-up to compose with. Making it *fast* needs a plan that starts from the
-hierarchy and drives into the fact table, which is not a plan the current detector emits.
+**H4 (cross-hierarchy conjunction)** — no longer a loss; fixed by #350, see
+[Cross-hierarchy conjunctions](#cross-hierarchy-conjunctions-h4-350) below. It was 1.1× on
+the 2026-08-14 host and 0.21× in the table above, because no rewrite recognized a
+conjunction over more than one axis: the general planner scanned every fact once per axis,
+joined them, and evaluated each `subsumes()` per row (#1345).
 
 **H7 (LCA), 1.6×.** The index answers LCA in O(depth) from the intervals, but the query
 shape again pays a cartesian product to bind both endpoints.
+
+## Cross-hierarchy conjunctions (H4, #350)
+
+A query such as H4-07 —
+`MATCH (e:Event)-[:ABOUT]->(t), (e)-[:ON]->(day), (e)-[:AT]->(z), (rt:Term {…}), (rd:Year {…}), (rz:Country {…}) WHERE subsumes(t, rt) AND subsumes(day, rd) AND subsumes(z, rz) RETURN count(e)`
+— is planned from the hierarchy into the facts rather than the other way round:
+
+1. **Pick the driving axis by selectivity.** Each axis's pinned root has a subtree size,
+   `descendant_count(root)`, which the index answers in O(1) in nested-set mode. The axis
+   with the smallest subtree drives; ties go to the axis written first, so the plan is a
+   function of the query text.
+2. **Drive it** with `HierarchyDescendantScan` on that root, then `Expand` back along the
+   axis's relationship into the fact table — the single-axis plan of #376. Facts outside
+   that subtree are never visited.
+3. **Test the other axes** per fact: one `Expand` out along each remaining relationship and
+   a `HierarchyOrderTest` against its root (O(1)), not a second descendant scan or a join.
+
+`EXPLAIN` shows the choice: the `HierarchyDescendantScan` names the driving variable
+(`day under … via cal` for H4-03, where Y2019M01 is the smallest subtree), and each other
+axis appears as a `HierarchyOrderTest`. The plan enumerates the same `(e, t, day, z)`
+tuples as the query, so `count(e)`, `count(DISTINCT e)` and `sum(e.p)` are exact.
+
+It **declines** — the query takes the general plan, which is always correct — when:
+
+- two axes use the same relationship type (relationship isomorphism would have to be
+  tracked between them);
+- a pinned root belongs to more than one usable hierarchy (`subsumes()` picks its index
+  from both arguments, so committing to one from the root alone is exact only when there
+  is one);
+- a root is ambiguous or outside every usable hierarchy, or a WHERE term is missing,
+  negated, OR-ed, repeated or accompanied by any other predicate, or a pinned node is not
+  used by any axis;
+- the hierarchy side carries a label or property, the fact a property, or a relationship a
+  variable, property, length or no direction; a path is named, or a path is written from
+  the hierarchy side (`(t)<-[:ABOUT]-(e)`);
+- the projection is anything but one `count(e)`, `count(DISTINCT e)` or `sum(e.p)`, or the
+  query has `OPTIONAL`, `ORDER BY`, `SKIP`, `LIMIT` or more than one clause.
+
+`descendant_count` counts hierarchy nodes, not the facts attached to them, so it is an
+estimate of how many facts an axis reaches. On H4-02 and H4-05 the driving year reaches
+about as many rows as the unindexed traversal does (1,184 against 1,193 at the test scale).
+
+**Before and after, H4 only** — `cargo run --release --example hier_benchmark`, default
+scale (18,975 nodes, 5,000 events), 10 reps, median per query, `speedup = baseline /
+indexed`. **A single run on one noisy host** (4-vCPU Intel Xeon @ 2.80GHz VM, load average
+1.1–1.6), before = 96cb03e, after = the #350 change on top of it. Other classes moved by up
+to 2× between the two runs with no code change affecting them, which is the noise floor.
+
+| Query | Before indexed (ms) | Before baseline (ms) | Before | After indexed (ms) | After baseline (ms) | After |
+|---|---:|---:|---:|---:|---:|---:|
+| H4-01 | 16.387 | 1.581 | 0.10× | 0.038 | 1.523 | 39.7× |
+| H4-02 | 21.924 | 2.592 | 0.12× | 0.377 | 1.912 | 5.1× |
+| H4-03 | 18.017 | 0.331 | 0.02× | 0.037 | 0.301 | 8.2× |
+| H4-04 | 16.171 | 10.669 | 0.66× | 0.044 | 12.423 | 279.6× |
+| H4-05 | 17.449 | 1.856 | 0.11× | 0.325 | 2.016 | 6.2× |
+| H4-06 | 16.361 | 0.653 | 0.04× | 0.118 | 0.656 | 5.6× |
+| H4-07 | 40.300 | 2.550 | 0.06× | 0.352 | 2.776 | 7.9× |
+| H4-08 | 31.164 | 2.116 | 0.07× | 0.135 | 2.067 | 15.3× |
+| H4-09 | 33.605 | 11.156 | 0.33× | 0.548 | 14.523 | 26.5× |
+| H4-10 | 35.272 | 1.490 | 0.04× | 0.127 | 1.461 | 11.5× |
+| H4-11 | 36.640 | 2.629 | 0.07× | 0.354 | 2.793 | 7.9× |
+| H4-12 | 36.577 | 11.800 | 0.32× | 0.047 | 16.116 | 346.4× |
+| **H4 class** | 26.655 | 4.118 | **0.2×** | 0.209 | 4.881 | **23.4×** |
+
+12/12 agree with the unindexed ground truth in both runs (108/108 over the controlled
+corpus). The class table under *Results* has not been re-measured on its documented
+hardware since; these rows are the evidence until it is. `tests/hier_cross_hierarchy.rs`
+holds the machine-independent version: every non-vector corpus query agrees at a small
+scale, and on each H4 query the driven plan produces no more rows (summed from `PROFILE`)
+than the unindexed traversal — 9,175 against 23,778 over the class — and under a fifth of
+the scan-and-test plan it replaced.
 
 ## The DAG double-count trap
 

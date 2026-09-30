@@ -292,10 +292,11 @@ mode.
 1. **Order-test rewrite** (#349). Detect `MATCH (d:L), (r:L {pin}) WHERE subsumes(d, r)` and emit
    `LabelScan → HierarchyOrderTest` instead of a cartesian product. Highest-value
    remaining work; H1/H6 measure exactly what it is worth.
-2. **A hierarchy-driven plan for cross-hierarchy conjunctions** (#350). HIER H4 runs at 1.1×
-   because the fact scan dominates both plans. Starting from `HierarchyDescendantScan` and
-   driving into the fact table would make the paper's motivating query fast, not merely
-   expressible.
+2. ~~**A hierarchy-driven plan for cross-hierarchy conjunctions** (#350).~~ **Done.** The
+   axis with the smallest `descendant_count` drives through `HierarchyDescendantScan` and an
+   `Expand` into the fact table; the other axes are `HierarchyOrderTest` checks. HIER H4
+   went from 0.2× to 23.4× in a single before/after run; the heuristic, the cases it
+   declines and the numbers are in `benchmarks/hier/README.md`.
 3. **`CALL … YIELD` composition** (engine gap, not ADR-035's, tracked as #348).
    `YIELD`-bound variables are not in scope for a following `WHERE`, which blocks
    hierarchy-filtered vector search — HIER class H9 — entirely.

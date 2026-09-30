@@ -78,6 +78,20 @@ pub enum HierarchyRewrite {
         /// What the query asks for.
         output: DrivenOutput,
     },
+    /// A conjunction over several hierarchies: drive from the smallest subtree into the
+    /// fact table, then test each fact against the remaining axes.
+    CrossHierarchyDriven {
+        /// Variable bound to the fact node.
+        fact_var: String,
+        /// Labels on the fact node, from every occurrence of it in the pattern.
+        fact_labels: Vec<Label>,
+        /// The axis whose subtree is enumerated.
+        driving: DrivenAxis,
+        /// The axes checked per fact, in pattern order.
+        residual: Vec<DrivenAxis>,
+        /// What the query asks for.
+        output: DrivenOutput,
+    },
     /// Enumerate the reflexive descendant set from the index.
     DescendantScan {
         /// Index that answers it.
@@ -96,6 +110,24 @@ pub enum DrivenOutput {
     Count { alias: String, distinct: bool },
     /// `RETURN sum(e.prop)`.
     Sum { alias: String, property: String },
+}
+
+/// One `(fact)-[:REL]->(x), (r {pin}) WHERE subsumes(x, r)` term of a cross-hierarchy
+/// conjunction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrivenAxis {
+    /// Index that answers it.
+    pub index_name: String,
+    /// Pinned subtree root.
+    pub root: NodeId,
+    /// Variable bound to the hierarchy member.
+    pub hier_var: String,
+    /// Relationship joining fact to hierarchy member.
+    pub edge_type: String,
+    /// Direction to walk *from the fact to the hierarchy member*.
+    pub from_fact: Direction,
+    /// `|{root} ∪ descendants(root)|` — the selectivity the driving axis is chosen by.
+    pub subtree_size: usize,
 }
 
 /// What an order-test query projects.
@@ -126,6 +158,9 @@ pub fn detect(query: &Query, store: &GraphStore) -> Option<HierarchyRewrite> {
         return Some(rewrite);
     }
     if let Some(rewrite) = detect_hierarchy_driven(query, store) {
+        return Some(rewrite);
+    }
+    if let Some(rewrite) = detect_cross_hierarchy_driven(query, store) {
         return Some(rewrite);
     }
 
@@ -269,6 +304,9 @@ fn detect_hierarchy_driven(query: &Query, store: &GraphStore) -> Option<Hierarch
     if segment.edge.types.len() != 1
         || segment.edge.length.is_some()
         || segment.edge.variable.is_some()
+        // A property constraint on the relationship is a filter the walk would not apply.
+        || segment.edge.properties.is_some()
+        || segment.edge.property_exprs.is_some()
     {
         return None;
     }
@@ -312,6 +350,23 @@ fn detect_hierarchy_driven(query: &Query, store: &GraphStore) -> Option<Hierarch
     let entry = store.hierarchy_index.usable_containing(&[root])?;
     let index_name = entry.read().unwrap().spec.name.clone();
 
+    let output = driven_output(query, &fact_var)?;
+
+    Some(HierarchyRewrite::HierarchyDriven {
+        index_name,
+        root,
+        hier_var,
+        fact_var,
+        fact_labels: fact_path.start.labels.clone(),
+        edge_type: segment.edge.types[0].as_str().to_string(),
+        to_fact,
+        output,
+    })
+}
+
+/// The projection a hierarchy-driven plan can produce: `count([DISTINCT] fact)` or
+/// `sum(fact.p)`, alone.
+fn driven_output(query: &Query, fact_var: &str) -> Option<DrivenOutput> {
     let ret = query.return_clause.as_ref()?;
     if ret.items.len() != 1 || ret.distinct {
         return None;
@@ -350,17 +405,223 @@ fn detect_hierarchy_driven(query: &Query, store: &GraphStore) -> Option<Hierarch
         },
         _ => return None,
     };
+    Some(output)
+}
 
-    Some(HierarchyRewrite::HierarchyDriven {
-        index_name,
-        root,
-        hier_var,
+/// Recognize the cross-hierarchy conjunction (HIER class H4, #350):
+///
+/// ```text
+/// MATCH (e:F)-[:A]->(x), (e)-[:B]->(y), (rx:L {pin}), (ry:M {pin})
+/// WHERE subsumes(x, rx) AND subsumes(y, ry)
+/// RETURN count(e) | sum(e.p)
+/// ```
+///
+/// with two or more axes. The default plan scans every fact, walks out along every axis
+/// and evaluates each `subsumes()` per row; #1345 measured it 11–49x slower than the
+/// unindexed traversal, which at least starts from a pinned root.
+///
+/// The rewrite starts from the axis whose subtree is smallest — `descendant_count` is
+/// O(1) in nested-set mode, so the choice costs nothing — enumerates that subtree from
+/// the index, walks back into the facts, and tests each remaining axis with
+/// `HierarchyOrderTest`. It is the single-axis plan of [`detect_hierarchy_driven`] with
+/// the other axes as residual predicates, and it enumerates exactly the same
+/// `(e, x, y, …)` tuples as the query, so counts and sums are preserved.
+///
+/// Two conditions beyond the single-axis ones keep it exact:
+///
+/// - **distinct relationship types per axis.** Within one `MATCH` two pattern
+///   relationships may not bind the same edge; axes over distinct types can never
+///   collide, so the plan need not track which edges it walked;
+/// - **each pinned root in exactly one usable hierarchy.** `subsumes()` picks the index
+///   from both of its arguments; committing to one from the root alone agrees with it for
+///   every candidate only when no other index holds that root.
+fn detect_cross_hierarchy_driven(query: &Query, store: &GraphStore) -> Option<HierarchyRewrite> {
+    if query.match_clauses.len() != 1
+        || query.with_clause.is_some()
+        || query.create_clause.is_some()
+        || query.delete_clause.is_some()
+        || query.call_clause.is_some()
+        || query.call_subquery.is_some()
+        || query.correlated_call.is_some()
+        || query.unwind_clause.is_some()
+        || query.load_csv_clause.is_some()
+        || query.merge_clause.is_some()
+        || query.foreach_clause.is_some()
+        || !query.set_clauses.is_empty()
+        || !query.remove_clauses.is_empty()
+        || !query.union_queries.is_empty()
+        || query.order_by.is_some()
+        || query.limit.is_some()
+        || query.skip.is_some()
+        || query.deferred_limit.is_some()
+        || query.deferred_skip.is_some()
+    {
+        return None;
+    }
+    let clause = &query.match_clauses[0];
+    let paths = &clause.pattern.paths;
+    if clause.optional || paths.len() < 4 || paths.iter().any(|p| p.path_variable.is_some()) {
+        return None;
+    }
+
+    // Split into fact paths `(e)-[:T]->(x)` and pinned roots `(r:L {pin})`.
+    let mut fact_paths = Vec::new();
+    let mut root_nodes = Vec::new();
+    for p in paths {
+        match p.segments.len() {
+            0 => root_nodes.push(&p.start),
+            1 => fact_paths.push(p),
+            _ => return None,
+        }
+    }
+    if fact_paths.len() < 2 || fact_paths.len() != root_nodes.len() {
+        return None;
+    }
+
+    // Every fact path starts at the same unconstrained-by-property fact variable.
+    let fact_var = fact_paths[0].start.variable.clone()?;
+    // Each pinned root is its own variable: one shared with the fact, a hierarchy member
+    // or another root would be a join the plan does not perform.
+    let mut root_vars: Vec<&str> = Vec::with_capacity(root_nodes.len());
+    for n in &root_nodes {
+        let v = n.variable.as_deref()?;
+        if v == fact_var || root_vars.contains(&v) {
+            return None;
+        }
+        root_vars.push(v);
+    }
+    let mut fact_labels: Vec<Label> = Vec::new();
+    // (hier_var, edge_type, from_fact), in pattern order.
+    let mut axes: Vec<(String, String, Direction)> = Vec::new();
+    for p in &fact_paths {
+        if p.start.variable.as_deref() != Some(fact_var.as_str())
+            || p.start.properties.is_some()
+            || p.start.property_exprs.is_some()
+        {
+            return None;
+        }
+        for l in &p.start.labels {
+            if !fact_labels.contains(l) {
+                fact_labels.push(l.clone());
+            }
+        }
+        let seg = &p.segments[0];
+        let edge = &seg.edge;
+        if edge.types.len() != 1
+            || edge.length.is_some()
+            || edge.variable.is_some()
+            || edge.properties.is_some()
+            || edge.property_exprs.is_some()
+            || edge.direction == Direction::Both
+        {
+            return None;
+        }
+        // A label or property on the hierarchy side would filter the subtree the scan
+        // enumerates, or the member the order test accepts.
+        let hier_var = seg.node.variable.clone()?;
+        if !seg.node.labels.is_empty()
+            || seg.node.properties.is_some()
+            || seg.node.property_exprs.is_some()
+            || hier_var == fact_var
+            || root_vars.contains(&hier_var.as_str())
+        {
+            return None;
+        }
+        let edge_type = edge.types[0].as_str().to_string();
+        if axes
+            .iter()
+            .any(|(h, t, _)| *h == hier_var || *t == edge_type)
+        {
+            return None;
+        }
+        axes.push((hier_var, edge_type, edge.direction.clone()));
+    }
+
+    // WHERE is exactly one `subsumes(hier_var, root_var)` per axis, ANDed together.
+    let mut terms = Vec::new();
+    flatten_and(&query.where_clause.as_ref()?.predicate, &mut terms);
+    if terms.len() != axes.len() {
+        return None;
+    }
+    let mut root_of: Vec<Option<String>> = vec![None; axes.len()];
+    for term in terms {
+        let (child, root_var) = match term {
+            Expression::Function {
+                name,
+                args,
+                distinct: false,
+            } if name.eq_ignore_ascii_case("subsumes") && args.len() == 2 => {
+                match (&args[0], &args[1]) {
+                    (Expression::Variable(a), Expression::Variable(b)) => (a, b),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let i = axes.iter().position(|(h, _, _)| h == child)?;
+        if root_of[i].is_some() || root_of.iter().flatten().any(|r| r == root_var) {
+            return None;
+        }
+        root_of[i] = Some(root_var.clone());
+    }
+
+    let mut resolved = Vec::with_capacity(axes.len());
+    for ((hier_var, edge_type, from_fact), root_var) in axes.into_iter().zip(root_of) {
+        let root_var = root_var?;
+        let root_pattern = root_nodes
+            .iter()
+            .find(|n| n.variable.as_deref() == Some(root_var.as_str()))?;
+        if root_pattern.property_exprs.is_some() {
+            return None;
+        }
+        let root = resolve_pinned_node(store, root_pattern)?;
+        let entry = store.hierarchy_index.only_usable_containing(root)?;
+        let (index_name, subtree_size) = {
+            let g = entry.read().unwrap();
+            let index = g.index.as_ref()?;
+            (
+                g.spec.name.clone(),
+                index.descendant_count(index.poset().idx(root)?),
+            )
+        };
+        resolved.push(DrivenAxis {
+            index_name,
+            root,
+            hier_var,
+            edge_type,
+            from_fact,
+            subtree_size,
+        });
+    }
+    // Every root variable is one of the pinned nodes, and there are as many of those as
+    // axes, so no pinned node is left over to multiply the result.
+    let output = driven_output(query, &fact_var)?;
+
+    // Ties go to the axis written first, so the plan is a function of the query.
+    let driving_at = (0..resolved.len()).min_by_key(|&i| resolved[i].subtree_size)?;
+    let driving = resolved.remove(driving_at);
+    Some(HierarchyRewrite::CrossHierarchyDriven {
         fact_var,
-        fact_labels: fact_path.start.labels.clone(),
-        edge_type: segment.edge.types[0].as_str().to_string(),
-        to_fact,
+        fact_labels,
+        driving,
+        residual: resolved,
         output,
     })
+}
+
+/// Collect the operands of a tree of `AND`s.
+fn flatten_and<'a>(expr: &'a Expression, out: &mut Vec<&'a Expression>) {
+    match expr {
+        Expression::Binary {
+            left,
+            op: crate::query::ast::BinaryOp::And,
+            right,
+        } => {
+            flatten_and(left, out);
+            flatten_and(right, out);
+        }
+        other => out.push(other),
+    }
 }
 
 /// Recognize `MATCH (d:L), (r:L2 {pin}) WHERE subsumes(d, r) RETURN count(d) | d`.

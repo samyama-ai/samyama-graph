@@ -870,7 +870,7 @@ impl QueryPlanner {
         &self,
         rewrite: super::hierarchy_detector::HierarchyRewrite,
     ) -> ExecutionPlan {
-        use super::hierarchy_detector::{DrivenOutput, HierarchyRewrite, OrderTestOutput};
+        use super::hierarchy_detector::{HierarchyRewrite, OrderTestOutput};
         match rewrite {
             HierarchyRewrite::HierarchyDriven {
                 index_name,
@@ -902,39 +902,59 @@ impl QueryPlanner {
                     )
                     .with_target_labels(fact_labels),
                 );
-                let (agg, alias) = match output {
-                    DrivenOutput::Count { alias, distinct } => (
-                        AggregateFunction {
-                            func: AggregateType::Count,
-                            expr: Expression::Variable(fact_var),
-                            alias: alias.clone(),
-                            distinct,
-                            percentile: None,
-                        },
-                        alias,
-                    ),
-                    DrivenOutput::Sum { alias, property } => (
-                        AggregateFunction {
-                            func: AggregateType::Sum,
-                            expr: Expression::Property {
-                                variable: fact_var,
-                                property,
-                            },
-                            alias: alias.clone(),
-                            distinct: false,
-                            percentile: None,
-                        },
-                        alias,
-                    ),
+                Self::driven_aggregate(expand, fact_var, output)
+            }
+            HierarchyRewrite::CrossHierarchyDriven {
+                fact_var,
+                fact_labels,
+                driving,
+                residual,
+                output,
+            } => {
+                // The single-axis plan from the smallest subtree, then one hop out and an
+                // O(1) order test per remaining axis. The detector chose `driving` by
+                // `descendant_count`, so the facts reached here are the fewest any axis
+                // could reach them through, and no fact outside that subtree is visited.
+                let to_fact = match driving.from_fact {
+                    Direction::Outgoing => Direction::Incoming,
+                    Direction::Incoming => Direction::Outgoing,
+                    Direction::Both => Direction::Both,
                 };
-                ExecutionPlan {
-                    root: Box::new(AggregateOperator::new(expand, Vec::new(), vec![agg])),
-                    output_columns: vec![alias],
-                    is_write: false,
-                    candidates_evaluated: 1,
-                    chosen_plan_cost: super::cost_model::HIERARCHY_DESCENDANT_SCAN_COST,
-                    candidate_costs: Vec::new(),
+                let scan: OperatorBox =
+                    Box::new(super::hierarchy_ops::HierarchyDescendantScanOperator::new(
+                        driving.index_name,
+                        driving.root,
+                        driving.hier_var.clone(),
+                    ));
+                let mut plan: OperatorBox = Box::new(
+                    ExpandOperator::new(
+                        scan,
+                        driving.hier_var,
+                        fact_var.clone(),
+                        None,
+                        vec![driving.edge_type],
+                        to_fact,
+                    )
+                    .with_target_labels(fact_labels),
+                );
+                for axis in residual {
+                    let out: OperatorBox = Box::new(ExpandOperator::new(
+                        plan,
+                        fact_var.clone(),
+                        axis.hier_var.clone(),
+                        None,
+                        vec![axis.edge_type],
+                        axis.from_fact,
+                    ));
+                    plan = Box::new(super::hierarchy_ops::HierarchyOrderTestOperator::new(
+                        out,
+                        axis.index_name,
+                        axis.hier_var,
+                        axis.root,
+                        false,
+                    ));
                 }
+                Self::driven_aggregate(plan, fact_var, output)
             }
             HierarchyRewrite::OrderTest {
                 index_name,
@@ -1018,6 +1038,48 @@ impl QueryPlanner {
                 chosen_plan_cost: super::cost_model::HIERARCHY_DESCENDANT_SCAN_COST,
                 candidate_costs: Vec::new(),
             },
+        }
+    }
+
+    /// Finish a hierarchy-driven plan with the single aggregate the query projects.
+    fn driven_aggregate(
+        input: OperatorBox,
+        fact_var: String,
+        output: super::hierarchy_detector::DrivenOutput,
+    ) -> ExecutionPlan {
+        use super::hierarchy_detector::DrivenOutput;
+        let (agg, alias) = match output {
+            DrivenOutput::Count { alias, distinct } => (
+                AggregateFunction {
+                    func: AggregateType::Count,
+                    expr: Expression::Variable(fact_var),
+                    alias: alias.clone(),
+                    distinct,
+                    percentile: None,
+                },
+                alias,
+            ),
+            DrivenOutput::Sum { alias, property } => (
+                AggregateFunction {
+                    func: AggregateType::Sum,
+                    expr: Expression::Property {
+                        variable: fact_var,
+                        property,
+                    },
+                    alias: alias.clone(),
+                    distinct: false,
+                    percentile: None,
+                },
+                alias,
+            ),
+        };
+        ExecutionPlan {
+            root: Box::new(AggregateOperator::new(input, Vec::new(), vec![agg])),
+            output_columns: vec![alias],
+            is_write: false,
+            candidates_evaluated: 1,
+            chosen_plan_cost: super::cost_model::HIERARCHY_DESCENDANT_SCAN_COST,
+            candidate_costs: Vec::new(),
         }
     }
 
