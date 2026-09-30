@@ -208,6 +208,11 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                             Rule::load_csv_clause => {
                                 query.clauses.push(Clause::LoadCsv(parse_load_csv_clause(c)?));
                             }
+                            Rule::load_parquet_clause => {
+                                query
+                                    .clauses
+                                    .push(Clause::LoadParquet(parse_load_parquet_clause(c)?));
+                            }
                             Rule::with_clause => {
                                 query.clauses.push(Clause::With(parse_with_clause(c)?));
                             }
@@ -718,9 +723,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                     }
                 }
             }
-            Rule::load_csv_stmt => {
+            Rule::load_csv_stmt | Rule::load_parquet_stmt => {
                 // Same clause set again -- `parse_match_statement` dispatches on each
-                // inner rule, and `load_csv_clause` is one of the rules it knows.
+                // inner rule, and `load_csv_clause` / `load_parquet_clause` are rules
+                // it knows.
                 parse_match_statement(inner, query)?;
             }
             Rule::match_stmt | Rule::unwind_stmt => {
@@ -1419,6 +1425,9 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             Rule::load_csv_clause => {
                 query.load_csv_clause = Some(parse_load_csv_clause(inner)?);
             }
+            Rule::load_parquet_clause => {
+                query.load_parquet_clause = Some(parse_load_parquet_clause(inner)?);
+            }
             Rule::merge_inline => {
                 query.merge_clause = Some(parse_merge_clause(inner)?);
             }
@@ -1734,6 +1743,27 @@ fn parse_load_csv_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<LoadC
             .ok_or_else(|| ParseError::SemanticError("LOAD CSV missing AS variable".to_string()))?,
         with_headers,
         field_terminator,
+    })
+}
+
+/// `LOAD PARQUET FROM <expr> AS <var>` (#1098).
+fn parse_load_parquet_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<LoadParquetClause> {
+    let mut source = None;
+    let mut variable = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::expression => source = Some(parse_expression(inner)?),
+            Rule::variable => variable = Some(unescape_name(inner.as_str())),
+            _ => {}
+        }
+    }
+    Ok(LoadParquetClause {
+        source: source.ok_or_else(|| {
+            ParseError::SemanticError("LOAD PARQUET missing FROM source".to_string())
+        })?,
+        variable: variable.ok_or_else(|| {
+            ParseError::SemanticError("LOAD PARQUET missing AS variable".to_string())
+        })?,
     })
 }
 

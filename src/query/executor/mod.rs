@@ -921,6 +921,9 @@ fn substitute_params(query: &mut Query, params: &HashMap<String, crate::graph::P
     if let Some(l) = &mut query.load_csv_clause {
         substitute_expr(&mut l.source, p)?;
     }
+    if let Some(l) = &mut query.load_parquet_clause {
+        substitute_expr(&mut l.source, p)?;
+    }
     if let Some(c) = &mut query.call_clause {
         for a in &mut c.arguments {
             substitute_expr(a, p)?;
@@ -944,6 +947,7 @@ fn substitute_params(query: &mut Query, params: &HashMap<String, crate::graph::P
             Clause::Where(w) => substitute_expr(&mut w.predicate, p)?,
             Clause::Unwind(u) => substitute_expr(&mut u.expression, p)?,
             Clause::LoadCsv(l) => substitute_expr(&mut l.source, p)?,
+            Clause::LoadParquet(l) => substitute_expr(&mut l.source, p)?,
             Clause::With(wc) => substitute_with(wc, p)?,
             Clause::Create(cc) => substitute_pattern(&mut cc.pattern, p)?,
             Clause::Merge(mc) => substitute_merge(mc, p)?,

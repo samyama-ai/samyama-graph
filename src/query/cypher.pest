@@ -8,7 +8,7 @@ COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 query = { SOI ~ explain_clause? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
 explain_clause = { ^"PROFILE" | ^"EXPLAIN" }
 union_clause = { ^"UNION" ~ ^"ALL"? }
-statement = { analyze_stmt | show_hierarchy_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
+statement = { analyze_stmt | show_hierarchy_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | load_parquet_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
 
 // A query as what Cypher actually is: an ordered sequence of clauses.
 //
@@ -25,7 +25,7 @@ statement = { analyze_stmt | show_hierarchy_indexes_stmt | show_indexes_stmt | s
 pipeline_query = { SOI ~ explain_clause? ~ pipeline_stmt ~ ";"? ~ EOI }
 pipeline_stmt = { pipeline_clause+ ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 pipeline_clause = _{
-    optional_match_clause | match_clause | where_clause | unwind_clause | load_csv_clause |
+    optional_match_clause | match_clause | where_clause | unwind_clause | load_csv_clause | load_parquet_clause |
     with_clause | create_clause | merge_inline | delete_clause |
     foreach_clause | set_clause | remove_clause | call_clause | return_clause
 }
@@ -138,6 +138,10 @@ unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
 // header row, or a list -- so it is not an optional detail: a query written for
 // one shape reads nothing from the other.
 load_csv_clause = { ^"LOAD" ~ ^"CSV" ~ (^"WITH" ~ ^"HEADERS")? ~ ^"FROM" ~ expression ~ ^"AS" ~ variable ~ (^"FIELDTERMINATOR" ~ string)? }
+// LOAD PARQUET (LANG-09, #1098). The same reading clause over a Parquet file; each
+// record binds as a map keyed by the file's column names. No `WITH HEADERS` and no
+// `FIELDTERMINATOR`: the file carries its own schema, so neither is the query's to say.
+load_parquet_clause = { ^"LOAD" ~ ^"PARQUET" ~ ^"FROM" ~ expression ~ ^"AS" ~ variable }
 merge_inline = { ^"MERGE" ~ pattern ~ (on_create_set | on_match_set)* }
 // A statement that *begins* with UNWIND. UNWIND was already allowed after a MATCH or a
 // WITH, but a leading one had no rule to match, so the batch-write idiom
@@ -150,6 +154,8 @@ unwind_stmt = { unwind_clause+ ~ ((optional_match_clause | match_clause)+ ~ wher
 // A statement that *begins* with LOAD CSV, which is where it almost always sits:
 // the clause is a source, so nothing binds before it. Same tail as `unwind_stmt`.
 load_csv_stmt = { load_csv_clause ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+// A statement that begins with LOAD PARQUET. Same tail as `load_csv_stmt`.
+load_parquet_stmt = { load_parquet_clause ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 match_clause = { ^"MATCH" ~ pattern }
 optional_match_clause = { ^"OPTIONAL" ~ ^"MATCH" ~ pattern }
 where_clause = { ^"WHERE" ~ expression }

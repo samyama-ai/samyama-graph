@@ -2721,6 +2721,29 @@ fn unwind_operator_paths() {
 }
 
 #[test]
+fn load_parquet_rejects_a_non_string_source_before_touching_disk() {
+    let store = GraphStore::new();
+    let clause = crate::query::ast::LoadParquetClause {
+        source: li(1),
+        variable: "row".into(),
+    };
+    let mut op = LoadParquetOperator::new(Box::new(SingleRowOperator::new()), clause.clone());
+    let d = op.describe();
+    assert_eq!(d.name, "LoadParquet");
+    assert!(d.details.ends_with("AS row"), "{}", d.details);
+    assert_eq!(op.children_mut().len(), 1);
+    match op.next(&store) {
+        Err(ExecutionError::TypeError(m)) => assert!(m.contains("expects a string path"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    op.reset();
+    // No input rows: nothing to open, and it stays exhausted.
+    let mut empty = LoadParquetOperator::new(Box::new(MaterializedOperator::new(vec![])), clause);
+    assert!(empty.next(&store).unwrap().is_none());
+    assert!(empty.next(&store).unwrap().is_none());
+}
+
+#[test]
 fn load_csv_rejects_a_non_string_source_before_touching_disk() {
     let store = GraphStore::new();
     let clause = crate::query::ast::LoadCsvClause {

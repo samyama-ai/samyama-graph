@@ -104,6 +104,16 @@ fn pipeline_accepts_merge_delete_optional_match_and_load_csv() {
         }
         other => panic!("expected LOAD CSV, got {other:?}"),
     }
+    let q = ok("CREATE (a) WITH a LOAD PARQUET FROM 'file:///x.parquet' AS row RETURN row");
+    assert!(kinds(&q).contains(&"LOAD PARQUET"));
+    match q
+        .clauses
+        .iter()
+        .find(|c| matches!(c, Clause::LoadParquet(_)))
+    {
+        Some(Clause::LoadParquet(l)) => assert_eq!(l.variable, "row"),
+        other => panic!("expected LOAD PARQUET, got {other:?}"),
+    }
 }
 
 #[test]
@@ -927,4 +937,17 @@ fn a_query_nested_past_the_limit_is_refused_before_parsing() {
             .contains(&format!("query nests brackets {depth} deep")),
         "{e}"
     );
+}
+
+#[test]
+fn load_parquet_parses_in_the_by_kind_shape() {
+    let q = ok("LOAD PARQUET FROM 'file:///x.parquet' AS row CREATE (:N {a: row.a})");
+    let l = q.load_parquet_clause.unwrap();
+    assert_eq!(l.variable, "row");
+    assert!(q.create_clause.is_some());
+    let q = ok("load parquet from 'x.parquet' as r RETURN r");
+    assert_eq!(q.load_parquet_clause.unwrap().variable, "r");
+    // The file carries its own schema: neither CSV option means anything here.
+    err("LOAD PARQUET WITH HEADERS FROM 'x.parquet' AS row RETURN row");
+    err("LOAD PARQUET FROM 'x.parquet' AS row FIELDTERMINATOR ';' RETURN row");
 }

@@ -547,6 +547,10 @@ fn parameters_reach_load_csv_and_procedure_arguments_before_they_run() {
     let msg = read_err("LOAD CSV FROM $src AS row RETURN row", &p);
     assert!(!msg.contains("Unresolved parameter"), "{msg}");
     assert!(msg.contains("LOAD CSV"), "{msg}");
+    let p2 = params(&[("src", PropertyValue::String("file:///x.parquet".into()))]);
+    let msg = read_err("LOAD PARQUET FROM $src AS row RETURN row", &p2);
+    assert!(!msg.contains("Unresolved parameter"), "{msg}");
+    assert!(msg.contains("LOAD PARQUET"), "{msg}");
     let msg = read_err("CALL nosuch.proc($x) YIELD y RETURN y", &p);
     assert!(!msg.contains("Unresolved parameter"), "{msg}");
     let mut s = store();
