@@ -1421,3 +1421,7 @@ fn quota_overrides_from_args() -> Option<samyama::persistence::tenant::ResourceQ
     if let Some(v) = storage { q.max_storage_bytes = v; }
     Some(q)
 }
+
+#[cfg(test)]
+#[path = "main_cov_tests.rs"]
+mod cov_tests;
