@@ -3,6 +3,8 @@ import type {
   ServerStatus,
   ErrorResponse,
   GraphSchema,
+  NlqRequest,
+  NlqResponse,
   CsvImportResult,
   JsonImportResult,
 } from "./types.js";
@@ -151,6 +153,30 @@ export class HttpTransport {
     );
   }
 
+  /**
+   * Translate a natural-language question into Cypher via POST /api/nlq.
+   *
+   * Returns the generated query without running it; pass it to `query` for
+   * results. The server chooses the LLM provider (`NLQ_PROVIDER`) and refuses
+   * any generated query that writes, which rejects with the server's message.
+   */
+  async nlq(question: string, opts?: RequestOptions): Promise<string> {
+    const body: NlqRequest = { question };
+    const response = await this.json<NlqResponse>(
+      "/api/nlq",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      opts,
+    );
+    if (typeof response.cypher !== "string") {
+      throw new Error("/api/nlq response has no `cypher` string");
+    }
+    return response.cypher;
+  }
+
   /** Get server status via GET /api/status */
   async status(opts?: RequestOptions): Promise<ServerStatus> {
     return this.json<ServerStatus>("/api/status", {}, opts);
@@ -201,11 +227,13 @@ export class HttpTransport {
     opts?: RequestOptions,
   ): Promise<CsvImportResult> {
     const formData = new FormData();
-    const blob = new Blob([csvContent], { type: "text/csv" });
-    formData.append("file", blob, "import.csv");
+    // The fields before the file: the server then parses the file as it
+    // arrives instead of copying it to disk first (#336).
     formData.append("label", label);
     if (options?.idColumn) formData.append("id_column", options.idColumn);
     if (options?.delimiter) formData.append("delimiter", options.delimiter);
+    const blob = new Blob([csvContent], { type: "text/csv" });
+    formData.append("file", blob, "import.csv");
 
     return this.json<CsvImportResult>(
       "/api/import/csv",

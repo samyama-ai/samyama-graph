@@ -3994,6 +3994,7 @@ dependencies = [
  "crc32fast",
  "criterion",
  "csv",
+ "csv-core",
  "flate2",
  "futures",
  "half",

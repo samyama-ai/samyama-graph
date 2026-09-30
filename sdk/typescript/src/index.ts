@@ -7,6 +7,8 @@ export type {
   QueryResult,
   ServerStatus,
   ErrorResponse,
+  NlqRequest,
+  NlqResponse,
   ClientOptions,
   GraphSchema,
   NodeType,

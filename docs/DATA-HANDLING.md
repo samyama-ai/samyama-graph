@@ -43,7 +43,9 @@ contains), `src/embed/mod.rs:59`, `src/http/vector.rs:190`, `src/graph/store.rs:
 ## Choosing a provider
 
 `NLQ_PROVIDER` and `EMBED_PROVIDER` accept `openai`, `ollama`, `gemini`,
-`azure`, `anthropic`, `claudecode` and `mock`.
+`azure`, `anthropic`, `claudecode` and `mock`. NLQ (`/api/nlq`, `GRAPH.NLQ`,
+enrichment) has no client for `azure` or `anthropic` and refuses them rather
+than failing at the first question.
 
 **`ollama` is a local endpoint** (`http://localhost:11434`) and nothing leaves
 your machine on that setting unless you repoint it with `NLQ_API_BASE_URL` /
@@ -65,8 +67,12 @@ already gone by the time anyone looks. See `LLMProvider::parse_named` in
 `src/persistence/tenant.rs` and `tests/llm_provider_is_never_defaulted.rs`.
 
 **Your API key is a credential and is read from the environment**, never from
-the graph and never logged. One caveat worth knowing: the Gemini API takes its
-key as a URL query parameter (`src/nlq/client.rs:204`), so on that provider the
+the graph and never logged. For NLQ each provider reads its own variable —
+`OPENAI_API_KEY` for `openai`, `GEMINI_API_KEY` for `gemini` — and a provider
+whose variable is unset is refused with its name; `ollama`, `claudecode` and
+`mock` take none. (NLQ used to read `OPENAI_API_KEY` for every provider, so a
+Gemini deployment's key lived in a variable named for OpenAI.) One caveat worth knowing: the Gemini API takes its
+key as a URL query parameter (`src/nlq/client.rs:228`), so on that provider the
 key reaches Google's request logs by their design, not ours.
 
 ## What stays local, that you might expect not to

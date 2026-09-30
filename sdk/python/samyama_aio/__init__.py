@@ -131,6 +131,9 @@ class AsyncSamyamaClient:
     async def query_readonly(self, cypher: str, graph: str = "default") -> Any:
         return await _to_thread(self._client.query_readonly, cypher, graph)
 
+    async def nlq(self, question: str) -> str:
+        return await _to_thread(self._client.nlq, question)
+
     async def status(self) -> Any:
         return await _to_thread(self._client.status)
 

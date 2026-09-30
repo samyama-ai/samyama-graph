@@ -267,6 +267,26 @@ impl SamyamaClient {
         }
     }
 
+    /// Translate a natural-language question into Cypher (`POST /api/nlq`).
+    ///
+    /// Returns the generated query; it does not run it. Pass the result to
+    /// `query_readonly` for results. The server chooses the LLM provider
+    /// (`NLQ_PROVIDER`) and refuses any generated query that writes; that
+    /// refusal, like an unconfigured provider, raises `RuntimeError` with the
+    /// server's message. Remote mode only: translation happens on the server.
+    fn nlq(&self, py: Python<'_>, question: &str) -> PyResult<String> {
+        let client = match &*self.inner {
+            ClientInner::Remote(c) => c,
+            ClientInner::Embedded(_) => {
+                return Err(PyRuntimeError::new_err(
+                    "nlq is only available in remote mode. Use SamyamaClient.connect(url).",
+                ))
+            }
+        };
+        let result = py.detach(|| get_runtime().block_on(client.nlq(question)));
+        result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Get server status
     fn status(&self, py: Python<'_>) -> PyResult<ServerStatus> {
         let result = py.detach(|| {
