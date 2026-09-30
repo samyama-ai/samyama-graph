@@ -534,13 +534,14 @@ pub fn kg08_conformance(catalog: &QueryCatalog) -> Vec<String> {
     problems
 }
 
-/// Digest of a catalog file, for the snapshot to reference.
+/// Digest of a catalog's content, as `catalog-gate` prints it.
 ///
 /// The catalog ships beside the `.sgsnap` rather than inside it: templates are
 /// schema-bound and get edited far more often than the data changes, and
 /// rebuilding a multi-GB artifact to fix a Cypher string is not a good trade
-/// (export runs at ~0.77 MB/s and is CPU-bound, #314). The digest is what makes
-/// a mismatched pair detectable anyway.
+/// (export runs at ~0.77 MB/s and is CPU-bound, #314). A digest is what makes
+/// a mismatched pair detectable anyway; the one the snapshot header records is
+/// `queries_sha256`, over the file's bytes rather than this re-serialisation.
 pub fn catalog_digest(serialized: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in serialized.as_bytes() {
@@ -548,6 +549,44 @@ pub fn catalog_digest(serialized: &str) -> String {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("fnv1a64:{h:016x}")
+}
+
+/// SHA-256 of a catalog file's bytes, as lowercase hex, for the snapshot
+/// header's `queries.sha256` (#1154).
+///
+/// Over the bytes as published rather than a re-serialisation, unlike
+/// `catalog_digest`: the header is checked against the release asset, and the
+/// check a downloader can run by hand is `sha256sum` on that asset. A
+/// cryptographic digest here, not FNV, because this one is compared against a
+/// file that crossed a network and may have been edited on the way.
+pub fn queries_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Check a catalog file against the reference in its snapshot's header.
+///
+/// A mismatch is refused rather than reported: a catalog that is not the one
+/// the snapshot was published with checks some other graph's answers, so its
+/// passing or failing says nothing about this restore.
+pub fn check_queries_ref(
+    link: &crate::snapshot::format::QueriesRef,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let actual = queries_sha256(bytes);
+    if actual.eq_ignore_ascii_case(&link.sha256) {
+        return Ok(());
+    }
+    Err(format!(
+        "the catalog's sha256 is {actual}, but the snapshot header records {} for {:?}. \
+         This is not the catalog the snapshot was published with, so its results would \
+         say nothing about this restore. Use the catalog the header names, or rebuild \
+         the pair with `samyama catalog-build ... --link`.",
+        link.sha256, link.file
+    ))
 }
 
 #[cfg(test)]
@@ -691,5 +730,28 @@ mod tests {
         };
         let err = verify(&GraphStore::new(), &catalog).unwrap_err();
         assert!(err.contains("refusing to guess"), "{err}");
+    }
+
+    #[test]
+    fn a_catalog_is_checked_against_the_digest_its_snapshot_records() {
+        use crate::snapshot::format::QueriesRef;
+        let bytes = br#"{"format":"samyama.queries/1"}"#;
+        // The digest `sha256sum` gives for the same bytes.
+        assert_eq!(
+            queries_sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let link = QueriesRef {
+            file: "kg.sgqueries".into(),
+            sha256: queries_sha256(bytes),
+        };
+        assert_eq!(check_queries_ref(&link, bytes), Ok(()));
+
+        let err = check_queries_ref(&link, br#"{"format":"samyama.queries/2"}"#).unwrap_err();
+        assert!(
+            err.contains("not the catalog the snapshot was published with"),
+            "{err}"
+        );
+        assert!(err.contains("kg.sgqueries"), "{err}");
     }
 }

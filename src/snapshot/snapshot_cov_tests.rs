@@ -592,3 +592,97 @@ fn two_snapshot_nodes_merging_into_one_node_with_an_unlisted_label() {
     );
     assert_eq!(store.label_node_count(&Label::new("Country")), 2);
 }
+
+// ------------------------------------------------------------------
+// The header's link to its query catalog (#1154)
+// ------------------------------------------------------------------
+
+fn header_line(sealed: &[u8]) -> String {
+    let mut line = String::new();
+    BufReader::new(GzDecoder::new(sealed))
+        .read_line(&mut line)
+        .unwrap();
+    line
+}
+
+fn link() -> format::QueriesRef {
+    format::QueriesRef {
+        file: "kg.sgqueries".into(),
+        sha256: "ab".repeat(32),
+    }
+}
+
+#[test]
+fn a_header_written_before_the_catalog_link_still_reads_and_imports() {
+    // `header()` is the shape every snapshot had before #1154: no `queries`.
+    let old = gz(&[header(2, &["Person"]), node(1, &["Person"], json!({}))]);
+    assert_eq!(peek_header(&old[..]).unwrap().queries, None);
+    let mut store = GraphStore::new();
+    assert_eq!(import_tenant(&mut store, &old[..]).unwrap().node_count, 1);
+}
+
+#[test]
+fn an_export_without_a_catalog_writes_no_queries_key() {
+    let mut plain = Vec::new();
+    export_tenant(&two_person_store(), &mut plain).unwrap();
+    let line = header_line(&plain);
+    assert!(!line.contains("\"queries\""), "{line}");
+}
+
+#[test]
+fn relinking_changes_the_header_and_nothing_after_it() {
+    let src = two_person_store();
+    let mut plain = Vec::new();
+    export_tenant(&src, &mut plain).unwrap();
+    let body = |sealed: &[u8]| {
+        let mut all = String::new();
+        GzDecoder::new(sealed).read_to_string(&mut all).unwrap();
+        all.split_once('\n').unwrap().1.to_string()
+    };
+
+    let mut linked = Vec::new();
+    let h = relink_queries(&plain[..], &mut linked, Some(link())).unwrap();
+    assert_eq!(h.queries, Some(link()));
+    assert_eq!(peek_header(&linked[..]).unwrap().queries, Some(link()));
+    assert_eq!(body(&linked), body(&plain));
+    let mut store = GraphStore::new();
+    let stats = import_tenant(&mut store, &linked[..]).unwrap();
+    assert_eq!((stats.node_count, stats.edge_count), (2, 1));
+
+    // Unlinking removes the key rather than writing `null`.
+    let mut unlinked = Vec::new();
+    relink_queries(&linked[..], &mut unlinked, None).unwrap();
+    assert!(!header_line(&unlinked).contains("\"queries\""));
+    assert_eq!(body(&unlinked), body(&plain));
+}
+
+#[test]
+fn relinking_keeps_header_fields_this_build_does_not_know() {
+    let mut h: serde_json::Value = serde_json::from_str(&header(2, &[])).unwrap();
+    h["from_a_newer_build"] = json!({"kept": true});
+    let src = gz(&[h.to_string()]);
+    let mut out = Vec::new();
+    relink_queries(&src[..], &mut out, Some(link())).unwrap();
+    let line: serde_json::Value = serde_json::from_str(&header_line(&out)).unwrap();
+    assert_eq!(line["from_a_newer_build"], json!({"kept": true}));
+    assert_eq!(line["queries"]["file"], json!("kg.sgqueries"));
+}
+
+#[test]
+fn relinking_refuses_encrypted_truncated_and_foreign_input() {
+    let key = [3u8; encryption::KEY_BYTES];
+    let mut sealed = Vec::new();
+    export_tenant_encrypted(&two_person_store(), &mut sealed, &key).unwrap();
+    let err = relink_queries(&sealed[..], Vec::new(), Some(link())).unwrap_err();
+    assert!(err.to_string().contains("encrypted"), "{err}");
+
+    let mut plain = Vec::new();
+    export_tenant(&two_person_store(), &mut plain).unwrap();
+    let cut = &plain[..plain.len() - 10];
+    assert!(relink_queries(cut, Vec::new(), Some(link())).is_err());
+
+    let foreign = gz(&[json!({"format": "other", "version": 2}).to_string()]);
+    let err = relink_queries(&foreign[..], Vec::new(), Some(link())).unwrap_err();
+    assert!(err.to_string().contains("invalid snapshot format"), "{err}");
+    assert!(relink_queries(&gz(&[])[..], Vec::new(), None).is_err());
+}

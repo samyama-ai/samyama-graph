@@ -320,7 +320,16 @@ fn auth_user_refuses_a_name_containing_the_separator() {
 fn verify_without_a_snapshot_or_catalog_is_a_usage_error() {
     assert_eq!(cmd_verify(&argv(&["verify"])), 64);
     assert_eq!(cmd_verify(&argv(&["verify", "--queries", "c.json"])), 64);
-    assert_eq!(cmd_verify(&argv(&["verify", "snap.sgsnap"])), 64);
+    // Without --queries the header is consulted, so the snapshot must exist;
+    // one whose header names no catalog is still a usage error, as before.
+    let dir = tempfile::tempdir().unwrap();
+    let snap = write_snapshot(dir.path(), "things.sgsnap", &things());
+    assert_eq!(cmd_verify(&argv(&["verify", s(&snap)])), 64);
+    assert_eq!(cmd_verify(&argv(&["verify", s(&snap), "--queries"])), 64);
+    assert_eq!(
+        cmd_verify(&argv(&["verify", s(&dir.path().join("absent.sgsnap"))])),
+        66
+    );
 }
 
 #[test]
@@ -560,7 +569,143 @@ fn catalog_build_reports_an_output_it_cannot_write() {
     );
 }
 
+/// A snapshot and a catalog built from it with `--link`, side by side.
+fn linked_pair(dir: &Path) -> (PathBuf, PathBuf) {
+    let snap = write_snapshot(dir, "things.sgsnap", &things());
+    let queries = write_json(dir, "q.json", &specs_json(&thing_queries()));
+    let out = dir.join("things.sgqueries");
+    assert_eq!(
+        cmd_catalog_build(&argv(&[
+            "catalog-build",
+            s(&snap),
+            "--queries",
+            s(&queries),
+            "--out",
+            s(&out),
+            "--link"
+        ])),
+        0
+    );
+    (snap, out)
+}
+
+#[test]
+fn catalog_build_link_records_the_catalog_in_the_snapshot_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let (snap, out) = linked_pair(dir.path());
+    let header = samyama::snapshot::peek_header(File::open(&snap).unwrap()).unwrap();
+    let link = header.queries.expect("--link wrote a queries reference");
+    assert_eq!(link.file, "things.sgqueries");
+    assert_eq!(
+        link.sha256,
+        samyama::snapshot::verify::queries_sha256(&std::fs::read(&out).unwrap())
+    );
+    assert!(!dir.path().join("things.sgsnap.link.tmp").exists());
+
+    // The header names the catalog, so verify finds it without being told.
+    assert_eq!(cmd_verify(&argv(&["verify", s(&snap)])), 0);
+    assert_eq!(
+        cmd_verify(&argv(&["verify", s(&snap), "--queries", s(&out)])),
+        0
+    );
+}
+
+#[test]
+fn verify_refuses_a_catalog_whose_digest_the_header_does_not_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let (snap, out) = linked_pair(dir.path());
+
+    // A catalog that would pass on its own merits is still not this pair's.
+    let other = write_catalog(dir.path(), "other.json", &authored_catalog());
+    assert_eq!(
+        cmd_verify(&argv(&["verify", s(&snap), "--queries", s(&other)])),
+        1
+    );
+
+    // Edited in place: even a whitespace change is a different file.
+    let mut bytes = std::fs::read(&out).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(&out, bytes).unwrap();
+    assert_eq!(cmd_verify(&argv(&["verify", s(&snap)])), 1);
+    assert_eq!(
+        cmd_verify(&argv(&["verify", s(&snap), "--queries", s(&out)])),
+        1
+    );
+}
+
+#[test]
+fn verify_refuses_when_the_catalog_the_header_names_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (snap, out) = linked_pair(dir.path());
+    std::fs::remove_file(&out).unwrap();
+    assert_eq!(cmd_verify(&argv(&["verify", s(&snap)])), 66);
+}
+
+#[test]
+fn an_unlinked_snapshot_verifies_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = write_snapshot(dir.path(), "things.sgsnap", &things());
+    let cat = write_catalog(dir.path(), "c.json", &authored_catalog());
+    assert!(samyama::snapshot::peek_header(File::open(&snap).unwrap())
+        .unwrap()
+        .queries
+        .is_none());
+    assert_eq!(
+        cmd_verify(&argv(&["verify", s(&snap), "--queries", s(&cat)])),
+        0
+    );
+}
+
+#[test]
+fn catalog_build_link_reports_a_snapshot_it_cannot_rewrite() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        link_catalog(s(&dir.path().join("absent.sgsnap")), "c.json", b"{}"),
+        74
+    );
+    assert!(!dir.path().join("absent.sgsnap.link.tmp").exists());
+}
+
 // ───────────────────────────────────────────────────────────── catalog-gate
+
+#[test]
+fn catalog_gate_with_a_snapshot_checks_the_pair() {
+    let dir = tempfile::tempdir().unwrap();
+    let (snap, out) = linked_pair(dir.path());
+    assert_eq!(
+        cmd_catalog_gate(&argv(&["catalog-gate", s(&out), "--snapshot", s(&snap)])),
+        0
+    );
+
+    // An unlinked snapshot: the pair could drift apart unnoticed.
+    let unlinked = write_snapshot(dir.path(), "plain.sgsnap", &things());
+    assert_eq!(
+        cmd_catalog_gate(&argv(&[
+            "catalog-gate",
+            s(&out),
+            "--snapshot",
+            s(&unlinked)
+        ])),
+        1
+    );
+
+    // A catalog that is not the one the header names.
+    let other = write_catalog(dir.path(), "other.json", &authored_catalog());
+    assert_eq!(
+        cmd_catalog_gate(&argv(&["catalog-gate", s(&other), "--snapshot", s(&snap)])),
+        1
+    );
+
+    let missing = dir.path().join("absent.sgsnap");
+    assert_eq!(
+        cmd_catalog_gate(&argv(&["catalog-gate", s(&out), "--snapshot", s(&missing)])),
+        66
+    );
+    assert_eq!(
+        cmd_catalog_gate(&argv(&["catalog-gate", s(&out), "--snapshot"])),
+        64
+    );
+}
 
 #[test]
 fn catalog_gate_without_a_catalog_is_a_usage_error() {

@@ -34,6 +34,31 @@ when there was something to lose, so an empty graph produces an empty list: a
 standing list of everything the format *could* drop is a disclaimer, and nobody
 reads those. The field is additive and the format version does not move.
 
+**The header can name its query catalog** (`queries: {file, sha256}`, added
+2026-09-30 for #1154). The `.sgqueries` catalog — the executable form of KG-08
+and DX-08 — ships *beside* the snapshot, not inside it: templates are edited far
+more often than the data changes, and regenerating a multi-GB artifact to fix a
+Cypher string is not a good trade. The header records the catalog's bare file
+name (resolved against the snapshot's directory) and the SHA-256 of its bytes as
+published, so `sha256sum` on the release asset gives the same string.
+
+- **Set after export, by `samyama catalog-build … --link`.** The catalog is
+  built by running queries against the snapshot, so it cannot exist when the
+  snapshot is written. `--link` rewrites line 0 only; every later line is copied
+  through unchanged, so the restored graph is the same. An encrypted snapshot
+  is refused — link before encrypting.
+- **Checked by `samyama verify`.** With a link, `--queries` may be omitted and
+  the named file beside the snapshot is used; either way a catalog whose SHA-256
+  differs is refused before any query runs, and a named catalog that is missing
+  is an error, not a skipped check. `samyama catalog-gate <catalog> --snapshot
+  <file>` refuses a pair that is unlinked or mismatched.
+- **Additive, no version bump.** Absent means no catalog is promised, and the
+  key is not written at all, so a snapshot without a catalog is byte-for-byte
+  what it was before. Older readers ignore the key.
+- **Editing the catalog means re-linking.** That rewrites the header (a
+  recompression pass, not a re-import); the old digest no longer matching is
+  the point of the field.
+
 **The file carries the index catalog** (`"t":"i"`, added 2026-09-29 for #1506).
 One line right after the header, holding every property index, unique
 constraint, full-text index and vector index the exporting store declared, as

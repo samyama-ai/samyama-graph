@@ -27,6 +27,30 @@ pub struct SnapshotHeader {
     /// loading and the format version where it is.
     #[serde(default)]
     pub dropped: Vec<Dropped>,
+    /// The query catalog published beside this snapshot (#1154).
+    ///
+    /// The catalog is a sidecar, not a section: templates are edited far more
+    /// often than the data changes, and rebuilding a multi-GB artifact to fix
+    /// one Cypher string is not a trade worth making. The digest is what keeps
+    /// the pair honest anyway -- `samyama verify` refuses a catalog whose bytes
+    /// do not match it. Additive: absent means "no catalog is promised", and is
+    /// not written at all, so a snapshot without one is byte-for-byte what it
+    /// was before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queries: Option<QueriesRef>,
+}
+
+/// Where a snapshot's query catalog lives, and what its bytes hash to (#1154).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueriesRef {
+    /// File name of the catalog, resolved against the snapshot's own directory.
+    /// A bare name rather than a path, because the pair is published together
+    /// (`gh release upload`, an S3 prefix) and a path would name the machine
+    /// that built it.
+    pub file: String,
+    /// Lowercase hex SHA-256 of the catalog file exactly as published, so
+    /// `sha256sum` on the release asset gives the same string.
+    pub sha256: String,
 }
 
 /// Current snapshot format version.

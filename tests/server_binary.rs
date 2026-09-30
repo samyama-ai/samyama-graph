@@ -331,6 +331,53 @@ fn catalog_build_verify_and_gate_work_end_to_end() {
 }
 
 #[test]
+fn a_linked_catalog_is_found_by_verify_and_a_swapped_one_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = samyama::GraphStore::new();
+    for i in 0..3i64 {
+        let n = store.create_node("Thing");
+        store.get_node_mut(n).unwrap().set_property("id", i);
+    }
+    let snap = dir.path().join("t.sgsnap");
+    samyama::snapshot::export_tenant(&store, std::fs::File::create(&snap).unwrap()).unwrap();
+    let queries = dir.path().join("q.json");
+    std::fs::write(
+        &queries,
+        r#"[{"id":"q_ids","cypher":"MATCH (t:Thing) RETURN t.id ORDER BY t.id"}]"#,
+    )
+    .unwrap();
+    let catalog = dir.path().join("t.sgqueries");
+
+    let args = [
+        "catalog-build",
+        s(&snap),
+        "--queries",
+        s(&queries),
+        "--out",
+        s(&catalog),
+        "--link",
+    ];
+    run(&args, &[]).assert_code(0).out_has("linked");
+    run(&["verify", s(&snap)], &[])
+        .assert_code(0)
+        .out_has("sha256 matches the snapshot header")
+        .out_has("OK  1 entries reproduced");
+    run(&["catalog-gate", s(&catalog), "--snapshot", s(&snap)], &[])
+        .assert_code(0)
+        .out_has("names this catalog");
+
+    std::fs::write(&catalog, std::fs::read_to_string(&catalog).unwrap() + " ").unwrap();
+    run(&["verify", s(&snap)], &[])
+        .assert_code(1)
+        .err_has("not the catalog the snapshot was published with");
+
+    std::fs::remove_file(&catalog).unwrap();
+    run(&["verify", s(&snap)], &[])
+        .assert_code(66)
+        .err_has("names its catalog \"t.sgqueries\"");
+}
+
+#[test]
 fn verify_says_when_every_entry_came_back_empty() {
     let dir = tempfile::tempdir().unwrap();
     let store = samyama::GraphStore::new();
