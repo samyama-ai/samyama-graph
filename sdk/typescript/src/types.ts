@@ -32,6 +32,16 @@ export interface ServerStatus {
   };
 }
 
+/** Request body of POST /api/nlq */
+export interface NlqRequest {
+  question: string;
+}
+
+/** Successful response of POST /api/nlq: the generated, read-only Cypher */
+export interface NlqResponse {
+  cypher: string;
+}
+
 /** Error response from the server */
 export interface ErrorResponse {
   error: string;

@@ -73,6 +73,14 @@ export class SamyamaClient {
   }
 
   /**
+   * Translate a natural-language question into read-only Cypher on the server.
+   * Returns the query without running it; pass it to `queryReadonly`.
+   */
+  async nlq(question: string): Promise<string> {
+    return this.http.nlq(question);
+  }
+
+  /**
    * Return the EXPLAIN plan for a Cypher query without executing it.
    * Returns the plan as text rows in the QueryResult records.
    */

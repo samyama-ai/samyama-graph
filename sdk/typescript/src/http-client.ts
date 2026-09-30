@@ -3,6 +3,8 @@ import type {
   ServerStatus,
   ErrorResponse,
   GraphSchema,
+  NlqRequest,
+  NlqResponse,
   CsvImportResult,
   JsonImportResult,
 } from "./types.js";
@@ -149,6 +151,30 @@ export class HttpTransport {
       },
       opts,
     );
+  }
+
+  /**
+   * Translate a natural-language question into Cypher via POST /api/nlq.
+   *
+   * Returns the generated query without running it; pass it to `query` for
+   * results. The server chooses the LLM provider (`NLQ_PROVIDER`) and refuses
+   * any generated query that writes, which rejects with the server's message.
+   */
+  async nlq(question: string, opts?: RequestOptions): Promise<string> {
+    const body: NlqRequest = { question };
+    const response = await this.json<NlqResponse>(
+      "/api/nlq",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      opts,
+    );
+    if (typeof response.cypher !== "string") {
+      throw new Error("/api/nlq response has no `cypher` string");
+    }
+    return response.cypher;
   }
 
   /** Get server status via GET /api/status */

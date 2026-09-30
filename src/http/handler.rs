@@ -2582,33 +2582,25 @@ pub struct NlqRequest {
 /// schema-grounded NLQ pipeline, and return it. Execution is left to the caller (`/api/query`)
 /// so this stays a thin, side-effect-free translation endpoint.
 ///
-/// LLM config is read from the environment: `NLQ_PROVIDER` (**no default** — an unset or
-/// unrecognised value is refused rather than sent to OpenAI), `NLQ_MODEL`
-/// (default `gpt-4o`), `OPENAI_API_KEY`, optional `NLQ_API_BASE_URL`. `text_to_cypher`
+/// LLM config is read from the environment by [`crate::nlq::config_from_env`]:
+/// `NLQ_PROVIDER` (**no default** — an unset or unrecognised value is refused rather than
+/// sent to OpenAI), `NLQ_MODEL` (default `gpt-4o`), the provider's own key variable
+/// (`OPENAI_API_KEY`, `GEMINI_API_KEY`), optional `NLQ_API_BASE_URL`. `text_to_cypher`
 /// already rejects any generated query that contains write operations.
 pub async fn nlq_handler(
     State(state): State<AppState>,
     Json(payload): Json<NlqRequest>,
 ) -> impl IntoResponse {
     use crate::nlq::NLQPipeline;
-    use crate::persistence::tenant::{LLMProvider, NLQConfig};
 
     // Refused, not defaulted. `NLQ_PROVIDER=claudecode` was not on the old list
     // and fell through to OpenAI, so an operator asking for the local CLI sent
     // the question and the schema summary to a third party instead.
-    let provider = match LLMProvider::parse(&std::env::var("NLQ_PROVIDER").unwrap_or_default()) {
-        Ok(p) => p,
+    let config = match crate::nlq::config_from_env() {
+        Ok(c) => c,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
         }
-    };
-    let config = NLQConfig {
-        enabled: true,
-        provider,
-        model: std::env::var("NLQ_MODEL").unwrap_or_else(|_| "gpt-4o".to_string()),
-        api_key: std::env::var("OPENAI_API_KEY").ok(),
-        api_base_url: std::env::var("NLQ_API_BASE_URL").ok(),
-        system_prompt: None,
     };
 
     let pipeline = match NLQPipeline::new(config) {

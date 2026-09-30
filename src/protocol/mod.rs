@@ -28,6 +28,8 @@
 //! - `GRAPH.RO_QUERY <graph> <cypher>` — execute a read-only Cypher query (can be
 //!   routed to replicas in a cluster)
 //! - `GRAPH.DELETE <graph>` — delete an entire graph
+//! - `GRAPH.NLQ <graph> <question>` — translate a natural-language question into
+//!   read-only Cypher, refusing any generated write; it returns the query, not results
 //!
 //! ## Why the Redis protocol?
 //!

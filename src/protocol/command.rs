@@ -93,6 +93,7 @@ impl CommandHandler {
         match cmd_name.as_str() {
             "GRAPH.QUERY" => self.handle_graph_query(args, store, auth).await,
             "GRAPH.RO_QUERY" => self.handle_graph_ro_query(args, store, auth).await,
+            "GRAPH.NLQ" => self.handle_graph_nlq(args, store, auth).await,
             "GRAPH.DELETE" => self.handle_graph_delete(args, store, auth).await,
             "GRAPH.LIST" => self.handle_graph_list(args, store, auth).await,
             "PING" => self.handle_ping(args),
@@ -410,6 +411,75 @@ impl CommandHandler {
             }
         }
         self.handle_graph_query(args, store, auth).await
+    }
+
+    /// Handle GRAPH.NLQ: translate a natural-language question into read-only
+    /// Cypher and reply with it as a bulk string (#438).
+    /// Format: GRAPH.NLQ graph_name "Who does Alice know?"
+    ///
+    /// The RESP counterpart of `POST /api/nlq`, with the same configuration
+    /// (`crate::nlq::config_from_env`) and the same refusal of any generated
+    /// query that writes. Like the HTTP route it does not run the query; the
+    /// caller passes the reply to GRAPH.RO_QUERY.
+    async fn handle_graph_nlq(
+        &self,
+        args: &[RespValue],
+        store: &Arc<RwLock<GraphStore>>,
+        auth: Option<&crate::auth::Credential>,
+    ) -> RespValue {
+        if args.len() != 3 {
+            return RespValue::Error(
+                "ERR wrong number of arguments for 'GRAPH.NLQ' command; quote the question \
+                 as one argument"
+                    .to_string(),
+            );
+        }
+        let graph_name = match args[1].as_string() {
+            Ok(Some(s)) => s,
+            Ok(None) => return RespValue::Error("ERR null graph name".to_string()),
+            Err(e) => return RespValue::Error(format!("ERR {}", e)),
+        };
+        if graph_name != "default" {
+            return RespValue::Error(format!(
+                "ERR this build serves a single graph ('default'); graph '{}' does not exist",
+                graph_name
+            ));
+        }
+        let question = match args[2].as_string() {
+            Ok(Some(s)) => s,
+            Ok(None) => return RespValue::Error("ERR null question".to_string()),
+            Err(e) => return RespValue::Error(format!("ERR {}", e)),
+        };
+        // The schema summary is read from the graph, so this needs what a read does.
+        if let Some(user) = auth {
+            if let Err(e) = user.authorize_statement(&graph_name, Ok::<bool, ()>(false)) {
+                return RespValue::Error(format!("ERR {e}"));
+            }
+        }
+        self.translate_nlq(&question, store, crate::nlq::config_from_env())
+            .await
+    }
+
+    /// The translation half of GRAPH.NLQ, with the configuration passed in so
+    /// tests do not depend on the process environment.
+    async fn translate_nlq(
+        &self,
+        question: &str,
+        store: &Arc<RwLock<GraphStore>>,
+        config: Result<crate::persistence::tenant::NLQConfig, String>,
+    ) -> RespValue {
+        let pipeline =
+            match config.and_then(|c| crate::nlq::NLQPipeline::new(c).map_err(|e| e.to_string())) {
+                Ok(p) => p,
+                Err(e) => return RespValue::Error(format!("ERR {e}")),
+            };
+        // Snapshot the schema and drop the read guard before the LLM call.
+        let schema = store.read().await.schema_summary();
+        // `text_to_cypher` refuses a generated write, as it does for /api/nlq.
+        match pipeline.text_to_cypher(question, &schema).await {
+            Ok(cypher) => RespValue::BulkString(Some(cypher.into_bytes())),
+            Err(e) => RespValue::Error(format!("ERR {e}")),
+        }
     }
 
     /// Handle GRAPH.DELETE command
@@ -1914,6 +1984,109 @@ mod tests {
                 handler.format_value(&map),
                 RespValue::Array(vec![bulk("k"), bulk("true")])
             );
+        }
+
+        // ---------- GRAPH.NLQ (#438) ----------
+
+        fn nlq_config(
+            provider: crate::persistence::tenant::LLMProvider,
+            base_url: Option<String>,
+        ) -> Result<crate::persistence::tenant::NLQConfig, String> {
+            Ok(crate::persistence::tenant::NLQConfig {
+                enabled: true,
+                provider,
+                model: "m".to_string(),
+                api_key: None,
+                api_base_url: base_url,
+                system_prompt: None,
+            })
+        }
+
+        #[tokio::test]
+        async fn graph_nlq_returns_the_generated_cypher_and_it_runs_read_only() {
+            use crate::persistence::tenant::LLMProvider;
+            let handler = CommandHandler::new(None);
+            let s = store();
+            let r = handler
+                .translate_nlq(
+                    "show me some nodes",
+                    &s,
+                    nlq_config(LLMProvider::Mock, None),
+                )
+                .await;
+            // The Mock provider's fixed answer.
+            assert_eq!(r, bulk("MATCH (n) RETURN n LIMIT 10"));
+
+            // What the caller does next.
+            let RespValue::BulkString(Some(cypher)) = r else {
+                unreachable!()
+            };
+            let cypher = String::from_utf8(cypher).unwrap();
+            let ran = handler
+                .handle_command(&cmd(&["GRAPH.RO_QUERY", "default", &cypher]), &s, None)
+                .await;
+            assert!(!matches!(ran, RespValue::Error(_)), "{ran:?}");
+        }
+
+        #[tokio::test]
+        async fn graph_nlq_refuses_a_generated_write() {
+            use crate::nlq::test_http::MockHttp;
+            use crate::persistence::tenant::LLMProvider;
+            let handler = CommandHandler::new(None);
+            let s = store();
+            s.write().await.create_node("Person");
+            // A model that answers with a destructive statement beginning MATCH,
+            // the shape the old prefix check let through (#1156).
+            let srv = MockHttp::serve(vec![(
+                200,
+                r#"{"response": "MATCH (n) DETACH DELETE n"}"#.to_string(),
+            )]);
+            let r = handler
+                .translate_nlq(
+                    "delete everything",
+                    &s,
+                    nlq_config(LLMProvider::Ollama, Some(srv.base_url.clone())),
+                )
+                .await;
+            assert!(err_text(&r).contains("write operations"), "{r:?}");
+            assert_eq!(srv.requests().len(), 1, "the model was asked once");
+            assert_eq!(s.read().await.node_count(), 1, "nothing was deleted");
+        }
+
+        #[tokio::test]
+        async fn graph_nlq_reports_a_configuration_error() {
+            use crate::persistence::tenant::LLMProvider;
+            let handler = CommandHandler::new(None);
+            let r = handler
+                .translate_nlq("q", &store(), Err("NLQ_PROVIDER is not set.".to_string()))
+                .await;
+            assert_eq!(err_text(&r), "ERR NLQ_PROVIDER is not set.");
+            let r = handler
+                .translate_nlq("q", &store(), nlq_config(LLMProvider::Anthropic, None))
+                .await;
+            assert!(err_text(&r).contains("not implemented"), "{r:?}");
+        }
+
+        #[tokio::test]
+        async fn graph_nlq_checks_its_arguments_before_reading_any_config() {
+            let handler = CommandHandler::new(None);
+            let s = store();
+            for args in [
+                &["GRAPH.NLQ", "default"][..],
+                &["GRAPH.NLQ", "default", "who", "knows", "ada"][..],
+            ] {
+                let r = handler.handle_command(&cmd(args), &s, None).await;
+                assert!(err_text(&r).contains("wrong number of arguments"), "{r:?}");
+            }
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.NLQ", "other", "who?"]), &s, None)
+                .await;
+            assert!(err_text(&r).contains("single graph"), "{r:?}");
+            let bound = cred(&format!("b:{D}:tenant=acme"));
+            let r = handler
+                .handle_command(&cmd(&["GRAPH.NLQ", "default", "who?"]), &s, Some(&bound))
+                .await;
+            assert!(err_text(&r).contains("unauthorized"), "{r:?}");
         }
 
         /// A list or map *literal* reaches `format_value` as
