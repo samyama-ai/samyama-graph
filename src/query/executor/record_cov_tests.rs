@@ -53,6 +53,21 @@ fn edge_and_edge_ref_with_the_same_id_are_equal_and_hash_alike() {
     assert_eq!(full, full.clone());
     assert_eq!(h(&full), h(&lazy));
     assert_ne!(lazy, Value::NodeRef(NodeId::new(e.as_u64())));
+    assert_eq!(lazy, lazy.clone());
+    assert!(lazy.as_node().is_none());
+    assert!(lazy.as_edge().is_none());
+    assert!(full.as_edge().is_some());
+}
+
+#[test]
+fn a_record_remembers_the_edges_it_traversed() {
+    let mut r = Record::new();
+    assert!(!r.edge_used(EdgeId::new(4)));
+    r.mark_edge_used(EdgeId::new(4));
+    assert!(r.edge_used(EdgeId::new(4)));
+    assert!(!r.edge_used(EdgeId::new(5)));
+    let copy = r.clone_with_capacity(2);
+    assert!(copy.edge_used(EdgeId::new(4)));
 }
 
 #[test]

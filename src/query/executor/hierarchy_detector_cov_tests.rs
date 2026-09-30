@@ -152,6 +152,9 @@ fn order_test_rejections() {
         "MATCH (d:Drug), (r:Class {code: 'NOPE'}) WHERE subsumes(d, r) RETURN count(d)",
         // An unpinned root.
         "MATCH (d:Drug), (r:Class) WHERE subsumes(d, r) RETURN count(d)",
+        // An empty pin, and counting a property rather than the scan.
+        "MATCH (d:Drug), (r:Class {}) WHERE subsumes(d, r) RETURN count(d)",
+        "MATCH (d:Drug), (r:Class {code: 'C0'}) WHERE subsumes(d, r) RETURN count(d.units)",
     ] {
         assert_eq!(detect_str(q, &f.store), None, "{q}");
     }

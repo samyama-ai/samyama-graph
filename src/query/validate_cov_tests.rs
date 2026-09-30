@@ -276,6 +276,55 @@ rejects! {
     unbound_variable: "MATCH (n) RETURN m" => c::VARIABLE_NOT_BOUND, "`m` is not bound";
     unbound_in_where: "MATCH (n) WHERE m.x = 1 RETURN n" => c::VARIABLE_NOT_BOUND, "`m`";
     unbounded_walk: "MATCH WALK (a)-[*]->(b) RETURN a" => c::INVALID_PATTERN, "unbounded WALK";
+    // ORDER BY after an aggregating projection.
+    order_by_aggregate_over_a_hidden_variable:
+        "MATCH (n) RETURN n.x AS x, count(*) AS c ORDER BY sum(n.y)"
+        => c::VARIABLE_NOT_BOUND, "`n` is not available to ORDER BY";
+    order_by_aggregate_of_a_projected_alias:
+        "MATCH (n) WITH n.x AS x RETURN x, count(*) AS c ORDER BY sum(x)"
+        => c::AGGREGATE_MISUSE, "ORDER BY introduces an aggregate";
+    order_by_an_unprojected_variable:
+        "MATCH (n), (m) RETURN n.x AS x, count(*) AS c ORDER BY m"
+        => c::VARIABLE_NOT_BOUND, "`m` is not available to ORDER BY";
+    // Operands that are statically not boolean.
+    float_and_operand: "RETURN 1.5 AND true AS x" => c::TYPE_MISMATCH, "a float";
+    string_or_operand: "RETURN 'a' OR true AS x" => c::TYPE_MISMATCH, "a string";
+    list_literal_operand: "RETURN [1] AND true AS x" => c::TYPE_MISMATCH, "a list";
+    map_literal_operand: "RETURN {a: 1} XOR true AS x" => c::TYPE_MISMATCH, "a map";
+    list_expression_operand: "WITH 1 AS y RETURN [y] AND true AS x" => c::TYPE_MISMATCH, "a list";
+    map_expression_operand: "WITH 1 AS y RETURN {a: y} AND true AS x" => c::TYPE_MISMATCH, "a map";
+    // Grouping and aggregation mixed in one item.
+    ungrouped_property_beside_an_aggregate: "MATCH (n) RETURN n.x + count(*) AS v"
+        => c::AGGREGATE_MISUSE, "`n` appears inside";
+    ungrouped_variable_beside_an_aggregate: "UNWIND [1] AS x RETURN x + count(*) AS v"
+        => c::AGGREGATE_MISUSE, "`x` appears inside";
+    aggregate_inside_a_comprehension: "RETURN [x IN [1] | count(x)] AS l"
+        => c::AGGREGATE_MISUSE, "inside a comprehension";
+    duplicate_with_columns: "MATCH (n) WITH n.x AS a, n.y AS a RETURN a" => c::CLAUSE_CONFLICT, "`a`";
+    // Writes onto what is already bound.
+    merge_on_bound_relationship: "MATCH ()-[r:T]->() MERGE ()-[r:T]->()"
+        => c::INVALID_WRITE_PATTERN, "`r`";
+    merge_on_bound_node: "MATCH (a) MERGE (a)" => c::INVALID_WRITE_PATTERN, "`a`";
+    merge_relabels_bound_node: "MATCH (a) MERGE (a:X)-[:T]->(b)" => c::INVALID_WRITE_PATTERN, "`a`";
+    // A pattern nested anywhere in a SET value.
+    pattern_comprehension_as_set_value: "MATCH (n) SET n.p = size([(n)-->(m) | m])"
+        => c::CLAUSE_CONFLICT, "SET";
+    pattern_in_a_list_set_value: "MATCH (n) SET n.p = [1, (n)-->()]" => c::CLAUSE_CONFLICT, "SET";
+    pattern_in_a_map_set_value: "MATCH (n) SET n.p = {a: (n)-->()}" => c::CLAUSE_CONFLICT, "SET";
+    negated_pattern_as_set_value: "MATCH (n) SET n.p = NOT (n)-->()" => c::CLAUSE_CONFLICT, "SET";
+    // DELETE targets that are not entities.
+    delete_a_literal: "MATCH (n) DELETE 1" => c::VARIABLE_KIND, "a literal is not one";
+    delete_arithmetic: "MATCH (n) DELETE n.x + 1" => c::VARIABLE_KIND, "arithmetic";
+    delete_a_label_test: "MATCH (n) DELETE n:L" => c::VARIABLE_KIND, "label test";
+    size_of_a_pattern: "MATCH (a) RETURN size((a)-->()) AS s" => c::VARIABLE_KIND, "a pattern";
+    // Properties read off literals of each kind.
+    property_on_float: "WITH 1.5 AS x RETURN x.p AS p" => c::VARIABLE_KIND, "a float";
+    property_on_string: "WITH 'a' AS x RETURN x.p AS p" => c::VARIABLE_KIND, "a string";
+    property_on_boolean: "WITH true AS x RETURN x.p AS p" => c::VARIABLE_KIND, "a boolean";
+    property_on_list: "WITH [1] AS x RETURN x.p AS p" => c::VARIABLE_KIND, "a list";
+    // A collection used as a relationship.
+    collection_as_relationship: "WITH [1] AS xs MATCH ()-[xs]->() RETURN 1 AS one"
+        => c::VARIABLE_KIND, "collection";
 }
 
 /// Queries that are fine and must stay fine: the other side of each check.
@@ -306,6 +355,28 @@ fn well_formed_queries_pass_validation() {
         "CALL { UNWIND [1] AS x RETURN x } RETURN x",
         "MATCH (n) WITH collect(n) AS ns FOREACH (m IN ns | SET m.v = 1)",
         "MATCH (a)-[r]->(b) WITH a, r MATCH (a)-[s]->(c) WHERE s <> r RETURN c",
+        // ORDER BY after an aggregating projection, each accepted spelling.
+        "MATCH (n) RETURN n.x + 1, count(*) AS c ORDER BY n.x + 1",
+        "MATCH (n) RETURN n.x AS x, count(*) AS c ORDER BY x + c",
+        "MATCH (n) RETURN n.x, count(*) AS c ORDER BY n.x * 2",
+        "MATCH (n) RETURN n.x AS k, count(*) AS c ORDER BY n.x * 2",
+        "MATCH (n) RETURN n, count(*) AS c ORDER BY n.name",
+        "MATCH (n) RETURN DISTINCT n ORDER BY n.name",
+        "MATCH (n) RETURN n.x AS x, count(*) AS c ORDER BY count(*)",
+        // DELETE, with its target bound by every kind of clause.
+        "UNWIND [1] AS x MATCH (n) DELETE n",
+        "MERGE (n:A) DELETE n",
+        "CREATE (n) DELETE n",
+        "UNWIND [1] AS x UNWIND [2] AS y MATCH (n) DELETE n",
+        "MATCH (n) WITH n UNWIND [1] AS x WITH n, x UNWIND [2] AS y MATCH (m) DELETE m",
+        "LOAD CSV FROM 'file:///x.csv' AS row MATCH (n) DELETE n",
+        "CREATE (a) WITH a LOAD CSV FROM 'file:///x.csv' AS row UNWIND [1] AS x MERGE (m:M) DELETE m",
+        "WITH {key: 1} AS nodes MATCH (n) DELETE nodes.key",
+        // A COUNT {} is a value and may be stored.
+        "MATCH (n) SET n.deg = COUNT { (n)-->() }",
+        // Re-aliasing a collection name to a scalar clears it.
+        "WITH [1] AS xs WITH 1 AS xs RETURN xs",
+        "MATCH (a) WHERE NOT EXISTS { MATCH (a)-->(b) WITH b WHERE b.x > 1 RETURN b } RETURN a",
     ] {
         assert!(parse_query(q).is_ok(), "{q}: {:?}", parse_query(q).err());
     }

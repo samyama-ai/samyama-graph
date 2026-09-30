@@ -396,8 +396,12 @@ fn order_test_skips_rows_without_a_node_and_rejects_nodes_outside_the_hierarchy(
     let outsider = t.store.create_node("Leaf");
     let mut not_a_node = Record::new();
     not_a_node.bind("x", Value::Property(PropertyValue::Integer(1)));
+    // A materialized node is recognised as well as a reference.
     let mut inside = Record::new();
-    inside.bind("x", Value::NodeRef(t.a1));
+    inside.bind(
+        "x",
+        Value::Node(t.a1, Box::new(t.store.get_node(t.a1).unwrap().clone())),
+    );
     let mut outside = Record::new();
     outside.bind("x", Value::NodeRef(outsider));
     let rows = vec![not_a_node, outside.clone(), inside];

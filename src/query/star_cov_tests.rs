@@ -49,6 +49,14 @@ fn return_star_does_not_duplicate_an_explicit_column() {
 fn return_star_after_create_returns_the_created_variables() {
     let q = parse_query("CREATE (n:P)-[e:T]->(m:P) RETURN *").unwrap();
     assert_eq!(return_columns(&q), vec!["n", "e", "m"]);
+    let q = parse_query("CREATE p = (n:P)-[:T]->(m:P) RETURN *").unwrap();
+    assert_eq!(return_columns(&q), vec!["p", "n", "m"]);
+}
+
+#[test]
+fn an_unaliased_expression_beside_a_star_is_not_an_explicit_name() {
+    let q = parse_query("MATCH (a) RETURN *, a.x").unwrap();
+    assert_eq!(return_columns(&q), vec!["a", "a.x"]);
 }
 
 #[test]

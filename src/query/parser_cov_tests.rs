@@ -900,3 +900,31 @@ fn backticked_variables_and_properties_are_unescaped() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn an_optional_match_where_is_split_into_its_conjuncts() {
+    let q = ok("MATCH (a) OPTIONAL MATCH (a)-->(b) WHERE b.x = 1 AND b.y = 2 RETURN a, b");
+    assert_eq!(q.optional_where.len(), 2);
+    assert!(q.match_clauses[1].optional);
+}
+
+#[test]
+fn a_single_quoted_unicode_escape_decodes() {
+    assert_eq!(
+        first_return_literal(r"RETURN 'A' AS s"),
+        PropertyValue::String("A".into())
+    );
+}
+
+#[test]
+fn a_query_nested_past_the_limit_is_refused_before_parsing() {
+    let depth = MAX_NESTING_DEPTH + 8;
+    let q = format!("RETURN {}1{} AS x", "(".repeat(depth), ")".repeat(depth));
+    let e = err(&q);
+    assert_eq!(e.code(), codes::SYNTAX);
+    assert!(
+        e.to_string()
+            .contains(&format!("query nests brackets {depth} deep")),
+        "{e}"
+    );
+}

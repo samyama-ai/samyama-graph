@@ -522,3 +522,108 @@ fn a_deadline_already_past_times_the_query_out() {
         .unwrap_err();
     assert!(err.to_string().contains("timed out"), "{err}");
 }
+
+#[test]
+fn parameters_after_a_with_and_across_extra_stages() {
+    let p = params(&[("a", int(1)), ("xs", list(&[10, 20]))]);
+    let b = read(
+        "MATCH (n:P) WITH n MATCH (m:P) WHERE m.i = $a RETURN m.i AS i",
+        &p,
+    );
+    assert_eq!(sorted(col(&b, "i")), vec![int(1), int(1), int(1)]);
+    let b = read(
+        "MATCH (n:P) WITH n WHERE n.i >= $a UNWIND $xs AS x \
+         MATCH (m:P {i: $a}) WHERE m.i = $a WITH n, x, m RETURN count(*) AS c",
+        &p,
+    );
+    assert_eq!(col(&b, "c"), vec![int(6)]);
+}
+
+#[test]
+fn parameters_reach_load_csv_and_procedure_arguments_before_they_run() {
+    let p = params(&[
+        ("src", PropertyValue::String("file:///x.csv".into())),
+        ("x", int(1)),
+    ]);
+    // Substituted first: the failure is about the clause, not the parameter.
+    let msg = read_err("LOAD CSV FROM $src AS row RETURN row", &p);
+    assert!(!msg.contains("Unresolved parameter"), "{msg}");
+    assert!(msg.contains("LOAD CSV"), "{msg}");
+    let msg = read_err("CALL nosuch.proc($x) YIELD y RETURN y", &p);
+    assert!(!msg.contains("Unresolved parameter"), "{msg}");
+    let mut s = store();
+    let err = QueryEngine::new()
+        .execute_mut_with_params(
+            "CREATE (a) WITH a CALL nosuch.proc($x) YIELD y RETURN y",
+            &mut s,
+            "default",
+            &p,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(!err.contains("Unresolved parameter"), "{err}");
+}
+
+#[test]
+fn parameters_in_a_call_subquery_and_a_pipeline_remove() {
+    let b = read(
+        "CALL { RETURN $a AS x } RETURN x",
+        &params(&[("a", int(4))]),
+    );
+    assert_eq!(col(&b, "x"), vec![int(4)]);
+    let mut s = GraphStore::new();
+    let b = write(
+        &mut s,
+        "CREATE (a:Z {v: $a}) WITH a REMOVE a.v RETURN a.v AS v",
+        &params(&[("a", int(1))]),
+    );
+    assert_eq!(col(&b, "v"), vec![PropertyValue::Null]);
+}
+
+fn foreach_delete_leaves(list_expr: &str, p: &BoundParams) -> PropertyValue {
+    let mut s = GraphStore::new();
+    write(&mut s, "CREATE (:D), (:D), (:D)", &BoundParams::new());
+    write(
+        &mut s,
+        &format!("MATCH (n:D) WITH collect(n) AS ns FOREACH (x IN {list_expr} | DETACH DELETE x)"),
+        p,
+    );
+    let b = write(
+        &mut s,
+        "MATCH (n:D) RETURN count(n) AS c",
+        &BoundParams::new(),
+    );
+    col(&b, "c").remove(0)
+}
+
+#[test]
+fn a_foreach_body_may_delete_every_node_of_a_list() {
+    assert_eq!(foreach_delete_leaves("ns", &BoundParams::new()), int(0));
+    // With parameters bound, the body's DELETE goes through substitution too.
+    let mut s = GraphStore::new();
+    write(&mut s, "CREATE (:D), (:D)", &BoundParams::new());
+    write(
+        &mut s,
+        "MATCH (n:D) WITH collect(n) AS ns FOREACH (x IN ns | SET x.v = $k DETACH DELETE x)",
+        &params(&[("k", int(2))]),
+    );
+    let b = write(
+        &mut s,
+        "MATCH (n:D) RETURN count(n) AS c",
+        &BoundParams::new(),
+    );
+    assert_eq!(col(&b, "c"), vec![int(0)]);
+}
+
+#[test]
+#[ignore = "bug: FOREACH (x IN ns[0..2] | DETACH DELETE x) over a slice of a collected node list deletes nothing, while the same body over `ns` deletes every node"]
+fn a_foreach_over_a_slice_of_nodes_deletes_them() {
+    assert_eq!(
+        foreach_delete_leaves("ns[0..2]", &BoundParams::new()),
+        int(1)
+    );
+    assert_eq!(
+        foreach_delete_leaves("ns[0..$k]", &params(&[("k", int(2))])),
+        int(1)
+    );
+}
