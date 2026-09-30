@@ -630,7 +630,10 @@ fn lists_of_entities_slice_and_compare() {
     assert_eq!(one("[ns[0]] <> [ns[1]]"), PropertyValue::Boolean(true));
     assert_eq!(one("ns = [ns[0]]"), PropertyValue::Boolean(false));
     assert_eq!(one("[ns[0], null] = [ns[0], 1]"), PropertyValue::Null);
-    assert_eq!(one("[ns[0], null] = [ns[1], 1]"), PropertyValue::Boolean(false));
+    assert_eq!(
+        one("[ns[0], null] = [ns[1], 1]"),
+        PropertyValue::Boolean(false)
+    );
     assert_eq!(one("[1, null] = [1, 2]"), PropertyValue::Null);
 }
 
