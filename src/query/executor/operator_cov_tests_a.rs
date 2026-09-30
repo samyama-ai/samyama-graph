@@ -1532,3 +1532,682 @@ fn hierarchy_functions_with_an_index() {
         PropertyValue::Array(vec![root_id])
     );
 }
+
+// ---------------------------------------------------------------------------
+// temporal constructors
+// ---------------------------------------------------------------------------
+
+/// `toString(<expr>)`, through both evaluators.
+fn ts(expr: &str) -> String {
+    s(&format!("toString({expr})"))
+}
+
+#[test]
+fn date_constructor_forms() {
+    assert_eq!(
+        ts("date({date: date('2020-05-15'), day: 28})"),
+        "2020-05-28"
+    );
+    assert_eq!(
+        ts("date({date: date('2020-05-15'), ordinalDay: 32})"),
+        "2020-02-01"
+    );
+    assert_eq!(
+        ts("date({date: date('2020-05-15'), year: 2021, month: 1})"),
+        "2021-01-15"
+    );
+    assert_eq!(
+        ts("date({date: date('1816-12-30'), week: 2})"),
+        "1817-01-06"
+    );
+    assert_eq!(
+        ts("date({date: date('2020-05-13'), dayOfWeek: 1})"),
+        "2020-05-11"
+    );
+    assert_eq!(
+        ts("date({date: date('1984-11-11'), quarter: 3})"),
+        "1984-08-11"
+    );
+    assert_eq!(
+        ts("date({date: date('1984-11-11'), dayOfQuarter: 1})"),
+        "1984-10-01"
+    );
+    assert_eq!(
+        ts("date({datetime: localdatetime('2020-01-02T10:00')})"),
+        "2020-01-02"
+    );
+    assert_eq!(ts("date({date: date('2020-05-15')})"), "2020-05-15");
+    assert_eq!(ts("date({year: 2020, month: 3, day: 4})"), "2020-03-04");
+    assert!(err("date({date: date('2020-01-01'), ordinalDay: 400})").contains("invalid ordinalDay"));
+    assert!(err("date({date: date('2020-01-01'), month: 2, day: 31})").contains("invalid date"));
+    assert!(err("date({date: date('2020-01-01'), week: 60})").contains("invalid week date"));
+    assert!(err("date({date: date('2020-01-01'), quarter: 5})").contains("invalid quarter"));
+    assert_eq!(ts("date(date('2020-01-02'))"), "2020-01-02");
+    assert_eq!(ts("date(localdatetime('2020-01-02T10:00'))"), "2020-01-02");
+    assert_eq!(ts("date(datetime('2020-01-02T23:00-02:00'))"), "2020-01-02");
+    assert!(err("date(localtime('10:00'))").contains("date() requires"));
+    assert!(matches!(
+        call("date", &[]),
+        Ok(Value::Property(PropertyValue::Date(_)))
+    ));
+}
+
+#[test]
+fn localtime_constructor_forms() {
+    assert_eq!(
+        ts("localtime({time: localtime('10:11:12'), second: 42})"),
+        "10:11:42"
+    );
+    assert_eq!(
+        ts("localtime({time: localtime('10:11:12.5'), millisecond: 7})"),
+        "10:11:12.007"
+    );
+    assert_eq!(
+        ts("localtime({time: localtime('10:11'), hour: 1, minute: 2})"),
+        "01:02"
+    );
+    assert_eq!(ts("localtime({hour: 9})"), "09:00");
+    assert_eq!(ts("localtime(datetime('2020-01-01T10:11Z'))"), "10:11");
+    assert_eq!(ts("localtime(localdatetime('2020-01-01T10:11'))"), "10:11");
+    assert_eq!(ts("localtime(time('10:11+01:00'))"), "10:11");
+    assert!(err("localtime(date('2020-01-01'))").contains("localtime() requires"));
+    assert!(matches!(
+        call("localtime", &[]),
+        Ok(Value::Property(PropertyValue::LocalTime(_)))
+    ));
+}
+
+#[test]
+fn time_constructor_forms() {
+    assert_eq!(ts("time('10:00+01:00')"), "10:00+01:00");
+    assert_eq!(ts("time('10:00')"), "10:00Z");
+    assert_eq!(
+        ts("time({time: time('12:00+01:00'), timezone: '+05:00'})"),
+        "16:00+05:00"
+    );
+    assert_eq!(
+        ts("time({time: time('12:00+01:00'), timezone: '+05:00', second: 42})"),
+        "16:00:42+05:00"
+    );
+    assert_eq!(
+        ts("time({time: localtime('12:31'), timezone: '+05:00'})"),
+        "12:31+05:00"
+    );
+    assert_eq!(ts("time({time: time('12:00+01:00')})"), "12:00+01:00");
+    assert_eq!(ts("time({hour: 10, timezone: '+02:00'})"), "10:00+02:00");
+    assert_eq!(ts("time({hour: 10})"), "10:00Z");
+    assert_eq!(
+        ts("time(datetime('2020-01-01T10:00+03:00'))"),
+        "10:00+03:00"
+    );
+    assert_eq!(ts("time(localtime('10:00'))"), "10:00Z");
+    assert!(err("time(date('2020-01-01'))").contains("time() requires"));
+    assert!(err_msg(call("time", &[Value::List(vec![])])).contains("time() requires"));
+    assert!(matches!(
+        call("time", &[]),
+        Ok(Value::Property(PropertyValue::Time {
+            offset_seconds: 0,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn localdatetime_constructor_forms() {
+    assert_eq!(ts("localdatetime('2020-01-02')"), "2020-01-02T00:00");
+    assert_eq!(
+        ts("localdatetime('2015-W30-2T214032.142')"),
+        "2015-07-21T21:40:32.142"
+    );
+    assert_eq!(
+        ts("localdatetime({year: 2020, month: 1, day: 2, hour: 3})"),
+        "2020-01-02T03:00"
+    );
+    assert_eq!(
+        ts("localdatetime({year: 2020, month: 1, day: 2})"),
+        "2020-01-02T00:00"
+    );
+    assert_eq!(ts("localdatetime(date('2020-01-02'))"), "2020-01-02T00:00");
+    assert_eq!(
+        ts("localdatetime(datetime('2020-01-02T05:06+01:00'))"),
+        "2020-01-02T05:06"
+    );
+    assert_eq!(
+        ts("localdatetime({date: date('2020-01-02'), time: localtime('10:11:12.5'), second: 1, nanosecond: 5})"),
+        "2020-01-02T10:11:01.000000005"
+    );
+    assert_eq!(
+        ts("localdatetime({date: date('2020-01-02'), time: localtime('10:11:12.5')})"),
+        "2020-01-02T10:11:12.5"
+    );
+    assert_eq!(
+        ts("localdatetime({datetime: localdatetime('2020-01-02T10:11'), day: 5})"),
+        "2020-01-05T10:11"
+    );
+    assert!(err("localdatetime({hour: 1})").contains("needs a date"));
+    assert!(err("localdatetime(localtime('10:00'))").contains("localdatetime() requires"));
+    assert!(matches!(
+        call("localdatetime", &[]),
+        Ok(Value::Property(PropertyValue::LocalDateTime { .. }))
+    ));
+}
+
+#[test]
+fn datetime_constructor_forms() {
+    assert_eq!(
+        ts("datetime('2015-07-21T21:40:32.142+02:00[Europe/Stockholm]')"),
+        "2015-07-21T21:40:32.142+02:00[Europe/Stockholm]"
+    );
+    assert_eq!(
+        ts("datetime('2015-07-21T21:40[Europe/Stockholm]')"),
+        "2015-07-21T21:40+02:00[Europe/Stockholm]"
+    );
+    assert_eq!(ts("datetime('2015-07-21T21:40')"), "2015-07-21T21:40Z");
+    assert_eq!(ts("datetime({epochMillis: 1000})"), "1970-01-01T00:00:01Z");
+    assert_eq!(ts("datetime({epochSeconds: 60})"), "1970-01-01T00:01Z");
+    assert_eq!(
+        ts("datetime({year: 2020, month: 1, day: 1, timezone: '+01:00'})"),
+        "2020-01-01T00:00+01:00"
+    );
+    assert_eq!(
+        ts("datetime({datetime: datetime('2020-01-01T12:00+02:00')})"),
+        "2020-01-01T12:00+02:00"
+    );
+    assert_eq!(
+        ts("datetime({datetime: datetime('2020-01-01T12:00+02:00'), timezone: '+00:00'})"),
+        "2020-01-01T10:00Z"
+    );
+    assert_eq!(
+        ts("datetime({date: date('2020-03-01'), time: datetime('2019-10-10T12:00[Europe/Stockholm]')})"),
+        "2020-03-01T12:00+01:00[Europe/Stockholm]"
+    );
+    assert_eq!(
+        ts("datetime({date: date('2020-07-01'), time: datetime('2019-10-10T12:00[Europe/Stockholm]'), timezone: '+00:00'})"),
+        "2020-07-01T10:00Z"
+    );
+    assert_eq!(
+        ts("datetime({date: date('2020-01-01'), time: time('10:00+03:00')})"),
+        "2020-01-01T10:00+03:00"
+    );
+    assert_eq!(
+        ts("datetime({date: date('2020-01-01'), time: time('10:00+03:00'), timezone: '+01:00'})"),
+        "2020-01-01T08:00+01:00"
+    );
+    assert_eq!(
+        ts("datetime(localdatetime('2020-01-01T10:00'))"),
+        "2020-01-01T10:00Z"
+    );
+    assert_eq!(ts("datetime(date('2020-01-01'))"), "2020-01-01T00:00Z");
+    assert_eq!(
+        ts("datetime(datetime('2020-01-01T10:00+05:00[Asia/Karachi]'))"),
+        "2020-01-01T10:00+05:00[Asia/Karachi]"
+    );
+    assert!(err("datetime(localtime('10:00'))").contains("datetime() requires"));
+    assert!(matches!(
+        call("datetime", &[]),
+        Ok(Value::Property(PropertyValue::ZonedDateTime {
+            offset_seconds: 0,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn duration_constructor_forms() {
+    assert_eq!(ts("duration('P1Y2M3DT4H5M6.5S')"), "P1Y2M3DT4H5M6.5S");
+    assert_eq!(
+        ts("duration('P2012-02-02T14:37:21.545')"),
+        "P2012Y2M2DT14H37M21.545S"
+    );
+    assert_eq!(ts("duration('P20120202T143721')"), "P2012Y2M2DT14H37M21S");
+    assert_eq!(ts("duration('P2012-02-02')"), "P2012Y2M2D");
+    assert_eq!(ts("duration('P2.5W')"), "P17DT12H");
+    assert_eq!(ts("duration('P1.5D')"), "P1DT12H");
+    assert_eq!(ts("duration('P0.5M')"), "P15DT5H14M33S");
+    assert_eq!(ts("duration('P0.5Y')"), "P6M");
+    assert_eq!(ts("duration('PT-2.001S')"), "PT-2.001S");
+    assert_eq!(ts("duration('P1DT-1H')"), "P1DT-1H");
+    assert_eq!(ts("duration('pt1h+30m')"), "PT1H30M");
+    assert!(err("duration('x')").contains("Invalid duration format"));
+    assert_eq!(ts("duration({months: 0.75})"), "P22DT19H51M49.5S");
+    assert_eq!(ts("duration({weeks: 2.5})"), "P17DT12H");
+    assert_eq!(ts("duration({years: 1, days: 1.5})"), "P1Y1DT12H");
+    assert_eq!(ts("duration({seconds: 2, milliseconds: -1})"), "PT1.999S");
+    assert_eq!(ts("duration({nanoseconds: -1})"), "PT-0.000000001S");
+    assert_eq!(
+        ts("duration({minutes: 1, microseconds: 2})"),
+        "PT1M0.000002S"
+    );
+    assert!(err_msg(call("duration", &[])).contains("requires an argument"));
+    assert!(err_msg(call("duration", &[pv(1i64)])).contains("requires string or map"));
+}
+
+#[test]
+fn parse_extended_duration_rejects_malformed_shapes() {
+    assert!(parse_extended_duration("2012-02", "").is_none());
+    assert!(parse_extended_duration("2012-0a-02", "").is_none());
+    assert!(parse_extended_duration("201202", "").is_none());
+    assert!(parse_extended_duration("2012-02-02", "14:37:21.x").is_none());
+    assert!(parse_extended_duration("2012-02-02", "14:37").is_none());
+    let v = parse_extended_duration("0001-00-00", "00:00:01,5").unwrap();
+    assert_eq!(
+        v.as_property(),
+        Some(&PropertyValue::Duration {
+            months: 12,
+            days: 0,
+            seconds: 1,
+            nanos: 500_000_000
+        })
+    );
+}
+
+#[test]
+fn epoch_constructors() {
+    assert_eq!(
+        ts("datetime.fromepoch(416779, 999999999)"),
+        "1970-01-05T19:46:19.999999999Z"
+    );
+    assert_eq!(
+        ts("datetime.fromepochmillis(-1)"),
+        "1969-12-31T23:59:59.999Z"
+    );
+    assert!(err("datetime.fromepoch(1, 2000000000)").contains("nanoseconds must be"));
+    assert!(err_msg(call("datetime.fromEpoch", &[pv(1i64)])).contains("requires 2 argument(s)"));
+    assert!(
+        err_msg(call("datetime.fromEpochMillis", &[pv(1i64), pv(2i64)]))
+            .contains("requires 1 argument(s)")
+    );
+    assert!(err_msg(call("datetime.fromEpochMillis", &[pv("x")])).contains("Expected integer"));
+}
+
+#[test]
+fn truncate_functions() {
+    assert_eq!(
+        ts("date.truncate('month', date('2020-05-15'))"),
+        "2020-05-01"
+    );
+    assert_eq!(
+        ts("date.truncate('month', date('2020-05-15'), {day: 5})"),
+        "2020-05-05"
+    );
+    assert_eq!(
+        ts("localtime.truncate('hour', localtime('10:11:12'))"),
+        "10:00"
+    );
+    assert_eq!(
+        ts("datetime.truncate('day', datetime('2020-05-15T10:11+02:00'))"),
+        "2020-05-15T00:00+02:00"
+    );
+    assert!(err_msg(call("date.truncate", &[pv("day")]))
+        .contains("requires a unit and a temporal value"));
+    assert!(err_msg(call(
+        "date.truncate",
+        &[pv(1i64), pv(PropertyValue::Date(0))]
+    ))
+    .contains("unit, as a string"));
+    assert!(
+        err_msg(call("date.truncate", &[pv("day"), Value::List(vec![])]))
+            .contains("needs a temporal value")
+    );
+}
+
+#[test]
+fn duration_in_unit_functions() {
+    assert_eq!(
+        ts("duration.inSeconds(date('2020-01-01'), date('2020-01-02'))"),
+        "PT24H"
+    );
+    assert_eq!(
+        ts("duration.inDays(localdatetime('2020-01-01T00:00'), localdatetime('2020-01-02T06:00'))"),
+        "P1D"
+    );
+    assert_eq!(
+        ts("duration.inMonths(date('2020-01-01'), date('2021-01-15'))"),
+        "P1Y"
+    );
+    assert_eq!(
+        ts("duration.inMonths(date('2021-01-15'), date('2020-01-01'))"),
+        "P-1Y"
+    );
+    assert!(err_msg(call("duration.inSeconds", &[pv(1i64)])).contains("requires 2 arguments"));
+    assert!(err_msg(call(
+        "duration.inDays",
+        &[Value::List(vec![]), Value::List(vec![])]
+    ))
+    .contains("needs two temporal values"));
+}
+
+#[test]
+fn duration_between_forms() {
+    assert_eq!(
+        ts("duration.between(date('1984-10-11'), date('2015-06-24'))"),
+        "P30Y8M13D"
+    );
+    assert_eq!(
+        ts("duration.between(date('2015-07-21'), date('2015-06-24'))"),
+        "P-27D"
+    );
+    assert_eq!(
+        ts("duration.between(date('2015-06-24'), date('2015-07-01'))"),
+        "P7D"
+    );
+    assert_eq!(
+        ts("duration.between(date('2015-01-31'), date('2015-03-01'))"),
+        "P1M1D"
+    );
+    assert_eq!(
+        ts("duration.between(date('2015-03-01'), date('2015-01-31'))"),
+        "P-1M-1D"
+    );
+    assert_eq!(
+        ts("duration.between(localdatetime('2015-01-01T10:00'), localdatetime('2015-03-01T09:00'))"),
+        "P1M27DT23H"
+    );
+    assert_eq!(
+        ts("duration.between(localdatetime('2015-03-01T09:00'), localdatetime('2015-01-01T10:00'))"),
+        "P-1M-30DT-23H"
+    );
+    assert_eq!(
+        ts("duration.between(date('2020-01-01'), localtime('16:30'))"),
+        "PT16H30M"
+    );
+    assert_eq!(
+        ts("duration.between(time('10:00+01:00'), time('12:00+02:00'))"),
+        "PT1H"
+    );
+    assert_eq!(
+        ts("duration.between(localdatetime('2015-07-21T21:40:32.142'), datetime('2015-07-21T21:40:32.142+01:00'))"),
+        "PT0S"
+    );
+    assert_eq!(
+        ts("duration.between(datetime('2017-10-28T12:00[Europe/Stockholm]'), datetime('2017-10-30T12:00[Europe/Stockholm]'))"),
+        "P2D"
+    );
+    assert_eq!(
+        ts(
+            "duration.between(localdatetime({year: 2017, month: 10, day: 29, hour: 0}), \
+             datetime({year: 2017, month: 10, day: 29, hour: 4, timezone: 'Europe/Stockholm'}))"
+        ),
+        "PT5H"
+    );
+    assert_eq!(
+        ts("duration.between(datetime('2014-07-21T21:40:36.143+02:00'), datetime('2015-07-21T21:40:32.142+01:00'))"),
+        "P1YT59M55.999S"
+    );
+    assert!(err("duration.between('a', date('2020-01-01'))").contains("temporal"));
+    assert!(
+        err_msg(call("duration_between", &[pv(PropertyValue::Date(0))]))
+            .contains("requires 2 arguments")
+    );
+    assert!(err_msg(call(
+        "duration.between",
+        &[Value::List(vec![]), pv(PropertyValue::Date(0))]
+    ))
+    .contains("two temporal"));
+}
+
+#[test]
+fn temporal_arithmetic() {
+    assert_eq!(ts("date('2020-01-31') + duration('P1M')"), "2020-02-29");
+    assert_eq!(ts("duration('P1D') + date('2020-01-01')"), "2020-01-02");
+    assert_eq!(ts("date('2020-03-01') - duration('P1D')"), "2020-02-29");
+    assert_eq!(ts("date('1984-10-11') + duration('PT49H')"), "1984-10-13");
+    assert_eq!(
+        ts("localtime('12:31:14') + duration({months: 1, days: -14, hours: 16})"),
+        "04:31:14"
+    );
+    assert_eq!(ts("time('10:00+01:00') + duration('PT1H')"), "11:00+01:00");
+    assert_eq!(ts("time('10:00+01:00') - duration('PT11H')"), "23:00+01:00");
+    assert_eq!(
+        ts("localdatetime('2020-01-31T10:00') + duration('P1M1DT1H')"),
+        "2020-03-01T11:00"
+    );
+    assert_eq!(
+        ts("datetime('2020-01-31T10:00+01:00') + duration('P1M')"),
+        "2020-02-29T10:00+01:00"
+    );
+    assert_eq!(
+        ts("datetime('2017-10-29T00:00[Europe/Stockholm]') + duration('P1D')"),
+        "2017-10-30T00:00+01:00[Europe/Stockholm]"
+    );
+    assert_eq!(
+        ts("datetime('2017-10-29T00:00[Europe/Stockholm]') + duration('PT24H')"),
+        "2017-10-29T23:00+01:00[Europe/Stockholm]"
+    );
+    assert_eq!(
+        ts("datetime('2017-09-29T00:00[Europe/Stockholm]') + duration('P1M')"),
+        "2017-10-29T00:00+02:00[Europe/Stockholm]"
+    );
+    assert_eq!(ts("date('2020-01-02') - date('2020-01-01')"), "P1D");
+    assert_eq!(ts("localtime('10:00') - localtime('09:00')"), "PT1H");
+    assert_eq!(
+        ts("localdatetime('2020-01-02T00:00') - localdatetime('2020-01-01T12:00')"),
+        "PT12H"
+    );
+    assert_eq!(ts("duration('P1D') + duration('PT1H')"), "P1DT1H");
+    assert_eq!(ts("duration('P1D') - duration('PT1H')"), "P1DT-1H");
+    assert_eq!(ts("duration('P1M') * 2"), "P2M");
+    assert_eq!(ts("2 * duration('P1D')"), "P2D");
+    assert_eq!(ts("duration('PT1S') * 1.5"), "PT1.5S");
+    assert_eq!(ts("duration('P1D') * 0.5"), "PT12H");
+    assert_eq!(ts("duration('P1M') / 2"), "P15DT5H14M33S");
+    assert_eq!(ts("duration('P2D') / 2.0"), "P1D");
+    assert!(err("duration('P1D') * (0.0 / 0.0)").contains("non-finite"));
+    assert!(err("duration('P1D') / 0.0").contains("divide a duration by zero"));
+}
+
+#[test]
+fn legacy_millisecond_datetime_arithmetic() {
+    let dt = |ms: i64| pv(PropertyValue::DateTime(ms));
+    let dur = |months: i64, days: i64, seconds: i64| {
+        pv(PropertyValue::Duration {
+            months,
+            days,
+            seconds,
+            nanos: 0,
+        })
+    };
+    let day = 86_400_000i64;
+    let op = |o: BinaryOp, l: Value, r: Value| {
+        eval_binary_op(&o, l, r)
+            .unwrap()
+            .as_property()
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(
+        op(BinaryOp::Add, dt(0), dur(0, 1, 1)),
+        PropertyValue::DateTime(day + 1000)
+    );
+    assert_eq!(
+        op(BinaryOp::Add, dur(0, 1, 0), dt(0)),
+        PropertyValue::DateTime(day)
+    );
+    // 1970-01-01 + 1 month = 1970-02-01; minus 1 month from there is back.
+    assert_eq!(
+        op(BinaryOp::Add, dt(0), dur(1, 0, 0)),
+        PropertyValue::DateTime(31 * day)
+    );
+    assert_eq!(
+        op(BinaryOp::Sub, dt(31 * day), dur(1, 0, 0)),
+        PropertyValue::DateTime(0)
+    );
+    assert_eq!(
+        op(BinaryOp::Sub, dt(day + 1500), dt(0)),
+        PropertyValue::Duration {
+            months: 0,
+            days: 1,
+            seconds: 1,
+            nanos: 500_000_000
+        }
+    );
+    assert_eq!(
+        add_duration_to_datetime(i64::MAX, 0, 0, 0),
+        PropertyValue::Null
+    );
+    // The legacy type orders against itself and against a raw integer.
+    assert_eq!(
+        cypher_ordering(&PropertyValue::DateTime(1), &PropertyValue::DateTime(2)),
+        Some(std::cmp::Ordering::Less)
+    );
+    assert_eq!(
+        cypher_ordering(&PropertyValue::DateTime(3), &PropertyValue::Integer(2)),
+        Some(std::cmp::Ordering::Greater)
+    );
+    assert_eq!(
+        cypher_ordering(&PropertyValue::Integer(3), &PropertyValue::DateTime(3)),
+        Some(std::cmp::Ordering::Equal)
+    );
+}
+
+#[test]
+fn temporal_helpers_directly() {
+    use PropertyValue as P;
+    let zdt = P::ZonedDateTime {
+        secs: 86_400 + 3600,
+        nanos: 5,
+        offset_seconds: 7200,
+        zone: None,
+    };
+    assert_eq!(date_part_of(&P::DateTime(86_400_000 * 2 + 5)), Some(2));
+    assert_eq!(date_part_of(&zdt), Some(1));
+    assert_eq!(date_part_of(&P::LocalTime(1)), None);
+    assert_eq!(time_part_of(&P::DateTime(1500)), Some(1_500_000_000));
+    assert_eq!(time_part_of(&zdt), Some(3 * 3600 * 1_000_000_000 + 5));
+    assert_eq!(time_part_of(&P::Date(1)), None);
+    assert_eq!(offset_seconds_of(&P::DateTime(0)), Some(0));
+    assert_eq!(
+        offset_seconds_of(&P::Time {
+            nanos: 0,
+            offset_seconds: 60
+        }),
+        Some(60)
+    );
+    assert_eq!(offset_seconds_of(&P::Date(0)), None);
+    assert!(matches!(
+        zone_of(&P::Time {
+            nanos: 0,
+            offset_seconds: 60
+        }),
+        Some(crate::query::executor::temporal::TzSpec::Offset(60))
+    ));
+    assert!(zone_of(&P::Date(0)).is_none());
+    assert_eq!(temporal_epoch_nanos(&P::DateTime(2)), Some(2_000_000));
+    assert_eq!(
+        temporal_epoch_nanos(&P::Time {
+            nanos: 10,
+            offset_seconds: 1
+        }),
+        Some(10 - 1_000_000_000)
+    );
+    assert_eq!(temporal_epoch_nanos(&P::Integer(1)), None);
+    assert_eq!(day_and_nanos_to_secs(1, -1), (86_399, 999_999_999));
+    assert_eq!(weekday_from_iso_num(7), chrono::Weekday::Sun);
+    assert_eq!(weekday_from_iso_num(3), chrono::Weekday::Wed);
+    assert_eq!(days_in_month(2020, 2), 29);
+    assert_eq!(days_in_month(2021, 12), 31);
+    assert_eq!(days_in_month(2021, 13), 31);
+    assert_eq!(
+        rebuild_temporal_like(&P::Integer(0), 5_000_000),
+        P::DateTime(5)
+    );
+    // Months cannot move a value with no calendar of its own.
+    let e = shift_temporal(&P::DateTime(0), 1, 0, 0, 0)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("cannot add months"), "{e}");
+    let e = shift_temporal(&P::Integer(0), 0, 1, 0, 0)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("not a temporal value"), "{e}");
+    // A temporal map arrives as a `Value::Map`; entities in it are skipped.
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("year".to_string(), pv(2020i64));
+    m.insert("gone".to_string(), Value::Null);
+    m.insert("node".to_string(), Value::NodeRef(NodeId::new(1)));
+    let got = temporal_arg_map(&Value::Map(m)).unwrap();
+    assert_eq!(got.get("year"), Some(&P::Integer(2020)));
+    assert_eq!(got.get("gone"), Some(&P::Null));
+    assert!(!got.contains_key("node"));
+    assert!(temporal_arg_map(&pv(1i64)).is_none());
+    // apply_time_overrides: only the named fields move.
+    let base = (10 * 3600 + 11 * 60 + 12) * 1_000_000_000 + 500;
+    let mut over = std::collections::HashMap::new();
+    over.insert("minute".to_string(), P::Integer(30));
+    over.insert("microsecond".to_string(), P::Integer(2));
+    assert_eq!(
+        apply_time_overrides(base, &over),
+        (10 * 3600 + 30 * 60 + 12) * 1_000_000_000 + 2_000
+    );
+    // parse_naive_date_time: date only, and a trailing `T`.
+    assert_eq!(parse_naive_date_time("1970-01-02").unwrap(), (86_400, 0));
+    assert_eq!(parse_naive_date_time("1970-01-02T").unwrap(), (86_400, 0));
+    assert!(parse_naive_date_time("nope").is_err());
+    // compose: a date-less map is an error, a selected date with a clock override works.
+    let mut m2 = std::collections::HashMap::new();
+    m2.insert("hour".to_string(), P::Integer(1));
+    assert!(compose_date_and_time(&m2).is_err());
+    m2.insert(
+        "datetime".to_string(),
+        P::LocalDateTime {
+            secs: 86_400 + 60,
+            nanos: 7,
+        },
+    );
+    m2.insert("millisecond".to_string(), P::Integer(3));
+    assert_eq!(
+        compose_date_and_time(&m2).unwrap(),
+        (1, 3600 * 1_000_000_000 + 60 * 1_000_000_000 + 3_000_000)
+    );
+}
+
+#[test]
+fn storable_property_rules() {
+    use PropertyValue as P;
+    let map = P::Map(Default::default());
+    assert_eq!(storable_property(&pv(1i64)), Some(P::Integer(1)));
+    assert_eq!(storable_property(&pv(map.clone())), Some(map.clone()));
+    assert_eq!(storable_property(&pv(P::Array(vec![map.clone()]))), None);
+    assert_eq!(
+        storable_property(&pv(P::Array(vec![P::Array(vec![map.clone()])]))),
+        None
+    );
+    assert_eq!(
+        storable_property(&Value::List(vec![pv(1i64), pv(2i64)])),
+        Some(P::Array(vec![P::Integer(1), P::Integer(2)]))
+    );
+    assert_eq!(storable_property(&Value::List(vec![pv(map)])), None);
+    assert_eq!(
+        storable_property(&Value::List(vec![Value::Map(Default::default())])),
+        None
+    );
+    assert_eq!(
+        storable_property(&Value::List(vec![Value::NodeRef(NodeId::new(1))])),
+        None
+    );
+    assert_eq!(storable_property(&Value::NodeRef(NodeId::new(1))), None);
+    assert!(property_is_storable(&P::Array(vec![P::Integer(1)])));
+}
+
+#[test]
+fn scale_duration_edge_cases() {
+    assert!(scale_duration(1, 0, 0, 0, f64::INFINITY).is_err());
+    assert_eq!(
+        scale_duration(0, 0, 58_390, 1, 0.5).unwrap(),
+        PropertyValue::Duration {
+            months: 0,
+            days: 0,
+            seconds: 29_195,
+            nanos: 0
+        }
+    );
+    assert_eq!(
+        scale_duration(0, 14, 16 * 3600, 0, 2.0).unwrap(),
+        PropertyValue::Duration {
+            months: 0,
+            days: 28,
+            seconds: 32 * 3600,
+            nanos: 0
+        }
+    );
+}
