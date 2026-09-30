@@ -336,7 +336,6 @@ fn pipeline_new_propagates_client_config_errors() {
 }
 
 #[tokio::test]
-#[ignore = "bug: EmbedPipeline::split_text slices at byte offsets and panics on a multi-byte UTF-8 character straddling a chunk boundary"]
 async fn pipeline_splits_non_ascii_text_without_panicking() {
     let mut config = cfg(LLMProvider::Mock, None, None, 0);
     config.chunk_size = 3;
@@ -346,4 +345,13 @@ async fn pipeline_splits_non_ascii_text_without_panicking() {
     let chunks = p.process_text("éééé").await.unwrap();
     let joined: String = chunks.iter().map(|c| c.text.as_str()).collect();
     assert_eq!(joined, "éééé");
+
+    // A character wider than the chunk is a chunk of its own (#1573).
+    let mut config = cfg(LLMProvider::Mock, None, None, 0);
+    config.chunk_size = 2;
+    config.chunk_overlap = 1;
+    let p = EmbedPipeline::new(config).unwrap();
+    let chunks = p.process_text("a😀b").await.unwrap();
+    let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(texts, ["a", "😀", "b"]);
 }

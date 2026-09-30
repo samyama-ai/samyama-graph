@@ -93,20 +93,42 @@ impl EmbedPipeline {
             return vec![text.to_string()];
         }
 
+        // Sizes are in bytes, but every boundary is moved to a character
+        // boundary: slicing inside a multi-byte character panicked (#1573).
+        let floor = |mut i: usize| {
+            while !text.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+        let ceil = |mut i: usize| {
+            while !text.is_char_boundary(i) {
+                i += 1;
+            }
+            i
+        };
+        let step = self.config.chunk_size.saturating_sub(self.config.chunk_overlap);
+
         let mut chunks = Vec::new();
         let mut start = 0;
-        
+
         while start < text.len() {
-            let end = std::cmp::min(start + self.config.chunk_size, text.len());
+            let mut end = floor(std::cmp::min(start + self.config.chunk_size, text.len()));
+            if end <= start {
+                // One character wider than a chunk: it is a chunk of its own.
+                end = ceil(start + 1);
+            }
             chunks.push(text[start..end].to_string());
-            
+
             if end == text.len() {
                 break;
             }
-            
-            start += self.config.chunk_size - self.config.chunk_overlap;
+
+            // Always move forward, even when the overlap rounds the step to zero.
+            let next = floor(start + step);
+            start = if next > start { next } else { end };
         }
-        
+
         chunks
     }
 }
