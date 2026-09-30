@@ -24025,3 +24025,7 @@ mod filter_sort_single_read {
 #[cfg(test)]
 #[path = "operator_cov_tests_a.rs"]
 mod cov_tests_a;
+
+#[cfg(test)]
+#[path = "operator_cov_tests_b.rs"]
+mod cov_tests_b;
