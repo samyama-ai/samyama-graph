@@ -875,4 +875,44 @@ mod tests {
         );
         assert!(replay_all(&wal, 0).unwrap().is_empty());
     }
+
+    #[test]
+    fn a_torn_tail_is_dropped_and_earlier_records_replay() {
+        let dir = TempDir::new().unwrap();
+        let good = encode_v1(1, &node_entry(5)).unwrap();
+        write_records(
+            dir.path(),
+            "wal-0000000000000000.log",
+            &[
+                (good.len() as u32 | FORMAT_FLAG, good),
+                // Promises 100 bytes, delivers 3: the write did not finish.
+                (100 | FORMAT_FLAG, vec![1, 2, 3]),
+            ],
+        );
+        let wal = Wal::new(dir.path()).unwrap();
+        assert_eq!(replay_all(&wal, 0).unwrap(), vec![5]);
+    }
+
+    #[test]
+    fn a_versioned_record_with_a_bad_crc_is_corruption_at_its_offset() {
+        let dir = TempDir::new().unwrap();
+        let good = encode_v1(1, &node_entry(5)).unwrap();
+        let mut bad = encode_v1(2, &node_entry(6)).unwrap();
+        let last = bad.len() - 1;
+        bad[last] ^= 0xff;
+        let first_len = good.len() as u64;
+        write_records(
+            dir.path(),
+            "wal-0000000000000000.log",
+            &[
+                (good.len() as u32 | FORMAT_FLAG, good),
+                (bad.len() as u32 | FORMAT_FLAG, bad),
+            ],
+        );
+        let wal = Wal::new(dir.path()).unwrap();
+        match replay_all(&wal, 0) {
+            Err(WalError::Corruption(offset)) => assert_eq!(offset, 4 + first_len),
+            other => panic!("expected corruption, got {other:?}"),
+        }
+    }
 }

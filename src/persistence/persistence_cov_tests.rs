@@ -298,3 +298,24 @@ async fn start_indexer_indexes_vectors_from_the_channel() {
     assert!(found, "the background indexer added the vector");
     assert_eq!(vi.search("Doc", "v", &[0.0, 1.0], 1).unwrap()[0].0, n);
 }
+
+#[test]
+fn a_node_deleted_after_it_was_persisted_is_removed_from_disk() {
+    let (_dir, m) = manager();
+    let mut store = GraphStore::new();
+    store.enable_write_log();
+    let n = store.create_node("P");
+    let log = store.take_write_log();
+    m.apply_mutations("default", &store, &log).unwrap();
+    assert_eq!(m.tenants().get_usage("default").unwrap().node_count, 1);
+
+    store.delete_node("default", n).unwrap();
+    let log = store.take_write_log();
+    assert_eq!(m.apply_mutations("default", &store, &log).unwrap(), 1);
+    assert!(m
+        .storage()
+        .get_node("default", n.as_u64())
+        .unwrap()
+        .is_none());
+    assert_eq!(m.tenants().get_usage("default").unwrap().node_count, 0);
+}

@@ -910,4 +910,49 @@ mod tests {
             "no such triple"
         );
     }
+
+    #[test]
+    fn deleting_an_edge_the_catalog_never_saw_changes_only_the_generation() {
+        let mut catalog = GraphCatalog::new();
+        let (a, b) = (Label::new("A"), Label::new("B"));
+        let r = EdgeType::new("R");
+        let before = catalog.generation;
+        catalog.on_edge_deleted(
+            NodeId::new(1),
+            &[a.clone()],
+            &r,
+            NodeId::new(2),
+            &[b.clone()],
+        );
+        assert!(catalog.triple_stats.is_empty());
+        assert_eq!(catalog.generation, before + 1);
+
+        // A known pattern but an endpoint it has no degree for.
+        catalog.on_edge_created(
+            NodeId::new(1),
+            &[a.clone()],
+            &r,
+            NodeId::new(2),
+            &[b.clone()],
+        );
+        catalog.on_edge_created(
+            NodeId::new(1),
+            &[a.clone()],
+            &r,
+            NodeId::new(3),
+            &[b.clone()],
+        );
+        catalog.on_edge_deleted(
+            NodeId::new(7),
+            &[a.clone()],
+            &r,
+            NodeId::new(8),
+            &[b.clone()],
+        );
+        let stats = catalog
+            .get_triple_stats(&TriplePattern::new(a, r, b))
+            .unwrap();
+        assert_eq!(stats.count, 1, "the count is decremented regardless");
+        assert_eq!(stats.distinct_sources, 1);
+    }
 }

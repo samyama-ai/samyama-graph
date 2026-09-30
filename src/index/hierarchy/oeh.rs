@@ -1651,4 +1651,48 @@ mod tests {
         let idx = OehIndex::build(p).unwrap();
         assert_eq!(idx.bytes_per_node(), 0.0);
     }
+
+    #[test]
+    fn one_path_per_node_depends_on_the_pinned_root() {
+        let p = diamond();
+        let (root, left, leaf) = (
+            p.idx(nid(0)).unwrap(),
+            p.idx(nid(1)).unwrap(),
+            p.idx(nid(3)).unwrap(),
+        );
+        let idx = OehIndex::build_forced(p, Encoding::NearTree).unwrap();
+        assert!(
+            !idx.subtree_has_one_path_per_node(root),
+            "3 reaches 0 twice"
+        );
+        assert!(idx.subtree_has_one_path_per_node(left), "3 reaches 1 once");
+        assert!(
+            idx.subtree_has_one_path_per_node(leaf),
+            "the multi-parent node itself"
+        );
+        let tree = OehIndex::build(balanced_tree(2, 2)).unwrap();
+        assert!(
+            tree.subtree_has_one_path_per_node(0),
+            "a tree has no multi-parent node"
+        );
+    }
+
+    #[test]
+    fn an_integer_measure_set_on_a_node_that_had_none() {
+        let p = balanced_tree(2, 2);
+        let n = p.n();
+        let oracle_poset = p.clone();
+        let mut measure = unit_measure(n);
+        measure[2] = None;
+        let mut idx = OehIndex::build(p).unwrap();
+        idx.set_measure(measure.clone(), &[RollupOp::Sum]);
+        assert!(idx.update_measure(oracle_poset.node_at(2), Some(RollupValue::Int(9))));
+        measure[2] = Some(RollupValue::Int(9));
+        for y in 0..n as u32 {
+            assert_eq!(
+                idx.rollup(y, RollupOp::Sum),
+                Some(oracle::rollup(&oracle_poset, y, &measure, RollupOp::Sum))
+            );
+        }
+    }
 }

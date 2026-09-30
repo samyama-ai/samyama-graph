@@ -555,3 +555,40 @@ fn a_snapshot_without_its_commit_marker_is_not_restored() {
     let restored = persist::restore_persisted_snapshots(&data_path, &mut store).unwrap();
     assert_eq!(restored.map(|s| s.node_count), Some(2));
 }
+
+#[test]
+fn input_shorter_than_the_magic_is_read_as_plain() {
+    let mut store = GraphStore::new();
+    let err = import_tenant_maybe_encrypted(&mut store, &b"abc"[..], None).unwrap_err();
+    assert!(!err.to_string().contains("encrypted"), "{err}");
+    assert!(peek_header_maybe_encrypted(&b"abc"[..], None).is_err());
+    assert_eq!(store.node_count(), 0);
+}
+
+#[test]
+fn two_snapshot_nodes_merging_into_one_node_with_an_unlisted_label() {
+    let mut store = GraphStore::new();
+    let existing = store.create_node_with_labels([Label::new("Country"), Label::new("Extra")]);
+    store
+        .set_node_property("default", existing, "code", "IN")
+        .unwrap();
+    let lines = vec![
+        header(2, &["Country"]),
+        node(1, &["Country"], json!({ "code": "in", "a": 1 })),
+        node(2, &["Country"], json!({ "code": "IN", "b": 2 })),
+        // A numeric dedup value is registered too, so the next node merges.
+        node(3, &["Country"], json!({ "code": 7 })),
+        node(4, &["Country"], json!({ "code": 7 })),
+    ];
+    let stats = import_tenant_with_dedup(&mut store, &gz(&lines)[..], &["code"]).unwrap();
+    assert_eq!(stats.merged_count, 3);
+    assert_eq!(
+        store.node_property(existing, "a"),
+        Some(PropertyValue::Integer(1))
+    );
+    assert_eq!(
+        store.node_property(existing, "b"),
+        Some(PropertyValue::Integer(2))
+    );
+    assert_eq!(store.label_node_count(&Label::new("Country")), 2);
+}
