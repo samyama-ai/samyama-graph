@@ -784,6 +784,232 @@ mod tests {
         assert_eq!(count, 0, "Chain graph should have no triangles");
     }
 
+    fn constraint(bound: &str, direction: Direction, types: &[&str], edge_var: Option<&str>) -> PhysicalTrieConstraint {
+        PhysicalTrieConstraint {
+            bound_var: bound.to_string(),
+            direction,
+            edge_types: types.iter().map(|s| s.to_string()).collect(),
+            edge_var: edge_var.map(|s| s.to_string()),
+        }
+    }
+
+    fn a_to_b(edge_type: &str) -> OperatorBox {
+        let scan = Box::new(NodeScanOperator::new("a".to_string(), vec![Label::new("Node")]));
+        Box::new(ExpandOperator::new(
+            scan,
+            "a".to_string(),
+            "b".to_string(),
+            None,
+            vec![edge_type.to_string()],
+            Direction::Outgoing,
+        ))
+    }
+
+    fn triangles(op: &mut TrieJoinOperator, store: &GraphStore) -> Vec<(u64, u64, u64)> {
+        let mut out = Vec::new();
+        while let Some(r) = op.next(store).unwrap() {
+            out.push((
+                r.get("a").unwrap().node_id().unwrap().as_u64(),
+                r.get("b").unwrap().node_id().unwrap().as_u64(),
+                r.get("c").unwrap().node_id().unwrap().as_u64(),
+            ));
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn test_adjacency_iterator_current_next_past_end_and_reset() {
+        let entries = make_entries(&[4, 8]);
+        let mut it = AdjacencyIterator::new(&entries);
+        assert_eq!(it.current(), Some((NodeId::new(4), EdgeId::new(400))));
+        it.next();
+        it.next();
+        assert!(it.at_end());
+        assert_eq!(it.current(), None);
+        assert_eq!(it.key(), None);
+        // Advancing past the end is a no-op.
+        it.next();
+        assert_eq!(it.remaining(), 0);
+        it.reset();
+        assert_eq!(it.key(), Some(NodeId::new(4)));
+        assert_eq!(it.remaining(), 2);
+    }
+
+    #[test]
+    fn test_leapfrog_join_single_iterator_yields_every_key() {
+        let a = make_entries(&[2, 4, 6]);
+        let mut join = LeapFrogJoin::new(vec![AdjacencyIterator::new(&a)]);
+        let got: Vec<u64> = join.collect_all().iter().map(|n| n.as_u64()).collect();
+        assert_eq!(got, vec![2, 4, 6]);
+    }
+
+    #[test]
+    fn test_leapfrog_join_no_iterators_is_empty() {
+        let mut join = LeapFrogJoin::new(vec![]);
+        assert_eq!(join.next_match(), None);
+    }
+
+    #[test]
+    fn test_count_triangles_leapfrog_counts_each_rotation() {
+        let store = build_triangle_graph();
+        assert_eq!(count_triangles_leapfrog(&store), 3);
+        let store = build_double_triangle_graph();
+        assert_eq!(count_triangles_leapfrog(&store), 6);
+    }
+
+    #[test]
+    fn test_count_triangles_leapfrog_on_chain_is_zero() {
+        let mut g = GraphStore::new();
+        let a = g.create_node("Node");
+        let b = g.create_node("Node");
+        let c = g.create_node("Node");
+        g.create_edge(a, b, "EDGE").unwrap();
+        g.create_edge(b, c, "EDGE").unwrap();
+        g.compact_adjacency();
+        assert_eq!(count_triangles_leapfrog(&g), 0);
+        assert_eq!(count_triangles_leapfrog(&GraphStore::new()), 0);
+    }
+
+    #[test]
+    fn test_trie_join_uses_uncompacted_write_buffer() {
+        // Without compact_adjacency every neighbour lives in the write buffer.
+        let mut g = GraphStore::new();
+        let a = g.create_node("Node");
+        let b = g.create_node("Node");
+        let c = g.create_node("Node");
+        g.create_edge(a, b, "EDGE").unwrap();
+        g.create_edge(b, c, "EDGE").unwrap();
+        g.create_edge(c, a, "EDGE").unwrap();
+
+        let mut tj = TrieJoinOperator::new(
+            a_to_b("EDGE"),
+            "c".to_string(),
+            vec![constraint("b", Direction::Outgoing, &[], None), constraint("a", Direction::Incoming, &[], None)],
+        );
+        assert_eq!(triangles(&mut tj, &g), vec![(1, 2, 3), (2, 3, 1), (3, 1, 2)]);
+    }
+
+    #[test]
+    fn test_trie_join_filters_by_edge_type() {
+        let mut g = GraphStore::new();
+        let a = g.create_node("Node");
+        let b = g.create_node("Node");
+        let c = g.create_node("Node");
+        g.create_edge(a, b, "EDGE").unwrap();
+        g.create_edge(b, c, "EDGE").unwrap();
+        g.create_edge(c, a, "OTHER").unwrap();
+        g.compact_adjacency();
+
+        let mut typed = TrieJoinOperator::new(
+            a_to_b("EDGE"),
+            "c".to_string(),
+            vec![constraint("b", Direction::Outgoing, &["EDGE"], None), constraint("a", Direction::Incoming, &["EDGE"], None)],
+        );
+        assert!(triangles(&mut typed, &g).is_empty(), "the closing edge is OTHER, not EDGE");
+
+        let mut either = TrieJoinOperator::new(
+            a_to_b("EDGE"),
+            "c".to_string(),
+            vec![constraint("b", Direction::Outgoing, &["EDGE"], None), constraint("a", Direction::Incoming, &["EDGE", "OTHER"], None)],
+        );
+        assert_eq!(triangles(&mut either, &g), vec![(1, 2, 3)]);
+    }
+
+    #[test]
+    fn test_trie_join_binds_edge_variables_in_both_directions() {
+        let store = build_triangle_graph();
+        let mut tj = TrieJoinOperator::new(
+            a_to_b("EDGE"),
+            "c".to_string(),
+            vec![constraint("b", Direction::Outgoing, &[], Some("r2")), constraint("a", Direction::Incoming, &[], Some("r3"))],
+        );
+        let mut rows = 0;
+        while let Some(r) = tj.next(&store).unwrap() {
+            rows += 1;
+            let a = r.get("a").unwrap().node_id().unwrap();
+            let b = r.get("b").unwrap().node_id().unwrap();
+            let c = r.get("c").unwrap().node_id().unwrap();
+            // r2 : b -> c, r3 : c -> a
+            assert_eq!(r.get("r2").unwrap().edge_endpoints(), Some((b, c)));
+            assert_eq!(r.get("r3").unwrap().edge_endpoints(), Some((c, a)));
+            assert_eq!(r.get("r2").unwrap().edge_type().map(|t| t.as_str().to_string()), Some("EDGE".to_string()));
+        }
+        assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn test_trie_join_both_direction_constraint() {
+        // Undirected neighbours of b intersected with incoming of a.
+        let store = build_triangle_graph();
+        let mut tj = TrieJoinOperator::new(
+            a_to_b("EDGE"),
+            "c".to_string(),
+            vec![constraint("b", Direction::Both, &[], Some("rb")), constraint("a", Direction::Incoming, &[], None)],
+        );
+        let rows = triangles(&mut tj, &store);
+        // For a=1,b=2: N_both(2) = {1,3}; N_in(1) = {3} -> c = 3.
+        assert!(rows.contains(&(1, 2, 3)), "{:?}", rows);
+        assert_eq!(rows.len(), 3, "{:?}", rows);
+    }
+
+    #[test]
+    fn test_trie_join_both_direction_binds_edge_from_bound_side() {
+        let store = build_triangle_graph();
+        let mut tj = TrieJoinOperator::new(
+            a_to_b("EDGE"),
+            "c".to_string(),
+            vec![constraint("b", Direction::Both, &[], Some("rb")), constraint("a", Direction::Incoming, &[], None)],
+        );
+        let r = tj.next(&store).unwrap().expect("at least one row");
+        let b = r.get("b").unwrap().node_id().unwrap();
+        let c = r.get("c").unwrap().node_id().unwrap();
+        assert_eq!(r.get("rb").unwrap().edge_endpoints(), Some((b, c)));
+    }
+
+    #[test]
+    fn test_trie_join_unbound_constraint_variable_yields_nothing() {
+        let store = build_triangle_graph();
+        let mut tj = TrieJoinOperator::new(
+            a_to_b("EDGE"),
+            "c".to_string(),
+            vec![constraint("missing", Direction::Outgoing, &[], None), constraint("a", Direction::Incoming, &[], None)],
+        );
+        assert!(tj.next(&store).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_trie_join_reset_replays_results() {
+        let store = build_triangle_graph();
+        let mut tj = TrieJoinOperator::new(
+            a_to_b("EDGE"),
+            "c".to_string(),
+            vec![constraint("b", Direction::Outgoing, &[], None), constraint("a", Direction::Incoming, &[], None)],
+        );
+        let first = triangles(&mut tj, &store);
+        tj.reset();
+        let second = triangles(&mut tj, &store);
+        assert_eq!(first.len(), 3);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_trie_join_children_mut_exposes_input() {
+        let mut tj = TrieJoinOperator::new(a_to_b("EDGE"), "c".to_string(), vec![]);
+        let children = tj.children_mut();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].describe().name, "Expand");
+    }
+
+    #[test]
+    fn test_trie_join_describe_both_direction() {
+        let scan = Box::new(NodeScanOperator::new("a".to_string(), vec![]));
+        let tj = TrieJoinOperator::new(scan, "c".to_string(), vec![constraint("b", Direction::Both, &["X", "Y"], None)]);
+        let desc = tj.describe();
+        assert_eq!(desc.details, "c ∈ N_both(b)[:X|Y]");
+        assert_eq!(desc.children.len(), 1);
+    }
+
     #[test]
     fn test_trie_join_describe() {
         let scan = Box::new(NodeScanOperator::new("a".to_string(), vec![]));

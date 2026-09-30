@@ -615,6 +615,463 @@ mod tests {
         assert!(detect(&q).is_none());
     }
 
+    fn q(s: &str) -> Query {
+        parse_query(s).unwrap_or_else(|e| panic!("parse {}: {:?}", s, e))
+    }
+
+    /// A minimal query the detector accepts; each rejection test perturbs it.
+    const BASE: &str = "MATCH (p:Person)-[:HAS]->(c1:Condition) \
+                        MATCH (p)-[:HAS]->(c2:Condition) \
+                        WITH c2.name AS n, count(DISTINCT p) AS c RETURN n, c";
+
+    fn var(s: &str) -> Expression {
+        Expression::Variable(s.to_string())
+    }
+
+    fn prop(v: &str, p: &str) -> Expression {
+        Expression::Property { variable: v.to_string(), property: p.to_string() }
+    }
+
+    #[test]
+    fn base_query_is_detected_without_predicates() {
+        let p = detect(&q(BASE)).expect("base shape");
+        assert_eq!(p.shared_var, "p");
+        assert!(p.first_predicate.is_none());
+        assert!(p.second_predicate.is_none());
+        assert!(p.order_by.is_none());
+        assert_eq!(p.limit, None);
+        assert_eq!(p.first_other_label.as_ref().map(|l| l.as_str()), Some("Condition"));
+        assert_eq!(p.group_by_expr, prop("c2", "name"));
+    }
+
+    #[test]
+    fn detects_reversed_endpoints_and_directions() {
+        // Shared var is the *target* of both paths, written with both arrow styles.
+        let p = detect(&q(
+            "MATCH (c1)-[:HAS]->(p:Person) \
+             MATCH (c2:Condition)<-[:OWNS]-(p) \
+             WITH c2 AS cond, count(p) AS c ORDER BY c DESC RETURN cond, c",
+        ))
+        .expect("should detect");
+        assert_eq!(p.first_other_var, "c1");
+        assert_eq!(p.first_other_label, None);
+        assert_eq!(p.first_direction, Direction::Incoming);
+        assert_eq!(p.second_other_var, "c2");
+        assert_eq!(p.second_direction, Direction::Outgoing);
+        assert_eq!(p.group_by_expr, var("c2"));
+        assert_eq!(p.order_by, Some(vec![(var("c"), false)]));
+    }
+
+    #[test]
+    fn detects_incoming_arrow_on_shared_start_and_outgoing_on_shared_end() {
+        let p = detect(&q(
+            "MATCH (p:Person)<-[:A]-(c1) \
+             MATCH (c2)-[:B]->(p) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .expect("should detect");
+        assert_eq!(p.first_direction, Direction::Incoming);
+        assert_eq!(p.second_direction, Direction::Incoming);
+    }
+
+    #[test]
+    fn detects_remaining_direction_combinations() {
+        let p = detect(&q(
+            "MATCH (c1)<-[:A]-(p:Person) \
+             MATCH (p)<-[:B]-(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .expect("should detect");
+        assert_eq!(p.first_direction, Direction::Outgoing);
+        assert_eq!(p.second_direction, Direction::Incoming);
+    }
+
+    #[test]
+    fn rejects_count_of_the_second_endpoint() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(c2) AS c RETURN n, c",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn predicates_are_split_by_side_and_anded() {
+        let p = detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1:Condition) \
+             MATCH (p)-[:HAS]->(c2:Condition) \
+             WHERE p.age > 18 AND c1.x = 1 AND c2.y = 2 AND c2.z = 3 \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .expect("should detect");
+        // Shared-only and first-side predicates go to the first MATCH.
+        let first = p.first_predicate.expect("first");
+        assert!(matches!(first, Expression::Binary { op: BinaryOp::And, .. }));
+        let second = p.second_predicate.expect("second");
+        assert!(matches!(second, Expression::Binary { op: BinaryOp::And, .. }));
+    }
+
+    #[test]
+    fn unaliased_projections_get_generated_aliases() {
+        let mut query = q(BASE);
+        for item in &mut query.with_clause.as_mut().unwrap().items {
+            item.alias = None;
+        }
+        query.return_clause.as_mut().unwrap().items[0].expression = var("g_0");
+        query.return_clause.as_mut().unwrap().items[1].expression = var("count_1");
+        let p = detect(&query).expect("should detect");
+        assert_eq!(p.group_by_alias, "g_0");
+        assert_eq!(p.count_alias, "count_1");
+    }
+
+    #[test]
+    fn rejects_when_split_is_not_after_both_matches() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) WITH p \
+             MATCH (p)-[:HAS]->(c2) RETURN c2.name, count(p)",
+        ))
+        .is_none());
+        let mut query = q(BASE);
+        query.with_split_index = None;
+        assert!(detect(&query).is_none());
+        query.with_split_index = Some(1);
+        assert!(detect(&query).is_none());
+    }
+
+    #[test]
+    fn rejects_extra_with_stages() {
+        let mut query = q(BASE);
+        let stage = query.with_clause.clone().unwrap();
+        query.extra_with_stages.push((stage, None, vec![], None));
+        assert!(detect(&query).is_none());
+    }
+
+    #[test]
+    fn rejects_write_or_call_clauses() {
+        let mut query = q(BASE);
+        query.set_clauses = q("MATCH (n) SET n.x = 1").set_clauses;
+        assert!(!query.set_clauses.is_empty());
+        assert!(detect(&query).is_none());
+
+        let mut query = q(BASE);
+        query.unwind_clause = q("UNWIND [1] AS x RETURN x").unwind_clause;
+        assert!(query.unwind_clause.is_some());
+        assert!(detect(&query).is_none());
+    }
+
+    #[test]
+    fn rejects_post_with_where() {
+        let mut query = q(BASE);
+        query.post_with_where_clause = Some(WhereClause { predicate: Expression::Literal(crate::graph::PropertyValue::Boolean(true)) });
+        assert!(detect(&query).is_none());
+    }
+
+    #[test]
+    fn rejects_optional_match() {
+        let mut query = q(BASE);
+        query.match_clauses[1].optional = true;
+        assert!(detect(&query).is_none());
+    }
+
+    #[test]
+    fn rejects_multiple_paths_in_a_match() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1), (x) \
+             MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_multi_hop_and_var_length() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1)-[:X]->(d) \
+             MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS*1..2]->(c1) \
+             MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_anonymous_endpoint() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->() \
+             MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_two_shared_variables() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c) \
+             MATCH (p)-[:LIKES]->(c) \
+             WITH c.name AS n, count(p) AS k RETURN n, k",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_unlabelled_or_multi_labelled_shared_variable() {
+        assert!(detect(&q(
+            "MATCH (p)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+        assert!(detect(&q(
+            "MATCH (p:Person:Patient)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p:Patient)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn accepts_consistent_shared_label_repeated() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p:Person)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_some());
+    }
+
+    #[test]
+    fn rejects_multi_labelled_other_endpoints() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1:A:B) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2:A:B) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn second_other_label_is_recorded() {
+        let p = detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2:Drug) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .unwrap();
+        assert_eq!(p.second_other_label.as_ref().map(|l| l.as_str()), Some("Drug"));
+    }
+
+    #[test]
+    fn rejects_inline_properties_anywhere() {
+        for s in [
+            "MATCH (p:Person)-[:HAS]->(c1 {x: 1}) MATCH (p)-[:HAS]->(c2) WITH c2.name AS n, count(p) AS c RETURN n, c",
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2 {x: 1}) WITH c2.name AS n, count(p) AS c RETURN n, c",
+            "MATCH (p:Person {x: 1})-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) WITH c2.name AS n, count(p) AS c RETURN n, c",
+            "MATCH (c1)-[:HAS]->(p:Person {x: 1}) MATCH (p)-[:HAS]->(c2) WITH c2.name AS n, count(p) AS c RETURN n, c",
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p {x: 1})-[:HAS]->(c2) WITH c2.name AS n, count(p) AS c RETURN n, c",
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (c2)-[:HAS]->(p {x: 1}) WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ] {
+            assert!(detect(&q(s)).is_none(), "{}", s);
+        }
+    }
+
+    #[test]
+    fn rejects_untyped_or_multi_typed_edges() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-->(c1) MATCH (p)-[:HAS]->(c2) WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:A|B]->(c2) WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_undirected_edges() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]-(c1) MATCH (p)-[:HAS]->(c2) WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]-(c2) WITH c2.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_with_distinct_where_or_extra_items() {
+        let mut query = q(BASE);
+        query.with_clause.as_mut().unwrap().distinct = true;
+        assert!(detect(&query).is_none());
+
+        let mut query = q(BASE);
+        query.with_clause.as_mut().unwrap().where_clause =
+            Some(WhereClause { predicate: Expression::Literal(crate::graph::PropertyValue::Boolean(true)) });
+        assert!(detect(&query).is_none());
+
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, c2.code AS k, count(p) AS c RETURN n, k, c",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_bad_count_shapes() {
+        // Two counts.
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH count(p) AS a, count(p) AS b RETURN a, b",
+        ))
+        .is_none());
+        // count(*) — not a variable.
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(*) AS c RETURN n, c",
+        ))
+        .is_none());
+        // count with two args is not produced by the parser; build it.
+        let mut query = q(BASE);
+        if let Expression::Function { args, .. } = &mut query.with_clause.as_mut().unwrap().items[1].expression {
+            args.push(var("p"));
+        }
+        assert!(detect(&query).is_none());
+    }
+
+    #[test]
+    fn rejects_group_by_that_is_not_the_second_endpoint() {
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH p.name AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+        // Two group-by items on c2.
+        let mut query = q(BASE);
+        query.with_clause.as_mut().unwrap().items[1].expression = prop("c2", "other");
+        assert!(detect(&query).is_none());
+        // A non-projection expression.
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.a + 1 AS n, count(p) AS c RETURN n, c",
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_with_missing_group_by_or_count() {
+        let mut query = q(BASE);
+        query.with_clause.as_mut().unwrap().items[1].expression = var("x");
+        // Now two group-by candidates, `x` not on c2 -> rejected earlier.
+        assert!(detect(&query).is_none());
+
+        // Only a count and a literal: the literal is not a projection.
+        let mut query = q(BASE);
+        query.with_clause.as_mut().unwrap().items[0].expression = Expression::Literal(crate::graph::PropertyValue::Integer(1));
+        assert!(detect(&query).is_none());
+    }
+
+    #[test]
+    fn rejects_return_shapes_other_than_aliases() {
+        let mut query = q(BASE);
+        query.return_clause.as_mut().unwrap().distinct = true;
+        assert!(detect(&query).is_none());
+        assert!(detect(&q(
+            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c + 1",
+        ))
+        .is_none());
+        let mut query = q(BASE);
+        query.return_clause = None;
+        assert!(detect(&query).is_none());
+        let mut query = q(BASE);
+        query.with_clause = None;
+        assert!(detect(&query).is_none());
+    }
+
+    #[test]
+    fn rejects_first_other_var_in_with_order_by_or_return() {
+        let mut query = q(BASE);
+        query.with_clause.as_mut().unwrap().order_by = Some(crate::query::ast::OrderByClause {
+            items: vec![crate::query::ast::OrderByItem { expression: prop("c1", "x"), ascending: true }],
+        });
+        assert!(detect(&query).is_none());
+
+        let mut query = q(BASE);
+        query.return_clause.as_mut().unwrap().items[0].expression = prop("c1", "x");
+        assert!(detect(&query).is_none());
+
+        // An ORDER BY that does not mention c1 is fine.
+        let mut query = q(BASE);
+        query.with_clause.as_mut().unwrap().order_by = Some(crate::query::ast::OrderByClause {
+            items: vec![crate::query::ast::OrderByItem { expression: var("c"), ascending: true }],
+        });
+        assert_eq!(detect(&query).unwrap().order_by, Some(vec![(var("c"), true)]));
+    }
+
+    #[test]
+    fn expression_references_walks_every_supported_node() {
+        use crate::graph::PropertyValue;
+        let lit = Expression::Literal(PropertyValue::Integer(1));
+        assert!(expression_references(&Expression::PathVariable("x".into()), "x"));
+        assert!(!expression_references(&Expression::PathVariable("y".into()), "x"));
+        assert!(!expression_references(&lit, "x"));
+        assert!(!expression_references(&Expression::Parameter("x".into()), "x"));
+
+        let parse_where = |s: &str| q(&format!("MATCH (x), (y) WHERE {} RETURN x", s)).where_clause.unwrap().predicate;
+        assert!(expression_references(&parse_where("NOT x.a"), "x"));
+        assert!(!expression_references(&parse_where("NOT y.a"), "x"));
+        assert!(expression_references(&parse_where("toUpper(x.a) = 'A'"), "x"));
+        assert!(expression_references(&parse_where("CASE x.a WHEN 1 THEN true END"), "x"));
+        assert!(expression_references(&parse_where("CASE WHEN y.a = 1 THEN x.b END"), "x"));
+        assert!(expression_references(&parse_where("CASE WHEN y.a = 1 THEN true ELSE x.b END"), "x"));
+        assert!(!expression_references(&parse_where("CASE WHEN y.a = 1 THEN true ELSE false END"), "x"));
+        assert!(expression_references(&parse_where("y.l[x.i] = 1"), "x"));
+        assert!(!expression_references(&parse_where("y.l[0] = 1"), "x"));
+        assert!(expression_references(&parse_where("size(y.l[x.i..]) = 1"), "x"));
+        assert!(expression_references(&parse_where("size(y.l[..x.i]) = 1"), "x"));
+        assert!(!expression_references(&parse_where("size(y.l[1..2]) = 1"), "x"));
+        let open_slice = Expression::ListSlice { expr: Box::new(var("y")), start: None, end: None };
+        assert!(!expression_references(&open_slice, "x"));
+        // Anything else is conservatively a reference.
+        assert!(expression_references(&parse_where("any(z IN y.l WHERE z = 1)"), "x"));
+    }
+
+    #[test]
+    fn references_only_allowed_rejects_unknown_expression_kinds() {
+        use crate::graph::PropertyValue;
+        let parse_where = |s: &str| q(&format!("MATCH (x), (y) WHERE {} RETURN x", s)).where_clause.unwrap().predicate;
+        assert!(references_only_allowed(&Expression::Parameter("p".into()), &["x"]));
+        assert!(references_only_allowed(&Expression::Literal(PropertyValue::Null), &[]));
+        assert!(references_only_allowed(&parse_where("NOT x.a"), &["x"]));
+        assert!(!references_only_allowed(&parse_where("NOT y.a"), &["x"]));
+        assert!(references_only_allowed(&parse_where("toUpper(x.a) = 'A'"), &["x"]));
+        assert!(!references_only_allowed(&parse_where("CASE WHEN x.a THEN 1 END = 1"), &["x"]));
+        assert!(!references_only_allowed(&var("z"), &["x", "y"]));
+        assert!(expression_references_only(&prop("x", "a"), "x"));
+    }
+
+    #[test]
+    fn split_where_without_clause_is_empty() {
+        assert_eq!(split_where(&None, "p", "a", "b"), Some((None, None)));
+    }
+
+    #[test]
+    fn predicate_side_variants_compare() {
+        assert_eq!(PredicateSide::First, PredicateSide::First);
+        assert_ne!(PredicateSide::First, PredicateSide::Second);
+    }
+
     /// The aggregate must be over the shared variable — not the group-by side.
     #[test]
     fn rejects_count_on_wrong_variable() {

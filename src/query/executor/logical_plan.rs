@@ -585,6 +585,266 @@ mod tests {
         assert_eq!(unvisited.len(), 1);
     }
 
+    fn scan(var: &str, label: Option<&str>) -> LogicalPlanNode {
+        LogicalPlanNode::LabelScan { variable: var.to_string(), label: label.map(Label::new) }
+    }
+
+    fn vars(plan: &LogicalPlanNode) -> Vec<String> {
+        let mut v: Vec<String> = plan.bound_variables().into_iter().collect();
+        v.sort();
+        v
+    }
+
+    fn adjacency(direction: ExpandDirection, neighbor_label: Option<&str>, distinct: bool) -> LogicalPlanNode {
+        LogicalPlanNode::AdjacencyCountAggregate {
+            input: Box::new(scan("j", Some("Journal"))),
+            grouped_var: "j".to_string(),
+            neighbor_var: "a".to_string(),
+            edge_type: EdgeType::new("PUBLISHED_IN"),
+            direction,
+            neighbor_label: neighbor_label.map(Label::new),
+            distinct,
+            count_alias: "articles".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_bound_variables_index_lookup() {
+        let plan = LogicalPlanNode::IndexLookup {
+            variable: "n".to_string(),
+            label: Label::new("Person"),
+            property: "age".to_string(),
+            op: BinaryOp::Eq,
+            value: Expression::Literal(crate::graph::PropertyValue::Integer(1)),
+        };
+        assert_eq!(vars(&plan), vec!["n"]);
+    }
+
+    #[test]
+    fn test_bound_variables_expand_into_includes_edge_var() {
+        let plan = LogicalPlanNode::ExpandInto {
+            input: Box::new(LogicalPlanNode::CartesianProduct {
+                left: Box::new(scan("a", None)),
+                right: Box::new(scan("b", None)),
+            }),
+            source_var: "a".to_string(),
+            target_var: "b".to_string(),
+            edge_types: vec![],
+            edge_var: Some("r".to_string()),
+        };
+        assert_eq!(vars(&plan), vec!["a", "b", "r"]);
+    }
+
+    #[test]
+    fn test_bound_variables_expand_without_edge_var() {
+        let plan = LogicalPlanNode::Expand {
+            input: Box::new(scan("a", None)),
+            source_var: "a".to_string(),
+            target_var: "b".to_string(),
+            edge_var: None,
+            edge_types: vec![],
+            direction: ExpandDirection::Reverse,
+        };
+        assert_eq!(vars(&plan), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_bound_variables_filter_passes_through_input() {
+        let plan = LogicalPlanNode::Filter {
+            input: Box::new(scan("n", Some("Person"))),
+            predicate: Expression::Variable("zzz".to_string()),
+        };
+        // The predicate's variables are not bound by a Filter.
+        assert_eq!(vars(&plan), vec!["n"]);
+    }
+
+    #[test]
+    fn test_bound_variables_join_and_cartesian_union_both_sides() {
+        let join = LogicalPlanNode::Join {
+            left: Box::new(scan("a", None)),
+            right: Box::new(scan("b", None)),
+            join_keys: vec!["a".to_string()],
+        };
+        assert_eq!(vars(&join), vec!["a", "b"]);
+        let cp = LogicalPlanNode::CartesianProduct {
+            left: Box::new(scan("x", None)),
+            right: Box::new(scan("y", None)),
+        };
+        assert_eq!(vars(&cp), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn test_bound_variables_adjacency_aggregate_hides_neighbor() {
+        let plan = adjacency(ExpandDirection::Reverse, Some("Article"), false);
+        assert_eq!(vars(&plan), vec!["articles", "j"]);
+    }
+
+    #[test]
+    fn test_display_label_scan_with_and_without_label() {
+        assert_eq!(scan("n", Some("Person")).display_plan(0), "NodeScan (var=n, labels=[\"Person\"])");
+        assert_eq!(scan("n", None).display_plan(1), "   +- NodeScan (var=n, labels=[*])");
+    }
+
+    #[test]
+    fn test_display_index_lookup() {
+        let plan = LogicalPlanNode::IndexLookup {
+            variable: "n".to_string(),
+            label: Label::new("Person"),
+            property: "age".to_string(),
+            op: BinaryOp::Gt,
+            value: Expression::Literal(crate::graph::PropertyValue::Integer(1)),
+        };
+        assert_eq!(plan.display_plan(0), "IndexScan (var=n, label=\"Person\", prop=age)");
+    }
+
+    #[test]
+    fn test_display_expand_forward_and_reverse() {
+        let fwd = LogicalPlanNode::Expand {
+            input: Box::new(scan("a", None)),
+            source_var: "a".to_string(),
+            target_var: "b".to_string(),
+            edge_var: None,
+            edge_types: vec![EdgeType::new("KNOWS"), EdgeType::new("LIKES")],
+            direction: ExpandDirection::Forward,
+        };
+        let text = fwd.display_plan(0);
+        assert!(text.starts_with("Expand ((a)-[:KNOWS|LIKES]->(b))\n"), "{}", text);
+        assert!(text.contains("   +- NodeScan (var=a"), "{}", text);
+
+        let rev = LogicalPlanNode::Expand {
+            input: Box::new(scan("a", None)),
+            source_var: "a".to_string(),
+            target_var: "b".to_string(),
+            edge_var: None,
+            edge_types: vec![],
+            direction: ExpandDirection::Reverse,
+        };
+        assert!(rev.display_plan(0).starts_with("Expand ((a)<-[:*]-(b))"), "{}", rev.display_plan(0));
+    }
+
+    #[test]
+    fn test_display_expand_into() {
+        let plan = LogicalPlanNode::ExpandInto {
+            input: Box::new(scan("a", None)),
+            source_var: "a".to_string(),
+            target_var: "b".to_string(),
+            edge_types: vec![EdgeType::new("KNOWS")],
+            edge_var: None,
+        };
+        assert!(plan.display_plan(0).starts_with("ExpandInto (a<-[:KNOWS]->b)\n"));
+    }
+
+    #[test]
+    fn test_display_trie_join_lists_every_constraint() {
+        let plan = LogicalPlanNode::TrieJoin {
+            input: Box::new(scan("a", None)),
+            target_var: "c".to_string(),
+            constraints: vec![
+                TrieJoinConstraint { bound_var: "b".to_string(), direction: ExpandDirection::Forward, edge_types: vec![], edge_var: None },
+                TrieJoinConstraint { bound_var: "a".to_string(), direction: ExpandDirection::Reverse, edge_types: vec![EdgeType::new("E")], edge_var: None },
+            ],
+        };
+        let text = plan.display_plan(0);
+        assert!(text.starts_with("TrieJoin (c ∈ N_out(b) ∩ N_in(a)[:E])\n"), "{}", text);
+    }
+
+    #[test]
+    fn test_display_filter_join_and_cartesian() {
+        let filter = LogicalPlanNode::Filter {
+            input: Box::new(scan("n", None)),
+            predicate: Expression::Variable("n".to_string()),
+        };
+        let text = filter.display_plan(0);
+        assert!(text.starts_with("Filter (Variable(\"n\"))\n"), "{}", text);
+
+        let join = LogicalPlanNode::Join {
+            left: Box::new(scan("a", None)),
+            right: Box::new(scan("b", None)),
+            join_keys: vec!["a".to_string(), "b".to_string()],
+        };
+        let text = join.display_plan(0);
+        assert!(text.starts_with("Join (on=[a, b])\n"), "{}", text);
+        assert!(text.contains("var=a") && text.contains("var=b"));
+
+        let cp = LogicalPlanNode::CartesianProduct {
+            left: Box::new(scan("a", None)),
+            right: Box::new(scan("b", None)),
+        };
+        let text = cp.display_plan(2);
+        assert!(text.starts_with("      +- CartesianProduct\n"), "{:?}", text);
+    }
+
+    #[test]
+    fn test_display_adjacency_count_aggregate() {
+        let text = adjacency(ExpandDirection::Reverse, Some("Article"), true).display_plan(0);
+        assert!(
+            text.starts_with("AdjacencyCountAggregate (j[:PUBLISHED_IN]<- :Article(DISTINCT a) AS articles)\n"),
+            "{}", text
+        );
+        let text = adjacency(ExpandDirection::Forward, None, false).display_plan(0);
+        assert!(
+            text.starts_with("AdjacencyCountAggregate (j[:PUBLISHED_IN]-> (a) AS articles)\n"),
+            "{}", text
+        );
+    }
+
+    #[test]
+    fn test_pattern_graph_records_inline_properties_and_both_direction() {
+        use crate::graph::PropertyValue;
+        let mut start_props = HashMap::new();
+        start_props.insert("name".to_string(), PropertyValue::String("Alice".into()));
+        let mut end_props = HashMap::new();
+        end_props.insert("age".to_string(), PropertyValue::Integer(3));
+
+        let mut path = make_path(
+            "a", vec![Label::new("Person")],
+            vec![make_segment(Some("r"), vec![], Direction::Both, "b", vec![])],
+        );
+        path.start.properties = Some(start_props);
+        path.segments[0].node.properties = Some(end_props);
+        let pg = PatternGraph::from_match_clause(&make_match_clause(vec![path]));
+
+        assert_eq!(pg.nodes["a"].properties, vec![("name".to_string(), PropertyValue::String("Alice".into()))]);
+        assert_eq!(pg.nodes["b"].properties, vec![("age".to_string(), PropertyValue::Integer(3))]);
+        assert_eq!(pg.edges[0].ast_direction, AstDirection::Both);
+        assert_eq!(pg.edges[0].source_var, "a");
+        assert_eq!(pg.edges[0].target_var, "b");
+        assert_eq!(pg.edges[0].edge_var.as_deref(), Some("r"));
+    }
+
+    #[test]
+    fn test_pattern_graph_skips_anonymous_nodes_and_keeps_first_labels() {
+        // (a:Person)-->(), (a:Other)-->(b)
+        let mut anon = make_path("a", vec![Label::new("Person")], vec![make_segment(None, vec![], Direction::Outgoing, "x", vec![])]);
+        anon.segments[0].node.variable = None;
+        let second = make_path("a", vec![Label::new("Other")], vec![make_segment(None, vec![], Direction::Outgoing, "b", vec![])]);
+        let mut unnamed_start = make_path("z", vec![], vec![]);
+        unnamed_start.start.variable = None;
+
+        let pg = PatternGraph::from_match_clause(&make_match_clause(vec![anon, second, unnamed_start]));
+        let mut names: Vec<_> = pg.nodes.keys().cloned().collect();
+        names.sort();
+        assert_eq!(names, vec!["a", "b"]);
+        // The first occurrence of `a` wins.
+        assert_eq!(pg.nodes["a"].labels, vec![Label::new("Person")]);
+        assert_eq!(pg.edges.len(), 2);
+        assert_eq!(pg.edges[0].target_var, "", "anonymous endpoint is recorded as empty");
+    }
+
+    #[test]
+    fn test_unvisited_neighbors_from_target_side() {
+        let clause = make_match_clause(vec![make_path(
+            "a", vec![],
+            vec![make_segment(None, vec![], Direction::Outgoing, "b", vec![])],
+        )]);
+        let pg = PatternGraph::from_match_clause(&clause);
+        // Looking from `b`, the other endpoint is the edge's source `a`.
+        assert_eq!(pg.unvisited_neighbors("b", &HashSet::new()).len(), 1);
+        let visited: HashSet<String> = ["a".to_string()].into_iter().collect();
+        assert!(pg.unvisited_neighbors("b", &visited).is_empty());
+        assert!(pg.neighbors("zzz").is_empty());
+    }
+
     #[test]
     fn test_expand_direction_equality() {
         assert_eq!(ExpandDirection::Forward, ExpandDirection::Forward);

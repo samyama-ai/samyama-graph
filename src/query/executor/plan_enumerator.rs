@@ -636,6 +636,296 @@ mod tests {
             "Triangle pattern should produce at least one plan with TrieJoin or ExpandInto");
     }
 
+    fn prop(var: &str, p: &str) -> Expression {
+        Expression::Property { variable: var.to_string(), property: p.to_string() }
+    }
+
+    fn lit(n: i64) -> Expression {
+        Expression::Literal(PropertyValue::Integer(n))
+    }
+
+    fn bin(l: Expression, op: BinaryOp, r: Expression) -> Expression {
+        Expression::Binary { left: Box::new(l), op, right: Box::new(r) }
+    }
+
+    fn single_node(var: &str, label: &str) -> PatternGraph {
+        PatternGraph::from_match_clause(&make_match_clause(vec![make_path(var, vec![Label::new(label)], vec![])]))
+    }
+
+    fn indexed(label: &str, property: &str) -> IndexManager {
+        let idx = IndexManager::new();
+        idx.create_index(Label::new(label), property.to_string());
+        idx
+    }
+
+    fn where_(pred: Expression) -> WhereClause {
+        WhereClause { predicate: pred }
+    }
+
+    #[test]
+    fn test_normalize_index_predicate_property_on_left() {
+        let got = normalize_index_predicate(&bin(prop("n", "age"), BinaryOp::Gt, lit(5)), "n");
+        assert_eq!(got, Some(("age".to_string(), BinaryOp::Gt, lit(5))));
+        // Other variable: not ours.
+        assert_eq!(normalize_index_predicate(&bin(prop("m", "age"), BinaryOp::Gt, lit(5)), "n"), None);
+    }
+
+    #[test]
+    fn test_normalize_index_predicate_flips_literal_on_left() {
+        let cases = [
+            (BinaryOp::Gt, BinaryOp::Lt),
+            (BinaryOp::Ge, BinaryOp::Le),
+            (BinaryOp::Lt, BinaryOp::Gt),
+            (BinaryOp::Le, BinaryOp::Ge),
+            (BinaryOp::Eq, BinaryOp::Eq),
+        ];
+        for (written, expected) in cases {
+            let got = normalize_index_predicate(&bin(lit(5), written.clone(), prop("n", "age")), "n");
+            assert_eq!(got, Some(("age".to_string(), expected, lit(5))), "for {:?}", written);
+        }
+        assert_eq!(normalize_index_predicate(&bin(lit(5), BinaryOp::Lt, prop("m", "age")), "n"), None);
+    }
+
+    #[test]
+    fn test_normalize_index_predicate_rejects_non_comparisons() {
+        assert_eq!(normalize_index_predicate(&prop("n", "age"), "n"), None);
+        assert_eq!(normalize_index_predicate(&bin(prop("n", "a"), BinaryOp::Eq, prop("n", "b")), "n"), None);
+        assert_eq!(normalize_index_predicate(&bin(lit(1), BinaryOp::Eq, lit(1)), "n"), None);
+    }
+
+    #[test]
+    fn test_indexed_equality_becomes_index_lookup() {
+        let pg = single_node("n", "Person");
+        let wc = where_(bin(prop("n", "age"), BinaryOp::Eq, lit(30)));
+        let plans = enumerate_plans(&pg, Some(&wc), &GraphCatalog::new(), &indexed("Person", "age"), &EnumerationConfig::default());
+        match &plans[0].0 {
+            LogicalPlanNode::IndexLookup { variable, property, op, value, .. } => {
+                assert_eq!(variable, "n");
+                assert_eq!(property, "age");
+                assert_eq!(*op, BinaryOp::Eq);
+                assert_eq!(*value, lit(30));
+            }
+            other => panic!("expected IndexLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_flipped_range_predicate_uses_index_with_normalized_op() {
+        let pg = single_node("n", "Person");
+        let wc = where_(bin(lit(18), BinaryOp::Lt, prop("n", "age")));
+        let plans = enumerate_plans(&pg, Some(&wc), &GraphCatalog::new(), &indexed("Person", "age"), &EnumerationConfig::default());
+        match &plans[0].0 {
+            LogicalPlanNode::IndexLookup { op, .. } => assert_eq!(*op, BinaryOp::Gt),
+            other => panic!("expected IndexLookup, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_non_indexable_operator_falls_back_to_scan_and_filter() {
+        let pg = single_node("n", "Person");
+        let wc = where_(bin(prop("n", "age"), BinaryOp::Ne, lit(30)));
+        let plans = enumerate_plans(&pg, Some(&wc), &GraphCatalog::new(), &indexed("Person", "age"), &EnumerationConfig::default());
+        match &plans[0].0 {
+            LogicalPlanNode::Filter { input, .. } => assert!(matches!(**input, LogicalPlanNode::LabelScan { .. })),
+            other => panic!("expected Filter(LabelScan), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unindexed_property_uses_scan() {
+        let pg = single_node("n", "Person");
+        let wc = where_(bin(prop("n", "name"), BinaryOp::Eq, lit(1)));
+        let plans = enumerate_plans(&pg, Some(&wc), &GraphCatalog::new(), &indexed("Person", "age"), &EnumerationConfig::default());
+        assert!(matches!(&plans[0].0, LogicalPlanNode::Filter { .. }));
+    }
+
+    #[test]
+    fn test_inline_property_is_treated_as_equality_predicate() {
+        let mut path = make_path("n", vec![Label::new("Person")], vec![]);
+        let mut props = std::collections::HashMap::new();
+        props.insert("age".to_string(), PropertyValue::Integer(42));
+        path.start.properties = Some(props);
+        let pg = PatternGraph::from_match_clause(&make_match_clause(vec![path]));
+
+        // With an index, the inline property drives an IndexLookup.
+        let plans = enumerate_plans(&pg, None, &GraphCatalog::new(), &indexed("Person", "age"), &EnumerationConfig::default());
+        assert!(matches!(&plans[0].0, LogicalPlanNode::IndexLookup { value, .. } if *value == lit(42)));
+
+        // Without one, it becomes a Filter.
+        let plans = enumerate_plans(&pg, None, &GraphCatalog::new(), &IndexManager::new(), &EnumerationConfig::default());
+        match &plans[0].0 {
+            LogicalPlanNode::Filter { predicate, .. } => {
+                assert_eq!(*predicate, bin(prop("n", "age"), BinaryOp::Eq, lit(42)));
+            }
+            other => panic!("expected Filter, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unlabelled_start_never_uses_index() {
+        let clause = make_match_clause(vec![make_path("n", vec![], vec![])]);
+        let pg = PatternGraph::from_match_clause(&clause);
+        let wc = where_(bin(prop("n", "age"), BinaryOp::Eq, lit(30)));
+        let plans = enumerate_plans(&pg, Some(&wc), &GraphCatalog::new(), &indexed("Person", "age"), &EnumerationConfig::default());
+        assert!(matches!(&plans[0].0, LogicalPlanNode::Filter { .. }));
+    }
+
+    #[test]
+    fn test_disconnected_components_are_joined_by_cartesian_product() {
+        // MATCH (a:Person), (b:Company)
+        let clause = make_match_clause(vec![
+            make_path("a", vec![Label::new("Person")], vec![]),
+            make_path("b", vec![Label::new("Company")], vec![]),
+        ]);
+        let pg = PatternGraph::from_match_clause(&clause);
+        let plans = enumerate_plans(&pg, None, &GraphCatalog::new(), &IndexManager::new(), &EnumerationConfig::default());
+        assert_eq!(plans.len(), 2);
+        for (plan, _) in &plans {
+            match plan {
+                LogicalPlanNode::CartesianProduct { left, right } => {
+                    let mut vars: Vec<String> = left.bound_variables().into_iter().chain(right.bound_variables()).collect();
+                    vars.sort();
+                    assert_eq!(vars, vec!["a", "b"]);
+                }
+                other => panic!("expected CartesianProduct, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_predicate_on_unknown_variable_is_applied_last() {
+        let pg = single_node("n", "Person");
+        let wc = where_(bin(prop("ghost", "x"), BinaryOp::Eq, lit(1)));
+        let plans = enumerate_plans(&pg, Some(&wc), &GraphCatalog::new(), &IndexManager::new(), &EnumerationConfig::default());
+        match &plans[0].0 {
+            LogicalPlanNode::Filter { predicate, input } => {
+                assert_eq!(*predicate, bin(prop("ghost", "x"), BinaryOp::Eq, lit(1)));
+                assert!(matches!(**input, LogicalPlanNode::LabelScan { .. }));
+            }
+            other => panic!("expected trailing Filter, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_constant_predicate_is_applied_last() {
+        let pg = single_node("n", "Person");
+        let wc = where_(Expression::Literal(PropertyValue::Boolean(true)));
+        let plans = enumerate_plans(&pg, Some(&wc), &GraphCatalog::new(), &IndexManager::new(), &EnumerationConfig::default());
+        assert!(matches!(&plans[0].0, LogicalPlanNode::Filter { .. }));
+    }
+
+    #[test]
+    fn test_max_candidate_plans_zero_yields_nothing() {
+        let pg = single_node("n", "Person");
+        let plans = enumerate_plans(&pg, None, &GraphCatalog::new(), &IndexManager::new(), &EnumerationConfig { max_candidate_plans: 0 });
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn test_max_candidate_plans_stops_enumeration_early() {
+        let clause = make_match_clause(vec![make_path(
+            "a", vec![], vec![
+                make_segment(None, vec![], Direction::Outgoing, "b", vec![]),
+                make_segment(None, vec![], Direction::Outgoing, "c", vec![]),
+            ],
+        )]);
+        let pg = PatternGraph::from_match_clause(&clause);
+        let plans = enumerate_plans(&pg, None, &GraphCatalog::new(), &IndexManager::new(), &EnumerationConfig { max_candidate_plans: 1 });
+        assert_eq!(plans.len(), 1);
+    }
+
+    #[test]
+    fn test_incoming_edge_from_target_expands_in_reverse() {
+        // MATCH (a)<-[:E]-(b): stored edge is b->a. Starting from `a` walks
+        // the incoming list.
+        let clause = make_match_clause(vec![make_path(
+            "a", vec![Label::new("A")],
+            vec![make_segment(None, vec![EdgeType::new("E")], Direction::Incoming, "b", vec![Label::new("B")])],
+        )]);
+        let pg = PatternGraph::from_match_clause(&clause);
+        let plans = enumerate_plans(&pg, None, &GraphCatalog::new(), &IndexManager::new(), &EnumerationConfig::default());
+        let from_a = plans.iter().find(|(p, _)| matches!(p, LogicalPlanNode::Expand { source_var, .. } if source_var == "a")).expect("plan from a");
+        match &from_a.0 {
+            LogicalPlanNode::Expand { direction, target_var, .. } => {
+                assert_eq!(*direction, ExpandDirection::Reverse);
+                assert_eq!(target_var, "b");
+            }
+            _ => unreachable!(),
+        }
+        let from_b = plans.iter().find(|(p, _)| matches!(p, LogicalPlanNode::Expand { source_var, .. } if source_var == "b")).expect("plan from b");
+        assert!(matches!(&from_b.0, LogicalPlanNode::Expand { direction: ExpandDirection::Forward, .. }));
+    }
+
+    #[test]
+    fn test_predicate_on_both_endpoints_is_pushed_after_expand() {
+        let clause = make_match_clause(vec![make_path(
+            "a", vec![],
+            vec![make_segment(None, vec![], Direction::Outgoing, "b", vec![])],
+        )]);
+        let pg = PatternGraph::from_match_clause(&clause);
+        let wc = where_(bin(prop("a", "x"), BinaryOp::Eq, prop("b", "x")));
+        let plans = enumerate_plans(&pg, Some(&wc), &GraphCatalog::new(), &IndexManager::new(), &EnumerationConfig::default());
+        for (plan, _) in &plans {
+            match plan {
+                LogicalPlanNode::Filter { input, .. } => assert!(matches!(**input, LogicalPlanNode::Expand { .. })),
+                other => panic!("expected Filter(Expand), got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_collect_vars_inner_walks_nested_expressions() {
+        let q = crate::query::parser::parse_query(
+            "MATCH (a), (b) WHERE NOT (toUpper(a.name) = CASE b.k WHEN 1 THEN a.x ELSE b.y END) AND a.list[b.i] = 1 RETURN a",
+        )
+        .unwrap();
+        let mut vars: Vec<String> = collect_expression_vars(&q.where_clause.unwrap().predicate).into_iter().collect();
+        vars.sort();
+        assert_eq!(vars, vec!["a", "b"]);
+
+        let q = crate::query::parser::parse_query("MATCH (a) WHERE CASE WHEN a.x = 1 THEN true END RETURN a").unwrap();
+        let vars = collect_expression_vars(&q.where_clause.unwrap().predicate);
+        assert!(vars.contains("a"));
+
+        assert!(collect_expression_vars(&Expression::Parameter("p".into())).is_empty());
+        assert_eq!(
+            collect_expression_vars(&Expression::Variable("v".into())).into_iter().collect::<Vec<_>>(),
+            vec!["v".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_flatten_and_leaves_or_intact() {
+        let or = bin(lit(1), BinaryOp::Or, lit(2));
+        assert_eq!(flatten_and_predicates(&or), vec![or.clone()]);
+    }
+
+    #[test]
+    fn test_contains_helpers_walk_every_node_kind() {
+        let into = LogicalPlanNode::ExpandInto {
+            input: Box::new(LogicalPlanNode::LabelScan { variable: "a".into(), label: None }),
+            source_var: "a".into(), target_var: "b".into(), edge_types: vec![], edge_var: None,
+        };
+        let tj = LogicalPlanNode::TrieJoin { input: Box::new(LogicalPlanNode::LabelScan { variable: "a".into(), label: None }), target_var: "c".into(), constraints: vec![] };
+        let scan = LogicalPlanNode::LabelScan { variable: "z".into(), label: None };
+        let wrap = |inner: LogicalPlanNode| vec![
+            LogicalPlanNode::Expand { input: Box::new(inner.clone()), source_var: "a".into(), target_var: "q".into(), edge_var: None, edge_types: vec![], direction: ExpandDirection::Forward },
+            LogicalPlanNode::Filter { input: Box::new(inner.clone()), predicate: lit(1) },
+            LogicalPlanNode::Join { left: Box::new(scan.clone()), right: Box::new(inner.clone()), join_keys: vec![] },
+            LogicalPlanNode::CartesianProduct { left: Box::new(scan.clone()), right: Box::new(inner.clone()) },
+            LogicalPlanNode::TrieJoin { input: Box::new(inner.clone()), target_var: "t".into(), constraints: vec![] },
+            LogicalPlanNode::ExpandInto { input: Box::new(inner.clone()), source_var: "a".into(), target_var: "q".into(), edge_types: vec![], edge_var: None },
+        ];
+        for p in wrap(into.clone()) {
+            assert!(contains_expand_into(&p), "{:?}", p);
+        }
+        for p in wrap(tj.clone()) {
+            assert!(contains_trie_join(&p), "{:?}", p);
+        }
+        assert!(!contains_expand_into(&scan));
+        assert!(!contains_trie_join(&scan));
+    }
+
     /// Helper to check if a plan contains an ExpandInto node
     fn contains_expand_into(plan: &LogicalPlanNode) -> bool {
         match plan {
