@@ -236,6 +236,8 @@ impl NLQClient {
     }
 }
 
+#[cfg(test)] #[path = "client_cov_tests.rs"] mod cov_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

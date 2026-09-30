@@ -359,4 +359,129 @@ mod tests {
         };
         assert!(p.is_reproducible());
     }
+
+    fn node(store: &mut GraphStore, label: &str, props: &[(&str, PropertyValue)]) -> NodeId {
+        let id = store.create_node(label);
+        for (k, v) in props {
+            store.set_node_property("default", id, *k, v.clone()).unwrap();
+        }
+        id
+    }
+
+    fn s(v: &str) -> PropertyValue {
+        PropertyValue::String(v.into())
+    }
+
+    #[test]
+    fn of_reads_every_key_and_renders_non_strings_as_text() {
+        let mut g = GraphStore::new();
+        let n = node(
+            &mut g,
+            "F",
+            &[
+                (SOURCE_URI, s("https://x")),
+                (SOURCE_VERSION, PropertyValue::Integer(3)),
+                (RETRIEVED_AT, s("2026-01-01")),
+                (LICENSE, s("CC-BY")),
+            ],
+        );
+        let p = of(&g, n);
+        assert_eq!(p.source_uri.as_deref(), Some("https://x"));
+        assert_eq!(p.source_version.as_deref(), Some("3"));
+        assert_eq!(p.retrieved_at.as_deref(), Some("2026-01-01"));
+        assert_eq!(p.license.as_deref(), Some("CC-BY"));
+        let bare = node(&mut g, "F", &[]);
+        assert!(of(&g, bare).is_empty());
+    }
+
+    #[test]
+    fn redistributable_reads_booleans_and_text() {
+        let mut g = GraphStore::new();
+        let cases = [
+            (Some(PropertyValue::Boolean(true)), Redistributable::Yes),
+            (Some(PropertyValue::Boolean(false)), Redistributable::No),
+            (Some(s(" YES ")), Redistributable::Yes),
+            (Some(s("1")), Redistributable::Yes),
+            (Some(s("no")), Redistributable::No),
+            (Some(s("0")), Redistributable::No),
+            (Some(s("maybe")), Redistributable::Unknown),
+            (Some(PropertyValue::Integer(1)), Redistributable::Unknown),
+            (None, Redistributable::Unknown),
+        ];
+        for (v, want) in cases {
+            let props: Vec<(&str, PropertyValue)> = v.clone().map(|v| (REDISTRIBUTABLE, v)).into_iter().collect();
+            let n = node(&mut g, "F", &props);
+            assert_eq!(redistributable(&g, n), want, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn derivation_path_is_breadth_first_cycle_safe_and_ignores_other_edges() {
+        let mut g = GraphStore::new();
+        let fact = node(&mut g, "Fact", &[]);
+        let a = node(&mut g, "Source", &[(SOURCE_URI, s("a"))]);
+        let b = node(&mut g, "Source", &[]);
+        let deep = node(&mut g, "Dump", &[(REDISTRIBUTABLE, PropertyValue::Boolean(false))]);
+        let unrelated = node(&mut g, "X", &[]);
+        g.create_edge(fact, a, DERIVED_FROM).unwrap();
+        g.create_edge(fact, b, DERIVED_FROM).unwrap();
+        g.create_edge(a, deep, DERIVED_FROM).unwrap();
+        g.create_edge(deep, fact, DERIVED_FROM).unwrap(); // a claimed cycle
+        g.create_edge(fact, unrelated, "MENTIONS").unwrap();
+
+        let path = derivation_path(&g, fact);
+        let got: Vec<(u64, usize)> = path.iter().map(|d| (d.node, d.depth)).collect();
+        assert_eq!(got.len(), 4);
+        assert_eq!(got[0], (fact.as_u64(), 0));
+        let mut depth1: Vec<u64> = got.iter().filter(|(_, d)| *d == 1).map(|(n, _)| *n).collect();
+        depth1.sort();
+        assert_eq!(depth1, vec![a.as_u64(), b.as_u64()]);
+        assert_eq!(got[3], (deep.as_u64(), 2));
+        assert_eq!(path[3].labels, vec!["Dump".to_string()]);
+        assert_eq!(path[3].redistributable, Redistributable::No);
+        assert!(!got.iter().any(|(n, _)| *n == unrelated.as_u64()));
+
+        // A missing node is still reported, with nothing known about it.
+        let ghost = derivation_path(&g, NodeId::new(987_654));
+        assert_eq!(ghost.len(), 1);
+        assert!(ghost[0].labels.is_empty() && ghost[0].provenance.is_empty());
+    }
+
+    #[test]
+    fn screen_counts_and_withholds_by_policy() {
+        let mut g = GraphStore::new();
+        let yes = node(
+            &mut g,
+            "F",
+            &[
+                (REDISTRIBUTABLE, PropertyValue::Boolean(true)),
+                (SOURCE_URI, s("u")),
+                (SOURCE_VERSION, s("v")),
+                (LICENSE, s("MIT")),
+            ],
+        );
+        let no = node(&mut g, "F", &[(REDISTRIBUTABLE, s("false")), (LICENSE, s("Proprietary"))]);
+        let unknown = node(&mut g, "F", &[(LICENSE, s("MIT"))]);
+        let all = [yes, no, unknown];
+
+        let (kept, r) = screen(&g, &all, ExportPolicy::CountOnly);
+        assert_eq!(kept, all.to_vec());
+        assert_eq!(
+            (r.nodes_considered, r.marked_redistributable, r.marked_not_redistributable, r.unmarked, r.withheld, r.reproducible),
+            (3, 1, 1, 1, 0, 1)
+        );
+        assert_eq!(r.licenses, vec!["MIT".to_string(), "Proprietary".to_string()]);
+
+        let (kept, r) = screen(&g, &all, ExportPolicy::WithholdForbidden);
+        assert_eq!(kept, vec![yes, unknown]);
+        assert_eq!(r.withheld, 1);
+
+        let (kept, r) = screen(&g, &all, ExportPolicy::RequirePermission);
+        assert_eq!(kept, vec![yes]);
+        assert_eq!(r.withheld, 2);
+
+        let (kept, r) = screen(&g, &[], ExportPolicy::default());
+        assert!(kept.is_empty());
+        assert_eq!(r, LicenceReport::default());
+    }
 }

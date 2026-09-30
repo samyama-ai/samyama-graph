@@ -222,4 +222,61 @@ mod tests {
         assert_eq!(qs.len(), 1, "{qs:?}");
         assert!(qs[0].contains("WHERE"), "{qs:?}");
     }
+
+    #[test]
+    fn short_code_is_the_last_segment() {
+        let r = Refusal { code: "Samyama.ClientError.Statement.SyntaxError".into(), detail: String::new() };
+        assert_eq!(r.short_code(), "SyntaxError");
+        let bare = Refusal { code: "Unclassified".into(), detail: String::new() };
+        assert_eq!(bare.short_code(), "Unclassified");
+    }
+
+    #[test]
+    fn cause_drops_quoted_specifics_and_trailing_position() {
+        let r = Refusal {
+            code: "X".into(),
+            detail: "Unknown property \"a b\" on `N` --> 1:5".into(),
+        };
+        assert_eq!(r.cause(), "Unknown property '…' on '…'");
+    }
+
+    #[test]
+    fn refusal_code_comes_from_a_bracketed_prefix_or_is_unclassified() {
+        let r = refusal_from("[Samyama.X.Y] something broke\nsecond line");
+        assert_eq!(r.code, "Samyama.X.Y");
+        assert_eq!(r.detail, "something broke");
+        let u = refusal_from("plain failure\nmore");
+        assert_eq!(u.code, "Unclassified");
+        assert_eq!(u.detail, "plain failure");
+        let p = refusal_from("[C] Parse error\n  --> 1:1\n   = expected label");
+        assert_eq!(p.detail, "Parse error: expected label");
+        assert_eq!(actionable(""), "");
+    }
+
+    #[test]
+    fn a_query_that_parses_but_cannot_be_planned_is_refused() {
+        let store = GraphStore::new();
+        let q = "MATCH (n) CALL { WITH m MATCH (x) RETURN x } RETURN n";
+        assert!(crate::query::parse_query(q).is_ok(), "the premise: this parses");
+        let r = judge(q, &store).refusal.expect("an import of an unbound name cannot be planned");
+        assert!(r.detail.contains("is not defined before the subquery"), "{r:?}");
+    }
+
+    #[test]
+    fn judge_all_keeps_order_and_query_text() {
+        let store = GraphStore::new();
+        let qs = vec!["RETURN 1".to_string(), "RETURN (".to_string()];
+        let vs = judge_all(&qs, &store);
+        assert_eq!(vs.len(), 2);
+        assert_eq!(vs[0].query, "RETURN 1");
+        assert!(vs[0].accepted());
+        assert!(!vs[1].accepted());
+        assert!(judge_all(&[], &store).is_empty());
+    }
+
+    #[test]
+    fn splitter_handles_dash_comments_and_trailing_text() {
+        assert_eq!(split_queries("-- c\nRETURN 1\nRETURN 2"), vec!["RETURN 1 RETURN 2".to_string()]);
+        assert!(split_queries("\n;\n\n").is_empty());
+    }
 }

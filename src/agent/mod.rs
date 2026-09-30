@@ -207,4 +207,98 @@ mod tests {
         let cypher = result.unwrap();
         assert!(cypher.contains("MATCH"));
     }
+
+    use crate::nlq::test_http::{dead_base_url, MockHttp};
+
+    fn ollama_config(base: &str) -> AgentConfig {
+        AgentConfig {
+            provider: LLMProvider::Ollama,
+            api_base_url: Some(base.to_string()),
+            ..mock_agent_config()
+        }
+    }
+
+    fn ollama_says(answer: &str) -> (u16, String) {
+        (200, serde_json::json!({ "response": answer }).to_string())
+    }
+
+    #[tokio::test]
+    async fn process_trigger_maps_llm_failures_to_llm_error() {
+        let runtime = AgentRuntime::new(ollama_config(&dead_base_url()));
+        let err = runtime.process_trigger("p", "c").await.unwrap_err();
+        assert!(matches!(err, AgentError::LLMError(ref m) if m.contains("Network error")), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn execute_plan_without_store_is_a_config_error() {
+        let runtime = AgentRuntime::new(mock_agent_config());
+        let err = runtime.execute_plan("p", &ToolPlan::default()).await.unwrap_err();
+        assert!(matches!(err, AgentError::ConfigError(ref m) if m.contains("with_store")), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn execute_plan_runs_registered_tools_and_writes_telemetry() {
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let mut runtime = AgentRuntime::new(mock_agent_config()).with_store(store.clone());
+        runtime.register_tool(Arc::new(tools::WebSearchTool::new("k".into())));
+        let plan = ToolPlan {
+            calls: vec![ToolCall {
+                tool: "web_search".into(),
+                args: serde_json::json!({"query": "graphs"}),
+                parallel_with_prev: false,
+            }],
+        };
+        let run = runtime.execute_plan("find graphs", &plan).await.unwrap();
+        assert_eq!(run.records.len(), 1);
+        assert!(run.records[0].error.is_none());
+        assert!(run.records[0].result.as_ref().unwrap()["results"].is_array());
+        assert_eq!(store.read().await.edge_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn plan_and_execute_sends_tool_catalogue_and_runs_the_returned_plan() {
+        let plan = r#"```json
+{"calls": [{"tool": "web_search", "args": {"query": "samyama"}}]}
+```"#;
+        let srv = MockHttp::serve(vec![ollama_says(plan)]);
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let mut runtime = AgentRuntime::new(ollama_config(&srv.base_url)).with_store(store.clone());
+        runtime.register_tool(Arc::new(tools::WebSearchTool::new("k".into())));
+
+        let run = runtime.plan_and_execute("tell me about samyama", "ctx-123").await.unwrap();
+        assert_eq!(run.records.len(), 1);
+        assert_eq!(run.records[0].tool, "web_search");
+        assert_eq!(run.records[0].args, serde_json::json!({"query": "samyama"}));
+
+        let sent = srv.requests()[0].json();
+        let prompt = sent["prompt"].as_str().unwrap();
+        assert!(prompt.contains("\"name\":\"web_search\""), "tool catalogue missing: {prompt}");
+        assert!(prompt.contains("Context: ctx-123"));
+        assert!(prompt.contains("Prompt: tell me about samyama"));
+    }
+
+    #[tokio::test]
+    async fn plan_and_execute_rejects_an_unparseable_plan() {
+        let srv = MockHttp::serve(vec![ollama_says("I cannot help with that.")]);
+        let runtime = AgentRuntime::new(ollama_config(&srv.base_url))
+            .with_store(Arc::new(RwLock::new(GraphStore::new())));
+        let err = runtime.plan_and_execute("p", "c").await.unwrap_err();
+        assert!(matches!(err, AgentError::ExecutionError(ref m) if m.contains("could not parse plan")), "{err:?}");
+        assert_eq!(srv.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn plan_and_execute_maps_llm_failures_to_llm_error() {
+        let runtime = AgentRuntime::new(ollama_config(&dead_base_url()));
+        let err = runtime.plan_and_execute("p", "c").await.unwrap_err();
+        assert!(matches!(err, AgentError::LLMError(_)), "{err:?}");
+    }
+
+    #[test]
+    fn agent_error_messages_name_their_kind() {
+        assert_eq!(AgentError::ConfigError("a".into()).to_string(), "Configuration error: a");
+        assert_eq!(AgentError::ToolError("b".into()).to_string(), "Tool error: b");
+        assert_eq!(AgentError::LLMError("c".into()).to_string(), "LLM error: c");
+        assert_eq!(AgentError::ExecutionError("d".into()).to_string(), "Execution error: d");
+    }
 }

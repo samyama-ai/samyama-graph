@@ -643,3 +643,5 @@ pub fn triage<'a>(report: &'a Report, waivers: &'a [Waiver]) -> Triage<'a> {
             .collect(),
     }
 }
+
+#[cfg(test)] #[path = "pii_cov_tests.rs"] mod cov_tests;

@@ -115,4 +115,18 @@ mod tests {
         let inferred = reasoner.materialize(&store).unwrap();
         assert!(inferred.is_empty()); // Stub returns empty
     }
+
+    #[test]
+    fn reason_stub_infers_nothing_and_leaves_store_unchanged() {
+        let mut store = RdfStore::new();
+        assert_eq!(RdfsReasoner::default().reason(&mut store).unwrap(), 0);
+        assert_eq!(store.len(), 0);
+        assert_eq!(RdfsReasoner::default().enabled_rules, RdfsReasoner::new().enabled_rules);
+    }
+
+    #[test]
+    fn reasoning_error_messages() {
+        assert_eq!(ReasoningError::InvalidRule("r".into()).to_string(), "Invalid rule: r");
+        assert_eq!(ReasoningError::InferenceError("e".into()).to_string(), "Inference error: e");
+    }
 }

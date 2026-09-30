@@ -3,6 +3,7 @@
 //! Implements Text-to-Cypher translation using LLMs.
 
 pub mod client;
+#[cfg(test)] #[path = "test_http_cov.rs"] pub(crate) mod test_http;
 
 use thiserror::Error;
 use crate::persistence::tenant::NLQConfig;

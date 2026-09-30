@@ -536,3 +536,5 @@ fn decode_segment(s: &str) -> String {
     }
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
+
+#[cfg(test)] #[path = "mapping_cov_tests.rs"] mod cov_tests;
