@@ -1705,6 +1705,141 @@ fn foreach_bodies_after_a_match() {
 }
 
 // ---------------------------------------------------------------------------
+// Pushdown onto an already-bound start
+// ---------------------------------------------------------------------------
+
+fn known(v: &[&str]) -> HashSet<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+fn first_match(s: &str) -> MatchClause {
+    q(s).match_clauses.last().cloned().expect("a MATCH clause")
+}
+
+#[test]
+fn can_pushdown_match_rules() {
+    let k = known(&["a", "b"]);
+    assert!(QueryPlanner::can_pushdown_match(&first_match("MATCH (a)-[:R]->(x) RETURN x"), &k));
+    // Optional, unbound start, anonymous start.
+    assert!(!QueryPlanner::can_pushdown_match(&first_match("MATCH (a) OPTIONAL MATCH (a)-[:R]->(x) RETURN x"), &k));
+    assert!(!QueryPlanner::can_pushdown_match(&first_match("MATCH (z)-[:R]->(x) RETURN x"), &k));
+    assert!(!QueryPlanner::can_pushdown_match(&first_match("MATCH ()-[:R]->(x) RETURN x"), &k));
+    // Closing onto a bound node or relationship.
+    assert!(!QueryPlanner::can_pushdown_match(&first_match("MATCH (a)-[:R]->(b) RETURN b"), &k));
+    let kr = known(&["a", "r"]);
+    assert!(!QueryPlanner::can_pushdown_match(&first_match("MATCH (a)-[r:R]->(x) RETURN x"), &kr));
+    // Two paths introducing the same variable.
+    assert!(!QueryPlanner::can_pushdown_match(&first_match("MATCH (a)-->(x), (b)-->(x) RETURN x"), &k));
+    // Variable length and shortest path.
+    assert!(!QueryPlanner::can_pushdown_match(&first_match("MATCH (a)-[:R*1..2]->(x) RETURN x"), &k));
+    assert!(!QueryPlanner::can_pushdown_match(&first_match("MATCH p = shortestPath((a)-[:R*]->(x)) RETURN p"), &k));
+}
+
+#[test]
+fn optional_pushdown_vars_rules() {
+    let k = known(&["a", "c", "r"]);
+    let opt = |s: &str| first_match(&format!("MATCH (a), (c) OPTIONAL MATCH {s} RETURN a"));
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&opt("(a)-[k:R]->(x)"), &k), Some(vec!["x".to_string(), "k".to_string()]));
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&opt("(a)-[k:R]->(c)"), &k), Some(vec!["k".to_string()]));
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&opt("(a)-[:R]->(c)"), &k), None, "nothing introduced");
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&opt("(a)-[r:R]->(x)"), &k), None, "bound relationship");
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&opt("(a)-[:R]->()"), &k), None, "anonymous far end");
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&opt("(z)-[:R]->(x)"), &k), None, "unbound start");
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&opt("(a)-[:R*1..2]->(x)"), &k), None, "var length");
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&opt("(a)-[:R]->(x)-[:R]->(y)"), &k), None, "two segments");
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&opt("(a)-[:R]->(x), (c)-[:R]->(y)"), &k), None, "two paths");
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&opt("p = (a)-[:R]->(x)"), &k), None, "path variable");
+    assert_eq!(QueryPlanner::optional_pushdown_vars(&first_match("MATCH (a)-[:R]->(x) RETURN x"), &k), None, "not optional");
+}
+
+#[test]
+fn pushed_down_match_chains_expands_from_the_bound_start() {
+    let s = people();
+    let b = read(
+        &s,
+        "MATCH (a:Person {name: 'A'}) MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c:Person {age: 40}) WHERE b.age > 1 AND c.city = 'Y' RETURN b.name AS b",
+    );
+    assert_eq!(strs(&b, "b"), vec!["C"]);
+    let b = read(&s, "MATCH (a:Person {name: 'A'}) MATCH (a)-[:KNOWS]->()-[:KNOWS]->(z) RETURN z.name AS z ORDER BY z");
+    assert_eq!(strs(&b, "z"), vec!["C", "D"]);
+    let b = read(&s, "MATCH (a:Person {name: 'A'}) MATCH p = (a)-[:KNOWS]->(b) RETURN length(p) AS len, b.name AS b ORDER BY b");
+    assert_eq!(ints(&b, "len"), vec![1, 1]);
+    // Two paths of one clause, a predicate across them, relationships distinct.
+    let b = read(
+        &s,
+        "MATCH (a:Person {name: 'A'}) MATCH (a)-[:KNOWS]->(x), (a)-[:KNOWS]->(y) WHERE x.age < y.age RETURN x.name AS x, y.name AS y",
+    );
+    assert_eq!(strs(&b, "x"), vec!["B"]);
+    assert_eq!(strs(&b, "y"), vec!["C"]);
+}
+
+#[test]
+fn optional_expand_pushdown_closes_onto_bound_nodes_and_prunes_targets() {
+    let s = people();
+    let b = read(
+        &s,
+        "MATCH (a:Person {name: 'A'}), (c:Person) WHERE c.name IN ['C', 'E'] OPTIONAL MATCH (a)-[k:KNOWS]->(c) \
+         RETURN c.name AS c, k.since AS since ORDER BY c",
+    );
+    assert_eq!(strs(&b, "c"), vec!["C", "E"]);
+    assert_eq!(col(&b, "since"), vec![PropertyValue::Integer(2003), PropertyValue::Null]);
+    let b = read(
+        &s,
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(x:Person {city: 'Y'}) RETURN a.name AS a, x.name AS x ORDER BY a",
+    );
+    assert_eq!(strs(&b, "x"), vec!["C", "C", "D", "<null>", "<null>"]);
+}
+
+// ---------------------------------------------------------------------------
+// Hierarchy-index rewrites
+// ---------------------------------------------------------------------------
+
+fn taxonomy() -> GraphStore {
+    let mut s = GraphStore::new();
+    run(
+        &mut s,
+        "CREATE (root:Class {code: 'ROOT', units: 0}), (c0:Class {code: 'C0', units: 1}), \
+                (c1:Class {code: 'C1', units: 2}), (c2:Class {code: 'C2', units: 3}), \
+                (c0)-[:IS_A]->(root), (c1)-[:IS_A]->(c0), (c2)-[:IS_A]->(root), \
+                (:Fact {p: 10})-[:ABOUT]->(c1), (:Fact {p: 20})-[:ABOUT]->(c0), (:Fact {p: 40})-[:ABOUT]->(c2)",
+    );
+    run(&mut s, "CREATE HIERARCHY INDEX h ON ()-[:IS_A]->() MEASURE units AGGREGATE sum");
+    s
+}
+
+#[test]
+fn hierarchy_rollup_and_descendant_scan() {
+    let s = taxonomy();
+    let b = read(&s, "MATCH (d)-[:IS_A*0..]->(r:Class {code: 'C0'}) RETURN sum(d.units) AS s");
+    assert_eq!(col(&b, "s").len(), 1);
+    assert!(matches!(col(&b, "s")[0], PropertyValue::Integer(3)) || matches!(col(&b, "s")[0], PropertyValue::Float(f) if f == 3.0), "{:?}", col(&b, "s"));
+    let b = read(&s, "MATCH (d)-[:IS_A*0..]->(r:Class {code: 'C0'}) RETURN d");
+    assert_eq!(b.records.len(), 2);
+}
+
+#[test]
+fn hierarchy_order_tests_count_and_enumerate() {
+    let s = taxonomy();
+    let b = read(&s, "MATCH (d:Class), (r:Class {code: 'C0'}) WHERE subsumes(d, r) RETURN count(d) AS c");
+    assert_eq!(ints(&b, "c"), vec![2]);
+    let b = read(&s, "MATCH (d:Class), (r:Class {code: 'C0'}) WHERE NOT subsumes(d, r) RETURN count(d) AS c");
+    assert_eq!(ints(&b, "c"), vec![2]);
+    let b = read(&s, "MATCH (d:Class), (r:Class {code: 'C0'}) WHERE subsumes(d, r) RETURN d");
+    assert_eq!(b.records.len(), 2);
+}
+
+#[test]
+fn hierarchy_driven_fact_aggregates() {
+    let s = taxonomy();
+    let b = read(&s, "MATCH (e:Fact)-[:ABOUT]->(x), (r:Class {code: 'C0'}) WHERE subsumes(x, r) RETURN count(e) AS c");
+    assert_eq!(ints(&b, "c"), vec![2]);
+    let b = read(&s, "MATCH (e:Fact)-[:ABOUT]->(x), (r:Class {code: 'C0'}) WHERE subsumes(x, r) RETURN count(DISTINCT e) AS c");
+    assert_eq!(ints(&b, "c"), vec![2]);
+    let b = read(&s, "MATCH (e:Fact)-[:ABOUT]->(x), (r:Class {code: 'ROOT'}) WHERE subsumes(x, r) RETURN sum(e.p) AS s");
+    assert_eq!(ints(&b, "s"), vec![70]);
+}
+
+// ---------------------------------------------------------------------------
 // Post-WITH stages
 // ---------------------------------------------------------------------------
 
