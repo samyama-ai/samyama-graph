@@ -835,7 +835,10 @@ fn ls(s: &str) -> Expression {
 
 fn lmap(entries: &[(&str, PropertyValue)]) -> Expression {
     Expression::Literal(PropertyValue::Map(
-        entries.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
     ))
 }
 
@@ -854,13 +857,19 @@ fn pstr(s: &str) -> PropertyValue {
 /// A graph of `n` `:V` nodes and the given directed `:E` edges. Each edge
 /// carries `w` (its weight, from `weights` or 1) and `t` (a time: 10, 20, ...
 /// in edge order). Returns the store and the node ids as `i64`s.
-fn algo_graph(n: usize, edges: &[(usize, usize)], weights: Option<&[f64]>) -> (GraphStore, Vec<i64>) {
+fn algo_graph(
+    n: usize,
+    edges: &[(usize, usize)],
+    weights: Option<&[f64]>,
+) -> (GraphStore, Vec<i64>) {
     let mut store = GraphStore::new();
     let ids: Vec<NodeId> = (0..n)
         .map(|i| {
             let id = store.create_node("V");
             store.set_node_property(TENANT, id, "x", i as i64).unwrap();
-            store.set_node_property(TENANT, id, "y", (i * i) as f64).unwrap();
+            store
+                .set_node_property(TENANT, id, "y", (i * i) as f64)
+                .unwrap();
             id
         })
         .collect();
@@ -868,7 +877,9 @@ fn algo_graph(n: usize, edges: &[(usize, usize)], weights: Option<&[f64]>) -> (G
         let e = store.create_edge(ids[a], ids[b], "E").unwrap();
         let w = weights.map(|ws| ws[k]).unwrap_or(1.0);
         store.set_edge_property(e, "w", w).unwrap();
-        store.set_edge_property(e, "t", (k as i64 + 1) * 10).unwrap();
+        store
+            .set_edge_property(e, "t", (k as i64 + 1) * 10)
+            .unwrap();
     }
     (store, ids.iter().map(|i| i.as_u64() as i64).collect())
 }
@@ -892,7 +903,11 @@ fn run_algo(store: &GraphStore, name: &str, args: Vec<Expression>) -> ExecutionR
     Ok(out)
 }
 
-fn run_algo_mut(store: &mut GraphStore, name: &str, args: Vec<Expression>) -> ExecutionResult<Vec<Record>> {
+fn run_algo_mut(
+    store: &mut GraphStore,
+    name: &str,
+    args: Vec<Expression>,
+) -> ExecutionResult<Vec<Record>> {
     let mut op = AlgorithmOperator::new(name.to_string(), args);
     let mut out = Vec::new();
     while let Some(r) = op.next_mut(store, TENANT)? {
@@ -939,7 +954,10 @@ fn rec_float(r: &Record, col: &str) -> f64 {
 }
 
 fn rec_node(r: &Record, col: &str) -> i64 {
-    r.get(col).and_then(|v| v.node_id()).unwrap_or_else(|| panic!("{col} not a node")).as_u64() as i64
+    r.get(col)
+        .and_then(|v| v.node_id())
+        .unwrap_or_else(|| panic!("{col} not a node"))
+        .as_u64() as i64
 }
 
 fn rec_ints(r: &Record, col: &str) -> Vec<i64> {
@@ -957,23 +975,49 @@ fn rec_ints(r: &Record, col: &str) -> Vec<i64> {
 
 #[test]
 fn algorithm_names_canonicalise_and_classify() {
-    assert_eq!(AlgorithmOperator::canonical_name("algo.pageRank"), "pagerank");
+    assert_eq!(
+        AlgorithmOperator::canonical_name("algo.pageRank"),
+        "pagerank"
+    );
     assert_eq!(AlgorithmOperator::canonical_name("samyama.WCC"), "wcc");
-    assert_eq!(AlgorithmOperator::canonical_name("gds.pageRank.stream"), "pagerank");
-    assert_eq!(AlgorithmOperator::canonical_name("gds.alpha.localClusteringCoefficient.stream"), "lcc");
-    assert_eq!(AlgorithmOperator::canonical_name("gds.beta.spanningTree"), "mst");
-    assert_eq!(AlgorithmOperator::canonical_name("gds.fastRP.stream"), "__gds_divergent__fastrp");
+    assert_eq!(
+        AlgorithmOperator::canonical_name("gds.pageRank.stream"),
+        "pagerank"
+    );
+    assert_eq!(
+        AlgorithmOperator::canonical_name("gds.alpha.localClusteringCoefficient.stream"),
+        "lcc"
+    );
+    assert_eq!(
+        AlgorithmOperator::canonical_name("gds.beta.spanningTree"),
+        "mst"
+    );
+    assert_eq!(
+        AlgorithmOperator::canonical_name("gds.fastRP.stream"),
+        "__gds_divergent__fastrp"
+    );
     assert!(!AlgorithmOperator::is_algorithm("gds.node2vec.stream"));
-    assert!(AlgorithmOperator::is_algorithm("gds.shortestPath.dijkstra.stream"));
+    assert!(AlgorithmOperator::is_algorithm(
+        "gds.shortestPath.dijkstra.stream"
+    ));
     assert!(AlgorithmOperator::is_algorithm("algo.hubsAndAuthorities"));
     assert!(!AlgorithmOperator::is_algorithm("algo.nope"));
     assert_eq!(
         AlgorithmOperator::unsupported_gds_mode("gds.alpha.pageRank.WRITE"),
         Some(("write", "pagerank".to_string()))
     );
-    assert_eq!(AlgorithmOperator::unsupported_gds_mode("gds.pageRank.stream"), None);
-    assert_eq!(AlgorithmOperator::unsupported_gds_mode("algo.pageRank.write"), None);
-    assert_eq!(AlgorithmOperator::unsupported_gds_mode("gds.pageRank"), None);
+    assert_eq!(
+        AlgorithmOperator::unsupported_gds_mode("gds.pageRank.stream"),
+        None
+    );
+    assert_eq!(
+        AlgorithmOperator::unsupported_gds_mode("algo.pageRank.write"),
+        None
+    );
+    assert_eq!(
+        AlgorithmOperator::unsupported_gds_mode("gds.pageRank"),
+        None
+    );
     assert!(AlgorithmOperator::procedure_is_mutating("samyama.OR.Solve"));
     assert!(AlgorithmOperator::procedure_is_mutating("algo.fastRP"));
     assert!(!AlgorithmOperator::procedure_is_mutating("algo.pageRank"));
@@ -1004,7 +1048,9 @@ fn mutating_algorithms_are_refused_on_the_read_path() {
     let (store, _) = path4();
     for name in ["algo.or.solve", "algo.fastRP", "algo.node2vec"] {
         match run_algo(&store, name, vec![]) {
-            Err(ExecutionError::RuntimeError(m)) => assert!(m.contains("requires write access"), "{m}"),
+            Err(ExecutionError::RuntimeError(m)) => {
+                assert!(m.contains("requires write access"), "{m}")
+            }
             other => panic!("{name}: {other:?}"),
         }
     }
@@ -1014,14 +1060,23 @@ fn mutating_algorithms_are_refused_on_the_read_path() {
 fn yield_aliases_rename_and_reset_reruns() {
     let (store, ids) = path4();
     let items = vec![
-        crate::query::ast::YieldItem { name: "node".into(), alias: Some("n".into()) },
-        crate::query::ast::YieldItem { name: "componentId".into(), alias: None },
+        crate::query::ast::YieldItem {
+            name: "node".into(),
+            alias: Some("n".into()),
+        },
+        crate::query::ast::YieldItem {
+            name: "componentId".into(),
+            alias: None,
+        },
     ];
     let mut op = AlgorithmOperator::new("algo.wcc".into(), vec![]).with_aliases(&items);
     let rows = drain(&mut op, &store);
     assert_eq!(rows.len(), 4);
     assert_eq!(rec_node(&rows[0], "n"), ids[0]);
-    assert_eq!(rec_int(&rows[0], "componentId"), rec_int(&rows[3], "componentId"));
+    assert_eq!(
+        rec_int(&rows[0], "componentId"),
+        rec_int(&rows[3], "componentId")
+    );
     op.reset();
     assert_eq!(drain(&mut op, &store).len(), 4);
 }
@@ -1032,20 +1087,39 @@ fn pagerank_config_label_and_edge_type() {
     let rows = algo_rows(
         &mut store,
         "algo.pageRank",
-        vec![ls("V"), ls("E"), lmap(&[("iterations", pint(5)), ("damping", PropertyValue::Float(0.5))])],
+        vec![
+            ls("V"),
+            ls("E"),
+            lmap(&[
+                ("iterations", pint(5)),
+                ("damping", PropertyValue::Float(0.5)),
+            ]),
+        ],
     );
     assert_eq!(rows.len(), 3);
     // A directed cycle: every node has the same score.
     let s0 = rec_float(&rows[0], "score");
-    assert!(rows.iter().all(|r| (rec_float(r, "score") - s0).abs() < 1e-9));
+    assert!(rows
+        .iter()
+        .all(|r| (rec_float(r, "score") - s0).abs() < 1e-9));
 }
 
 #[test]
 fn unknown_config_keys_are_refused_naming_the_rest() {
     let (mut store, _) = path4();
-    let e = algo_err(&mut store, "algo.pageRank", vec![lmap(&[("writeProperty", pstr("pr")), ("zeta", pint(1))])]);
-    assert!(e.contains("unknown config key `writeProperty` (and 1 more: zeta)"), "{e}");
-    assert!(e.contains("This algorithm reads: damping, iterations"), "{e}");
+    let e = algo_err(
+        &mut store,
+        "algo.pageRank",
+        vec![lmap(&[("writeProperty", pstr("pr")), ("zeta", pint(1))])],
+    );
+    assert!(
+        e.contains("unknown config key `writeProperty` (and 1 more: zeta)"),
+        "{e}"
+    );
+    assert!(
+        e.contains("This algorithm reads: damping, iterations"),
+        "{e}"
+    );
     let e = algo_err(&mut store, "algo.wcc", vec![lmap(&[("bogus", pint(1))])]);
     assert!(e.contains("unknown config key `bogus`."), "{e}");
 }
@@ -1053,21 +1127,41 @@ fn unknown_config_keys_are_refused_naming_the_rest() {
 #[test]
 fn shortest_path_argument_errors_and_weights() {
     let (mut store, ids) = algo_graph(3, &[(0, 1), (1, 2), (0, 2)], Some(&[1.0, 1.0, 5.0]));
-    assert!(algo_err(&mut store, "algo.shortestPath", vec![li(ids[0])]).contains("requires source and target"));
-    assert!(algo_err(&mut store, "algo.shortestPath", vec![ls("a"), li(ids[1])]).contains("Source must be integer ID"));
-    assert!(algo_err(&mut store, "algo.shortestPath", vec![li(ids[0]), ls("b")]).contains("Target must be integer ID"));
+    assert!(algo_err(&mut store, "algo.shortestPath", vec![li(ids[0])])
+        .contains("requires source and target"));
+    assert!(
+        algo_err(&mut store, "algo.shortestPath", vec![ls("a"), li(ids[1])])
+            .contains("Source must be integer ID")
+    );
+    assert!(
+        algo_err(&mut store, "algo.shortestPath", vec![li(ids[0]), ls("b")])
+            .contains("Target must be integer ID")
+    );
 
-    let rows = algo_rows(&mut store, "algo.shortestPath", vec![li(ids[0]), li(ids[2])]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.shortestPath",
+        vec![li(ids[0]), li(ids[2])],
+    );
     assert_eq!(rec_ints(&rows[0], "path"), vec![ids[0], ids[2]]);
     let rows = algo_rows(
         &mut store,
         "algo.shortestPath",
-        vec![li(ids[0]), li(ids[2]), lmap(&[("weight_property", pstr("w"))])],
+        vec![
+            li(ids[0]),
+            li(ids[2]),
+            lmap(&[("weight_property", pstr("w"))]),
+        ],
     );
     assert_eq!(rec_ints(&rows[0], "path"), vec![ids[0], ids[1], ids[2]]);
     assert_eq!(rec_float(&rows[0], "cost"), 2.0);
     // Unreachable (edges are directed): no rows.
-    assert!(algo_rows(&mut store, "algo.shortestPath", vec![li(ids[2]), li(ids[0])]).is_empty());
+    assert!(algo_rows(
+        &mut store,
+        "algo.shortestPath",
+        vec![li(ids[2]), li(ids[0])]
+    )
+    .is_empty());
 }
 
 #[test]
@@ -1076,22 +1170,41 @@ fn negative_weights_are_refused_by_dijkstra_style_algorithms() {
     let e = algo_err(
         &mut store,
         "algo.shortestPath",
-        vec![li(ids[0]), li(ids[2]), lmap(&[("weight_property", pstr("w"))])],
+        vec![
+            li(ids[0]),
+            li(ids[2]),
+            lmap(&[("weight_property", pstr("w"))]),
+        ],
     );
     assert!(e.contains("holds a negative weight"), "{e}");
-    let e = algo_err(&mut store, "algo.weightedPath", vec![li(ids[0]), li(ids[2]), ls("w")]);
-    assert!(e.contains("weightedPath: edge property `w` holds a negative weight"), "{e}");
+    let e = algo_err(
+        &mut store,
+        "algo.weightedPath",
+        vec![li(ids[0]), li(ids[2]), ls("w")],
+    );
+    assert!(
+        e.contains("weightedPath: edge property `w` holds a negative weight"),
+        "{e}"
+    );
     let e = algo_err(
         &mut store,
         "algo.yens",
-        vec![li(ids[0]), li(ids[2]), lmap(&[("weightProperty", pstr("w"))])],
+        vec![
+            li(ids[0]),
+            li(ids[2]),
+            lmap(&[("weightProperty", pstr("w"))]),
+        ],
     );
     assert!(e.contains("negative weight"), "{e}");
     // All-shortest-paths counts hops and is unaffected.
     let rows = algo_rows(
         &mut store,
         "algo.allShortestPaths",
-        vec![li(ids[0]), li(ids[2]), lmap(&[("weightProperty", pstr("w"))])],
+        vec![
+            li(ids[0]),
+            li(ids[2]),
+            lmap(&[("weightProperty", pstr("w"))]),
+        ],
     );
     assert_eq!(rows.len(), 1);
     assert_eq!(rec_int(&rows[0], "cost"), 2);
@@ -1100,16 +1213,43 @@ fn negative_weights_are_refused_by_dijkstra_style_algorithms() {
 #[test]
 fn weighted_path_argument_errors_and_result() {
     let (mut store, ids) = algo_graph(3, &[(0, 1), (1, 2), (0, 2)], Some(&[1.0, 1.0, 5.0]));
-    assert!(algo_err(&mut store, "algo.weightedPath", vec![li(ids[0]), li(ids[1])])
-        .contains("requires source, target, and weight"));
-    assert!(algo_err(&mut store, "algo.weightedPath", vec![ls("x"), li(ids[1]), ls("w")]).contains("Source must be integer ID"));
-    assert!(algo_err(&mut store, "algo.weightedPath", vec![li(ids[0]), ls("x"), ls("w")]).contains("Target must be integer ID"));
-    assert!(algo_err(&mut store, "algo.weightedPath", vec![li(ids[0]), li(ids[1]), li(3)])
-        .contains("Weight property must be a string"));
-    let rows = algo_rows(&mut store, "algo.weightedPath", vec![li(ids[0]), li(ids[2]), ls("w")]);
+    assert!(algo_err(
+        &mut store,
+        "algo.weightedPath",
+        vec![li(ids[0]), li(ids[1])]
+    )
+    .contains("requires source, target, and weight"));
+    assert!(algo_err(
+        &mut store,
+        "algo.weightedPath",
+        vec![ls("x"), li(ids[1]), ls("w")]
+    )
+    .contains("Source must be integer ID"));
+    assert!(algo_err(
+        &mut store,
+        "algo.weightedPath",
+        vec![li(ids[0]), ls("x"), ls("w")]
+    )
+    .contains("Target must be integer ID"));
+    assert!(algo_err(
+        &mut store,
+        "algo.weightedPath",
+        vec![li(ids[0]), li(ids[1]), li(3)]
+    )
+    .contains("Weight property must be a string"));
+    let rows = algo_rows(
+        &mut store,
+        "algo.weightedPath",
+        vec![li(ids[0]), li(ids[2]), ls("w")],
+    );
     assert_eq!(rec_float(&rows[0], "cost"), 2.0);
     assert_eq!(rec_ints(&rows[0], "path"), vec![ids[0], ids[1], ids[2]]);
-    assert!(algo_rows(&mut store, "algo.weightedPath", vec![li(ids[2]), li(ids[0]), ls("w")]).is_empty());
+    assert!(algo_rows(
+        &mut store,
+        "algo.weightedPath",
+        vec![li(ids[2]), li(ids[0]), ls("w")]
+    )
+    .is_empty());
 }
 
 #[test]
@@ -1126,7 +1266,11 @@ fn wcc_scc_cdlp_lcc_and_triangles() {
     // The triangle is one SCC; 3 and 4 are each their own.
     assert_eq!(comps.len(), 3);
 
-    let rows = algo_rows(&mut store, "algo.cdlp", vec![ls("V"), ls("E"), lmap(&[("maxIterations", pint(3))])]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.cdlp",
+        vec![ls("V"), ls("E"), lmap(&[("maxIterations", pint(3))])],
+    );
     assert_eq!(rows.len(), 5);
     let rows = algo_rows(&mut store, "algo.labelPropagation", vec![]);
     assert_eq!(rows.len(), 5);
@@ -1135,7 +1279,9 @@ fn wcc_scc_cdlp_lcc_and_triangles() {
     assert_eq!(rows.len(), 5);
     // Triangle members have coefficient 1 and sort first.
     assert_eq!(rec_float(&rows[0], "coefficient"), 1.0);
-    assert!(rows.iter().any(|r| rec_node(r, "node") == ids[3] && rec_float(r, "coefficient") == 0.0));
+    assert!(rows
+        .iter()
+        .any(|r| rec_node(r, "node") == ids[3] && rec_float(r, "coefficient") == 0.0));
 
     let rows = algo_rows(&mut store, "algo.triangleCount", vec![]);
     assert_eq!(rec_int(&rows[0], "triangles"), 1);
@@ -1151,15 +1297,38 @@ fn mst_and_max_flow() {
     let rows = algo_rows(&mut store, "algo.mst", vec![li(1)]);
     assert_eq!(rec_float(&rows[0], "total_weight"), 2.0);
 
-    assert!(algo_err(&mut store, "algo.maxFlow", vec![li(ids[0])]).contains("requires source and sink"));
-    assert!(algo_err(&mut store, "algo.maxFlow", vec![ls("a"), li(ids[1])]).contains("Source must be integer ID"));
-    assert!(algo_err(&mut store, "algo.maxFlow", vec![li(ids[0]), ls("b")]).contains("Sink must be integer ID"));
-    assert!(algo_err(&mut store, "algo.maxFlow", vec![li(ids[0]), li(ids[0])]).contains("source and sink are the same node"));
-    assert!(algo_err(&mut store, "algo.maxFlow", vec![li(ids[0]), li(999)]).contains("no node 999"));
-    assert!(algo_err(&mut store, "algo.maxFlow", vec![li(999), li(ids[0])]).contains("no node 999"));
-    let rows = algo_rows(&mut store, "algo.maxFlow", vec![li(ids[0]), li(ids[2]), ls("w")]);
+    assert!(
+        algo_err(&mut store, "algo.maxFlow", vec![li(ids[0])]).contains("requires source and sink")
+    );
+    assert!(
+        algo_err(&mut store, "algo.maxFlow", vec![ls("a"), li(ids[1])])
+            .contains("Source must be integer ID")
+    );
+    assert!(
+        algo_err(&mut store, "algo.maxFlow", vec![li(ids[0]), ls("b")])
+            .contains("Sink must be integer ID")
+    );
+    assert!(
+        algo_err(&mut store, "algo.maxFlow", vec![li(ids[0]), li(ids[0])])
+            .contains("source and sink are the same node")
+    );
+    assert!(
+        algo_err(&mut store, "algo.maxFlow", vec![li(ids[0]), li(999)]).contains("no node 999")
+    );
+    assert!(
+        algo_err(&mut store, "algo.maxFlow", vec![li(999), li(ids[0])]).contains("no node 999")
+    );
+    let rows = algo_rows(
+        &mut store,
+        "algo.maxFlow",
+        vec![li(ids[0]), li(ids[2]), ls("w")],
+    );
     assert_eq!(rec_float(&rows[0], "max_flow"), 6.0);
-    let rows = algo_rows(&mut store, "algo.maxFlow", vec![li(ids[0]), li(ids[2]), li(7)]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.maxFlow",
+        vec![li(ids[0]), li(ids[2]), li(7)],
+    );
     assert_eq!(rec_float(&rows[0], "max_flow"), 2.0);
 }
 
@@ -1167,31 +1336,67 @@ fn mst_and_max_flow() {
 fn temporal_algorithms() {
     // 0 -(t=10)-> 1 -(t=20)-> 2 -(t=30)-> 3
     let (mut store, ids) = path4();
-    let cfg = lmap(&[("timeProperty", pstr("t")), ("label", pstr("V")), ("edgeType", pstr("E"))]);
+    let cfg = lmap(&[
+        ("timeProperty", pstr("t")),
+        ("label", pstr("V")),
+        ("edgeType", pstr("E")),
+    ]);
     // Every node but the source is reached.
-    let rows = algo_rows(&mut store, "algo.temporalReachability", vec![li(ids[0]), cfg.clone()]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.temporalReachability",
+        vec![li(ids[0]), cfg.clone()],
+    );
     assert_eq!(rows.len(), 3);
     let last = rows.iter().find(|r| rec_node(r, "node") == ids[3]).unwrap();
     assert_eq!(rec_int(last, "time"), 30);
     assert_eq!(rec_ints(last, "path"), ids);
     assert_eq!(rec_ints(last, "times"), vec![10, 20, 30]);
 
-    let ranked = algo_rows(&mut store, "algo.propagationRanking", vec![li(ids[0]), cfg.clone()]);
+    let ranked = algo_rows(
+        &mut store,
+        "algo.propagationRanking",
+        vec![li(ids[0]), cfg.clone()],
+    );
     assert_eq!(rec_int(&ranked[0], "rank"), 1);
 
     // Starting after the first edge fired, nothing is reachable.
     let late = lmap(&[("timeProperty", pstr("t")), ("startTime", pint(15))]);
-    let rows = algo_rows(&mut store, "algo.temporalReachability", vec![li(ids[0]), late]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.temporalReachability",
+        vec![li(ids[0]), late],
+    );
     assert!(rows.is_empty());
-    let dt = lmap(&[("timeProperty", pstr("t")), ("startTime", PropertyValue::DateTime(0))]);
-    assert_eq!(algo_rows(&mut store, "algo.temporalReachability", vec![li(ids[0]), dt]).len(), 3);
+    let dt = lmap(&[
+        ("timeProperty", pstr("t")),
+        ("startTime", PropertyValue::DateTime(0)),
+    ]);
+    assert_eq!(
+        algo_rows(
+            &mut store,
+            "algo.temporalReachability",
+            vec![li(ids[0]), dt]
+        )
+        .len(),
+        3
+    );
 
-    let rows = algo_rows(&mut store, "algo.temporalShortestPath", vec![li(ids[0]), li(ids[3]), cfg.clone()]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.temporalShortestPath",
+        vec![li(ids[0]), li(ids[3]), cfg.clone()],
+    );
     assert_eq!(rec_ints(&rows[0], "path"), ids);
     assert_eq!(rec_ints(&rows[0], "times"), vec![10, 20, 30]);
     assert_eq!(rec_int(&rows[0], "arrival"), 30);
     // No time-respecting route backwards: no rows.
-    assert!(algo_rows(&mut store, "algo.temporalShortestPath", vec![li(ids[3]), li(ids[0]), cfg.clone()]).is_empty());
+    assert!(algo_rows(
+        &mut store,
+        "algo.temporalShortestPath",
+        vec![li(ids[3]), li(ids[0]), cfg.clone()]
+    )
+    .is_empty());
 
     let e = algo_err(&mut store, "algo.temporalShortestPath", vec![li(ids[0])]);
     assert!(e.contains("requires a target as argument 2"), "{e}");
@@ -1201,7 +1406,10 @@ fn temporal_algorithms() {
     let rows = algo_rows(
         &mut store,
         "algo.symptomExplanation",
-        vec![larr(vec![PropertyValue::Array(vec![pint(ids[3]), pint(100)])]), cfg.clone()],
+        vec![
+            larr(vec![PropertyValue::Array(vec![pint(ids[3]), pint(100)])]),
+            cfg.clone(),
+        ],
     );
     assert!(!rows.is_empty());
     assert!(rows.iter().any(|r| rec_node(r, "node") == ids[0]));
@@ -1209,8 +1417,14 @@ fn temporal_algorithms() {
 
     for (args, want) in [
         (vec![li(1)], "requires a list of [nodeId, seenAt] pairs"),
-        (vec![larr(vec![pint(1)])], "each symptom must be a [nodeId, seenAt] pair"),
-        (vec![larr(vec![PropertyValue::Array(vec![pstr("a"), pint(1)])])], "pair of integers"),
+        (
+            vec![larr(vec![pint(1)])],
+            "each symptom must be a [nodeId, seenAt] pair",
+        ),
+        (
+            vec![larr(vec![PropertyValue::Array(vec![pstr("a"), pint(1)])])],
+            "pair of integers",
+        ),
         (
             vec![larr(vec![PropertyValue::Array(vec![pint(999), pint(1)])])],
             "symptom node 999 is not in the projected graph",
@@ -1235,18 +1449,35 @@ fn centrality_family() {
         let rows = algo_rows(
             &mut store,
             name,
-            vec![ls("V"), lmap(&[("edgeType", pstr("E")), ("undirected", PropertyValue::Boolean(true))])],
+            vec![
+                ls("V"),
+                lmap(&[
+                    ("edgeType", pstr("E")),
+                    ("undirected", PropertyValue::Boolean(true)),
+                ]),
+            ],
         );
         assert_eq!(rows.len(), 4, "{name}");
-        assert_eq!(rec_node(&rows[0], "node"), ids[0], "{name}: the hub ranks first");
+        assert_eq!(
+            rec_node(&rows[0], "node"),
+            ids[0],
+            "{name}: the hub ranks first"
+        );
     }
     let rows = algo_rows(
         &mut store,
         "algo.degreeCentrality",
-        vec![lmap(&[("label", pstr("V")), ("undirected", PropertyValue::Boolean(false))])],
+        vec![lmap(&[
+            ("label", pstr("V")),
+            ("undirected", PropertyValue::Boolean(false)),
+        ])],
     );
     assert_eq!(rows.len(), 4);
-    let e = algo_err(&mut store, "algo.degree", vec![lmap(&[("iterations", pint(1))])]);
+    let e = algo_err(
+        &mut store,
+        "algo.degree",
+        vec![lmap(&[("iterations", pint(1))])],
+    );
     assert!(e.contains("unknown config key `iterations`"), "{e}");
 
     // A star is bipartite, so the power iteration oscillates and never settles.
@@ -1272,7 +1503,11 @@ fn link_prediction_pairs_and_rankings() {
         let ranked = algo_rows(
             &mut store,
             name,
-            vec![lmap(&[("limit", pint(2)), ("label", pstr("V")), ("edgeType", pstr("E"))])],
+            vec![lmap(&[
+                ("limit", pint(2)),
+                ("label", pstr("V")),
+                ("edgeType", pstr("E")),
+            ])],
         );
         assert_eq!(ranked.len(), 2, "{name}");
     }
@@ -1286,10 +1521,17 @@ fn link_prediction_pairs_and_rankings() {
 fn structural_algorithms_on_a_path_and_a_cycle() {
     let (mut dag, ids) = path4();
     let rows = algo_rows(&mut dag, "algo.topologicalSort", vec![ls("V")]);
-    assert_eq!(rows.iter().map(|r| rec_node(r, "node")).collect::<Vec<_>>(), ids);
+    assert_eq!(
+        rows.iter().map(|r| rec_node(r, "node")).collect::<Vec<_>>(),
+        ids
+    );
     assert_eq!(rec_int(&rows[3], "position"), 3);
     assert!(algo_rows(&mut dag, "algo.findCycle", vec![]).is_empty());
-    let bridges = algo_rows(&mut dag, "algo.bridges", vec![lmap(&[("label", pstr("V")), ("edgeType", pstr("E"))])]);
+    let bridges = algo_rows(
+        &mut dag,
+        "algo.bridges",
+        vec![lmap(&[("label", pstr("V")), ("edgeType", pstr("E"))])],
+    );
     assert_eq!(bridges.len(), 3);
     let aps = algo_rows(&mut dag, "algo.articulationPoints", vec![]);
     let mut ap_ids: Vec<i64> = aps.iter().map(|r| rec_node(r, "node")).collect();
@@ -1298,7 +1540,10 @@ fn structural_algorithms_on_a_path_and_a_cycle() {
 
     let (mut cyc, _) = triangle();
     let e = algo_err(&mut cyc, "algo.topologicalSort", vec![]);
-    assert!(e.contains("no topological order: the graph has a cycle"), "{e}");
+    assert!(
+        e.contains("no topological order: the graph has a cycle"),
+        "{e}"
+    );
     assert_eq!(algo_rows(&mut cyc, "algo.findCycle", vec![]).len(), 3);
 }
 
@@ -1307,7 +1552,11 @@ fn graph_shape_metrics() {
     let (mut store, _) = path4();
     let rows = algo_rows(&mut store, "algo.diameter", vec![]);
     assert_eq!(rec_int(&rows[0], "diameter"), 3);
-    let rows = algo_rows(&mut store, "algo.radius", vec![lmap(&[("undirected", PropertyValue::Boolean(true))])]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.radius",
+        vec![lmap(&[("undirected", PropertyValue::Boolean(true))])],
+    );
     assert_eq!(rec_int(&rows[0], "radius"), 2);
     let rows = algo_rows(&mut store, "algo.eccentricity", vec![]);
     assert_eq!(rows.len(), 4);
@@ -1316,22 +1565,34 @@ fn graph_shape_metrics() {
     let rows = algo_rows(&mut store, "algo.degreeAssortativity", vec![]);
     assert!(rec_float(&rows[0], "assortativity") < 0.0);
     // Directed: the path's far end cannot reach back, so some eccentricity is null.
-    let rows = algo_rows(&mut store, "algo.eccentricity", vec![lmap(&[("undirected", PropertyValue::Boolean(false))])]);
-    assert!(rows.iter().any(|r| matches!(r.get("eccentricity"), Some(Value::Property(PropertyValue::Null)))));
+    let rows = algo_rows(
+        &mut store,
+        "algo.eccentricity",
+        vec![lmap(&[("undirected", PropertyValue::Boolean(false))])],
+    );
+    assert!(rows.iter().any(|r| matches!(
+        r.get("eccentricity"),
+        Some(Value::Property(PropertyValue::Null))
+    )));
     let e = algo_err(&mut store, "algo.diameter", vec![lmap(&[("k", pint(1))])]);
     assert!(e.contains("unknown config key `k`"), "{e}");
 
     let (mut split, _) = algo_graph(4, &[(0, 1), (2, 3)], None);
-    assert!(algo_err(&mut split, "algo.diameter", vec![]).contains("not connected, so it has no diameter"));
+    assert!(algo_err(&mut split, "algo.diameter", vec![])
+        .contains("not connected, so it has no diameter"));
     assert!(algo_err(&mut split, "algo.radius", vec![]).contains("no radius"));
     let (mut tri, _) = triangle();
-    assert!(algo_err(&mut tri, "algo.degreeAssortativity", vec![]).contains("degree assortativity is undefined"));
+    assert!(algo_err(&mut tri, "algo.degreeAssortativity", vec![])
+        .contains("degree assortativity is undefined"));
 }
 
 #[test]
 fn louvain_and_modularity() {
-    let (mut store, ids) =
-        algo_graph(6, &[(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3), (2, 3)], None);
+    let (mut store, ids) = algo_graph(
+        6,
+        &[(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3), (2, 3)],
+        None,
+    );
     let rows = algo_rows(&mut store, "algo.louvain", vec![]);
     assert_eq!(rows.len(), 6);
     assert!(rec_float(&rows[0], "modularity") > 0.0);
@@ -1347,60 +1608,118 @@ fn louvain_and_modularity() {
 
     for (args, want) in [
         (vec![], "requires a list of [nodeId, community] pairs"),
-        (vec![larr(vec![pint(1)])], "each entry must be a [nodeId, community] pair"),
-        (vec![larr(vec![PropertyValue::Array(vec![pint(1)])])], "pair of integers"),
+        (
+            vec![larr(vec![pint(1)])],
+            "each entry must be a [nodeId, community] pair",
+        ),
+        (
+            vec![larr(vec![PropertyValue::Array(vec![pint(1)])])],
+            "pair of integers",
+        ),
         (
             vec![larr(vec![PropertyValue::Array(vec![pint(999), pint(0)])])],
             "node 999 is not in the projected graph",
         ),
-        (vec![larr(vec![PropertyValue::Array(vec![pint(ids[0]), pint(0)])])], "has no community"),
+        (
+            vec![larr(vec![PropertyValue::Array(vec![
+                pint(ids[0]),
+                pint(0),
+            ])])],
+            "has no community",
+        ),
     ] {
         let e = algo_err(&mut store, "algo.modularity", args);
         assert!(e.contains(want), "{e} !~ {want}");
     }
 
     let (mut bare, bare_ids) = algo_graph(2, &[], None);
-    let all = larr(bare_ids.iter().map(|id| PropertyValue::Array(vec![pint(*id), pint(0)])).collect());
-    assert!(algo_err(&mut bare, "algo.modularity", vec![all]).contains("undefined on a graph with no edges"));
+    let all = larr(
+        bare_ids
+            .iter()
+            .map(|id| PropertyValue::Array(vec![pint(*id), pint(0)]))
+            .collect(),
+    );
+    assert!(algo_err(&mut bare, "algo.modularity", vec![all])
+        .contains("undefined on a graph with no edges"));
     let rows = algo_rows(&mut bare, "algo.louvain", vec![]);
-    assert!(rows.iter().all(|r| matches!(r.get("modularity"), Some(Value::Property(PropertyValue::Null)))));
+    assert!(rows.iter().all(|r| matches!(
+        r.get("modularity"),
+        Some(Value::Property(PropertyValue::Null))
+    )));
 }
 
 #[test]
 fn path_enumeration_algorithms() {
     // A diamond: 0 -> 1 -> 3 and 0 -> 2 -> 3, the lower branch heavier.
-    let (mut store, ids) =
-        algo_graph(4, &[(0, 1), (1, 3), (0, 2), (2, 3)], Some(&[1.0, 1.0, 2.0, 2.0]));
-    let rows = algo_rows(&mut store, "algo.allShortestPaths", vec![li(ids[0]), li(ids[3]), lmap(&[("limit", pint(5))])]);
+    let (mut store, ids) = algo_graph(
+        4,
+        &[(0, 1), (1, 3), (0, 2), (2, 3)],
+        Some(&[1.0, 1.0, 2.0, 2.0]),
+    );
+    let rows = algo_rows(
+        &mut store,
+        "algo.allShortestPaths",
+        vec![li(ids[0]), li(ids[3]), lmap(&[("limit", pint(5))])],
+    );
     assert_eq!(rows.len(), 2);
     assert_eq!(rec_int(&rows[1], "rank"), 2);
 
     let rows = algo_rows(
         &mut store,
         "algo.yens",
-        vec![li(ids[0]), li(ids[3]), li(2), lmap(&[("weightProperty", pstr("w"))])],
+        vec![
+            li(ids[0]),
+            li(ids[3]),
+            li(2),
+            lmap(&[("weightProperty", pstr("w"))]),
+        ],
     );
     assert_eq!(rows.len(), 2);
     assert_eq!(rec_float(&rows[0], "cost"), 2.0);
     assert_eq!(rec_float(&rows[1], "cost"), 4.0);
-    let rows = algo_rows(&mut store, "algo.yens", vec![li(ids[0]), li(ids[3]), lmap(&[("k", pint(1))])]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.yens",
+        vec![li(ids[0]), li(ids[3]), lmap(&[("k", pint(1))])],
+    );
     assert_eq!(rows.len(), 1);
 
     let rows = algo_rows(
         &mut store,
         "algo.aStar",
-        vec![li(ids[0]), li(ids[3]), lmap(&[("weightProperty", pstr("w")), ("heuristicProperty", pstr("x"))])],
+        vec![
+            li(ids[0]),
+            li(ids[3]),
+            lmap(&[
+                ("weightProperty", pstr("w")),
+                ("heuristicProperty", pstr("x")),
+            ]),
+        ],
     );
     assert_eq!(rec_ints(&rows[0], "path"), vec![ids[0], ids[1], ids[3]]);
-    let rows = algo_rows(&mut store, "algo.aStar", vec![li(ids[0]), li(ids[3]), lmap(&[("heuristicProperty", pstr("y"))])]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.aStar",
+        vec![
+            li(ids[0]),
+            li(ids[3]),
+            lmap(&[("heuristicProperty", pstr("y"))]),
+        ],
+    );
     assert_eq!(rows.len(), 1);
     // Unreachable: no rows.
     assert!(algo_rows(&mut store, "algo.aStar", vec![li(ids[3]), li(ids[0])]).is_empty());
 
-    assert!(algo_err(&mut store, "algo.yens", vec![li(ids[0])]).contains("requires a source and a target node id"));
-    assert!(algo_err(&mut store, "algo.yens", vec![li(ids[0]), li(999)]).contains("node 999 is not in the projected graph"));
-    assert!(algo_err(&mut store, "algo.aStar", vec![li(ids[0]), li(ids[3]), lmap(&[("q", pint(1))])])
-        .contains("unknown config key `q`"));
+    assert!(algo_err(&mut store, "algo.yens", vec![li(ids[0])])
+        .contains("requires a source and a target node id"));
+    assert!(algo_err(&mut store, "algo.yens", vec![li(ids[0]), li(999)])
+        .contains("node 999 is not in the projected graph"));
+    assert!(algo_err(
+        &mut store,
+        "algo.aStar",
+        vec![li(ids[0]), li(ids[3]), lmap(&[("q", pint(1))])]
+    )
+    .contains("unknown config key `q`"));
 }
 
 #[test]
@@ -1417,9 +1736,14 @@ fn random_walk_is_seeded_and_validated() {
     assert_eq!(rec_node(&a[0], "node"), ids[0]);
     assert_eq!(rec_int(&a[5], "step"), 5);
     assert!(algo_err(&mut store, "algo.randomWalk", vec![]).contains("requires a source node id"));
-    assert!(algo_err(&mut store, "algo.randomWalk", vec![li(999)]).contains("node 999 is not in the projected graph"));
-    assert!(algo_err(&mut store, "algo.randomWalk", vec![li(ids[0]), lmap(&[("length", pint(1))])])
-        .contains("unknown config key"));
+    assert!(algo_err(&mut store, "algo.randomWalk", vec![li(999)])
+        .contains("node 999 is not in the projected graph"));
+    assert!(algo_err(
+        &mut store,
+        "algo.randomWalk",
+        vec![li(ids[0]), lmap(&[("length", pint(1))])]
+    )
+    .contains("unknown config key"));
 }
 
 #[test]
@@ -1428,7 +1752,10 @@ fn ranking_algorithms_beyond_pagerank() {
     let rows = algo_rows(
         &mut store,
         "algo.articleRank",
-        vec![lmap(&[("dampingFactor", PropertyValue::Float(0.8)), ("iterations", pint(10))])],
+        vec![lmap(&[
+            ("dampingFactor", PropertyValue::Float(0.8)),
+            ("iterations", pint(10)),
+        ])],
     );
     assert_eq!(rows.len(), 4);
     assert_eq!(rec_node(&rows[0], "node"), ids[1]);
@@ -1447,17 +1774,30 @@ fn ranking_algorithms_beyond_pagerank() {
     let e = algo_err(
         &mut store,
         "algo.katz",
-        vec![lmap(&[("alpha", PropertyValue::Float(5.0)), ("iterations", pint(20))])],
+        vec![lmap(&[
+            ("alpha", PropertyValue::Float(5.0)),
+            ("iterations", pint(20)),
+        ])],
     );
-    assert!(e.contains("did not converge in 20 iterations at alpha=5"), "{e}");
+    assert!(
+        e.contains("did not converge in 20 iterations at alpha=5"),
+        "{e}"
+    );
 
     let rows = algo_rows(
         &mut store,
         "algo.hits",
-        vec![lmap(&[("iterations", pint(100)), ("tolerance", PropertyValue::Float(1e-6))])],
+        vec![lmap(&[
+            ("iterations", pint(100)),
+            ("tolerance", PropertyValue::Float(1e-6)),
+        ])],
     );
     assert_eq!(rows.len(), 4);
-    assert_eq!(rec_node(&rows[0], "node"), ids[1], "node 1 is the authority");
+    assert_eq!(
+        rec_node(&rows[0], "node"),
+        ids[1],
+        "node 1 is the authority"
+    );
     assert!(rec_float(&rows[0], "authority") > 0.0);
 
     let rows = algo_rows(
@@ -1467,7 +1807,10 @@ fn ranking_algorithms_beyond_pagerank() {
             larr(vec![pint(ids[2]), pstr("skip")]),
             li(ids[3]),
             li(999),
-            lmap(&[("dampingFactor", PropertyValue::Float(0.85)), ("iterations", pint(50))]),
+            lmap(&[
+                ("dampingFactor", PropertyValue::Float(0.85)),
+                ("iterations", pint(50)),
+            ]),
             ls("ignored"),
         ],
     );
@@ -1476,7 +1819,11 @@ fn ranking_algorithms_beyond_pagerank() {
     let rows = algo_rows(&mut store, "algo.voteRank", vec![li(1)]);
     assert_eq!(rows.len(), 1);
     assert_eq!(rec_node(&rows[0], "node"), ids[1]);
-    let rows = algo_rows(&mut store, "algo.voteRank", vec![lmap(&[("k", pint(2))]), ls("x")]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.voteRank",
+        vec![lmap(&[("k", pint(2))]), ls("x")],
+    );
     assert_eq!(rec_int(rows.last().unwrap(), "rank"), rows.len() as i64);
 }
 
@@ -1487,17 +1834,24 @@ fn path_and_closure_algorithms() {
     assert_eq!(rows.len(), 4);
     let far = rows.iter().find(|r| rec_node(r, "node") == ids[3]).unwrap();
     assert_eq!(rec_float(far, "distance"), 3.0);
-    assert!(algo_err(&mut store, "algo.bellmanFord", vec![]).contains("requires a source as argument 1"));
+    assert!(algo_err(&mut store, "algo.bellmanFord", vec![])
+        .contains("requires a source as argument 1"));
     // Only nodes reachable from the source get a row.
-    assert_eq!(algo_rows(&mut store, "algo.bellmanFord", vec![li(ids[3])]).len(), 1);
+    assert_eq!(
+        algo_rows(&mut store, "algo.bellmanFord", vec![li(ids[3])]).len(),
+        1
+    );
 
     let rows = algo_rows(&mut store, "algo.allPairs", vec![]);
-    assert!(rows
-        .iter()
-        .any(|r| rec_node(r, "source") == ids[0] && rec_node(r, "target") == ids[3] && rec_int(r, "hops") == 3));
+    assert!(rows.iter().any(|r| rec_node(r, "source") == ids[0]
+        && rec_node(r, "target") == ids[3]
+        && rec_int(r, "hops") == 3));
 
     let rows = algo_rows(&mut store, "algo.dagLongestPath", vec![]);
-    assert_eq!(rows.iter().map(|r| rec_node(r, "node")).collect::<Vec<_>>(), ids);
+    assert_eq!(
+        rows.iter().map(|r| rec_node(r, "node")).collect::<Vec<_>>(),
+        ids
+    );
     let rows = algo_rows(&mut store, "algo.transitiveClosure", vec![]);
     assert_eq!(rows.len(), 6);
 
@@ -1516,7 +1870,10 @@ fn cohesion_algorithms() {
     let rows = algo_rows(&mut path, "algo.bipartite", vec![]);
     assert_eq!(rows.len(), 4);
     assert_eq!(rows.iter().filter(|r| rec_int(r, "side") == 0).count(), 2);
-    assert_eq!(algo_rows(&mut path, "algo.maximalMatching", vec![]).len(), 2);
+    assert_eq!(
+        algo_rows(&mut path, "algo.maximalMatching", vec![]).len(),
+        2
+    );
     let colours = algo_rows(&mut path, "algo.colouring", vec![]);
     assert!(colours.iter().all(|r| rec_int(r, "colour") < 2));
     assert!(!algo_rows(&mut path, "algo.dominatingSet", vec![]).is_empty());
@@ -1529,32 +1886,54 @@ fn cohesion_algorithms() {
     assert_eq!(rows.len(), 2);
     let rows = algo_rows(&mut path, "algo.richClub", vec![lmap(&[("k", pint(1))])]);
     assert!(rec_float(&rows[0], "coefficient") > 0.0);
-    assert!(algo_err(&mut path, "algo.richClub", vec![li(5)]).contains("fewer than two nodes have degree above 5"));
+    assert!(algo_err(&mut path, "algo.richClub", vec![li(5)])
+        .contains("fewer than two nodes have degree above 5"));
     let rows = algo_rows(&mut path, "algo.biconnectedComponents", vec![]);
     let comps: HashSet<i64> = rows.iter().map(|r| rec_int(r, "componentId")).collect();
     assert_eq!(comps.len(), 3);
 
     let (mut tri, _) = triangle();
     assert!(algo_err(&mut tri, "algo.bipartite", vec![]).contains("odd cycle"));
-    assert_eq!(algo_rows(&mut tri, "algo.kTruss", vec![lmap(&[("k", pint(3))])]).len(), 3);
-    assert_eq!(rec_float(&algo_rows(&mut tri, "algo.transitivity", vec![])[0], "transitivity"), 1.0);
+    assert_eq!(
+        algo_rows(&mut tri, "algo.kTruss", vec![lmap(&[("k", pint(3))])]).len(),
+        3
+    );
+    assert_eq!(
+        rec_float(
+            &algo_rows(&mut tri, "algo.transitivity", vec![])[0],
+            "transitivity"
+        ),
+        1.0
+    );
 
     let (mut one_edge, _) = algo_graph(2, &[(0, 1)], None);
-    assert!(algo_err(&mut one_edge, "algo.transitivity", vec![]).contains("no connected triple exists"));
+    assert!(
+        algo_err(&mut one_edge, "algo.transitivity", vec![]).contains("no connected triple exists")
+    );
     let (mut single, _) = algo_graph(1, &[], None);
-    assert!(algo_err(&mut single, "algo.globalEfficiency", vec![]).contains("needs at least two nodes"));
+    assert!(
+        algo_err(&mut single, "algo.globalEfficiency", vec![]).contains("needs at least two nodes")
+    );
 }
 
 #[test]
 fn similarity_and_structural_holes() {
     // 0 and 2 both point at 1 and 3; 4 is isolated.
     let (mut store, ids) = algo_graph(5, &[(0, 1), (0, 3), (2, 1), (2, 3)], None);
-    let rows = algo_rows(&mut store, "algo.nodeSimilarity", vec![lmap(&[("cutoff", PropertyValue::Float(0.1))])]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.nodeSimilarity",
+        vec![lmap(&[("cutoff", PropertyValue::Float(0.1))])],
+    );
     assert!(rows.iter().any(|r| rec_node(r, "node") == ids[0]
         && rec_node(r, "other") == ids[2]
         && rec_float(r, "similarity") == 1.0));
-    assert!(algo_err(&mut store, "algo.nodeSimilarity", vec![lmap(&[("topK", pint(1))])])
-        .contains("unknown config key `topK`"));
+    assert!(algo_err(
+        &mut store,
+        "algo.nodeSimilarity",
+        vec![lmap(&[("topK", pint(1))])]
+    )
+    .contains("unknown config key `topK`"));
 
     for name in ["algo.overlap", "algo.cosine"] {
         let rows = algo_rows(&mut store, name, vec![]);
@@ -1573,7 +1952,13 @@ fn similarity_and_structural_holes() {
     }
 
     let (mut recip, _) = algo_graph(2, &[(0, 1), (1, 0)], None);
-    assert_eq!(rec_float(&algo_rows(&mut recip, "algo.reciprocity", vec![])[0], "reciprocity"), 1.0);
+    assert_eq!(
+        rec_float(
+            &algo_rows(&mut recip, "algo.reciprocity", vec![])[0],
+            "reciprocity"
+        ),
+        1.0
+    );
     let (mut none, _) = algo_graph(2, &[], None);
     assert!(algo_err(&mut none, "algo.reciprocity", vec![]).contains("no directed edges"));
 }
@@ -1581,7 +1966,11 @@ fn similarity_and_structural_holes() {
 #[test]
 fn pca_projects_numeric_properties() {
     let (mut store, ids) = path4();
-    let rows = algo_rows(&mut store, "algo.pca", vec![ls("V"), larr(vec![pstr("x"), pstr("y")]), li(1)]);
+    let rows = algo_rows(
+        &mut store,
+        "algo.pca",
+        vec![ls("V"), larr(vec![pstr("x"), pstr("y")]), li(1)],
+    );
     assert_eq!(rows.len(), 4);
     assert_eq!(rec_node(&rows[0], "node"), ids[0]);
     match rows[0].get("projection") {
@@ -1594,14 +1983,28 @@ fn pca_projects_numeric_properties() {
     let rows = algo_rows(&mut store, "algo.pca", vec![null.clone(), list_expr, null]);
     assert_eq!(rows.len(), 4);
     // A label with no nodes: no rows.
-    assert!(algo_rows(&mut store, "algo.pca", vec![ls("Nope"), larr(vec![pstr("x")])]).is_empty());
+    assert!(algo_rows(
+        &mut store,
+        "algo.pca",
+        vec![ls("Nope"), larr(vec![pstr("x")])]
+    )
+    .is_empty());
 
     for (args, want) in [
-        (vec![li(1), larr(vec![pstr("x")])], "the label must be a string or null"),
-        (vec![ls("V"), larr(vec![pint(1)])], "property names must be strings"),
+        (
+            vec![li(1), larr(vec![pstr("x")])],
+            "the label must be a string or null",
+        ),
+        (
+            vec![ls("V"), larr(vec![pint(1)])],
+            "property names must be strings",
+        ),
         (vec![ls("V"), ls("x")], "requires a list of property names"),
         (vec![ls("V"), larr(vec![])], "needs at least one property"),
-        (vec![ls("V"), larr(vec![pstr("x")]), li(0)], "nComponents must be a positive integer"),
+        (
+            vec![ls("V"), larr(vec![pstr("x")]), li(0)],
+            "nComponents must be a positive integer",
+        ),
     ] {
         let e = algo_err(&mut store, "algo.pca", args);
         assert!(e.contains(want), "{e} !~ {want}");
@@ -1616,7 +2019,10 @@ fn fastrp_writes_embeddings_and_validates_config() {
         "algo.fastRP",
         vec![lmap(&[
             ("embeddingDimension", pint(4)),
-            ("iterationWeights", PropertyValue::Array(vec![PropertyValue::Float(1.0), pint(1)])),
+            (
+                "iterationWeights",
+                PropertyValue::Array(vec![PropertyValue::Float(1.0), pint(1)]),
+            ),
             ("seed", pint(3)),
             ("normalize", PropertyValue::Boolean(true)),
             ("writeProperty", pstr("emb")),
@@ -1633,12 +2039,23 @@ fn fastrp_writes_embeddings_and_validates_config() {
         other => panic!("{other:?}"),
     }
     for (cfg, want) in [
-        (lmap(&[("embeddingDimension", pint(0))]), "embeddingDimension must be a positive integer"),
-        (lmap(&[("iterationWeights", PropertyValue::Array(vec![pstr("a")]))]), "iterationWeights must be numbers"),
-        (lmap(&[("iterationWeights", PropertyValue::Array(vec![]))]), "iterationWeights must not be empty"),
+        (
+            lmap(&[("embeddingDimension", pint(0))]),
+            "embeddingDimension must be a positive integer",
+        ),
+        (
+            lmap(&[("iterationWeights", PropertyValue::Array(vec![pstr("a")]))]),
+            "iterationWeights must be numbers",
+        ),
+        (
+            lmap(&[("iterationWeights", PropertyValue::Array(vec![]))]),
+            "iterationWeights must not be empty",
+        ),
         (lmap(&[("bogus", pint(1))]), "unknown config key `bogus`"),
     ] {
-        let e = run_algo_mut(&mut store, "algo.fastRP", vec![cfg]).unwrap_err().to_string();
+        let e = run_algo_mut(&mut store, "algo.fastRP", vec![cfg])
+            .unwrap_err()
+            .to_string();
         assert!(e.contains(want), "{e} !~ {want}");
     }
 }
@@ -1669,19 +2086,42 @@ fn node2vec_writes_embeddings_and_validates_config() {
     let rows = run_algo_mut(
         &mut store,
         "algo.node2vec",
-        vec![lmap(&[("returnFactor", pint(1)), ("inOutFactor", PropertyValue::Float(0.5))])],
+        vec![lmap(&[
+            ("returnFactor", pint(1)),
+            ("inOutFactor", PropertyValue::Float(0.5)),
+        ])],
     )
     .unwrap();
     assert_eq!(rows.len(), 3);
     for (cfg, want) in [
-        (lmap(&[("embeddingDimension", pstr("x"))]), "embeddingDimension must be a positive integer"),
-        (lmap(&[("walkLength", pint(1))]), "walkLength must be at least 2"),
-        (lmap(&[("walksPerNode", pint(0))]), "walksPerNode must be at least 1"),
-        (lmap(&[("returnFactor", pstr("x"))]), "returnFactor must be a number"),
-        (lmap(&[("inOutFactor", pstr("x"))]), "inOutFactor must be a number"),
-        (lmap(&[("windowSize", pint(0))]), "windowSize must be at least 1"),
+        (
+            lmap(&[("embeddingDimension", pstr("x"))]),
+            "embeddingDimension must be a positive integer",
+        ),
+        (
+            lmap(&[("walkLength", pint(1))]),
+            "walkLength must be at least 2",
+        ),
+        (
+            lmap(&[("walksPerNode", pint(0))]),
+            "walksPerNode must be at least 1",
+        ),
+        (
+            lmap(&[("returnFactor", pstr("x"))]),
+            "returnFactor must be a number",
+        ),
+        (
+            lmap(&[("inOutFactor", pstr("x"))]),
+            "inOutFactor must be a number",
+        ),
+        (
+            lmap(&[("windowSize", pint(0))]),
+            "windowSize must be at least 1",
+        ),
     ] {
-        let e = run_algo_mut(&mut store, "algo.node2vec", vec![cfg]).unwrap_err().to_string();
+        let e = run_algo_mut(&mut store, "algo.node2vec", vec![cfg])
+            .unwrap_err()
+            .to_string();
         assert!(e.contains(want), "{e} !~ {want}");
     }
 }
@@ -1690,8 +2130,12 @@ fn solve_store() -> GraphStore {
     let mut store = GraphStore::new();
     for i in 0..3 {
         let n = store.create_node("Item");
-        store.set_node_property(TENANT, n, "cost", (i + 1) as f64).unwrap();
-        store.set_node_property(TENANT, n, "risk", (3 - i) as f64).unwrap();
+        store
+            .set_node_property(TENANT, n, "cost", (i + 1) as f64)
+            .unwrap();
+        store
+            .set_node_property(TENANT, n, "risk", (3 - i) as f64)
+            .unwrap();
     }
     store
 }
@@ -1720,15 +2164,19 @@ fn or_solve_single_objective_writes_back() {
     assert_eq!(prop_str(&rows[0], "algorithm"), "Jaya");
     assert_eq!(rec_int(&rows[0], "max_iterations"), 5);
     assert!(rec_int(&rows[0], "iterations") <= 5);
-    let written = read(&store, "MATCH (n:Item) WHERE n.qty IS NOT NULL RETURN count(n) AS c");
+    let written = read(
+        &store,
+        "MATCH (n:Item) WHERE n.qty IS NOT NULL RETURN count(n) AS c",
+    );
     assert_eq!(int(&written, 0, "c"), 3);
 }
 
 #[test]
 fn or_solve_every_single_objective_solver_dispatches() {
     for name in [
-        "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "SAMPJaya", "QOJaya", "EHRJaya", "BMR", "BWR",
-        "BMWR", "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS", "FPA", "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR",
+        "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "SAMPJaya", "QOJaya",
+        "EHRJaya", "BMR", "BWR", "BMWR", "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
+        "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR",
     ] {
         let mut store = solve_store();
         let rows = run_algo_mut(
@@ -1760,7 +2208,10 @@ fn or_solve_multi_objective_reports_a_front() {
                 ("algorithm", pstr(name)),
                 ("label", pstr("Item")),
                 ("property", pstr("qty")),
-                ("costProperties", PropertyValue::Array(vec![pstr("cost"), pstr("risk")])),
+                (
+                    "costProperties",
+                    PropertyValue::Array(vec![pstr("cost"), pstr("risk")]),
+                ),
                 ("populationSize", pint(6)),
                 ("maxIterations", pint(3)),
             ])],
@@ -1777,7 +2228,10 @@ fn or_solve_multi_objective_reports_a_front() {
         vec![lmap(&[
             ("label", pstr("Item")),
             ("property", pstr("qty")),
-            ("cost_properties", PropertyValue::Array(vec![pstr("cost"), pstr("risk")])),
+            (
+                "cost_properties",
+                PropertyValue::Array(vec![pstr("cost"), pstr("risk")]),
+            ),
             ("populationSize", pint(6)),
             ("maxIterations", pint(2)),
         ])],
@@ -1792,12 +2246,29 @@ fn or_solve_argument_errors() {
     for (args, want) in [
         (vec![], "requires a config map"),
         (vec![ls("x")], "First argument must be a map"),
-        (vec![lmap(&[("algorithm", pstr("Simplex")), ("label", pstr("Item"))])], "unknown algorithm `Simplex`"),
-        (vec![lmap(&[("property", pstr("q"))])], "Missing 'label' in config"),
-        (vec![lmap(&[("label", pstr("Item"))])], "Missing 'property' in config"),
-        (vec![lmap(&[("label", pstr("Item")), ("iterations", pint(1))])], "unknown config key `iterations`"),
+        (
+            vec![lmap(&[
+                ("algorithm", pstr("Simplex")),
+                ("label", pstr("Item")),
+            ])],
+            "unknown algorithm `Simplex`",
+        ),
+        (
+            vec![lmap(&[("property", pstr("q"))])],
+            "Missing 'label' in config",
+        ),
+        (
+            vec![lmap(&[("label", pstr("Item"))])],
+            "Missing 'property' in config",
+        ),
+        (
+            vec![lmap(&[("label", pstr("Item")), ("iterations", pint(1))])],
+            "unknown config key `iterations`",
+        ),
     ] {
-        let e = run_algo_mut(&mut store, "algo.or.solve", args).unwrap_err().to_string();
+        let e = run_algo_mut(&mut store, "algo.or.solve", args)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains(want), "{e} !~ {want}");
     }
     // No nodes under the label: no rows.
@@ -1862,12 +2333,18 @@ fn var(name: &str) -> Expression {
 
 /// A materialized input of one row per node, bound to `n`.
 fn node_rows(ids: &[NodeId]) -> OperatorBox {
-    Box::new(MaterializedOperator::new(ids.iter().map(|id| a_record("n", Value::NodeRef(*id))).collect()))
+    Box::new(MaterializedOperator::new(
+        ids.iter()
+            .map(|id| a_record("n", Value::NodeRef(*id)))
+            .collect(),
+    ))
 }
 
 fn int_rows(var_name: &str, n: i64) -> OperatorBox {
     Box::new(MaterializedOperator::new(
-        (0..n).map(|i| a_record(var_name, Value::Property(PropertyValue::Integer(i)))).collect(),
+        (0..n)
+            .map(|i| a_record(var_name, Value::Property(PropertyValue::Integer(i))))
+            .collect(),
     ))
 }
 
@@ -1885,7 +2362,10 @@ fn skip_operator_paths() {
     // The batch the skip lands in is returned from the skip onwards.
     let b = op.next_batch(&store, 3).unwrap().unwrap();
     assert_eq!(b.records.len(), 1);
-    assert_eq!(b.records[0].get("x"), Some(&Value::Property(PropertyValue::Integer(2))));
+    assert_eq!(
+        b.records[0].get("x"),
+        Some(&Value::Property(PropertyValue::Integer(2)))
+    );
     let b = op.next_batch(&store, 3).unwrap().unwrap();
     assert_eq!(b.records.len(), 2);
     assert!(op.next_batch(&store, 3).unwrap().is_none());
@@ -1897,7 +2377,10 @@ fn skip_operator_paths() {
     // A skip that lands exactly at a batch boundary.
     let mut op = SkipOperator::new(int_rows("x", 4), 2);
     let b = op.next_batch(&store, 2).unwrap().unwrap();
-    assert_eq!(b.records[0].get("x"), Some(&Value::Property(PropertyValue::Integer(2))));
+    assert_eq!(
+        b.records[0].get("x"),
+        Some(&Value::Property(PropertyValue::Integer(2)))
+    );
 
     // A skip longer than the input.
     let mut op = SkipOperator::new(int_rows("x", 2), 5);
@@ -1928,7 +2411,9 @@ fn delete_operator_paths() {
     op.reset();
     // A plain DELETE of a connected node is refused.
     match op.next_mut(&mut store, TENANT) {
-        Err(ExecutionError::ConstraintVerificationFailed(m)) => assert!(m.contains("still has 1 relationship"), "{m}"),
+        Err(ExecutionError::ConstraintVerificationFailed(m)) => {
+            assert!(m.contains("still has 1 relationship"), "{m}")
+        }
         other => panic!("{other:?}"),
     }
 
@@ -1936,7 +2421,10 @@ fn delete_operator_paths() {
         node_rows(&[]),
         vec![
             Expression::PathVariable("p".into()),
-            Expression::Property { variable: "m".into(), property: "k".into() },
+            Expression::Property {
+                variable: "m".into(),
+                property: "k".into(),
+            },
             li(3),
         ],
         true,
@@ -1948,12 +2436,24 @@ fn delete_operator_paths() {
     // Entities inside lists, maps and paths are all deleted.
     let c = store.create_node("N");
     let mut row = Record::new();
-    row.bind("l", Value::List(vec![Value::EdgeRef(e, a, b, EdgeType::new("R"))]));
+    row.bind(
+        "l",
+        Value::List(vec![Value::EdgeRef(e, a, b, EdgeType::new("R"))]),
+    );
     row.bind(
         "m",
-        Value::Map(std::collections::BTreeMap::from([("x".to_string(), Value::NodeRef(c))])),
+        Value::Map(std::collections::BTreeMap::from([(
+            "x".to_string(),
+            Value::NodeRef(c),
+        )])),
     );
-    row.bind("p", Value::Path { nodes: vec![a, b], edges: vec![] });
+    row.bind(
+        "p",
+        Value::Path {
+            nodes: vec![a, b],
+            edges: vec![],
+        },
+    );
     row.bind("s", Value::Property(PropertyValue::Integer(1)));
     let mut op = DeleteOperator::new(
         Box::new(MaterializedOperator::new(vec![row])),
@@ -1971,7 +2471,14 @@ fn delete_operator_paths() {
     let mut op = DeleteOperator::new(node_rows(&[a]), vec![var("n")], true);
     assert_eq!(drain_mut(&mut op, &mut store).len(), 1);
     assert_eq!(store.node_count(), 1);
-    assert_eq!(int(&read(&store, "MATCH ()-[r]->() RETURN count(r) AS c"), 0, "c"), 0);
+    assert_eq!(
+        int(
+            &read(&store, "MATCH ()-[r]->() RETURN count(r) AS c"),
+            0,
+            "c"
+        ),
+        0
+    );
 }
 
 #[test]
@@ -1987,8 +2494,25 @@ fn set_property_operator_paths() {
     row.bind("r", Value::EdgeRef(e, a, b, EdgeType::new("R")));
     row.bind("s", Value::Property(PropertyValue::Integer(1)));
     let items = vec![
-        ("n".to_string(), "list".to_string(), Expression::ListExpr(vec![var("m"), var("r"), li(1), Expression::Literal(PropertyValue::Null)])),
-        ("n".to_string(), "map".to_string(), Expression::MapExpr(vec![("a".into(), var("m")), ("b".into(), var("r")), ("c".into(), li(2))])),
+        (
+            "n".to_string(),
+            "list".to_string(),
+            Expression::ListExpr(vec![
+                var("m"),
+                var("r"),
+                li(1),
+                Expression::Literal(PropertyValue::Null),
+            ]),
+        ),
+        (
+            "n".to_string(),
+            "map".to_string(),
+            Expression::MapExpr(vec![
+                ("a".into(), var("m")),
+                ("b".into(), var("r")),
+                ("c".into(), li(2)),
+            ]),
+        ),
         ("n".to_string(), "node".to_string(), var("m")),
         ("n".to_string(), "edge".to_string(), var("r")),
         ("n".to_string(), "err".to_string(), var("unbound")),
@@ -1999,14 +2523,21 @@ fn set_property_operator_paths() {
     let mut op = SetPropertyOperator::with_entity_items(
         Box::new(MaterializedOperator::new(vec![row.clone()])),
         items,
-        vec![("missing".to_string(), false, lmap(&[])), ("m".to_string(), true, lmap(&[("z", pint(1))]))],
+        vec![
+            ("missing".to_string(), false, lmap(&[])),
+            ("m".to_string(), true, lmap(&[("z", pint(1))])),
+        ],
     );
     assert!(op.is_mutating());
     let d = op.describe();
     assert_eq!(d.name, "SetProperty");
     assert!(d.details.contains("m += "), "{}", d.details);
     assert_eq!(op.children_mut().len(), 1);
-    assert_eq!(drain(&mut op, &store).len(), 1, "the read path is a pass-through");
+    assert_eq!(
+        drain(&mut op, &store).len(),
+        1,
+        "the read path is a pass-through"
+    );
     op.reset();
     assert_eq!(op.next_batch(&store, 4).unwrap().unwrap().records.len(), 1);
     op.reset();
@@ -2015,7 +2546,12 @@ fn set_property_operator_paths() {
     let (ai, bi, ei) = (a.as_u64() as i64, b.as_u64() as i64, e.as_u64() as i64);
     assert_eq!(
         store.node_property(a, "list"),
-        Some(PropertyValue::Array(vec![pint(bi), pint(ei), pint(1), PropertyValue::Null]))
+        Some(PropertyValue::Array(vec![
+            pint(bi),
+            pint(ei),
+            pint(1),
+            PropertyValue::Null
+        ]))
     );
     match store.node_property(a, "map") {
         Some(PropertyValue::Map(m)) => {
@@ -2029,7 +2565,10 @@ fn set_property_operator_paths() {
     assert_eq!(store.node_property(a, "edge"), Some(pint(ei)));
     // An expression that fails to evaluate stores nothing.
     assert_eq!(store.node_property(a, "err"), None);
-    assert_eq!(store.get_edge(e).unwrap().properties.get("w"), Some(&pint(9)));
+    assert_eq!(
+        store.get_edge(e).unwrap().properties.get("w"),
+        Some(&pint(9))
+    );
     assert_eq!(store.node_property(b, "z"), Some(pint(1)));
     assert_eq!(store.node_property(b, "k"), Some(pint(5)));
     let _ = ai;
@@ -2038,8 +2577,16 @@ fn set_property_operator_paths() {
     let mut op = SetPropertyOperator::new(
         Box::new(MaterializedOperator::new(vec![row.clone()])),
         vec![
-            ("n".to_string(), "node".to_string(), Expression::Literal(PropertyValue::Null)),
-            ("r".to_string(), "w".to_string(), Expression::Literal(PropertyValue::Null)),
+            (
+                "n".to_string(),
+                "node".to_string(),
+                Expression::Literal(PropertyValue::Null),
+            ),
+            (
+                "r".to_string(),
+                "w".to_string(),
+                Expression::Literal(PropertyValue::Null),
+            ),
         ],
     );
     drain_mut(&mut op, &mut store);
@@ -2049,10 +2596,16 @@ fn set_property_operator_paths() {
     // A list holding a map is refused.
     let mut op = SetPropertyOperator::new(
         Box::new(MaterializedOperator::new(vec![row])),
-        vec![("n".to_string(), "bad".to_string(), larr(vec![PropertyValue::Map(Default::default())]))],
+        vec![(
+            "n".to_string(),
+            "bad".to_string(),
+            larr(vec![PropertyValue::Map(Default::default())]),
+        )],
     );
     match op.next_mut(&mut store, TENANT) {
-        Err(ExecutionError::TypeError(m)) => assert!(m.contains("InvalidPropertyType: `bad`"), "{m}"),
+        Err(ExecutionError::TypeError(m)) => {
+            assert!(m.contains("InvalidPropertyType: `bad`"), "{m}")
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -2065,7 +2618,9 @@ fn entity_assignment_on_edges_and_its_sources() {
     let e = store.create_edge(a, b, "R").unwrap();
     store.set_edge_property(e, "old", 1i64).unwrap();
     let edge = Value::EdgeRef(e, a, b, EdgeType::new("R"));
-    let map = Value::Property(PropertyValue::Map([("new".to_string(), pint(2))].into_iter().collect()));
+    let map = Value::Property(PropertyValue::Map(
+        [("new".to_string(), pint(2))].into_iter().collect(),
+    ));
     apply_entity_assignment(&edge, &map, false, &mut store, TENANT).unwrap();
     let props = store.get_edge(e).unwrap().properties;
     assert_eq!(props.get("old"), None);
@@ -2077,9 +2632,15 @@ fn entity_assignment_on_edges_and_its_sources() {
     let full = Value::Edge(e, Box::new(store.get_edge(e).unwrap()));
     let from_edge = SetPropertyOperator::source_properties(&full, &store).unwrap();
     assert_eq!(from_edge.get("new"), Some(&pint(2)));
-    assert!(SetPropertyOperator::source_properties(&Value::Property(PropertyValue::Null), &store).unwrap().is_empty());
+    assert!(
+        SetPropertyOperator::source_properties(&Value::Property(PropertyValue::Null), &store)
+            .unwrap()
+            .is_empty()
+    );
     match SetPropertyOperator::source_properties(&Value::Property(pint(3)), &store) {
-        Err(ExecutionError::TypeError(m)) => assert!(m.contains("expects a map or another entity"), "{m}"),
+        Err(ExecutionError::TypeError(m)) => {
+            assert!(m.contains("expects a map or another entity"), "{m}")
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -2093,7 +2654,11 @@ fn label_and_remove_operators_paths() {
     let e = store.create_edge(a, b, "R").unwrap();
     store.set_edge_property(e, "w", 1i64).unwrap();
 
-    let mut op = LabelMutationOperator::new(node_rows(&[a]), vec![("n".into(), Label::new("B"))], vec![("n".into(), Label::new("A"))]);
+    let mut op = LabelMutationOperator::new(
+        node_rows(&[a]),
+        vec![("n".into(), Label::new("B"))],
+        vec![("n".into(), Label::new("A"))],
+    );
     let d = op.describe();
     assert_eq!(d.name, "LabelMutation");
     assert_eq!(d.details, "+n:B, -n:A");
@@ -2111,7 +2676,12 @@ fn label_and_remove_operators_paths() {
     row.bind("s", Value::Property(pint(1)));
     let mut op = RemovePropertyOperator::new(
         Box::new(MaterializedOperator::new(vec![row])),
-        vec![("n".into(), "k".into()), ("r".into(), "w".into()), ("s".into(), "x".into()), ("zz".into(), "x".into())],
+        vec![
+            ("n".into(), "k".into()),
+            ("r".into(), "w".into()),
+            ("s".into(), "x".into()),
+            ("zz".into(), "x".into()),
+        ],
     );
     assert!(op.is_mutating());
     assert_eq!(op.describe().details, "n.k, r.w, s.x, zz.x");
@@ -2135,7 +2705,10 @@ fn unwind_operator_paths() {
     assert!(d.details.ends_with("AS v"), "{}", d.details);
     let rows = drain(&mut op, &store);
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[1].get("v"), Some(&Value::Property(PropertyValue::Float(2.0))));
+    assert_eq!(
+        rows[1].get("v"),
+        Some(&Value::Property(PropertyValue::Float(2.0)))
+    );
     op.reset();
     let b = op.next_batch(&store, 10).unwrap().unwrap();
     assert_eq!(b.columns, vec!["v".to_string()]);
@@ -2159,7 +2732,11 @@ fn load_csv_rejects_a_non_string_source_before_touching_disk() {
     let mut op = LoadCsvOperator::new(Box::new(SingleRowOperator::new()), clause.clone());
     let d = op.describe();
     assert_eq!(d.name, "LoadCsv");
-    assert!(d.details.ends_with("AS row (with headers)"), "{}", d.details);
+    assert!(
+        d.details.ends_with("AS row (with headers)"),
+        "{}",
+        d.details
+    );
     assert_eq!(op.children_mut().len(), 1);
     match op.next(&store) {
         Err(ExecutionError::TypeError(m)) => assert!(m.contains("expects a string path"), "{m}"),
@@ -2176,8 +2753,13 @@ fn load_csv_rejects_a_non_string_source_before_touching_disk() {
         with_headers: false,
         field_terminator: None,
     };
-    let details = LoadCsvOperator::new(Box::new(SingleRowOperator::new()), no_headers).describe().details;
-    assert!(details.contains("x.csv") && details.ends_with(" AS r"), "{details}");
+    let details = LoadCsvOperator::new(Box::new(SingleRowOperator::new()), no_headers)
+        .describe()
+        .details;
+    assert!(
+        details.contains("x.csv") && details.ends_with(" AS r"),
+        "{details}"
+    );
 }
 
 #[test]
@@ -2185,7 +2767,10 @@ fn foreach_operator_paths() {
     let mut store = GraphStore::new();
     let mut op = ForeachOperator::new(int_rows("x", 1), "i".into(), li(3), vec![]);
     assert_eq!(op.children_mut().len(), 1);
-    assert!(matches!(op.next(&store), Err(ExecutionError::RuntimeError(_))));
+    assert!(matches!(
+        op.next(&store),
+        Err(ExecutionError::RuntimeError(_))
+    ));
     // The batch form goes through the refusing read path and yields nothing.
     assert!(op.next_batch(&store, 5).unwrap().is_none());
     op.reset();
@@ -2194,9 +2779,19 @@ fn foreach_operator_paths() {
         other => panic!("{other:?}"),
     }
     // A null list is empty.
-    let mut op = ForeachOperator::new(int_rows("x", 1), "i".into(), Expression::Literal(PropertyValue::Null), vec![]);
+    let mut op = ForeachOperator::new(
+        int_rows("x", 1),
+        "i".into(),
+        Expression::Literal(PropertyValue::Null),
+        vec![],
+    );
     assert_eq!(drain_mut(&mut op, &mut store).len(), 1);
-    let mut op = ForeachOperator::new(int_rows("x", 1), "i".into(), larr(vec![pint(1), pint(2)]), vec![]);
+    let mut op = ForeachOperator::new(
+        int_rows("x", 1),
+        "i".into(),
+        larr(vec![pint(1), pint(2)]),
+        vec![],
+    );
     assert_eq!(drain_mut(&mut op, &mut store).len(), 1);
 }
 
@@ -2254,10 +2849,20 @@ fn expand_into_operator_paths() {
         r.bind("t", Value::NodeRef(t));
         r
     };
-    let input = || -> OperatorBox { Box::new(MaterializedOperator::new(vec![pair(a, c), pair(a, b)])) };
-    let mut op = ExpandIntoOperator::new(input(), "s".into(), "t".into(), Some("R".into()), Some("r".into()));
+    let input =
+        || -> OperatorBox { Box::new(MaterializedOperator::new(vec![pair(a, c), pair(a, b)])) };
+    let mut op = ExpandIntoOperator::new(
+        input(),
+        "s".into(),
+        "t".into(),
+        Some("R".into()),
+        Some("r".into()),
+    );
     let d = op.describe();
-    assert_eq!((d.name.as_str(), d.details.as_str()), ("ExpandInto", "(s)--[:R]-->(t)"));
+    assert_eq!(
+        (d.name.as_str(), d.details.as_str()),
+        ("ExpandInto", "(s)--[:R]-->(t)")
+    );
     assert_eq!(op.children_mut().len(), 1);
     let rows = drain(&mut op, &store);
     // Only the connected pair survives, with the edge bound.
@@ -2273,7 +2878,10 @@ fn expand_into_operator_paths() {
     assert_eq!(any.describe().details, "(s)--[:*]-->(t)");
 
     let mut missing = ExpandIntoOperator::new(
-        Box::new(MaterializedOperator::new(vec![a_record("t", Value::NodeRef(b))])),
+        Box::new(MaterializedOperator::new(vec![a_record(
+            "t",
+            Value::NodeRef(b),
+        )])),
         "s".into(),
         "t".into(),
         None,
@@ -2281,7 +2889,10 @@ fn expand_into_operator_paths() {
     );
     assert!(matches!(missing.next(&store), Err(ExecutionError::VariableNotFound(v)) if v == "s"));
     let mut missing = ExpandIntoOperator::new(
-        Box::new(MaterializedOperator::new(vec![a_record("s", Value::NodeRef(a))])),
+        Box::new(MaterializedOperator::new(vec![a_record(
+            "s",
+            Value::NodeRef(a),
+        )])),
         "s".into(),
         "t".into(),
         None,
@@ -2295,7 +2906,8 @@ fn node_by_id_operator_checks_labels_and_existence() {
     let mut store = GraphStore::new();
     let a = store.create_node("P");
     let b = store.create_node("Q");
-    let mut op = NodeByIdOperator::new(vec![a, b, NodeId::new(999)], "n".into()).with_labels(vec![Label::new("P")]);
+    let mut op = NodeByIdOperator::new(vec![a, b, NodeId::new(999)], "n".into())
+        .with_labels(vec![Label::new("P")]);
     let rows = drain(&mut op, &store);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get("n"), Some(&Value::NodeRef(a)));
@@ -2342,12 +2954,25 @@ fn merge_path_creates_then_matches_with_on_create_and_on_match() {
              ON CREATE SET a.created = true ON MATCH SET a.matched = true \
              RETURN a.id AS a, b.id AS b, r.w AS w";
     let first = write(&mut store, q);
-    assert_eq!((int(&first, 0, "a"), int(&first, 0, "b"), int(&first, 0, "w")), (1, 2, 1));
+    assert_eq!(
+        (
+            int(&first, 0, "a"),
+            int(&first, 0, "b"),
+            int(&first, 0, "w")
+        ),
+        (1, 2, 1)
+    );
     let second = write(&mut store, q);
     assert_eq!(second.records.len(), 1);
     assert_eq!(count_of(&store, "MATCH (n:P) RETURN count(n) AS c"), 2);
-    assert_eq!(count_of(&store, "MATCH ()-[r:R]->() RETURN count(r) AS c"), 1);
-    let b = read(&store, "MATCH (a:P {id: 1}) RETURN a.created AS c, a.matched AS m");
+    assert_eq!(
+        count_of(&store, "MATCH ()-[r:R]->() RETURN count(r) AS c"),
+        1
+    );
+    let b = read(
+        &store,
+        "MATCH (a:P {id: 1}) RETURN a.created AS c, a.matched AS m",
+    );
     assert_eq!(cell(&b, 0, "c"), PropertyValue::Boolean(true));
     assert_eq!(cell(&b, 0, "m"), PropertyValue::Boolean(true));
 }
@@ -2356,10 +2981,19 @@ fn merge_path_creates_then_matches_with_on_create_and_on_match() {
 fn merge_path_incoming_and_undirected_patterns() {
     let mut store = GraphStore::new();
     write(&mut store, "MERGE (x:Q {k: 1})<-[:S]-(y:Q {k: 2})");
-    assert_eq!(count_of(&store, "MATCH (:Q {k: 2})-[:S]->(:Q {k: 1}) RETURN count(*) AS c"), 1);
+    assert_eq!(
+        count_of(
+            &store,
+            "MATCH (:Q {k: 2})-[:S]->(:Q {k: 1}) RETURN count(*) AS c"
+        ),
+        1
+    );
     // Undirected: the existing edge matches in either direction.
     write(&mut store, "MERGE (x:Q {k: 1})-[:S]-(y:Q {k: 2})");
-    assert_eq!(count_of(&store, "MATCH ()-[r:S]->() RETURN count(r) AS c"), 1);
+    assert_eq!(
+        count_of(&store, "MATCH ()-[r:S]->() RETURN count(r) AS c"),
+        1
+    );
 }
 
 #[test]
@@ -2378,7 +3012,10 @@ fn merge_path_with_a_partial_match_creates_the_whole_pattern() {
     write(&mut store, "CREATE (:P {id: 1})");
     write(&mut store, "MERGE (a:P {id: 1})-[:R]->(b:P {id: 3})");
     // The pattern as a whole was absent, so both ends are fresh.
-    assert_eq!(count_of(&store, "MATCH (n:P {id: 1}) RETURN count(n) AS c"), 2);
+    assert_eq!(
+        count_of(&store, "MATCH (n:P {id: 1}) RETURN count(n) AS c"),
+        2
+    );
     // Now it exists, and the index finds its candidates.
     write(&mut store, "MERGE (a:P {id: 1})-[:R]->(b:P {id: 3})");
     assert_eq!(count_of(&store, "MATCH (n:P) RETURN count(n) AS c"), 3);
@@ -2387,10 +3024,16 @@ fn merge_path_with_a_partial_match_creates_the_whole_pattern() {
 #[test]
 fn merge_path_per_row_with_property_expressions() {
     let mut store = GraphStore::new();
-    let b = write(&mut store, "UNWIND [1, 2, 2] AS x MERGE (a:W {v: x})-[:L {x: x}]->(b:W2 {v: x}) RETURN count(*) AS c");
+    let b = write(
+        &mut store,
+        "UNWIND [1, 2, 2] AS x MERGE (a:W {v: x})-[:L {x: x}]->(b:W2 {v: x}) RETURN count(*) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 3);
     assert_eq!(count_of(&store, "MATCH (n:W) RETURN count(n) AS c"), 2);
-    assert_eq!(count_of(&store, "MATCH ()-[r:L]->() RETURN sum(r.x) AS c"), 3);
+    assert_eq!(
+        count_of(&store, "MATCH ()-[r:L]->() RETURN sum(r.x) AS c"),
+        3
+    );
 }
 
 #[test]
@@ -2399,11 +3042,20 @@ fn merge_path_entity_sets_and_labels() {
     let q = "MERGE (a:E1)-[:R]->(b:E2) ON CREATE SET a += {k: 1} ON MATCH SET a = {z: 2}, b:Seen";
     write(&mut store, q);
     let r = read(&store, "MATCH (a:E1) RETURN a.k AS k, a.z AS z");
-    assert_eq!((cell(&r, 0, "k"), cell(&r, 0, "z")), (pint(1), PropertyValue::Null));
+    assert_eq!(
+        (cell(&r, 0, "k"), cell(&r, 0, "z")),
+        (pint(1), PropertyValue::Null)
+    );
     write(&mut store, q);
     let r = read(&store, "MATCH (a:E1) RETURN a.k AS k, a.z AS z");
-    assert_eq!((cell(&r, 0, "k"), cell(&r, 0, "z")), (PropertyValue::Null, pint(2)));
-    assert_eq!(count_of(&store, "MATCH (b:E2:Seen) RETURN count(b) AS c"), 1);
+    assert_eq!(
+        (cell(&r, 0, "k"), cell(&r, 0, "z")),
+        (PropertyValue::Null, pint(2))
+    );
+    assert_eq!(
+        count_of(&store, "MATCH (b:E2:Seen) RETURN count(b) AS c"),
+        1
+    );
 }
 
 #[test]
@@ -2418,9 +3070,15 @@ fn merge_path_reuses_a_bound_node() {
 fn merge_node_binds_every_match_and_applies_on_match() {
     let mut store = GraphStore::new();
     write(&mut store, "CREATE (:M {i: 1}), (:M {i: 2})");
-    let b = write(&mut store, "MERGE (m:M) ON MATCH SET m.seen = m.i * 10, m:Old RETURN m.i AS i");
+    let b = write(
+        &mut store,
+        "MERGE (m:M) ON MATCH SET m.seen = m.i * 10, m:Old RETURN m.i AS i",
+    );
     assert_eq!(b.records.len(), 2);
-    assert_eq!(count_of(&store, "MATCH (m:M:Old) RETURN sum(m.seen) AS c"), 30);
+    assert_eq!(
+        count_of(&store, "MATCH (m:M:Old) RETURN sum(m.seen) AS c"),
+        30
+    );
 }
 
 #[test]
@@ -2432,14 +3090,26 @@ fn merge_node_on_create_null_removes_and_labels() {
     );
     assert_eq!(int(&b, 0, "y"), 2);
     assert_eq!(int(&b, 0, "z"), 3);
-    assert_eq!(count_of(&store, "MATCH (n:Fresh:New) WHERE n.x IS NULL RETURN count(n) AS c"), 1);
+    assert_eq!(
+        count_of(
+            &store,
+            "MATCH (n:Fresh:New) WHERE n.x IS NULL RETURN count(n) AS c"
+        ),
+        1
+    );
 }
 
 #[test]
 fn merge_refuses_a_non_scalar_property() {
     let mut store = GraphStore::new();
-    let e = write_err(&mut store, "WITH [{a: 1}] AS m MERGE (n:Bad {v: m}) RETURN n");
-    assert!(e.contains("must be a scalar value") || e.contains("Type"), "{e}");
+    let e = write_err(
+        &mut store,
+        "WITH [{a: 1}] AS m MERGE (n:Bad {v: m}) RETURN n",
+    );
+    assert!(
+        e.contains("must be a scalar value") || e.contains("Type"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -2451,14 +3121,21 @@ fn merge_operator_direct_paths() {
         None => panic!("no merge clause"),
     };
     let mut op = MergeOperator::new(pattern, vec![], vec![], vec![], vec![]);
-    assert!(matches!(op.next(&store), Err(ExecutionError::RuntimeError(_))));
+    assert!(matches!(
+        op.next(&store),
+        Err(ExecutionError::RuntimeError(_))
+    ));
     assert!(op.next_batch(&store, 5).unwrap().is_none());
     op.reset();
     let mut store = store;
     assert_eq!(drain_mut(&mut op, &mut store).len(), 1);
     op.reset();
     assert_eq!(drain_mut(&mut op, &mut store).len(), 1);
-    assert_eq!(store.node_count(), 1, "the second run matches the node the first made");
+    assert_eq!(
+        store.node_count(),
+        1,
+        "the second run matches the node the first made"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2470,18 +3147,24 @@ fn shortest_path_queries_in_every_direction() {
     let store = people();
     let len = |q: &str| -> Vec<i64> { ints(&read(&store, q), "l") };
     assert_eq!(
-        len("MATCH (a:Person {name: 'alice'}), (c:Person {name: 'carol'}) \
-             MATCH p = shortestPath((a)-[:KNOWS*]->(c)) RETURN length(p) AS l"),
+        len(
+            "MATCH (a:Person {name: 'alice'}), (c:Person {name: 'carol'}) \
+             MATCH p = shortestPath((a)-[:KNOWS*]->(c)) RETURN length(p) AS l"
+        ),
         vec![2]
     );
     assert_eq!(
-        len("MATCH (a:Person {name: 'alice'}), (c:Person {name: 'carol'}) \
-             MATCH p = shortestPath((c)<-[:KNOWS*]-(a)) RETURN length(p) AS l"),
+        len(
+            "MATCH (a:Person {name: 'alice'}), (c:Person {name: 'carol'}) \
+             MATCH p = shortestPath((c)<-[:KNOWS*]-(a)) RETURN length(p) AS l"
+        ),
         vec![2]
     );
     assert_eq!(
-        len("MATCH (a:Person {name: 'alice'}), (c:Person {name: 'carol'}) \
-             MATCH p = allShortestPaths((c)-[*]-(a)) RETURN length(p) AS l"),
+        len(
+            "MATCH (a:Person {name: 'alice'}), (c:Person {name: 'carol'}) \
+             MATCH p = allShortestPaths((c)-[*]-(a)) RETURN length(p) AS l"
+        ),
         vec![2]
     );
     // Against the direction: no path, no row.
@@ -2501,13 +3184,25 @@ fn shortest_path_queries_in_every_direction() {
 #[test]
 fn with_barrier_orders_pages_filters_and_aggregates() {
     let store = people();
-    let b = read(&store, "MATCH (n:Person) WITH n.age AS age ORDER BY age DESC SKIP 1 LIMIT 1 RETURN age");
+    let b = read(
+        &store,
+        "MATCH (n:Person) WITH n.age AS age ORDER BY age DESC SKIP 1 LIMIT 1 RETURN age",
+    );
     assert_eq!(ints(&b, "age"), vec![40]);
-    let b = read(&store, "MATCH (n:Person) WITH DISTINCT n.age > 35 AS old RETURN count(*) AS c");
+    let b = read(
+        &store,
+        "MATCH (n:Person) WITH DISTINCT n.age > 35 AS old RETURN count(*) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 2);
-    let b = read(&store, "MATCH (n:Person) WITH count(n) AS c WHERE c > 1 RETURN c");
+    let b = read(
+        &store,
+        "MATCH (n:Person) WITH count(n) AS c WHERE c > 1 RETURN c",
+    );
     assert_eq!(int(&b, 0, "c"), 3);
-    let b = read(&store, "MATCH (n:Person) WITH count(n) AS c WHERE c > 10 RETURN c");
+    let b = read(
+        &store,
+        "MATCH (n:Person) WITH count(n) AS c WHERE c > 10 RETURN c",
+    );
     assert!(b.records.is_empty());
     let b = read(
         &store,
@@ -2517,9 +3212,15 @@ fn with_barrier_orders_pages_filters_and_aggregates() {
     assert_eq!(cell(&b, 0, "old"), PropertyValue::Boolean(true));
     assert_eq!(int(&b, 0, "s"), 2);
     assert_eq!(float(&b, 0, "a"), 45.0);
-    let b = read(&store, "MATCH (n:Person) WITH n ORDER BY n.name DESC SKIP 2 RETURN n.name AS name");
+    let b = read(
+        &store,
+        "MATCH (n:Person) WITH n ORDER BY n.name DESC SKIP 2 RETURN n.name AS name",
+    );
     assert_eq!(strings(&b, "name"), vec!["alice"]);
-    let b = read(&store, "MATCH (n:Person) WITH n.name AS name WHERE name STARTS WITH 'b' RETURN name");
+    let b = read(
+        &store,
+        "MATCH (n:Person) WITH n.name AS name WHERE name STARTS WITH 'b' RETURN name",
+    );
     assert_eq!(strings(&b, "name"), vec!["bob"]);
 }
 
@@ -2588,14 +3289,26 @@ fn count_distinct_state_over_every_value_shape() {
         Value::Null,
         Value::List(vec![pv(pint(1))]),
         Value::Map(Default::default()),
-        Value::Path { nodes: vec![n], edges: vec![] },
+        Value::Path {
+            nodes: vec![n],
+            edges: vec![],
+        },
     ];
     // node 1, edge 7, 1 (collides with node id 1), the list and the map.
-    assert_eq!(agg(AggregateType::Count, true, &values).result(), pv(pint(4)));
+    assert_eq!(
+        agg(AggregateType::Count, true, &values).result(),
+        pv(pint(4))
+    );
     // Plain count skips only the two nulls.
-    assert_eq!(agg(AggregateType::Count, false, &values).result(), pv(pint(7)));
+    assert_eq!(
+        agg(AggregateType::Count, false, &values).result(),
+        pv(pint(7))
+    );
     assert_eq!(agg_split(AggregateType::Count, false, &values), pv(pint(7)));
-    assert_eq!(agg_split(AggregateType::Count, true, &values[..3]), pv(pint(2)));
+    assert_eq!(
+        agg_split(AggregateType::Count, true, &values[..3]),
+        pv(pint(2))
+    );
 }
 
 #[test]
@@ -2603,35 +3316,84 @@ fn sum_and_avg_promote_and_merge() {
     let ints = [pv(pint(1)), pv(pint(2)), pv(pint(3)), pv(pint(4))];
     assert_eq!(agg(AggregateType::Sum, false, &ints).result(), pv(pint(10)));
     assert_eq!(agg_split(AggregateType::Sum, false, &ints), pv(pint(10)));
-    let mixed = [pv(pint(1)), pv(PropertyValue::Float(0.5)), pv(pint(2)), pv(pstr("x"))];
-    assert_eq!(agg(AggregateType::Sum, false, &mixed).result(), pv(PropertyValue::Float(3.5)));
+    let mixed = [
+        pv(pint(1)),
+        pv(PropertyValue::Float(0.5)),
+        pv(pint(2)),
+        pv(pstr("x")),
+    ];
+    assert_eq!(
+        agg(AggregateType::Sum, false, &mixed).result(),
+        pv(PropertyValue::Float(3.5))
+    );
     // Float half merged into an integer half, and the other way round.
     assert_eq!(
-        agg_split(AggregateType::Sum, false, &[pv(pint(1)), pv(pint(1)), pv(PropertyValue::Float(0.5)), pv(pint(1))]),
+        agg_split(
+            AggregateType::Sum,
+            false,
+            &[
+                pv(pint(1)),
+                pv(pint(1)),
+                pv(PropertyValue::Float(0.5)),
+                pv(pint(1))
+            ]
+        ),
         pv(PropertyValue::Float(3.5))
     );
     assert_eq!(
-        agg_split(AggregateType::Sum, false, &[pv(PropertyValue::Float(0.5)), pv(pint(1)), pv(pint(1)), pv(pint(1))]),
+        agg_split(
+            AggregateType::Sum,
+            false,
+            &[
+                pv(PropertyValue::Float(0.5)),
+                pv(pint(1)),
+                pv(pint(1)),
+                pv(pint(1))
+            ]
+        ),
         pv(PropertyValue::Float(3.5))
     );
 
     assert_eq!(agg(AggregateType::Avg, false, &[]).result(), Value::Null);
-    assert_eq!(agg_split(AggregateType::Avg, false, &ints), pv(PropertyValue::Float(2.5)));
     assert_eq!(
-        agg(AggregateType::Avg, false, &[pv(PropertyValue::Float(1.0)), pv(pint(3)), pv(pstr("x"))]).result(),
+        agg_split(AggregateType::Avg, false, &ints),
+        pv(PropertyValue::Float(2.5))
+    );
+    assert_eq!(
+        agg(
+            AggregateType::Avg,
+            false,
+            &[pv(PropertyValue::Float(1.0)), pv(pint(3)), pv(pstr("x"))]
+        )
+        .result(),
         pv(PropertyValue::Float(2.0))
     );
 }
 
 #[test]
 fn min_max_skip_nulls_and_merge() {
-    let values = [pv(pint(3)), pv(PropertyValue::Null), pv(pint(1)), pv(pint(5)), Value::NodeRef(NodeId::new(0))];
-    assert_eq!(agg(AggregateType::Min, false, &values).result(), pv(pint(1)));
-    assert_eq!(agg(AggregateType::Max, false, &values).result(), pv(pint(5)));
+    let values = [
+        pv(pint(3)),
+        pv(PropertyValue::Null),
+        pv(pint(1)),
+        pv(pint(5)),
+        Value::NodeRef(NodeId::new(0)),
+    ];
+    assert_eq!(
+        agg(AggregateType::Min, false, &values).result(),
+        pv(pint(1))
+    );
+    assert_eq!(
+        agg(AggregateType::Max, false, &values).result(),
+        pv(pint(5))
+    );
     assert_eq!(agg_split(AggregateType::Min, false, &values), pv(pint(1)));
     assert_eq!(agg_split(AggregateType::Max, false, &values), pv(pint(5)));
     assert_eq!(agg(AggregateType::Min, false, &[]).result(), Value::Null);
-    assert_eq!(agg(AggregateType::Max, false, &[pv(PropertyValue::Null)]).result(), Value::Null);
+    assert_eq!(
+        agg(AggregateType::Max, false, &[pv(PropertyValue::Null)]).result(),
+        Value::Null
+    );
     // Merging an empty half leaves the other alone.
     let mut a = agg(AggregateType::Max, false, &[pv(pint(2))]);
     a.merge(agg(AggregateType::Max, false, &[]));
@@ -2643,66 +3405,121 @@ fn min_max_skip_nulls_and_merge() {
 
 #[test]
 fn collect_plain_and_distinct() {
-    let values = [pv(pint(2)), pv(PropertyValue::Null), Value::Null, pv(pint(1)), pv(pint(2))];
+    let values = [
+        pv(pint(2)),
+        pv(PropertyValue::Null),
+        Value::Null,
+        pv(pint(1)),
+        pv(pint(2)),
+    ];
     assert_eq!(
         agg(AggregateType::Collect, false, &values).result(),
         pv(PropertyValue::Array(vec![pint(2), pint(1), pint(2)]))
     );
-    assert_eq!(agg_split(AggregateType::Collect, true, &values), pv(PropertyValue::Array(vec![pint(1), pint(2)])));
+    assert_eq!(
+        agg_split(AggregateType::Collect, true, &values),
+        pv(PropertyValue::Array(vec![pint(1), pint(2)]))
+    );
     assert_eq!(
         agg_split(AggregateType::Collect, false, &values),
         pv(PropertyValue::Array(vec![pint(2), pint(1), pint(2)]))
     );
     // Entities make it a list of values, not an array of properties.
     let n = Value::NodeRef(NodeId::new(3));
-    assert_eq!(agg(AggregateType::Collect, false, &[n.clone(), pv(pint(1))]).result(), Value::List(vec![n, pv(pint(1))]));
+    assert_eq!(
+        agg(AggregateType::Collect, false, &[n.clone(), pv(pint(1))]).result(),
+        Value::List(vec![n, pv(pint(1))])
+    );
 }
 
 #[test]
 fn percentiles_cont_and_disc() {
-    let values: Vec<Value> = (1..=4).map(|i| pv(pint(i))).chain([pv(pstr("x"))]).collect();
+    let values: Vec<Value> = (1..=4)
+        .map(|i| pv(pint(i)))
+        .chain([pv(pstr("x"))])
+        .collect();
     let mut cont = agg(AggregateType::PercentileCont, false, &values);
     assert_eq!(cont.result(), pv(PropertyValue::Float(2.5)));
-    cont.set_percentile(&pv(PropertyValue::Float(0.25))).unwrap();
+    cont.set_percentile(&pv(PropertyValue::Float(0.25)))
+        .unwrap();
     assert_eq!(cont.result(), pv(PropertyValue::Float(1.75)));
-    let mut disc = agg(AggregateType::PercentileDisc, false, &[pv(PropertyValue::Float(1.0)), pv(pint(2)), pv(pint(3))]);
+    let mut disc = agg(
+        AggregateType::PercentileDisc,
+        false,
+        &[pv(PropertyValue::Float(1.0)), pv(pint(2)), pv(pint(3))],
+    );
     disc.set_percentile(&pv(pint(1))).unwrap();
     assert_eq!(disc.result(), pv(PropertyValue::Float(3.0)));
     disc.set_percentile(&pv(PropertyValue::Null)).unwrap();
-    assert!(matches!(disc.set_percentile(&pv(pstr("x"))), Err(ExecutionError::TypeError(_))));
+    assert!(matches!(
+        disc.set_percentile(&pv(pstr("x"))),
+        Err(ExecutionError::TypeError(_))
+    ));
     match disc.set_percentile(&pv(PropertyValue::Float(1.5))) {
         Err(ExecutionError::RuntimeError(m)) => assert!(m.contains("between 0.0 and 1.0"), "{m}"),
         other => panic!("{other:?}"),
     }
-    assert_eq!(agg(AggregateType::PercentileCont, false, &[]).result(), Value::Null);
-    assert_eq!(agg_split(AggregateType::PercentileDisc, false, &values[..4]), pv(PropertyValue::Float(2.0)));
+    assert_eq!(
+        agg(AggregateType::PercentileCont, false, &[]).result(),
+        Value::Null
+    );
+    assert_eq!(
+        agg_split(AggregateType::PercentileDisc, false, &values[..4]),
+        pv(PropertyValue::Float(2.0))
+    );
     // Setting a percentile on a state that has none is a no-op.
-    agg(AggregateType::Count, false, &[]).set_percentile(&pv(pint(1))).unwrap();
+    agg(AggregateType::Count, false, &[])
+        .set_percentile(&pv(pint(1)))
+        .unwrap();
 }
 
 #[test]
 fn stdev_sample_and_population() {
-    let values = [pv(pint(2)), pv(pint(4)), pv(PropertyValue::Float(4.0)), pv(pint(4)), pv(pint(5)), pv(pint(5)), pv(pint(7)), pv(pint(9))];
-    assert_eq!(agg(AggregateType::StDevP, false, &values).result(), pv(PropertyValue::Float(2.0)));
+    let values = [
+        pv(pint(2)),
+        pv(pint(4)),
+        pv(PropertyValue::Float(4.0)),
+        pv(pint(4)),
+        pv(pint(5)),
+        pv(pint(5)),
+        pv(pint(7)),
+        pv(pint(9)),
+    ];
+    assert_eq!(
+        agg(AggregateType::StDevP, false, &values).result(),
+        pv(PropertyValue::Float(2.0))
+    );
     match agg_split(AggregateType::StDev, false, &values) {
         Value::Property(PropertyValue::Float(f)) => assert!((f - 2.138089935).abs() < 1e-6, "{f}"),
         other => panic!("{other:?}"),
     }
     assert_eq!(agg(AggregateType::StDev, false, &[]).result(), Value::Null);
     // One value: the sample denominator is clamped to 1.
-    assert_eq!(agg(AggregateType::StDev, false, &[pv(pint(3))]).result(), pv(PropertyValue::Float(0.0)));
+    assert_eq!(
+        agg(AggregateType::StDev, false, &[pv(pint(3))]).result(),
+        pv(PropertyValue::Float(0.0))
+    );
 }
 
 #[test]
 fn approximate_aggregates() {
     let values: Vec<Value> = (0..100).map(|i| pv(pint(i % 10))).collect();
-    assert_eq!(agg_split(AggregateType::ApproxCountDistinct, false, &values), pv(pint(10)));
-    let floats: Vec<Value> = (0..101).map(|i| pv(PropertyValue::Float(i as f64))).collect();
+    assert_eq!(
+        agg_split(AggregateType::ApproxCountDistinct, false, &values),
+        pv(pint(10))
+    );
+    let floats: Vec<Value> = (0..101)
+        .map(|i| pv(PropertyValue::Float(i as f64)))
+        .collect();
     match agg_split(AggregateType::ApproxPercentile, false, &floats) {
         Value::Property(PropertyValue::Float(f)) => assert!((f - 50.0).abs() < 5.0, "{f}"),
         other => panic!("{other:?}"),
     }
-    let mut p = agg(AggregateType::ApproxPercentile, false, &[pv(pint(1)), pv(pint(2))]);
+    let mut p = agg(
+        AggregateType::ApproxPercentile,
+        false,
+        &[pv(pint(1)), pv(pint(2))],
+    );
     p.set_percentile(&pv(PropertyValue::Float(1.0))).unwrap();
     let mut q = agg(AggregateType::ApproxPercentile, false, &[]);
     // The merged-in half's percentile is taken when this one is still the default.
@@ -2711,7 +3528,10 @@ fn approximate_aggregates() {
         Value::Property(PropertyValue::Float(f)) => assert!(f >= 1.5, "{f}"),
         other => panic!("{other:?}"),
     }
-    assert_eq!(agg(AggregateType::ApproxPercentile, false, &[]).result(), Value::Null);
+    assert_eq!(
+        agg(AggregateType::ApproxPercentile, false, &[]).result(),
+        Value::Null
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2722,14 +3542,38 @@ fn approximate_aggregates() {
 fn extend_path_appends_or_starts_fresh() {
     let (a, b, c) = (NodeId::new(1), NodeId::new(2), NodeId::new(3));
     let (e1, e2) = (EdgeId::new(10), EdgeId::new(11));
-    let base = Value::Path { nodes: vec![a, b], edges: vec![e1] };
-    assert_eq!(extend_path(Some(&base), b, c, e2), Value::Path { nodes: vec![a, b, c], edges: vec![e1, e2] });
+    let base = Value::Path {
+        nodes: vec![a, b],
+        edges: vec![e1],
+    };
+    assert_eq!(
+        extend_path(Some(&base), b, c, e2),
+        Value::Path {
+            nodes: vec![a, b, c],
+            edges: vec![e1, e2]
+        }
+    );
     // The base does not end at the source: a fresh one-hop path.
-    assert_eq!(extend_path(Some(&base), c, a, e2), Value::Path { nodes: vec![c, a], edges: vec![e2] });
-    assert_eq!(extend_path(None, a, b, e1), Value::Path { nodes: vec![a, b], edges: vec![e1] });
+    assert_eq!(
+        extend_path(Some(&base), c, a, e2),
+        Value::Path {
+            nodes: vec![c, a],
+            edges: vec![e2]
+        }
+    );
+    assert_eq!(
+        extend_path(None, a, b, e1),
+        Value::Path {
+            nodes: vec![a, b],
+            edges: vec![e1]
+        }
+    );
     assert_eq!(
         extend_path(Some(&Value::Property(pint(1))), a, b, e1),
-        Value::Path { nodes: vec![a, b], edges: vec![e1] }
+        Value::Path {
+            nodes: vec![a, b],
+            edges: vec![e1]
+        }
     );
 }
 
@@ -2784,61 +3628,152 @@ fn names(store: &GraphStore, q: &str) -> Vec<String> {
 #[test]
 fn single_hop_expands_in_every_shape() {
     let s = social();
-    assert_eq!(names(&s, "MATCH (:Person {name: 'a'})-[:KNOWS]->(n) RETURN n.name AS name"), vec!["b"]);
-    assert_eq!(names(&s, "MATCH (:Person {name: 'a'})<-[:KNOWS]-(n) RETURN n.name AS name"), vec!["c", "d"]);
-    assert_eq!(names(&s, "MATCH (:Person {name: 'a'})-[:KNOWS]-(n) RETURN n.name AS name"), vec!["b", "c", "d"]);
-    assert_eq!(names(&s, "MATCH (:Person {name: 'a'})-[:KNOWS|LIKES]->(n) RETURN n.name AS name"), vec!["b", "c"]);
-    assert_eq!(names(&s, "MATCH (:Person {name: 'a'})-->(n:City) RETURN n.name AS name"), vec!["x"]);
-    assert_eq!(names(&s, "MATCH (:Person {name: 'a'})-[r {w: 5}]->(n) RETURN n.name AS name"), vec!["c"]);
-    assert_eq!(names(&s, "MATCH (n)-[r]->(:City) WHERE r.w IS NULL RETURN n.name AS name"), vec!["a", "b"]);
-    assert_eq!(names(&s, "MATCH (n:Admin)-[:KNOWS]->(m:Person) RETURN m.name AS name"), vec!["a"]);
-    assert_eq!(names(&s, "MATCH (:City)<-[:LIVES_IN]-(n:Person) RETURN n.name AS name"), vec!["a", "b"]);
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (:Person {name: 'a'})-[:KNOWS]->(n) RETURN n.name AS name"
+        ),
+        vec!["b"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (:Person {name: 'a'})<-[:KNOWS]-(n) RETURN n.name AS name"
+        ),
+        vec!["c", "d"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (:Person {name: 'a'})-[:KNOWS]-(n) RETURN n.name AS name"
+        ),
+        vec!["b", "c", "d"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (:Person {name: 'a'})-[:KNOWS|LIKES]->(n) RETURN n.name AS name"
+        ),
+        vec!["b", "c"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (:Person {name: 'a'})-->(n:City) RETURN n.name AS name"
+        ),
+        vec!["x"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (:Person {name: 'a'})-[r {w: 5}]->(n) RETURN n.name AS name"
+        ),
+        vec!["c"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (n)-[r]->(:City) WHERE r.w IS NULL RETURN n.name AS name"
+        ),
+        vec!["a", "b"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (n:Admin)-[:KNOWS]->(m:Person) RETURN m.name AS name"
+        ),
+        vec!["a"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (:City)<-[:LIVES_IN]-(n:Person) RETURN n.name AS name"
+        ),
+        vec!["a", "b"]
+    );
     let b = read(&s, "MATCH p = (:Person {name: 'a'})-[:KNOWS]->(:Person)-[:KNOWS]->(n) RETURN n.name AS name, length(p) AS l");
-    assert_eq!((string(&b, 0, "name"), int(&b, 0, "l")), ("c".to_string(), 2));
-    let b = read(&s, "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN type(r) AS t, count(*) AS c");
+    assert_eq!(
+        (string(&b, 0, "name"), int(&b, 0, "l")),
+        ("c".to_string(), 2)
+    );
+    let b = read(
+        &s,
+        "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN type(r) AS t, count(*) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 4);
     // A self-join via a repeated variable (expand into a bound node).
-    let b = read(&s, "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN count(*) AS c");
+    let b = read(
+        &s,
+        "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN count(*) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 3);
     // A missing type is empty, not an error.
-    assert!(names(&s, "MATCH (:Person {name: 'a'})-[:NOPE]->(n) RETURN n.name AS name").is_empty());
+    assert!(names(
+        &s,
+        "MATCH (:Person {name: 'a'})-[:NOPE]->(n) RETURN n.name AS name"
+    )
+    .is_empty());
 }
 
 #[test]
 fn variable_length_expands() {
     let s = social();
     assert_eq!(
-        names(&s, "MATCH (:Person {name: 'd'})-[:KNOWS*2]->(n) RETURN n.name AS name"),
+        names(
+            &s,
+            "MATCH (:Person {name: 'd'})-[:KNOWS*2]->(n) RETURN n.name AS name"
+        ),
         vec!["b"]
     );
     assert_eq!(
-        names(&s, "MATCH (:Person {name: 'd'})-[:KNOWS*1..3]->(n) RETURN DISTINCT n.name AS name"),
+        names(
+            &s,
+            "MATCH (:Person {name: 'd'})-[:KNOWS*1..3]->(n) RETURN DISTINCT n.name AS name"
+        ),
         vec!["a", "b", "c"]
     );
     assert_eq!(
-        names(&s, "MATCH (:Person {name: 'd'})-[:KNOWS*0..1]->(n) RETURN n.name AS name"),
+        names(
+            &s,
+            "MATCH (:Person {name: 'd'})-[:KNOWS*0..1]->(n) RETURN n.name AS name"
+        ),
         vec!["a", "d"]
     );
     assert_eq!(
-        names(&s, "MATCH (:Person {name: 'b'})<-[:KNOWS*2..2]-(n) RETURN n.name AS name"),
+        names(
+            &s,
+            "MATCH (:Person {name: 'b'})<-[:KNOWS*2..2]-(n) RETURN n.name AS name"
+        ),
         vec!["c", "d"]
     );
     assert_eq!(
-        names(&s, "MATCH (:Person {name: 'x'})-[*]-(n) RETURN n.name AS name"),
+        names(
+            &s,
+            "MATCH (:Person {name: 'x'})-[*]-(n) RETURN n.name AS name"
+        ),
         Vec::<String>::new()
     );
-    let b = read(&s, "MATCH (:City)-[*1..2]-(n:Person) RETURN count(DISTINCT n) AS c");
+    let b = read(
+        &s,
+        "MATCH (:City)-[*1..2]-(n:Person) RETURN count(DISTINCT n) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 4);
     let b = read(&s, "MATCH p = (:Person {name: 'd'})-[rs:KNOWS*]->(n {name: 'c'}) RETURN length(p) AS l, size(rs) AS s");
     assert_eq!((int(&b, 0, "l"), int(&b, 0, "s")), (3, 3));
-    let b = read(&s, "MATCH (:Person {name: 'a'})-[rs:KNOWS*1..3 {w: 1}]->(n) RETURN n.name AS name");
+    let b = read(
+        &s,
+        "MATCH (:Person {name: 'a'})-[rs:KNOWS*1..3 {w: 1}]->(n) RETURN n.name AS name",
+    );
     assert_eq!(strings(&b, "name"), vec!["b"]);
     let b = read(
         &s,
         "MATCH (a:Person {name: 'd'}), (c:Person {name: 'c'}) MATCH (a)-[:KNOWS*]->(c) RETURN count(*) AS c",
     );
     assert_eq!(int(&b, 0, "c"), 1);
-    let b = read(&s, "MATCH (:Person {name: 'a'})-[r:KNOWS|LIKES*1..2]->(n) RETURN count(*) AS c");
+    let b = read(
+        &s,
+        "MATCH (:Person {name: 'a'})-[r:KNOWS|LIKES*1..2]->(n) RETURN count(*) AS c",
+    );
     assert!(int(&b, 0, "c") >= 3);
 }
 
@@ -2852,33 +3787,51 @@ fn projection_aggregation_and_grouping_queries() {
     assert_eq!(float(&b, 0, "p"), 2.5);
     assert_eq!(float(&b, 0, "d"), 2.0);
     assert!(float(&b, 0, "sd") > float(&b, 0, "sp"));
-    assert_eq!(cell(&b, 0, "parity"), PropertyValue::Array(vec![pint(0), pint(1)]));
+    assert_eq!(
+        cell(&b, 0, "parity"),
+        PropertyValue::Array(vec![pint(0), pint(1)])
+    );
     assert_eq!(string(&b, 0, "mn"), "a");
     assert_eq!(int(&b, 0, "mx"), 4);
     assert_eq!(float(&b, 0, "av"), 2.5);
 
-    let b = read(&s, "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name AS name, count(b) AS c ORDER BY name");
+    let b = read(
+        &s,
+        "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name AS name, count(b) AS c ORDER BY name",
+    );
     assert_eq!(strings(&b, "name"), vec!["a", "b", "c", "d"]);
     assert_eq!(ints(&b, "c"), vec![1, 1, 1, 1]);
-    let b = read(&s, "MATCH (a:Person)-[:KNOWS]-(b) RETURN a.name AS name, count(DISTINCT b) AS c ORDER BY name");
+    let b = read(
+        &s,
+        "MATCH (a:Person)-[:KNOWS]-(b) RETURN a.name AS name, count(DISTINCT b) AS c ORDER BY name",
+    );
     assert_eq!(ints(&b, "c"), vec![3, 2, 2, 1]);
     let b = read(&s, "MATCH (a:Person)<-[:KNOWS]-(b) RETURN a, count(*) AS c");
     assert_eq!(b.records.len(), 3);
     let b = read(&s, "MATCH (a:Person)-[:KNOWS]->(b) RETURN count(b) AS c");
     assert_eq!(int(&b, 0, "c"), 4);
-    let b = read(&s, "MATCH (n:Person) RETURN n.age % 2 AS k, sum(n.age) AS s, collect(n.name) AS ns ORDER BY k");
+    let b = read(
+        &s,
+        "MATCH (n:Person) RETURN n.age % 2 AS k, sum(n.age) AS s, collect(n.name) AS ns ORDER BY k",
+    );
     assert_eq!(ints(&b, "s"), vec![6, 4]);
     let b = read(&s, "MATCH (n:Person) WHERE n.age > 100 RETURN count(n) AS c, sum(n.age) AS s, avg(n.age) AS a, collect(n) AS l");
     assert_eq!(int(&b, 0, "c"), 0);
     assert_eq!(int(&b, 0, "s"), 0);
     assert_eq!(cell(&b, 0, "a"), PropertyValue::Null);
-    let b = read(&s, "MATCH (n:Person) WHERE n.age > 100 RETURN n.name AS k, count(*) AS c");
+    let b = read(
+        &s,
+        "MATCH (n:Person) WHERE n.age > 100 RETURN n.name AS k, count(*) AS c",
+    );
     assert!(b.records.is_empty());
     let b = read(&s, "MATCH (n:Person) RETURN n AS node, count(*) AS c");
     assert_eq!(b.records.len(), 4);
     let b = read(&s, "MATCH (n:Person) RETURN {name: n.name, age: n.age} AS m, [n.age, n.age * 2] AS l ORDER BY n.age LIMIT 1");
     assert_eq!(b.records.len(), 1);
-    let b = read(&s, "UNWIND [1, 2, 2, 3] AS x RETURN x, count(*) AS c ORDER BY x");
+    let b = read(
+        &s,
+        "UNWIND [1, 2, 2, 3] AS x RETURN x, count(*) AS c ORDER BY x",
+    );
     assert_eq!(ints(&b, "c"), vec![1, 2, 1]);
 }
 
@@ -2886,20 +3839,53 @@ fn projection_aggregation_and_grouping_queries() {
 fn ordering_paging_and_distinct_queries() {
     let s = social();
     let q = |cypher: &str| strings(&read(&s, cypher), "name");
-    assert_eq!(q("MATCH (n:Person) RETURN n.name AS name ORDER BY n.age DESC"), vec!["d", "c", "b", "a"]);
-    assert_eq!(q("MATCH (n:Person) RETURN n.name AS name ORDER BY n.age DESC LIMIT 2"), vec!["d", "c"]);
-    assert_eq!(q("MATCH (n:Person) RETURN n.name AS name ORDER BY n.age SKIP 1 LIMIT 2"), vec!["b", "c"]);
-    assert_eq!(q("MATCH (n:Person) RETURN n.name AS name ORDER BY n.age % 2, n.name DESC"), vec!["d", "b", "c", "a"]);
-    assert_eq!(q("MATCH (n) RETURN n.name AS name ORDER BY n.age, n.name LIMIT 1"), vec!["a"]);
+    assert_eq!(
+        q("MATCH (n:Person) RETURN n.name AS name ORDER BY n.age DESC"),
+        vec!["d", "c", "b", "a"]
+    );
+    assert_eq!(
+        q("MATCH (n:Person) RETURN n.name AS name ORDER BY n.age DESC LIMIT 2"),
+        vec!["d", "c"]
+    );
+    assert_eq!(
+        q("MATCH (n:Person) RETURN n.name AS name ORDER BY n.age SKIP 1 LIMIT 2"),
+        vec!["b", "c"]
+    );
+    assert_eq!(
+        q("MATCH (n:Person) RETURN n.name AS name ORDER BY n.age % 2, n.name DESC"),
+        vec!["d", "b", "c", "a"]
+    );
+    assert_eq!(
+        q("MATCH (n) RETURN n.name AS name ORDER BY n.age, n.name LIMIT 1"),
+        vec!["a"]
+    );
     // Nulls sort last ascending and first descending.
-    assert_eq!(q("MATCH (n) RETURN n.name AS name ORDER BY n.age DESC LIMIT 1"), vec!["x"]);
-    assert_eq!(q("MATCH (n:Person) RETURN DISTINCT n.name AS name ORDER BY name DESC SKIP 3"), vec!["a"]);
-    assert_eq!(q("MATCH (n:Person) RETURN n.name AS name ORDER BY toString(n.age) DESC LIMIT 1"), vec!["d"]);
-    let b = read(&s, "MATCH (n:Person) RETURN DISTINCT n.age % 2 AS p ORDER BY p LIMIT 1");
+    assert_eq!(
+        q("MATCH (n) RETURN n.name AS name ORDER BY n.age DESC LIMIT 1"),
+        vec!["x"]
+    );
+    assert_eq!(
+        q("MATCH (n:Person) RETURN DISTINCT n.name AS name ORDER BY name DESC SKIP 3"),
+        vec!["a"]
+    );
+    assert_eq!(
+        q("MATCH (n:Person) RETURN n.name AS name ORDER BY toString(n.age) DESC LIMIT 1"),
+        vec!["d"]
+    );
+    let b = read(
+        &s,
+        "MATCH (n:Person) RETURN DISTINCT n.age % 2 AS p ORDER BY p LIMIT 1",
+    );
     assert_eq!(ints(&b, "p"), vec![0]);
-    let b = read(&s, "UNWIND [3.5, 1, 'z', null, 2.0, true] AS v RETURN v ORDER BY v");
+    let b = read(
+        &s,
+        "UNWIND [3.5, 1, 'z', null, 2.0, true] AS v RETURN v ORDER BY v",
+    );
     assert_eq!(b.records.len(), 6);
-    let b = read(&s, "UNWIND ['b', 'a', 'c'] AS v RETURN v ORDER BY v DESC LIMIT 2");
+    let b = read(
+        &s,
+        "UNWIND ['b', 'a', 'c'] AS v RETURN v ORDER BY v DESC LIMIT 2",
+    );
     assert_eq!(strings(&b, "v"), vec!["c", "b"]);
     let b = read(&s, "MATCH (n:Person) RETURN n.name AS name SKIP 10");
     assert!(b.records.is_empty());
@@ -2912,7 +3898,10 @@ fn join_cartesian_and_optional_queries() {
     let s = social();
     let b = read(&s, "MATCH (a:Person), (c:City) RETURN count(*) AS c");
     assert_eq!(int(&b, 0, "c"), 4);
-    let b = read(&s, "MATCH (a:Person), (b:Person) WHERE a.age = b.age + 1 RETURN count(*) AS c");
+    let b = read(
+        &s,
+        "MATCH (a:Person), (b:Person) WHERE a.age = b.age + 1 RETURN count(*) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 3);
     let b = read(
         &s,
@@ -2932,11 +3921,20 @@ fn join_cartesian_and_optional_queries() {
     assert_eq!(cell(&b, 0, "other"), PropertyValue::Null);
     let b = read(&s, "OPTIONAL MATCH (n:Nope) RETURN n");
     assert_eq!(b.records.len(), 1);
-    let b = read(&s, "MATCH (a:Person {name: 'a'}) OPTIONAL MATCH (a)-[:KNOWS*1..2]->(b) RETURN count(b) AS c");
+    let b = read(
+        &s,
+        "MATCH (a:Person {name: 'a'}) OPTIONAL MATCH (a)-[:KNOWS*1..2]->(b) RETURN count(b) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 2);
-    let b = read(&s, "MATCH (a:Person) WHERE EXISTS { (a)-[:LIVES_IN]->(:City) } RETURN count(a) AS c");
+    let b = read(
+        &s,
+        "MATCH (a:Person) WHERE EXISTS { (a)-[:LIVES_IN]->(:City) } RETURN count(a) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 2);
-    let b = read(&s, "MATCH (a:Person) WHERE NOT (a)-[:LIVES_IN]->() RETURN count(a) AS c");
+    let b = read(
+        &s,
+        "MATCH (a:Person) WHERE NOT (a)-[:LIVES_IN]->() RETURN count(a) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 2);
     let b = read(&s, "MATCH (a:Person) CALL { WITH a MATCH (a)-[:KNOWS]->(b) RETURN b.name AS friend } RETURN a.name AS name, friend ORDER BY name");
     assert_eq!(strings(&b, "friend"), vec!["b", "c", "a", "a"]);
@@ -2951,16 +3949,56 @@ fn index_backed_queries() {
     let mut s = social();
     write(&mut s, "CREATE INDEX ON :Person(age)");
     write(&mut s, "CREATE INDEX ON :Person(name)");
-    assert_eq!(names(&s, "MATCH (n:Person) WHERE n.age = 2 RETURN n.name AS name"), vec!["b"]);
-    assert_eq!(names(&s, "MATCH (n:Person) WHERE n.age > 2 RETURN n.name AS name"), vec!["c", "d"]);
-    assert_eq!(names(&s, "MATCH (n:Person) WHERE n.age >= 2 AND n.age < 4 RETURN n.name AS name"), vec!["b", "c"]);
-    assert_eq!(names(&s, "MATCH (n:Person) WHERE n.age <= 1 RETURN n.name AS name"), vec!["a"]);
-    assert_eq!(names(&s, "MATCH (n:Person) WHERE n.age IN [1, 4] RETURN n.name AS name"), vec!["a", "d"]);
-    assert_eq!(names(&s, "MATCH (n:Person {name: 'c'}) RETURN n.name AS name"), vec!["c"]);
-    assert_eq!(names(&s, "MATCH (n:Person) WHERE n.name STARTS WITH 'd' RETURN n.name AS name"), vec!["d"]);
-    assert!(names(&s, "MATCH (n:Person) WHERE n.age = 99 RETURN n.name AS name").is_empty());
+    assert_eq!(
+        names(&s, "MATCH (n:Person) WHERE n.age = 2 RETURN n.name AS name"),
+        vec!["b"]
+    );
+    assert_eq!(
+        names(&s, "MATCH (n:Person) WHERE n.age > 2 RETURN n.name AS name"),
+        vec!["c", "d"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (n:Person) WHERE n.age >= 2 AND n.age < 4 RETURN n.name AS name"
+        ),
+        vec!["b", "c"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (n:Person) WHERE n.age <= 1 RETURN n.name AS name"
+        ),
+        vec!["a"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (n:Person) WHERE n.age IN [1, 4] RETURN n.name AS name"
+        ),
+        vec!["a", "d"]
+    );
+    assert_eq!(
+        names(&s, "MATCH (n:Person {name: 'c'}) RETURN n.name AS name"),
+        vec!["c"]
+    );
+    assert_eq!(
+        names(
+            &s,
+            "MATCH (n:Person) WHERE n.name STARTS WITH 'd' RETURN n.name AS name"
+        ),
+        vec!["d"]
+    );
+    assert!(names(
+        &s,
+        "MATCH (n:Person) WHERE n.age = 99 RETURN n.name AS name"
+    )
+    .is_empty());
     // An index lookup correlated with an earlier row.
-    let b = read(&s, "MATCH (c:City) MATCH (n:Person) WHERE n.age = 1 RETURN count(*) AS c");
+    let b = read(
+        &s,
+        "MATCH (c:City) MATCH (n:Person) WHERE n.age = 1 RETURN count(*) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 1);
     let b = read(&s, "UNWIND [1, 3, 7] AS v MATCH (n:Person) WHERE n.age = v RETURN n.name AS name ORDER BY name");
     assert_eq!(strings(&b, "name"), vec!["a", "c"]);
@@ -3037,7 +4075,9 @@ fn seed_operator_replays_its_cell_once_per_reset() {
     op.reset();
     assert_eq!(drain(&mut op, &store).len(), 1);
     let mut bad = SeedOperator::new(poisoned_seed());
-    assert!(matches!(bad.next(&store), Err(ExecutionError::RuntimeError(m)) if m.contains("poisoned")));
+    assert!(
+        matches!(bad.next(&store), Err(ExecutionError::RuntimeError(m)) if m.contains("poisoned"))
+    );
 }
 
 #[test]
@@ -3056,27 +4096,50 @@ fn correlated_call_runs_the_body_per_outer_row() {
     assert_eq!(drain(&mut op, &store).len(), 3);
 
     let poisoned = poisoned_seed();
-    let mut op = CorrelatedCallOperator::new(int_rows("x", 1), Box::new(SeedOperator::new(poisoned.clone())), poisoned);
-    assert!(matches!(op.next(&store), Err(ExecutionError::RuntimeError(m)) if m.contains("poisoned")));
+    let mut op = CorrelatedCallOperator::new(
+        int_rows("x", 1),
+        Box::new(SeedOperator::new(poisoned.clone())),
+        poisoned,
+    );
+    assert!(
+        matches!(op.next(&store), Err(ExecutionError::RuntimeError(m)) if m.contains("poisoned"))
+    );
 }
 
 #[test]
 fn semi_apply_keeps_or_drops_rows_by_existence() {
     let store = GraphStore::new();
     let seed: Seed = Default::default();
-    let mut keep = SemiApplyOperator::new(int_rows("x", 2), Box::new(SeedOperator::new(seed.clone())), seed.clone(), false);
+    let mut keep = SemiApplyOperator::new(
+        int_rows("x", 2),
+        Box::new(SeedOperator::new(seed.clone())),
+        seed.clone(),
+        false,
+    );
     assert_eq!(keep.describe().name, "SemiApply");
     assert_eq!(drain(&mut keep, &store).len(), 2);
     keep.reset();
     assert_eq!(drain(&mut keep, &store).len(), 2);
 
-    let mut anti = SemiApplyOperator::new(int_rows("x", 2), Box::new(SeedOperator::new(seed.clone())), seed, true);
+    let mut anti = SemiApplyOperator::new(
+        int_rows("x", 2),
+        Box::new(SeedOperator::new(seed.clone())),
+        seed,
+        true,
+    );
     assert_eq!(anti.describe().name, "AntiSemiApply");
     assert!(drain(&mut anti, &store).is_empty());
 
     let poisoned = poisoned_seed();
-    let mut op = SemiApplyOperator::new(int_rows("x", 1), Box::new(SingleRowOperator::new()), poisoned, false);
-    assert!(matches!(op.next(&store), Err(ExecutionError::RuntimeError(m)) if m.contains("EXISTS")));
+    let mut op = SemiApplyOperator::new(
+        int_rows("x", 1),
+        Box::new(SingleRowOperator::new()),
+        poisoned,
+        false,
+    );
+    assert!(
+        matches!(op.next(&store), Err(ExecutionError::RuntimeError(m)) if m.contains("EXISTS"))
+    );
 }
 
 #[test]
@@ -3110,15 +4173,29 @@ fn bind_path_operator_binds_only_complete_paths() {
     no_edge.bind("r", Value::Property(pint(1)));
     let no_node = a_record("a", Value::NodeRef(a));
     let input = || -> OperatorBox {
-        Box::new(MaterializedOperator::new(vec![full.clone(), no_edge.clone(), no_node.clone()]))
+        Box::new(MaterializedOperator::new(vec![
+            full.clone(),
+            no_edge.clone(),
+            no_node.clone(),
+        ]))
     };
-    let paths = vec![("p".to_string(), vec!["a".to_string(), "b".to_string()], vec!["r".to_string()])];
+    let paths = vec![(
+        "p".to_string(),
+        vec!["a".to_string(), "b".to_string()],
+        vec!["r".to_string()],
+    )];
     let mut op = BindPathOperator::new(input(), paths.clone());
     let d = op.describe();
     assert_eq!((d.name.as_str(), d.details.as_str()), ("BindPath", "p"));
     assert_eq!(op.children_mut().len(), 1);
     let rows = drain(&mut op, &store);
-    assert_eq!(rows[0].get("p"), Some(&Value::Path { nodes: vec![a, b], edges: vec![e] }));
+    assert_eq!(
+        rows[0].get("p"),
+        Some(&Value::Path {
+            nodes: vec![a, b],
+            edges: vec![e]
+        })
+    );
     assert!(rows[1].get("p").is_none());
     assert!(rows[2].get("p").is_none());
     op.reset();
@@ -3179,7 +4256,13 @@ fn index_scan_operator_every_comparison() {
     assert_eq!(count(BinaryOp::Le, 2), 3);
     assert_eq!(count(BinaryOp::Ne, 2), 0);
 
-    let mut op = IndexScanOperator::new("n".into(), Label::new("P"), "k".into(), BinaryOp::Ge, pint(1));
+    let mut op = IndexScanOperator::new(
+        "n".into(),
+        Label::new("P"),
+        "k".into(),
+        BinaryOp::Ge,
+        pint(1),
+    );
     assert!(op.filter_predicate().is_none());
     let d = op.describe();
     assert_eq!(d.name, "IndexScan");
@@ -3192,15 +4275,34 @@ fn index_scan_operator_every_comparison() {
     op.reset();
     assert_eq!(drain(&mut op, &store).len(), 4);
 
-    let eq = IndexScanOperator::new("n".into(), Label::new("P"), "k".into(), BinaryOp::Eq, pint(1));
+    let eq = IndexScanOperator::new(
+        "n".into(),
+        Label::new("P"),
+        "k".into(),
+        BinaryOp::Eq,
+        pint(1),
+    );
     assert!(eq.filter_predicate().is_some());
-    for (op, sym) in [(BinaryOp::Eq, "="), (BinaryOp::Gt, ">"), (BinaryOp::Lt, "<"), (BinaryOp::Le, "<="), (BinaryOp::Ne, "?")] {
-        let d = IndexScanOperator::new("n".into(), Label::new("P"), "k".into(), op, pint(1)).describe();
+    for (op, sym) in [
+        (BinaryOp::Eq, "="),
+        (BinaryOp::Gt, ">"),
+        (BinaryOp::Lt, "<"),
+        (BinaryOp::Le, "<="),
+        (BinaryOp::Ne, "?"),
+    ] {
+        let d =
+            IndexScanOperator::new("n".into(), Label::new("P"), "k".into(), op, pint(1)).describe();
         assert!(d.details.contains(&format!(" {sym} ")), "{}", d.details);
     }
 
     // No index on the property: nothing.
-    let mut none = IndexScanOperator::new("n".into(), Label::new("P"), "zz".into(), BinaryOp::Eq, pint(1));
+    let mut none = IndexScanOperator::new(
+        "n".into(),
+        Label::new("P"),
+        "zz".into(),
+        BinaryOp::Eq,
+        pint(1),
+    );
     assert!(none.next(&store).unwrap().is_none());
     assert!(none.next_batch(&store, 2).unwrap().is_none());
 }
@@ -3230,7 +4332,10 @@ fn correlated_index_lookup_probes_per_row() {
     assert!(d.details.contains("= <per row>"));
     assert_eq!(op.children_mut().len(), 1);
     let out = drain(&mut op, &store);
-    assert_eq!(out.iter().map(|r| r.get("n").cloned()).collect::<Vec<_>>(), vec![Some(Value::NodeRef(ids[3])), Some(Value::NodeRef(ids[1]))]);
+    assert_eq!(
+        out.iter().map(|r| r.get("n").cloned()).collect::<Vec<_>>(),
+        vec![Some(Value::NodeRef(ids[3])), Some(Value::NodeRef(ids[1]))]
+    );
     op.reset();
     assert_eq!(drain_mut(&mut op, &mut store).len(), 2);
     // A property with no index finds nothing.
@@ -3254,14 +4359,28 @@ fn vector_search_operator_ranks_by_similarity() {
         .create_vector_index("Doc", "emb", 2, crate::vector::DistanceMetric::Cosine)
         .unwrap();
     let a = store.create_node("Doc");
-    store.set_node_property(TENANT, a, "emb", PropertyValue::Vector(vec![1.0, 0.0])).unwrap();
+    store
+        .set_node_property(TENANT, a, "emb", PropertyValue::Vector(vec![1.0, 0.0]))
+        .unwrap();
     let b = store.create_node("Doc");
-    store.set_node_property(TENANT, b, "emb", PropertyValue::Vector(vec![0.0, 1.0])).unwrap();
+    store
+        .set_node_property(TENANT, b, "emb", PropertyValue::Vector(vec![0.0, 1.0]))
+        .unwrap();
     store.rebuild_vector_index();
 
-    let mut op = VectorSearchOperator::new("Doc".into(), "emb".into(), vec![1.0, 0.1], 1, "n".into(), Some("s".into()));
+    let mut op = VectorSearchOperator::new(
+        "Doc".into(),
+        "emb".into(),
+        vec![1.0, 0.1],
+        1,
+        "n".into(),
+        Some("s".into()),
+    );
     let d = op.describe();
-    assert_eq!((d.name.as_str(), d.details.as_str()), ("VectorSearch", "Doc.emb, k=1"));
+    assert_eq!(
+        (d.name.as_str(), d.details.as_str()),
+        ("VectorSearch", "Doc.emb, k=1")
+    );
     let rows = drain(&mut op, &store);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get("n"), Some(&Value::NodeRef(a)));
@@ -3269,12 +4388,26 @@ fn vector_search_operator_ranks_by_similarity() {
     op.reset();
     assert_eq!(drain(&mut op, &store).len(), 1);
 
-    let mut no_score = VectorSearchOperator::new("Doc".into(), "emb".into(), vec![0.0, 1.0], 5, "n".into(), None);
+    let mut no_score = VectorSearchOperator::new(
+        "Doc".into(),
+        "emb".into(),
+        vec![0.0, 1.0],
+        5,
+        "n".into(),
+        None,
+    );
     let rows = drain(&mut no_score, &store);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get("n"), Some(&Value::NodeRef(b)));
 
-    let mut missing = VectorSearchOperator::new("Nope".into(), "emb".into(), vec![1.0, 0.0], 1, "n".into(), None);
+    let mut missing = VectorSearchOperator::new(
+        "Nope".into(),
+        "emb".into(),
+        vec![1.0, 0.0],
+        1,
+        "n".into(),
+        None,
+    );
     // No index for the label: nothing to rank.
     assert!(missing.next(&store).unwrap().is_none());
 }
@@ -3351,9 +4484,17 @@ fn hash_join_paths() {
     assert!(op.next_batch(&store, 5).unwrap().is_none());
 
     let many: Vec<i64> = (0..10_000).collect();
-    let mut big = JoinOperator::new(kv_rows("k", &many, "l", &many), kv_rows("k", &many, "r", &many), vec!["k".into()]);
+    let mut big = JoinOperator::new(
+        kv_rows("k", &many, "l", &many),
+        kv_rows("k", &many, "r", &many),
+        vec!["k".into()],
+    );
     assert_eq!(drain(&mut big, &store).len(), 10_000);
-    let mut big = JoinOperator::new(kv_rows("k", &many, "l", &many), kv_rows("k", &many, "r", &many), vec!["k".into()]);
+    let mut big = JoinOperator::new(
+        kv_rows("k", &many, "l", &many),
+        kv_rows("k", &many, "r", &many),
+        vec!["k".into()],
+    );
     assert!(big.next_mut(&mut store, TENANT).unwrap().is_some());
 }
 
@@ -3371,12 +4512,20 @@ fn left_outer_join_paths() {
     let right = || kv_rows("k", &[1, 1, 2], "r", &[5, 50, 7]);
     let mut op = LeftOuterJoinOperator::new(left(), right(), vec!["k".into()], vec!["r".into()]);
     let d = op.describe();
-    assert_eq!((d.name.as_str(), d.details.as_str()), ("LeftOuterJoin", "on=k"));
+    assert_eq!(
+        (d.name.as_str(), d.details.as_str()),
+        ("LeftOuterJoin", "on=k")
+    );
     assert_eq!(op.children_mut().len(), 2);
     let rows = drain(&mut op, &store);
     // 1 matches twice, 2 once, 3 and the keyless row get nulls.
     assert_eq!(rows.len(), 5);
-    assert_eq!(rows.iter().filter(|r| r.get("r") == Some(&Value::Null)).count(), 2);
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.get("r") == Some(&Value::Null))
+            .count(),
+        2
+    );
     op.reset();
     let b = op.next_batch(&store, 3).unwrap().unwrap();
     assert_eq!(b.records.len(), 3);
@@ -3386,21 +4535,46 @@ fn left_outer_join_paths() {
     assert_eq!(drain_mut(&mut op, &mut store).len(), 5);
 
     // With a predicate that rejects every candidate, matched keys fall back to nulls.
-    let never = Expression::Binary { left: Box::new(var("r")), op: BinaryOp::Gt, right: Box::new(li(1000)) };
-    let mut op = LeftOuterJoinOperator::new(left(), right(), vec!["k".into()], vec!["r".into()]).with_join_predicate(never);
+    let never = Expression::Binary {
+        left: Box::new(var("r")),
+        op: BinaryOp::Gt,
+        right: Box::new(li(1000)),
+    };
+    let mut op = LeftOuterJoinOperator::new(left(), right(), vec!["k".into()], vec!["r".into()])
+        .with_join_predicate(never);
     let rows = drain(&mut op, &store);
     assert_eq!(rows.len(), 4);
     assert!(rows.iter().all(|r| r.get("r") == Some(&Value::Null)));
-    let some = Expression::Binary { left: Box::new(var("r")), op: BinaryOp::Gt, right: Box::new(li(6)) };
-    let mut op = LeftOuterJoinOperator::new(left(), right(), vec!["k".into()], vec!["r".into()]).with_join_predicate(some);
+    let some = Expression::Binary {
+        left: Box::new(var("r")),
+        op: BinaryOp::Gt,
+        right: Box::new(li(6)),
+    };
+    let mut op = LeftOuterJoinOperator::new(left(), right(), vec!["k".into()], vec!["r".into()])
+        .with_join_predicate(some);
     let rows = drain(&mut op, &store);
     assert_eq!(rows.len(), 4);
-    assert_eq!(rows.iter().filter(|r| r.get("r") != Some(&Value::Null)).count(), 2);
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.get("r") != Some(&Value::Null))
+            .count(),
+        2
+    );
 
     let many: Vec<i64> = (0..10_000).collect();
-    let mut big = LeftOuterJoinOperator::new(kv_rows("k", &many, "l", &many), kv_rows("k", &many, "r", &many), vec!["k".into()], vec!["r".into()]);
+    let mut big = LeftOuterJoinOperator::new(
+        kv_rows("k", &many, "l", &many),
+        kv_rows("k", &many, "r", &many),
+        vec!["k".into()],
+        vec!["r".into()],
+    );
     assert_eq!(drain(&mut big, &store).len(), 10_000);
-    let mut big = LeftOuterJoinOperator::new(kv_rows("k", &many, "l", &many), kv_rows("k", &many, "r", &many), vec!["k".into()], vec!["r".into()]);
+    let mut big = LeftOuterJoinOperator::new(
+        kv_rows("k", &many, "l", &many),
+        kv_rows("k", &many, "r", &many),
+        vec!["k".into()],
+        vec!["r".into()],
+    );
     assert!(big.next_mut(&mut store, TENANT).unwrap().is_some());
 }
 
@@ -3409,9 +4583,17 @@ fn left_outer_join_paths() {
 // ---------------------------------------------------------------------------
 
 fn expr_of(text: &str) -> Expression {
-    let q = parse_query(&format!("MATCH (n) WITH n, 0 AS x, [] AS l RETURN {text} AS out"))
-        .unwrap_or_else(|e| panic!("{text}: {e}"));
-    q.return_clause.expect("RETURN").items.into_iter().next().unwrap().expression
+    let q = parse_query(&format!(
+        "MATCH (n) WITH n, 0 AS x, [] AS l RETURN {text} AS out"
+    ))
+    .unwrap_or_else(|e| panic!("{text}: {e}"));
+    q.return_clause
+        .expect("RETURN")
+        .items
+        .into_iter()
+        .next()
+        .unwrap()
+        .expression
 }
 
 /// Four `:F` nodes with `v` = 1..4 (the last without `v`), each row binding
@@ -3426,16 +4608,32 @@ fn filter_rows() -> (GraphStore, Vec<Record>) {
         }
         let mut r = a_record("n", Value::NodeRef(n));
         r.bind("x", Value::Property(pint(i)));
-        r.bind("l", Value::Property(PropertyValue::Array(vec![pint(i), pint(i + 1)])));
+        r.bind(
+            "l",
+            Value::Property(PropertyValue::Array(vec![pint(i), pint(i + 1)])),
+        );
         r.bind("$p", Value::Property(pint(2)));
-        r.bind("path", Value::Path { nodes: vec![n], edges: vec![] });
+        r.bind(
+            "path",
+            Value::Path {
+                nodes: vec![n],
+                edges: vec![],
+            },
+        );
         rows.push(r);
     }
     (store, rows)
 }
 
-fn filter_count(store: &GraphStore, rows: &[Record], predicate: Expression) -> ExecutionResult<usize> {
-    let mut op = FilterOperator::new(Box::new(MaterializedOperator::new(rows.to_vec())), predicate);
+fn filter_count(
+    store: &GraphStore,
+    rows: &[Record],
+    predicate: Expression,
+) -> ExecutionResult<usize> {
+    let mut op = FilterOperator::new(
+        Box::new(MaterializedOperator::new(rows.to_vec())),
+        predicate,
+    );
     let mut n = 0;
     while op.next(store)?.is_some() {
         n += 1;
@@ -3469,23 +4667,45 @@ fn filter_evaluates_every_expression_kind() {
     for (text, want) in cases {
         match filter_count(&store, &rows, expr_of(text)) {
             Ok(n) => assert_eq!(n, *want, "{text}"),
-            Err(e) if *text == "n.v" => assert!(e.to_string().contains("Predicate must evaluate to boolean"), "{e}"),
+            Err(e) if *text == "n.v" => assert!(
+                e.to_string().contains("Predicate must evaluate to boolean"),
+                "{e}"
+            ),
             Err(e) => panic!("{text}: {e}"),
         }
     }
     // A parameter bound in the row, a path variable and a bare variable.
     assert_eq!(
-        filter_count(&store, &rows, Expression::Binary { left: Box::new(Expression::Parameter("p".into())), op: BinaryOp::Eq, right: Box::new(var("x")) }).unwrap(),
+        filter_count(
+            &store,
+            &rows,
+            Expression::Binary {
+                left: Box::new(Expression::Parameter("p".into())),
+                op: BinaryOp::Eq,
+                right: Box::new(var("x"))
+            }
+        )
+        .unwrap(),
         1
     );
     assert_eq!(
-        filter_count(&store, &rows, Expression::Unary { op: UnaryOp::IsNotNull, expr: Box::new(Expression::PathVariable("path".into())) }).unwrap(),
+        filter_count(
+            &store,
+            &rows,
+            Expression::Unary {
+                op: UnaryOp::IsNotNull,
+                expr: Box::new(Expression::PathVariable("path".into()))
+            }
+        )
+        .unwrap(),
         4
     );
-    assert!(filter_count(&store, &rows, Expression::Parameter("missing".into()))
-        .unwrap_err()
-        .to_string()
-        .contains("Unresolved parameter: $missing"));
+    assert!(
+        filter_count(&store, &rows, Expression::Parameter("missing".into()))
+            .unwrap_err()
+            .to_string()
+            .contains("Unresolved parameter: $missing")
+    );
     assert!(filter_count(&store, &rows, Expression::PathVariable("nope".into())).is_err());
     assert!(filter_count(&store, &rows, var("nope")).is_err());
 }
@@ -3493,25 +4713,76 @@ fn filter_evaluates_every_expression_kind() {
 #[test]
 fn filter_unary_errors_and_nulls() {
     let (store, rows) = filter_rows();
-    let not_int = Expression::Unary { op: UnaryOp::Not, expr: Box::new(var("x")) };
-    assert!(matches!(filter_count(&store, &rows, not_int), Err(ExecutionError::TypeError(m)) if m.contains("NOT requires boolean")));
-    let neg_str = Expression::Unary { op: UnaryOp::Minus, expr: Box::new(ls("a")) };
-    let neg_str = Expression::Binary { left: Box::new(neg_str), op: BinaryOp::Eq, right: Box::new(li(1)) };
-    assert!(matches!(filter_count(&store, &rows, neg_str), Err(ExecutionError::TypeError(m)) if m.contains("Negation requires numeric")));
-    let overflow = Expression::Unary { op: UnaryOp::Minus, expr: Box::new(li(i64::MIN)) };
-    let overflow = Expression::Binary { left: Box::new(overflow), op: BinaryOp::Eq, right: Box::new(li(1)) };
-    assert!(matches!(filter_count(&store, &rows, overflow), Err(ExecutionError::RuntimeError(m)) if m.contains("out of range")));
+    let not_int = Expression::Unary {
+        op: UnaryOp::Not,
+        expr: Box::new(var("x")),
+    };
+    assert!(
+        matches!(filter_count(&store, &rows, not_int), Err(ExecutionError::TypeError(m)) if m.contains("NOT requires boolean"))
+    );
+    let neg_str = Expression::Unary {
+        op: UnaryOp::Minus,
+        expr: Box::new(ls("a")),
+    };
+    let neg_str = Expression::Binary {
+        left: Box::new(neg_str),
+        op: BinaryOp::Eq,
+        right: Box::new(li(1)),
+    };
+    assert!(
+        matches!(filter_count(&store, &rows, neg_str), Err(ExecutionError::TypeError(m)) if m.contains("Negation requires numeric"))
+    );
+    let overflow = Expression::Unary {
+        op: UnaryOp::Minus,
+        expr: Box::new(li(i64::MIN)),
+    };
+    let overflow = Expression::Binary {
+        left: Box::new(overflow),
+        op: BinaryOp::Eq,
+        right: Box::new(li(1)),
+    };
+    assert!(
+        matches!(filter_count(&store, &rows, overflow), Err(ExecutionError::RuntimeError(m)) if m.contains("out of range"))
+    );
     // NOT null and -null are null, which filters the row out.
     let null = Expression::Literal(PropertyValue::Null);
-    assert_eq!(filter_count(&store, &rows, Expression::Unary { op: UnaryOp::Not, expr: Box::new(null.clone()) }).unwrap(), 0);
-    let neg_null = Expression::Unary { op: UnaryOp::Minus, expr: Box::new(null) };
-    assert_eq!(filter_count(&store, &rows, Expression::Unary { op: UnaryOp::IsNull, expr: Box::new(neg_null) }).unwrap(), 4);
+    assert_eq!(
+        filter_count(
+            &store,
+            &rows,
+            Expression::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(null.clone())
+            }
+        )
+        .unwrap(),
+        0
+    );
+    let neg_null = Expression::Unary {
+        op: UnaryOp::Minus,
+        expr: Box::new(null),
+    };
+    assert_eq!(
+        filter_count(
+            &store,
+            &rows,
+            Expression::Unary {
+                op: UnaryOp::IsNull,
+                expr: Box::new(neg_null)
+            }
+        )
+        .unwrap(),
+        4
+    );
 }
 
 #[test]
 fn filter_operator_batch_mut_reset_and_describe() {
     let (mut store, rows) = filter_rows();
-    let mut op = FilterOperator::new(Box::new(MaterializedOperator::new(rows.clone())), expr_of("x > 1"));
+    let mut op = FilterOperator::new(
+        Box::new(MaterializedOperator::new(rows.clone())),
+        expr_of("x > 1"),
+    );
     let d = op.describe();
     assert_eq!(d.name, "Filter");
     assert_eq!(d.children.len(), 1);
@@ -3524,16 +4795,27 @@ fn filter_operator_batch_mut_reset_and_describe() {
     assert_eq!(drain_mut(&mut op, &mut store).len(), 2);
 
     // Retaining the filter's read hands the values back with the batch.
-    let mut op = FilterOperator::new(Box::new(MaterializedOperator::new(rows)), expr_of("n.v >= 2"));
+    let mut op = FilterOperator::new(
+        Box::new(MaterializedOperator::new(rows)),
+        expr_of("n.v >= 2"),
+    );
     assert!(op.retain_property_reads("n", "v"));
-    assert!(op.retain_property_reads("n", "v"), "asking again for the same read is fine");
-    assert!(!op.retain_property_reads("n", "w"), "a second, different read is refused");
+    assert!(
+        op.retain_property_reads("n", "v"),
+        "asking again for the same read is fine"
+    );
+    assert!(
+        !op.retain_property_reads("n", "w"),
+        "a second, different read is refused"
+    );
     let b = op.next_batch(&store, 10).unwrap().unwrap();
     assert_eq!(b.records.len(), 2);
-    assert_eq!(op.take_retained_reads(), Some(vec![Some(pint(2)), Some(pint(3))]));
+    assert_eq!(
+        op.take_retained_reads(),
+        Some(vec![Some(pint(2)), Some(pint(3))])
+    );
     assert_eq!(op.take_retained_reads(), None);
 }
-
 
 // ---------------------------------------------------------------------------
 // SortOperator
@@ -3555,7 +4837,9 @@ fn mixed_sort_store() -> GraphStore {
     for (i, v) in values.into_iter().enumerate() {
         let n = store.create_node("S");
         store.set_node_property(TENANT, n, "i", i as i64).unwrap();
-        store.set_node_property(TENANT, n, "g", (i % 2) as i64).unwrap();
+        store
+            .set_node_property(TENANT, n, "g", (i % 2) as i64)
+            .unwrap();
         if let Some(v) = v {
             store.set_node_property(TENANT, n, "p", v).unwrap();
         }
@@ -3567,18 +4851,42 @@ fn mixed_sort_store() -> GraphStore {
 fn sort_mixes_strings_with_other_types_in_cypher_order() {
     let store = mixed_sort_store();
     // Strings sort before booleans, which sort before numbers; null is last.
-    let asc = ints(&read(&store, "MATCH (n:S) RETURN n.i AS i ORDER BY n.p"), "i");
+    let asc = ints(
+        &read(&store, "MATCH (n:S) RETURN n.i AS i ORDER BY n.p"),
+        "i",
+    );
     assert_eq!(asc, vec![2, 0, 6, 5, 7, 4, 1, 3]);
-    let desc = ints(&read(&store, "MATCH (n:S) RETURN n.i AS i ORDER BY n.p DESC"), "i");
+    let desc = ints(
+        &read(&store, "MATCH (n:S) RETURN n.i AS i ORDER BY n.p DESC"),
+        "i",
+    );
     assert_eq!(desc, vec![3, 1, 4, 7, 5, 6, 0, 2]);
-    let top = ints(&read(&store, "MATCH (n:S) RETURN n.i AS i ORDER BY n.p LIMIT 3"), "i");
+    let top = ints(
+        &read(&store, "MATCH (n:S) RETURN n.i AS i ORDER BY n.p LIMIT 3"),
+        "i",
+    );
     assert_eq!(top, vec![2, 0, 6]);
     // Three keys use the heap-allocated key.
-    let three = ints(&read(&store, "MATCH (n:S) RETURN n.i AS i ORDER BY n.g, n.p DESC, n.i LIMIT 4"), "i");
+    let three = ints(
+        &read(
+            &store,
+            "MATCH (n:S) RETURN n.i AS i ORDER BY n.g, n.p DESC, n.i LIMIT 4",
+        ),
+        "i",
+    );
     assert_eq!(three, vec![4, 6, 0, 2]);
-    let distinct = read(&store, "MATCH (n:S) RETURN DISTINCT n.g AS g ORDER BY n.g DESC LIMIT 1");
+    let distinct = read(
+        &store,
+        "MATCH (n:S) RETURN DISTINCT n.g AS g ORDER BY n.g DESC LIMIT 1",
+    );
     assert_eq!(ints(&distinct, "g"), vec![1]);
-    let expr_key = ints(&read(&store, "MATCH (n:S) RETURN n.i AS i ORDER BY n.i % 3, n.i DESC"), "i");
+    let expr_key = ints(
+        &read(
+            &store,
+            "MATCH (n:S) RETURN n.i AS i ORDER BY n.i % 3, n.i DESC",
+        ),
+        "i",
+    );
     assert_eq!(expr_key, vec![6, 3, 0, 7, 4, 1, 5, 2]);
 }
 
@@ -3587,14 +4895,20 @@ fn sort_operator_direct_paths() {
     let mut store = GraphStore::new();
     let rows = || -> OperatorBox {
         Box::new(MaterializedOperator::new(
-            [3i64, 1, 2].iter().map(|i| a_record("x", Value::Property(pint(*i)))).collect(),
+            [3i64, 1, 2]
+                .iter()
+                .map(|i| a_record("x", Value::Property(pint(*i))))
+                .collect(),
         ))
     };
     let mut op = SortOperator::new(rows(), vec![(var("x"), false)]);
     let d = op.describe();
     assert_eq!(d.name, "Sort");
     assert_eq!(op.children_mut().len(), 1);
-    let got: Vec<i64> = drain(&mut op, &store).iter().map(|r| rec_int(r, "x")).collect();
+    let got: Vec<i64> = drain(&mut op, &store)
+        .iter()
+        .map(|r| rec_int(r, "x"))
+        .collect();
     assert_eq!(got, vec![3, 2, 1]);
     op.reset();
     let b = op.next_batch(&store, 2).unwrap().unwrap();
@@ -3606,12 +4920,22 @@ fn sort_operator_direct_paths() {
 
     let mut limited = SortOperator::new(rows(), vec![(var("x"), true)]);
     assert!(limited.try_push_limit(1));
-    let got: Vec<i64> = drain(&mut limited, &store).iter().map(|r| rec_int(r, "x")).collect();
+    let got: Vec<i64> = drain(&mut limited, &store)
+        .iter()
+        .map(|r| rec_int(r, "x"))
+        .collect();
     assert_eq!(got, vec![1]);
     let mut soft = SortOperator::new(rows(), vec![(var("x"), true)]);
     soft.hint_early_stop(1);
-    let got: Vec<i64> = drain(&mut soft, &store).iter().map(|r| rec_int(r, "x")).collect();
-    assert_eq!(got, vec![1, 2, 3], "a soft hint still yields every row in order");
+    let got: Vec<i64> = drain(&mut soft, &store)
+        .iter()
+        .map(|r| rec_int(r, "x"))
+        .collect();
+    assert_eq!(
+        got,
+        vec![1, 2, 3],
+        "a soft hint still yields every row in order"
+    );
 
     let mut bad = SortOperator::new(rows(), vec![(var("missing"), true)]);
     assert!(bad.next(&store).is_err());
@@ -3621,7 +4945,10 @@ fn sort_operator_direct_paths() {
 #[ignore = "bug: `[1, x] = [1, 2]` is a TypeError (a list built from a variable is treated as an entity by `=`)"]
 fn list_equality_with_a_variable_element() {
     let store = GraphStore::new();
-    let b = read(&store, "UNWIND [0, 1, 2] AS x WITH x WHERE [1, x] = [1, 2] RETURN x");
+    let b = read(
+        &store,
+        "UNWIND [0, 1, 2] AS x WITH x WHERE [1, x] = [1, 2] RETURN x",
+    );
     assert_eq!(ints(&b, "x"), vec![2]);
 }
 
@@ -3650,11 +4977,38 @@ fn count_rows(store: &GraphStore, q: &str) -> usize {
 fn path_selectors_pick_among_matches() {
     let s = cycle_store();
     // Two trails from 0 to 2 within three hops: the chord and 0->1->2.
-    assert_eq!(count_rows(&s, "MATCH (a:C {i: 0})-[:R*1..3]->(b:C {i: 2}) RETURN b"), 2);
-    assert_eq!(count_rows(&s, "MATCH ALL SHORTEST (a:C {i: 0})-[:R*1..3]->(b:C {i: 2}) RETURN b"), 1);
-    assert_eq!(count_rows(&s, "MATCH ANY SHORTEST (a:C {i: 0})-[:R*1..3]->(b:C {i: 2}) RETURN b"), 1);
-    assert_eq!(count_rows(&s, "MATCH ANY (a:C {i: 0})-[:R*1..3]->(b:C {i: 2}) RETURN b"), 1);
-    assert_eq!(count_rows(&s, "MATCH ALL (a:C {i: 0})-[:R*1..3]->(b:C {i: 2}) RETURN b"), 2);
+    assert_eq!(
+        count_rows(&s, "MATCH (a:C {i: 0})-[:R*1..3]->(b:C {i: 2}) RETURN b"),
+        2
+    );
+    assert_eq!(
+        count_rows(
+            &s,
+            "MATCH ALL SHORTEST (a:C {i: 0})-[:R*1..3]->(b:C {i: 2}) RETURN b"
+        ),
+        1
+    );
+    assert_eq!(
+        count_rows(
+            &s,
+            "MATCH ANY SHORTEST (a:C {i: 0})-[:R*1..3]->(b:C {i: 2}) RETURN b"
+        ),
+        1
+    );
+    assert_eq!(
+        count_rows(
+            &s,
+            "MATCH ANY (a:C {i: 0})-[:R*1..3]->(b:C {i: 2}) RETURN b"
+        ),
+        1
+    );
+    assert_eq!(
+        count_rows(
+            &s,
+            "MATCH ALL (a:C {i: 0})-[:R*1..3]->(b:C {i: 2}) RETURN b"
+        ),
+        2
+    );
     let b = read(&s, "MATCH ANY SHORTEST p = (a:C {i: 0})-[:R*]->(b:C) RETURN b.i AS i, length(p) AS l ORDER BY i");
     assert_eq!(ints(&b, "i"), vec![0, 1, 2, 3]);
     // Back to the start through the chord: 0 -> 2 -> 3 -> 0.
@@ -3665,48 +5019,99 @@ fn path_selectors_pick_among_matches() {
 fn path_restrictors_bound_repetition() {
     let s = cycle_store();
     // Back to the start: a trail may revisit the first node at the end.
-    assert_eq!(count_rows(&s, "MATCH TRAIL (a:C {i: 0})-[:R*1..4]->(b:C {i: 0}) RETURN b"), 2);
-    assert_eq!(count_rows(&s, "MATCH SIMPLE (a:C {i: 0})-[:R*1..4]->(b:C {i: 0}) RETURN b"), 2);
-    assert_eq!(count_rows(&s, "MATCH ACYCLIC (a:C {i: 0})-[:R*1..4]->(b:C {i: 0}) RETURN b"), 0);
+    assert_eq!(
+        count_rows(
+            &s,
+            "MATCH TRAIL (a:C {i: 0})-[:R*1..4]->(b:C {i: 0}) RETURN b"
+        ),
+        2
+    );
+    assert_eq!(
+        count_rows(
+            &s,
+            "MATCH SIMPLE (a:C {i: 0})-[:R*1..4]->(b:C {i: 0}) RETURN b"
+        ),
+        2
+    );
+    assert_eq!(
+        count_rows(
+            &s,
+            "MATCH ACYCLIC (a:C {i: 0})-[:R*1..4]->(b:C {i: 0}) RETURN b"
+        ),
+        0
+    );
     // A walk may repeat edges; bounded, it is finite.
     let walks = count_rows(&s, "MATCH WALK (a:C {i: 0})-[:R*1..5]->(b) RETURN b");
     let trails = count_rows(&s, "MATCH TRAIL (a:C {i: 0})-[:R*1..5]->(b) RETURN b");
     assert!(walks > trails, "{walks} walks vs {trails} trails");
-    assert_eq!(count_rows(&s, "MATCH ANY SHORTEST ACYCLIC (a:C {i: 0})-[:R*]->(b:C {i: 3}) RETURN b"), 1);
+    assert_eq!(
+        count_rows(
+            &s,
+            "MATCH ANY SHORTEST ACYCLIC (a:C {i: 0})-[:R*]->(b:C {i: 3}) RETURN b"
+        ),
+        1
+    );
 }
 
 #[test]
 fn variable_length_details() {
     let s = cycle_store();
     // An edge-property filter on every hop.
-    assert_eq!(count_rows(&s, "MATCH (a:C {i: 0})-[:R*1..3 {w: 1}]->(b:C {i: 3}) RETURN b"), 1);
+    assert_eq!(
+        count_rows(
+            &s,
+            "MATCH (a:C {i: 0})-[:R*1..3 {w: 1}]->(b:C {i: 3}) RETURN b"
+        ),
+        1
+    );
     // A bound end on both sides.
-    let b = read(&s, "MATCH (a:C {i: 1}), (b:C {i: 0}) MATCH p = (a)-[:R*]->(b) RETURN length(p) AS l");
+    let b = read(
+        &s,
+        "MATCH (a:C {i: 1}), (b:C {i: 0}) MATCH p = (a)-[:R*]->(b) RETURN length(p) AS l",
+    );
     assert_eq!(ints(&b, "l"), vec![3]);
     // Incoming and undirected.
     // Only 2 -> 3 -> 0 arrives at 0 in exactly two hops.
     assert_eq!(count_rows(&s, "MATCH (a:C {i: 0})<-[:R*2]-(b) RETURN b"), 1);
-    let b = read(&s, "MATCH (a:C {i: 0})-[:R*1]-(b) RETURN count(DISTINCT b) AS c");
+    let b = read(
+        &s,
+        "MATCH (a:C {i: 0})-[:R*1]-(b) RETURN count(DISTINCT b) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 3);
     // Target labels and target properties restrict the far end.
-    assert_eq!(count_rows(&s, "MATCH (a:C {i: 0})-[:R*1..2]->(b:C {i: 3}) RETURN b"), 1);
-    assert_eq!(count_rows(&s, "MATCH (a:C {i: 0})-[:R*1..2]->(b:Nope) RETURN b"), 0);
+    assert_eq!(
+        count_rows(&s, "MATCH (a:C {i: 0})-[:R*1..2]->(b:C {i: 3}) RETURN b"),
+        1
+    );
+    assert_eq!(
+        count_rows(&s, "MATCH (a:C {i: 0})-[:R*1..2]->(b:Nope) RETURN b"),
+        0
+    );
     // A relationship list variable, then walked again as a bound list.
     let b = read(
         &s,
         "MATCH (a:C {i: 0})-[rs:R*2]->(b:C {i: 2}) WITH a, rs MATCH (a)-[rs*]->(c) RETURN c.i AS i",
     );
     assert_eq!(ints(&b, "i"), vec![2]);
-    let b = read(&s, "MATCH (a:C {i: 0})-[rs:R*2]->(b) RETURN [r IN rs | r.w] AS ws ORDER BY b.i");
+    let b = read(
+        &s,
+        "MATCH (a:C {i: 0})-[rs:R*2]->(b) RETURN [r IN rs | r.w] AS ws ORDER BY b.i",
+    );
     assert_eq!(b.records.len(), 2);
     // Zero hops binds the start itself.
     let b = read(&s, "MATCH (a:C {i: 2})-[:R*0]->(b) RETURN b.i AS i");
     assert_eq!(ints(&b, "i"), vec![2]);
     // Unbounded from a pinned target.
-    let b = read(&s, "MATCH (b:C {i: 3}) MATCH (a:C)-[:R*]->(b) RETURN count(DISTINCT a) AS c");
+    let b = read(
+        &s,
+        "MATCH (b:C {i: 3}) MATCH (a:C)-[:R*]->(b) RETURN count(DISTINCT a) AS c",
+    );
     assert_eq!(int(&b, 0, "c"), 4);
     // An optional variable-length match with no path.
-    let b = read(&s, "MATCH (a:C {i: 0}) OPTIONAL MATCH (a)-[:NONE*]->(b) RETURN b");
+    let b = read(
+        &s,
+        "MATCH (a:C {i: 0}) OPTIONAL MATCH (a)-[:NONE*]->(b) RETURN b",
+    );
     assert_eq!(cell(&b, 0, "b"), PropertyValue::Null);
 }
 
@@ -3725,13 +5130,18 @@ fn variable_length_operator_direct() {
     )
     .with_target_labels(vec![Label::new("V")])
     .with_path_variable("p".into())
-    .with_edge_properties(HashMap::from([("w".to_string(), PropertyValue::Float(1.0))]));
+    .with_edge_properties(HashMap::from([(
+        "w".to_string(),
+        PropertyValue::Float(1.0),
+    )]));
     let d = op.describe();
     assert!(!d.name.is_empty());
     assert_eq!(op.children_mut().len(), 1);
     let rows = drain(&mut op, &store);
     assert_eq!(rows.len(), 3);
-    assert!(rows.iter().all(|r| matches!(r.get("p"), Some(Value::Path { .. }))));
+    assert!(rows
+        .iter()
+        .all(|r| matches!(r.get("p"), Some(Value::Path { .. }))));
     op.reset();
     let b = op.next_batch(&store, 2).unwrap().unwrap();
     assert_eq!(b.records.len(), 2);
@@ -3752,7 +5162,10 @@ fn variable_length_operator_direct() {
     .with_reversed_walk();
     assert!(drain(&mut op, &store).is_empty());
     let mut op = VarLengthExpandOperator::new(
-        Box::new(MaterializedOperator::new(vec![a_record("n", Value::Property(pint(1)))])),
+        Box::new(MaterializedOperator::new(vec![a_record(
+            "n",
+            Value::Property(pint(1)),
+        )])),
         "n".into(),
         "m".into(),
         vec![],
@@ -3770,15 +5183,30 @@ fn variable_length_operator_direct() {
 #[test]
 fn with_barrier_corners() {
     let s = social();
-    let b = read(&s, "MATCH (n:Person) WITH n.age % 2 AS k, count(*) AS c ORDER BY k DESC RETURN k, c");
+    let b = read(
+        &s,
+        "MATCH (n:Person) WITH n.age % 2 AS k, count(*) AS c ORDER BY k DESC RETURN k, c",
+    );
     assert_eq!(ints(&b, "k"), vec![1, 0]);
-    let b = read(&s, "MATCH (n:Person) WITH DISTINCT n.age % 2 AS k ORDER BY k SKIP 1 RETURN k");
+    let b = read(
+        &s,
+        "MATCH (n:Person) WITH DISTINCT n.age % 2 AS k ORDER BY k SKIP 1 RETURN k",
+    );
     assert_eq!(ints(&b, "k"), vec![1]);
     let b = read(&s, "MATCH (n:Person) WITH n.age % 2 AS k, collect(n.name) AS ns WHERE size(ns) > 1 RETURN k ORDER BY k");
     assert_eq!(ints(&b, "k"), vec![0, 1]);
-    let b = read(&s, "MATCH (n:Person) WITH n ORDER BY n.age LIMIT 2 RETURN collect(n.name) AS ns");
-    assert_eq!(cell(&b, 0, "ns"), PropertyValue::Array(vec![pstr("a"), pstr("b")]));
-    let b = read(&s, "MATCH (n:Person) WITH sum(n.age) AS total, max(n.age) AS top RETURN total, top");
+    let b = read(
+        &s,
+        "MATCH (n:Person) WITH n ORDER BY n.age LIMIT 2 RETURN collect(n.name) AS ns",
+    );
+    assert_eq!(
+        cell(&b, 0, "ns"),
+        PropertyValue::Array(vec![pstr("a"), pstr("b")])
+    );
+    let b = read(
+        &s,
+        "MATCH (n:Person) WITH sum(n.age) AS total, max(n.age) AS top RETURN total, top",
+    );
     assert_eq!((int(&b, 0, "total"), int(&b, 0, "top")), (10, 4));
     let b = read(&s, "MATCH (n:Nope) WITH count(n) AS c RETURN c");
     assert_eq!(int(&b, 0, "c"), 0);
@@ -3786,11 +5214,20 @@ fn with_barrier_corners() {
     assert!(b.records.is_empty());
     let b = read(&s, "MATCH (n:Person) WITH n.name AS name, n.age AS age WHERE age > 1 WITH name ORDER BY name DESC LIMIT 1 RETURN name");
     assert_eq!(strings(&b, "name"), vec!["d"]);
-    let b = read(&s, "MATCH (n:Person) WITH percentileCont(n.age, 0.5) AS p, stDevP(n.age) AS sd RETURN p, sd");
+    let b = read(
+        &s,
+        "MATCH (n:Person) WITH percentileCont(n.age, 0.5) AS p, stDevP(n.age) AS sd RETURN p, sd",
+    );
     assert_eq!(float(&b, 0, "p"), 2.5);
-    let b = read(&s, "MATCH (a:Person)-[:KNOWS]->(b) WITH a, count(b) AS c, collect(b) AS bs RETURN sum(c) AS s");
+    let b = read(
+        &s,
+        "MATCH (a:Person)-[:KNOWS]->(b) WITH a, count(b) AS c, collect(b) AS bs RETURN sum(c) AS s",
+    );
     assert_eq!(int(&b, 0, "s"), 4);
-    let b = read(&s, "UNWIND [1, 2, 3] AS x WITH x WHERE x > 1 RETURN sum(x) AS s");
+    let b = read(
+        &s,
+        "UNWIND [1, 2, 3] AS x WITH x WHERE x > 1 RETURN sum(x) AS s",
+    );
     assert_eq!(int(&b, 0, "s"), 5);
 }
 
@@ -3799,22 +5236,40 @@ fn aggregation_corners() {
     let s = social();
     let b = read(&s, "MATCH (n:Person) RETURN count(DISTINCT n) AS c, count(n.missing) AS m, collect(DISTINCT n.age > 2) AS flags");
     assert_eq!((int(&b, 0, "c"), int(&b, 0, "m")), (4, 0));
-    let b = read(&s, "MATCH (n) RETURN labels(n) AS l, count(*) AS c ORDER BY c DESC");
+    let b = read(
+        &s,
+        "MATCH (n) RETURN labels(n) AS l, count(*) AS c ORDER BY c DESC",
+    );
     assert!(b.records.len() >= 2);
     let b = read(&s, "MATCH (n:Person)-[r]->(m) RETURN type(r) AS t, count(DISTINCT m) AS c, sum(r.w) AS w ORDER BY t");
     assert_eq!(strings(&b, "t"), vec!["KNOWS", "LIKES", "LIVES_IN"]);
-    let b = read(&s, "MATCH (n:Person) RETURN n.age > 2 AS old, avg(n.age) AS a, min(n.age) AS mn ORDER BY old");
+    let b = read(
+        &s,
+        "MATCH (n:Person) RETURN n.age > 2 AS old, avg(n.age) AS a, min(n.age) AS mn ORDER BY old",
+    );
     assert_eq!(b.records.len(), 2);
-    let b = read(&s, "MATCH (n:Person) RETURN percentileDisc(n.age, 1.0) AS p");
+    let b = read(
+        &s,
+        "MATCH (n:Person) RETURN percentileDisc(n.age, 1.0) AS p",
+    );
     assert_eq!(float(&b, 0, "p"), 4.0);
-    let e = read_err(&s, "MATCH (n:Person) RETURN percentileCont(n.age, 2.0) AS p");
+    let e = read_err(
+        &s,
+        "MATCH (n:Person) RETURN percentileCont(n.age, 2.0) AS p",
+    );
     assert!(e.contains("percentile"), "{e}");
-    let b = read(&s, "MATCH (n:Person) RETURN n.name AS name, n.age AS age, count(*) AS c ORDER BY name LIMIT 2");
+    let b = read(
+        &s,
+        "MATCH (n:Person) RETURN n.name AS name, n.age AS age, count(*) AS c ORDER BY name LIMIT 2",
+    );
     assert_eq!(strings(&b, "name"), vec!["a", "b"]);
     let b = read(&s, "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS name, count(DISTINCT b.age) AS c ORDER BY name");
     assert_eq!(strings(&b, "name"), vec!["a", "b", "c", "d"]);
     assert_eq!(ints(&b, "c"), vec![1, 1, 1, 1]);
-    let b = read(&s, "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, count(DISTINCT b.age) AS c");
+    let b = read(
+        &s,
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, count(DISTINCT b.age) AS c",
+    );
     let mut sources: Vec<String> = b
         .records
         .iter()
@@ -3833,7 +5288,7 @@ fn aggregation_corners() {
     let b = read(&s, "MATCH (a:Person)-[:KNOWS]-(b) WHERE b.age > 1 RETURN a.name AS name, count(b) AS n ORDER BY name");
     // d's only neighbour is a, who is too young, so d has no group.
     assert_eq!(strings(&b, "name"), vec!["a", "b", "c"]);
-    assert_eq!(ints(&b, "n"), vec![2, 1, 1]);
+    assert_eq!(ints(&b, "n"), vec![3, 1, 1]);
 }
 
 // ---------------------------------------------------------------------------
@@ -3851,9 +5306,18 @@ fn every_operator_evaluator_agrees_with_eval_expression() {
 
     let mut row = a_record("n", Value::NodeRef(a));
     row.bind("x", Value::Property(pint(2)));
-    row.bind("l", Value::Property(PropertyValue::Array(vec![pint(1), pint(2), pint(3)])));
+    row.bind(
+        "l",
+        Value::Property(PropertyValue::Array(vec![pint(1), pint(2), pint(3)])),
+    );
     row.bind("$p", Value::Property(pint(7)));
-    row.bind("path", Value::Path { nodes: vec![a], edges: vec![] });
+    row.bind(
+        "path",
+        Value::Path {
+            nodes: vec![a],
+            edges: vec![],
+        },
+    );
 
     let mut exprs: Vec<(String, Expression)> = [
         "n.v + x",
@@ -3894,9 +5358,15 @@ fn every_operator_evaluator_agrees_with_eval_expression() {
         let got = [
             ("filter", filter.evaluate_expression(e, &row, &store)),
             ("project", project.evaluate_expression(e, &row, &store)),
-            ("aggregate", AggregateOperator::evaluate_expression(e, &row, &store)),
+            (
+                "aggregate",
+                AggregateOperator::evaluate_expression(e, &row, &store),
+            ),
             ("sort", SortOperator::evaluate_expression(e, &row, &store)),
-            ("with", WithBarrierOperator::evaluate_expression(e, &row, &store)),
+            (
+                "with",
+                WithBarrierOperator::evaluate_expression(e, &row, &store),
+            ),
         ];
         for (who, v) in got {
             let v = v.unwrap_or_else(|err| panic!("{who} {text}: {err}"));
@@ -3905,7 +5375,10 @@ fn every_operator_evaluator_agrees_with_eval_expression() {
     }
 
     // Unresolved names are errors everywhere a lookup can fail.
-    for e in [Expression::Parameter("zz".into()), Expression::PathVariable("zz".into())] {
+    for e in [
+        Expression::Parameter("zz".into()),
+        Expression::PathVariable("zz".into()),
+    ] {
         assert!(filter.evaluate_expression(&e, &row, &store).is_err());
         assert!(project.evaluate_expression(&e, &row, &store).is_err());
         assert!(AggregateOperator::evaluate_expression(&e, &row, &store).is_err());
@@ -3936,27 +5409,48 @@ fn ring_store() -> GraphStore {
 #[test]
 fn typed_expands_past_the_type_index_threshold() {
     let s = ring_store();
-    assert_eq!(count_of(&s, "MATCH (a:N)-[:T]->(b) RETURN count(*) AS c"), 1201);
-    assert_eq!(count_of(&s, "MATCH (a:N)<-[:T]-(b) RETURN count(*) AS c"), 1201);
+    assert_eq!(
+        count_of(&s, "MATCH (a:N)-[:T]->(b) RETURN count(*) AS c"),
+        1201
+    );
+    assert_eq!(
+        count_of(&s, "MATCH (a:N)<-[:T]-(b) RETURN count(*) AS c"),
+        1201
+    );
     // Undirected: every edge from both ends, the self-loop once.
-    assert_eq!(count_of(&s, "MATCH (a:N)-[:T]-(b) RETURN count(*) AS c"), 2401);
+    assert_eq!(
+        count_of(&s, "MATCH (a:N)-[:T]-(b) RETURN count(*) AS c"),
+        2401
+    );
     // A cyclic close: a -> a+1 -> a+2 closed by a -> a+2.
     assert_eq!(
-        count_of(&s, "MATCH (a:N)-[:T]->(b)-[:T]->(c)<-[:T]-(a) RETURN count(*) AS c"),
+        count_of(
+            &s,
+            "MATCH (a:N)-[:T]->(b)-[:T]->(c)<-[:T]-(a) RETURN count(*) AS c"
+        ),
         600
     );
     assert_eq!(
-        count_of(&s, "MATCH (a:N)-[:T]->(c), (a)-[:T]->(b)-[:T]->(c) RETURN count(*) AS c"),
+        count_of(
+            &s,
+            "MATCH (a:N)-[:T]->(c), (a)-[:T]->(b)-[:T]->(c) RETURN count(*) AS c"
+        ),
         600
     );
     // The same close written from the other end.
     assert_eq!(
-        count_of(&s, "MATCH (c:N)<-[:T]-(b)<-[:T]-(a)-[:T]->(c) RETURN count(*) AS c"),
+        count_of(
+            &s,
+            "MATCH (c:N)<-[:T]-(b)<-[:T]-(a)-[:T]->(c) RETURN count(*) AS c"
+        ),
         600
     );
     // Undirected closes see each directed triangle-with-chord more than once,
     // but the typed and untyped walks must agree.
-    let typed = count_of(&s, "MATCH (a:N)-[:T]-(b)-[:T]-(c)-[:T]-(a) RETURN count(*) AS c");
+    let typed = count_of(
+        &s,
+        "MATCH (a:N)-[:T]-(b)-[:T]-(c)-[:T]-(a) RETURN count(*) AS c",
+    );
     let any = count_of(&s, "MATCH (a:N)-[x]-(b)-[y]-(c)-[z]-(a) WHERE type(x) = 'T' AND type(y) = 'T' AND type(z) = 'T' RETURN count(*) AS c");
     assert_eq!(typed, any);
     assert!(typed > 0);
@@ -3970,12 +5464,16 @@ fn typed_variable_length_walks_agree_with_fixed_hops() {
     assert_eq!(var2, fixed2);
     let var_in = count_of(&s, "MATCH (a:N)<-[:T*2]-(b) RETURN count(*) AS c");
     assert_eq!(var_in, fixed2);
-    let var_both = count_of(&s, "MATCH (a:N)-[:T*1..2]-(b) RETURN count(*) AS c");
-    let fixed_both1 = count_of(&s, "MATCH (a:N)-[:T]-(b) RETURN count(*) AS c");
-    let fixed_both2 = count_of(&s, "MATCH (a:N)-[:T]-(m)-[:T]-(b) RETURN count(*) AS c");
+    // Undirected, on the type without the self-loop.
+    let var_both = count_of(&s, "MATCH (a:N)-[:U*1..2]-(b) RETURN count(*) AS c");
+    let fixed_both1 = count_of(&s, "MATCH (a:N)-[:U]-(b) RETURN count(*) AS c");
+    let fixed_both2 = count_of(&s, "MATCH (a:N)-[:U]-(m)-[:U]-(b) RETURN count(*) AS c");
     assert_eq!(var_both, fixed_both1 + fixed_both2);
     // Pinned far end, many sources.
-    let pinned = count_of(&s, "MATCH (z:N) WITH z LIMIT 1 MATCH (a:N)-[:T*1..2]->(z) RETURN count(*) AS c");
+    let pinned = count_of(
+        &s,
+        "MATCH (z:N) WITH z LIMIT 1 MATCH (a:N)-[:T*1..2]->(z) RETURN count(*) AS c",
+    );
     assert!(pinned >= 4, "{pinned}");
 }
 
@@ -3984,7 +5482,10 @@ fn typed_variable_length_walks_agree_with_fixed_hops() {
 // ---------------------------------------------------------------------------
 
 fn edge_count(store: &GraphStore, ty: &str) -> i64 {
-    count_of(store, &format!("MATCH ()-[r:{ty}]->() RETURN count(r) AS c"))
+    count_of(
+        store,
+        &format!("MATCH ()-[r:{ty}]->() RETURN count(r) AS c"),
+    )
 }
 
 #[test]
@@ -4003,22 +5504,57 @@ fn match_create_edge_operator_paths() {
         Some(HashMap::from([("fromx".to_string(), var("x"))])),
     )];
     let edges: Vec<EdgeToCreate> = vec![
-        ("a".into(), "c".into(), EdgeType::new("R"), HashMap::from([("w".to_string(), pint(1))]), Some("r".into()), Some(HashMap::from([("x2".to_string(), var("x"))]))),
-        ("missing".into(), "b".into(), EdgeType::new("R"), HashMap::new(), None, None),
-        ("a".into(), "missing".into(), EdgeType::new("R"), HashMap::new(), None, None),
+        (
+            "a".into(),
+            "c".into(),
+            EdgeType::new("R"),
+            HashMap::from([("w".to_string(), pint(1))]),
+            Some("r".into()),
+            Some(HashMap::from([("x2".to_string(), var("x"))])),
+        ),
+        (
+            "missing".into(),
+            "b".into(),
+            EdgeType::new("R"),
+            HashMap::new(),
+            None,
+            None,
+        ),
+        (
+            "a".into(),
+            "missing".into(),
+            EdgeType::new("R"),
+            HashMap::new(),
+            None,
+            None,
+        ),
     ];
     let mut op = MatchCreateEdgeOperator::with_nodes(input(row.clone()), nodes.clone(), edges);
     assert!(op.is_mutating());
     assert_eq!(op.children_mut().len(), 1);
-    assert!(matches!(op.next(&store), Err(ExecutionError::RuntimeError(_))));
+    assert!(matches!(
+        op.next(&store),
+        Err(ExecutionError::RuntimeError(_))
+    ));
     let rows = drain_mut(&mut op, &mut store);
     // Only the edge whose ends are bound is made.
     assert_eq!(rows.len(), 1);
     assert!(matches!(rows[0].get("r"), Some(Value::Edge(..))));
     assert!(rows[0].get("_edge").is_some());
     assert_eq!(edge_count(&store, "R"), 1);
-    let b2 = read(&store, "MATCH (a:A)-[r:R]->(c:C) RETURN c.lit AS lit, c.fromx AS fx, r.w AS w, r.x2 AS x2");
-    assert_eq!((int(&b2, 0, "lit"), int(&b2, 0, "fx"), int(&b2, 0, "w"), int(&b2, 0, "x2")), (1, 4, 1, 4));
+    let b2 = read(
+        &store,
+        "MATCH (a:A)-[r:R]->(c:C) RETURN c.lit AS lit, c.fromx AS fx, r.w AS w, r.x2 AS x2",
+    );
+    assert_eq!(
+        (
+            int(&b2, 0, "lit"),
+            int(&b2, 0, "fx"),
+            int(&b2, 0, "w"),
+            int(&b2, 0, "x2")
+        ),
+        (1, 4, 1, 4)
+    );
     op.reset();
     assert_eq!(drain_mut(&mut op, &mut store).len(), 1);
     assert_eq!(edge_count(&store, "R"), 2);
@@ -4038,7 +5574,9 @@ fn match_create_edge_operator_paths() {
     )];
     let mut bad = MatchCreateEdgeOperator::with_nodes(input(row), bad_nodes, vec![]);
     match bad.next_mut(&mut store, TENANT) {
-        Err(ExecutionError::TypeError(m)) => assert!(m.contains("property `bad` must be a scalar"), "{m}"),
+        Err(ExecutionError::TypeError(m)) => {
+            assert!(m.contains("property `bad` must be a scalar"), "{m}")
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -4052,22 +5590,61 @@ fn match_merge_edge_operator_paths() {
     row.bind("b", Value::NodeRef(b));
     let input = |r: Record| -> OperatorBox { Box::new(MaterializedOperator::new(vec![r])) };
     let edges = vec![
-        ("a".to_string(), "b".to_string(), EdgeType::new("M"), HashMap::from([("k".to_string(), pint(1))]), Some("r".to_string()), false),
-        ("zz".to_string(), "b".to_string(), EdgeType::new("M"), HashMap::new(), None, false),
-        ("a".to_string(), "zz".to_string(), EdgeType::new("M"), HashMap::new(), None, false),
+        (
+            "a".to_string(),
+            "b".to_string(),
+            EdgeType::new("M"),
+            HashMap::from([("k".to_string(), pint(1))]),
+            Some("r".to_string()),
+            false,
+        ),
+        (
+            "zz".to_string(),
+            "b".to_string(),
+            EdgeType::new("M"),
+            HashMap::new(),
+            None,
+            false,
+        ),
+        (
+            "a".to_string(),
+            "zz".to_string(),
+            EdgeType::new("M"),
+            HashMap::new(),
+            None,
+            false,
+        ),
     ];
     let on_create = vec![
         ("r".to_string(), "created".to_string(), li(1)),
-        ("_edge".to_string(), "gone".to_string(), Expression::Literal(PropertyValue::Null)),
-        ("r".to_string(), "list".to_string(), Expression::ListExpr(vec![var("a")])),
+        (
+            "_edge".to_string(),
+            "gone".to_string(),
+            Expression::Literal(PropertyValue::Null),
+        ),
+        (
+            "r".to_string(),
+            "list".to_string(),
+            Expression::ListExpr(vec![var("a")]),
+        ),
     ];
     let on_match = vec![
         ("r".to_string(), "matched".to_string(), li(2)),
-        ("r".to_string(), "created".to_string(), Expression::Literal(PropertyValue::Null)),
+        (
+            "r".to_string(),
+            "created".to_string(),
+            Expression::Literal(PropertyValue::Null),
+        ),
         ("r".to_string(), "entity".to_string(), var("a")),
     ];
     let make = |store_row: Record| {
-        MatchMergeEdgeOperator::new(input(store_row), edges.clone(), on_create.clone(), on_match.clone()).with_entity_sets(
+        MatchMergeEdgeOperator::new(
+            input(store_row),
+            edges.clone(),
+            on_create.clone(),
+            on_match.clone(),
+        )
+        .with_entity_sets(
             vec![("r".to_string(), true, lmap(&[("ce", pint(3))]))],
             vec![("_edge".to_string(), true, lmap(&[("me", pint(4))]))],
         )
@@ -4075,11 +5652,20 @@ fn match_merge_edge_operator_paths() {
     let mut op = make(row.clone());
     assert!(op.is_mutating());
     assert_eq!(op.children_mut().len(), 1);
-    assert!(matches!(op.next(&store), Err(ExecutionError::RuntimeError(_))));
+    assert!(matches!(
+        op.next(&store),
+        Err(ExecutionError::RuntimeError(_))
+    ));
     let rows = drain_mut(&mut op, &mut store);
     assert_eq!(rows.len(), 1);
-    let b1 = read(&store, "MATCH ()-[r:M]->() RETURN r.k AS k, r.created AS c, r.ce AS ce, r.matched AS m");
-    assert_eq!((int(&b1, 0, "k"), int(&b1, 0, "c"), int(&b1, 0, "ce")), (1, 1, 3));
+    let b1 = read(
+        &store,
+        "MATCH ()-[r:M]->() RETURN r.k AS k, r.created AS c, r.ce AS ce, r.matched AS m",
+    );
+    assert_eq!(
+        (int(&b1, 0, "k"), int(&b1, 0, "c"), int(&b1, 0, "ce")),
+        (1, 1, 3)
+    );
     assert_eq!(cell(&b1, 0, "m"), PropertyValue::Null);
 
     // Second run matches the edge: ON MATCH applies, ON CREATE does not.
@@ -4088,14 +5674,24 @@ fn match_merge_edge_operator_paths() {
     assert_eq!(rows.len(), 1);
     assert!(matches!(rows[0].get("r"), Some(Value::Edge(..))));
     assert_eq!(edge_count(&store, "M"), 1);
-    let b2 = read(&store, "MATCH ()-[r:M]->() RETURN r.created AS c, r.matched AS m, r.me AS me");
+    let b2 = read(
+        &store,
+        "MATCH ()-[r:M]->() RETURN r.created AS c, r.matched AS m, r.me AS me",
+    );
     assert_eq!(cell(&b2, 0, "c"), PropertyValue::Null);
     assert_eq!((int(&b2, 0, "m"), int(&b2, 0, "me")), (2, 4));
 
     // Undirected: an edge the other way round matches too.
     let mut rev = a_record("a", Value::NodeRef(b));
     rev.bind("b", Value::NodeRef(a));
-    let undirected = vec![("a".to_string(), "b".to_string(), EdgeType::new("M"), HashMap::new(), None, true)];
+    let undirected = vec![(
+        "a".to_string(),
+        "b".to_string(),
+        EdgeType::new("M"),
+        HashMap::new(),
+        None,
+        true,
+    )];
     let mut op = MatchMergeEdgeOperator::new(input(rev), undirected, vec![], vec![]);
     assert_eq!(drain_mut(&mut op, &mut store).len(), 1);
     assert_eq!(edge_count(&store, "M"), 1);
@@ -4105,8 +5701,18 @@ fn match_merge_edge_operator_paths() {
 fn create_nodes_and_edges_operator_paths() {
     let mut store = GraphStore::new();
     let nodes = CreateNodeOperator::new(vec![
-        (vec![Label::new("A")], HashMap::from([("id".to_string(), pint(7))]), Some("a".into()), None),
-        (vec![Label::new("B")], HashMap::new(), Some("b".into()), None),
+        (
+            vec![Label::new("A")],
+            HashMap::from([("id".to_string(), pint(7))]),
+            Some("a".into()),
+            None,
+        ),
+        (
+            vec![Label::new("B")],
+            HashMap::new(),
+            Some("b".into()),
+            None,
+        ),
     ]);
     let edges: Vec<EdgeToCreate> = vec![
         (
@@ -4116,11 +5722,24 @@ fn create_nodes_and_edges_operator_paths() {
             HashMap::from([("lit".to_string(), pint(1))]),
             Some("r".into()),
             Some(HashMap::from([
-                ("fromA".to_string(), Expression::Property { variable: "a".into(), property: "id".into() }),
+                (
+                    "fromA".to_string(),
+                    Expression::Property {
+                        variable: "a".into(),
+                        property: "id".into(),
+                    },
+                ),
                 ("entity".to_string(), var("a")),
             ])),
         ),
-        ("b".into(), "a".into(), EdgeType::new("S"), HashMap::new(), None, None),
+        (
+            "b".into(),
+            "a".into(),
+            EdgeType::new("S"),
+            HashMap::new(),
+            None,
+            None,
+        ),
     ];
     let mut op = CreateNodesAndEdgesOperator::new(Box::new(nodes), edges);
     assert!(op.is_mutating());
@@ -4129,17 +5748,494 @@ fn create_nodes_and_edges_operator_paths() {
     assert_eq!(rows.len(), 1);
     assert!(rows[0].get("r").is_some());
     assert!(rows[0].get("__created_edge_1").is_some());
-    let b = read(&store, "MATCH (:A)-[r:R]->(:B) RETURN r.lit AS l, r.fromA AS f, r.entity AS e");
+    let b = read(
+        &store,
+        "MATCH (:A)-[r:R]->(:B) RETURN r.lit AS l, r.fromA AS f, r.entity AS e",
+    );
     assert_eq!((int(&b, 0, "l"), int(&b, 0, "f")), (1, 7));
-    assert_eq!(cell(&b, 0, "e"), PropertyValue::Null, "an entity is not a storable property");
+    assert_eq!(
+        cell(&b, 0, "e"),
+        PropertyValue::Null,
+        "an entity is not a storable property"
+    );
     op.reset();
 
-    let missing: Vec<EdgeToCreate> = vec![("a".into(), "nope".into(), EdgeType::new("R"), HashMap::new(), None, None)];
-    let nodes = CreateNodeOperator::new(vec![(vec![Label::new("A")], HashMap::new(), Some("a".into()), None)]);
+    let missing: Vec<EdgeToCreate> = vec![(
+        "a".into(),
+        "nope".into(),
+        EdgeType::new("R"),
+        HashMap::new(),
+        None,
+        None,
+    )];
+    let nodes = CreateNodeOperator::new(vec![(
+        vec![Label::new("A")],
+        HashMap::new(),
+        Some("a".into()),
+        None,
+    )]);
     let mut op = CreateNodesAndEdgesOperator::new(Box::new(nodes), missing);
-    assert!(matches!(op.next_mut(&mut store, TENANT), Err(ExecutionError::VariableNotFound(v)) if v == "nope"));
-    let missing: Vec<EdgeToCreate> = vec![("nope".into(), "a".into(), EdgeType::new("R"), HashMap::new(), None, None)];
-    let nodes = CreateNodeOperator::new(vec![(vec![Label::new("A")], HashMap::new(), Some("a".into()), None)]);
+    assert!(
+        matches!(op.next_mut(&mut store, TENANT), Err(ExecutionError::VariableNotFound(v)) if v == "nope")
+    );
+    let missing: Vec<EdgeToCreate> = vec![(
+        "nope".into(),
+        "a".into(),
+        EdgeType::new("R"),
+        HashMap::new(),
+        None,
+        None,
+    )];
+    let nodes = CreateNodeOperator::new(vec![(
+        vec![Label::new("A")],
+        HashMap::new(),
+        Some("a".into()),
+        None,
+    )]);
     let mut op = CreateNodesAndEdgesOperator::new(Box::new(nodes), missing);
-    assert!(matches!(op.next_mut(&mut store, TENANT), Err(ExecutionError::VariableNotFound(v)) if v == "nope"));
+    assert!(
+        matches!(op.next_mut(&mut store, TENANT), Err(ExecutionError::VariableNotFound(v)) if v == "nope")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VarLengthExpandOperator walking an already-bound relationship list
+// ---------------------------------------------------------------------------
+
+/// The edge ids of `path4`'s three edges, in path order.
+fn path4_edges(store: &GraphStore, ids: &[i64]) -> Vec<EdgeId> {
+    (0..3)
+        .map(|i| {
+            store
+                .get_outgoing_edges(NodeId::new(ids[i] as u64))
+                .iter()
+                .map(|e| e.id)
+                .next()
+                .unwrap()
+        })
+        .collect()
+}
+
+fn edge_list(store: &GraphStore, es: &[EdgeId]) -> Value {
+    Value::List(
+        es.iter()
+            .map(|e| {
+                let edge = store.get_edge(*e).unwrap();
+                Value::EdgeRef(*e, edge.source, edge.target, edge.edge_type.clone())
+            })
+            .collect(),
+    )
+}
+
+fn bound_walk(
+    store: &GraphStore,
+    row: Record,
+    direction: Direction,
+    configure: impl FnOnce(VarLengthExpandOperator) -> VarLengthExpandOperator,
+) -> ExecutionResult<Vec<Record>> {
+    let op = VarLengthExpandOperator::new(
+        Box::new(MaterializedOperator::new(vec![row])),
+        "n".into(),
+        "m".into(),
+        vec![],
+        direction,
+        1,
+        5,
+    )
+    .with_rel_variable("rs".into());
+    let mut op = configure(op);
+    let mut out = Vec::new();
+    while let Some(r) = op.next(store)? {
+        out.push(r);
+    }
+    Ok(out)
+}
+
+#[test]
+fn bound_relationship_lists_are_walked_not_searched() {
+    let (store, ids) = path4();
+    let node = |i: usize| NodeId::new(ids[i] as u64);
+    let es = path4_edges(&store, &ids);
+    let row = |src: Value, list: Value| {
+        let mut r = a_record("n", src);
+        r.bind("rs", list);
+        r
+    };
+    let ends = |rows: &[Record]| -> Vec<Option<NodeId>> {
+        rows.iter()
+            .map(|r| r.get("m").and_then(|v| v.node_id()))
+            .collect()
+    };
+
+    let ok = bound_walk(
+        &store,
+        row(Value::NodeRef(node(0)), edge_list(&store, &es[..2])),
+        Direction::Outgoing,
+        id_op,
+    )
+    .unwrap();
+    assert_eq!(ends(&ok), vec![Some(node(2))]);
+    // Walked backwards.
+    let back = bound_walk(
+        &store,
+        row(Value::NodeRef(node(2)), edge_list(&store, &[es[1], es[0]])),
+        Direction::Incoming,
+        id_op,
+    )
+    .unwrap();
+    assert_eq!(ends(&back), vec![Some(node(0))]);
+    let both = bound_walk(
+        &store,
+        row(Value::NodeRef(node(2)), edge_list(&store, &[es[1], es[0]])),
+        Direction::Both,
+        id_op,
+    )
+    .unwrap();
+    assert_eq!(ends(&both), vec![Some(node(0))]);
+    let both_fwd = bound_walk(
+        &store,
+        row(Value::NodeRef(node(0)), edge_list(&store, &es[..1])),
+        Direction::Both,
+        id_op,
+    )
+    .unwrap();
+    assert_eq!(ends(&both_fwd), vec![Some(node(1))]);
+
+    // Lists that do not describe a walk from the source yield nothing.
+    for list in [
+        edge_list(&store, &[es[0], es[0]]),
+        edge_list(&store, &[es[1]]),
+        Value::List(vec![Value::Property(pint(1))]),
+        Value::Property(PropertyValue::Array(vec![pint(1)])),
+    ] {
+        let rows = bound_walk(
+            &store,
+            row(Value::NodeRef(node(0)), list.clone()),
+            Direction::Outgoing,
+            id_op,
+        )
+        .unwrap();
+        assert!(rows.is_empty(), "{list:?}");
+    }
+    // Too long for the bounds.
+    let rows = bound_walk(
+        &store,
+        row(Value::NodeRef(node(0)), edge_list(&store, &es)),
+        Direction::Outgoing,
+        |op| VarLengthExpandOperator { max_hops: 2, ..op },
+    )
+    .unwrap();
+    assert!(rows.is_empty());
+    // A type, a property, a label, a bound end or a pinned end that the walk misses.
+    let two = || edge_list(&store, &es[..2]);
+    assert!(bound_walk(
+        &store,
+        row(Value::NodeRef(node(0)), two()),
+        Direction::Outgoing,
+        |op| VarLengthExpandOperator {
+            edge_types: vec!["X".into()],
+            ..op
+        }
+    )
+    .unwrap()
+    .is_empty());
+    assert!(bound_walk(
+        &store,
+        row(Value::NodeRef(node(0)), two()),
+        Direction::Outgoing,
+        |op| op.with_edge_properties(HashMap::from([(
+            "w".to_string(),
+            PropertyValue::Float(9.0)
+        )]))
+    )
+    .unwrap()
+    .is_empty());
+    assert!(bound_walk(
+        &store,
+        row(Value::NodeRef(node(0)), two()),
+        Direction::Outgoing,
+        |op| op.with_target_labels(vec![Label::new("Nope")])
+    )
+    .unwrap()
+    .is_empty());
+    assert_eq!(
+        bound_walk(
+            &store,
+            row(Value::NodeRef(node(0)), two()),
+            Direction::Outgoing,
+            |op| op.with_target_labels(vec![Label::new("V")])
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    assert!(bound_walk(
+        &store,
+        row(Value::NodeRef(node(0)), two()),
+        Direction::Outgoing,
+        |op| op.with_pinned_target(node(3))
+    )
+    .unwrap()
+    .is_empty());
+    let mut bound_end = row(Value::NodeRef(node(0)), two());
+    bound_end.bind("m", Value::NodeRef(node(3)));
+    assert!(bound_walk(&store, bound_end, Direction::Outgoing, id_op)
+        .unwrap()
+        .is_empty());
+    // Edges already used by the clause cannot be reused.
+    assert_eq!(
+        bound_walk(
+            &store,
+            row(Value::NodeRef(node(0)), two()),
+            Direction::Outgoing,
+            |op| op.with_edge_isolation(false)
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+
+    // A null source is no row; anything else that is not a node is an error.
+    assert!(
+        bound_walk(&store, row(Value::Null, two()), Direction::Outgoing, id_op)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        bound_walk(
+            &store,
+            row(Value::Property(pint(1)), two()),
+            Direction::Outgoing,
+            id_op
+        ),
+        Err(ExecutionError::TypeError(_))
+    ));
+    let mut no_source = Record::new();
+    no_source.bind("rs", two());
+    assert!(matches!(
+        bound_walk(&store, no_source, Direction::Outgoing, id_op),
+        Err(ExecutionError::VariableNotFound(_))
+    ));
+}
+
+fn id_op(op: VarLengthExpandOperator) -> VarLengthExpandOperator {
+    op
+}
+
+#[test]
+fn variable_length_builder_options_filter_the_far_end() {
+    let (store, ids) = path4();
+    let node = |i: usize| NodeId::new(ids[i] as u64);
+    let run = |configure: &dyn Fn(VarLengthExpandOperator) -> VarLengthExpandOperator,
+               dir: Direction,
+               from: usize| {
+        let op = VarLengthExpandOperator::new(
+            node_rows(&[node(from)]),
+            "n".into(),
+            "m".into(),
+            vec!["E".into()],
+            dir,
+            1,
+            3,
+        );
+        let mut op = configure(op);
+        drain(&mut op, &store)
+            .iter()
+            .map(|r| r.get("m").and_then(|v| v.node_id()).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        run(&|op| op.with_pinned_target(node(2)), Direction::Outgoing, 0),
+        vec![node(2)]
+    );
+    assert_eq!(
+        run(&|op| op.with_pinned_target(node(0)), Direction::Incoming, 3),
+        vec![node(0)]
+    );
+    assert!(run(&|op| op.with_pinned_target(node(0)), Direction::Outgoing, 3).is_empty());
+    assert_eq!(
+        run(&|op| op.with_pinned_target(node(3)), Direction::Both, 0),
+        vec![node(3)]
+    );
+    assert_eq!(
+        run(
+            &|op| op.with_target_props(vec![("x".into(), pint(3))]),
+            Direction::Outgoing,
+            0
+        ),
+        vec![node(3)]
+    );
+    assert_eq!(
+        run(
+            &|op| op.with_target_ids(HashSet::from([node(1)])),
+            Direction::Outgoing,
+            0
+        ),
+        vec![node(1)]
+    );
+    let mut all = run(&|op| op.with_trail_enumeration(), Direction::Outgoing, 0);
+    all.sort();
+    assert_eq!(all, vec![node(1), node(2), node(3)]);
+    let sel = run(
+        &|op| {
+            op.with_selector(crate::query::ast::PathSelector::AnyShortest)
+                .with_restrictor(crate::query::ast::PathRestrictor::Acyclic)
+                .with_restrictor_explicit(true)
+        },
+        Direction::Outgoing,
+        0,
+    );
+    assert_eq!(sel.len(), 3);
+}
+
+// ---------------------------------------------------------------------------
+// AggregateOperator constructed directly
+// ---------------------------------------------------------------------------
+
+fn agg_fn(func: AggregateType, expr: Expression, alias: &str) -> AggregateFunction {
+    AggregateFunction {
+        func,
+        expr,
+        alias: alias.to_string(),
+        distinct: false,
+        percentile: None,
+    }
+}
+
+/// Rows over two variables, `a` and `b`, with integer values.
+fn two_key_rows() -> Vec<Record> {
+    [(1, 1), (1, 2), (2, 1), (1, 1), (2, 2)]
+        .iter()
+        .map(|(a, b)| {
+            let mut r = a_record("a", Value::Property(pint(*a)));
+            r.bind("b", Value::Property(pint(*b)));
+            r
+        })
+        .collect()
+}
+
+#[test]
+fn aggregate_operator_multi_key_groups() {
+    let mut store = GraphStore::new();
+    let make = || {
+        AggregateOperator::new(
+            Box::new(MaterializedOperator::new(two_key_rows())),
+            vec![(var("a"), "a".into()), (var("b"), "b".into())],
+            vec![
+                agg_fn(AggregateType::Count, var("a"), "c"),
+                AggregateFunction {
+                    percentile: Some(Expression::Literal(PropertyValue::Float(0.5))),
+                    ..agg_fn(AggregateType::PercentileCont, var("b"), "p")
+                },
+            ],
+        )
+    };
+    let mut op = make();
+    let d = op.describe();
+    assert_eq!(d.name, "Aggregate");
+    assert!(
+        d.details.contains("group_by=[a AS a, b AS b]"),
+        "{}",
+        d.details
+    );
+    assert_eq!(op.children_mut().len(), 1);
+    let mut rows: Vec<(i64, i64, i64)> = drain(&mut op, &store)
+        .iter()
+        .map(|r| (rec_int(r, "a"), rec_int(r, "b"), rec_int(r, "c")))
+        .collect();
+    rows.sort();
+    assert_eq!(rows, vec![(1, 1, 2), (1, 2, 1), (2, 1, 1), (2, 2, 1)]);
+    op.reset();
+    let b = op.next_batch(&store, 3).unwrap().unwrap();
+    assert_eq!(b.records.len(), 3);
+    assert_eq!(op.next_batch(&store, 3).unwrap().unwrap().records.len(), 1);
+    assert!(op.next_batch(&store, 3).unwrap().is_none());
+
+    // The write path buffers its input first, and batches through `next_mut`.
+    let mut op = make();
+    let b = op.next_batch_mut(&mut store, TENANT, 10).unwrap().unwrap();
+    assert_eq!(b.records.len(), 4);
+    assert!(op.next_batch_mut(&mut store, TENANT, 10).unwrap().is_none());
+
+    // Only counts: the fast count-only branch.
+    let mut counts = AggregateOperator::new(
+        Box::new(MaterializedOperator::new(two_key_rows())),
+        vec![(var("a"), "a".into()), (var("b"), "b".into())],
+        vec![agg_fn(
+            AggregateType::Count,
+            Expression::Literal(pint(1)),
+            "c",
+        )],
+    );
+    let total: i64 = drain(&mut counts, &store)
+        .iter()
+        .map(|r| rec_int(r, "c"))
+        .sum();
+    assert_eq!(total, 5);
+}
+
+#[test]
+fn aggregate_operator_groups_by_edge_and_by_scalar_identity() {
+    let mut store = GraphStore::new();
+    let x = store.create_node("X");
+    let y = store.create_node("X");
+    let e1 = store.create_edge(x, y, "R").unwrap();
+    let e2 = store.create_edge(y, x, "R").unwrap();
+    let rows: Vec<Record> = [e1, e1, e2]
+        .iter()
+        .map(|e| {
+            let edge = store.get_edge(*e).unwrap();
+            a_record(
+                "r",
+                Value::EdgeRef(*e, edge.source, edge.target, edge.edge_type.clone()),
+            )
+        })
+        .collect();
+    let mut op = AggregateOperator::new(
+        Box::new(MaterializedOperator::new(rows)),
+        vec![(var("r"), "r".into())],
+        vec![agg_fn(
+            AggregateType::Count,
+            Expression::Literal(pint(1)),
+            "c",
+        )],
+    );
+    let mut counts: Vec<i64> = drain(&mut op, &store)
+        .iter()
+        .map(|r| rec_int(r, "c"))
+        .collect();
+    counts.sort();
+    assert_eq!(counts, vec![1, 2]);
+
+    let rows: Vec<Record> = [1, 1, 2, 3]
+        .iter()
+        .map(|i| a_record("k", Value::Property(pint(*i))))
+        .collect();
+    let mut op = AggregateOperator::new(
+        Box::new(MaterializedOperator::new(rows)),
+        vec![(var("k"), "k".into())],
+        vec![agg_fn(AggregateType::Sum, var("k"), "s")],
+    );
+    let mut sums: Vec<i64> = drain(&mut op, &store)
+        .iter()
+        .map(|r| rec_int(r, "s"))
+        .collect();
+    sums.sort();
+    assert_eq!(sums, vec![2, 2, 3]);
+    let _ = &mut store;
+}
+
+#[test]
+fn multi_key_grouping_through_cypher() {
+    let s = social();
+    let b = read(
+        &s,
+        "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.age % 2 AS ka, b.age % 2 AS kb, count(*) AS c, \
+         percentileDisc(b.age, 0.5) AS p ORDER BY ka, kb",
+    );
+    let got: Vec<(i64, i64, i64)> = (0..b.records.len())
+        .map(|i| (int(&b, i, "ka"), int(&b, i, "kb"), int(&b, i, "c")))
+        .collect();
+    // a(1)->b(2), b(2)->c(3), c(3)->a(1), d(4)->a(1)
+    assert_eq!(got, vec![(0, 1, 2), (1, 0, 1), (1, 1, 1)]);
 }
