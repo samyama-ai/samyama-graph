@@ -773,4 +773,283 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::OK, "{}", body);
         assert_eq!(body["results"].as_array().unwrap().len(), 2, "{}", body);
     }
+
+    async fn list(state: AppState) -> serde_json::Value {
+        let req = Request::builder()
+            .uri("/api/vector/indexes")
+            .body(Body::empty())
+            .unwrap();
+        let resp = test_app(state).oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn listed_indexes_report_their_canonical_metric() {
+        let state = test_state();
+        for (label, metric) in [("A", "L2"), ("B", "dot"), ("C", "Cosine")] {
+            let (status, _) = post_json(
+                test_app(state.clone()),
+                "/api/vector/indexes",
+                json!({ "label": label, "property_key": "v", "dimensions": 4, "metric": metric }),
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+        }
+        let body = list(state).await;
+        assert_eq!(body["count"], 3);
+        let mut metrics: Vec<(String, String)> = body["indexes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                (
+                    i["label"].as_str().unwrap().into(),
+                    i["metric"].as_str().unwrap().into(),
+                )
+            })
+            .collect();
+        metrics.sort();
+        assert_eq!(
+            metrics,
+            vec![
+                ("A".into(), "l2".into()),
+                ("B".into(), "inner_product".into()),
+                ("C".into(), "cosine".into())
+            ]
+        );
+        assert!(body["indexes"][0]["model_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_search_of_a_graph_this_build_does_not_serve_is_refused() {
+        let (status, body) = post_json(
+            test_app(test_state()),
+            "/api/vector-search",
+            json!({ "query_vector": [0.1], "graph": "tenant-b" }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body["graph"], "tenant-b");
+    }
+
+    #[tokio::test]
+    async fn a_label_with_indexes_on_two_properties_needs_a_property_key() {
+        let state = test_state();
+        for p in ["emb_a", "emb_b"] {
+            state
+                .store
+                .read()
+                .await
+                .create_vector_index("Doc", p, 2, DistanceMetric::L2)
+                .unwrap();
+        }
+        let (status, body) = post_json(
+            test_app(state),
+            "/api/vector-search",
+            json!({ "query_vector": [0.1, 0.2], "label": "Doc" }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        let e = body["error"].as_str().unwrap();
+        assert!(e.contains("emb_a, emb_b") && e.contains("\"Doc\""), "{e}");
+    }
+
+    #[tokio::test]
+    async fn the_only_indexed_property_is_searched_and_hidden_unless_asked_for() {
+        let state = test_state();
+        {
+            let mut store = state.store.write().await;
+            store
+                .create_vector_index("Doc", "emb", 2, DistanceMetric::L2)
+                .unwrap();
+            let id = store.create_node("Doc");
+            let _ = store.set_node_property(
+                "default",
+                id,
+                "title".to_string(),
+                crate::graph::PropertyValue::String("t".into()),
+            );
+            store
+                .vector_index
+                .add_vector("Doc", "emb", id, &vec![1.0_f32, 0.0])
+                .unwrap();
+            let _ = store.set_node_property(
+                "default",
+                id,
+                "emb".to_string(),
+                crate::graph::PropertyValue::Vector(vec![1.0, 0.0]),
+            );
+        }
+        let (status, body) = post_json(
+            test_app(state.clone()),
+            "/api/vector-search",
+            json!({ "query_vector": [1.0, 0.0], "label": "Doc", "k": 1 }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["mode"], "vector");
+        assert!(body["query_text"].is_null());
+        let node = &body["results"][0]["node"];
+        assert_eq!(node["labels"], json!(["Doc"]));
+        assert_eq!(node["properties"]["title"], "t");
+        assert!(
+            node["properties"].get("emb").is_none(),
+            "the vector is hidden: {node}"
+        );
+        assert_eq!(body["results"][0]["score"], 1.0);
+
+        let (_, body) = post_json(
+            test_app(state),
+            "/api/vector-search",
+            json!({ "query_vector": [1.0, 0.0], "label": "Doc", "k": 1, "include_vectors": true }),
+        )
+        .await;
+        assert!(
+            body["results"][0]["node"]["properties"]["emb"].is_array(),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_label_with_no_index_searches_to_nothing() {
+        let (status, body) = post_json(
+            test_app(test_state()),
+            "/api/vector-search",
+            json!({ "query_vector": [0.1, 0.2], "label": "Nothing", "property_key": "vec" }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["results"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_query_of_the_wrong_dimension_is_a_400_naming_the_index() {
+        let state = test_state();
+        state
+            .store
+            .read()
+            .await
+            .create_vector_index("Doc", "vec", 2, DistanceMetric::L2)
+            .unwrap();
+        let (status, body) = post_json(
+            test_app(state),
+            "/api/vector-search",
+            json!({ "query_vector": [0.1, 0.2, 0.3], "label": "Doc", "property_key": "vec" }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        let e = body["error"].as_str().unwrap();
+        assert!(e.starts_with("Vector search failed"), "{e}");
+        assert!(e.contains("label 'Doc' property 'vec'"), "{e}");
+    }
+
+    fn tenant_config(
+        provider: crate::persistence::tenant::LLMProvider,
+        model: &str,
+    ) -> crate::persistence::tenant::AutoEmbedConfig {
+        crate::persistence::tenant::AutoEmbedConfig {
+            provider,
+            embedding_model: model.to_string(),
+            api_key: None,
+            api_base_url: None,
+            chunk_size: 1000,
+            chunk_overlap: 0,
+            vector_dimension: 64,
+            embedding_policies: HashMap::new(),
+            embedding_property: "embedding".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tenant_embed_config_builds_and_caches_a_pipeline() {
+        let tm = Arc::new(crate::persistence::TenantManager::new());
+        tm.update_embed_config(
+            "default",
+            Some(tenant_config(
+                crate::persistence::tenant::LLMProvider::Mock,
+                "tenant-model",
+            )),
+        )
+        .unwrap();
+        let mut state = test_state();
+        state.tenant_manager = Some(tm);
+        // A global pipeline exists too; the tenant's own config wins.
+        state.embed_pipeline = Some(mock_pipeline("global-model"));
+        seed_doc_index(&state, Some("tenant-model")).await;
+
+        for _ in 0..2 {
+            let (status, body) = text_search(&state, Some("Doc")).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert_eq!(body["mode"], "text");
+            assert_eq!(body["query_text"], "graph databases");
+        }
+        let cache = state.embed_cache.read().await;
+        assert_eq!(cache.get("default").unwrap().model_id(), "tenant-model");
+    }
+
+    #[tokio::test]
+    async fn a_tenant_config_that_cannot_build_falls_back_to_the_global_pipeline() {
+        // Azure needs a base URL, so this config cannot become a pipeline.
+        let tm = Arc::new(crate::persistence::TenantManager::new());
+        tm.update_embed_config(
+            "default",
+            Some(tenant_config(
+                crate::persistence::tenant::LLMProvider::AzureOpenAI,
+                "azure-model",
+            )),
+        )
+        .unwrap();
+        let mut state = state_with_model(Some("model-a"));
+        state.tenant_manager = Some(tm);
+        seed_doc_index(&state, Some("model-a")).await;
+        let (status, body) = text_search(&state, Some("Doc")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(
+            state.embed_cache.read().await.is_empty(),
+            "nothing was built to cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_embedding_failure_is_a_400_naming_it() {
+        let tm = Arc::new(crate::persistence::TenantManager::new());
+        tm.update_embed_config(
+            "default",
+            Some(tenant_config(
+                crate::persistence::tenant::LLMProvider::Anthropic,
+                "some-model",
+            )),
+        )
+        .unwrap();
+        let mut state = test_state();
+        state.tenant_manager = Some(tm);
+        let (status, body) = text_search(&state, Some("Doc")).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Embedding generation failed"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_index_of_another_dimension_is_not_checked_for_its_model() {
+        // No label: the search fans out over indexes of the query's dimension
+        // only, so a 32-dim index built by another model is not in the way.
+        let state = state_with_model(Some("model-b"));
+        {
+            let store = state.store.read().await;
+            store
+                .create_vector_index("Small", "embedding", 32, DistanceMetric::Cosine)
+                .unwrap();
+            store
+                .vector_index
+                .set_model_id("Small", "embedding", "model-a");
+        }
+        let (status, body) = text_search(&state, None).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    }
 }

@@ -750,3 +750,7 @@ async fn cancel_solve(
 
 // Bring StreamExt into scope for `.map(...)` above.
 use tokio_stream::StreamExt;
+
+#[cfg(test)]
+#[path = "optimize_cov_tests.rs"]
+mod cov_tests;

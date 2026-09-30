@@ -208,4 +208,39 @@ mod tests {
         // Every objective carries the 1e6 penalty.
         for v in &obj { assert!(*v >= 1e5, "expected penalty in {:?}", obj); }
     }
+
+    #[test]
+    fn uc2_default_matches_new_and_declares_its_shape() {
+        let p = UC2DosingProblem::default();
+        assert_eq!(p.dim(), 6);
+        assert_eq!(p.num_objectives(), 3);
+        let (lo, hi) = p.bounds();
+        assert_eq!(lo, Array1::<f64>::zeros(6));
+        assert_eq!(hi, Array1::<f64>::ones(6));
+    }
+
+    #[test]
+    fn uc2_a_safe_combination_scores_efficacy_risk_and_dose() {
+        let p = UC2DosingProblem::new();
+        // D0 (metformin) and D1 (sitagliptin) both reach glucose_homeostasis
+        // and interact with severity 0.1.
+        let x = Array1::from(vec![0.5, 0.5, 0.0, 0.0, 0.0, 0.0]);
+        let obj = p.objectives(&x);
+        assert!(
+            (obj[0] - (-1.0)).abs() < 1e-9,
+            "efficacy is 0.5*1 + 0.5*1: {obj:?}"
+        );
+        assert!(
+            (obj[1] - 0.025).abs() < 1e-9,
+            "risk is 0.1*0.5*0.5: {obj:?}"
+        );
+        assert!((obj[2] - 1.0).abs() < 1e-9, "total dose: {obj:?}");
+    }
+
+    #[test]
+    fn uc2_a_dose_below_the_activity_threshold_does_not_count() {
+        let p = UC2DosingProblem::new();
+        let x = Array1::from(vec![0.04, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(p.objectives(&x), vec![0.0, 0.0, 0.0]);
+    }
 }

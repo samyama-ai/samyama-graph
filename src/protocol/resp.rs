@@ -1210,4 +1210,98 @@ mod tests {
         let val2 = RespValue::decode(&mut buf).unwrap().unwrap();
         assert_eq!(val2, RespValue::Integer(42));
     }
+
+    #[test]
+    fn a_multi_line_error_is_escaped_onto_one_line() {
+        let val = RespValue::Error("ERR parse\n  |\r\n  ^".to_string());
+        let mut buf = Vec::new();
+        val.encode(&mut buf).unwrap();
+        assert_eq!(buf, b"-ERR parse\\n  |\\r\\n  ^\r\n");
+        // Exactly one CRLF, at the end: the framing a client relies on.
+        assert_eq!(buf.iter().filter(|&&b| b == b'\n').count(), 1);
+    }
+
+    #[test]
+    fn a_simple_string_with_a_bare_cr_is_escaped() {
+        let mut buf = Vec::new();
+        RespValue::SimpleString("a\rb".to_string())
+            .encode(&mut buf)
+            .unwrap();
+        assert_eq!(buf, b"+a\\rb\r\n");
+    }
+
+    #[test]
+    fn a_bulk_string_without_its_trailing_crlf_is_a_protocol_error() {
+        let mut buf = BytesMut::from(&b"$3\r\nfooXY"[..]);
+        match RespValue::decode(&mut buf) {
+            Err(RespError::Protocol(m)) => assert!(m.contains("Missing"), "{m}"),
+            other => panic!("expected a protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_array_whose_length_line_is_incomplete_waits_for_more() {
+        let mut buf = BytesMut::from(&b"*2"[..]);
+        assert_eq!(RespValue::decode(&mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn a_null_whose_line_is_incomplete_waits_for_more() {
+        let mut buf = BytesMut::from(&b"_"[..]);
+        assert_eq!(RespValue::decode(&mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn a_null_with_trailing_bytes_is_a_protocol_error() {
+        let mut buf = BytesMut::from(&b"_x\r\n"[..]);
+        assert!(matches!(
+            RespValue::decode(&mut buf),
+            Err(RespError::Protocol(m)) if m.contains("null")
+        ));
+    }
+
+    #[test]
+    fn an_inline_command_without_crlf_waits_for_more() {
+        let mut buf = BytesMut::from(&b"PING"[..]);
+        assert_eq!(RespValue::decode(&mut buf).unwrap(), None);
+    }
+
+    /// A command split across two TCP reads must decode as the command once
+    /// the rest arrives. `decode_array` consumes the `*1` header and
+    /// `decode_bulk_string` the `$4` length line before finding the payload
+    /// short, then return `Incomplete` without putting them back -- so the
+    /// server's next attempt parses `PING\r\n` as an inline command, and a
+    /// longer split frame (`$5\r\nhello`) turns into garbage.
+    #[test]
+    #[ignore = "bug: RespValue::decode consumes the header of an incomplete array/bulk frame, so a frame split across reads is misparsed"]
+    fn an_incomplete_frame_is_left_in_the_buffer_until_it_is_complete() {
+        let mut buf = BytesMut::from(&b"*2\r\n$4\r\nECHO\r\n$5\r\nhel"[..]);
+        let first = RespValue::decode(&mut buf);
+        assert!(
+            matches!(first, Ok(None) | Err(RespError::Incomplete)),
+            "{first:?}"
+        );
+        assert_eq!(
+            &buf[..],
+            b"*2\r\n$4\r\nECHO\r\n$5\r\nhel",
+            "an incomplete frame must not be consumed"
+        );
+        buf.extend_from_slice(b"lo\r\n");
+        assert_eq!(
+            RespValue::decode(&mut buf).unwrap(),
+            Some(RespValue::Array(vec![
+                RespValue::BulkString(Some(b"ECHO".to_vec())),
+                RespValue::BulkString(Some(b"hello".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_quoted_inline_token_ending_in_a_backslash_is_an_unclosed_quote() {
+        // The backslash consumes nothing, and the quote is never closed.
+        match RespValue::parse_inline_tokens("ECHO \"abc\\") {
+            Err(RespError::Protocol(m)) => assert!(m.contains("Unclosed quote"), "{m}"),
+            other => panic!("expected an unclosed-quote error, got {other:?}"),
+        }
+    }
 }

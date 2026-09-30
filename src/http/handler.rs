@@ -4234,3 +4234,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "handler_cov_tests.rs"]
+mod cov_tests;
