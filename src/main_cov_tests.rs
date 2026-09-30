@@ -726,6 +726,51 @@ fn a_graphalytics_dataset_that_is_not_there_loads_nothing() {
     assert_eq!(store.node_count(), 0);
 }
 
+#[test]
+fn a_graphalytics_vertex_limit_caps_the_vertices_and_drops_their_edges() {
+    // The loader reads `data/graphalytics` relative to the working directory,
+    // which is process-wide; no other test here depends on it.
+    let cwd = tempfile::tempdir().unwrap();
+    let ds = cwd.path().join("data/graphalytics/tiny");
+    std::fs::create_dir_all(&ds).unwrap();
+    std::fs::write(ds.join("tiny.v"), "1\n2\n3\n4\n").unwrap();
+    std::fs::write(ds.join("tiny.e"), "1 2 2.5\n2 3\n3 4\n").unwrap();
+
+    let before = std::env::current_dir().unwrap();
+    std::env::set_current_dir(cwd.path()).unwrap();
+    let mut store = GraphStore::new();
+    let loaded = load_graphalytics_dataset(&mut store, "tiny", false, Some(2));
+    std::env::set_current_dir(before).unwrap();
+
+    assert!(loaded);
+    assert_eq!(store.node_count(), 2, "the limit caps the vertices read");
+    assert_eq!(store.edge_count(), 1, "only 1-2 has both endpoints loaded");
+    let batch = QueryEngine::new()
+        .execute(
+            "MATCH (a:Vertex)-[r:CONNECTS]->(b:Vertex) RETURN a.vid AS a, b.vid AS b, r.weight AS w, a.dataset AS d",
+            &store,
+        )
+        .unwrap();
+    assert_eq!(batch.len(), 1);
+    let rec = &batch.records[0];
+    assert_eq!(
+        rec.get("a").and_then(|v| v.as_property()),
+        Some(&PropertyValue::Integer(1))
+    );
+    assert_eq!(
+        rec.get("b").and_then(|v| v.as_property()),
+        Some(&PropertyValue::Integer(2))
+    );
+    assert_eq!(
+        rec.get("w").and_then(|v| v.as_property()),
+        Some(&PropertyValue::Float(2.5))
+    );
+    assert_eq!(
+        rec.get("d").and_then(|v| v.as_property()),
+        Some(&PropertyValue::String("tiny".into()))
+    );
+}
+
 // ───────────────────────────────────────────────────────────── quotas
 
 #[test]

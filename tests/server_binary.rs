@@ -642,6 +642,76 @@ fn a_restart_recovers_persisted_rows_and_their_indexes() {
 }
 
 #[test]
+fn a_recovered_edge_whose_endpoint_is_gone_is_skipped_with_a_warning() {
+    use samyama::persistence::PersistenceManager;
+    let data = tempfile::tempdir().unwrap();
+    {
+        let pm = PersistenceManager::new(data.path()).unwrap();
+        pm.tenants()
+            .create_tenant("default".into(), "default".into(), None)
+            .ok();
+        let mut rows = samyama::GraphStore::new();
+        rows.enable_write_log();
+        let q = "CREATE (:Gone)-[:KNOWS]->(:Kept)";
+        samyama::QueryEngine::new()
+            .execute_mut(q, &mut rows, "default")
+            .unwrap();
+        let muts = rows.take_write_log();
+        pm.apply_mutations("default", &rows, &muts).unwrap();
+        // The source node's record is removed and its edge's is not.
+        let gone = rows.get_nodes_by_label(&samyama::graph::Label::new("Gone"))[0].id;
+        pm.persist_delete_node("default", gone.as_u64()).unwrap();
+        pm.checkpoint().unwrap();
+    }
+
+    run(&["--data-path", s(data.path()), "--max-nodes", "?"], &[])
+        .assert_code(2)
+        .out_has("Tenant 'default': 1 nodes, 1 edges")
+        .err_has("Warning: edge recovery error")
+        .out_has("Recovery complete. Total: 1 nodes, 0 edges");
+}
+
+#[test]
+fn a_unique_constraint_the_recovered_rows_break_is_reported_not_restored() {
+    use samyama::persistence::PersistenceManager;
+    let data = tempfile::tempdir().unwrap();
+    {
+        let pm = PersistenceManager::new(data.path()).unwrap();
+        pm.tenants()
+            .create_tenant("default".into(), "default".into(), None)
+            .ok();
+        // Two rows with the same name, written without the constraint...
+        let mut rows = samyama::GraphStore::new();
+        rows.enable_write_log();
+        let q = "CREATE (:Person {name: 'Ada'}), (:Person {name: 'Ada'})";
+        samyama::QueryEngine::new()
+            .execute_mut(q, &mut rows, "default")
+            .unwrap();
+        let muts = rows.take_write_log();
+        pm.apply_mutations("default", &rows, &muts).unwrap();
+        // ...and a catalog declaring a constraint they violate.
+        let mut decl = samyama::GraphStore::new();
+        samyama::QueryEngine::new()
+            .execute_mut(
+                "CREATE CONSTRAINT ON (n:Person) ASSERT n.name IS UNIQUE",
+                &mut decl,
+                "default",
+            )
+            .unwrap();
+        pm.persist_index_catalog("default", &decl).unwrap();
+        pm.checkpoint().unwrap();
+    }
+
+    run(&["--data-path", s(data.path()), "--max-nodes", "?"], &[])
+        .assert_code(2)
+        .out_has("Tenant 'default': 2 nodes, 0 edges")
+        .err_has("1 index definition(s) for 'default' could not be rebuilt")
+        // The constraint is refused; the property index declared with it is
+        // not, and is the one index counted.
+        .out_has("Recovery complete. Total: 2 nodes, 0 edges, 1 indexes in-memory");
+}
+
+#[test]
 fn a_committed_snapshot_is_replayed_when_there_is_nothing_to_recover() {
     let data = tempfile::tempdir().unwrap();
     let mut store = samyama::GraphStore::new();
