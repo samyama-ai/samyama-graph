@@ -6239,3 +6239,199 @@ fn multi_key_grouping_through_cypher() {
     // a(1)->b(2), b(2)->c(3), c(3)->a(1), d(4)->a(1)
     assert_eq!(got, vec![(0, 1, 2), (1, 0, 1), (1, 1, 1)]);
 }
+
+// ---------------------------------------------------------------------------
+// Bidirectional shortest path: the backward side expands too
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shortest_path_expands_from_the_smaller_frontier() {
+    let mut store = GraphStore::new();
+    // s fans out to five nodes; only m2 leads on, through x, to t.
+    write(
+        &mut store,
+        "CREATE (s:SP {n: 's'}), (t:SP {n: 't'}), (x:SP {n: 'x'}), \
+         (m0:SP {n: 'm0'}), (m1:SP {n: 'm1'}), (m2:SP {n: 'm2'}), (m3:SP {n: 'm3'}), (m4:SP {n: 'm4'}), \
+         (s)-[:L]->(m0), (s)-[:L]->(m1), (s)-[:L]->(m2), (s)-[:L]->(m3), (s)-[:L]->(m4), \
+         (m2)-[:L]->(x), (x)-[:L]->(t)",
+    );
+    let len = |q: &str| ints(&read(&store, q), "l");
+    let base = "MATCH (s:SP {n: 's'}), (t:SP {n: 't'}) ";
+    assert_eq!(
+        len(&format!(
+            "{base}MATCH p = shortestPath((s)-[:L*]->(t)) RETURN length(p) AS l"
+        )),
+        vec![3]
+    );
+    assert_eq!(
+        len(&format!(
+            "{base}MATCH p = shortestPath((t)<-[:L*]-(s)) RETURN length(p) AS l"
+        )),
+        vec![3]
+    );
+    assert_eq!(
+        len(&format!(
+            "{base}MATCH p = shortestPath((s)-[*]-(t)) RETURN length(p) AS l"
+        )),
+        vec![3]
+    );
+    assert_eq!(
+        len(&format!(
+            "{base}MATCH p = allShortestPaths((s)-[:L*]->(t)) RETURN length(p) AS l"
+        )),
+        vec![3]
+    );
+    let b = read(
+        &store,
+        &format!("{base}MATCH p = shortestPath((s)-[:L*]->(t)) RETURN [n IN nodes(p) | n.n] AS ns"),
+    );
+    assert_eq!(
+        cell(&b, 0, "ns"),
+        PropertyValue::Array(vec![pstr("s"), pstr("m2"), pstr("x"), pstr("t")])
+    );
+    // Unreachable against the direction.
+    assert!(len(&format!(
+        "{base}MATCH p = shortestPath((t)-[:L*]->(s)) RETURN length(p) AS l"
+    ))
+    .is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// AdjacencyCountAggregateOperator constructed directly
+// ---------------------------------------------------------------------------
+
+#[test]
+fn adjacency_count_operator_paths() {
+    let (mut store, ids) = algo_graph(4, &[(0, 1), (0, 2), (1, 2), (3, 0)], None);
+    let nodes: Vec<NodeId> = ids.iter().map(|i| NodeId::new(*i as u64)).collect();
+    let make = |dir: Direction| {
+        AdjacencyCountAggregateOperator::new(
+            node_rows(&nodes),
+            "n".into(),
+            "c".into(),
+            EdgeType::new("E"),
+            dir,
+        )
+    };
+    let counts = |op: &mut AdjacencyCountAggregateOperator, store: &GraphStore| -> Vec<i64> {
+        let mut v: Vec<i64> = drain(op, store).iter().map(|r| rec_int(r, "c")).collect();
+        v.sort();
+        v
+    };
+    let mut out = make(Direction::Outgoing);
+    assert_eq!(out.children_mut().len(), 1);
+    assert_eq!(out.describe().details, "(n)->[:E]-> count AS c");
+    assert_eq!(counts(&mut out, &store), vec![1, 1, 2]);
+    out.reset();
+    assert_eq!(counts(&mut out, &store), vec![1, 1, 2]);
+    let mut inc = make(Direction::Incoming);
+    assert_eq!(counts(&mut inc, &store), vec![1, 1, 2]);
+    let mut both = make(Direction::Both);
+    assert_eq!(counts(&mut both, &store), vec![1, 2, 2, 3]);
+    // Grouped by a property, with a neighbour label.
+    let mut grouped = make(Direction::Both)
+        .with_group_by_props(vec!["x".into()])
+        .with_neighbor_label(Some(Label::new("V")));
+    assert_eq!(counts(&mut grouped, &store), vec![1, 2, 2, 3]);
+    let mut none = make(Direction::Outgoing).with_neighbor_label(Some(Label::new("Nope")));
+    assert!(counts(&mut none, &store).is_empty());
+    let mut labelled_in = make(Direction::Incoming).with_neighbor_label(Some(Label::new("V")));
+    assert_eq!(counts(&mut labelled_in, &store), vec![1, 1, 2]);
+    let mut labelled_out = make(Direction::Outgoing).with_neighbor_label(Some(Label::new("V")));
+    assert_eq!(counts(&mut labelled_out, &store), vec![1, 1, 2]);
+    // DISTINCT neighbours.
+    let mut distinct = make(Direction::Both).with_count_distinct(true);
+    assert_eq!(counts(&mut distinct, &store), vec![1, 2, 2, 3]);
+    let mut distinct_out = make(Direction::Outgoing)
+        .with_count_distinct(true)
+        .with_group_by_props(vec!["x".into()]);
+    assert_eq!(counts(&mut distinct_out, &store), vec![0, 1, 1, 2]);
+    let mut distinct_in = make(Direction::Incoming).with_count_distinct(true);
+    assert_eq!(counts(&mut distinct_in, &store), vec![0, 1, 1, 2]);
+    // The write path drains its input first.
+    let mut w = make(Direction::Outgoing);
+    assert_eq!(drain_mut(&mut w, &mut store).len(), 3);
+    // Rows whose variable is not a node are skipped.
+    let mut skip = AdjacencyCountAggregateOperator::new(
+        int_rows("n", 2),
+        "n".into(),
+        "c".into(),
+        EdgeType::new("E"),
+        Direction::Outgoing,
+    );
+    assert!(drain(&mut skip, &store).is_empty());
+    let mut skip = AdjacencyCountAggregateOperator::new(
+        int_rows("n", 2),
+        "n".into(),
+        "c".into(),
+        EdgeType::new("E"),
+        Direction::Outgoing,
+    )
+    .with_count_distinct(true);
+    assert!(drain(&mut skip, &store).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Bounded and early-stopping sorts over enough rows to trim
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bounded_sorts_trim_and_soft_hints_sort_the_tail_on_demand() {
+    let store = GraphStore::new();
+    let b = read(
+        &store,
+        "UNWIND range(1, 5000) AS x RETURN x ORDER BY x DESC LIMIT 3",
+    );
+    assert_eq!(ints(&b, "x"), vec![5000, 4999, 4998]);
+    let b = read(
+        &store,
+        "UNWIND range(1, 5000) AS x RETURN x ORDER BY x % 7, x SKIP 2 LIMIT 2",
+    );
+    assert_eq!(ints(&b, "x"), vec![21, 28]);
+    let b = read(
+        &store,
+        "UNWIND range(1, 50) AS x RETURN x ORDER BY x LIMIT 0",
+    );
+    assert!(b.records.is_empty());
+    let b = read(
+        &store,
+        "UNWIND range(1, 3000) AS x RETURN DISTINCT x % 100 AS k ORDER BY k DESC LIMIT 3",
+    );
+    assert_eq!(ints(&b, "k"), vec![99, 98, 97]);
+
+    // A soft hint orders a head up front; reading past it sorts the rest.
+    let rows = || -> OperatorBox {
+        Box::new(MaterializedOperator::new(
+            (0..3000i64)
+                .map(|i| a_record("x", Value::Property(pint((i * 7919) % 3000))))
+                .collect(),
+        ))
+    };
+    let mut op = SortOperator::new(rows(), vec![(var("x"), true)]);
+    op.hint_early_stop(5);
+    let got: Vec<i64> = drain(&mut op, &store)
+        .iter()
+        .map(|r| rec_int(r, "x"))
+        .collect();
+    assert_eq!(got.len(), 3000);
+    assert!(got.windows(2).all(|w| w[0] <= w[1]));
+    let mut op = SortOperator::new(rows(), vec![(var("x"), false)]);
+    op.hint_early_stop(5);
+    let mut seen = Vec::new();
+    while let Some(b) = op.next_batch(&store, 700).unwrap() {
+        seen.extend(b.records.iter().map(|r| rec_int(r, "x")));
+    }
+    assert_eq!(seen.len(), 3000);
+    assert!(seen.windows(2).all(|w| w[0] >= w[1]));
+    let mut limited = SortOperator::new(rows(), vec![(var("x"), true)]);
+    assert!(limited.try_push_limit(10));
+    assert!(limited.try_push_limit(4));
+    let got: Vec<i64> = drain(&mut limited, &store)
+        .iter()
+        .map(|r| rec_int(r, "x"))
+        .collect();
+    assert_eq!(got, vec![0, 1, 2, 3]);
+    let mut zero = SortOperator::new(rows(), vec![(var("x"), true)]);
+    zero.try_push_limit(0);
+    assert!(drain(&mut zero, &store).is_empty());
+}
