@@ -1193,6 +1193,467 @@ async fn an_edge_import_past_the_edge_quota_is_429() {
     assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
 }
 
+// ---------- /api/import/csv: streaming, batches, body limit (#336) ----------
+
+/// `rows` rows of about 250 bytes each, every tenth with a quoted comma and a
+/// quoted newline so records straddle the chunks the upload is sent in.
+fn big_csv(rows: usize) -> String {
+    let pad = "x".repeat(200);
+    let mut csv = String::from("id,name,note\n");
+    for i in 0..rows {
+        if i % 10 == 0 {
+            csv.push_str(&format!("{i},\"Doe, {i}\",\"line one\nline two {pad}\"\n"));
+        } else {
+            csv.push_str(&format!("{i},n{i},{pad}\n"));
+        }
+    }
+    csv
+}
+
+/// A multipart body sent as a stream of `frame`-byte pieces, the way a large
+/// upload reaches the handler, rather than as one buffer. Each piece is behind
+/// a yield, as a socket's next read is: multer reads until its stream is
+/// pending, so without one it would buffer the whole body before the handler
+/// saw its first chunk.
+async fn post_multipart_streamed(
+    app: Router,
+    uri: &str,
+    parts: Vec<Part<'_>>,
+    frame: usize,
+) -> Reply {
+    const B: &str = "COV-BOUNDARY";
+    let mut body = Vec::new();
+    for p in parts {
+        let disposition = match p.filename {
+            Some(f) => format!("name=\"{}\"; filename=\"{f}\"", p.name),
+            None => format!("name=\"{}\"", p.name),
+        };
+        body.extend_from_slice(
+            format!("--{B}\r\nContent-Disposition: form-data; {disposition}\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(&p.data);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{B}--\r\n").as_bytes());
+    let frames: Vec<Result<bytes::Bytes, std::io::Error>> = body
+        .chunks(frame)
+        .map(|c| Ok(bytes::Bytes::copy_from_slice(c)))
+        .collect();
+    send(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", format!("multipart/form-data; boundary={B}"))
+            .body(Body::from_stream(futures::StreamExt::then(
+                futures::stream::iter(frames),
+                |f| async {
+                    tokio::task::yield_now().await;
+                    f
+                },
+            )))
+            .unwrap(),
+    )
+    .await
+}
+
+/// The import routes had axum's 2 MB default body limit, and a CSV upload past
+/// it failed with "No file field in multipart request" (#336). Through the
+/// router the server ships, with its default limit.
+#[tokio::test]
+async fn a_csv_upload_past_two_megabytes_is_imported_in_batches() {
+    let store = Arc::new(RwLock::new(GraphStore::new()));
+    let app = crate::http::server::HttpServer::new(Arc::clone(&store), 0).router();
+    let rows = 20_000;
+    let csv = big_csv(rows);
+    assert!(csv.len() > 4 * 1024 * 1024, "{} bytes", csv.len());
+
+    let r = post_multipart_streamed(
+        app,
+        "/api/import/csv",
+        vec![field("label", "Big"), file(csv)],
+        7919,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["nodes_created"], rows);
+    assert_eq!(j["processed"], rows);
+    assert_eq!(j["columns"], json!(["id", "name", "note"]));
+    // Written 5000 rows at a time, not in one lock over the whole file.
+    assert_eq!(j["batches"], rows.div_ceil(DEFAULT_IMPORT_BATCH_ROWS));
+    assert!(j["batches"].as_u64().unwrap() > 1);
+
+    let s = store.read().await;
+    assert_eq!(s.node_count(), rows);
+    let by_id: HashMap<i64, NodeId> = s
+        .get_nodes_by_label(&"Big".into())
+        .iter()
+        .filter_map(|n| match s.node_property(n.id, "id") {
+            Some(PropertyValue::Integer(i)) => Some((i, n.id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(by_id.len(), rows, "every row, each once");
+    let last_quoted = (rows - 10) as i64;
+    assert_eq!(
+        s.node_property(by_id[&last_quoted], "name"),
+        Some(PropertyValue::String(format!("Doe, {last_quoted}")))
+    );
+    match s.node_property(by_id[&last_quoted], "note") {
+        Some(PropertyValue::String(note)) => assert!(note.starts_with("line one\nline two")),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Past the configured limit is a 413 naming the cause, on all three routes,
+/// and nothing a CSV upload streamed before the limit was reached is left.
+#[tokio::test]
+async fn the_import_routes_answer_413_past_the_configured_limit() {
+    let store = Arc::new(RwLock::new(GraphStore::new()));
+    let app = crate::http::server::HttpServer::new(Arc::clone(&store), 0)
+        .with_import_body_limit(64 * 1024)
+        .router();
+
+    let r = post_multipart_streamed(
+        app.clone(),
+        "/api/import/csv",
+        vec![
+            field("label", "P"),
+            field("batch_size", "10"),
+            file(big_csv(1000)),
+        ],
+        4096,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", r.text());
+    // Inside the file, after batches of it had been written.
+    let e = r.json()["error"].as_str().unwrap().to_string();
+    assert!(e.starts_with("Failed to read file: "), "{e}");
+    assert!(e.contains("--import-max-bytes"), "{e}");
+    assert_eq!(store.read().await.node_count(), 0);
+
+    let nodes: Vec<serde_json::Value> = (0..10_000).map(|i| json!({ "n": i })).collect();
+    let r = post_json(
+        app.clone(),
+        "/api/import/json",
+        json!({ "label": "P", "nodes": nodes }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", r.text());
+
+    let r = post_multipart(
+        app.clone(),
+        "/api/import/parquet?label=P",
+        vec![file(vec![0u8; 100 * 1024])],
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", r.text());
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .contains("--import-max-bytes"),
+        "{}",
+        r.text()
+    );
+
+    // Under the limit the same router imports.
+    let r = post_multipart(
+        app,
+        "/api/import/csv",
+        vec![field("label", "P"), file(big_csv(10))],
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert_eq!(store.read().await.node_count(), 10);
+}
+
+#[tokio::test]
+async fn batch_size_sets_how_many_rows_each_write_takes() {
+    let s = state();
+    let r = post_multipart(
+        routes(s.clone()),
+        "/api/import/csv",
+        vec![
+            field("label", "P"),
+            field("batch_size", "2"),
+            file("a\n1\n2\n3\n4\n5\n"),
+        ],
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["nodes_created"], 5);
+    assert_eq!(j["processed"], 5);
+    assert_eq!(j["batches"], 3);
+
+    let r = post_multipart(
+        routes(s.clone()),
+        "/api/import/csv",
+        vec![
+            field("label", "P"),
+            field("batch_size", "0"),
+            file("a\n1\n"),
+        ],
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.json()["error"].as_str().unwrap().contains("batch_size"));
+    assert_eq!(s.store.read().await.node_count(), 5);
+}
+
+/// A refusal found after earlier batches were written takes them back out, so
+/// the file is still imported whole or not at all (#1105, #1483).
+#[tokio::test]
+async fn a_refusal_in_a_later_batch_leaves_nothing_behind() {
+    let s = state();
+    // Sent a few bytes at a time, so the first batches are written before
+    // the ragged row has arrived.
+    let r = post_multipart_streamed(
+        routes(s.clone()),
+        "/api/import/csv",
+        vec![
+            field("label", "P"),
+            field("batch_size", "2"),
+            file("a,b\n1,1\n2,2\n3,3\n4,4\n5\n"),
+        ],
+        3,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.text());
+    assert_eq!(
+        r.json()["error"],
+        "CSV row 5 (line 6): found record with 1 fields, but the header has 2"
+    );
+    assert_eq!(s.store.read().await.node_count(), 0);
+
+    // The second batch takes the tenant past its quota of three.
+    let (s, _pm, _dir) = state_with_quota(3, 0);
+    let r = post_multipart(
+        routes(s.clone()),
+        "/api/import/csv",
+        vec![
+            field("label", "P"),
+            field("batch_size", "2"),
+            file("a\n1\n2\n3\n4\n"),
+        ],
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.text());
+    assert_eq!(r.json()["nodes_created"], 0);
+    assert_eq!(s.store.read().await.node_count(), 0);
+}
+
+/// The spool files this thread's imports created, forgetting them.
+fn take_spooled() -> Vec<std::path::PathBuf> {
+    SPOOLED.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
+/// The TypeScript SDK sends `file` first and its label and delimiter after it.
+/// Such an upload is copied to disk, imported once the form has ended, and
+/// the copy removed.
+#[tokio::test]
+async fn a_file_sent_before_its_fields_is_spooled_and_imported_in_batches() {
+    let s = state();
+    take_spooled();
+    let r = post_multipart_streamed(
+        routes(s.clone()),
+        "/api/import/csv",
+        vec![
+            file("id;name\n1;ada\n2;grace\n3;alan\n4;edsger\n5;barbara\n"),
+            field("label", "P"),
+            field("delimiter", ";"),
+            field("id_column", "id"),
+            field("strict", "false"),
+            field("batch_size", "2"),
+        ],
+        7,
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["nodes_created"], 5);
+    assert_eq!(j["batches"], 3);
+    assert_eq!(j["columns"], json!(["id", "name"]));
+    let rows = run(&s, "MATCH (p:P) RETURN p.name ORDER BY p.id").await;
+    assert_eq!(
+        rows["records"],
+        json!([["ada"], ["grace"], ["alan"], ["edsger"], ["barbara"]])
+    );
+    let spooled = take_spooled();
+    assert_eq!(spooled.len(), 1, "the upload was spooled");
+    assert!(!spooled[0].exists(), "the spool file was left behind");
+
+    // Refused at its last row, which is read from the spool after batches of
+    // the rows before it were written: nothing is left, spool included.
+    let r = post_multipart(
+        routes(s.clone()),
+        "/api/import/csv",
+        vec![
+            file(big_csv(1000) + "ragged\n"),
+            field("label", "Q"),
+            field("batch_size", "10"),
+        ],
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.text());
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("CSV row 1001 "),
+        "{}",
+        r.text()
+    );
+    assert_eq!(s.store.read().await.node_count(), 5);
+    let spooled = take_spooled();
+    assert_eq!(spooled.len(), 1);
+    assert!(!spooled[0].exists());
+
+    // A field that never arrives is still named as missing.
+    let r = post_multipart(routes(s.clone()), "/api/import/csv", vec![file("a\n1\n")]).await;
+    assert_eq!(r.json()["error"], "Missing 'label' field");
+    let spooled = take_spooled();
+    assert_eq!(spooled.len(), 1);
+    assert!(!spooled[0].exists());
+
+    // Cut off inside a file being spooled.
+    let r = post_truncated(routes(s.clone()), "/api/import/csv", "", "file").await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.json()["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("Failed to read file: "));
+    let spooled = take_spooled();
+    assert_eq!(spooled.len(), 1);
+    assert!(!spooled[0].exists());
+    assert_eq!(s.store.read().await.node_count(), 5);
+}
+
+#[tokio::test]
+async fn a_file_imported_as_it_arrived_is_undone_by_a_later_field_that_changes_it() {
+    let s = state();
+    take_spooled();
+    // The label came first, so the file was imported with `,` as it arrived;
+    // a delimiter after it would have read it differently.
+    let r = post_multipart(
+        routes(s.clone()),
+        "/api/import/csv",
+        vec![
+            field("label", "P"),
+            field("batch_size", "1"),
+            file("a\n1\n2\n3\n"),
+            field("delimiter", ";"),
+        ],
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("'delimiter' was sent after 'file' had been imported"),
+        "{}",
+        r.text()
+    );
+    assert_eq!(s.store.read().await.node_count(), 0);
+    assert!(take_spooled().is_empty(), "streamed, not spooled");
+
+    // A late field that changes nothing, or one the import does not read.
+    let r = post_multipart(
+        routes(s.clone()),
+        "/api/import/csv",
+        vec![
+            field("label", "P"),
+            file("a\n1\n"),
+            field("graph", "default"),
+            field("comment", "x"),
+        ],
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert_eq!(s.store.read().await.node_count(), 1);
+
+    let r = post_multipart(
+        routes(s.clone()),
+        "/api/import/csv",
+        vec![field("label", "P"), file("a\n1\n"), file("a\n2\n")],
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.json()["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("more than one 'file' field"));
+    assert_eq!(s.store.read().await.node_count(), 1);
+}
+
+#[tokio::test]
+async fn a_csv_edge_import_resolves_across_batches_and_a_strict_refusal_undoes_them() {
+    let s = state();
+    people(&s, &[1, 2, 3]).await;
+    let mut parts = edge_fields();
+    parts.push(field("batch_size", "1"));
+    parts.push(file("from,to\n1,2\n2,3\n"));
+    let r = post_multipart(routes(s.clone()), "/api/import/csv", parts).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["created"], 2);
+    assert_eq!(j["batches"], 2);
+    assert_eq!(s.store.read().await.edge_count(), 2);
+
+    // Record 3 is in the third batch, after two edges were written.
+    let mut parts = edge_fields();
+    parts.push(field("batch_size", "1"));
+    parts.push(file("from,to\n1,3\n3,1\n1,9\n2,1\n"));
+    let r = post_multipart(routes(s.clone()), "/api/import/csv", parts).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["processed"], 4, "the refusal counts the whole file");
+    assert_eq!(j["created"], 0);
+    assert_eq!(j["missing_targets"], 1);
+    assert_eq!(
+        j["errors"],
+        json!(["record 3: no :P with target key Some(\"9\")"])
+    );
+    assert_eq!(
+        s.store.read().await.edge_count(),
+        2,
+        "only the first import's edges"
+    );
+}
+
+#[test]
+fn the_chunked_csv_reader_agrees_with_csv_fed_a_byte_at_a_time() {
+    let text = "\u{feff}h1,h2,h3\r\nplain,\"quoted, comma\",\"two\nlines\"\n\"\"\"q\"\"\",,x\n\nlast,row,no-newline";
+    let mut want: Vec<Vec<String>> = Vec::new();
+    let mut rdr = csv::ReaderBuilder::new().from_reader(text.as_bytes());
+    for r in rdr.records() {
+        want.push(r.unwrap().iter().map(str::to_string).collect());
+    }
+    let mut reader = CsvChunkReader::new(b',');
+    let mut rows = Vec::new();
+    for b in text.as_bytes() {
+        reader.feed(std::slice::from_ref(b), &mut rows).unwrap();
+    }
+    reader.feed(&[], &mut rows).unwrap();
+    let got: Vec<Vec<String>> = rows
+        .iter()
+        .map(|r| r.iter().map(str::to_string).collect())
+        .collect();
+    assert_eq!(got, want);
+    assert_eq!(
+        reader.headers,
+        Some(vec!["h1".to_string(), "h2".into(), "h3".into()])
+    );
+
+    let mut reader = CsvChunkReader::new(b',');
+    let mut rows = Vec::new();
+    let e = reader.feed(b"a,b\n1,2\n\xff,3\n", &mut rows).unwrap_err();
+    assert_eq!(e, "CSV row 2 (line 3): field 1 is not valid UTF-8");
+}
+
 // ---------- /api/import/json ----------
 
 #[tokio::test]
@@ -1782,11 +2243,54 @@ async fn an_upload_cut_off_inside_the_file_is_a_400() {
     assert_eq!(s.store.read().await.node_count(), 0);
 }
 
+/// Cut off before the file, the upload used to be answered "No file field",
+/// since a read error ended the field loop as the end of the form would (#336).
+/// It is answered with the error itself.
 #[tokio::test]
-async fn an_upload_cut_off_inside_a_text_field_has_no_file() {
+async fn an_upload_cut_off_inside_a_text_field_names_the_multipart_error() {
     let r = post_truncated(routes(state()), "/api/import/csv", "", "label").await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
-    assert_eq!(r.json()["error"], "No file field in multipart request");
+    let e = r.json()["error"].as_str().unwrap().to_string();
+    assert!(e.starts_with("Failed to read field 'label': "), "{e}");
+    assert_ne!(e, "Failed to read field 'label': ");
+
+    let r = post_truncated(
+        routes(state()),
+        "/api/import/parquet?label=Doc",
+        "",
+        "label",
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("could not read the multipart request: "),
+        "{}",
+        r.text()
+    );
+
+    // Not multipart at all past the first boundary line.
+    let r = send(
+        routes(state()),
+        Request::builder()
+            .method("POST")
+            .uri("/api/import/csv")
+            .header("content-type", "multipart/form-data; boundary=B")
+            .body(Body::from("--B\r\nno headers here"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Failed to read multipart request: "),
+        "{}",
+        r.text()
+    );
 }
 
 #[tokio::test]
