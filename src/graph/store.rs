@@ -150,6 +150,11 @@ pub enum GraphError {
     /// is refused before it reaches the store (#1483).
     #[error("Quota exceeded: {0}")]
     QuotaExceeded(String),
+
+    /// A key lookup named a `(label, property)` with no unique constraint, so
+    /// no index can answer it with at most one node (#542).
+    #[error("No unique constraint on :{label}({property})")]
+    NoUniqueConstraint { label: String, property: String },
 }
 
 pub type GraphResult<T> = Result<T, GraphError>;
@@ -1868,6 +1873,18 @@ NodeDeleted { .. } => {
                 );
             }
         }
+        // The unique-constraint index as well, or a node created here is not
+        // found by `find_node_by_unique` and does not conflict with a later
+        // write of the same key (#542). Registered, not enforced: this
+        // constructor has no way to refuse.
+        if self.property_index.has_any_unique_constraints() {
+            for (key, value) in indexed_properties.iter().filter(|(_, v)| !v.is_null()) {
+                for label in &labels {
+                    self.property_index
+                        .constraint_insert(label, key, value.clone(), node_id);
+                }
+            }
+        }
         if let Some(sender) = &self.index_sender {
             let _ = sender.send(crate::graph::event::IndexEvent::NodeCreated {
                 tenant_id: tenant_id.to_string(),
@@ -2198,7 +2215,13 @@ NodeDeleted { .. } => {
         // Record the new value so subsequent writes can see it. Without this the
         // constraint index only ever holds what the backfill put there at CREATE
         // CONSTRAINT time, and nodes added afterwards would not conflict with each other.
+        // The value it replaces goes, or the key stays taken by a node that no longer
+        // holds it (#542).
         for label in &constrained_labels {
+            if let Some(old) = old_val.as_ref().filter(|old| **old != val) {
+                self.property_index
+                    .constraint_remove(label, &key_str, old, node_id);
+            }
             self.property_index
                 .constraint_insert(label, &key_str, val.clone(), node_id);
         }
@@ -2353,9 +2376,14 @@ NodeDeleted { .. } => {
         // Removed from the property index here, not on a channel: a delete the
         // index has not yet learned about hands the next lookup a node that is
         // gone (#1467, the mirror of the missing insert).
-        for (key, value) in &latest_node.properties {
+        //
+        // Read with the column, not off the row: the row has been empty since
+        // #1188, so the values were never removed at all, and a deleted node's
+        // key stayed taken under its unique constraint (#542).
+        for (key, value) in &self.node_properties_full(id) {
             for label in &latest_node.labels {
                 self.property_index.index_remove(label, key, value, id);
+                self.property_index.constraint_remove(label, key, value, id);
             }
         }
         if let Some(sender) = &self.index_sender {
@@ -3550,6 +3578,18 @@ NodeDeleted { .. } => {
     /// leaves the value readable, which is what `REMOVE n.prop` was doing
     /// (#594). Anything that removes a property has to go through here.
     pub fn remove_node_property(&mut self, node_id: NodeId, key: &str) {
+        // A removed key frees its value under every unique constraint the node
+        // is in, or the next node to take it is refused as a duplicate (#542).
+        if self.property_index.has_any_unique_constraints() {
+            if let (Some(old), Some(node)) =
+                (self.node_property(node_id, key), self.get_node(node_id))
+            {
+                for label in &node.labels {
+                    self.property_index
+                        .constraint_remove(label, key, &old, node_id);
+                }
+            }
+        }
         // A removal is a write, and history keeps what it removed (#1200).
         if let Some(last_write) = self.get_node(node_id).map(|n| n.version) {
             if self.undo_needed(node_id, last_write, |e| {
@@ -4927,6 +4967,13 @@ NodeDeleted { .. } => {
             self.insert_recovered_node(node);
             let idx = id.as_u64() as usize;
             for (key, value) in properties {
+                // Back into the indexes `delete_node` took it out of (#542).
+                for label in &labels {
+                    self.property_index
+                        .index_insert(label, &key, value.clone(), id);
+                    self.property_index
+                        .constraint_insert(label, &key, value.clone(), id);
+                }
                 self.node_columns.set_property(idx, &key, value);
             }
             // `insert_recovered_node` restores the label index, not the catalog
@@ -5684,6 +5731,59 @@ NodeDeleted { .. } => {
             self.property_index.index_insert(label, property, val, node_id);
         }
         Ok(filled)
+    }
+
+    /// The node holding `value` for `:label(property)` under a unique
+    /// constraint: a lookup by external key (#542).
+    ///
+    /// Answered from the constraint's own index, so no node is visited but the
+    /// one returned, whatever the size of the label. Without a constraint on
+    /// `(label, property)` it refuses with [`GraphError::NoUniqueConstraint`]
+    /// instead of scanning: a scan is neither fast nor sure to find one node,
+    /// and a caller who asked for a key lookup would not see that it had
+    /// become one. `CREATE CONSTRAINT FOR (n:Label) REQUIRE n.prop IS UNIQUE`
+    /// first.
+    ///
+    /// Equality is the index's: exact, so `Integer(1)` does not find a node
+    /// holding `Float(1.0)`.
+    ///
+    /// Each candidate is checked against the node as it stands -- alive, still
+    /// carrying `label`, still holding `value` -- so an index entry some write
+    /// path failed to drop answers `None`, not the wrong node. Two nodes
+    /// holding the key, which only `create_node_with_properties` can produce
+    /// because it cannot refuse, is a `ConstraintViolation` rather than a pick.
+    pub fn find_node_by_unique(
+        &self,
+        label: &Label,
+        property: &str,
+        value: &PropertyValue,
+    ) -> GraphResult<Option<NodeId>> {
+        let candidates = self
+            .property_index
+            .unique_constraint_holders(label, property, value)
+            .ok_or_else(|| GraphError::NoUniqueConstraint {
+                label: label.as_str().to_string(),
+                property: property.to_string(),
+            })?;
+        let mut holders: Vec<NodeId> = candidates
+            .into_iter()
+            .filter(|&id| {
+                self.get_node(id).is_some_and(|n| n.labels.contains(label))
+                    && self.node_property(id, property).as_ref() == Some(value)
+            })
+            .collect();
+        holders.sort();
+        match holders.as_slice() {
+            [] => Ok(None),
+            [id] => Ok(Some(*id)),
+            _ => Err(GraphError::ConstraintViolation(format!(
+                ":{}({}) value {:?} is held by nodes {:?}",
+                label.as_str(),
+                property,
+                value,
+                holders
+            ))),
+        }
     }
 
     /// `DROP INDEX ON :Label(property)`.
@@ -9021,6 +9121,55 @@ mod tests {
         store.commit_session_transaction().unwrap();
         assert!(store.commit_session_transaction().is_err(), "committing twice succeeded");
         assert!(store.rollback_session_transaction().is_err(), "rolling back with none open succeeded");
+    }
+
+    /// A key lookup reads the one node it returns and no other (#542).
+    ///
+    /// Counted in property reads, not timed: the same lookup against a label of
+    /// 10 and of 2,000 nodes reads the same number of values, and a scan of the
+    /// larger label -- the control -- reads every one of them.
+    #[test]
+    fn test_find_node_by_unique_reads_only_the_node_it_returns() {
+        use crate::graph::storage::columnar::COLUMN_READS;
+        fn keyed(n: i64) -> GraphStore {
+            let mut store = GraphStore::new();
+            store
+                .create_unique_constraint(&Label::new("Acct"), "krid")
+                .unwrap();
+            for i in 0..n {
+                let id = store.create_node("Acct");
+                store.set_node_property("default", id, "krid", i).unwrap();
+            }
+            store
+        }
+        let reads = |store: &GraphStore, key: i64| {
+            let before = COLUMN_READS.with(|c| c.get());
+            let found = store
+                .find_node_by_unique(&Label::new("Acct"), "krid", &PropertyValue::Integer(key))
+                .unwrap();
+            assert!(found.is_some(), "key {key} not found");
+            COLUMN_READS.with(|c| c.get()) - before
+        };
+
+        let small = keyed(10);
+        let large = keyed(2_000);
+        assert_eq!(reads(&small, 7), reads(&large, 1_999));
+        assert!(
+            reads(&large, 1_999) <= 1,
+            "more than the returned node was read"
+        );
+
+        let before = COLUMN_READS.with(|c| c.get());
+        let scanned = large
+            .get_nodes_by_label(&Label::new("Acct"))
+            .iter()
+            .filter(|n| large.node_property(n.id, "krid") == Some(PropertyValue::Integer(1_999)))
+            .count();
+        assert_eq!(scanned, 1);
+        assert!(
+            COLUMN_READS.with(|c| c.get()) - before >= 2_000,
+            "the counter does not see a scan, so it cannot see its absence"
+        );
     }
 }
 

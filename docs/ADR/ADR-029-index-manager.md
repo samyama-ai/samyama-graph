@@ -104,6 +104,42 @@ full-text and vector definitions cross a snapshot boundary with their names,
 dimensions, metric and quantization. Discovery (`rebuild_vector_index_full`)
 now runs only for a snapshot that carries no catalog line. See ADR-022.
 
+## Lookup by external key (2026-09-30, #542)
+
+A node imported from another system usually arrives with its own key — a
+primary key, a UUID, a business id — and an incremental load has to find the
+node that key was loaded into last time. `NodeId`s are assigned by the store and
+reused after a delete, so they cannot be that key. The key goes in a property
+under a unique constraint, and the constraint's index answers the lookup:
+
+```rust
+store.create_unique_constraint(&Label::new("Acct"), "krid")?;
+// ... load ...
+let id: Option<NodeId> = store.find_node_by_unique(&Label::new("Acct"), "krid", &PropertyValue::Integer(42))?;
+```
+
+- **From the index, never a scan.** Without a unique constraint on the pair it
+  returns `GraphError::NoUniqueConstraint`. A plain index is not enough: it does
+  not promise one node per key. For a non-unique property, use Cypher
+  (`MATCH (n:Acct {region: $r})`), which uses a property index when there is one.
+- **Exact equality**, as the B-Tree keys it: `Integer(1)` does not find
+  `Float(1.0)`.
+- **Checked against the node.** A candidate that is gone, has lost the label or
+  no longer holds the value is not returned, so an entry a write path failed to
+  drop answers `None` rather than the wrong node.
+- **The index now follows every write.** A key changed with `SET`, removed with
+  `REMOVE`, or on a deleted node used to stay registered to the node that gave it
+  up, so reloading a deleted row was refused as a duplicate of nothing;
+  `create_node_with_properties` never registered its keys at all. All four are
+  maintained, and a rolled-back delete puts the node's entries back.
+- In the Rust SDK: `EmbeddedClient::find_node_by_unique` and
+  `RemoteClient::find_node_by_unique`. The remote one sends
+  `MATCH (n:Label {prop: $key}) RETURN id(n)` with the key bound, and does not
+  check for the constraint first.
+
+User-chosen `NodeId`s — the issue's other option — are a storage change and are
+not part of this.
+
 ## Alternatives Considered
 
 | Option | Rejected because |
