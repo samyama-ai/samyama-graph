@@ -6,7 +6,7 @@ pub mod client;
 #[cfg(test)] #[path = "test_http_cov.rs"] pub(crate) mod test_http;
 
 use thiserror::Error;
-use crate::persistence::tenant::NLQConfig;
+use crate::persistence::tenant::{LLMProvider, NLQConfig};
 
 #[derive(Error, Debug)]
 pub enum NLQError {
@@ -35,18 +35,7 @@ impl NLQPipeline {
     }
 
     pub async fn text_to_cypher(&self, question: &str, schema_summary: &str) -> NLQResult<String> {
-        let prompt = format!(
-            "You are a Cypher query expert for a graph database. Given this schema:\n\n{}\n\n\
-            Rules:\n\
-            - Follow the Relationship Patterns EXACTLY — do not invent edges between labels that aren't listed\n\
-            - When a question involves two unrelated labels (e.g. Country + DiseaseCategory), join them through a shared node (e.g. Trial)\n\
-            - Use property names from the Key Properties section\n\
-            - Use count(x) not COUNT(DISTINCT x) — DISTINCT inside aggregation is not supported\n\
-            - Return ONLY the Cypher query, no markdown, no explanations\n\n\
-            Question: \"{}\"",
-            schema_summary,
-            question
-        );
+        let prompt = Self::build_prompt(question, schema_summary);
 
         let cypher = self.client.generate_cypher(&prompt).await?;
 
@@ -58,6 +47,27 @@ impl NLQPipeline {
         } else {
             Err(NLQError::ValidationError("Generated query contains write operations or unsafe keywords".to_string()))
         }
+    }
+
+    /// The prompt sent to the model for `question` over `schema_summary`.
+    ///
+    /// There used to be a rule here telling the model that `count(DISTINCT x)`
+    /// is not supported and to write `count(x)` instead. It is supported, so
+    /// the rule turned every "how many different ..." question into a count of
+    /// rows with duplicates (#438).
+    fn build_prompt(question: &str, schema_summary: &str) -> String {
+        format!(
+            "You are a Cypher query expert for a graph database. Given this schema:\n\n{}\n\n\
+            Rules:\n\
+            - Follow the Relationship Patterns EXACTLY — do not invent edges between labels that aren't listed\n\
+            - When a question involves two unrelated labels (e.g. Country + DiseaseCategory), join them through a shared node (e.g. Trial)\n\
+            - Use property names from the Key Properties section\n\
+            - To filter on aggregated values, use WITH to compute the aggregation first, then WHERE, then RETURN — never place WHERE after RETURN\n\
+            - Return ONLY the Cypher query, no markdown, no explanations\n\n\
+            Question: \"{}\"",
+            schema_summary,
+            question
+        )
     }
 
     /// Extract a Cypher query from an LLM response that may contain markdown
@@ -124,6 +134,64 @@ impl NLQPipeline {
             Err(_) => false,
         }
     }
+}
+
+/// The environment variable a provider's API key is read from, or `None` for
+/// a provider that takes no key.
+///
+/// Every NLQ path used to read `OPENAI_API_KEY` whatever the provider, so a
+/// Gemini deployment had to put its Google key in a variable named for
+/// OpenAI -- and an operator who set both sent the OpenAI key to Google (#438).
+pub fn api_key_var(provider: &LLMProvider) -> Option<&'static str> {
+    match provider {
+        LLMProvider::OpenAI => Some("OPENAI_API_KEY"),
+        LLMProvider::Gemini => Some("GEMINI_API_KEY"),
+        LLMProvider::Anthropic => Some("ANTHROPIC_API_KEY"),
+        LLMProvider::AzureOpenAI => Some("AZURE_OPENAI_API_KEY"),
+        LLMProvider::Ollama | LLMProvider::ClaudeCode | LLMProvider::Mock => None,
+    }
+}
+
+/// The NLQ configuration the process environment describes: `NLQ_PROVIDER`
+/// (no default), `NLQ_MODEL` (default `gpt-4o`), the provider's own key
+/// variable (see [`api_key_var`]) and optional `NLQ_API_BASE_URL`.
+///
+/// One reader for `POST /api/nlq`, `GRAPH.NLQ` and the enrichment worker, so
+/// the three cannot disagree about which variable holds what.
+pub fn config_from_env() -> Result<NLQConfig, String> {
+    config_from(|var| std::env::var(var).ok())
+}
+
+/// As [`config_from_env`], reading variables through `get`.
+///
+/// Refuses a provider that is accepted by name but not implemented, and a
+/// provider that needs a key when its variable is unset, naming the variable:
+/// both used to surface only at the first request, as a generic error from
+/// deep inside the client.
+pub fn config_from(get: impl Fn(&str) -> Option<String>) -> Result<NLQConfig, String> {
+    let provider = LLMProvider::parse(&get("NLQ_PROVIDER").unwrap_or_default())?;
+    client::check_implemented(&provider).map_err(|e| e.to_string())?;
+    let api_key = match api_key_var(&provider) {
+        None => None,
+        Some(var) => match get(var).filter(|k| !k.trim().is_empty()) {
+            Some(key) => Some(key),
+            None => {
+                return Err(format!(
+                    "NLQ_PROVIDER is {provider:?}, which needs an API key in {var}, and {var} is \
+                     not set. Each provider reads its own variable; OPENAI_API_KEY is only \
+                     read for OpenAI."
+                ))
+            }
+        },
+    };
+    Ok(NLQConfig {
+        enabled: true,
+        provider,
+        model: get("NLQ_MODEL").unwrap_or_else(|| "gpt-4o".to_string()),
+        api_key,
+        api_base_url: get("NLQ_API_BASE_URL"),
+        system_prompt: None,
+    })
 }
 
 #[cfg(test)]
@@ -438,5 +506,102 @@ mod tests {
     fn test_is_safe_query_unwind_prefix() {
         let pipeline = make_pipeline();
         assert!(pipeline.is_safe_query("UNWIND [1,2,3] AS x RETURN x"));
+    }
+
+    // --- prompt and environment config (#438) ---
+
+    #[test]
+    fn the_prompt_does_not_forbid_count_distinct_and_asks_for_with_before_where() {
+        let prompt = NLQPipeline::build_prompt("how many cities?", "Labels: City");
+        // count(DISTINCT x) is supported (tests/aggregate_identity_grouping.rs);
+        // telling the model otherwise made it count duplicates.
+        assert!(!prompt.contains("DISTINCT"), "{prompt}");
+        assert!(!prompt.contains("not supported"), "{prompt}");
+        assert!(
+            prompt.contains("use WITH to compute the aggregation first, then WHERE, then RETURN"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("never place WHERE after RETURN"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Labels: City") && prompt.contains("how many cities?"));
+    }
+
+    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn each_provider_reads_its_own_key_variable() {
+        let cases = [("openai", "OPENAI_API_KEY"), ("gemini", "GEMINI_API_KEY")];
+        for (name, var) in cases {
+            // Every key variable set, each to a different value: the one that
+            // arrives in the config says which variable was read.
+            let all = [
+                ("NLQ_PROVIDER", name),
+                ("OPENAI_API_KEY", "OPENAI_API_KEY"),
+                ("GEMINI_API_KEY", "GEMINI_API_KEY"),
+                ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
+                ("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"),
+            ];
+            let config = config_from(env(&all)).unwrap();
+            assert_eq!(config.api_key.as_deref(), Some(var), "{name}");
+        }
+        for name in ["ollama", "claudecode", "mock"] {
+            let config =
+                config_from(env(&[("NLQ_PROVIDER", name), ("OPENAI_API_KEY", "sk")])).unwrap();
+            assert_eq!(
+                config.api_key, None,
+                "{name} takes no key and must not be sent one"
+            );
+        }
+        assert_eq!(
+            api_key_var(&LLMProvider::Anthropic),
+            Some("ANTHROPIC_API_KEY")
+        );
+        assert_eq!(
+            api_key_var(&LLMProvider::AzureOpenAI),
+            Some("AZURE_OPENAI_API_KEY")
+        );
+    }
+
+    #[test]
+    fn a_missing_key_is_refused_naming_the_variable() {
+        // The Gemini case is the old defect: OPENAI_API_KEY set, and read.
+        let err =
+            config_from(env(&[("NLQ_PROVIDER", "gemini"), ("OPENAI_API_KEY", "sk")])).unwrap_err();
+        assert!(err.contains("GEMINI_API_KEY"), "{err}");
+        let err =
+            config_from(env(&[("NLQ_PROVIDER", "openai"), ("OPENAI_API_KEY", " ")])).unwrap_err();
+        assert!(err.contains("OPENAI_API_KEY"), "{err}");
+    }
+
+    #[test]
+    fn the_rest_of_the_config_comes_from_the_environment() {
+        let config = config_from(env(&[
+            ("NLQ_PROVIDER", "ollama"),
+            ("NLQ_MODEL", "llama3"),
+            ("NLQ_API_BASE_URL", "http://127.0.0.1:1"),
+        ]))
+        .unwrap();
+        assert_eq!(config.provider, LLMProvider::Ollama);
+        assert_eq!(config.model, "llama3");
+        assert_eq!(config.api_base_url.as_deref(), Some("http://127.0.0.1:1"));
+        let unset = config_from(env(&[])).unwrap_err();
+        assert!(unset.contains("NLQ_PROVIDER"), "{unset}");
+    }
+
+    #[test]
+    fn an_unimplemented_provider_is_refused_before_its_key_is_asked_for() {
+        for name in ["anthropic", "azure"] {
+            let err = config_from(env(&[("NLQ_PROVIDER", name)])).unwrap_err();
+            assert!(err.contains("not implemented"), "{name}: {err}");
+            assert!(!err.contains("API_KEY"), "{name}: {err}");
+        }
     }
 }

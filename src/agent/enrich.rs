@@ -637,24 +637,17 @@ pub fn verify(config: &EnrichConfig, store: &mut GraphStore, node_ids: &[NodeId]
 
 /// Build an [`EnrichmentWorker`] from environment config (same knobs as `/api/nlq`).
 pub fn worker_from_env() -> Result<EnrichmentWorker, String> {
-    use crate::persistence::tenant::{LLMProvider, NLQConfig};
     // Same refusal as `/api/nlq`, and it matters more here: enrichment sends the
     // gap node's actual property **values**, not just schema metadata.
-    let provider = LLMProvider::parse(&std::env::var("NLQ_PROVIDER").unwrap_or_default())?;
-    let model = std::env::var("NLQ_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
-    let config = NLQConfig {
-        enabled: true,
-        provider,
-        model: model.clone(),
-        api_key: std::env::var("OPENAI_API_KEY").ok(),
-        api_base_url: std::env::var("NLQ_API_BASE_URL").ok(),
-        // Neutral domain prompt — the NLQ client otherwise defaults to "You are a Cypher
-        // expert", which biases enrichment answers toward Cypher instead of facts.
-        system_prompt: Some(
-            "You are a precise industrial asset-management domain expert. Answer factually \
-             and follow the requested output format exactly.".to_string(),
-        ),
-    };
+    let mut config = crate::nlq::config_from_env()?;
+    let model = config.model.clone();
+    // Neutral domain prompt — the NLQ client otherwise defaults to "You are a Cypher
+    // expert", which biases enrichment answers toward Cypher instead of facts.
+    config.system_prompt = Some(
+        "You are a precise industrial asset-management domain expert. Answer factually \
+         and follow the requested output format exactly."
+            .to_string(),
+    );
     let client = NLQClient::new(&config).map_err(|e| e.to_string())?;
     Ok(EnrichmentWorker::new(client, model))
 }

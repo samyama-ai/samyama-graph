@@ -12,8 +12,29 @@ pub struct NLQClient {
     api_base_url: String,
 }
 
+/// Refuse a provider `generate_cypher` has no implementation for.
+///
+/// `anthropic` and `azure` parse, because the name is shared with the
+/// embedding and agent configs, but NLQ has no client for them. Such a
+/// config used to be accepted and fail at the first question with "not yet
+/// implemented"; it is now refused when it is built.
+pub fn check_implemented(provider: &LLMProvider) -> NLQResult<()> {
+    match provider {
+        LLMProvider::OpenAI
+        | LLMProvider::Ollama
+        | LLMProvider::Gemini
+        | LLMProvider::ClaudeCode
+        | LLMProvider::Mock => Ok(()),
+        LLMProvider::AzureOpenAI | LLMProvider::Anthropic => Err(NLQError::ConfigError(format!(
+            "NLQ provider {provider:?} is not implemented; use openai, ollama, gemini, \
+             claudecode or mock"
+        ))),
+    }
+}
+
 impl NLQClient {
     pub fn new(config: &NLQConfig) -> NLQResult<Self> {
+        check_implemented(&config.provider)?;
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
@@ -45,7 +66,10 @@ impl NLQClient {
             LLMProvider::Gemini => self.gemini_chat(prompt).await,
             LLMProvider::ClaudeCode => self.claude_code_generate(prompt).await,
             LLMProvider::Mock => Ok("MATCH (n) RETURN n LIMIT 10".to_string()),
-            _ => Err(NLQError::ConfigError(format!("Provider {:?} not yet implemented", self.config.provider))),
+            // Refused by `new`, so not reachable through a constructed client.
+            LLMProvider::AzureOpenAI | LLMProvider::Anthropic => {
+                check_implemented(&self.config.provider).map(|()| String::new())
+            }
         }
     }
 
@@ -323,7 +347,7 @@ mod tests {
             system_prompt: None,
         };
         let client = NLQClient::new(&config);
-        assert!(client.is_ok());
+        assert!(client.is_err());
     }
 
     #[test]
@@ -337,7 +361,7 @@ mod tests {
             system_prompt: None,
         };
         let client = NLQClient::new(&config);
-        assert!(client.is_ok());
+        assert!(client.is_err());
     }
 
     #[test]
@@ -368,19 +392,28 @@ mod tests {
         assert!(client.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_generate_cypher_unsupported_provider() {
-        let config = NLQConfig {
-            enabled: true,
-            provider: LLMProvider::AzureOpenAI,
-            model: "gpt-4".to_string(),
-            api_key: Some("test-key".to_string()),
-            api_base_url: Some("https://test.openai.azure.com".to_string()),
-            system_prompt: None,
-        };
-        let client = NLQClient::new(&config).unwrap();
-        let result = client.generate_cypher("test").await;
-        assert!(result.is_err());
+    #[test]
+    fn test_unimplemented_provider_is_refused_at_construction() {
+        for provider in [LLMProvider::AzureOpenAI, LLMProvider::Anthropic] {
+            let config = NLQConfig {
+                enabled: true,
+                provider: provider.clone(),
+                model: "m".to_string(),
+                api_key: Some("test-key".to_string()),
+                api_base_url: Some("https://test.example.com".to_string()),
+                system_prompt: None,
+            };
+            let err = NLQClient::new(&config).err().expect("refused");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not implemented") && msg.contains("ollama"),
+                "{msg}"
+            );
+            assert!(
+                crate::nlq::NLQPipeline::new(config).is_err(),
+                "{provider:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -431,30 +464,6 @@ mod tests {
         let client_gemini = NLQClient::new(&config_gemini).unwrap();
         assert_eq!(client_gemini.api_base_url, "https://generativelanguage.googleapis.com/v1beta");
 
-        // Anthropic default base URL
-        let config_anthropic = NLQConfig {
-            enabled: true,
-            provider: LLMProvider::Anthropic,
-            model: "claude-3".to_string(),
-            api_key: Some("key".to_string()),
-            api_base_url: None,
-            system_prompt: None,
-        };
-        let client_anthropic = NLQClient::new(&config_anthropic).unwrap();
-        assert_eq!(client_anthropic.api_base_url, "https://api.anthropic.com/v1");
-
-        // AzureOpenAI default (empty)
-        let config_azure = NLQConfig {
-            enabled: true,
-            provider: LLMProvider::AzureOpenAI,
-            model: "gpt-4".to_string(),
-            api_key: Some("key".to_string()),
-            api_base_url: None,
-            system_prompt: None,
-        };
-        let client_azure = NLQClient::new(&config_azure).unwrap();
-        assert_eq!(client_azure.api_base_url, "");
-
         // ClaudeCode default (empty)
         let config_cc = NLQConfig {
             enabled: true,
@@ -496,23 +505,6 @@ mod tests {
         let r2 = client.generate_cypher("Count all nodes").await.unwrap();
         assert_eq!(r1, r2);
         assert_eq!(r1, "MATCH (n) RETURN n LIMIT 10");
-    }
-
-    #[tokio::test]
-    async fn test_generate_cypher_anthropic_not_implemented() {
-        let config = NLQConfig {
-            enabled: true,
-            provider: LLMProvider::Anthropic,
-            model: "claude-3".to_string(),
-            api_key: Some("key".to_string()),
-            api_base_url: None,
-            system_prompt: None,
-        };
-        let client = NLQClient::new(&config).unwrap();
-        let result = client.generate_cypher("test").await;
-        assert!(result.is_err());
-        let err_msg = format!("{}", result.err().unwrap());
-        assert!(err_msg.contains("not yet implemented"));
     }
 
     #[test]

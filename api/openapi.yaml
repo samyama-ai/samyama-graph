@@ -985,7 +985,9 @@ paths:
       description: |
         Translate a natural-language question into a read-only OpenCypher query using
         a configured LLM provider. NLQ must be enabled via environment
-        (`NLQ_MODEL`, `OPENAI_API_KEY`, optional `NLQ_API_BASE_URL`). Returns the
+        (`NLQ_PROVIDER`, `NLQ_MODEL`, the provider's key -- `OPENAI_API_KEY` or
+        `GEMINI_API_KEY`; none for `ollama`, `claudecode` or `mock` -- and optional
+        `NLQ_API_BASE_URL`). Returns the
         generated Cypher only; execute it with `/api/query`.
       requestBody:
         required: true
