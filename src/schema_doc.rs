@@ -244,3 +244,5 @@ pub fn derive_from_path(path: &std::path::Path) -> Result<Schema, String> {
         Ok(BufReader::new(r))
     })
 }
+
+#[cfg(test)] #[path = "schema_doc_cov_tests.rs"] mod cov_tests;

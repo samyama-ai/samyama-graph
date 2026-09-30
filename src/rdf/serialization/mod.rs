@@ -149,6 +149,8 @@ impl RdfSerializer {
     }
 }
 
+#[cfg(test)] #[path = "serialization_cov_tests.rs"] mod cov_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

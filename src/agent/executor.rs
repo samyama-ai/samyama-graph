@@ -262,4 +262,152 @@ mod tests {
         );
         assert!(large > small * 10, "expected large>>small, got {small} vs {large}");
     }
+
+    #[test]
+    fn hit_rate_scores_scalars_strings_and_plain_objects() {
+        assert_eq!(score_hit_rate(&json!(true)), 1.0);
+        assert_eq!(score_hit_rate(&json!(0)), 1.0);
+        assert_eq!(score_hit_rate(&json!("")), 0.5);
+        assert_eq!(score_hit_rate(&json!("x")), 1.0);
+        assert_eq!(score_hit_rate(&json!({})), 0.5);
+        assert_eq!(score_hit_rate(&json!({"a": 1})), 1.0);
+        // A non-array `records` field is not the records shape.
+        assert_eq!(score_hit_rate(&json!({"records": 3})), 1.0);
+    }
+
+    #[test]
+    fn token_estimate_without_result_counts_args_only() {
+        // `{"q":"x"}` is 9 bytes -> ceil(9/4) = 3.
+        assert_eq!(estimate_tokens(&json!({"q": "x"}), None), 3);
+        assert_eq!(estimate_tokens(&json!(null), Some(&json!(null))), 2);
+    }
+
+    #[test]
+    fn hex_prefix_truncates_to_requested_length() {
+        assert_eq!(hex_prefix(&[0xab, 0xcd, 0xef], 3), "abc");
+        assert_eq!(hex_prefix(&[0x01], 8), "01");
+        assert_eq!(hex_prefix(&[], 4), "");
+    }
+
+    struct Echo;
+    #[async_trait::async_trait]
+    impl Tool for Echo {
+        fn name(&self) -> &str { "echo" }
+        fn description(&self) -> &str { "echo args" }
+        fn parameters(&self) -> serde_json::Value { json!({}) }
+        async fn execute(&self, args: serde_json::Value) -> AgentResult<serde_json::Value> {
+            Ok(json!({"records": [args]}))
+        }
+    }
+
+    struct Fails;
+    #[async_trait::async_trait]
+    impl Tool for Fails {
+        fn name(&self) -> &str { "fails" }
+        fn description(&self) -> &str { "always fails" }
+        fn parameters(&self) -> serde_json::Value { json!({}) }
+        async fn execute(&self, _args: serde_json::Value) -> AgentResult<serde_json::Value> {
+            Err(AgentError::ToolError("nope".into()))
+        }
+    }
+
+    fn executor() -> (PlanExecutor, Arc<RwLock<GraphStore>>) {
+        let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        tools.insert("echo".into(), Arc::new(Echo));
+        tools.insert("fails".into(), Arc::new(Fails));
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        (PlanExecutor::new(tools, store.clone()), store)
+    }
+
+    fn call(tool: &str, parallel: bool) -> ToolCall {
+        ToolCall { tool: tool.into(), args: json!({"t": tool}), parallel_with_prev: parallel }
+    }
+
+    #[tokio::test]
+    async fn execute_records_results_errors_and_missing_tools_in_plan_order() {
+        let (exec, store) = executor();
+        let plan = ToolPlan {
+            calls: vec![call("echo", false), call("fails", true), call("ghost", false)],
+        };
+        let run = exec.execute("what?", &plan).await.unwrap();
+        assert_eq!(run.question_id, PlanExecutor::question_id("what?"));
+        let tools: Vec<&str> = run.records.iter().map(|r| r.tool.as_str()).collect();
+        assert_eq!(tools, vec!["echo", "fails", "ghost"]);
+
+        let echo = &run.records[0];
+        assert_eq!(echo.result, Some(json!({"records": [{"t": "echo"}]})));
+        assert_eq!(echo.error, None);
+        assert_eq!(echo.hit_rate, 1.0);
+        assert!(echo.token_cost > 0);
+
+        let fails = &run.records[1];
+        assert_eq!(fails.result, None);
+        assert_eq!(fails.error.as_deref(), Some("Tool error: nope"));
+        assert_eq!(fails.hit_rate, 0.0);
+
+        let ghost = &run.records[2];
+        assert_eq!(ghost.error.as_deref(), Some("tool 'ghost' not registered"));
+        assert_eq!(run.total_token_cost, run.records.iter().map(|r| r.token_cost).sum::<u64>());
+
+        // Telemetry: one Question, three Tool nodes, one USED_TOOL edge per call.
+        let g = store.read().await;
+        let q = find_node_by_property(&g, "Question", "qid", &run.question_id).expect("question node");
+        assert_eq!(g.node_property(q, "text"), Some(PropertyValue::String("what?".into())));
+        assert_eq!(g.get_nodes_by_label(&Label::new("Tool")).len(), 3);
+        let mut edges = g.get_outgoing_edges(q);
+        edges.sort_by_key(|e| match e.properties.get("slot") {
+            Some(PropertyValue::Integer(i)) => *i,
+            _ => -1,
+        });
+        assert_eq!(edges.len(), 3);
+        assert!(edges.iter().all(|e| e.edge_type.as_str() == "USED_TOOL"));
+        assert_eq!(edges[0].properties.get("error"), None);
+        assert_eq!(
+            edges[1].properties.get("error"),
+            Some(&PropertyValue::String("Tool error: nope".into()))
+        );
+        assert_eq!(edges[0].properties.get("hit_rate"), Some(&PropertyValue::Float(1.0)));
+    }
+
+    #[tokio::test]
+    async fn repeated_prompts_reuse_question_and_tool_nodes() {
+        let (exec, store) = executor();
+        let plan = ToolPlan { calls: vec![call("echo", false), call("echo", false)] };
+        exec.execute("same", &plan).await.unwrap();
+        exec.execute("same", &plan).await.unwrap();
+        let g = store.read().await;
+        assert_eq!(g.get_nodes_by_label(&Label::new("Question")).len(), 1);
+        assert_eq!(g.get_nodes_by_label(&Label::new("Tool")).len(), 1);
+        let q = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("same")).unwrap();
+        assert_eq!(g.get_outgoing_edges(q).len(), 4);
+    }
+
+    #[tokio::test]
+    async fn empty_plan_creates_only_the_question() {
+        let (exec, store) = executor();
+        let run = exec.execute("nothing", &ToolPlan::default()).await.unwrap();
+        assert!(run.records.is_empty());
+        assert_eq!(run.total_token_cost, 0);
+        let g = store.read().await;
+        assert_eq!(g.get_nodes_by_label(&Label::new("Question")).len(), 1);
+        assert!(g.get_nodes_by_label(&Label::new("Tool")).is_empty());
+        assert!(find_node_by_property(&g, "Question", "qid", "no-such-qid").is_none());
+    }
+
+    #[tokio::test]
+    async fn distinct_prompts_get_distinct_question_nodes() {
+        let (exec, store) = executor();
+        assert_eq!(Echo.description(), "echo args");
+        assert_eq!(Echo.parameters(), json!({}));
+        assert_eq!(Fails.description(), "always fails");
+        assert_eq!(Fails.parameters(), json!({}));
+        exec.execute("first", &ToolPlan::default()).await.unwrap();
+        exec.execute("second", &ToolPlan::default()).await.unwrap();
+        exec.execute("second", &ToolPlan::default()).await.unwrap();
+        let g = store.read().await;
+        assert_eq!(g.get_nodes_by_label(&Label::new("Question")).len(), 2);
+        let q1 = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("first"));
+        let q2 = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("second"));
+        assert!(q1.is_some() && q2.is_some() && q1 != q2);
+    }
 }

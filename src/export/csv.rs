@@ -158,5 +158,66 @@ mod tests {
         assert!(!reads_as_formula("1+1"));
         assert!(!reads_as_formula("Alice"));
         assert!(!reads_as_formula(""));
+        assert!(reads_as_formula("\r=1"));
+    }
+
+    use crate::graph::{NodeId, PropertyValue as P};
+    use crate::query::executor::record::Record;
+    use std::collections::HashMap;
+
+    fn batch(cols: &[&str], rows: Vec<Vec<(&str, Value)>>) -> RecordBatch {
+        let mut b = RecordBatch::new(cols.iter().map(|c| c.to_string()).collect());
+        for row in rows {
+            let mut r = Record::new();
+            for (k, v) in row {
+                r.bind(k, v);
+            }
+            b.records.push(r);
+        }
+        b
+    }
+
+    #[test]
+    fn to_csv_writes_header_rows_and_counts_what_it_could_not_express() {
+        let mut m = HashMap::new();
+        m.insert("k".to_string(), P::Integer(1));
+        let b = batch(
+            &["a", "b,c"],
+            vec![
+                vec![("a", Value::Property(P::String("x, y".into()))), ("b,c", Value::Property(P::Integer(3)))],
+                vec![("a", Value::Null), ("b,c", Value::Property(P::Null))],
+                vec![("a", Value::Property(P::Array(vec![P::Integer(1)])))],
+                vec![("a", Value::Property(P::Map(m))), ("b,c", Value::Property(P::Vector(vec![0.5])))],
+                vec![("a", Value::NodeRef(NodeId::new(9))), ("b,c", Value::Property(P::String("=cmd".into())))],
+                vec![("a", Value::Property(P::Boolean(true))), ("b,c", Value::Property(P::Float(1.5)))],
+            ],
+        );
+        let (text, rep) = to_csv(&b);
+        let lines: Vec<&str> = text.split("\r\n").collect();
+        assert_eq!(lines[0], "a,\"b,c\"");
+        assert_eq!(lines[1], "\"x, y\",3");
+        assert_eq!(lines[2], ",");
+        assert_eq!(lines[3], "[1],", "unbound column is empty");
+        assert_eq!(lines[4], "\"{\"\"k\"\":1}\",[0.5]");
+        assert_eq!(lines[5], "\"{\"\"id\"\":9}\",=cmd");
+        assert_eq!(lines[6], "true,1.5");
+        assert_eq!(lines[7], "", "trailing CRLF");
+        assert_eq!(
+            rep,
+            CsvReport {
+                rows_written: 6,
+                columns: 2,
+                nulls_written_as_empty: 3,
+                values_written_as_json: 4,
+                fields_a_spreadsheet_reads_as_a_formula: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn to_csv_of_empty_result_is_only_the_header() {
+        let (text, rep) = to_csv(&batch(&["only"], vec![]));
+        assert_eq!(text, "only\r\n");
+        assert_eq!((rep.rows_written, rep.columns), (0, 1));
     }
 }

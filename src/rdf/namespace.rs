@@ -163,4 +163,35 @@ mod tests {
         let expanded = mgr.expand("ex:alice").unwrap();
         assert_eq!(expanded, "http://example.org/alice");
     }
+
+    #[test]
+    fn expand_rejects_unknown_prefix_and_text_without_colon() {
+        let mgr = NamespaceManager::default();
+        match mgr.expand("nope:x") {
+            Err(PrefixError::UnknownPrefix(p)) => assert_eq!(p, "nope"),
+            other => panic!("{other:?}"),
+        }
+        match mgr.expand("plain") {
+            Err(e @ PrefixError::InvalidIri(_)) => assert_eq!(e.to_string(), "Invalid IRI: plain"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(mgr.get_iri("zz").unwrap_err().to_string(), "Unknown prefix: zz");
+    }
+
+    #[test]
+    fn compact_returns_none_for_unregistered_namespace() {
+        assert_eq!(NamespaceManager::new().compact("http://example.org/x"), None);
+    }
+
+    #[test]
+    fn prefixes_lists_every_registered_namespace() {
+        let mut mgr = NamespaceManager::new();
+        mgr.add_prefix("ex", "http://example.org/");
+        let all = mgr.prefixes();
+        assert_eq!(all.len(), 8);
+        let ex = all.iter().find(|n| n.prefix == "ex").unwrap();
+        assert_eq!(ex.iri, "http://example.org/");
+        let ns = Namespace::new("a", "http://a/");
+        assert_eq!((ns.prefix.as_str(), ns.iri.as_str()), ("a", "http://a/"));
+    }
 }

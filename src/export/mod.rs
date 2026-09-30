@@ -542,6 +542,7 @@ pub fn to_parquet(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
 /// where that belongs, with the mapping written in the query.
 pub mod csv;
 pub mod graphml;
+#[cfg(test)] #[path = "export_cov_tests.rs"] mod cov_tests;
 
 pub mod import {
     use std::collections::HashMap;

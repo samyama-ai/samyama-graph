@@ -141,4 +141,30 @@ mod tests {
     fn rejects_garbage() {
         assert!(ToolPlan::from_llm_json("not json").is_err());
     }
+
+    #[test]
+    fn strips_untagged_fences_and_defaults_args() {
+        let p = ToolPlan::from_llm_json("  ```\n{\"calls\": [{\"tool\": \"y\"}]}\n```  ").unwrap();
+        assert_eq!(p.calls[0].tool, "y");
+        assert_eq!(p.calls[0].args, Value::Null);
+        assert!(!p.calls[0].parallel_with_prev);
+    }
+
+    #[test]
+    fn garbage_error_quotes_at_most_200_chars_of_input() {
+        let long = "z".repeat(500);
+        let err = ToolPlan::from_llm_json(&long).unwrap_err().to_string();
+        assert!(err.contains("could not parse plan"), "{err}");
+        assert!(err.contains(&"z".repeat(200)));
+        assert!(!err.contains(&"z".repeat(201)));
+    }
+
+    #[test]
+    fn empty_plan_has_no_groups_and_first_call_ignores_parallel_flag() {
+        assert!(ToolPlan::default().parallel_groups().is_empty());
+        let plan = ToolPlan {
+            calls: vec![ToolCall { tool: "a".into(), args: json!(null), parallel_with_prev: true }],
+        };
+        assert_eq!(plan.parallel_groups(), vec![vec![0]]);
+    }
 }

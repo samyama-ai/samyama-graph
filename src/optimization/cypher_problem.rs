@@ -320,4 +320,161 @@ mod tests {
         // sum(weight) = 5.0; 5.0 * 2.0 = 10.0
         assert!((v - 10.0).abs() < 1e-6, "got {}", v);
     }
+
+    fn one_dim(template: &str) -> CypherProblem {
+        let (g, e) = build_test_graph();
+        CypherProblem::new(1, Array1::from(vec![0.0]), Array1::from(vec![10.0]), template, g, e)
+    }
+
+    #[test]
+    fn dim_and_bounds_are_reported() {
+        let p = one_dim("RETURN 1");
+        assert_eq!(Problem::dim(&p), 1);
+        let (lo, hi) = Problem::bounds(&p);
+        assert_eq!(lo.to_vec(), vec![0.0]);
+        assert_eq!(hi.to_vec(), vec![10.0]);
+        assert_eq!(p.quantize, 1e-10);
+        assert!(p.penalty_template.is_none() && p.custom_subs.is_none());
+    }
+
+    #[test]
+    fn substitute_replaces_high_indices_before_low_ones() {
+        let x = Array1::from((0..11).map(|i| i as f64).collect::<Vec<_>>());
+        let out = substitute("$x10 + $x1", &x, None);
+        assert_eq!(out, format!("{:.17} + {:.17}", 10.0, 1.0));
+    }
+
+    #[test]
+    fn substitute_applies_custom_subs_first() {
+        let f: CustomSubsFn = Box::new(|x: &Array1<f64>| vec![("$picked".to_string(), format!("[{}]", x[0] as i64))]);
+        let out = substitute("RETURN size($picked) + $x0", &Array1::from(vec![3.0]), Some(&f));
+        assert_eq!(out, format!("RETURN size([3]) + {:.17}", 3.0));
+    }
+
+    #[test]
+    fn hash_quantized_groups_values_within_resolution() {
+        let a = hash_quantized(&Array1::from(vec![1.0]), 0.5);
+        let b = hash_quantized(&Array1::from(vec![1.1]), 0.5);
+        let c = hash_quantized(&Array1::from(vec![2.0]), 0.5);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn integer_and_boolean_results_are_numeric() {
+        assert_eq!(one_dim("RETURN 7 AS f").objective(&Array1::from(vec![0.0])), 7.0);
+        assert_eq!(one_dim("RETURN true AS f").objective(&Array1::from(vec![0.0])), 1.0);
+        assert_eq!(one_dim("RETURN false AS f").objective(&Array1::from(vec![0.0])), 0.0);
+    }
+
+    #[test]
+    fn non_numeric_empty_or_failing_objectives_are_infinite_and_not_cached() {
+        for tmpl in [
+            "RETURN 'text' AS f",
+            "MATCH (n:Missing) RETURN n.w AS f",
+            "THIS IS NOT CYPHER",
+        ] {
+            let p = one_dim(tmpl);
+            let x = Array1::from(vec![1.0]);
+            assert_eq!(p.objective(&x), f64::INFINITY, "{tmpl}");
+            assert_eq!(p.objective(&x), f64::INFINITY, "{tmpl}");
+            assert_eq!(p.cache_size(), 0, "{tmpl}");
+            assert_eq!(p.stats().misses, 2, "{tmpl}");
+            assert_eq!(p.stats().hits, 0, "{tmpl}");
+        }
+    }
+
+    #[test]
+    fn scalar_from_batch_needs_a_row_and_a_column() {
+        use crate::query::executor::record::RecordBatch;
+        assert_eq!(scalar_from_batch(&RecordBatch::new(vec!["f".into()])), None);
+        let mut no_cols = RecordBatch::new(vec![]);
+        no_cols.records.push(crate::query::executor::record::Record::new());
+        assert_eq!(scalar_from_batch(&no_cols), None);
+    }
+
+    #[test]
+    fn penalty_is_zero_without_template() {
+        let p = one_dim("RETURN $x0 AS f");
+        assert_eq!(p.penalty(&Array1::from(vec![4.0])), 0.0);
+        assert_eq!(p.fitness(&Array1::from(vec![4.0])), 4.0);
+        assert_eq!(p.stats().penalty_evals, 0);
+    }
+
+    #[test]
+    fn penalty_is_added_to_fitness_and_memoized() {
+        let p = one_dim("RETURN $x0 AS f").with_penalty("RETURN $x0 * 10 AS p");
+        let x = Array1::from(vec![2.0]);
+        assert!((p.fitness(&x) - 22.0).abs() < 1e-9);
+        let s = p.stats();
+        assert_eq!((s.misses, s.hits, s.penalty_evals), (1, 0, 1));
+        // Second fitness: objective and penalty both come from the cache.
+        assert!((p.fitness(&x) - 22.0).abs() < 1e-9);
+        let s = p.stats();
+        assert_eq!((s.misses, s.hits, s.penalty_evals), (1, 2, 1));
+        assert_eq!(p.cache_size(), 1);
+    }
+
+    #[test]
+    fn failing_or_non_numeric_penalty_counts_as_zero() {
+        let x = Array1::from(vec![1.0]);
+        let bad = one_dim("RETURN 1 AS f").with_penalty("NOT CYPHER");
+        assert_eq!(bad.penalty(&x), 0.0);
+        let text = one_dim("RETURN 1 AS f").with_penalty("RETURN 'x' AS p");
+        assert_eq!(text.penalty(&x), 0.0);
+        assert_eq!(text.stats().penalty_evals, 1);
+    }
+
+    #[test]
+    fn with_subs_feeds_custom_placeholders_into_the_query() {
+        let p = one_dim("RETURN size($items) AS f")
+            .with_subs(|x| vec![("$items".into(), format!("range(1, {})", x[0] as i64))]);
+        assert_eq!(p.objective(&Array1::from(vec![4.0])), 4.0);
+    }
+
+    #[test]
+    #[ignore = "bug: CypherProblem::penalty() evaluated before objective() caches (INFINITY, pen), so the next objective() returns INFINITY from cache instead of evaluating"]
+    fn penalty_first_does_not_poison_objective_cache() {
+        let p = one_dim("RETURN $x0 AS f").with_penalty("RETURN 0 AS p");
+        let x = Array1::from(vec![3.0]);
+        assert_eq!(p.penalty(&x), 0.0);
+        assert_eq!(p.objective(&x), 3.0);
+    }
+
+    fn mo(templates: &[&str]) -> CypherMOProblem {
+        let (g, e) = build_test_graph();
+        CypherMOProblem::new(
+            1,
+            Array1::from(vec![-1.0]),
+            Array1::from(vec![1.0]),
+            templates.iter().map(|s| s.to_string()).collect(),
+            g,
+            e,
+        )
+    }
+
+    #[test]
+    fn multi_objective_evaluates_each_template_and_memoizes() {
+        let p = mo(&["RETURN $x0 AS a", "MATCH (i:Item) RETURN sum(i.weight) AS b"]);
+        assert_eq!(p.num_objectives(), 2);
+        assert_eq!(MultiObjectiveProblem::dim(&p), 1);
+        let (lo, hi) = MultiObjectiveProblem::bounds(&p);
+        assert_eq!((lo[0], hi[0]), (-1.0, 1.0));
+
+        let x = Array1::from(vec![0.5]);
+        assert_eq!(p.objectives(&x), vec![0.5, 5.0]);
+        assert_eq!(p.objectives(&x), vec![0.5, 5.0]);
+        let s = p.stats();
+        assert_eq!((s.misses, s.hits), (1, 1));
+    }
+
+    #[test]
+    fn multi_objective_with_a_failing_template_is_infinite_and_not_cached() {
+        let p = mo(&["RETURN 1 AS a", "BROKEN"]);
+        let x = Array1::from(vec![0.0]);
+        assert_eq!(p.objectives(&x), vec![1.0, f64::INFINITY]);
+        assert_eq!(p.objectives(&x), vec![1.0, f64::INFINITY]);
+        let s = p.stats();
+        assert_eq!((s.misses, s.hits), (2, 0));
+    }
 }

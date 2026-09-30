@@ -248,3 +248,4 @@ fn edge_time(edge: &crate::graph::Edge, property: Option<&str>) -> i64 {
     }
     edge.created_at
 }
+#[cfg(test)] #[path = "algo_cov_tests.rs"] mod cov_tests;

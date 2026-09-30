@@ -399,4 +399,129 @@ mod tests {
         assert_eq!(esc("a\u{1}b"), "ab");
         assert_eq!(esc("a\tb\nc"), "a\tb\nc");
     }
+
+    use std::collections::HashMap;
+
+    #[test]
+    fn empty_graph_declares_only_the_label_keys() {
+        let (xml, rep) = to_graphml(&GraphStore::new());
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<graphml"));
+        assert!(xml.contains("<graph id=\"G\" edgedefault=\"directed\">"));
+        assert!(xml.ends_with("  </graph>\n</graphml>\n"));
+        assert_eq!((rep.nodes_written, rep.edges_written, rep.keys_declared), (0, 0, 2));
+        assert!(rep.typed_losslessly());
+    }
+
+    #[test]
+    fn nodes_and_edges_carry_labels_types_and_typed_data() {
+        let mut g = GraphStore::new();
+        let a = g.create_node_with_labels([
+            crate::graph::Label::new("Person"),
+            crate::graph::Label::new("Big Cat"),
+        ]);
+        g.set_node_property("default", a, "age", 30i64).unwrap();
+        g.set_node_property("default", a, "name", 7i64).unwrap();
+        g.set_node_property("default", a, "ok", true).unwrap();
+        g.set_node_property("default", a, "score", 1.5f64).unwrap();
+        let b = g.create_node("Person");
+        g.set_node_property("default", b, "age", 2.5f64).unwrap(); // long + double -> double
+        g.set_node_property("default", b, "name", "A&B").unwrap(); // long + string -> string
+        let e = g.create_edge(a, b, "KNOWS").unwrap();
+        g.set_edge_property(e, "w", 1i64).unwrap();
+        let e2 = g.create_edge(b, a, "KNOWS").unwrap();
+        g.set_edge_property(e2, "w", "heavy").unwrap(); // edge widening
+        g.set_node_property("default", a, "rank", 1i64).unwrap();
+        g.set_node_property("default", b, "rank", 2i64).unwrap(); // same type twice
+        let e3 = g.create_edge(a, a, "SELF").unwrap();
+        g.set_edge_property(e3, "w", "light").unwrap(); // string after string
+        let bare = g.create_node_with_labels(std::iter::empty());
+
+        let (xml, rep) = to_graphml(&g);
+        assert_eq!((rep.nodes_written, rep.edges_written), (3, 3));
+        assert_eq!(rep.keys_declared, 2 + 5 + 1);
+        assert!(xml.contains("attr.name=\"rank\" attr.type=\"long\""), "{xml}");
+        assert!(xml.contains(&format!("<node id=\"n{}\">\n    </node>", bare.as_u64())), "{xml}");
+        assert_eq!(rep.attributes_widened_to_string, vec!["edge.w".to_string(), "node.name".to_string()]);
+        assert_eq!(rep.labels_containing_a_space, vec!["Big Cat".to_string()]);
+        assert!(!rep.typed_losslessly());
+
+        assert!(xml.contains("attr.name=\"age\" attr.type=\"double\""), "{xml}");
+        assert!(xml.contains("attr.name=\"name\" attr.type=\"string\""), "{xml}");
+        assert!(xml.contains("attr.name=\"ok\" attr.type=\"boolean\""), "{xml}");
+        assert!(xml.contains("attr.name=\"w\" attr.type=\"string\""), "{xml}");
+        assert!(xml.contains("<data key=\"labels\">Big Cat Person</data>"), "{xml}");
+        assert!(xml.contains("A&amp;B"), "{xml}");
+        assert!(xml.contains(&format!(
+            "<edge id=\"e{}\" source=\"n{}\" target=\"n{}\">",
+            e.as_u64(),
+            a.as_u64(),
+            b.as_u64()
+        )));
+        assert!(xml.contains("<data key=\"label\">KNOWS</data>"));
+        assert!(xml.contains(">heavy</data>"));
+    }
+
+    #[test]
+    fn complex_and_temporal_values_are_written_as_text_and_counted() {
+        let mut g = GraphStore::new();
+        let n = g.create_node("N");
+        let mut m = HashMap::new();
+        m.insert("k".to_string(), PropertyValue::Array(vec![PropertyValue::Null, PropertyValue::Boolean(true)]));
+        g.set_node_property("default", n, "arr", PropertyValue::Array(vec![PropertyValue::Integer(1), PropertyValue::Float(0.5), PropertyValue::String("s".into())])).unwrap();
+        g.set_node_property("default", n, "map", PropertyValue::Map(m)).unwrap();
+        g.set_node_property("default", n, "vec", PropertyValue::Vector(vec![1.0])).unwrap();
+        g.set_node_property("default", n, "when", PropertyValue::Date(0)).unwrap();
+        g.set_node_property(
+            "default",
+            n,
+            "nested_date",
+            PropertyValue::Array(vec![PropertyValue::Date(0)]),
+        )
+        .unwrap();
+
+        let (xml, rep) = to_graphml(&g);
+        assert_eq!(rep.values_written_as_json, 4);
+        assert_eq!(rep.temporal_values_written_as_text, 1);
+        assert!(xml.contains("[1,0.5,&quot;s&quot;]"), "{xml}");
+        assert!(xml.contains("{&quot;k&quot;:[null,true]}"), "{xml}");
+        assert!(xml.contains("[1.0]"), "{xml}");
+        assert!(xml.contains(&esc(&PropertyValue::Date(0).to_string())), "{xml}");
+        assert!(xml.contains(&esc(&format!("[\"{}\"]", PropertyValue::Date(0)))), "{xml}");
+    }
+
+    #[test]
+    fn text_of_null_is_empty_and_json_text_handles_scalars() {
+        let mut rep = GraphMlReport::default();
+        assert_eq!(text_of(&PropertyValue::Null, &mut rep), "");
+        assert_eq!(text_of(&PropertyValue::Float(2.0), &mut rep), "2");
+        assert_eq!(json_text(&PropertyValue::Integer(3)), "3");
+        assert_eq!(json_text(&PropertyValue::String("q".into())), "\"q\"");
+        assert_eq!(rep, GraphMlReport::default());
+    }
+
+    #[test]
+    #[ignore = "bug: a string-then-integer conflict widens to string but is not listed in attributes_widened_to_string (only a non-string first value is reported), so the report depends on node order"]
+    fn a_string_seen_before_an_integer_is_still_reported_as_widened() {
+        let mut g = GraphStore::new();
+        let a = g.create_node("N");
+        g.set_node_property("default", a, "code", "x").unwrap();
+        let b = g.create_node("N");
+        g.set_node_property("default", b, "code", 5i64).unwrap();
+        let (xml, rep) = to_graphml(&g);
+        assert!(xml.contains("attr.name=\"code\" attr.type=\"string\""), "{xml}");
+        assert_eq!(rep.attributes_widened_to_string, vec!["node.code".to_string()]);
+    }
+
+    #[test]
+    #[ignore = "bug: a boolean/integer conflict widens to `long` (Boolean < Long in GmlType order), so `true` is written under attr.type=\"long\" and the conflict is not reported"]
+    fn a_boolean_integer_conflict_widens_to_string() {
+        let mut g = GraphStore::new();
+        let a = g.create_node("N");
+        g.set_node_property("default", a, "flag", true).unwrap();
+        let b = g.create_node("N");
+        g.set_node_property("default", b, "flag", 1i64).unwrap();
+        let (xml, rep) = to_graphml(&g);
+        assert!(xml.contains("attr.name=\"flag\" attr.type=\"string\""), "{xml}");
+        assert_eq!(rep.attributes_widened_to_string, vec!["node.flag".to_string()]);
+    }
 }

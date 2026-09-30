@@ -904,4 +904,33 @@ mod tests {
         // The triple should exist
         assert!(store.contains(&triple));
     }
+
+    #[test]
+    fn removing_one_of_several_triples_keeps_the_shared_index_entries() {
+        use super::super::types::{NamedNode, RdfObject, RdfPredicate, RdfSubject, TriplePattern};
+        let s = |x: &str| RdfSubject::from(NamedNode::new(&format!("http://e/{x}")).unwrap());
+        let p = |x: &str| RdfPredicate::new(&format!("http://e/{x}")).unwrap();
+        let o = |x: &str| RdfObject::from(NamedNode::new(&format!("http://e/{x}")).unwrap());
+
+        let mut store = RdfStore::new();
+        let target = Triple::new(s("s"), p("p"), o("o1"));
+        let others = [
+            Triple::new(s("s"), p("p"), o("o2")),  // same s, p
+            Triple::new(s("s"), p("p2"), o("o1")), // same s, o
+            Triple::new(s("s2"), p("p"), o("o1")), // same p, o
+        ];
+        store.insert(target.clone()).unwrap();
+        for t in &others {
+            store.insert(t.clone()).unwrap();
+        }
+        store.remove(&target).unwrap();
+
+        assert!(!store.contains(&target));
+        assert_eq!(store.len(), 3);
+        assert_eq!(store.get_triples_with_subject(&s("s")).len(), 2);
+        assert_eq!(store.get_triples_with_predicate(&p("p")).len(), 2);
+        assert_eq!(store.get_triples_with_object(&o("o1")).len(), 2);
+        let q = store.query(&TriplePattern::new(Some(s("s")), Some(p("p")), None));
+        assert_eq!(q, vec![others[0].clone()]);
+    }
 }

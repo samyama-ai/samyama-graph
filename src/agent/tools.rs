@@ -205,4 +205,136 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_err());
     }
+
+    // ---------------------------------------------------------- CypherTool
+
+    use crate::graph::{EdgeId, EdgeType, PropertyValue as P};
+    use crate::query::executor::record::Value as V;
+    use std::collections::{BTreeMap, HashMap};
+
+    fn cypher_tool(store: GraphStore) -> CypherTool {
+        CypherTool::new(Arc::new(QueryEngine::new()), Arc::new(RwLock::new(store)))
+    }
+
+    fn people() -> GraphStore {
+        let mut s = GraphStore::new();
+        let a = s.create_node("Person");
+        s.set_node_property("default", a, "name", "Alice").unwrap();
+        s.set_node_property("default", a, "age", 30i64).unwrap();
+        let b = s.create_node("Person");
+        s.set_node_property("default", b, "name", "Bob").unwrap();
+        s
+    }
+
+    #[test]
+    fn cypher_tool_metadata() {
+        let tool = cypher_tool(GraphStore::new()).with_tenant("t1");
+        assert_eq!(tool.name(), "cypher");
+        assert_eq!(tool.tenant, "t1");
+        assert!(tool.description().contains("read-only Cypher"));
+        let p = tool.parameters();
+        assert_eq!(p["required"], json!(["query"]));
+        assert_eq!(p["properties"]["query"]["type"], "string");
+    }
+
+    #[tokio::test]
+    async fn cypher_tool_returns_headers_and_rows_in_column_order() {
+        let tool = cypher_tool(people());
+        let out = tool
+            .execute(json!({"query": "MATCH (p:Person) RETURN p.name AS name, p.age AS age ORDER BY name"}))
+            .await
+            .unwrap();
+        assert_eq!(out["headers"], json!(["name", "age"]));
+        assert_eq!(out["records"], json!([["Alice", 30], ["Bob", null]]));
+    }
+
+    #[tokio::test]
+    async fn cypher_tool_renders_nodes_as_ids() {
+        let tool = cypher_tool(people());
+        let out = tool
+            .execute(json!({"query": "MATCH (p:Person {name: 'Alice'}) RETURN p"}))
+            .await
+            .unwrap();
+        let rec = &out["records"][0][0];
+        assert!(rec["node_id"].is_u64(), "{out}");
+    }
+
+    #[tokio::test]
+    async fn cypher_tool_missing_or_non_string_query_is_a_tool_error() {
+        let tool = cypher_tool(GraphStore::new());
+        for args in [json!({}), json!({"query": 5})] {
+            let err = tool.execute(args).await.unwrap_err();
+            assert!(matches!(err, AgentError::ToolError(ref m) if m.contains("missing 'query'")), "{err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cypher_tool_reports_query_errors() {
+        let tool = cypher_tool(GraphStore::new());
+        let err = tool.execute(json!({"query": "THIS IS NOT CYPHER"})).await.unwrap_err();
+        assert!(matches!(err, AgentError::ToolError(ref m) if m.starts_with("cypher: ")), "{err:?}");
+    }
+
+    #[test]
+    fn value_to_json_covers_every_value_shape() {
+        let mut s = GraphStore::new();
+        let a = s.create_node("A");
+        let b = s.create_node("B");
+        let e = s.create_edge(a, b, "R").unwrap();
+        let edge = s.get_edge(e).unwrap();
+        let node = s.node_materialized(a).unwrap();
+
+        assert_eq!(value_to_json(&V::Null), Value::Null);
+        assert_eq!(value_to_json(&V::Property(P::Integer(4))), json!(4));
+        assert_eq!(
+            value_to_json(&V::List(vec![V::Property(P::Boolean(true)), V::Null])),
+            json!([true, null])
+        );
+        let mut m = BTreeMap::new();
+        m.insert("k".to_string(), V::Property(P::String("v".into())));
+        assert_eq!(value_to_json(&V::Map(m)), json!({"k": "v"}));
+        assert_eq!(value_to_json(&V::Node(a, Box::new(node))), json!({"node_id": a.as_u64()}));
+        assert_eq!(value_to_json(&V::NodeRef(b)), json!({"node_id": b.as_u64()}));
+        assert_eq!(value_to_json(&V::Edge(e, Box::new(edge))), json!({"edge_id": e.as_u64()}));
+        assert_eq!(
+            value_to_json(&V::EdgeRef(EdgeId::new(9), a, b, EdgeType::new("R"))),
+            json!({"edge_id": 9})
+        );
+        assert_eq!(
+            value_to_json(&V::Path { nodes: vec![a, b], edges: vec![e] }),
+            json!({"nodes": [a.as_u64(), b.as_u64()], "edges": [e.as_u64()]})
+        );
+    }
+
+    #[test]
+    fn prop_to_json_covers_every_property_shape() {
+        assert_eq!(prop_to_json(&P::String("s".into())), json!("s"));
+        assert_eq!(prop_to_json(&P::Float(1.5)), json!(1.5));
+        assert_eq!(prop_to_json(&P::Boolean(false)), json!(false));
+        assert_eq!(prop_to_json(&P::DateTime(1234)), json!(1234));
+        assert_eq!(prop_to_json(&P::Date(16637)), json!("2015-07-21"));
+        assert_eq!(prop_to_json(&P::Null), Value::Null);
+        assert_eq!(
+            prop_to_json(&P::Array(vec![P::Integer(1), P::String("x".into())])),
+            json!([1, "x"])
+        );
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), P::Integer(1));
+        assert_eq!(prop_to_json(&P::Map(m)), json!({"a": 1}));
+        assert_eq!(prop_to_json(&P::Vector(vec![0.5, 1.0])), json!([0.5, 1.0]));
+        assert_eq!(
+            prop_to_json(&P::Duration { months: 1, days: 2, seconds: 3, nanos: 4 }),
+            json!({"months": 1, "days": 2, "seconds": 3, "nanos": 4})
+        );
+        // Temporal values are rendered as their Cypher text, not decomposed.
+        for p in [
+            P::LocalTime(3_600_000_000_000),
+            P::Time { nanos: 0, offset_seconds: 3600 },
+            P::LocalDateTime { secs: 0, nanos: 0 },
+            P::ZonedDateTime { secs: 0, nanos: 0, offset_seconds: 0, zone: None },
+        ] {
+            assert_eq!(prop_to_json(&p), json!(p.to_cypher_string()));
+            assert!(prop_to_json(&p).is_string());
+        }
+    }
 }

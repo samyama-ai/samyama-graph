@@ -1265,6 +1265,26 @@ mod tests {
     }
 
     #[test]
+    fn test_quad_pattern_subject_mismatch_and_full_match() {
+        let subj = RdfSubject::from(NamedNode::new("http://example.org/s").unwrap());
+        let pred = RdfPredicate::new("http://example.org/p").unwrap();
+        let obj = RdfObject::from(Literal::new_simple_literal("v"));
+        let quad = Quad::from_triple(Triple::new(subj.clone(), pred.clone(), obj.clone()));
+
+        let other = RdfSubject::from(NamedNode::new("http://example.org/other").unwrap());
+        let mismatch = QuadPattern { subject: Some(other), predicate: None, object: None, graph: None };
+        assert!(!mismatch.matches(&quad));
+
+        let all = QuadPattern {
+            subject: Some(subj),
+            predicate: Some(pred),
+            object: Some(obj),
+            graph: Some(None),
+        };
+        assert!(all.matches(&quad));
+    }
+
+    #[test]
     fn test_quad_pattern_predicate_mismatch() {
         let subj = RdfSubject::from(NamedNode::new("http://example.org/s").unwrap());
         let pred = RdfPredicate::new("http://example.org/p1").unwrap();

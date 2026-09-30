@@ -666,6 +666,8 @@ pub fn global_config() -> &'static std::sync::RwLock<EnrichConfig> {
     G.get_or_init(|| std::sync::RwLock::new(EnrichConfig::default()))
 }
 
+#[cfg(test)] #[path = "enrich_cov_tests.rs"] mod cov_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
