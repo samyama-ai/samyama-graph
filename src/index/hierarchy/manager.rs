@@ -350,6 +350,31 @@ impl HierarchyIndexManager {
         None
     }
 
+    /// The usable index containing `id`, but only when exactly one does.
+    ///
+    /// `subsumes(x, y)` asks [`Self::usable_containing`] for an index holding *both*
+    /// nodes, so which index answers can depend on `x`. A plan that commits to one index
+    /// from `y` alone gives the same answer for every `x` only when no other index holds
+    /// `y` — which is what this checks.
+    pub fn only_usable_containing(&self, id: NodeId) -> Option<Arc<RwLock<HierarchyEntry>>> {
+        let entries = self.entries.read().unwrap();
+        let mut found = None;
+        for e in entries.values() {
+            let g = e.read().unwrap();
+            if g.usable()
+                && g.index
+                    .as_ref()
+                    .is_some_and(|i| i.poset().idx(id).is_some())
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(Arc::clone(e));
+            }
+        }
+        found
+    }
+
     /// Mark every hierarchy built on `edge_type` stale. Called from edge writes.
     pub fn mark_stale_for_edge_type(&self, edge_type: &EdgeType) {
         let entries = self.entries.read().unwrap();
