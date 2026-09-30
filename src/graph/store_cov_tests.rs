@@ -1820,12 +1820,12 @@ fn rollback_undoes_a_whole_map_handed_out_mutably() {
     store.set_edge_property(e, "k", 5i64).unwrap();
     let before = store.get_edge_at_version(e, 1).unwrap();
     assert_eq!(before.properties.get("k"), Some(&PropertyValue::Integer(1)));
-    assert!(before.properties.get("extra").is_none());
+    assert!(!before.properties.contains_key("extra"));
     store.rollback_session_transaction().unwrap();
 
     let now = store.edge_properties_merged(e);
     assert_eq!(now.get("k"), Some(&PropertyValue::Integer(1)));
-    assert!(now.get("extra").is_none(), "{now:?}");
+    assert!(!now.contains_key("extra"), "{now:?}");
 }
 
 #[test]
@@ -1917,7 +1917,7 @@ fn txn_reads_its_own_buffered_writes_and_creations() {
 
     let seen = store.get_node_for_txn(t, n).unwrap();
     assert_eq!(seen.properties.get("k"), Some(&s("v")));
-    assert!(seen.properties.get("gone").is_none());
+    assert!(!seen.properties.contains_key("gone"));
     let fresh = store.get_node_for_txn(t, created).unwrap();
     assert!(fresh.has_label(&Label::new("New")));
     assert_eq!(fresh.properties.get("x"), Some(&PropertyValue::Integer(5)));

@@ -66,13 +66,6 @@ fn run(store: &mut GraphStore, s: &str) -> RecordBatch {
         .unwrap_or_else(|e| panic!("{s}: {e}"))
 }
 
-fn run_err(store: &mut GraphStore, s: &str) -> String {
-    match engine().execute_mut(s, store, "default") {
-        Ok(b) => panic!("{s}: expected an error, got {} rows", b.records.len()),
-        Err(e) => e.to_string(),
-    }
-}
-
 fn read(store: &GraphStore, s: &str) -> RecordBatch {
     engine()
         .execute(s, store)
@@ -676,7 +669,7 @@ fn lookup_node_and_hop_accept_only_simple_shapes() {
 
 #[test]
 fn lookup_key_requires_an_index_and_a_bound_key() {
-    let mut store = GraphStore::new();
+    let store = GraphStore::new();
     store
         .property_index
         .create_index(Label::new("N"), "id".to_string());

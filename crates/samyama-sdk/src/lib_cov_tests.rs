@@ -66,7 +66,7 @@ fn errors_render_with_their_category() {
     for (e, want) in cases {
         assert_eq!(e.to_string(), want);
     }
-    let io: SamyamaError = std::io::Error::new(std::io::ErrorKind::Other, "disk").into();
+    let io: SamyamaError = std::io::Error::other("disk").into();
     assert_eq!(io.to_string(), "I/O error: disk");
     let json: SamyamaError = serde_json::from_str::<serde_json::Value>("{")
         .unwrap_err()

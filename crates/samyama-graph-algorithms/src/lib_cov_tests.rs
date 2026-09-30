@@ -950,7 +950,7 @@ fn pca_transform_applies_scaling_and_skips_constant_columns() {
         })
         .collect();
     let one = r.transform_one(&point);
-    let many = r.transform(&[point.clone()]);
+    let many = r.transform(std::slice::from_ref(&point));
     for c in 0..r.components.len() {
         assert!((one[c] - manual[c]).abs() < 1e-9, "{one:?} vs {manual:?}");
         assert!(

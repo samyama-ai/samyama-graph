@@ -341,7 +341,7 @@ fn import_labels_properties_and_edges() {
         props.get("full name"),
         Some(&PropertyValue::String("Ann".into()))
     );
-    assert!(props.get("ignored").is_none());
+    assert!(!props.contains_key("ignored"));
     let out = g.get_outgoing_edges(a);
     assert_eq!(out.len(), 1);
     assert_eq!((out[0].edge_type.as_str(), out[0].target), ("LIKES", b));
@@ -421,7 +421,7 @@ fn import_restores_reified_edge_properties_and_ignores_broken_statements() {
     assert_eq!(edges.len(), 1);
     let props = g.edge_properties_merged(edges[0].id);
     assert_eq!(props.get("w t"), Some(&PropertyValue::Integer(7)));
-    assert!(props.get("lost").is_none(), "{props:?}");
+    assert!(!props.contains_key("lost"), "{props:?}");
 }
 
 #[test]

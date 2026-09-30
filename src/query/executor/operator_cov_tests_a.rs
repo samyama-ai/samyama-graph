@@ -970,8 +970,8 @@ fn size_and_list_accessors() {
         Value::NodeRef(NodeId::new(1)),
         Value::NodeRef(NodeId::new(2)),
     ]);
-    assert!(matches!(call("head", &[l.clone()]), Ok(Value::NodeRef(id)) if id == NodeId::new(1)));
-    assert!(matches!(call("last", &[l.clone()]), Ok(Value::NodeRef(id)) if id == NodeId::new(2)));
+    assert!(matches!(call("head", std::slice::from_ref(&l)), Ok(Value::NodeRef(id)) if id == NodeId::new(1)));
+    assert!(matches!(call("last", std::slice::from_ref(&l)), Ok(Value::NodeRef(id)) if id == NodeId::new(2)));
     assert!(matches!(call("tail", &[l]), Ok(Value::List(v)) if v.len() == 1));
     assert!(matches!(
         call("head", &[Value::List(vec![])]),
@@ -1015,7 +1015,7 @@ fn math_functions() {
     assert!(err_msg(call("floor", &[pv("a")])).contains("floor()"));
     assert_eq!(i("round(1.5)"), 2);
     assert_eq!(i("round(4)"), 4);
-    assert_eq!(f("round(3.14159, 2)"), 3.14);
+    assert_eq!(f("round(2.71828, 2)"), 2.72);
     assert!(err_msg(call("round", &[pv("a")])).contains("round()"));
     assert_eq!(f("sqrt(16)"), 4.0);
     assert_eq!(f("sqrt(2.25)"), 1.5);
@@ -1085,30 +1085,30 @@ fn meta_functions_on_entities() {
     let full_edge = Value::Edge(e, Box::new(store.get_edge(e).unwrap().clone()));
 
     assert_eq!(
-        prop(call("id", &[edge.clone()])),
+        prop(call("id", std::slice::from_ref(&edge))),
         PropertyValue::Integer(e.as_u64() as i64)
     );
     assert!(err_msg(call("id", &[pv(1i64)])).contains("id() requires"));
     assert_eq!(
-        prop(call("elementId", &[node.clone()])),
+        prop(call("elementId", std::slice::from_ref(&node))),
         PropertyValue::String(format!("node:{}", a.as_u64()))
     );
     assert_eq!(
-        prop(call("elementId", &[edge.clone()])),
+        prop(call("elementId", std::slice::from_ref(&edge))),
         PropertyValue::String(format!("edge:{}", e.as_u64()))
     );
     assert!(err_msg(call("elementId", &[pv(1i64)])).contains("elementId()"));
 
     // labels
     assert_eq!(
-        prop(call("labels", &[full_node.clone()])),
+        prop(call("labels", std::slice::from_ref(&full_node))),
         PropertyValue::Array(vec!["A".into()])
     );
     assert_eq!(
         prop(call_on(&store, "labels", &[Value::NodeRef(b2)])),
         PropertyValue::Array(vec!["A".into(), "B".into()])
     );
-    assert!(err_msg(call("labels", &[node.clone()])).contains("requires store"));
+    assert!(err_msg(call("labels", std::slice::from_ref(&node))).contains("requires store"));
     assert!(err_msg(call_on(
         &store,
         "labels",
@@ -1119,19 +1119,19 @@ fn meta_functions_on_entities() {
 
     // type / startNode / endNode
     assert_eq!(
-        prop(call("type", &[full_edge.clone()])),
+        prop(call("type", std::slice::from_ref(&full_edge))),
         PropertyValue::String("R".into())
     );
     assert!(err_msg(call("type", &[pv(1i64)])).contains("type() requires"));
-    assert!(matches!(call("startNode", &[full_edge.clone()]), Ok(Value::NodeRef(id)) if id == a));
-    assert!(matches!(call("endNode", &[full_edge.clone()]), Ok(Value::NodeRef(id)) if id == b2));
-    assert!(matches!(call("endNode", &[edge.clone()]), Ok(Value::NodeRef(id)) if id == b2));
+    assert!(matches!(call("startNode", std::slice::from_ref(&full_edge)), Ok(Value::NodeRef(id)) if id == a));
+    assert!(matches!(call("endNode", std::slice::from_ref(&full_edge)), Ok(Value::NodeRef(id)) if id == b2));
+    assert!(matches!(call("endNode", std::slice::from_ref(&edge)), Ok(Value::NodeRef(id)) if id == b2));
     assert!(err_msg(call("startNode", &[pv(1i64)])).contains("startNode()"));
     assert!(err_msg(call("endNode", &[pv(1i64)])).contains("endNode()"));
 
     // keys
     let keys = PropertyValue::Array(vec!["n".into(), "name".into()]);
-    assert_eq!(prop(call_on(&store, "keys", &[full_node.clone()])), keys);
+    assert_eq!(prop(call_on(&store, "keys", std::slice::from_ref(&full_node))), keys);
     // Without a store only the node's row-storage map is consulted.
     let mut row_keys: Vec<String> = store
         .get_node(a)
@@ -1142,25 +1142,25 @@ fn meta_functions_on_entities() {
         .collect();
     row_keys.sort();
     assert_eq!(
-        prop(call("keys", &[full_node.clone()])),
+        prop(call("keys", std::slice::from_ref(&full_node))),
         PropertyValue::Array(row_keys.into_iter().map(PropertyValue::String).collect())
     );
-    assert_eq!(prop(call_on(&store, "keys", &[node.clone()])), keys);
-    assert!(err_msg(call("keys", &[node.clone()])).contains("requires store"));
+    assert_eq!(prop(call_on(&store, "keys", std::slice::from_ref(&node))), keys);
+    assert!(err_msg(call("keys", std::slice::from_ref(&node))).contains("requires store"));
     assert!(
         err_msg(call_on(&store, "keys", &[Value::NodeRef(NodeId::new(999))])).contains("not found")
     );
     assert_eq!(
-        prop(call("keys", &[full_edge.clone()])),
+        prop(call("keys", std::slice::from_ref(&full_edge))),
         PropertyValue::Array(vec!["w".into()])
     );
     assert_eq!(
-        prop(call_on(&store, "keys", &[edge.clone()])),
+        prop(call_on(&store, "keys", std::slice::from_ref(&edge))),
         PropertyValue::Array(vec!["w".into()])
     );
-    assert!(err_msg(call("keys", &[edge.clone()])).contains("requires store"));
+    assert!(err_msg(call("keys", std::slice::from_ref(&edge))).contains("requires store"));
     let ghost = Value::EdgeRef(crate::graph::EdgeId::new(999), a, b2, EdgeType::new("R"));
-    assert!(err_msg(call_on(&store, "keys", &[ghost.clone()])).contains("not found"));
+    assert!(err_msg(call_on(&store, "keys", std::slice::from_ref(&ghost))).contains("not found"));
     assert!(err_msg(call("keys", &[pv(1i64)])).contains("keys() requires"));
     assert_eq!(
         ok("keys({b: 1, a: 2})"),
@@ -1168,14 +1168,14 @@ fn meta_functions_on_entities() {
     );
 
     // properties
-    let props = prop(call_on(&store, "properties", &[full_node.clone()]));
+    let props = prop(call_on(&store, "properties", std::slice::from_ref(&full_node)));
     assert_eq!(
         props.as_map().unwrap().get("name"),
         Some(&PropertyValue::String("x".into()))
     );
     let props = prop(call("properties", &[full_node]));
     assert!(props.as_map().is_some());
-    let props = prop(call_on(&store, "properties", &[node.clone()]));
+    let props = prop(call_on(&store, "properties", std::slice::from_ref(&node)));
     assert_eq!(
         props.as_map().unwrap().get("n"),
         Some(&PropertyValue::Integer(1))
@@ -1192,7 +1192,7 @@ fn meta_functions_on_entities() {
         props.as_map().unwrap().get("w"),
         Some(&PropertyValue::Integer(2))
     );
-    let props = prop(call_on(&store, "properties", &[edge.clone()]));
+    let props = prop(call_on(&store, "properties", std::slice::from_ref(&edge)));
     assert_eq!(
         props.as_map().unwrap().get("w"),
         Some(&PropertyValue::Integer(2))
@@ -2238,7 +2238,7 @@ fn more_temporal_edge_cases() {
         "07:00"
     );
     assert_eq!(ts("time({time: date('2020-01-01'), hour: 7})"), "07:00Z");
-    assert!(err("date.truncate('fortnight', date('2020-05-15'))").len() > 0);
+    assert!(!err("date.truncate('fortnight', date('2020-05-15'))").is_empty());
     // A local date-time that lands in a spring-forward gap once the calendar
     // part is added: 2017-03-26T02:30 does not exist in Stockholm.
     assert_eq!(

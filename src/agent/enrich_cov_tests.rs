@@ -714,13 +714,11 @@ fn retract_skips_nodes_the_model_never_touched() {
 fn worker_from_env_refuses_an_unset_or_unknown_provider() {
     // Read-only check against whatever the environment holds: in CI and on a
     // dev host NLQ_PROVIDER is unset, which must be refused, not defaulted.
-    match std::env::var("NLQ_PROVIDER") {
-        Err(_) => {
-            let err = worker_from_env()
-                .err()
-                .expect("unset provider must be refused");
-            assert!(err.contains("NLQ_PROVIDER"), "{err}");
-        }
-        Ok(_) => {} // someone configured a provider; nothing to assert here
+    // If someone configured a provider there is nothing to assert here.
+    if std::env::var("NLQ_PROVIDER").is_err() {
+        let err = worker_from_env()
+            .err()
+            .expect("unset provider must be refused");
+        assert!(err.contains("NLQ_PROVIDER"), "{err}");
     }
 }

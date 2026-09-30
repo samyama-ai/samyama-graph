@@ -54,7 +54,7 @@ fn chi_square_with_half_degree_of_freedom_uses_gamma_reflection() {
 #[test]
 fn ln_gamma_matches_known_values_on_both_sides_of_one_half() {
     // Gamma(0.25) = 3.6256099082219083
-    assert!((ln_gamma(0.25) - 3.625_609_908_221_908_3f64.ln()).abs() < 1e-10);
+    assert!((ln_gamma(0.25) - 3.625_609_908_221_908f64.ln()).abs() < 1e-10);
     // Gamma(5) = 24
     assert!((ln_gamma(5.0) - 24f64.ln()).abs() < 1e-10);
 }
