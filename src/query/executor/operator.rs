@@ -464,6 +464,57 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             {
                 Some(false)
             }
+            // ...and an entity against null is null, like any comparison with
+            // null. It fell through to the narrowing below and raised a
+            // TypeError instead (#1565).
+            (Value::NodeRef(_) | Value::Node(..) | Value::EdgeRef(..) | Value::Edge(..)
+                | Value::Path { .. }, _)
+            | (_, Value::NodeRef(_) | Value::Node(..) | Value::EdgeRef(..) | Value::Edge(..)
+                | Value::Path { .. }) => {
+                return Ok(Value::Property(PropertyValue::Null));
+            }
+            // A list that holds an entity cannot be narrowed to a property
+            // list, so it is compared element by element, with the same
+            // three-valued rule as `cypher_equals`: a pair that differs makes
+            // the lists differ, otherwise a null pair makes the answer null.
+            (Value::List(a), Value::List(_) | Value::Property(PropertyValue::Array(_)))
+            | (Value::Property(PropertyValue::Array(_)), Value::List(a))
+                if a.iter().any(|v| !matches!(v, Value::Property(_) | Value::Null)) =>
+            {
+                let items = |v: &Value| -> Vec<Value> {
+                    match v {
+                        Value::List(items) => items.clone(),
+                        Value::Property(PropertyValue::Array(items)) => {
+                            items.iter().cloned().map(Value::Property).collect()
+                        }
+                        _ => unreachable!("matched as a list above"),
+                    }
+                };
+                let (l, r) = (items(&left), items(&right));
+                if l.len() != r.len() {
+                    Some(false)
+                } else {
+                    let mut unknown = false;
+                    let mut differ = false;
+                    for (x, y) in l.into_iter().zip(r) {
+                        match eval_binary_op(&BinaryOp::Eq, x, y)? {
+                            Value::Property(PropertyValue::Boolean(false)) => {
+                                differ = true;
+                                break;
+                            }
+                            Value::Property(PropertyValue::Boolean(true)) => {}
+                            _ => unknown = true,
+                        }
+                    }
+                    if differ {
+                        Some(false)
+                    } else if unknown {
+                        return Ok(Value::Property(PropertyValue::Null));
+                    } else {
+                        Some(true)
+                    }
+                }
+            }
             _ => None,
         };
         if let Some(eq) = same {
@@ -549,6 +600,31 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             _ => {}
         }
     }
+
+    // A `Value::List` of plain values is the same list as the `Array` a
+    // literal folds to, and is compared as one: `[1, x] = [1, 2]` raised a
+    // TypeError only because `x` made it a `Value::List` (#1564). A list that
+    // still holds an entity after this stays an error, as before.
+    let narrow_list = |v: Value| -> Value {
+        match v {
+            Value::List(items) => {
+                let props: Option<Vec<PropertyValue>> = items
+                    .iter()
+                    .map(|v| match v {
+                        Value::Property(p) => Some(p.clone()),
+                        Value::Null => Some(PropertyValue::Null),
+                        _ => None,
+                    })
+                    .collect();
+                match props {
+                    Some(p) => Value::Property(PropertyValue::Array(p)),
+                    None => Value::List(items),
+                }
+            }
+            other => other,
+        }
+    };
+    let (left, right) = (narrow_list(left), narrow_list(right));
 
     let left_prop = match left {
         Value::Property(p) => p,
@@ -1013,27 +1089,38 @@ fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) 
     if is_null(&start) || is_null(&end) {
         return Ok(Value::Property(PropertyValue::Null));
     }
-    match &collection {
+    // The `start..end` range of a list of `len` items, empty when it is.
+    let range = |len: usize| -> std::ops::Range<usize> {
+        let n = len as i64;
+        let resolve_idx = |idx: i64| -> usize {
+            let resolved = if idx < 0 { (n + idx).max(0) } else { idx.min(n) };
+            resolved as usize
+        };
+        let s = match start {
+            Some(Value::Property(PropertyValue::Integer(i))) => resolve_idx(i),
+            _ => 0,
+        };
+        let e = match end {
+            Some(Value::Property(PropertyValue::Integer(i))) => resolve_idx(i),
+            _ => len,
+        };
+        if s >= e || s >= len { 0..0 } else { s..e.min(len) }
+    };
+    match collection {
         Value::Property(PropertyValue::Array(arr)) => {
-            let len = arr.len() as i64;
-            let resolve_idx = |idx: i64| -> usize {
-                let resolved = if idx < 0 { (len + idx).max(0) } else { idx.min(len) };
-                resolved as usize
-            };
-            let s = match start {
-                Some(Value::Property(PropertyValue::Integer(i))) => resolve_idx(i),
-                _ => 0,
-            };
-            let e = match end {
-                Some(Value::Property(PropertyValue::Integer(i))) => resolve_idx(i),
-                _ => len as usize,
-            };
-            if s >= e || s >= arr.len() {
-                Ok(Value::Property(PropertyValue::Array(vec![])))
-            } else {
-                let sliced: Vec<PropertyValue> = arr[s..e.min(arr.len())].to_vec();
-                Ok(Value::Property(PropertyValue::Array(sliced)))
-            }
+            Ok(Value::Property(PropertyValue::Array(arr[range(arr.len())].to_vec())))
+        }
+        // A list built from an expression (`[x, 5, 6]`, `collect(n)`) is a
+        // `Value::List`, which fell through to null here (#1563). As with `+`,
+        // the slice comes back as the narrower `Array` whenever it fits.
+        Value::List(items) => {
+            let slice = &items[range(items.len())];
+            let props: Option<Vec<PropertyValue>> =
+                slice.iter().map(|v| v.as_property().cloned()).collect();
+            Ok(match props {
+                Some(p) => Value::Property(PropertyValue::Array(p)),
+                None => Value::List(slice.to_vec()),
+            })
         }
         _ => Ok(Value::Null),
     }

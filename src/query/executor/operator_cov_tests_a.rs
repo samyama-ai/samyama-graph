@@ -588,7 +588,6 @@ fn entity_comparison_and_arithmetic() {
 }
 
 #[test]
-#[ignore = "bug: `n = null` on a node/relationship/path raises a TypeError instead of returning null"]
 fn entity_equality_with_null_is_null() {
     let mut store = GraphStore::new();
     let a = store.create_node("A");
@@ -606,11 +605,33 @@ fn entity_equality_with_null_is_null() {
 }
 
 #[test]
-#[ignore = "bug: slicing a list built from a non-literal expression (a `Value::List`) returns null"]
 fn slicing_an_expression_built_list() {
     let store = GraphStore::new();
     let got = one_on(&store, "WITH 3 AS x RETURN [x, 5, 6][1..] AS v");
     assert_eq!(got, PropertyValue::Array(vec![5i64.into(), 6i64.into()]));
+}
+
+/// #1563/#1564 for lists that hold entities, which stay `Value::List`.
+#[test]
+fn lists_of_entities_slice_and_compare() {
+    let mut store = GraphStore::new();
+    store.create_node("A");
+    store.create_node("A");
+    let one = |e: &str| {
+        one_on(
+            &store,
+            &format!("MATCH (a:A) WITH collect(a) AS ns RETURN {e} AS v"),
+        )
+    };
+    assert_eq!(one("size(ns[0..1])"), PropertyValue::Integer(1));
+    assert_eq!(one("size(ns[1..])"), PropertyValue::Integer(1));
+    assert_eq!(one("ns[0..1] = [ns[0]]"), PropertyValue::Boolean(true));
+    assert_eq!(one("[ns[0]] = [ns[1]]"), PropertyValue::Boolean(false));
+    assert_eq!(one("[ns[0]] <> [ns[1]]"), PropertyValue::Boolean(true));
+    assert_eq!(one("ns = [ns[0]]"), PropertyValue::Boolean(false));
+    assert_eq!(one("[ns[0], null] = [ns[0], 1]"), PropertyValue::Null);
+    assert_eq!(one("[ns[0], null] = [ns[1], 1]"), PropertyValue::Boolean(false));
+    assert_eq!(one("[1, null] = [1, 2]"), PropertyValue::Null);
 }
 
 // ---------------------------------------------------------------------------

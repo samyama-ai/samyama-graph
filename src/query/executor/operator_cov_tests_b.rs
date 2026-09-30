@@ -4942,7 +4942,6 @@ fn sort_operator_direct_paths() {
 }
 
 #[test]
-#[ignore = "bug: `[1, x] = [1, 2]` is a TypeError (a list built from a variable is treated as an entity by `=`)"]
 fn list_equality_with_a_variable_element() {
     let store = GraphStore::new();
     let b = read(

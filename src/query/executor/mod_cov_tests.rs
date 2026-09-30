@@ -616,7 +616,7 @@ fn a_foreach_body_may_delete_every_node_of_a_list() {
 }
 
 #[test]
-#[ignore = "bug: FOREACH (x IN ns[0..2] | DETACH DELETE x) over a slice of a collected node list deletes nothing, while the same body over `ns` deletes every node"]
+// #1561: fixed with #1563 (slicing a `Value::List`).
 fn a_foreach_over_a_slice_of_nodes_deletes_them() {
     assert_eq!(
         foreach_delete_leaves("ns[0..2]", &BoundParams::new()),
