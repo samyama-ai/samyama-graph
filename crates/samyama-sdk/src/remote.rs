@@ -238,10 +238,89 @@ impl RemoteClient {
         }
     }
 
+    /// The node holding an external key under a unique constraint (#542).
+    ///
+    /// The remote counterpart of `EmbeddedClient::find_node_by_unique`, sent
+    /// as one read-only query with the key **bound** as a parameter, never
+    /// spliced into the text:
+    ///
+    /// ```text
+    /// MATCH (n:`Label` {`property`: $key}) RETURN id(n) AS id LIMIT 2
+    /// ```
+    ///
+    /// The server answers it from the index the constraint creates. Unlike
+    /// the embedded call it does not check that the constraint exists -- that
+    /// would be a second round trip per key -- so without one the server plans
+    /// a label scan. Two matching nodes are an error either way.
+    ///
+    /// The key must be a string, integer, float or boolean: the types a JSON
+    /// parameter carries exactly.
+    pub async fn find_node_by_unique(
+        &self,
+        graph: &str,
+        label: &str,
+        property: &str,
+        value: impl Into<samyama::graph::PropertyValue>,
+    ) -> SamyamaResult<Option<samyama::graph::NodeId>> {
+        use samyama::graph::PropertyValue;
+        let value = value.into();
+        if !matches!(
+            value,
+            PropertyValue::String(_)
+                | PropertyValue::Integer(_)
+                | PropertyValue::Float(_)
+                | PropertyValue::Boolean(_)
+        ) {
+            return Err(SamyamaError::QueryError(format!(
+                "a {} key cannot be sent as a query parameter exactly",
+                value.type_name()
+            )));
+        }
+        let quote = |name: &str| format!("`{}`", name.replace('`', "``"));
+        let cypher = format!(
+            "MATCH (n:{} {{{}: $key}}) RETURN id(n) AS id LIMIT 2",
+            quote(label),
+            quote(property)
+        );
+        let params = serde_json::json!({ "key": value.to_json() });
+        let result = self.post_query_with(graph, &cypher, params).await?;
+        let ids = result
+            .records
+            .iter()
+            .map(|row| {
+                row.first().and_then(|v| v.as_u64()).ok_or_else(|| {
+                    SamyamaError::ProtocolError(format!("id(n) came back as {row:?}"))
+                })
+            })
+            .collect::<SamyamaResult<Vec<u64>>>()?;
+        match ids.as_slice() {
+            [] => Ok(None),
+            [id] => Ok(Some(samyama::graph::NodeId::new(*id))),
+            _ => Err(SamyamaError::QueryError(format!(
+                "more than one :{label} node holds {property} = {value:?}; is there a unique constraint?"
+            ))),
+        }
+    }
+
     /// Execute a POST request to /api/query
     async fn post_query(&self, graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
+        self.post_query_with(graph, cypher, serde_json::json!({}))
+            .await
+    }
+
+    /// Execute a POST request to /api/query with bound `params`.
+    async fn post_query_with(
+        &self,
+        graph: &str,
+        cypher: &str,
+        params: serde_json::Value,
+    ) -> SamyamaResult<QueryResult> {
         let url = format!("{}/api/query", self.http_base_url);
-        let body = serde_json::json!({ "query": cypher, "graph": graph });
+        let mut body = serde_json::json!({ "query": cypher, "graph": graph });
+        // Only when there are some, so a plain query's body is what it always was.
+        if params.as_object().is_some_and(|p| !p.is_empty()) {
+            body["params"] = params;
+        }
 
         let response = self
             .send_with_retry(|| self.http_client.post(&url).json(&body))

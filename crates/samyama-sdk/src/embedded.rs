@@ -136,6 +136,39 @@ impl EmbeddedClient {
         let stats = samyama::snapshot::import_tenant_with_dedup(&mut store_guard, reader, dedup_keys)?;
         Ok(stats)
     }
+
+    /// The node holding an external key -- a primary key or business id
+    /// imported from another system -- under a unique constraint (#542).
+    ///
+    /// Answered from the constraint's index; see
+    /// [`GraphStore::find_node_by_unique`]. `Ok(None)` means no node holds the
+    /// key. Without `CREATE CONSTRAINT FOR (n:Label) REQUIRE n.property IS
+    /// UNIQUE` it is an error, not a scan.
+    ///
+    /// # Example
+    /// ```
+    /// # use samyama_sdk::{EmbeddedClient, SamyamaClient};
+    /// # #[tokio::main] async fn main() -> samyama_sdk::SamyamaResult<()> {
+    /// let client = EmbeddedClient::new();
+    /// client.query("default", "CREATE CONSTRAINT FOR (a:Acct) REQUIRE a.krid IS UNIQUE").await?;
+    /// client.query("default", "CREATE (:Acct {krid: 42})").await?;
+    /// let id = client.find_node_by_unique("default", "Acct", "krid", 42i64).await?;
+    /// assert!(id.is_some());
+    /// # Ok(()) }
+    /// ```
+    pub async fn find_node_by_unique(
+        &self,
+        _graph: &str,
+        label: &str,
+        property: &str,
+        value: impl Into<samyama::graph::PropertyValue>,
+    ) -> SamyamaResult<Option<samyama::graph::NodeId>> {
+        let value = value.into();
+        let store_guard = self.store.read().await;
+        store_guard
+            .find_node_by_unique(&samyama::graph::Label::new(label), property, &value)
+            .map_err(|e| SamyamaError::QueryError(e.to_string()))
+    }
 }
 
 impl Default for EmbeddedClient {

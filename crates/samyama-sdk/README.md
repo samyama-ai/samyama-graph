@@ -88,6 +88,26 @@ build; the server rejects other names.
 A `QueryResult` is `{ nodes, edges, columns, records }`, with `records` as
 `Vec<Vec<serde_json::Value>>` and a `len()`.
 
+## Find a node by an external key
+
+Data imported from another system keeps its own keys — a primary key, a UUID.
+Put the key in a property under a unique constraint, and look the node up by it
+on the next load instead of keeping a key-to-`NodeId` map between runs:
+
+```rust
+client.query("default", "CREATE CONSTRAINT FOR (a:Acct) REQUIRE a.krid IS UNIQUE").await?;
+client.query("default", "CREATE (:Acct {krid: 42})").await?;
+
+let id: Option<NodeId> = client.find_node_by_unique("default", "Acct", "krid", 42i64).await?;
+```
+
+`Ok(None)` means no node holds the key. `EmbeddedClient` answers from the
+constraint's index and returns an error, not a scan, when there is no unique
+constraint on the label and property. `RemoteClient` sends one read-only query
+with the key bound as a parameter; the server uses the index the constraint
+created, but the client does not check that the constraint exists. Both return
+an error if two nodes hold the key.
+
 ## More
 
 - [`docs/SDK_API_CLI_ARCHITECTURE.md`](../../docs/SDK_API_CLI_ARCHITECTURE.md)

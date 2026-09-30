@@ -221,6 +221,28 @@ impl IndexManager {
         holders.first().copied()
     }
 
+    /// Every node registered under `value` for a constrained `label`.`property`, or
+    /// `None` when no such constraint exists.
+    ///
+    /// `None` and an empty list are different answers: the first says the question
+    /// cannot be answered from a constraint at all, the second that no node holds the
+    /// key. `GraphStore::find_node_by_unique` reports them differently (#542).
+    pub fn unique_constraint_holders(
+        &self,
+        label: &Label,
+        property: &str,
+        value: &PropertyValue,
+    ) -> Option<Vec<NodeId>> {
+        let key = PropertyIndexKey {
+            label: label.clone(),
+            property: property.to_string(),
+        };
+        let constraints = self.unique_constraints.read().unwrap();
+        let index = constraints.get(&key)?;
+        let holders = index.read().unwrap().get(value);
+        Some(holders)
+    }
+
     /// Insert into unique constraint index
     pub fn constraint_insert(&self, label: &Label, property: &str, value: PropertyValue, node_id: NodeId) {
         let key = PropertyIndexKey {
@@ -230,6 +252,29 @@ impl IndexManager {
         let constraints = self.unique_constraints.read().unwrap();
         if let Some(index) = constraints.get(&key) {
             index.write().unwrap().insert(value, node_id);
+        }
+    }
+
+    /// Remove a value from the unique constraint index, when a node's key changes,
+    /// is removed, or the node is deleted.
+    ///
+    /// Without it the old value stays registered to the node that used to hold it, and
+    /// the next node to take that key -- a re-import after a delete, a key corrected
+    /// upstream -- is refused as a duplicate of a node that no longer has it (#542).
+    pub fn constraint_remove(
+        &self,
+        label: &Label,
+        property: &str,
+        value: &PropertyValue,
+        node_id: NodeId,
+    ) {
+        let key = PropertyIndexKey {
+            label: label.clone(),
+            property: property.to_string(),
+        };
+        let constraints = self.unique_constraints.read().unwrap();
+        if let Some(index) = constraints.get(&key) {
+            index.write().unwrap().remove(value, node_id);
         }
     }
 
