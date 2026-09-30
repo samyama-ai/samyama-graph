@@ -7,6 +7,11 @@
 //! sequence -- demo data, recovery, quotas, the embed pipeline, the indexer --
 //! run for real without leaving a server behind.
 //!
+//! A run with persistence open must stop that way, never through an early
+//! `std::process::exit`: exiting while RocksDB's background threads run races
+//! its static destructors and segfaults about one run in ten. Refusals are
+//! exercised on `--ephemeral` servers instead.
+//!
 //! Every run gets a fresh working directory, so the default `./samyama_data`
 //! never lands in the repository, and a bounded wait: a run that does not exit
 //! is killed and fails the test rather than hanging it.
@@ -525,20 +530,10 @@ fn every_configured_file_is_loaded_before_a_later_refusal() {
 #[test]
 fn the_social_demo_is_loaded_into_a_persistent_server() {
     let data = tempfile::tempdir().unwrap();
-    run(
-        &[
-            "--data-path",
-            s(data.path()),
-            "--demo",
-            "social",
-            "--max-nodes",
-            "?",
-        ],
-        &[],
-    )
-    .assert_code(2)
-    .out_has("No persisted tenants found.")
-    .out_has("Total nodes: 5270");
+    serve_until_the_resp_port_is_refused(&["--data-path", s(data.path()), "--demo", "social"], &[])
+        .assert_code(0)
+        .out_has("No persisted tenants found.")
+        .out_has("Total nodes: 5270");
 }
 
 #[test]
@@ -622,23 +617,13 @@ fn a_restart_recovers_persisted_rows_and_their_indexes() {
         pm.checkpoint().unwrap();
     }
 
-    run(
-        &[
-            "--data-path",
-            s(data.path()),
-            "--demo",
-            "social",
-            "--max-nodes",
-            "?",
-        ],
-        &[],
-    )
-    .assert_code(2)
-    .out_has("Recovering data for 1 tenant(s)")
-    .out_has("Tenant 'default': 2 nodes, 1 edges")
-    .out_has("Recovery complete. Total: 2 nodes, 1 edges, 1 indexes in-memory")
-    // Recovered data wins over the demo.
-    .out_has("Total nodes: 2\n");
+    serve_until_the_resp_port_is_refused(&["--data-path", s(data.path()), "--demo", "social"], &[])
+        .assert_code(0)
+        .out_has("Recovering data for 1 tenant(s)")
+        .out_has("Tenant 'default': 2 nodes, 1 edges")
+        .out_has("Recovery complete. Total: 2 nodes, 1 edges, 1 indexes in-memory")
+        // Recovered data wins over the demo.
+        .out_has("Total nodes: 2\n");
 }
 
 #[test]
@@ -664,8 +649,8 @@ fn a_recovered_edge_whose_endpoint_is_gone_is_skipped_with_a_warning() {
         pm.checkpoint().unwrap();
     }
 
-    run(&["--data-path", s(data.path()), "--max-nodes", "?"], &[])
-        .assert_code(2)
+    serve_until_the_resp_port_is_refused(&["--data-path", s(data.path())], &[])
+        .assert_code(0)
         .out_has("Tenant 'default': 1 nodes, 1 edges")
         .err_has("Warning: edge recovery error")
         .out_has("Recovery complete. Total: 1 nodes, 0 edges");
@@ -702,8 +687,8 @@ fn a_unique_constraint_the_recovered_rows_break_is_reported_not_restored() {
         pm.checkpoint().unwrap();
     }
 
-    run(&["--data-path", s(data.path()), "--max-nodes", "?"], &[])
-        .assert_code(2)
+    serve_until_the_resp_port_is_refused(&["--data-path", s(data.path())], &[])
+        .assert_code(0)
         .out_has("Tenant 'default': 2 nodes, 0 edges")
         .err_has("1 index definition(s) for 'default' could not be rebuilt")
         // The constraint is refused; the property index declared with it is
@@ -722,8 +707,8 @@ fn a_committed_snapshot_is_replayed_when_there_is_nothing_to_recover() {
     samyama::snapshot::export_tenant(&store, &mut bytes).unwrap();
     samyama::snapshot::persist::persist_snapshot(s(data.path()), &bytes).unwrap();
 
-    run(&["--data-path", s(data.path()), "--max-nodes", "?"], &[])
-        .assert_code(2)
+    serve_until_the_resp_port_is_refused(&["--data-path", s(data.path())], &[])
+        .assert_code(0)
         .out_has("[snapshot-persist] Restored 2 nodes, 1 edges")
         .out_has("Total edges: 1");
 
@@ -735,8 +720,8 @@ fn a_committed_snapshot_is_replayed_when_there_is_nothing_to_recover() {
             std::fs::write(&path, "corrupt").unwrap();
         }
     }
-    run(&["--data-path", s(data.path()), "--max-nodes", "?"], &[])
-        .assert_code(2)
+    serve_until_the_resp_port_is_refused(&["--data-path", s(data.path())], &[])
+        .assert_code(0)
         .err_has("[snapshot-persist] Restore error")
         .out_has("Total nodes: 0");
 }
