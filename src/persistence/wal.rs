@@ -705,4 +705,214 @@ mod tests {
         }).unwrap();
         assert_eq!(found_version, Some(0));
     }
+
+    fn node_entry(id: u64) -> WalEntry {
+        WalEntry::CreateNode {
+            tenant: "default".to_string(),
+            node_id: id,
+            labels: vec!["L".to_string()],
+            properties: vec![],
+        }
+    }
+
+    /// Write raw records (length word, body) into a WAL file of the directory.
+    fn write_records(dir: &Path, name: &str, records: &[(u32, Vec<u8>)]) {
+        let mut f = File::create(dir.join(name)).unwrap();
+        for (word, body) in records {
+            f.write_all(&word.to_le_bytes()).unwrap();
+            f.write_all(body).unwrap();
+        }
+    }
+
+    fn legacy_body(sequence: u64, entry: &WalEntry, corrupt: bool) -> Vec<u8> {
+        let bytes = bincode::serialize(entry).unwrap();
+        let mut checksum = bytes.iter().fold(0u32, |acc, &b| acc ^ (b as u32));
+        if corrupt {
+            checksum ^= 0xff;
+        }
+        bincode::serialize(&(sequence, entry, checksum)).unwrap()
+    }
+
+    fn replay_all(wal: &Wal, from: u64) -> WalResult<Vec<u64>> {
+        let mut ids = Vec::new();
+        wal.replay(from, |e| {
+            if let WalEntry::CreateNode { node_id, .. } = e {
+                ids.push(*node_id);
+            }
+            Ok(())
+        })?;
+        Ok(ids)
+    }
+
+    #[test]
+    fn a_legacy_record_still_replays() {
+        let dir = TempDir::new().unwrap();
+        let body = legacy_body(1, &node_entry(7), false);
+        write_records(
+            dir.path(),
+            "wal-0000000000000000.log",
+            &[(body.len() as u32, body)],
+        );
+        let wal = Wal::new(dir.path()).unwrap();
+        assert_eq!(replay_all(&wal, 0).unwrap(), vec![7]);
+    }
+
+    #[test]
+    fn a_legacy_record_with_a_bad_checksum_is_corruption() {
+        let dir = TempDir::new().unwrap();
+        let body = legacy_body(1, &node_entry(7), true);
+        write_records(
+            dir.path(),
+            "wal-0000000000000000.log",
+            &[(body.len() as u32, body)],
+        );
+        let wal = Wal::new(dir.path()).unwrap();
+        assert!(matches!(replay_all(&wal, 0), Err(WalError::Corruption(0))));
+    }
+
+    #[test]
+    fn a_legacy_record_that_does_not_decode_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        write_records(
+            dir.path(),
+            "wal-0000000000000000.log",
+            &[(3, vec![1, 2, 3])],
+        );
+        let wal = Wal::new(dir.path()).unwrap();
+        assert!(matches!(
+            replay_all(&wal, 0),
+            Err(WalError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn a_versioned_record_too_short_for_its_checksum_is_corruption() {
+        let dir = TempDir::new().unwrap();
+        write_records(
+            dir.path(),
+            "wal-0000000000000000.log",
+            &[(3 | FORMAT_FLAG, vec![1, 2, 3])],
+        );
+        let wal = Wal::new(dir.path()).unwrap();
+        assert!(matches!(replay_all(&wal, 0), Err(WalError::Corruption(0))));
+    }
+
+    #[test]
+    fn an_unknown_record_format_is_refused_by_name() {
+        let dir = TempDir::new().unwrap();
+        let mut body = encode_v1(1, &node_entry(1)).unwrap();
+        // Change the format byte and re-seal it so the checksum still holds.
+        body.truncate(body.len() - V1_CRC_LEN);
+        body[0] = 9;
+        let crc = crc32fast::hash(&body);
+        body.extend_from_slice(&crc.to_le_bytes());
+        write_records(
+            dir.path(),
+            "wal-0000000000000000.log",
+            &[(body.len() as u32 | FORMAT_FLAG, body)],
+        );
+        let wal = Wal::new(dir.path()).unwrap();
+        match replay_all(&wal, 0) {
+            Err(WalError::InvalidEntry(msg)) => assert!(msg.contains("format 9"), "{msg}"),
+            other => panic!("expected an invalid-entry error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_body_that_does_not_decode_under_a_valid_checksum_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        let mut body = vec![FORMAT_V1];
+        body.extend_from_slice(&1u64.to_le_bytes());
+        body.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+        let crc = crc32fast::hash(&body);
+        body.extend_from_slice(&crc.to_le_bytes());
+        write_records(
+            dir.path(),
+            "wal-0000000000000000.log",
+            &[(body.len() as u32 | FORMAT_FLAG, body)],
+        );
+        let wal = Wal::new(dir.path()).unwrap();
+        assert!(matches!(
+            replay_all(&wal, 0),
+            Err(WalError::Serialization(_))
+        ));
+    }
+
+    #[test]
+    fn replay_skips_records_before_the_requested_sequence() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = Wal::new(dir.path()).unwrap();
+        for id in 1..=4 {
+            wal.append(node_entry(id)).unwrap();
+        }
+        wal.flush().unwrap();
+        assert_eq!(replay_all(&wal, 3).unwrap(), vec![3, 4]);
+    }
+
+    #[test]
+    fn sync_mode_can_be_forced_and_still_appends() {
+        let dir = TempDir::new().unwrap();
+        let mut wal = Wal::new(dir.path()).unwrap();
+        wal.set_sync_mode(true);
+        assert!(wal.sync_mode());
+        assert_eq!(wal.append(node_entry(1)).unwrap(), 1);
+        wal.set_sync_mode(false);
+        assert!(!wal.sync_mode());
+        assert_eq!(wal.current_sequence(), 1);
+        assert_eq!(replay_all(&wal, 0).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn unrelated_and_unparseable_files_are_ignored() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"hello").unwrap();
+        std::fs::write(dir.path().join("wal-zzzz.log"), b"").unwrap();
+        let wal = Wal::new(dir.path()).unwrap();
+        assert_eq!(
+            wal.current_sequence(),
+            0,
+            "a non-hex name does not set the sequence"
+        );
+        assert!(replay_all(&wal, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_torn_tail_is_dropped_and_earlier_records_replay() {
+        let dir = TempDir::new().unwrap();
+        let good = encode_v1(1, &node_entry(5)).unwrap();
+        write_records(
+            dir.path(),
+            "wal-0000000000000000.log",
+            &[
+                (good.len() as u32 | FORMAT_FLAG, good),
+                // Promises 100 bytes, delivers 3: the write did not finish.
+                (100 | FORMAT_FLAG, vec![1, 2, 3]),
+            ],
+        );
+        let wal = Wal::new(dir.path()).unwrap();
+        assert_eq!(replay_all(&wal, 0).unwrap(), vec![5]);
+    }
+
+    #[test]
+    fn a_versioned_record_with_a_bad_crc_is_corruption_at_its_offset() {
+        let dir = TempDir::new().unwrap();
+        let good = encode_v1(1, &node_entry(5)).unwrap();
+        let mut bad = encode_v1(2, &node_entry(6)).unwrap();
+        let last = bad.len() - 1;
+        bad[last] ^= 0xff;
+        let first_len = good.len() as u64;
+        write_records(
+            dir.path(),
+            "wal-0000000000000000.log",
+            &[
+                (good.len() as u32 | FORMAT_FLAG, good),
+                (bad.len() as u32 | FORMAT_FLAG, bad),
+            ],
+        );
+        let wal = Wal::new(dir.path()).unwrap();
+        match replay_all(&wal, 0) {
+            Err(WalError::Corruption(offset)) => assert_eq!(offset, 4 + first_len),
+            other => panic!("expected corruption, got {other:?}"),
+        }
+    }
 }

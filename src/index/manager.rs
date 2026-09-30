@@ -623,4 +623,33 @@ mod tests {
         mgr.index_insert(&label, "name", PropertyValue::String("Alice".to_string()), NodeId::new(1));
         assert!(mgr.get_index(&label, "name").is_none());
     }
+
+    #[test]
+    fn index_memory_lists_indexes_and_constraints_largest_first() {
+        let mgr = IndexManager::new();
+        assert!(mgr.index_memory().is_empty());
+        let person = Label::new("Person");
+        mgr.create_index(person.clone(), "name".to_string());
+        for i in 0..50 {
+            mgr.index_insert(
+                &person,
+                "name",
+                PropertyValue::String(format!("name-{i}")),
+                NodeId::new(i),
+            );
+        }
+        mgr.create_unique_constraint(Label::new("Acct"), "id".to_string());
+
+        let rows = mgr.index_memory();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0].kind, "index");
+        assert_eq!(rows[0].label, "Person");
+        assert_eq!(rows[0].property, "name");
+        assert_eq!(rows[0].entries, 50);
+        assert!(rows[0].bytes > 0);
+        assert!(rows.windows(2).all(|w| w[0].bytes >= w[1].bytes));
+        assert!(rows
+            .iter()
+            .any(|r| r.kind == "unique_constraint" && r.label == "Acct" && r.entries == 0));
+    }
 }

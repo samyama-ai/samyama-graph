@@ -911,4 +911,92 @@ mod tests {
             Some(RollupValue::Int(13))
         );
     }
+
+    #[test]
+    fn stale_entries_are_skipped_by_every_lookup() {
+        let (store, ids) = drug_store();
+        let mgr = HierarchyIndexManager::new();
+        mgr.create(&store, spec_with_measure()).unwrap();
+        let e = mgr.get("atc").unwrap();
+        assert_eq!(e.read().unwrap().unusable_reason(), None);
+        assert_eq!(encoding_name(&e.read().unwrap()), "nested-set");
+        assert_eq!(
+            entry_encoding(&e.read().unwrap()),
+            Some(Encoding::NestedSet)
+        );
+        assert!(mgr.usable_named("atc").is_some());
+        assert!(mgr.usable_named("nope").is_none());
+        assert!(mgr.usable_containing(&[ids[0], ids[1]]).is_some());
+        assert!(mgr
+            .usable_containing(&[ids[0], NodeId::new(9_999)])
+            .is_none());
+
+        mgr.mark_stale_for_edge_type(&EdgeType::new("IS_A"));
+        assert_eq!(e.read().unwrap().unusable_reason(), Some(Unusable::Stale));
+        assert!(mgr.usable_named("atc").is_none());
+        assert!(mgr.usable_containing(&[ids[0]]).is_none());
+    }
+
+    #[test]
+    fn a_measure_write_outside_the_poset_marks_the_index_stale() {
+        let (store, _) = drug_store();
+        let mgr = HierarchyIndexManager::new();
+        mgr.create(&store, spec_with_measure()).unwrap();
+        // A property no hierarchy measures is not a write to any of them.
+        assert_eq!(
+            mgr.update_measure(NodeId::new(9_999), "other", &PropertyValue::Integer(1)),
+            0
+        );
+        assert!(mgr.any_usable());
+        assert_eq!(
+            mgr.update_measure(NodeId::new(9_999), "units", &PropertyValue::Integer(1)),
+            0
+        );
+        assert!(!mgr.any_usable());
+    }
+
+    #[test]
+    fn a_cycle_in_the_covering_relation_is_an_error() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("C");
+        let b = store.create_node("C");
+        store.create_edge(a, b, "IS_A").unwrap();
+        store.create_edge(b, a, "IS_A").unwrap();
+        let mgr = HierarchyIndexManager::new();
+        let err = mgr
+            .create(&store, HierarchySpec::new("h", vec![EdgeType::new("IS_A")]))
+            .unwrap_err();
+        assert!(matches!(err, HierarchyError::NotAcyclic { .. }), "{err:?}");
+        assert!(mgr.is_empty());
+    }
+
+    #[test]
+    fn a_label_restricted_measure_reads_floats_and_booleans_and_skips_other_labels() {
+        let mut store = GraphStore::new();
+        let root = store.create_node("Class");
+        let a = store.create_node("Drug");
+        let b = store.create_node("Drug");
+        let c = store.create_node("Drug");
+        for n in [a, b, c] {
+            store.create_edge(n, root, "IS_A").unwrap();
+        }
+        store
+            .set_node_property("default", root, "w", 100.0f64)
+            .unwrap();
+        store.set_node_property("default", a, "w", 1.5f64).unwrap();
+        store.set_node_property("default", b, "w", true).unwrap();
+        store.set_node_property("default", c, "w", "text").unwrap();
+
+        let poset = Poset::from_store(&store, &[EdgeType::new("IS_A")], false).unwrap();
+        let spec = MeasureSpec {
+            label: Some(Label::new("Drug")),
+            property: "w".to_string(),
+        };
+        let values = read_measure(&store, &poset, &spec);
+        let at = |id: NodeId| values[poset.idx(id).unwrap() as usize];
+        assert_eq!(at(root), None, "Class is not the measured label");
+        assert_eq!(at(a), Some(RollupValue::Float(1.5)));
+        assert_eq!(at(b), Some(RollupValue::Int(1)));
+        assert_eq!(at(c), None, "a string is not a measure");
+    }
 }

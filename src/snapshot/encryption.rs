@@ -434,4 +434,67 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "two generated keys were identical");
     }
+
+    #[test]
+    fn data_larger_than_a_frame_round_trips_through_several_frames() {
+        let k = key();
+        let data: Vec<u8> = (0..(2 * FRAME + 123)).map(|i| (i % 251) as u8).collect();
+        let mut w = EncryptingWriter::new(Vec::new(), &k).unwrap();
+        w.write_all(&data).unwrap();
+        w.flush().unwrap();
+        let sealed = w.finish().unwrap();
+        // Three data frames plus the terminator, each with a length and a tag.
+        assert!(sealed.len() > data.len() + 4 * (4 + 16));
+
+        // A head shorter than magic + prefix: the rest of the prefix is read
+        // from the stream.
+        let head_len = MAGIC.len() + 3;
+        let mut r = DecryptingReader::new(&sealed[head_len..], &k, &sealed[..head_len]).unwrap();
+        let mut out = Vec::new();
+        r.read_to_end(&mut out).unwrap();
+        assert_eq!(out, data);
+        let mut more = [0u8; 8];
+        assert_eq!(
+            r.read(&mut more).unwrap(),
+            0,
+            "stays at the end after the terminator"
+        );
+    }
+
+    #[test]
+    fn a_plain_head_is_refused_by_the_decrypting_reader() {
+        assert!(!looks_encrypted(b"\x1f\x8b\x08 gzip"));
+        let err = DecryptingReader::new(&b""[..], &key(), b"\x1f\x8b\x08 plain gzip")
+            .err()
+            .unwrap();
+        assert_eq!(err, "not an encrypted snapshot");
+    }
+
+    #[test]
+    fn a_header_cut_inside_the_prefix_is_truncated() {
+        let sealed = seal(b"x", &key());
+        let head = &sealed[..MAGIC.len()];
+        let err = DecryptingReader::new(&sealed[MAGIC.len()..MAGIC.len() + 2], &key(), head)
+            .err()
+            .unwrap();
+        assert!(err.contains("truncated encrypted snapshot header"), "{err}");
+    }
+
+    #[test]
+    fn a_writer_dropped_without_finish_leaves_a_file_that_does_not_import() {
+        let mut buf = Vec::new();
+        {
+            let mut w = EncryptingWriter::new(&mut buf, &key()).unwrap();
+            w.write_all(b"some rows").unwrap();
+            // dropped here: no frame sealed, no terminator
+        }
+        assert_eq!(
+            buf.len(),
+            MAGIC.len() + 8,
+            "only the header reached the file"
+        );
+        let err = open(&buf, &key()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert!(err.to_string().contains("truncated"), "{err}");
+    }
 }

@@ -97,3 +97,33 @@ impl RestoredIndexes {
         self.property + self.unique + self.fulltext + self.vector
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_len_and_emptiness() {
+        let mut cat = IndexCatalog::default();
+        assert!(cat.is_empty());
+        assert_eq!(cat.len(), 0);
+        cat.definitions.push(IndexDefinition::Property {
+            label: "A".into(),
+            property: "p".into(),
+        });
+        assert!(!cat.is_empty());
+        assert_eq!(cat.len(), 1);
+    }
+
+    #[test]
+    fn restored_total_excludes_failures() {
+        let r = RestoredIndexes {
+            property: 1,
+            unique: 2,
+            fulltext: 3,
+            vector: 4,
+            failed: 5,
+        };
+        assert_eq!(r.total(), 10);
+    }
+}

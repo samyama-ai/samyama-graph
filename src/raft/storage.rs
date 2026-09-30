@@ -259,4 +259,44 @@ mod tests {
         let metadata = storage.get_snapshot_metadata().await;
         assert_eq!(metadata, Some((10, 2)));
     }
+
+    #[tokio::test]
+    async fn entries_by_range_commit_index_and_snapshot_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = RaftStorage::new(temp_dir.path()).unwrap();
+        let entries: Vec<LogEntry> = (1..=5)
+            .map(|i| LogEntry {
+                index: i,
+                term: 1,
+                data: vec![i as u8],
+            })
+            .collect();
+        storage.append_entries(entries).await.unwrap();
+        let got: Vec<u64> = storage
+            .get_entries(2, 4)
+            .await
+            .iter()
+            .map(|e| e.index)
+            .collect();
+        assert_eq!(got, vec![2, 3]);
+        assert!(storage.get_entries(9, 12).await.is_empty());
+
+        assert_eq!(storage.get_commit_index().await, 0);
+        storage.set_commit_index(4).await.unwrap();
+        assert_eq!(storage.get_commit_index().await, 4);
+        storage.flush().await.unwrap();
+
+        // With the whole log compacted away, the last index comes from the snapshot.
+        storage.create_snapshot(5, 3, vec![]).await.unwrap();
+        storage.delete_entries_from(0).await.unwrap();
+        assert!(storage.get_entry(1).await.is_none());
+        assert_eq!(storage.get_last_log_index_term().await, (5, 3));
+    }
+
+    #[tokio::test]
+    async fn an_empty_log_without_a_snapshot_is_at_zero() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = RaftStorage::new(temp_dir.path()).unwrap();
+        assert_eq!(storage.get_last_log_index_term().await, (0, 0));
+    }
 }

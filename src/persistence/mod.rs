@@ -943,3 +943,7 @@ mod tests {
         assert!(tenants.is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "persistence_cov_tests.rs"]
+mod cov_tests;

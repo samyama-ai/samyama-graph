@@ -131,4 +131,29 @@ mod tests {
             assert!(results.contains(&NodeId::new(i)));
         }
     }
+
+    #[test]
+    fn heap_bytes_counts_every_entry() {
+        let mut index = PropertyIndex::default();
+        assert_eq!(index.heap_bytes(), (0, 0));
+        index.insert(PropertyValue::String("abc".to_string()), NodeId::new(1));
+        index.insert(PropertyValue::String("abc".to_string()), NodeId::new(2));
+        index.insert(PropertyValue::Integer(1), NodeId::new(3));
+        let (bytes, entries) = index.heap_bytes();
+        assert_eq!(entries, 3);
+        assert!(bytes >= 2 * std::mem::size_of::<PropertyValue>() + 3);
+    }
+
+    #[test]
+    fn removing_an_absent_value_or_node_is_a_no_op() {
+        let mut index = PropertyIndex::new();
+        index.insert(PropertyValue::Integer(1), NodeId::new(1));
+        index.insert(PropertyValue::Integer(1), NodeId::new(2));
+        index.remove(&PropertyValue::Integer(9), NodeId::new(1));
+        index.remove(&PropertyValue::Integer(1), NodeId::new(2));
+        assert_eq!(index.count(&PropertyValue::Integer(1)), 1);
+        index.remove(&PropertyValue::Integer(1), NodeId::new(1));
+        assert_eq!(index.count(&PropertyValue::Integer(1)), 0);
+        assert!(index.get(&PropertyValue::Integer(1)).is_empty());
+    }
 }

@@ -9023,3 +9023,7 @@ mod tests {
         assert!(store.rollback_session_transaction().is_err(), "rolling back with none open succeeded");
     }
 }
+
+#[cfg(test)]
+#[path = "store_cov_tests.rs"]
+mod cov_tests;

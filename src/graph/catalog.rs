@@ -840,4 +840,119 @@ mod tests {
         // This tells the planner: starting from Company and expanding incoming is 10x more expensive
         // than starting from Person and expanding outgoing
     }
+
+    #[test]
+    fn deleting_one_of_several_edges_keeps_the_endpoint_degrees() {
+        let mut catalog = GraphCatalog::new();
+        let (p, c) = (Label::new("Person"), Label::new("Company"));
+        let works = EdgeType::new("WORKS_AT");
+        // One person at two companies, and a second person at the first.
+        catalog.on_edge_created(
+            NodeId::new(1),
+            &[p.clone()],
+            &works,
+            NodeId::new(10),
+            &[c.clone()],
+        );
+        catalog.on_edge_created(
+            NodeId::new(1),
+            &[p.clone()],
+            &works,
+            NodeId::new(11),
+            &[c.clone()],
+        );
+        catalog.on_edge_created(
+            NodeId::new(2),
+            &[p.clone()],
+            &works,
+            NodeId::new(10),
+            &[c.clone()],
+        );
+
+        catalog.on_edge_deleted(
+            NodeId::new(1),
+            &[p.clone()],
+            &works,
+            NodeId::new(10),
+            &[c.clone()],
+        );
+        let stats = catalog
+            .get_triple_stats(&TriplePattern::new(p.clone(), works.clone(), c.clone()))
+            .expect("two edges remain");
+        assert_eq!(stats.count, 2);
+        assert_eq!(stats.distinct_sources, 2, "person 1 still has an edge");
+        assert_eq!(stats.distinct_targets, 2, "company 10 still has an edge");
+        assert_eq!(stats.max_out_degree, 1);
+        assert_eq!(stats.avg_out_degree, 1.0);
+        assert_eq!(stats.avg_in_degree, 1.0);
+    }
+
+    #[test]
+    fn edge_existence_is_zero_when_a_label_count_has_dropped_to_zero() {
+        let mut catalog = GraphCatalog::new();
+        let (a, b) = (Label::new("A"), Label::new("B"));
+        let r = EdgeType::new("R");
+        catalog.on_label_added(&a);
+        catalog.on_label_added(&b);
+        catalog.on_edge_created(
+            NodeId::new(1),
+            &[a.clone()],
+            &r,
+            NodeId::new(2),
+            &[b.clone()],
+        );
+        assert_eq!(catalog.estimate_edge_existence(&a, &r, &b), 1.0);
+        catalog.on_label_removed(&a);
+        assert_eq!(catalog.estimate_edge_existence(&a, &r, &b), 0.0);
+        assert_eq!(
+            catalog.estimate_edge_existence(&b, &r, &a),
+            0.0,
+            "no such triple"
+        );
+    }
+
+    #[test]
+    fn deleting_an_edge_the_catalog_never_saw_changes_only_the_generation() {
+        let mut catalog = GraphCatalog::new();
+        let (a, b) = (Label::new("A"), Label::new("B"));
+        let r = EdgeType::new("R");
+        let before = catalog.generation;
+        catalog.on_edge_deleted(
+            NodeId::new(1),
+            &[a.clone()],
+            &r,
+            NodeId::new(2),
+            &[b.clone()],
+        );
+        assert!(catalog.triple_stats.is_empty());
+        assert_eq!(catalog.generation, before + 1);
+
+        // A known pattern but an endpoint it has no degree for.
+        catalog.on_edge_created(
+            NodeId::new(1),
+            &[a.clone()],
+            &r,
+            NodeId::new(2),
+            &[b.clone()],
+        );
+        catalog.on_edge_created(
+            NodeId::new(1),
+            &[a.clone()],
+            &r,
+            NodeId::new(3),
+            &[b.clone()],
+        );
+        catalog.on_edge_deleted(
+            NodeId::new(7),
+            &[a.clone()],
+            &r,
+            NodeId::new(8),
+            &[b.clone()],
+        );
+        let stats = catalog
+            .get_triple_stats(&TriplePattern::new(a, r, b))
+            .unwrap();
+        assert_eq!(stats.count, 1, "the count is decremented regardless");
+        assert_eq!(stats.distinct_sources, 1);
+    }
 }

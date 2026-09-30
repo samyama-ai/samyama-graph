@@ -1713,4 +1713,113 @@ mod tests {
         let result = manager.check_quota("default", "storage");
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn memory_and_connection_quotas_are_enforced() {
+        let manager = TenantManager::new();
+        let quotas = ResourceQuotas {
+            max_memory_bytes: Some(100),
+            max_connections: Some(2),
+            ..ResourceQuotas::unlimited()
+        };
+        manager.update_quotas("default", quotas).unwrap();
+        assert!(manager.check_quota("default", "memory").is_ok());
+        assert!(manager.check_quota("default", "connections").is_ok());
+        manager.set_usage("default", "memory", 100).unwrap();
+        manager.set_usage("default", "connections", 2).unwrap();
+        match manager.check_quota("default", "memory") {
+            Err(TenantError::QuotaExceeded { tenant, resource }) => {
+                assert_eq!(tenant, "default");
+                assert_eq!(resource, "memory (100/100)");
+            }
+            other => panic!("expected a memory quota error, got {other:?}"),
+        }
+        let err = manager.check_quota("default", "connections").unwrap_err();
+        assert!(err.to_string().contains("connections (2/2)"), "{err}");
+        // An unknown resource has no quota.
+        assert!(manager.check_quota("default", "bandwidth").is_ok());
+    }
+
+    #[test]
+    fn set_usage_covers_every_resource_and_ignores_unknown_ones() {
+        let manager = TenantManager::new();
+        manager.set_usage("default", "storage", 7).unwrap();
+        manager.set_usage("default", "memory", 8).unwrap();
+        manager.set_usage("default", "connections", 9).unwrap();
+        manager.set_usage("default", "bogus", 10).unwrap();
+        let usage = manager.get_usage("default").unwrap();
+        assert_eq!(usage.storage_bytes, 7);
+        assert_eq!(usage.memory_bytes, 8);
+        assert_eq!(usage.active_connections, 9);
+        assert!(matches!(
+            manager.set_usage("nobody", "nodes", 1),
+            Err(TenantError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn provider_names_parse_and_unknown_or_empty_ones_are_refused() {
+        for (name, want) in [
+            ("openai", LLMProvider::OpenAI),
+            ("Ollama", LLMProvider::Ollama),
+            ("gemini", LLMProvider::Gemini),
+            ("azure", LLMProvider::AzureOpenAI),
+            ("AzureOpenAI", LLMProvider::AzureOpenAI),
+            ("anthropic", LLMProvider::Anthropic),
+            (" claudecode ", LLMProvider::ClaudeCode),
+            ("mock", LLMProvider::Mock),
+        ] {
+            assert_eq!(LLMProvider::parse(name), Ok(want), "{name}");
+        }
+        let empty = LLMProvider::parse_named("EMBED_PROVIDER", "  ").unwrap_err();
+        assert!(empty.starts_with("EMBED_PROVIDER is not set"), "{empty}");
+        let typo = LLMProvider::parse("OpenAi-typo").unwrap_err();
+        assert!(
+            typo.contains("unknown NLQ_PROVIDER \"OpenAi-typo\""),
+            "{typo}"
+        );
+    }
+
+    #[test]
+    fn embed_config_defaults_its_target_property_and_validates_dimensions() {
+        let cfg: AutoEmbedConfig = serde_json::from_value(serde_json::json!({
+            "provider": "Mock",
+            "embedding_model": "custom-model",
+            "api_key": null,
+            "api_base_url": null,
+            "chunk_size": 10,
+            "chunk_overlap": 0,
+            "vector_dimension": 0,
+            "embedding_policies": {}
+        }))
+        .unwrap();
+        assert_eq!(cfg.embedding_property, "embedding");
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("greater than zero"), "{err}");
+
+        let mismatch = AutoEmbedConfig {
+            embedding_model: "text-embedding-3-small".into(),
+            vector_dimension: 64,
+            ..cfg.clone()
+        };
+        let err = mismatch.validate().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("produces 1536-dimensional vectors"),
+            "{err}"
+        );
+        let manager = TenantManager::new();
+        assert!(matches!(
+            manager.update_embed_config("default", Some(mismatch)),
+            Err(TenantError::InvalidEmbedConfig(_))
+        ));
+        let unknown_model = AutoEmbedConfig {
+            vector_dimension: 5,
+            ..cfg
+        };
+        assert!(
+            unknown_model.validate().is_ok(),
+            "an unrecognised model is not rejected"
+        );
+    }
 }

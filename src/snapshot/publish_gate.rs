@@ -201,3 +201,15 @@ pub fn gate(
 
     GateVerdict { publishable: reasons.is_empty(), reasons, findings }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_values_are_redacted_completely() {
+        assert_eq!(redact(""), "");
+        assert_eq!(redact("abcd"), "****");
+        assert_eq!(redact("abcdef"), "ab**ef");
+    }
+}

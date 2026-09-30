@@ -443,3 +443,140 @@ impl Default for VectorIndexManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_ids_need_an_index_and_an_empty_one_clears() {
+        let mgr = VectorIndexManager::default();
+        assert!(!mgr.set_model_id("Doc", "v", "m1"), "no index yet");
+        assert_eq!(mgr.bind_model_if_unset("Doc", "v", "m1"), None);
+
+        mgr.create_index("Doc", "v", 2, DistanceMetric::Cosine)
+            .unwrap();
+        assert_eq!(
+            mgr.bind_model_if_unset("Doc", "v", "  "),
+            None,
+            "blank binds nothing"
+        );
+        assert!(mgr.set_model_id("Doc", "v", " m1 "));
+        assert_eq!(mgr.model_id("Doc", "v").as_deref(), Some("m1"));
+        assert_eq!(
+            mgr.bind_model_if_unset("Doc", "v", ""),
+            Some("m1".to_string())
+        );
+        assert_eq!(
+            mgr.bind_model_if_unset("Doc", "v", "m2"),
+            Some("m1".to_string())
+        );
+        assert!(mgr.set_model_id("Doc", "v", ""));
+        assert_eq!(mgr.model_id("Doc", "v"), None);
+    }
+
+    #[test]
+    fn adding_to_a_missing_index_stores_nothing_and_searching_it_finds_nothing() {
+        let mgr = VectorIndexManager::new();
+        assert!(mgr
+            .add_vector("Nope", "v", NodeId::new(1), &vec![1.0, 0.0])
+            .is_ok());
+        assert!(mgr.list_indices().is_empty());
+        assert!(mgr.search("Nope", "v", &[1.0, 0.0], 3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_all_skips_indexes_of_another_dimension_and_keeps_the_best_distance() {
+        let mgr = VectorIndexManager::new();
+        mgr.create_index("A", "v", 2, DistanceMetric::Cosine)
+            .unwrap();
+        mgr.create_index("B", "v", 2, DistanceMetric::Cosine)
+            .unwrap();
+        mgr.create_index("C", "v", 3, DistanceMetric::Cosine)
+            .unwrap();
+        mgr.add_vector("A", "v", NodeId::new(1), &vec![1.0, 0.0])
+            .unwrap();
+        mgr.add_vector("B", "v", NodeId::new(1), &vec![0.6, 0.8])
+            .unwrap();
+        mgr.add_vector("B", "v", NodeId::new(2), &vec![0.0, 1.0])
+            .unwrap();
+        mgr.add_vector("C", "v", NodeId::new(3), &vec![1.0, 0.0, 0.0])
+            .unwrap();
+
+        let hits = mgr.search_all(&[1.0, 0.0], 5).unwrap();
+        let ids: Vec<u64> = hits.iter().map(|(n, _)| n.as_u64()).collect();
+        assert_eq!(
+            ids,
+            vec![1, 2],
+            "node 1 once, at its better distance; C skipped"
+        );
+        assert!(hits[0].1 < 1e-6);
+    }
+
+    #[test]
+    fn rebuild_skips_mismatched_vectors_and_ignores_unknown_indexes() {
+        let mgr = VectorIndexManager::new();
+        assert!(mgr
+            .rebuild_for_label("Nope", "v", &[(NodeId::new(1), vec![1.0])])
+            .is_ok());
+        mgr.create_index("A", "v", 2, DistanceMetric::Cosine)
+            .unwrap();
+        mgr.rebuild_for_label(
+            "A",
+            "v",
+            &[
+                (NodeId::new(1), vec![1.0, 0.0]),
+                (NodeId::new(2), vec![1.0, 0.0, 0.0]),
+            ],
+        )
+        .unwrap();
+        let idx = mgr.get_index("A", "v").unwrap();
+        assert_eq!(idx.read().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dump_and_load_round_trip_model_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vectors");
+        let mgr = VectorIndexManager::new();
+        mgr.create_index("A", "v", 2, DistanceMetric::Cosine)
+            .unwrap();
+        mgr.create_index("B", "w", 2, DistanceMetric::Cosine)
+            .unwrap();
+        mgr.add_vector("A", "v", NodeId::new(1), &vec![1.0, 0.0])
+            .unwrap();
+        mgr.set_model_id("A", "v", "model-a");
+        mgr.dump_all(&path).unwrap();
+
+        let loaded = VectorIndexManager::new();
+        // A stale binding for B is dropped, since the dump has none for it.
+        loaded
+            .create_index("B", "w", 2, DistanceMetric::Cosine)
+            .unwrap();
+        loaded.set_model_id("B", "w", "stale");
+        loaded.load_all(&path).unwrap();
+        assert_eq!(loaded.model_id("A", "v").as_deref(), Some("model-a"));
+        assert_eq!(loaded.model_id("B", "w"), None);
+        assert_eq!(
+            loaded.search("A", "v", &[1.0, 0.0], 1).unwrap()[0].0,
+            NodeId::new(1)
+        );
+    }
+
+    #[test]
+    fn load_all_without_a_directory_or_metadata_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = VectorIndexManager::new();
+        mgr.load_all(&dir.path().join("absent")).unwrap();
+        mgr.load_all(dir.path()).unwrap();
+        assert!(mgr.list_indices().is_empty());
+    }
+
+    #[test]
+    fn load_all_rejects_malformed_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("metadata.json"), b"not json").unwrap();
+        let mgr = VectorIndexManager::new();
+        assert!(mgr.load_all(dir.path()).is_err());
+    }
+}

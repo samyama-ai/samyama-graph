@@ -197,4 +197,15 @@ mod tests {
         let id2 = NodeId::new(2);
         assert!(id1 < id2);
     }
+
+    #[test]
+    fn conversions_from_owned_values() {
+        let e: EdgeId = 9u64.into();
+        assert_eq!(e, EdgeId::new(9));
+        assert_eq!(e.as_u64(), 9);
+        let l: Label = String::from("Person").into();
+        assert_eq!(l, Label::new("Person"));
+        let t: EdgeType = String::from("KNOWS").into();
+        assert_eq!(t.as_str(), "KNOWS");
+    }
 }

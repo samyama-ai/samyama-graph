@@ -649,4 +649,74 @@ mod tests {
             let _ = format!("{:?}", deserialized);
         }
     }
+
+    #[tokio::test]
+    async fn every_write_reports_a_persistence_failure_as_an_error_response() {
+        let temp_dir = TempDir::new().unwrap();
+        let persistence = Arc::new(PersistenceManager::new(temp_dir.path()).unwrap());
+        // With its directory gone, the WAL cannot open a file, so every append fails.
+        std::fs::remove_dir_all(temp_dir.path().join("wal")).unwrap();
+        let sm = GraphStateMachine::new(persistence);
+        let t = || "default".to_string();
+        let cases = vec![
+            (
+                Request::CreateNode {
+                    tenant: t(),
+                    node_id: 1,
+                    labels: vec![],
+                    properties: PropertyMap::new(),
+                },
+                "Failed to create node",
+            ),
+            (
+                Request::CreateEdge {
+                    tenant: t(),
+                    edge_id: 1,
+                    source: 1,
+                    target: 2,
+                    edge_type: "R".into(),
+                    properties: PropertyMap::new(),
+                },
+                "Failed to create edge",
+            ),
+            (
+                Request::DeleteNode {
+                    tenant: t(),
+                    node_id: 1,
+                },
+                "Failed to delete node",
+            ),
+            (
+                Request::DeleteEdge {
+                    tenant: t(),
+                    edge_id: 1,
+                },
+                "Failed to delete edge",
+            ),
+            (
+                Request::UpdateNodeProperties {
+                    tenant: t(),
+                    node_id: 1,
+                    properties: PropertyMap::new(),
+                    version: 2,
+                },
+                "Failed to update node properties",
+            ),
+            (
+                Request::UpdateEdgeProperties {
+                    tenant: t(),
+                    edge_id: 1,
+                    properties: PropertyMap::new(),
+                    version: 2,
+                },
+                "Failed to update edge properties",
+            ),
+        ];
+        for (request, want) in cases {
+            match sm.apply(request).await {
+                Response::Error { message } => assert!(message.starts_with(want), "{message}"),
+                other => panic!("expected an error for {want}, got {other:?}"),
+            }
+        }
+    }
 }
