@@ -319,3 +319,291 @@ fn a_node_deleted_after_it_was_persisted_is_removed_from_disk() {
         .is_none());
     assert_eq!(m.tenants().get_usage("default").unwrap().node_count, 0);
 }
+
+/// What one `apply_mutations` call cost, counted rather than timed (#1109).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ApplyOps {
+    row_reads: u64,
+    quota_checks: u64,
+    wal_locks: u64,
+    wal_appends: u64,
+}
+
+fn ops_now() -> ApplyOps {
+    ApplyOps {
+        row_reads: storage::ROW_READS.with(|c| c.get()),
+        quota_checks: tenant::QUOTA_CHECKS.with(|c| c.get()),
+        wal_locks: wal::WAL_LOCKS.with(|c| c.get()),
+        wal_appends: wal::WAL_APPENDS.with(|c| c.get()),
+    }
+}
+
+/// Run `apply_mutations` and return what it wrote and what it cost.
+fn apply_counted(
+    m: &PersistenceManager,
+    tenant: &str,
+    store: &GraphStore,
+    log: &[Mutation],
+) -> (Result<usize, PersistenceError>, ApplyOps) {
+    let before = ops_now();
+    let result = m.apply_mutations(tenant, store, log);
+    let after = ops_now();
+    let ops = ApplyOps {
+        row_reads: after.row_reads - before.row_reads,
+        quota_checks: after.quota_checks - before.quota_checks,
+        wal_locks: after.wal_locks - before.wal_locks,
+        wal_appends: after.wal_appends - before.wal_appends,
+    };
+    (result, ops)
+}
+
+/// A batch pays for its existence probe, its quota check and its WAL lock
+/// once, not once per row (#1109).
+///
+/// Measured on the per-row code this replaced: 1,000 creates cost 1,000
+/// probes, 1,000 quota checks and 1,000 lock acquisitions. The WAL still gets
+/// one record per row — its format is unchanged — so `wal_appends` stays at
+/// the row count by design.
+#[test]
+fn a_batch_costs_one_probe_one_quota_check_and_one_wal_lock() {
+    const N: usize = 1_000;
+    let (_dir, m) = manager();
+    let mut store = GraphStore::new();
+    store.enable_write_log();
+    let ids: Vec<NodeId> = (0..N)
+        .map(|i| {
+            let n = store.create_node("P");
+            store
+                .set_node_property("default", n, "i", i as i64)
+                .unwrap();
+            n
+        })
+        .collect();
+    let log = store.take_write_log();
+    let (written, ops) = apply_counted(&m, "default", &store, &log);
+    eprintln!("#1109 {N} creates: {ops:?}");
+    assert_eq!(written.unwrap(), N);
+    assert_eq!(
+        ops,
+        ApplyOps {
+            row_reads: 1,
+            quota_checks: 1,
+            wal_locks: 1,
+            wal_appends: N as u64
+        },
+        "per batch, not per row"
+    );
+    assert_eq!(m.tenants().get_usage("default").unwrap().node_count, N);
+
+    // Mixed: every existing node updated, N new nodes and N new edges between
+    // them. Still one of each, and the counter moves by the new ids only.
+    for &n in &ids {
+        store.set_node_property("default", n, "seen", true).unwrap();
+    }
+    for &a in &ids {
+        let b = store.create_node("Q");
+        store.create_edge(a, b, "R").unwrap();
+    }
+    let log = store.take_write_log();
+    let (written, ops) = apply_counted(&m, "default", &store, &log);
+    eprintln!("#1109 {N} updates + {N} node creates + {N} edge creates: {ops:?}");
+    assert_eq!(written.unwrap(), 3 * N);
+    assert_eq!(
+        ops,
+        ApplyOps {
+            row_reads: 2,
+            quota_checks: 1,
+            wal_locks: 1,
+            wal_appends: 3 * N as u64
+        },
+        "one probe per kind of row, one quota check, one lock"
+    );
+    let usage = m.tenants().get_usage("default").unwrap();
+    assert_eq!((usage.node_count, usage.edge_count), (2 * N, N));
+    let stored = m
+        .storage()
+        .get_node("default", ids[7].as_u64())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.properties.get("i"), Some(&PropertyValue::Integer(7)));
+    assert_eq!(
+        stored.properties.get("seen"),
+        Some(&PropertyValue::Boolean(true))
+    );
+}
+
+/// A mixed batch — creates, updates, deletes, nodes and edges — survives a
+/// restart exactly as it was written (#1109).
+#[test]
+fn a_mixed_batch_reads_back_identically_after_a_restart() {
+    let dir = TempDir::new().unwrap();
+    let mut store = GraphStore::new();
+    store.enable_write_log();
+    let (usage_before, nodes_before, edges_before) = {
+        let m = PersistenceManager::new(dir.path()).unwrap();
+        let a = store.create_node("P");
+        let b = store.create_node("P");
+        let gone = store.create_node("P");
+        let e = store.create_edge(a, b, "R").unwrap();
+        let log = store.take_write_log();
+        m.apply_mutations("default", &store, &log).unwrap();
+
+        // One batch: update a, create c and an edge to it, delete `gone`,
+        // re-type nothing, set an edge property, and create-then-delete d.
+        store
+            .set_node_property("default", a, "name", "Ann")
+            .unwrap();
+        let c = store.create_node("Q");
+        store.set_node_property("default", c, "n", 3i64).unwrap();
+        store.create_edge(b, c, "S").unwrap();
+        store.set_edge_property(e, "w", 1.5f64).unwrap();
+        store.delete_node("default", gone).unwrap();
+        let d = store.create_node("Tmp");
+        store.delete_node("default", d).unwrap();
+        let log = store.take_write_log();
+        assert_eq!(m.apply_mutations("default", &store, &log).unwrap(), 5);
+        m.flush().unwrap();
+
+        let usage = m.tenants().get_usage("default").unwrap();
+        let (mut nodes, mut edges) = m.recover("default").unwrap();
+        nodes.sort_by_key(|n| n.id);
+        edges.sort_by_key(|e| e.id);
+        ((usage.node_count, usage.edge_count), nodes, edges)
+    };
+    assert_eq!(usage_before, (3, 2));
+
+    let m = PersistenceManager::new(dir.path()).unwrap();
+    let mut back = GraphStore::new();
+    let (n, e, _) = m.recover_into("default", &mut back).unwrap();
+    assert_eq!((n, e), (store.node_count(), store.edge_count()));
+    let usage = m.tenants().get_usage("default").unwrap();
+    assert_eq!((usage.node_count, usage.edge_count), usage_before);
+    let (mut nodes, mut edges) = m.recover("default").unwrap();
+    nodes.sort_by_key(|n| n.id);
+    edges.sort_by_key(|e| e.id);
+    let key = |n: &Node| (n.id, n.labels.clone(), n.properties.clone());
+    assert_eq!(
+        nodes.iter().map(key).collect::<Vec<_>>(),
+        nodes_before.iter().map(key).collect::<Vec<_>>()
+    );
+    let ekey = |e: &Edge| {
+        (
+            e.id,
+            e.source,
+            e.target,
+            e.edge_type.clone(),
+            e.properties.clone(),
+        )
+    };
+    assert_eq!(
+        edges.iter().map(ekey).collect::<Vec<_>>(),
+        edges_before.iter().map(ekey).collect::<Vec<_>>()
+    );
+    // And the disk agrees with the store it came from.
+    for node in &nodes {
+        let live = store.node_materialized(node.id).expect("in the store");
+        assert_eq!(node.properties, live.properties);
+    }
+}
+
+/// A batch that crosses the quota at persist time stops at it: the rows
+/// before the ceiling are written and counted, the one that hit it and every
+/// row after it are not on disk at all (#1274, #1109).
+///
+/// This is the per-row code's behaviour and it is kept: the check moved from
+/// every row to once per batch, and the batch falls back to checking each new
+/// id only when the one check says it will not all fit.
+#[test]
+fn a_batch_that_crosses_the_quota_at_persist_time_writes_nothing_past_it() {
+    let (_dir, m) = manager();
+    let quotas = ResourceQuotas {
+        max_nodes: Some(5),
+        ..ResourceQuotas::unlimited()
+    };
+    m.tenants().update_quotas("default", quotas).unwrap();
+
+    let mut store = GraphStore::new();
+    store.enable_write_log();
+    let first = store.create_node("P");
+    let log = store.take_write_log();
+    m.apply_mutations("default", &store, &log).unwrap();
+
+    // An update to `first` and eight new nodes against four free slots.
+    store
+        .set_node_property("default", first, "x", 1i64)
+        .unwrap();
+    let new: Vec<NodeId> = (0..8).map(|_| store.create_node("P")).collect();
+    let log = store.take_write_log();
+    let (result, ops) = apply_counted(&m, "default", &store, &log);
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("nodes (5/5)"), "{err}");
+
+    let on_disk = |id: NodeId| m.storage().get_node("default", id.as_u64()).unwrap();
+    assert_eq!(
+        on_disk(first).unwrap().properties.get("x"),
+        Some(&PropertyValue::Integer(1)),
+        "the update ahead of the ceiling was written"
+    );
+    for (i, &n) in new.iter().enumerate() {
+        assert_eq!(on_disk(n).is_some(), i < 4, "new node {i}");
+    }
+    assert_eq!(m.tenants().get_usage("default").unwrap().node_count, 5);
+    assert_eq!(
+        ops.wal_appends, 5,
+        "one WAL record each for the update and the four admitted nodes, none for the refused"
+    );
+
+    // A delete earlier in a batch frees the slot a later create uses, as it
+    // did when each row was checked on its own. `new[5]` is one of the refused
+    // nodes: still in the store, not on disk.
+    store.delete_node("default", new[0]).unwrap();
+    store.take_write_log();
+    let log = [
+        Mutation::NodeDeleted(new[0]),
+        Mutation::NodeUpserted(new[5]),
+    ];
+    assert_eq!(m.apply_mutations("default", &store, &log).unwrap(), 2);
+    assert!(on_disk(new[0]).is_none());
+    assert!(on_disk(new[5]).is_some());
+    assert_eq!(m.tenants().get_usage("default").unwrap().node_count, 5);
+}
+
+/// Usage collected over a batch and applied once lands where applying each
+/// change in turn would have, including a decrement that stopped at zero
+/// part way through (#1109).
+#[test]
+fn a_usage_run_applied_once_matches_applying_each_step() {
+    let (_dir, m) = manager();
+    let t = m.tenants();
+    let walks: [&[i64]; 5] = [
+        &[1, 1, -1],
+        &[-1, 1],
+        &[-1, -1, 1, 1, 1],
+        &[1, -1, -1, -1, 1],
+        &[],
+    ];
+    for start in [0usize, 1, 3] {
+        for walk in walks {
+            t.set_usage("default", "nodes", start).unwrap();
+            for &s in walk {
+                if s > 0 {
+                    t.increment_usage("default", "nodes", 1).unwrap();
+                } else {
+                    t.decrement_usage("default", "nodes", 1).unwrap();
+                }
+            }
+            let stepwise = t.get_usage("default").unwrap().node_count;
+
+            t.set_usage("default", "nodes", start).unwrap();
+            let mut run = UsageRun::default();
+            walk.iter().for_each(|&s| run.step(s));
+            t.apply_usage_run("default", "nodes", run.net, run.low)
+                .unwrap();
+            assert_eq!(
+                t.get_usage("default").unwrap().node_count,
+                stepwise,
+                "start {start}, walk {walk:?}"
+            );
+        }
+    }
+}

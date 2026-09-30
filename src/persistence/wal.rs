@@ -68,6 +68,22 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+#[cfg(test)]
+thread_local! {
+    /// WAL mutex acquisitions through [`lock`] and records written by
+    /// [`Wal::append`], for tests that pin how often a batch takes the lock (#1109).
+    pub(crate) static WAL_LOCKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    pub(crate) static WAL_APPENDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Take the WAL mutex. One place to acquire it, so a test can count how often
+/// the write path does (#1109).
+pub(crate) fn lock(wal: &std::sync::Mutex<Wal>) -> std::sync::MutexGuard<'_, Wal> {
+    #[cfg(test)]
+    WAL_LOCKS.with(|c| c.set(c.get() + 1));
+    wal.lock().unwrap()
+}
+
 /// WAL errors
 #[derive(Error, Debug)]
 pub enum WalError {
@@ -300,6 +316,8 @@ impl Wal {
 
     /// Append an entry to the WAL
     pub fn append(&mut self, entry: WalEntry) -> WalResult<u64> {
+        #[cfg(test)]
+        WAL_APPENDS.with(|c| c.set(c.get() + 1));
         // Increment sequence
         self.sequence += 1;
         let sequence = self.sequence;

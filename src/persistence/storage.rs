@@ -86,6 +86,13 @@ struct StoredEdge {
     created_at: i64,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Point reads of a node or edge row, for tests that pin how many
+    /// existence probes a batch of writes costs (#1109).
+    pub(crate) static ROW_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// RocksDB-based persistent storage
 pub struct PersistentStorage {
     /// RocksDB instance
@@ -221,6 +228,8 @@ impl PersistentStorage {
 
     /// Get a node
     pub fn get_node(&self, tenant: &str, node_id: u64) -> StorageResult<Option<Node>> {
+        #[cfg(test)]
+        ROW_READS.with(|c| c.set(c.get() + 1));
         let cf = self.db.cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
 
@@ -246,6 +255,38 @@ impl PersistentStorage {
             }
             None => Ok(None),
         }
+    }
+
+    /// Which of `ids` already have a stored row, in one batched read (#1109).
+    ///
+    /// A writer that needs only to know whether an id is new used to call
+    /// `get_node` per id: a point read each, and a decode of a row it then
+    /// threw away. This is one `batched_multi_get_cf` for the whole list, and
+    /// the values are pinned rather than copied or decoded. `edges` picks the
+    /// column family; the answer is in the order of `ids`.
+    pub fn rows_exist(&self, tenant: &str, edges: bool, ids: &[u64]) -> StorageResult<Vec<bool>> {
+        #[cfg(test)]
+        ROW_READS.with(|c| c.set(c.get() + 1));
+        let name = if edges { "edges" } else { "nodes" };
+        let cf = self
+            .db
+            .cf_handle(name)
+            .ok_or_else(|| StorageError::ColumnFamily(name.to_string()))?;
+        let keys: Vec<Vec<u8>> = ids
+            .iter()
+            .map(|&id| {
+                if edges {
+                    Self::edge_key(tenant, id)
+                } else {
+                    Self::node_key(tenant, id)
+                }
+            })
+            .collect();
+        self.db
+            .batched_multi_get_cf(&cf, &keys, false)
+            .into_iter()
+            .map(|r| Ok(r?.is_some()))
+            .collect()
     }
 
     /// Store an edge
@@ -282,6 +323,8 @@ impl PersistentStorage {
 
     /// Get an edge
     pub fn get_edge(&self, tenant: &str, edge_id: u64) -> StorageResult<Option<Edge>> {
+        #[cfg(test)]
+        ROW_READS.with(|c| c.set(c.get() + 1));
         let cf = self.db.cf_handle("edges")
             .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
 

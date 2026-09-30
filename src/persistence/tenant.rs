@@ -9,6 +9,13 @@ use thiserror::Error;
 // warn removed - was unused import causing compiler warning
 use tracing::{debug, info};
 
+#[cfg(test)]
+thread_local! {
+    /// Quota checks made through [`TenantManager::check_quota`], for tests that
+    /// pin how many a batch of writes costs (#1109).
+    pub(crate) static QUOTA_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Tenant errors
 #[derive(Error, Debug)]
 pub enum TenantError {
@@ -495,6 +502,8 @@ impl TenantManager {
 
     /// Check and enforce resource quota
     pub fn check_quota(&self, tenant_id: &str, resource: &str) -> TenantResult<()> {
+        #[cfg(test)]
+        QUOTA_CHECKS.with(|c| c.set(c.get() + 1));
         let tenants = self.tenants.read().unwrap();
         let usage = self.usage.read().unwrap();
 
@@ -520,6 +529,35 @@ impl TenantManager {
             })
     }
 
+    /// Would `new_nodes` nodes and `new_edges` edges all pass
+    /// [`Self::check_quota`], checked one at a time as each is counted (#1109)?
+    ///
+    /// One check for a batch in place of one per row. `true` means every
+    /// per-row check would have passed, so the caller may skip them; `false`
+    /// means at least one might not — or the tenant is unknown or disabled —
+    /// and the caller must check each row to fail at the same row with the same
+    /// error. A resource with nothing new is not consulted, as `check_quota` is
+    /// never called for it.
+    pub fn admits_batch(&self, tenant_id: &str, new_nodes: usize, new_edges: usize) -> bool {
+        #[cfg(test)]
+        QUOTA_CHECKS.with(|c| c.set(c.get() + 1));
+        if new_nodes == 0 && new_edges == 0 {
+            return true;
+        }
+        let tenants = self.tenants.read().unwrap();
+        let usage = self.usage.read().unwrap();
+        let (Some(tenant), Some(used)) = (tenants.get(tenant_id), usage.get(tenant_id)) else {
+            return false;
+        };
+        // Row k of n passes `used + k - 1 < max`; all of them pass iff `used + n <= max`.
+        let fits = |n: usize, used: usize, max: Option<usize>| {
+            n == 0 || max.is_none_or(|max| used.saturating_add(n) <= max)
+        };
+        tenant.enabled
+            && fits(new_nodes, used.node_count, tenant.quotas.max_nodes)
+            && fits(new_edges, used.edge_count, tenant.quotas.max_edges)
+    }
+
     /// Increment resource usage
     pub fn increment_usage(&self, tenant_id: &str, resource: &str, amount: usize) -> TenantResult<()> {
         let mut usage = self.usage.write().unwrap();
@@ -537,6 +575,44 @@ impl TenantManager {
         }
 
         debug!("Incremented {} for tenant {} by {}", resource, tenant_id, amount);
+
+        Ok(())
+    }
+
+    /// Apply a run of `+1`/`-1` changes to the node or edge count in one
+    /// update (#1109).
+    ///
+    /// `net` is the run's sum and `low` the lowest its running sum reached
+    /// (`<= 0`). The result is what applying each change in turn through
+    /// `increment_usage` and `decrement_usage` would leave, including a
+    /// decrement that stops at zero part way through the run.
+    pub fn apply_usage_run(
+        &self,
+        tenant_id: &str,
+        resource: &str,
+        net: i64,
+        low: i64,
+    ) -> TenantResult<()> {
+        let mut usage = self.usage.write().unwrap();
+
+        let tenant_usage = usage
+            .get_mut(tenant_id)
+            .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
+
+        let count = match resource {
+            "nodes" => &mut tenant_usage.node_count,
+            "edges" => &mut tenant_usage.edge_count,
+            _ => return Ok(()),
+        };
+        let start = *count as i64;
+        // Every step below zero was a decrement that saturated, so it did not count.
+        let lost = (-(start + low)).max(0);
+        *count = (start + net + lost) as usize;
+
+        debug!(
+            "Applied {} (low {}) to {} for tenant {}",
+            net, low, resource, tenant_id
+        );
 
         Ok(())
     }

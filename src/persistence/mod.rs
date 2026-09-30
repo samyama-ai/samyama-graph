@@ -410,10 +410,67 @@ impl PersistenceManager {
             }
         }
 
+        // Existence for the whole batch, one batched read per kind of row
+        // (#1109). It used to be a `get_node` per row, which read and decoded a
+        // row only to learn whether it was there. Ids are unique after
+        // coalescing, so no row of the batch can change another's answer.
+        let mut exists: HashMap<(bool, u64), bool> = HashMap::with_capacity(order.len());
+        for edges in [false, true] {
+            let ids: Vec<u64> = order.iter().filter(|k| k.0 == edges).map(|k| k.1).collect();
+            if !ids.is_empty() {
+                let found = self.storage.rows_exist(tenant, edges, &ids)?;
+                exists.extend(ids.into_iter().zip(found).map(|(id, f)| ((edges, id), f)));
+            }
+        }
+
+        // One quota check for the batch. An upsert of an id with no stored row
+        // is counted as new even if the store has since dropped it, which can
+        // only make this stricter. When it says the batch fits, no per-row
+        // check could have failed; when it does not, every new id is checked
+        // as before, so a refusal happens at the same row with the same error
+        // and the rows ahead of it are written and counted as they were.
+        let new_of = |edges: bool| {
+            order
+                .iter()
+                .filter(|&&k| k.0 == edges && !last[&k] && !exists[&k])
+                .count()
+        };
+        let (new_nodes, new_edges) = (new_of(false), new_of(true));
+        let per_row = !self.tenants.admits_batch(tenant, new_nodes, new_edges);
+
+        let mut usage = UsageDelta::default();
+        let result = self.write_batch(tenant, store, &order, &last, &exists, per_row, &mut usage);
+        // Counted even when a row failed: every row before it is on disk.
+        let flushed = usage.flush(&self.tenants, tenant);
+        let written = result?;
+        flushed?;
+        Ok(written)
+    }
+
+    /// The write loop of [`Self::apply_mutations`], under one WAL lock (#1109).
+    ///
+    /// Per row the order is what it always was — quota check, WAL record,
+    /// storage write — and the WAL still gets one record per row, so its format
+    /// and replay are unchanged; only the mutex is taken once rather than per
+    /// row. Usage is collected in `usage` and applied once by the caller,
+    /// unless `per_row` asks for the old behaviour of applying it row by row.
+    #[allow(clippy::too_many_arguments)]
+    fn write_batch(
+        &self,
+        tenant: &str,
+        store: &GraphStore,
+        order: &[(bool, u64)],
+        last: &std::collections::HashMap<(bool, u64), bool>,
+        exists: &std::collections::HashMap<(bool, u64), bool>,
+        per_row: bool,
+        usage: &mut UsageDelta,
+    ) -> Result<usize, PersistenceError> {
+        let mut wal = wal::lock(&self.wal);
         let mut written = 0usize;
-        for key in order {
+        for &key in order {
             let (is_edge, id) = key;
             let deleted = last[&key];
+            let existed = exists[&key];
             match (is_edge, deleted) {
                 (false, false) => {
                     // `node_materialized`, not `get_node`: a node that arrived by
@@ -426,14 +483,13 @@ impl PersistenceManager {
                     // Skipped when absent: deleted later in the same statement.
                     if let Some(node) = store.node_materialized(crate::graph::NodeId::new(id)) {
                         let node = &node;
-                        let existed = self.storage.get_node(tenant, id)?.is_some();
                         // Before the write, not after: a refused node must not
                         // reach the disk (#1274).
-                        if !existed {
+                        if !existed && per_row {
                             self.tenants.check_quota(tenant, "nodes")?;
                         }
                         let properties = bincode::serialize(&node.properties)?;
-                        self.wal.lock().unwrap().append(WalEntry::CreateNode {
+                        wal.append(WalEntry::CreateNode {
                             tenant: tenant.to_string(),
                             node_id: id,
                             labels: node.labels.iter().map(|l| l.as_str().to_string()).collect(),
@@ -441,25 +497,29 @@ impl PersistenceManager {
                         })?;
                         self.storage.put_node(tenant, node)?;
                         if !existed {
-                            self.tenants.increment_usage(tenant, "nodes", 1)?;
+                            usage.nodes.step(1);
                         }
                         written += 1;
                     }
                 }
                 (false, true) => {
-                    if self.storage.get_node(tenant, id)?.is_some() {
-                        self.persist_delete_node(tenant, id)?;
+                    if existed {
+                        wal.append(WalEntry::DeleteNode {
+                            tenant: tenant.to_string(),
+                            node_id: id,
+                        })?;
+                        self.storage.delete_node(tenant, id)?;
+                        usage.nodes.step(-1);
                         written += 1;
                     }
                 }
                 (true, false) => {
                     if let Some(edge) = store.get_edge(crate::graph::EdgeId::new(id)) {
-                        let existed = self.storage.get_edge(tenant, id)?.is_some();
-                        if !existed {
+                        if !existed && per_row {
                             self.tenants.check_quota(tenant, "edges")?;
                         }
                         let properties = bincode::serialize(&edge.properties)?;
-                        self.wal.lock().unwrap().append(WalEntry::CreateEdge {
+                        wal.append(WalEntry::CreateEdge {
                             tenant: tenant.to_string(),
                             edge_id: id,
                             source: edge.source.as_u64(),
@@ -469,17 +529,25 @@ impl PersistenceManager {
                         })?;
                         self.storage.put_edge(tenant, &edge)?;
                         if !existed {
-                            self.tenants.increment_usage(tenant, "edges", 1)?;
+                            usage.edges.step(1);
                         }
                         written += 1;
                     }
                 }
                 (true, true) => {
-                    if self.storage.get_edge(tenant, id)?.is_some() {
-                        self.persist_delete_edge(tenant, id)?;
+                    if existed {
+                        wal.append(WalEntry::DeleteEdge {
+                            tenant: tenant.to_string(),
+                            edge_id: id,
+                        })?;
+                        self.storage.delete_edge(tenant, id)?;
+                        usage.edges.step(-1);
                         written += 1;
                     }
                 }
+            }
+            if per_row {
+                usage.flush(&self.tenants, tenant)?;
             }
         }
         Ok(written)
@@ -691,6 +759,42 @@ impl PersistenceManager {
         let vector_path = self.base_path.join("vectors");
         vector_index.load_all(&vector_path)
             .map_err(|e| PersistenceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+    }
+}
+
+/// Usage changes a batch has made and not yet applied (#1109).
+#[derive(Debug, Default)]
+struct UsageDelta {
+    nodes: UsageRun,
+    edges: UsageRun,
+}
+
+impl UsageDelta {
+    /// Apply what has collected, and start again from nothing.
+    fn flush(&mut self, tenants: &TenantManager, tenant: &str) -> Result<(), PersistenceError> {
+        for (resource, run) in [("nodes", &mut self.nodes), ("edges", &mut self.edges)] {
+            let taken = std::mem::take(run);
+            if taken != UsageRun::default() {
+                tenants.apply_usage_run(tenant, resource, taken.net, taken.low)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A run of `+1`/`-1` changes to one counter: their sum, and the lowest the
+/// running sum went. The low point is what lets one update reproduce a
+/// decrement that stopped at zero part way through.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct UsageRun {
+    net: i64,
+    low: i64,
+}
+
+impl UsageRun {
+    fn step(&mut self, by: i64) {
+        self.net += by;
+        self.low = self.low.min(self.net);
     }
 }
 
