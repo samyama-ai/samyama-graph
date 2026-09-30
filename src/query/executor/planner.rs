@@ -545,12 +545,24 @@ fn exists_body_of(e: &Expression) -> Option<(&Query, bool)> {
 /// list, not one relationship) keep the refusal.
 fn hoist_match_property_exprs(q: &mut Query) {
     let split = q.with_split_index.unwrap_or(q.match_clauses.len()).min(q.match_clauses.len());
+    // `optional_where` records each OPTIONAL MATCH by its pattern as parsed.
+    // Hoisting changes that pattern, so the records are moved to the hoisted
+    // form, and a conjunct hoisted out of an OPTIONAL MATCH is recorded as that
+    // clause's own: it is part of the optional pattern (#1557).
+    let mut renamed: Vec<(Pattern, Pattern)> = Vec::new();
+    let mut owned: Vec<(Pattern, Expression)> = Vec::new();
     let (pre, post) = q.match_clauses.split_at_mut(split);
-    hoist_group(pre, &mut q.where_clause);
-    hoist_group(post, &mut q.post_with_where_clause);
+    hoist_group(pre, &mut q.where_clause, &mut renamed, &mut owned);
+    hoist_group(post, &mut q.post_with_where_clause, &mut renamed, &mut owned);
     for (_, _, matches, wh) in &mut q.extra_with_stages {
-        hoist_group(matches, wh);
+        hoist_group(matches, wh, &mut renamed, &mut owned);
     }
+    for (pattern, _) in &mut q.optional_where {
+        if let Some((_, hoisted)) = renamed.iter().find(|(as_parsed, _)| as_parsed == pattern) {
+            *pattern = hoisted.clone();
+        }
+    }
+    q.optional_where.extend(owned);
     // In the clause pipeline a MATCH's own WHERE is the clause after it.
     let mut i = 0;
     while i < q.clauses.len() {
@@ -568,8 +580,24 @@ fn hoist_match_property_exprs(q: &mut Query) {
     }
 }
 
-fn hoist_group(matches: &mut [MatchClause], wh: &mut Option<WhereClause>) {
-    if let Some(pred) = take_conjuncts(matches) {
+/// Hoist each clause's conjuncts into the group's WHERE, noting every pattern
+/// that changed in `renamed` (as parsed, hoisted) and every conjunct taken
+/// from an OPTIONAL MATCH in `owned`.
+fn hoist_group(
+    matches: &mut [MatchClause],
+    wh: &mut Option<WhereClause>,
+    renamed: &mut Vec<(Pattern, Pattern)>,
+    owned: &mut Vec<(Pattern, Expression)>,
+) {
+    for m in matches.iter_mut() {
+        let as_parsed = m.pattern.clone();
+        let Some(pred) = take_conjuncts(std::slice::from_mut(m)) else { continue };
+        renamed.push((as_parsed, m.pattern.clone()));
+        if m.optional {
+            for c in flatten_and_predicates(&pred) {
+                owned.push((m.pattern.clone(), c));
+            }
+        }
         match wh {
             Some(w) => and_into(&mut w.predicate, pred),
             None => *wh = Some(WhereClause { predicate: pred }),
@@ -1820,61 +1848,18 @@ impl QueryPlanner {
                 continue;
             }
 
-            // A predicate mentioning an OPTIONAL MATCH's variables belongs to
-            // that clause, not above the join. Cypher scopes the WHERE after an
-            // OPTIONAL MATCH to the optional match itself, so a row failing it
-            // keeps the left side and nulls the right — filtering above the
-            // join deletes the row entirely, which is what
-            // `OPTIONAL MATCH (x)-[:E1]->(y) WHERE y.val > 4` did: one row
-            // returned where Cypher returns three (#667).
-            //
-            // Only for predicates that cannot be pushed *into* the optional
-            // clause's own plan, i.e. ones also referencing an outer variable.
-            // Any predicate naming a variable the optional clause introduces.
-            // "Introduces" is the operative word: the clause's own set includes
-            // the join variable it shares with the outer match, so testing
-            // against the whole set catches predicates that belong entirely to
-            // the outer side.
-            let optional_target = pre_with_clauses.iter().enumerate().find(|(i, mc)| {
-                if !mc.optional || pred_vars.is_empty() {
-                    return false;
-                }
-                let own = &pre_match_var_sets[*i];
-                // Must *span* the join: name something this clause introduces
-                // **and** something it does not.
-                //
-                // A predicate naming only the optional clause's own variables
-                // is pushed inside that clause instead, where it can anchor the
-                // scan — `OPTIONAL MATCH (b:N) WHERE id(b) = 6` has to stay an
-                // id lookup. Routing those here cost that anchor and
-                // `anchor_coverage` caught it. They are already handled
-                // correctly by the existing per-clause decomposition: a filter
-                // inside the optional side leaves unmatched rows null, which is
-                // what Cypher asks for.
-                let earlier: HashSet<&String> = pre_match_var_sets[..*i]
-                    .iter()
-                    .flat_map(|s| s.iter())
-                    .collect();
-                let introduced: HashSet<&String> =
-                    own.iter().filter(|v| !earlier.contains(*v)).collect();
-                let touches_optional = pred_vars.iter().any(|v| introduced.contains(v));
-                let touches_outer = pred_vars.iter().any(|v| !introduced.contains(v));
-                touches_optional && touches_outer
-            });
-            if let Some((i, _)) = optional_target {
-                optional_join_predicates[i] = Some(match optional_join_predicates[i].take() {
-                    Some(existing) => Expression::Binary {
-                        left: Box::new(existing),
-                        op: BinaryOp::And,
-                        right: Box::new(pred),
-                    },
-                    None => pred,
-                });
-                continue;
-            }
-
-            let target = pre_match_var_sets.iter().position(|match_vars| {
-                pred_vars.is_empty() || pred_vars.iter().all(|v| match_vars.contains(v))
+            // A conjunct not written after an OPTIONAL MATCH (nor hoisted out
+            // of one's property map, which `hoist_match_property_exprs` records
+            // the same way) is never that clause's join condition and never
+            // goes inside it, whatever variables it names: in either place it
+            // only nulls the optional side. Scoping by variables alone was the
+            // rule before #1231 recorded where each WHERE was written, and it
+            // let `MATCH (p) OPTIONAL MATCH (p)-->(f) MATCH (z) WHERE f.age >
+            // p.age` return the rows the WHERE removes, with `f` null (#1557).
+            // Such a conjunct goes to a plain MATCH or filters after the join.
+            let target = pre_match_var_sets.iter().enumerate().position(|(i, match_vars)| {
+                (!pre_with_clauses[i].optional || owners[k] == Some(i))
+                    && (pred_vars.is_empty() || pred_vars.iter().all(|v| match_vars.contains(v)))
             });
             if let Some(i) = target {
                 match &mut per_match_where[i] {
@@ -5681,17 +5666,15 @@ impl QueryPlanner {
             operator = Box::new(FilterOperator::new(operator, pred));
         }
 
-        // SKIP/LIMIT from the WITH clause. When a filter ran, these are
-        // applied in user order: skip first, then limit of the filtered
-        // stream. When no filter ran, early_limit on the scan already
-        // handled both, so these wrappers are redundant — but harmless.
-        if filter_will_run {
-            if let Some(skip) = pat.grouped_scan_skip {
-                operator = Box::new(SkipOperator::new(operator, skip));
-            }
-            if let Some(lim) = pat.grouped_scan_limit {
-                operator = Box::new(LimitOperator::new(operator, lim));
-            }
+        // SKIP/LIMIT from the WITH clause, in user order: skip first, then
+        // limit. Always applied. The early limit above only stops the scan
+        // after `skip + limit` rows; it drops nothing from the front, so
+        // without a filter the SKIP used to be lost entirely (#1556).
+        if let Some(skip) = pat.grouped_scan_skip {
+            operator = Box::new(SkipOperator::new(operator, skip));
+        }
+        if let Some(lim) = pat.grouped_scan_limit {
+            operator = Box::new(LimitOperator::new(operator, lim));
         }
 
         // Adjacency-count aggregate. Like Phase 1 (P8.5), push any

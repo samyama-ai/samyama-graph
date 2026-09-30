@@ -1735,7 +1735,6 @@ fn adjacency_count_with_binding_applies_skip_after_a_prefilter() {
 }
 
 #[test]
-#[ignore = "bug: WITH-bound adjacency count ignores the WITH's SKIP when there is no WHERE (planner.rs plan_adjacency_count_aggregate_with_binding)"]
 fn adjacency_count_with_binding_applies_skip_without_a_prefilter() {
     let s = ring();
     // Correct answer: 5 people, 3 skipped, each remaining one knows one person.
@@ -2631,7 +2630,6 @@ fn optional_join_conditions_accumulate() {
 }
 
 #[test]
-#[ignore = "bug: a WHERE written after a plain MATCH that follows an OPTIONAL MATCH is turned into the optional clause's join condition, so rows it should filter out survive with nulls (planner.rs plan_inner_seeded, #667 decomposition)"]
 fn where_after_a_later_plain_match_filters_the_whole_row() {
     let s = people();
     // The WHERE belongs to `MATCH (z ...)` and filters rows; a null `f` fails it.
