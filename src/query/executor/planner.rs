@@ -10463,3 +10463,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "planner_cov_tests.rs"]
+mod cov_tests;
