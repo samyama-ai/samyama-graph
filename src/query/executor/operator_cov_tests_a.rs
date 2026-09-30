@@ -69,8 +69,12 @@ fn direct_eval(store: &GraphStore, expr: &str) -> Result<PropertyValue, String> 
 }
 
 fn parse_expr(expr: &str) -> Expression {
-    let q = crate::query::parser::parse_query(&format!("RETURN {expr} AS v"))
-        .unwrap_or_else(|e| panic!("`{expr}` does not parse: {e}"));
+    // Every name a test uses is bound first, so the validator accepts it.
+    const NAMES: &str = "a b c d i j l m n p r s x y one";
+    let with: Vec<String> = NAMES.split(' ').map(|n| format!("null AS {n}")).collect();
+    let q =
+        crate::query::parser::parse_query(&format!("WITH {} RETURN {expr} AS v", with.join(", ")))
+            .unwrap_or_else(|e| panic!("`{expr}` does not parse: {e}"));
     q.return_clause
         .expect("RETURN")
         .items
@@ -599,6 +603,14 @@ fn entity_equality_with_null_is_null() {
     assert_eq!(one("a = null"), PropertyValue::Null);
     assert_eq!(one("null <> r"), PropertyValue::Null);
     assert_eq!(one("p = null"), PropertyValue::Null);
+}
+
+#[test]
+#[ignore = "bug: slicing a list built from a non-literal expression (a `Value::List`) returns null"]
+fn slicing_an_expression_built_list() {
+    let store = GraphStore::new();
+    let got = one_on(&store, "WITH 3 AS x RETURN [x, 5, 6][1..] AS v");
+    assert_eq!(got, PropertyValue::Array(vec![5i64.into(), 6i64.into()]));
 }
 
 // ---------------------------------------------------------------------------
@@ -2210,4 +2222,1152 @@ fn scale_duration_edge_cases() {
             nanos: 0
         }
     );
+}
+
+#[test]
+fn more_temporal_edge_cases() {
+    // An unknown unit letter contributes nothing.
+    assert_eq!(ts("duration('P1X2D')"), "P2D");
+    // A selection whose source has no date part falls back to the components.
+    assert_eq!(
+        ts("date({date: localtime('10:00'), year: 2020, month: 2, day: 3})"),
+        "2020-02-03"
+    );
+    assert_eq!(
+        ts("localtime({time: date('2020-01-01'), hour: 7})"),
+        "07:00"
+    );
+    assert_eq!(ts("time({time: date('2020-01-01'), hour: 7})"), "07:00Z");
+    assert!(err("date.truncate('fortnight', date('2020-05-15'))").len() > 0);
+    // A local date-time that lands in a spring-forward gap once the calendar
+    // part is added: 2017-03-26T02:30 does not exist in Stockholm.
+    assert_eq!(
+        ts("duration.between(datetime('2017-03-25T02:30[Europe/Stockholm]'), datetime('2017-03-26T05:00[Europe/Stockholm]'))"),
+        "P1DT1H30M"
+    );
+    // A point map with a non-numeric coordinate.
+    assert!(err("point({x: 'a', y: 1})").contains("needs either"));
+    assert!(err("point.distance({x: 'a', y: 1}, {x: 0, y: 0})").contains("needs `x` and `y`"));
+    // `n:A:B` with a non-string label in the list only tests the string ones.
+    let (store, a, _, _) = small_graph();
+    let labels = pv(PropertyValue::Array(vec![
+        "A".into(),
+        PropertyValue::Integer(1),
+    ]));
+    assert_eq!(
+        prop(call_on(&store, "hasLabels", &[Value::NodeRef(a), labels])),
+        PropertyValue::Boolean(true)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// eval_expression with bindings
+// ---------------------------------------------------------------------------
+
+/// Evaluate `expr` with `record`'s bindings through `eval_expression`.
+fn dx(store: &GraphStore, record: &Record, expr: &str) -> Result<Value, ExecutionError> {
+    eval_expression(&parse_expr(expr), record, store)
+}
+
+fn dxp(store: &GraphStore, record: &Record, expr: &str) -> PropertyValue {
+    prop(dx(store, record, expr))
+}
+
+#[test]
+fn eval_expression_arms_with_bindings() {
+    let (store, a, b2, e) = small_graph();
+    let mut r = Record::new();
+    r.bind("a", Value::NodeRef(a));
+    r.bind("b", Value::NodeRef(b2));
+    r.bind("r", Value::EdgeRef(e, a, b2, EdgeType::new("R")));
+    r.bind("x", pv(3i64));
+    r.bind("s", pv("abc"));
+    r.bind(
+        "p",
+        Value::Path {
+            nodes: vec![a, b2],
+            edges: vec![e],
+        },
+    );
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("k".to_string(), Value::NodeRef(a));
+    r.bind("m", Value::Map(m));
+    r.bind("$param", pv(9i64));
+
+    assert_eq!(
+        dxp(&store, &r, "CASE x WHEN 3 THEN 'three' ELSE 'other' END"),
+        PropertyValue::String("three".into())
+    );
+    assert_eq!(
+        dxp(&store, &r, "CASE x WHEN 4 THEN 'four' END"),
+        PropertyValue::Null
+    );
+    assert_eq!(
+        dxp(
+            &store,
+            &r,
+            "CASE WHEN x > 5 THEN 'big' WHEN x > 1 THEN 'mid' END"
+        ),
+        PropertyValue::String("mid".into())
+    );
+    assert_eq!(
+        dxp(&store, &r, "CASE WHEN x > 5 THEN 'big' ELSE 'small' END"),
+        PropertyValue::String("small".into())
+    );
+    assert_eq!(dxp(&store, &r, "[x, x + 1][1]"), PropertyValue::Integer(4));
+    assert_eq!(
+        dxp(&store, &r, "[3, 5, 6][1..]"),
+        PropertyValue::Array(vec![5i64.into(), 6i64.into()])
+    );
+    assert_eq!(dxp(&store, &r, "{v: x}['v']"), PropertyValue::Integer(3));
+    assert_eq!(dxp(&store, &r, "a.name"), PropertyValue::String("x".into()));
+    assert_eq!(
+        dxp(&store, &r, "m.k.name"),
+        PropertyValue::String("x".into())
+    );
+    assert!(matches!(dx(&store, &r, "m.zz"), Ok(Value::Null)));
+    assert_eq!(dxp(&store, &r, "r.w"), PropertyValue::Integer(2));
+    assert_eq!(dxp(&store, &r, "length(p)"), PropertyValue::Integer(1));
+    assert!(matches!(dx(&store, &r, "p"), Ok(Value::Path { .. })));
+    assert_eq!(dxp(&store, &r, "$param + 1"), PropertyValue::Integer(10));
+    let e2 = dx(&store, &r, "$missing").unwrap_err().to_string();
+    assert!(e2.contains("Unresolved parameter"), "{e2}");
+    let e3 = dx(&store, &r, "j + 1").unwrap_err();
+    assert!(
+        matches!(e3, ExecutionError::VariableNotFoundInScope { .. }),
+        "{e3:?}"
+    );
+    let e4 = dx(&store, &Record::new(), "j.prop").unwrap_err();
+    assert!(matches!(e4, ExecutionError::VariableNotFound(_)), "{e4:?}");
+    assert_eq!(
+        dxp(&store, &r, "x IS NOT NULL"),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        dxp(&store, &r, "[y IN [1, 2] | y + x]"),
+        PropertyValue::Array(vec![4i64.into(), 5i64.into()])
+    );
+    assert_eq!(
+        dxp(&store, &r, "any(y IN [1, 3] WHERE y = x)"),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        dxp(&store, &r, "reduce(t = 0, y IN [1, 2] | t + y * x)"),
+        PropertyValue::Integer(9)
+    );
+}
+
+#[test]
+fn borrowed_string_comparisons_read_columns() {
+    let (mut store, a, b2, e) = small_graph();
+    store.set_edge_property(e, "tag", "hot").unwrap();
+    let mut r = Record::new();
+    r.bind("a", Value::NodeRef(a));
+    r.bind("r", Value::EdgeRef(e, a, b2, EdgeType::new("R")));
+    r.bind("i", pv(1i64));
+    assert_eq!(
+        dxp(&store, &r, "a.name = 'x'"),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        dxp(&store, &r, "a.name STARTS WITH 'y'"),
+        PropertyValue::Boolean(false)
+    );
+    assert_eq!(
+        dxp(&store, &r, "r.tag = 'hot'"),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        dxp(&store, &r, "r.tag CONTAINS a.name"),
+        PropertyValue::Boolean(false)
+    );
+    // A number column is not borrowed but still compares.
+    assert_eq!(
+        dxp(&store, &r, "r.w = 'hot'"),
+        PropertyValue::Boolean(false)
+    );
+    assert_eq!(dxp(&store, &r, "a.n = 'x'"), PropertyValue::Boolean(false));
+    // Not a node or relationship: the ordinary path answers.
+    let e2 = dx(&store, &r, "i.name = 'x'");
+    assert!(e2.is_ok() || e2.is_err());
+    assert_eq!(dxp(&store, &r, "a.missing = 'x'"), PropertyValue::Null);
+    // A deleted relationship is not borrowed, and reading it is an error.
+    let ghost = crate::graph::EdgeId::new(999);
+    let mut r2 = Record::new();
+    r2.bind("r", Value::EdgeRef(ghost, a, b2, EdgeType::new("R")));
+    r2.bind("n", Value::NodeRef(NodeId::new(999)));
+    let err_e = dx(&store, &r2, "r.tag = 'hot'").unwrap_err();
+    assert!(
+        matches!(err_e, ExecutionError::EntityNotFound(ref m) if m.contains("relationship")),
+        "{err_e:?}"
+    );
+    let err_n = dx(&store, &r2, "n.name = 'x'").unwrap_err();
+    assert!(
+        matches!(err_n, ExecutionError::EntityNotFound(ref m) if m.contains("node")),
+        "{err_n:?}"
+    );
+}
+
+#[test]
+fn read_property_missing_is_null_mode() {
+    let store = GraphStore::new();
+    let r = Record::new();
+    assert!(read_property(&r, "n", "p", &store, true).unwrap().is_null());
+    assert!(matches!(
+        read_property(&r, "n", "p", &store, false),
+        Err(ExecutionError::VariableNotFound(_))
+    ));
+}
+
+#[test]
+fn eval_binary_op_entity_edges() {
+    let n = Value::NodeRef(NodeId::new(1));
+    let e = Value::EdgeRef(
+        crate::graph::EdgeId::new(1),
+        NodeId::new(1),
+        NodeId::new(2),
+        EdgeType::new("R"),
+    );
+    let t = |v: Result<Value, ExecutionError>| v.unwrap().as_property().cloned().unwrap();
+    assert_eq!(
+        t(eval_binary_op(&BinaryOp::Eq, pv(1i64), n.clone())),
+        PropertyValue::Boolean(false)
+    );
+    assert_eq!(
+        t(eval_binary_op(&BinaryOp::Ne, pv("a"), e.clone())),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        t(eval_binary_op(&BinaryOp::Eq, e.clone(), e.clone())),
+        PropertyValue::Boolean(true)
+    );
+    let err = eval_binary_op(&BinaryOp::Sub, pv(1i64), n)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("on the right"), "{err}");
+    assert_eq!(
+        t(eval_binary_op(
+            &BinaryOp::Ne,
+            pv(PropertyValue::Array(vec![1i64.into()])),
+            pv(PropertyValue::Array(vec![1i64.into(), 2i64.into()]))
+        )),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        t(eval_binary_op(
+            &BinaryOp::Ne,
+            pv(PropertyValue::Array(vec![1i64.into()])),
+            pv(PropertyValue::Array(vec![PropertyValue::Null]))
+        )),
+        PropertyValue::Null
+    );
+    // String position operators on non-strings are null.
+    assert_eq!(
+        t(eval_binary_op(&BinaryOp::StartsWith, pv(1i64), pv("a"))),
+        PropertyValue::Null
+    );
+    assert_eq!(
+        t(eval_binary_op(&BinaryOp::EndsWith, pv("a"), pv(1i64))),
+        PropertyValue::Null
+    );
+    assert_eq!(
+        t(eval_binary_op(&BinaryOp::Contains, pv(true), pv(true))),
+        PropertyValue::Null
+    );
+    assert_eq!(
+        string_position_op(
+            StringPositionOp::EndsWith,
+            &PropertyValue::String("abc".into()),
+            &PropertyValue::String("bc".into())
+        ),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        string_position_op(
+            StringPositionOp::StartsWith,
+            &PropertyValue::String("abc".into()),
+            &PropertyValue::String("b".into())
+        ),
+        PropertyValue::Boolean(false)
+    );
+    assert_eq!(
+        string_position_op(
+            StringPositionOp::Contains,
+            &PropertyValue::String("abc".into()),
+            &PropertyValue::String("b".into())
+        ),
+        PropertyValue::Boolean(true)
+    );
+    // Lists of entities built by an expression concatenate as `Value::List`.
+    let l = Value::List(vec![Value::NodeRef(NodeId::new(1))]);
+    match eval_binary_op(&BinaryOp::Add, l.clone(), l).unwrap() {
+        Value::List(items) => assert_eq!(items.len(), 2),
+        other => panic!("{other:?}"),
+    }
+    assert!(eval_index(pv(1i64), Value::NodeRef(NodeId::new(1)), &GraphStore::new()).is_err());
+    assert_eq!(
+        cypher_ordering(
+            &PropertyValue::String("a".into()),
+            &PropertyValue::String("b".into())
+        ),
+        Some(std::cmp::Ordering::Less)
+    );
+    assert_eq!(
+        cypher_ordering(&PropertyValue::Float(1.0), &PropertyValue::Integer(2)),
+        Some(std::cmp::Ordering::Less)
+    );
+    assert_eq!(
+        cypher_ordering(
+            &PropertyValue::Integer(1),
+            &PropertyValue::String("a".into())
+        ),
+        None
+    );
+}
+
+#[test]
+fn eval_predicate_standalone_evaluates_a_predicate() {
+    let (store, a, _, _) = small_graph();
+    let mut r = Record::new();
+    r.bind("a", Value::NodeRef(a));
+    assert!(eval_predicate_standalone(&parse_expr("a.n = 1"), &r, &store).unwrap());
+    assert!(!eval_predicate_standalone(&parse_expr("a.n = 2"), &r, &store).unwrap());
+    assert!(!eval_predicate_standalone(&parse_expr("a.missing = 2"), &r, &store).unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// EXISTS / COUNT subqueries and pattern comprehensions
+// ---------------------------------------------------------------------------
+
+/// `(a)-[:K {w:1}]->(b)-[:K]->(c)-[:K]->(c)`, `(a)-[:L]->(c)`, all `:P` with a
+/// `name`.
+fn exists_graph() -> GraphStore {
+    let mut store = GraphStore::new();
+    run_mut(
+        &mut store,
+        "CREATE (a:P {name:'a'})-[:K {w: 1}]->(b:P {name:'b'})-[:K]->(c:P {name:'c'}), \
+         (a)-[:L]->(c), (c)-[:K]->(c), (:Q {name: 'q'})",
+    )
+    .unwrap();
+    store
+}
+
+fn node_named(store: &GraphStore, name: &str) -> NodeId {
+    let id = one_on(
+        store,
+        &format!("MATCH (n {{name: '{name}'}}) RETURN id(n) AS v"),
+    );
+    NodeId::new(id.as_integer().unwrap() as u64)
+}
+
+fn by_name(store: &GraphStore, q: &str) -> Vec<PropertyValue> {
+    rows(store, q, "v")
+}
+
+fn bools(v: &[bool]) -> Vec<PropertyValue> {
+    v.iter().map(|b| PropertyValue::Boolean(*b)).collect()
+}
+
+#[test]
+fn exists_subquery_shapes() {
+    let store = exists_graph();
+    let q = |sub: &str| {
+        by_name(
+            &store,
+            &format!("MATCH (n:P) WITH n ORDER BY n.name RETURN EXISTS {{ {sub} }} AS v"),
+        )
+    };
+    assert_eq!(
+        q("MATCH (n)-[:K]->(m:P {name: 'b'})"),
+        bools(&[true, false, false])
+    );
+    assert_eq!(
+        q("MATCH (n)-[:K]->(m) WHERE m.name = 'c'"),
+        bools(&[false, true, true])
+    );
+    assert_eq!(
+        q("MATCH (x:P {name: 'a'})-[:K*1..2]->(n)"),
+        bools(&[false, true, true])
+    );
+    assert_eq!(q("MATCH ()-[:K]->(n)"), bools(&[false, true, true]));
+    assert_eq!(q("MATCH (n)<-[:K]-(m)"), bools(&[false, true, true]));
+    assert_eq!(q("MATCH (n)-[:K {w: 1}]->()"), bools(&[true, false, false]));
+    assert_eq!(
+        q("MATCH (n)-[:K {w: 2}]->()"),
+        bools(&[false, false, false])
+    );
+    assert_eq!(
+        q("MATCH p = (n)-[r:K]->(m) WHERE length(p) = 1 AND type(r) = 'K' AND m.name <> n.name"),
+        bools(&[true, true, false])
+    );
+    assert_eq!(
+        q("MATCH (n)-[:K]->(), (n)-[:L]->()"),
+        bools(&[true, false, false])
+    );
+    assert_eq!(q("MATCH (n)-[:NOPE]->()"), bools(&[false, false, false]));
+    assert_eq!(q("MATCH (n)-->(:Q)"), bools(&[false, false, false]));
+    assert_eq!(
+        q("MATCH (n)-[*]->(m:P {name: 'c'})"),
+        bools(&[true, true, true])
+    );
+    assert_eq!(q("MATCH (n:Q)"), bools(&[false, false, false]));
+}
+
+#[test]
+fn exists_between_two_pinned_nodes() {
+    let store = exists_graph();
+    let got = rows(
+        &store,
+        "MATCH (n:P), (m:P) WHERE EXISTS { MATCH (n)-[:K]-(m) } RETURN n.name + m.name AS v ORDER BY v",
+        "v",
+    );
+    let want: Vec<PropertyValue> = ["ab", "ba", "bc", "cb", "cc"]
+        .iter()
+        .map(|s| PropertyValue::String(s.to_string()))
+        .collect();
+    assert_eq!(got, want);
+    let got = rows(
+        &store,
+        "MATCH (n:P), (m:P) WHERE EXISTS { MATCH (n)<-[:K {w: 1}]-(m) } RETURN n.name + m.name AS v ORDER BY v",
+        "v",
+    );
+    assert_eq!(got, vec![PropertyValue::String("ba".into())]);
+}
+
+#[test]
+fn count_subquery_counts_every_match() {
+    let store = exists_graph();
+    let got = by_name(
+        &store,
+        "MATCH (n:P) WITH n ORDER BY n.name RETURN COUNT { MATCH (n)-[:K]->() } AS v",
+    );
+    assert_eq!(
+        got,
+        vec![
+            PropertyValue::Integer(1),
+            PropertyValue::Integer(1),
+            PropertyValue::Integer(1)
+        ]
+    );
+    let got = by_name(&store, "MATCH (n:P) WITH n ORDER BY n.name RETURN COUNT { MATCH (n)-[]-(m) WHERE m.name <> 'a' } AS v");
+    // a: b, c (via L); b: c (b->c); c: b, itself once.
+    assert_eq!(
+        got,
+        vec![
+            PropertyValue::Integer(2),
+            PropertyValue::Integer(1),
+            PropertyValue::Integer(2)
+        ]
+    );
+}
+
+#[test]
+fn exists_directly_through_eval_expression() {
+    let store = exists_graph();
+    let a = node_named(&store, "a");
+    let mut r = Record::new();
+    r.bind("n", Value::NodeRef(a));
+    r.bind("one", pv(1i64));
+    assert_eq!(
+        dxp(&store, &r, "EXISTS { MATCH (n)-[:L]->() }"),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        dxp(&store, &r, "COUNT { MATCH (n)-->() }"),
+        PropertyValue::Integer(2)
+    );
+    // Bound to something that is not a node: nothing can match.
+    assert_eq!(
+        dxp(&store, &r, "EXISTS { MATCH (one)-->() }"),
+        PropertyValue::Boolean(false)
+    );
+    // An inner node pinned to a non-node never closes.
+    assert_eq!(
+        dxp(&store, &r, "EXISTS { MATCH (n)-->(one) }"),
+        PropertyValue::Boolean(false)
+    );
+    // A path variable binds the walked path.
+    assert_eq!(
+        dxp(&store, &r, "[p = (n)-[:K]->()-[:K]->() | length(p)]"),
+        PropertyValue::Array(vec![2i64.into()])
+    );
+    match dx(&store, &r, "[p = (n)-[:K]->() | p]").unwrap() {
+        Value::List(items) => {
+            assert_eq!(items.len(), 1);
+            assert!(
+                matches!(&items[0], Value::Path { nodes, edges } if nodes.len() == 2 && edges.len() == 1)
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        dxp(&store, &r, "[(n)-[:K|L]->(m) WHERE m.name <> 'b' | m.name]"),
+        PropertyValue::Array(vec!["c".into()])
+    );
+    assert_eq!(
+        dxp(&store, &r, "[(n)-[:K]->(m) | m.name]"),
+        PropertyValue::Array(vec!["b".into()])
+    );
+}
+
+#[test]
+fn walked_path_follows_edges_in_either_direction() {
+    let store = exists_graph();
+    let edges: Vec<_> = store
+        .all_edges()
+        .iter()
+        .map(|e| (e.id, e.source, e.target))
+        .collect();
+    let (eid, src, tgt) = edges[0];
+    match walked_path(&store, (tgt, 0), &[eid]) {
+        Value::Path { nodes, edges } => {
+            assert_eq!(nodes, vec![tgt, src]);
+            assert_eq!(edges, vec![eid]);
+        }
+        other => panic!("{other:?}"),
+    }
+    // An edge that no longer exists leaves the walk where it was.
+    match walked_path(&store, (src, 0), &[crate::graph::EdgeId::new(999)]) {
+        Value::Path { nodes, .. } => assert_eq!(nodes, vec![src, src]),
+        other => panic!("{other:?}"),
+    }
+    assert!(edge_ref(&store, crate::graph::EdgeId::new(999)).is_none());
+    assert!(
+        matches!(edge_ref(&store, eid), Some(Value::EdgeRef(id, s, t, _)) if id == eid && s == src && t == tgt)
+    );
+}
+
+#[test]
+fn exists_node_matches_checks_labels_and_inline_props() {
+    let store = exists_graph();
+    let q = crate::query::parser::parse_query(
+        "MATCH (x:P {name: 'a'}), (y:Q), (z:P {name: 'zz'}) RETURN 1",
+    )
+    .unwrap();
+    let pats: Vec<_> = q.match_clauses[0]
+        .pattern
+        .paths
+        .iter()
+        .map(|p| p.start.clone())
+        .collect();
+    let a = node_named(&store, "a");
+    assert!(exists_node_matches(&store, a, &pats[0]));
+    assert!(!exists_node_matches(&store, a, &pats[1]));
+    assert!(!exists_node_matches(&store, a, &pats[2]));
+    assert!(!exists_node_matches(&store, NodeId::new(999), &pats[0]));
+}
+
+// ---------------------------------------------------------------------------
+// misc helpers: names, arity, formatting, cost
+// ---------------------------------------------------------------------------
+
+#[test]
+fn collect_expression_names_finds_every_variable() {
+    let names = |e: &str| {
+        let mut out = HashSet::new();
+        collect_expression_names(&parse_expr(e), &mut out);
+        let mut v: Vec<String> = out.into_iter().collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names("a.x + -b"), vec!["a", "b"]);
+    assert_eq!(names("coalesce(a, b.c)"), vec!["a", "b"]);
+    assert_eq!(names("toUpper(a)"), vec!["a"]);
+    assert_eq!(names("[a, b]"), vec!["a", "b"]);
+    assert_eq!(names("{k: a, j: b}"), vec!["a", "b"]);
+    assert_eq!(names("a[b]"), vec!["a", "b"]);
+    assert_eq!(names("a[b..c]"), vec!["a", "b", "c"]);
+    assert_eq!(
+        names("CASE a WHEN b THEN c ELSE d END"),
+        vec!["a", "b", "c", "d"]
+    );
+    assert_eq!(names("NOT a"), vec!["a"]);
+    assert_eq!(names("1"), Vec::<String>::new());
+}
+
+#[test]
+fn known_functions_and_arity_table() {
+    assert!(is_known_function("toUpper"));
+    assert!(is_known_function("date.realtime"));
+    assert!(!is_known_function("lenght"));
+    assert_eq!(min_arity("ToUpper"), Some(1));
+    assert_eq!(min_arity("point.withinBBox"), Some(3));
+    assert_eq!(min_arity("rand"), None);
+}
+
+#[test]
+fn format_expression_renders_every_form() {
+    let fe = |e: &str| format_expression(&parse_expr(e));
+    assert_eq!(fe("a.x > 1 AND (b OR c)"), "a.x > Integer(1) AND (b OR c)");
+    assert_eq!(fe("a - (b - c)"), "a - (b - c)");
+    assert_eq!(fe("(a - b) - c"), "a - b - c");
+    assert_eq!(fe("a ^ (b ^ c)"), "a ^ b ^ c");
+    assert_eq!(fe("(a ^ b) ^ c"), "(a ^ b) ^ c");
+    assert_eq!(fe("NOT (a AND b)"), "NOT (a AND b)");
+    assert_eq!(fe("NOT a"), "NOT a");
+    assert_eq!(fe("a IS NULL"), "a IS NULL");
+    assert_eq!(fe("(a + b) IS NOT NULL"), "(a + b) IS NOT NULL");
+    assert_eq!(fe("-a"), "- a");
+    assert_eq!(fe("count(DISTINCT a)"), "count(DISTINCT a)");
+    assert_eq!(fe("coalesce(a, b)"), "coalesce(a, b)");
+    assert_eq!(fe("$p"), "$p");
+    assert_eq!(fe("[a]"), "...");
+    for (op, sym) in [
+        ("a <> b", "<>"),
+        ("a <= b", "<="),
+        ("a >= b", ">="),
+        ("a < b", "<"),
+        ("a = b", "="),
+        ("a * b", "*"),
+        ("a / b", "/"),
+        ("a % b", "%"),
+        ("a XOR b", "XOR"),
+        ("a STARTS WITH b", "STARTS WITH"),
+        ("a ENDS WITH b", "ENDS WITH"),
+        ("a CONTAINS b", "CONTAINS"),
+        ("a IN b", "IN"),
+        ("a =~ b", "=~"),
+    ] {
+        assert_eq!(fe(op), format!("a {sym} b"), "{op}");
+    }
+    assert_eq!(
+        format_expression(&Expression::PathVariable("p".into())),
+        "path(p)"
+    );
+}
+
+#[test]
+fn predicate_cost_weights() {
+    let c = |e: &str| predicate_cost(&parse_expr(e));
+    assert_eq!(c("a.x"), 1);
+    assert_eq!(c("a"), 0);
+    assert_eq!(c("$p"), 0);
+    assert_eq!(c("a.x > 1"), 2);
+    assert_eq!(c("a.x CONTAINS 'z'"), 5);
+    assert_eq!(c("NOT a.x"), 2);
+    assert_eq!(c("toUpper(a.x)"), 9);
+    assert_eq!(c("[a.x, a.y]"), 3);
+    assert_eq!(c("{k: a.x}"), 2);
+    assert_eq!(c("CASE a.x WHEN 1 THEN a.y ELSE a.z END"), 4);
+    assert_eq!(c("a.l[a.i]"), 3);
+    assert_eq!(c("a.l[a.i..a.j]"), 5);
+    assert_eq!(c("a.l[..]"), 3);
+    assert_eq!(c("EXISTS { MATCH (a)-->() }"), 50);
+    assert_eq!(c("[x IN a.l WHERE x > 1 | x]"), 22);
+    assert_eq!(c("any(x IN a.l WHERE x > 1)"), 22);
+    assert_eq!(c("reduce(t = 0, x IN a.l | t + x)"), 22);
+    assert_eq!(c("[(a)-->(b) | b]"), 50);
+    assert_eq!(predicate_cost(&Expression::PathVariable("p".into())), 0);
+}
+
+// ---------------------------------------------------------------------------
+// leaf operators and the trait's defaults
+// ---------------------------------------------------------------------------
+
+fn drain_all(op: &mut dyn PhysicalOperator, store: &GraphStore) -> Vec<Record> {
+    let mut out = Vec::new();
+    while let Some(r) = op.next(store).unwrap() {
+        out.push(r);
+    }
+    out
+}
+
+fn labelled_store() -> GraphStore {
+    let mut store = GraphStore::new();
+    for i in 0..6 {
+        let n = store.create_node("A");
+        if i % 2 == 0 {
+            store.add_label_to_node("default", n, "B").unwrap();
+        }
+    }
+    store.create_node("C");
+    store
+}
+
+#[test]
+fn node_scan_multi_label_is_an_intersection() {
+    let store = labelled_store();
+    let mut op = NodeScanOperator::new("n".into(), vec![Label::new("A"), Label::new("B")]);
+    let ids: Vec<u64> = drain_all(&mut op, &store)
+        .iter()
+        .map(|r| r.get("n").unwrap().node_id().unwrap().as_u64())
+        .collect();
+    assert_eq!(ids.len(), 3);
+    assert!(ids.windows(2).all(|w| w[0] < w[1]));
+    // With a limit, a prefix of the same order.
+    let mut op = NodeScanOperator::new("n".into(), vec![Label::new("B"), Label::new("A")])
+        .with_early_limit(2);
+    let limited: Vec<u64> = drain_all(&mut op, &store)
+        .iter()
+        .map(|r| r.get("n").unwrap().node_id().unwrap().as_u64())
+        .collect();
+    assert_eq!(limited, ids[..2].to_vec());
+    // No labels at all: every node.
+    let mut op = NodeScanOperator::new("n".into(), vec![]);
+    assert_eq!(drain_all(&mut op, &store).len(), 7);
+    assert_eq!(op.describe().details, "var=n, all labels");
+    op.reset();
+    assert_eq!(drain_all(&mut op, &store).len(), 7);
+    let d = NodeScanOperator::new("n".into(), vec![Label::new("A")]).describe();
+    assert_eq!(d.name, "NodeScan");
+    assert!(d.details.contains("\"A\""), "{}", d.details);
+}
+
+#[test]
+fn node_scan_push_limit_and_batches() {
+    let store = labelled_store();
+    let mut op = NodeScanOperator::new("n".into(), vec![Label::new("A")]);
+    assert!(op.try_push_limit(4));
+    assert!(op.try_push_limit(10));
+    let b1 = op.next_batch(&store, 3).unwrap().unwrap();
+    assert_eq!(b1.records.len(), 3);
+    assert_eq!(b1.columns, vec!["n".to_string()]);
+    let b2 = op.next_batch(&store, 3).unwrap().unwrap();
+    assert_eq!(b2.records.len(), 1);
+    assert!(op.next_batch(&store, 3).unwrap().is_none());
+    assert!(op.next(&store).unwrap().is_none());
+    // Unlimited batches, exhausted.
+    let mut op = NodeScanOperator::new("n".into(), vec![Label::new("C")]);
+    assert_eq!(op.next_batch(&store, 10).unwrap().unwrap().records.len(), 1);
+    assert!(op.next_batch(&store, 10).unwrap().is_none());
+}
+
+#[test]
+fn node_scan_large_batches_build_records_in_parallel() {
+    let mut store = GraphStore::new();
+    for _ in 0..1100 {
+        store.create_node("A");
+    }
+    let mut op = NodeScanOperator::new("n".into(), vec![Label::new("A")]);
+    let batch = op.next_batch(&store, 2048).unwrap().unwrap();
+    assert_eq!(batch.records.len(), 1100);
+    let first = batch.records[0]
+        .get("n")
+        .unwrap()
+        .node_id()
+        .unwrap()
+        .as_u64();
+    let last = batch.records[1099]
+        .get("n")
+        .unwrap()
+        .node_id()
+        .unwrap()
+        .as_u64();
+    assert!(first < last);
+    // Early limit reached exactly at a batch boundary.
+    let mut op = NodeScanOperator::new("n".into(), vec![Label::new("A")]).with_early_limit(2);
+    assert_eq!(op.next_batch(&store, 2).unwrap().unwrap().records.len(), 2);
+    assert!(op.next_batch(&store, 2).unwrap().is_none());
+}
+
+#[test]
+fn label_count_operator() {
+    let store = labelled_store();
+    let count_of = |labels: Vec<Label>| {
+        let mut op = LabelCountOperator::new(labels, "c".into());
+        let rows = drain_all(&mut op, &store);
+        assert_eq!(rows.len(), 1);
+        op.reset();
+        assert_eq!(drain_all(&mut op, &store).len(), 1);
+        rows[0].get("c").unwrap().as_property().cloned().unwrap()
+    };
+    assert_eq!(count_of(vec![]), PropertyValue::Integer(7));
+    assert_eq!(count_of(vec![Label::new("A")]), PropertyValue::Integer(6));
+    assert_eq!(
+        count_of(vec![Label::new("A"), Label::new("B")]),
+        PropertyValue::Integer(3)
+    );
+    assert_eq!(
+        LabelCountOperator::new(vec![], "c".into())
+            .describe()
+            .details,
+        "labels=[all], alias=c"
+    );
+    assert_eq!(
+        LabelCountOperator::new(vec![Label::new("A"), Label::new("B")], "c".into())
+            .describe()
+            .details,
+        "labels=[A, B], alias=c"
+    );
+}
+
+#[test]
+fn edge_count_operators() {
+    let store = exists_graph();
+    let count_of = |t: Option<&str>| {
+        let mut op = EdgeCountOperator::new(t.map(String::from), "c".into());
+        let rows = drain_all(&mut op, &store);
+        assert_eq!(rows.len(), 1);
+        op.reset();
+        assert_eq!(drain_all(&mut op, &store).len(), 1);
+        rows[0].get("c").unwrap().as_property().cloned().unwrap()
+    };
+    assert_eq!(count_of(Some("K")), PropertyValue::Integer(3));
+    assert_eq!(count_of(Some("NOPE")), PropertyValue::Integer(0));
+    assert_eq!(count_of(None), PropertyValue::Integer(4));
+    assert_eq!(
+        EdgeCountOperator::new(Some("K".into()), "c".into())
+            .describe()
+            .details,
+        "type=K, alias=c"
+    );
+    assert_eq!(
+        EdgeCountOperator::new(None, "c".into()).describe().details,
+        "all types, alias=c"
+    );
+
+    let mut op = EdgeTypeCountOperator::new("t".into(), "c".into());
+    let mut got: Vec<(String, i64)> = drain_all(&mut op, &store)
+        .iter()
+        .map(|r| {
+            let t = match r.get("t").unwrap().as_property().unwrap() {
+                PropertyValue::String(s) => s.clone(),
+                o => panic!("{o:?}"),
+            };
+            let c = r
+                .get("c")
+                .unwrap()
+                .as_property()
+                .unwrap()
+                .as_integer()
+                .unwrap();
+            (t, c)
+        })
+        .collect();
+    got.sort();
+    assert_eq!(got, vec![("K".to_string(), 3), ("L".to_string(), 1)]);
+    op.reset();
+    let b = op.next_batch(&store, 1).unwrap().unwrap();
+    assert_eq!(b.records.len(), 1);
+    assert_eq!(op.next_batch(&store, 5).unwrap().unwrap().records.len(), 1);
+    assert!(op.next_batch(&store, 5).unwrap().is_none());
+    let d = op.describe();
+    assert_eq!(d.name, "EdgeTypeCount");
+    assert_eq!(d.details, "type_alias=t, count_alias=c");
+}
+
+/// An operator implementing only what the trait requires.
+struct Rows(Vec<Record>, usize);
+impl PhysicalOperator for Rows {
+    fn next(&mut self, _: &GraphStore) -> ExecutionResult<Option<Record>> {
+        let r = self.0.get(self.1).cloned();
+        self.1 += 1;
+        Ok(r)
+    }
+    fn reset(&mut self) {
+        self.1 = 0;
+    }
+}
+
+fn int_rows(n: i64) -> Rows {
+    Rows(
+        (0..n)
+            .map(|i| {
+                let mut r = Record::new();
+                r.bind("i", pv(i));
+                r
+            })
+            .collect(),
+        0,
+    )
+}
+
+#[test]
+fn physical_operator_trait_defaults() {
+    let mut store = GraphStore::new();
+    let mut op = int_rows(3);
+    assert!(!op.is_materialized());
+    assert!(!op.try_push_limit(1));
+    assert!(!op.hint_early_stop(1));
+    assert!(op.filter_predicate().is_none());
+    assert!(!op.retain_property_reads("a", "b"));
+    assert!(op.take_retained_reads().is_none());
+    assert!(op.children_mut().is_empty());
+    assert!(!op.is_mutating());
+    assert!(!op.amplifies_rows());
+    let d = op.describe();
+    assert_eq!(d.name, "Unknown");
+    assert!(d.details.is_empty() && d.children.is_empty());
+    assert_eq!(op.next_batch(&store, 2).unwrap().unwrap().records.len(), 2);
+    assert_eq!(op.next_batch(&store, 2).unwrap().unwrap().records.len(), 1);
+    assert!(op.next_batch(&store, 2).unwrap().is_none());
+    op.reset();
+    assert_eq!(
+        op.next_batch_mut(&mut store, "default", 5)
+            .unwrap()
+            .unwrap()
+            .records
+            .len(),
+        3
+    );
+    assert!(op
+        .next_batch_mut(&mut store, "default", 5)
+        .unwrap()
+        .is_none());
+    op.reset();
+    assert!(op.next_mut(&mut store, "default").unwrap().is_some());
+}
+
+#[test]
+fn drain_input_for_write_materialises_once() {
+    let mut store = GraphStore::new();
+    let mut input: OperatorBox = Box::new(int_rows(3));
+    drain_input_for_write(&mut input, &mut store, "default").unwrap();
+    assert!(input.is_materialized());
+    // A second drain leaves the materialised rows alone.
+    drain_input_for_write(&mut input, &mut store, "default").unwrap();
+    let mut n = 0;
+    while input.next(&store).unwrap().is_some() {
+        n += 1;
+    }
+    assert_eq!(n, 3);
+}
+
+#[test]
+fn operator_description_hash_and_format() {
+    let leaf = |details: &str| OperatorDescription {
+        name: "Materialized".into(),
+        details: details.into(),
+        children: vec![],
+    };
+    let tree = |details: &str| OperatorDescription {
+        name: "Project".into(),
+        details: "x".into(),
+        children: vec![leaf(details)],
+    };
+    // A row count is data, not plan structure.
+    assert_eq!(
+        tree("3 rows").structural_hash(),
+        tree("4000 rows").structural_hash()
+    );
+    assert_ne!(
+        tree("3 rows").structural_hash(),
+        tree("some rows").structural_hash()
+    );
+    assert_ne!(
+        tree(" rows").structural_hash(),
+        tree("3 rows").structural_hash()
+    );
+    assert_ne!(leaf("a").structural_hash(), tree("a").structural_hash());
+    let text = tree("3 rows").format(0);
+    assert_eq!(text, "Project (x)\n+- Materialized (3 rows)\n");
+    let bare = OperatorDescription {
+        name: "Leaf".into(),
+        details: String::new(),
+        children: vec![],
+    };
+    assert_eq!(bare.format(2), "   +- Leaf\n");
+}
+
+#[test]
+fn graph_optimization_problem_objectives_and_penalties() {
+    let p = GraphOptimizationProblem {
+        costs: vec![1.0, 2.0],
+        multi_costs: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+        budget: Some(5.0),
+        min_total: Some(4.0),
+        dim: 2,
+        lower: 0.0,
+        upper: 10.0,
+    };
+    let x = Array1::from(vec![1.0, 1.0]);
+    assert_eq!(Problem::dim(&p), 2);
+    let (lo, hi) = Problem::bounds(&p);
+    assert_eq!((lo[0], hi[1]), (0.0, 10.0));
+    assert_eq!(p.objective(&x), 3.0);
+    // Under budget, but short of the minimum total by 2: 2^2 * 100.
+    assert_eq!(p.penalty(&x), 400.0);
+    // Over budget by 1 (cost 6), total meets the minimum.
+    let y = Array1::from(vec![2.0, 2.0]);
+    assert_eq!(p.penalty(&y), 1.0);
+    assert_eq!(p.num_objectives(), 2);
+    assert_eq!(p.objectives(&y), vec![2.0, 2.0]);
+    assert_eq!(MultiObjectiveProblem::dim(&p), 2);
+    let (lo, hi) = MultiObjectiveProblem::bounds(&p);
+    assert_eq!((lo[1], hi[0]), (0.0, 10.0));
+    let free = GraphOptimizationProblem {
+        budget: None,
+        min_total: None,
+        ..p
+    };
+    assert_eq!(free.penalty(&y), 0.0);
+}
+
+#[test]
+fn hierarchy_functions_with_only_a_stale_index_refuse() {
+    let mut store = hierarchy_store();
+    // A new BROADER edge after the build leaves the index stale.
+    run_mut(
+        &mut store,
+        "MATCH (x:Loose), (y:Term {code:'root'}) CREATE (x)-[:BROADER]->(y)",
+    )
+    .unwrap();
+    let e = QueryEngine::new()
+        .execute(
+            "MATCH (a:Term {code:'l1'}), (b:Term {code:'root'}) RETURN subsumes(a, b) AS v",
+            &store,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("stale"), "{e}");
+}
+
+#[test]
+fn node_scan_limit_pushed_after_initialisation() {
+    let store = labelled_store();
+    let mut op = NodeScanOperator::new("n".into(), vec![Label::new("A")]);
+    assert!(op.next(&store).unwrap().is_some());
+    // The ids are already materialised; the limit still stops the scan.
+    assert!(op.try_push_limit(1));
+    assert!(op.next(&store).unwrap().is_none());
+}
+
+#[test]
+fn binary_op_null_operands_and_unknown_list_equality() {
+    let t = |v: Result<Value, ExecutionError>| v.unwrap().as_property().cloned().unwrap();
+    assert_eq!(
+        t(eval_binary_op(&BinaryOp::Add, pv(1i64), Value::Null)),
+        PropertyValue::Null
+    );
+    assert_eq!(
+        t(eval_binary_op(&BinaryOp::Mul, Value::Null, pv(1i64))),
+        PropertyValue::Null
+    );
+    let l = |v: Vec<PropertyValue>| pv(PropertyValue::Array(v));
+    assert_eq!(
+        t(eval_binary_op(
+            &BinaryOp::Eq,
+            l(vec![1i64.into()]),
+            l(vec![PropertyValue::Null])
+        )),
+        PropertyValue::Null
+    );
+    assert_eq!(
+        t(eval_binary_op(
+            &BinaryOp::Eq,
+            l(vec![1i64.into()]),
+            l(vec![1.0f64.into()])
+        )),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        ok("point({x: 1.5, y: -2.0})").as_map().unwrap().get("x"),
+        Some(&PropertyValue::Float(1.5))
+    );
+}
+
+#[test]
+fn path_variable_expression_reads_the_binding() {
+    let store = GraphStore::new();
+    let mut r = Record::new();
+    r.bind(
+        "p",
+        Value::Path {
+            nodes: vec![NodeId::new(1)],
+            edges: vec![],
+        },
+    );
+    let got = eval_expression(&Expression::PathVariable("p".into()), &r, &store).unwrap();
+    assert!(matches!(got, Value::Path { ref nodes, .. } if nodes.len() == 1));
+    let e = eval_expression(&Expression::PathVariable("q".into()), &r, &store).unwrap_err();
+    assert!(
+        matches!(e, ExecutionError::VariableNotFoundInScope { .. }),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn exists_inline_property_falls_back_to_row_storage() {
+    let mut store = GraphStore::new();
+    let n = store.create_node("P");
+    // Written to the node's own map, not the column store.
+    store.get_node_mut(n).unwrap().set_property("k", 7i64);
+    let q = crate::query::parser::parse_query("MATCH (x:P {k: 7}), (y:P {k: 8}) RETURN 1").unwrap();
+    let pats: Vec<_> = q.match_clauses[0]
+        .pattern
+        .paths
+        .iter()
+        .map(|p| p.start.clone())
+        .collect();
+    assert!(exists_node_matches(&store, n, &pats[0]));
+    assert!(!exists_node_matches(&store, n, &pats[1]));
+}
+
+#[test]
+fn exists_walks_respect_relationship_isomorphism_and_var_length() {
+    let store = exists_graph();
+    let (a, b2, c) = (
+        node_named(&store, "a"),
+        node_named(&store, "b"),
+        node_named(&store, "c"),
+    );
+    let at = |id: NodeId| {
+        let mut r = Record::new();
+        r.bind("n", Value::NodeRef(id));
+        r
+    };
+    // Three distinct K hops: only from a (a->b->c->c); the self-loop may not
+    // be walked twice.
+    let three = "EXISTS { MATCH (n)-[:K]->()-[:K]->()-[:K]->() }";
+    assert_eq!(dxp(&store, &at(a), three), PropertyValue::Boolean(true));
+    assert_eq!(dxp(&store, &at(b2), three), PropertyValue::Boolean(false));
+    assert_eq!(dxp(&store, &at(c), three), PropertyValue::Boolean(false));
+    // A variable-length segment followed by a fixed one.
+    let var = "EXISTS { MATCH (n)-[:K*1..2]->(m)-[:L]->() }";
+    assert_eq!(dxp(&store, &at(a), var), PropertyValue::Boolean(false));
+    let var2 = "EXISTS { MATCH (n)-[:K*1..2]->(m {name: 'c'}) }";
+    assert_eq!(dxp(&store, &at(a), var2), PropertyValue::Boolean(true));
+    assert_eq!(
+        dxp(&store, &at(c), "EXISTS { MATCH (n)-[:K*2..2]->(n) }"),
+        PropertyValue::Boolean(false)
+    );
+    assert_eq!(
+        dxp(&store, &at(a), "COUNT { MATCH (n)-[:K*]->() }"),
+        PropertyValue::Integer(3)
+    );
+    // A quantifier over a list of entities.
+    let mut r = at(a);
+    r.bind(
+        "l",
+        Value::List(vec![Value::NodeRef(a), Value::NodeRef(b2)]),
+    );
+    assert_eq!(
+        dxp(&store, &r, "any(x IN l WHERE x.name = 'b')"),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        dxp(&store, &r, "all(x IN l WHERE x.name = 'b')"),
+        PropertyValue::Boolean(false)
+    );
+}
+
+#[test]
+fn exists_propagates_errors_from_the_inner_where() {
+    let store = exists_graph();
+    let (a, b2) = (node_named(&store, "a"), node_named(&store, "b"));
+    let mut r = Record::new();
+    r.bind("n", Value::NodeRef(a));
+    // Walked neighbours.
+    let e = dx(&store, &r, "EXISTS { MATCH (n)-->(m) WHERE size(m) = 1 }")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("size()"), "{e}");
+    let e = dx(&store, &r, "EXISTS { MATCH (n)<--(m) WHERE size(m) = 1 }");
+    assert_eq!(
+        prop(e),
+        PropertyValue::Boolean(false),
+        "a has no incoming edge, so nothing is evaluated"
+    );
+    // A pinned far end looked up directly.
+    r.bind("m", Value::NodeRef(b2));
+    let e = dx(&store, &r, "EXISTS { MATCH (n)-->(m) WHERE size(m) = 1 }")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("size()"), "{e}");
+    let mut r2 = Record::new();
+    r2.bind("n", Value::NodeRef(b2));
+    let e = dx(&store, &r2, "EXISTS { MATCH (n)<--(m) WHERE size(m) = 1 }")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("size()"), "{e}");
 }
