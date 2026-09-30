@@ -606,7 +606,19 @@ pub struct HttpServer {
     audit: Option<Arc<AuditLog>>,
     /// Key for encrypting snapshots at rest (REL-09).
     snapshot_key: Option<Arc<[u8; crate::snapshot::encryption::KEY_BYTES]>>,
+    /// Largest request body the CSV, JSON and Parquet import routes accept.
+    import_body_limit: usize,
 }
+
+/// The import routes' body limit unless the operator sets one (#336).
+///
+/// Without a layer of their own the import routes had axum's default of 2 MB,
+/// so any CSV, JSON or Parquet upload past that failed -- the CSV one with "No
+/// file field", which sent the caller looking at their form. A CSV upload is
+/// streamed and applied in batches, so for it this is only a ceiling. JSON and
+/// Parquet are still read whole, and a JSON document parses to several times
+/// its size, which is why this is 1 GiB and not the snapshot route's 64 GB.
+pub const DEFAULT_IMPORT_BODY_LIMIT: usize = 1024 * 1024 * 1024;
 
 impl HttpServer {
     /// Create a new HTTP server
@@ -629,6 +641,7 @@ impl HttpServer {
             tls: None,
             audit: None,
             snapshot_key: None,
+            import_body_limit: DEFAULT_IMPORT_BODY_LIMIT,
         }
     }
 
@@ -700,6 +713,14 @@ impl HttpServer {
         key: Arc<[u8; crate::snapshot::encryption::KEY_BYTES]>,
     ) -> Self {
         self.snapshot_key = Some(key);
+        self
+    }
+
+    /// Largest body, in bytes, that `/api/import/csv`, `/api/import/json` and
+    /// `/api/import/parquet` accept; a larger one is answered 413 (#336).
+    /// [`DEFAULT_IMPORT_BODY_LIMIT`] unless set.
+    pub fn with_import_body_limit(mut self, bytes: usize) -> Self {
+        self.import_body_limit = bytes;
         self
     }
 
@@ -803,7 +824,10 @@ impl HttpServer {
             .route("/api/tx/begin", post(super::transactions::begin_handler))
             .route("/api/tx/:id/commit", post(super::transactions::commit_handler))
             .route("/api/tx/:id/rollback", post(super::transactions::rollback_handler))
-            .route("/api/import/parquet", post(import_parquet_handler))
+            .route(
+                "/api/import/parquet",
+                post(import_parquet_handler).layer(DefaultBodyLimit::max(self.import_body_limit)),
+            )
             .route("/api/enrich/policy", post(set_enrich_policy_handler))
             .route("/api/enrich", post(enrich_handler))
             .route("/api/verify", post(verify_handler))
@@ -813,8 +837,14 @@ impl HttpServer {
             .route("/metrics", get(metrics_handler))
             .route("/api/schema", get(schema_handler))
             .route("/api/sample", post(sample_handler))
-            .route("/api/import/csv", post(import_csv_handler))
-            .route("/api/import/json", post(import_json_handler))
+            .route(
+                "/api/import/csv",
+                post(import_csv_handler).layer(DefaultBodyLimit::max(self.import_body_limit)),
+            )
+            .route(
+                "/api/import/json",
+                post(import_json_handler).layer(DefaultBodyLimit::max(self.import_body_limit)),
+            )
             .route("/api/vector/indexes", get(list_indexes_handler))
             .route("/api/vector/indexes", post(create_index_handler))
             .route("/api/vector-search", post(search_handler))

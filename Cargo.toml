@@ -100,6 +100,10 @@ arrow = { version = "53", default-features = false, features = ["ipc"] }
 parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
 # RFC 4180 parsing for `/api/import/csv`, which used to split on the delimiter (#1105).
 csv = "1.4"
+# The same parser, fed chunk by chunk, so a CSV upload is parsed as it arrives (#336).
+csv-core = "0.1"
+# Spools a CSV upload whose form fields follow the file (#336).
+tempfile = "3.8"
 
 # High Availability (Phase 4)
 openraft = { version = "0.9", features = ["serde"] }

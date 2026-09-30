@@ -296,17 +296,18 @@ pub async fn import_parquet_handler(
     }
 
     let mut data: Option<Vec<u8>> = None;
-    while let Ok(Some(field)) = multipart.next_field().await {
+    // Not `while let Ok(Some(..))`: that ended the loop on a read error, and an
+    // upload past the body limit was answered "no `file` field" (#336).
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(e) => return multipart_refusal("could not read the multipart request", e),
+        };
         if field.name().unwrap_or("") == "file" {
             match field.bytes().await {
                 Ok(b) => data = Some(b.to_vec()),
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({ "error": format!("could not read the file: {e}") })),
-                    )
-                        .into_response()
-                }
+                Err(e) => return multipart_refusal("could not read the file", e),
             }
         }
     }
@@ -1549,7 +1550,7 @@ fn parse_import_mode(s: &str) -> Result<ImportMode, axum::response::Response> {
 }
 
 /// How an edge import finds its endpoints (#336).
-#[derive(Default)]
+#[derive(Default, Clone, PartialEq)]
 struct EdgeImportSpec {
     source_label: String,
     source_key_col: String,
@@ -1624,6 +1625,10 @@ struct EdgeImportStats {
     missing_sources: usize,
     missing_targets: usize,
     ambiguous: usize,
+    /// How many batches a CSV import was written in (#336). A JSON import is
+    /// one document written at once, and reports none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batches: Option<usize>,
     /// The first few problems, each naming its record. Capped so a file of a
     /// million dangling rows does not produce a response of the same size.
     errors: Vec<String>,
@@ -1671,6 +1676,114 @@ fn resolve_endpoint(
     }
 }
 
+/// A resolved edge: source, target and the properties to set on it.
+type ResolvedEdge = (
+    crate::graph::NodeId,
+    crate::graph::NodeId,
+    Vec<(String, PropertyValue)>,
+);
+
+/// The endpoint indexes an edge import resolves against, built once per import.
+struct EdgeEndpoints {
+    sources: EndpointIndex,
+    /// `None` when both ends are one label keyed on one property.
+    targets: Option<EndpointIndex>,
+}
+
+impl EdgeEndpoints {
+    fn new(store: &crate::graph::GraphStore, spec: &EdgeImportSpec) -> Self {
+        let sources = endpoint_index(store, &spec.source_label, spec.source_prop());
+        let targets =
+            if spec.source_label == spec.target_label && spec.source_prop() == spec.target_prop() {
+                None
+            } else {
+                Some(endpoint_index(
+                    store,
+                    &spec.target_label,
+                    spec.target_prop(),
+                ))
+            };
+        Self { sources, targets }
+    }
+
+    /// The rows of `rows` whose endpoints each match exactly one node. Every
+    /// other row is counted in `stats` and named by its record number, which
+    /// starts at `first_record` so a file read in batches numbers them as one.
+    fn resolve(
+        &self,
+        spec: &EdgeImportSpec,
+        rows: Vec<EdgeRow>,
+        first_record: usize,
+        stats: &mut EdgeImportStats,
+    ) -> Vec<ResolvedEdge> {
+        let targets = self.targets.as_ref().unwrap_or(&self.sources);
+        let mut resolved = Vec::with_capacity(rows.len());
+        for (i, row) in rows.into_iter().enumerate() {
+            stats.processed += 1;
+            let record = first_record + i;
+            let src = resolve_endpoint(&self.sources, &row.source);
+            let tgt = resolve_endpoint(targets, &row.target);
+            if let (Ok(s), Ok(t)) = (src, tgt) {
+                resolved.push((s, t, row.props));
+                continue;
+            }
+            stats.skipped += 1;
+            for (is_source, res, label, key) in [
+                (true, src, &spec.source_label, &row.source),
+                (false, tgt, &spec.target_label, &row.target),
+            ] {
+                let end = if is_source { "source" } else { "target" };
+                match res {
+                    Ok(_) => {}
+                    Err(true) => {
+                        stats.ambiguous += 1;
+                        stats.note(format!(
+                            "record {record}: {end} key {key:?} matches more than one :{label}"
+                        ));
+                    }
+                    Err(false) => {
+                        if is_source {
+                            stats.missing_sources += 1;
+                        } else {
+                            stats.missing_targets += 1;
+                        }
+                        stats.note(format!(
+                            "record {record}: no :{label} with {end} key {key:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        resolved
+    }
+}
+
+/// Write edges whose endpoints are already resolved, recording each one
+/// created in `created`.
+fn write_edges(
+    store: &mut crate::graph::GraphStore,
+    spec: &EdgeImportSpec,
+    resolved: Vec<ResolvedEdge>,
+    stats: &mut EdgeImportStats,
+    created: &mut Vec<crate::graph::EdgeId>,
+) {
+    for (s, t, props) in resolved {
+        match store.create_edge(s, t, spec.edge_type.as_str()) {
+            Ok(edge_id) => {
+                for (k, v) in props {
+                    let _ = store.set_edge_property(edge_id, k, v);
+                }
+                created.push(edge_id);
+                stats.created += 1;
+            }
+            Err(e) => {
+                stats.failed += 1;
+                stats.note(format!("{e}"));
+            }
+        }
+    }
+}
+
 /// Create the edges `rows` describe, or none of them.
 ///
 /// Every endpoint is resolved before the first edge is written. With `strict`
@@ -1684,76 +1797,12 @@ fn import_edges(
     rows: Vec<EdgeRow>,
     strict: bool,
 ) -> Result<EdgeImportStats, EdgeImportStats> {
-    let sources = endpoint_index(store, &spec.source_label, spec.source_prop());
-    let separate_targets =
-        if spec.source_label == spec.target_label && spec.source_prop() == spec.target_prop() {
-            None
-        } else {
-            Some(endpoint_index(
-                store,
-                &spec.target_label,
-                spec.target_prop(),
-            ))
-        };
-    let targets = separate_targets.as_ref().unwrap_or(&sources);
-
     let mut stats = EdgeImportStats::default();
-    let mut resolved = Vec::with_capacity(rows.len());
-    for (i, row) in rows.into_iter().enumerate() {
-        stats.processed += 1;
-        let record = i + 1;
-        let src = resolve_endpoint(&sources, &row.source);
-        let tgt = resolve_endpoint(targets, &row.target);
-        if let (Ok(s), Ok(t)) = (src, tgt) {
-            resolved.push((s, t, row.props));
-            continue;
-        }
-        stats.skipped += 1;
-        for (is_source, res, label, key) in [
-            (true, src, &spec.source_label, &row.source),
-            (false, tgt, &spec.target_label, &row.target),
-        ] {
-            let end = if is_source { "source" } else { "target" };
-            match res {
-                Ok(_) => {}
-                Err(true) => {
-                    stats.ambiguous += 1;
-                    stats.note(format!(
-                        "record {record}: {end} key {key:?} matches more than one :{label}"
-                    ));
-                }
-                Err(false) => {
-                    if is_source {
-                        stats.missing_sources += 1;
-                    } else {
-                        stats.missing_targets += 1;
-                    }
-                    stats.note(format!(
-                        "record {record}: no :{label} with {end} key {key:?}"
-                    ));
-                }
-            }
-        }
-    }
-
+    let resolved = EdgeEndpoints::new(store, spec).resolve(spec, rows, 1, &mut stats);
     if strict && stats.skipped > 0 {
         return Err(stats);
     }
-
-    for (s, t, props) in resolved {
-        match store.create_edge(s, t, spec.edge_type.as_str()) {
-            Ok(edge_id) => {
-                for (k, v) in props {
-                    let _ = store.set_edge_property(edge_id, k, v);
-                }
-                stats.created += 1;
-            }
-            Err(e) => {
-                stats.failed += 1;
-                stats.note(format!("{e}"));
-            }
-        }
-    }
+    write_edges(store, spec, resolved, &mut stats, &mut Vec::new());
     Ok(stats)
 }
 
@@ -1797,6 +1846,657 @@ fn parse_bool_field(s: &str) -> bool {
     )
 }
 
+/// Rows written per store lock when the form names no `batch_size` (#336).
+const DEFAULT_IMPORT_BATCH_ROWS: usize = 5000;
+
+/// A multipart read failure, answered with its cause (#336).
+///
+/// These used to end the field loop with `Err(_) => break`, so an upload past
+/// the body limit or cut off in transit was reported as "No file field".
+/// `MultipartError`'s `Display` says only that multipart parsing failed; the
+/// cause is its `body_text`. 413 when the body passed the route's limit, 400
+/// for anything else: a body that cannot be read is the request's fault.
+fn multipart_refusal(
+    context: &str,
+    e: axum::extract::multipart::MultipartError,
+) -> axum::response::Response {
+    let (status, hint) = if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            " (the upload is larger than this server accepts for an import; \
+             see --import-max-bytes)",
+        )
+    } else {
+        (StatusCode::BAD_REQUEST, "")
+    };
+    (
+        status,
+        Json(json!({ "error": format!("{context}: {}{hint}", e.body_text()) })),
+    )
+        .into_response()
+}
+
+/// An RFC 4180 reader fed one upload chunk at a time (#336).
+///
+/// `csv::Reader` pulls from a blocking `Read`, and a multipart field is an async
+/// stream, so the file used to be read whole with `field.text()` before any of
+/// it was parsed. This drives the parser `csv` is built on, `csv_core`, with
+/// each chunk as it arrives; a record split across two chunks is carried in
+/// `out`. It enforces what the `csv::Reader` did: the first record is the
+/// header, and every record has as many fields as the header (#1105).
+struct CsvChunkReader {
+    core: csv_core::Reader,
+    out: Vec<u8>,
+    ends: Vec<usize>,
+    outlen: usize,
+    endlen: usize,
+    headers: Option<Vec<String>>,
+    rows: usize,
+}
+
+impl CsvChunkReader {
+    fn new(delimiter: u8) -> Self {
+        Self {
+            core: csv_core::ReaderBuilder::new().delimiter(delimiter).build(),
+            out: vec![0; 4096],
+            ends: vec![0; 64],
+            outlen: 0,
+            endlen: 0,
+            headers: None,
+            rows: 0,
+        }
+    }
+
+    /// Parse `input`, appending each complete data record to `rows`. An empty
+    /// `input` is the end of the file, and flushes a last record that has no
+    /// line terminator.
+    fn feed(&mut self, mut input: &[u8], rows: &mut Vec<csv::StringRecord>) -> Result<(), String> {
+        use csv_core::ReadRecordResult;
+        let eof = input.is_empty();
+        loop {
+            let (res, nin, nout, nend) = self.core.read_record(
+                input,
+                &mut self.out[self.outlen..],
+                &mut self.ends[self.endlen..],
+            );
+            input = &input[nin..];
+            self.outlen += nout;
+            self.endlen += nend;
+            match res {
+                ReadRecordResult::InputEmpty | ReadRecordResult::End => return Ok(()),
+                ReadRecordResult::OutputFull => {
+                    let n = self.out.len();
+                    self.out.resize(n * 2, 0);
+                }
+                ReadRecordResult::OutputEndsFull => {
+                    let n = self.ends.len();
+                    self.ends.resize(n * 2, 0);
+                }
+                ReadRecordResult::Record => self.finish_record(eof, rows)?,
+            }
+        }
+    }
+
+    fn finish_record(
+        &mut self,
+        eof: bool,
+        rows: &mut Vec<csv::StringRecord>,
+    ) -> Result<(), String> {
+        let (n, len) = (self.endlen, self.outlen);
+        self.endlen = 0;
+        self.outlen = 0;
+        if self.headers.is_some() {
+            self.rows += 1;
+        }
+        // The line the record ends on. `line()` has counted the terminator of
+        // a record that had one; the last record of a file need not.
+        let line = self.core.line() - u64::from(!eof);
+        let at = match self.headers {
+            None => "CSV header".to_string(),
+            Some(_) => format!("CSV row {} (line {line})", self.rows),
+        };
+        let mut record = csv::StringRecord::with_capacity(len, n);
+        let mut start = 0;
+        for (i, &end) in self.ends[..n].iter().enumerate() {
+            let field = std::str::from_utf8(&self.out[start..end])
+                .map_err(|_| format!("{at}: field {} is not valid UTF-8", i + 1))?;
+            record.push_field(field);
+            start = end;
+        }
+        match &self.headers {
+            // `csv_core` strips a byte-order mark only when its first input
+            // holds all three bytes of it, and a chunk need not.
+            None => {
+                self.headers = Some(
+                    record
+                        .iter()
+                        .enumerate()
+                        .map(|(i, h)| {
+                            let h = if i == 0 {
+                                h.trim_start_matches('\u{feff}')
+                            } else {
+                                h
+                            };
+                            h.trim().to_string()
+                        })
+                        .collect(),
+                )
+            }
+            Some(h) if record.len() != h.len() => {
+                return Err(format!(
+                    "{at}: found record with {} fields, but the header has {}",
+                    record.len(),
+                    h.len()
+                ))
+            }
+            Some(_) => rows.push(record),
+        }
+        Ok(())
+    }
+}
+
+/// The CSV import's form fields other than `file`.
+#[derive(Clone, PartialEq)]
+struct CsvImportForm {
+    label: String,
+    delimiter: u8,
+    graph: String,
+    import_mode: String,
+    spec: EdgeImportSpec,
+    strict: bool,
+    batch_size: String,
+}
+
+impl Default for CsvImportForm {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            delimiter: b',',
+            graph: "default".to_string(),
+            import_mode: String::new(),
+            spec: EdgeImportSpec::default(),
+            strict: true,
+            batch_size: String::new(),
+        }
+    }
+}
+
+impl CsvImportForm {
+    /// Record a field; `false` when the import does not read one of that name.
+    fn set(&mut self, name: &str, text: String) -> bool {
+        match name {
+            "label" => self.label = text,
+            // Accepted and ignored, as it always was in effect: the map it
+            // keyed was built and then dropped.
+            "id_column" => {}
+            "delimiter" => {
+                if let Some(&ch) = text.as_bytes().first() {
+                    self.delimiter = ch;
+                }
+            }
+            "graph" => self.graph = text,
+            "import_mode" => self.import_mode = text,
+            "source_label" => self.spec.source_label = text,
+            "source_key_col" => self.spec.source_key_col = text,
+            "target_label" => self.spec.target_label = text,
+            "target_key_col" => self.spec.target_key_col = text,
+            "edge_type" => self.spec.edge_type = text,
+            "source_key_prop" => self.spec.source_key_prop = text,
+            "target_key_prop" => self.spec.target_key_prop = text,
+            "strict" => self.strict = parse_bool_field(&text),
+            "batch_size" => self.batch_size = text,
+            _ => return false,
+        }
+        true
+    }
+
+    /// The mode and batch size to import with, or why the form cannot be.
+    // `Response` as the error, as in `parse_import_mode` and `validate`, which
+    // this passes on.
+    #[allow(clippy::result_large_err)]
+    fn check(
+        &self,
+        subject: &Option<Extension<Subject>>,
+    ) -> Result<(ImportMode, usize), axum::response::Response> {
+        if let Some(refusal) = refuse_import_graph(subject, &self.graph) {
+            return Err(refusal);
+        }
+        let mode = parse_import_mode(&self.import_mode)?;
+        match mode {
+            ImportMode::Node if self.label.is_empty() => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "Missing 'label' field" })),
+                )
+                    .into_response());
+            }
+            ImportMode::Edge => self.spec.validate()?,
+            _ => {}
+        }
+        let batch = match self.batch_size.trim() {
+            "" => DEFAULT_IMPORT_BATCH_ROWS,
+            s => match s.parse::<usize>() {
+                Ok(n) if n > 0 => n,
+                _ => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": format!("batch_size must be a positive integer, got {s:?}")
+                        })),
+                    )
+                        .into_response())
+                }
+            },
+        };
+        Ok((mode, batch))
+    }
+}
+
+/// What an import has written, so a refusal after the first batch can take it
+/// back out.
+#[derive(Default)]
+struct ImportWrites {
+    nodes: Vec<crate::graph::NodeId>,
+    edges: Vec<crate::graph::EdgeId>,
+}
+
+/// Delete what an import wrote before it was refused (#336).
+///
+/// A CSV upload is applied a batch at a time, so a ragged row, a quota breach or
+/// a late form field can be found after earlier batches are in the store. The
+/// import was whole-file-or-nothing when the file was read into memory first
+/// (#1105, #1483), and a caller that retries a refused file relies on that, so
+/// the batches already written are removed. Readers could see them in between;
+/// what a refused import cannot do is leave them behind.
+async fn undo_import(state: &AppState, graph: &str, writes: ImportWrites) {
+    if writes.nodes.is_empty() && writes.edges.is_empty() {
+        return;
+    }
+    state
+        .mutate(graph, |store| {
+            for id in writes.edges.into_iter().rev() {
+                let _ = store.delete_edge(id);
+            }
+            for id in writes.nodes.into_iter().rev() {
+                let _ = store.delete_node(graph, id);
+            }
+        })
+        .await;
+}
+
+/// An edge import's per-file state, carried across batches.
+struct CsvEdgeState {
+    src_idx: usize,
+    tgt_idx: usize,
+    endpoints: EdgeEndpoints,
+    stats: EdgeImportStats,
+    /// A strict import has met a bad endpoint: nothing more is written, and the
+    /// rest of the file is only read so the refusal can count all of it.
+    refused: bool,
+}
+
+/// One CSV upload being applied, batch by batch.
+struct CsvImport<'a> {
+    state: &'a AppState,
+    form: &'a CsvImportForm,
+    mode: ImportMode,
+    batch: usize,
+    headers: Option<Vec<String>>,
+    edge: Option<CsvEdgeState>,
+    processed: usize,
+    batches: usize,
+    writes: ImportWrites,
+}
+
+/// Where a CSV import reads its file from.
+enum CsvSource<'r, 'f> {
+    /// The upload itself, as it arrives: every field the import reads came
+    /// before the file.
+    Field(&'r mut axum::extract::multipart::Field<'f>),
+    /// The copy [`spool_csv`] made of it, because the form was not complete
+    /// when the file arrived.
+    Spool(tokio::fs::File),
+}
+
+impl CsvSource<'_, '_> {
+    async fn next_chunk(&mut self) -> Result<Option<bytes::Bytes>, axum::response::Response> {
+        match self {
+            CsvSource::Field(field) => field
+                .chunk()
+                .await
+                .map_err(|e| multipart_refusal("Failed to read file", e)),
+            CsvSource::Spool(file) => {
+                use tokio::io::AsyncReadExt;
+                let mut buf = vec![0u8; 64 * 1024];
+                let n = file.read(&mut buf).await.map_err(spool_error)?;
+                buf.truncate(n);
+                Ok((n > 0).then(|| bytes::Bytes::from(buf)))
+            }
+        }
+    }
+}
+
+fn spool_error(e: std::io::Error) -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": format!("could not spool the upload to disk: {e}") })),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every spool file this thread created, so a test can check each was removed.
+    static SPOOLED: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Copy the `file` field to a temporary file, chunk by chunk (#336).
+///
+/// For a form whose fields follow the file -- which is the order the
+/// TypeScript SDK has always sent -- the file cannot be parsed as it arrives,
+/// since its label or delimiter is not known yet. It is copied to disk and
+/// imported once the form has ended, so memory stays bounded either way; the
+/// body limit bounds the copy. The file is removed when the returned handle is
+/// dropped, whatever the outcome.
+async fn spool_csv(
+    field: &mut axum::extract::multipart::Field<'_>,
+) -> Result<tempfile::NamedTempFile, axum::response::Response> {
+    use tokio::io::AsyncWriteExt;
+    let spool = tempfile::Builder::new()
+        .prefix("samyama-csv-import-")
+        .tempfile()
+        .map_err(spool_error)?;
+    #[cfg(test)]
+    SPOOLED.with(|s| s.borrow_mut().push(spool.path().to_path_buf()));
+    let mut out = tokio::fs::File::from_std(spool.reopen().map_err(spool_error)?);
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|e| multipart_refusal("Failed to read file", e))?
+    {
+        out.write_all(&chunk).await.map_err(spool_error)?;
+    }
+    out.flush().await.map_err(spool_error)?;
+    Ok(spool)
+}
+
+/// What the `file` field of a CSV import became.
+enum CsvFile {
+    /// Imported as it arrived, with the form as it stood then. Boxed: it
+    /// holds a response and a form, and the spool is a handle.
+    Imported(Box<(CsvImported, CsvImportForm)>),
+    /// Copied to disk, to import once the rest of the form has arrived.
+    Spooled(tempfile::NamedTempFile),
+}
+
+/// A CSV import that has been written, and what it wrote.
+struct CsvImported {
+    graph: String,
+    writes: ImportWrites,
+    response: axum::response::Response,
+}
+
+impl<'a> CsvImport<'a> {
+    /// Read the file from `source` into the store. On a refusal whatever was
+    /// already written has been taken back out.
+    async fn run(
+        state: &'a AppState,
+        form: &'a CsvImportForm,
+        mode: ImportMode,
+        batch: usize,
+        source: CsvSource<'_, '_>,
+    ) -> Result<CsvImported, axum::response::Response> {
+        let mut import = CsvImport {
+            state,
+            form,
+            mode,
+            batch,
+            headers: None,
+            edge: None,
+            processed: 0,
+            batches: 0,
+            writes: ImportWrites::default(),
+        };
+        let outcome = match import.read(source).await {
+            // A strict edge import that met a bad endpoint read to the end
+            // only to count the file; it is still a refusal.
+            Ok(()) if import.edge.as_ref().is_some_and(|e| e.refused) => Err(import.finish()),
+            Ok(()) => Ok(import.finish()),
+            Err(r) => Err(r),
+        };
+        match outcome {
+            Ok(response) => Ok(CsvImported {
+                graph: form.graph.clone(),
+                writes: import.writes,
+                response,
+            }),
+            Err(r) => {
+                undo_import(state, &form.graph, import.writes).await;
+                Err(r)
+            }
+        }
+    }
+
+    async fn read(
+        &mut self,
+        mut source: CsvSource<'_, '_>,
+    ) -> Result<(), axum::response::Response> {
+        // A parse error is answered as the whole-file reader answered it.
+        let parse_error = |e: String| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e, "nodes_created": 0 })),
+            )
+                .into_response()
+        };
+        let mut reader = CsvChunkReader::new(self.form.delimiter);
+        let mut pending: Vec<csv::StringRecord> = Vec::new();
+        while let Some(chunk) = source.next_chunk().await? {
+            reader.feed(&chunk, &mut pending).map_err(parse_error)?;
+            self.flush(&reader, &mut pending, false).await?;
+        }
+        reader.feed(&[], &mut pending).map_err(parse_error)?;
+        self.flush(&reader, &mut pending, true).await
+    }
+
+    /// Apply every full batch in `pending`, and at end of file the rest.
+    async fn flush(
+        &mut self,
+        reader: &CsvChunkReader,
+        pending: &mut Vec<csv::StringRecord>,
+        eof: bool,
+    ) -> Result<(), axum::response::Response> {
+        if self.headers.is_none() {
+            match &reader.headers {
+                Some(h) if !h.is_empty() => self.prepare(h.clone()).await?,
+                _ if eof => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "Empty CSV file" })),
+                    )
+                        .into_response())
+                }
+                _ => return Ok(()),
+            }
+        }
+        while pending.len() >= self.batch || (eof && !pending.is_empty()) {
+            let n = pending.len().min(self.batch);
+            let rows: Vec<csv::StringRecord> = pending.drain(..n).collect();
+            self.apply(rows).await?;
+        }
+        Ok(())
+    }
+
+    /// Take the header; for an edge import, find its key columns and index the
+    /// endpoints once for the whole file.
+    async fn prepare(&mut self, headers: Vec<String>) -> Result<(), axum::response::Response> {
+        if self.mode == ImportMode::Edge {
+            let spec = &self.form.spec;
+            let col = |name: &str| headers.iter().position(|h| h == name.trim());
+            let (Some(src_idx), Some(tgt_idx)) =
+                (col(&spec.source_key_col), col(&spec.target_key_col))
+            else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!(
+                            "the CSV header {:?} must name both source_key_col '{}' and \
+                             target_key_col '{}'",
+                            headers, spec.source_key_col, spec.target_key_col
+                        ),
+                    })),
+                )
+                    .into_response());
+            };
+            let endpoints = EdgeEndpoints::new(&*self.state.store.read().await, spec);
+            self.edge = Some(CsvEdgeState {
+                src_idx,
+                tgt_idx,
+                endpoints,
+                stats: EdgeImportStats::default(),
+                refused: false,
+            });
+        }
+        self.headers = Some(headers);
+        Ok(())
+    }
+
+    async fn apply(
+        &mut self,
+        rows: Vec<csv::StringRecord>,
+    ) -> Result<(), axum::response::Response> {
+        let graph = self.form.graph.as_str();
+        let headers = self.headers.as_deref().unwrap_or_default();
+        self.batches += 1;
+        self.processed += rows.len();
+
+        if let Some(edge) = self.edge.as_mut() {
+            // Before resolution, and counting every row, as when the file was
+            // checked whole: the quota answer does not depend on the graph.
+            if !edge.refused {
+                if let Some(e) = self.state.quota_refuses(graph, 0, rows.len() as u64) {
+                    return Err((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(json!({ "error": e, "created": 0 })),
+                    )
+                        .into_response());
+                }
+            }
+            let (src_idx, tgt_idx) = (edge.src_idx, edge.tgt_idx);
+            let key = |r: &csv::StringRecord, i: usize| {
+                r.get(i)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            let rows: Vec<EdgeRow> = rows
+                .iter()
+                .map(|r| EdgeRow {
+                    source: key(r, src_idx),
+                    target: key(r, tgt_idx),
+                    props: headers
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != src_idx && *i != tgt_idx)
+                        .filter_map(|(i, h)| {
+                            r.get(i).and_then(csv_cell_value).map(|v| (h.clone(), v))
+                        })
+                        .collect(),
+                })
+                .collect();
+            let first = edge.stats.processed + 1;
+            let resolved = edge
+                .endpoints
+                .resolve(&self.form.spec, rows, first, &mut edge.stats);
+            if self.form.strict && edge.stats.skipped > 0 {
+                edge.refused = true;
+            }
+            if !edge.refused {
+                let (spec, stats, created) =
+                    (&self.form.spec, &mut edge.stats, &mut self.writes.edges);
+                self.state
+                    .mutate(graph, |store| {
+                        write_edges(store, spec, resolved, stats, created)
+                    })
+                    .await;
+            }
+            return Ok(());
+        }
+
+        // The quota is asked per batch, with the rows of the batches before
+        // this one already counted as used; a breach takes those back out
+        // (#1483).
+        if let Some(e) = self.state.quota_refuses(graph, rows.len() as u64, 0) {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": e, "nodes_created": 0 })),
+            )
+                .into_response());
+        }
+        let (label, created) = (self.form.label.as_str(), &mut self.writes.nodes);
+        self.state
+            .mutate(graph, |store_guard| {
+                for record in &rows {
+                    let node_id = store_guard.create_node(label);
+                    created.push(node_id);
+
+                    // Collected first, then written through `set_node_property`
+                    // (#1505). Setting them on the `&mut Node` from `get_node_mut`
+                    // maintains nothing: the full-text index is updated from
+                    // `apply_property_set_readback`, which only the setter runs, so
+                    // a corpus imported here was searchable by `MATCH` and returned
+                    // nothing from `db.index.fulltext.queryNodes` — no error, no
+                    // warning. The two-step exists because `get_node_mut` borrows
+                    // the store mutably and `set_node_property` needs it again.
+                    let props: Vec<(String, PropertyValue)> = headers
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, header)| {
+                            record
+                                .get(i)
+                                .and_then(csv_cell_value)
+                                .map(|v| (header.to_string(), v))
+                        })
+                        .collect();
+                    for (k, v) in props {
+                        let _ = store_guard.set_node_property(graph, node_id, k, v);
+                    }
+                }
+            })
+            .await;
+        Ok(())
+    }
+
+    /// The response for a file read to its end.
+    fn finish(&mut self) -> axum::response::Response {
+        let form = self.form;
+        if let Some(edge) = self.edge.as_mut() {
+            let mut stats = std::mem::take(&mut edge.stats);
+            stats.batches = Some(self.batches);
+            let outcome = if edge.refused {
+                // What the earlier batches wrote is about to be removed.
+                stats.created = 0;
+                Err(stats)
+            } else {
+                Ok(stats)
+            };
+            return edge_import_response(&form.graph, &form.spec, form.strict, outcome);
+        }
+        Json(json!({
+            "status": "ok",
+            "import_mode": "node",
+            "nodes_created": self.writes.nodes.len(),
+            "processed": self.processed,
+            "batches": self.batches,
+            "label": form.label,
+            "graph": form.graph,
+            "columns": self.headers,
+        }))
+        .into_response()
+    }
+}
+
 /// Handler for CSV file upload and import
 ///
 /// `import_mode=node` (the default) creates one `label` node per row.
@@ -1804,262 +2504,124 @@ fn parse_bool_field(s: &str) -> bool {
 /// `source_label` node whose `source_key_col` property (or `source_key_prop`,
 /// if given) equals that column's value to the `target_label` node matched the
 /// same way; the remaining columns become the relationship's properties (#336).
+///
+/// The file is parsed and written `batch_size` rows (default 5000) at a time,
+/// so an upload is not held in memory whole (#336). When every field it needs
+/// came before `file`, it is parsed as it arrives; otherwise it is copied to a
+/// temporary file and imported from there once the form has ended, so the
+/// fields may come in any order.
 pub async fn import_csv_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let mut csv_data: Option<String> = None;
-    let mut label = String::new();
-    let mut id_column: Option<String> = None;
-    let mut delimiter = b',';
-    let mut graph = "default".to_string();
-    let mut import_mode = String::new();
-    let mut spec = EdgeImportSpec::default();
-    let mut strict = true;
+    let mut form = CsvImportForm::default();
+    let mut file: Option<CsvFile> = None;
+    let mut second_file = false;
+    // The first field read after a file that was already imported.
+    let mut late: Option<String> = None;
 
-    loop {
-        let field_result: Result<Option<axum::extract::multipart::Field<'_>>, _> =
-            multipart.next_field().await;
-        match field_result {
-            Ok(Some(field)) => {
-                let name = field.name().unwrap_or("").to_string();
-                if name == "file" {
-                    match field.text().await {
-                        Ok(text) => csv_data = Some(text),
-                        Err(e) => {
-                            return (
-                                axum::http::StatusCode::BAD_REQUEST,
-                                Json(json!({ "error": format!("Failed to read file: {}", e) })),
-                            )
-                                .into_response()
-                        }
-                    }
-                    continue;
-                }
-                let Ok(text) = field.text().await else {
-                    continue;
-                };
-                match name.as_str() {
-                    "label" => label = text,
-                    "id_column" => id_column = Some(text),
-                    "delimiter" => {
-                        if let Some(&ch) = text.as_bytes().first() {
-                            delimiter = ch;
-                        }
-                    }
-                    "graph" => graph = text,
-                    "import_mode" => import_mode = text,
-                    "source_label" => spec.source_label = text,
-                    "source_key_col" => spec.source_key_col = text,
-                    "target_label" => spec.target_label = text,
-                    "target_key_col" => spec.target_key_col = text,
-                    "edge_type" => spec.edge_type = text,
-                    "source_key_prop" => spec.source_key_prop = text,
-                    "target_key_prop" => spec.target_key_prop = text,
-                    "strict" => strict = parse_bool_field(&text),
-                    _ => {}
-                }
+    let refusal = loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break None,
+            Err(e) => break Some(multipart_refusal("Failed to read multipart request", e)),
+        };
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" {
+            if file.is_some() {
+                second_file = true;
+                continue;
             }
-            Ok(None) => break,
-            Err(_) => break,
+            file = Some(match form.check(&subject) {
+                // A refused import has already taken back what it wrote.
+                Ok((mode, batch)) => {
+                    let source = CsvSource::Field(&mut field);
+                    match CsvImport::run(&state, &form, mode, batch, source).await {
+                        Ok(done) => CsvFile::Imported(Box::new((done, form.clone()))),
+                        Err(r) => return r,
+                    }
+                }
+                // The field the form lacks may yet arrive.
+                Err(_) => match spool_csv(&mut field).await {
+                    Ok(spool) => CsvFile::Spooled(spool),
+                    Err(r) => return r,
+                },
+            });
+            continue;
         }
-    }
-
-    if let Some(refusal) = refuse_import_graph(&subject, &graph) {
-        return refusal;
-    }
-    let mode = match parse_import_mode(&import_mode) {
-        Ok(m) => m,
-        Err(r) => return r,
+        let text = match field.text().await {
+            Ok(text) => text,
+            Err(e) => {
+                break Some(multipart_refusal(
+                    &format!("Failed to read field '{name}'"),
+                    e,
+                ))
+            }
+        };
+        if form.set(&name, text) && matches!(file, Some(CsvFile::Imported(..))) {
+            late.get_or_insert(name);
+        }
     };
 
-    let csv_text = match csv_data {
-        Some(data) => data,
-        None => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
+    let refusal = refusal.or_else(|| {
+        let error = if second_file {
+            "more than one 'file' field; send one file per import".to_string()
+        } else {
+            // The file was imported with the fields sent before it, and a field
+            // after it would have read it differently -- a delimiter or graph
+            // sent late. Rare: it needs the required fields before the file and
+            // an optional one after it. Refused, and the import taken back out,
+            // rather than kept under settings the caller did not ask for.
+            match (&file, &late) {
+                (Some(CsvFile::Imported(done)), Some(name)) if done.1 != form => format!(
+                    "'{name}' was sent after 'file' had been imported with the fields \
+                     before it, and would change how it is read; send it before 'file'"
+                ),
+                _ => return None,
+            }
+        };
+        Some((StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response())
+    });
+    match (refusal, file) {
+        (Some(refusal), Some(CsvFile::Imported(done))) => {
+            let (done, _) = *done;
+            undo_import(&state, &done.graph, done.writes).await;
+            refusal
+        }
+        // A spool is removed as it goes out of scope, here and below.
+        (Some(refusal), _) => refusal,
+        (None, Some(CsvFile::Imported(done))) => done.0.response,
+        (None, Some(CsvFile::Spooled(spool))) => {
+            let (mode, batch) = match form.check(&subject) {
+                Ok(checked) => checked,
+                Err(r) => return r,
+            };
+            let source = match tokio::fs::File::open(spool.path()).await {
+                Ok(f) => CsvSource::Spool(f),
+                Err(e) => return spool_error(e),
+            };
+            match CsvImport::run(&state, &form, mode, batch, source).await {
+                Ok(done) => done.response,
+                Err(r) => r,
+            }
+        }
+        (None, None) => {
+            // The graph and mode refusals come before the missing file, as
+            // they always have; a missing label does not.
+            if let Some(r) = refuse_import_graph(&subject, &form.graph) {
+                return r;
+            }
+            if let Err(r) = parse_import_mode(&form.import_mode) {
+                return r;
+            }
+            (
+                StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "No file field in multipart request" })),
             )
                 .into_response()
         }
-    };
-
-    match mode {
-        ImportMode::Node if label.is_empty() => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "Missing 'label' field" })),
-            )
-                .into_response();
-        }
-        ImportMode::Edge => {
-            if let Err(r) = spec.validate() {
-                return r;
-            }
-        }
-        _ => {}
     }
-
-    // RFC 4180, not `split(delimiter)`. The hand-rolled version had no quote
-    // handling and no record-vs-line distinction, so `"Doe, Jane",42` parsed as
-    // three fields and shifted every column after it, and a quoted field holding a
-    // newline became two records -- silently, with a plausible `nodes_created`
-    // count and `"status": "ok"` (#1105).
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(delimiter)
-        .has_headers(true)
-        // A row with the wrong number of fields is an error, not a node with some
-        // of its properties missing.
-        .flexible(false)
-        .from_reader(csv_text.as_bytes());
-
-    let headers: Vec<String> = match reader.headers() {
-        Ok(h) if !h.is_empty() => h.iter().map(|h| h.trim().to_string()).collect(),
-        Ok(_) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "Empty CSV file" })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(json!({ "error": format!("Unreadable CSV header: {e}") })),
-            )
-                .into_response()
-        }
-    };
-    let id_col_idx = id_column
-        .as_ref()
-        .and_then(|id_col| headers.iter().position(|h| h == id_col.as_str()));
-
-    // Read and validate every record before touching the store, so a ragged row on
-    // line 900 does not leave 899 nodes behind and a 400 in front of them.
-    let mut records: Vec<csv::StringRecord> = Vec::new();
-    for record in reader.records() {
-        match record {
-            Ok(r) => records.push(r),
-            Err(e) => {
-                return (
-                    axum::http::StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": format!("{e}"), "nodes_created": 0 })),
-                )
-                    .into_response()
-            }
-        }
-    }
-
-    if mode == ImportMode::Edge {
-        let col = |name: &str| headers.iter().position(|h| h == name.trim());
-        let (Some(src_idx), Some(tgt_idx)) = (col(&spec.source_key_col), col(&spec.target_key_col))
-        else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!(
-                        "the CSV header {:?} must name both source_key_col '{}' and \
-                         target_key_col '{}'",
-                        headers, spec.source_key_col, spec.target_key_col
-                    ),
-                })),
-            )
-                .into_response();
-        };
-        if let Some(e) = state.quota_refuses(&graph, 0, records.len() as u64) {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({ "error": e, "created": 0 })),
-            )
-                .into_response();
-        }
-        let key = |r: &csv::StringRecord, i: usize| {
-            r.get(i)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        };
-        let rows: Vec<EdgeRow> = records
-            .iter()
-            .map(|r| EdgeRow {
-                source: key(r, src_idx),
-                target: key(r, tgt_idx),
-                props: headers
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != src_idx && *i != tgt_idx)
-                    .filter_map(|(i, h)| r.get(i).and_then(csv_cell_value).map(|v| (h.clone(), v)))
-                    .collect(),
-            })
-            .collect();
-        let outcome = state
-            .mutate(&graph, |store| import_edges(store, &spec, rows, strict))
-            .await;
-        return edge_import_response(&graph, &spec, strict, outcome);
-    }
-
-    // Whole file or none, the same stance the ragged-row check above takes. A
-    // bulk load used to be admitted into memory and refused at persist time,
-    // which took the process read-only rather than returning an error (#1483).
-    if let Some(e) = state.quota_refuses(&graph, records.len() as u64, 0) {
-        return (
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({ "error": e, "nodes_created": 0 })),
-        )
-            .into_response();
-    }
-
-    let mut count = 0usize;
-    state
-        .mutate(&graph, |store_guard| {
-            let mut id_map: HashMap<String, crate::graph::NodeId> = HashMap::new();
-
-            for record in &records {
-                let node_id = store_guard.create_node(label.as_str());
-
-                if let Some(idx) = id_col_idx {
-                    if let Some(val) = record.get(idx) {
-                        id_map.insert(val.trim().to_string(), node_id);
-                    }
-                }
-
-                // Collected first, then written through `set_node_property`
-                // (#1505). Setting them on the `&mut Node` from `get_node_mut`
-                // maintains nothing: the full-text index is updated from
-                // `apply_property_set_readback`, which only the setter runs, so
-                // a corpus imported here was searchable by `MATCH` and returned
-                // nothing from `db.index.fulltext.queryNodes` — no error, no
-                // warning. The two-step exists because `get_node_mut` borrows
-                // the store mutably and `set_node_property` needs it again.
-                let props: Vec<(String, PropertyValue)> = headers
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, header)| {
-                        record
-                            .get(i)
-                            .and_then(csv_cell_value)
-                            .map(|v| (header.to_string(), v))
-                    })
-                    .collect();
-                for (k, v) in props {
-                    let _ = store_guard.set_node_property(&graph, node_id, k, v);
-                }
-                count += 1;
-            }
-            let _ = id_map;
-        })
-        .await;
-
-    Json(json!({
-        "status": "ok",
-        "import_mode": "node",
-        "nodes_created": count,
-        "label": label,
-        "graph": graph,
-        "columns": headers,
-    }))
-    .into_response()
 }
 
 /// Request for JSON import

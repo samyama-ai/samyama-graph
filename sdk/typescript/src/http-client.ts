@@ -227,11 +227,13 @@ export class HttpTransport {
     opts?: RequestOptions,
   ): Promise<CsvImportResult> {
     const formData = new FormData();
-    const blob = new Blob([csvContent], { type: "text/csv" });
-    formData.append("file", blob, "import.csv");
+    // The fields before the file: the server then parses the file as it
+    // arrives instead of copying it to disk first (#336).
     formData.append("label", label);
     if (options?.idColumn) formData.append("id_column", options.idColumn);
     if (options?.delimiter) formData.append("delimiter", options.delimiter);
+    const blob = new Blob([csvContent], { type: "text/csv" });
+    formData.append("file", blob, "import.csv");
 
     return this.json<CsvImportResult>(
       "/api/import/csv",

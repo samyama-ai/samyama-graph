@@ -209,6 +209,20 @@ paths:
         Upload a CSV file to create nodes. The first row is treated as column headers
         (property names). Each subsequent row creates one node with the specified label.
         Property types are auto-detected (integer → float → boolean → string).
+
+        The file is written `batch_size` rows at a time and is never held in memory
+        whole. Fields may come in any order. When the ones the import needs are sent
+        before `file`, it is parsed as it arrives; otherwise it is copied to a
+        temporary file on the server and imported once the form has ended. A field
+        sent after a file that was already imported, and which would change how it
+        is read (a `delimiter` or `graph` sent late), is refused with a 400. So is a
+        second `file`. A file refused part way through (a malformed row, the quota,
+        a broken upload) leaves nothing behind: the batches already written are
+        removed.
+
+        The request body may be up to 1 GiB, or what the server was started with
+        (`--import-max-bytes`, `SAMYAMA_IMPORT_MAX_BYTES`); the same limit applies to
+        `/api/import/json` and `/api/import/parquet`.
       requestBody:
         required: true
         content:
@@ -234,6 +248,9 @@ paths:
                 graph:
                   type: string
                   description: "Target graph/tenant name (default: 'default')"
+                batch_size:
+                  type: integer
+                  description: "Rows written per batch (default: 5000)"
       responses:
         '200':
           description: Import successful
@@ -242,7 +259,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/CsvImportResponse'
         '400':
-          description: Import error (missing fields, parse error)
+          description: |
+            Import error (missing fields, a conflicting field sent after `file`, parse error, or a
+            multipart body that could not be read, with the reason)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: The request body is larger than the server's import limit
           content:
             application/json:
               schema:
@@ -1251,6 +1276,12 @@ components:
             - ok
         nodes_created:
           type: integer
+        processed:
+          type: integer
+          description: Data rows read from the file
+        batches:
+          type: integer
+          description: How many batches the rows were written in
         label:
           type: string
         columns:

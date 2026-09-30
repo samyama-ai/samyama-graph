@@ -926,6 +926,30 @@ async fn start_server() {
         }
     }
 
+    // Largest body the HTTP import routes accept (#336). `--import-max-bytes`
+    // or `SAMYAMA_IMPORT_MAX_BYTES`; 1 GiB unless set. The routes used to have
+    // axum's 2 MB default, which no bulk import fits in.
+    let import_max_bytes: usize = {
+        let args: Vec<String> = std::env::args().collect();
+        let raw = args
+            .iter()
+            .position(|a| a == "--import-max-bytes")
+            .map(|i| args.get(i + 1).cloned().unwrap_or_default())
+            .or_else(|| std::env::var("SAMYAMA_IMPORT_MAX_BYTES").ok());
+        match raw {
+            None => samyama::http::server::DEFAULT_IMPORT_BODY_LIMIT,
+            // A value that does not parse stops the server rather than falling
+            // back to the default the operator was trying to change.
+            Some(v) => match v.replace('_', "").parse::<usize>() {
+                Ok(n) if n > 0 => n,
+                _ => {
+                    eprintln!("FATAL: --import-max-bytes expects a number of bytes, got {v:?}");
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
+
     // TLS for the HTTP listener (REL-09). Paths, like the credential file:
     // a private key is a secret and belongs in a file with file permissions,
     // not in argv where `ps` shows it to every user on the box.
@@ -1339,6 +1363,7 @@ async fn start_server() {
     tokio::spawn(async move {
         let mut http_server = HttpServer::new(http_store, http_port)
             .with_data_path(http_data_path)
+            .with_import_body_limit(import_max_bytes)
             // The same host as the RESP listener. The HTTP server used to bind
             // 0.0.0.0 unconditionally while RESP defaulted to loopback, so
             // `--host` said one thing and half the server did another (#1328).
