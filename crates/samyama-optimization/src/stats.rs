@@ -529,3 +529,7 @@ fn ln_gamma(x: f64) -> f64 {
         0.5 * (2.0 * PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
     }
 }
+
+#[cfg(test)]
+#[path = "stats_cov_tests.rs"]
+mod cov_tests;

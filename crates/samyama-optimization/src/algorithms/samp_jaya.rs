@@ -137,3 +137,7 @@ fn find_best_worst(population: &[Individual]) -> (usize, usize) {
     }
     (best_idx, worst_idx)
 }
+
+#[cfg(test)]
+#[path = "samp_jaya_cov_tests.rs"]
+mod cov_tests;

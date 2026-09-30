@@ -11,3 +11,7 @@ pub use common::*;
 pub fn init() {
     tracing::info!("Samyama Optimization Engine Initialized");
 }
+
+#[cfg(test)]
+#[path = "lib_cov_tests.rs"]
+mod cov_tests;
