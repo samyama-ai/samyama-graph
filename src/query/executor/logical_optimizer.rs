@@ -650,6 +650,294 @@ mod tests {
         }
     }
 
+    fn scan(var: &str) -> LogicalPlanNode {
+        LogicalPlanNode::LabelScan { variable: var.to_string(), label: None }
+    }
+
+    fn expand(input: LogicalPlanNode, src: &str, tgt: &str, edge_var: Option<&str>) -> LogicalPlanNode {
+        LogicalPlanNode::Expand {
+            input: Box::new(input),
+            source_var: src.to_string(),
+            target_var: tgt.to_string(),
+            edge_var: edge_var.map(|s| s.to_string()),
+            edge_types: vec![EdgeType::new("E")],
+            direction: ExpandDirection::Forward,
+        }
+    }
+
+    fn expand_into(input: LogicalPlanNode, src: &str, tgt: &str) -> LogicalPlanNode {
+        LogicalPlanNode::ExpandInto {
+            input: Box::new(input),
+            source_var: src.to_string(),
+            target_var: tgt.to_string(),
+            edge_types: vec![EdgeType::new("E")],
+            edge_var: None,
+        }
+    }
+
+    fn filter(input: LogicalPlanNode, predicate: Expression) -> LogicalPlanNode {
+        LogicalPlanNode::Filter { input: Box::new(input), predicate }
+    }
+
+    fn prop_eq(var: &str) -> Expression {
+        Expression::Binary {
+            left: Box::new(Expression::Property { variable: var.to_string(), property: "x".to_string() }),
+            op: crate::query::ast::BinaryOp::Eq,
+            right: Box::new(Expression::Literal(PropertyValue::Integer(1))),
+        }
+    }
+
+    /// Parse `MATCH (a), (b) WHERE <pred> RETURN a` and return the predicate.
+    fn where_expr(pred: &str) -> Expression {
+        let q = crate::query::parser::parse_query(&format!("MATCH (a), (b) WHERE {} RETURN a", pred))
+            .unwrap_or_else(|e| panic!("parse {}: {:?}", pred, e));
+        q.where_clause.expect("where clause").predicate
+    }
+
+    fn sorted_vars(expr: &Expression) -> Vec<String> {
+        let mut v: Vec<String> = collect_expression_vars(expr).into_iter().collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn test_filter_over_scan_stays_on_top() {
+        let plan = filter(scan("a"), prop_eq("a"));
+        match push_filters_down(plan) {
+            LogicalPlanNode::Filter { input, .. } => assert!(matches!(*input, LogicalPlanNode::LabelScan { .. })),
+            other => panic!("expected Filter, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_constant_filter_is_not_pushed_below_expand() {
+        // A predicate with no variables must stay where it is.
+        let plan = filter(expand(scan("a"), "a", "b", None), Expression::Literal(PropertyValue::Boolean(true)));
+        match push_filters_down(plan) {
+            LogicalPlanNode::Filter { input, .. } => assert!(matches!(*input, LogicalPlanNode::Expand { .. })),
+            other => panic!("expected Filter on top, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_filter_on_edge_variable_is_not_pushed_below_expand() {
+        let plan = filter(expand(scan("a"), "a", "b", Some("r")), prop_eq("r"));
+        match push_filters_down(plan) {
+            LogicalPlanNode::Filter { input, .. } => match *input {
+                LogicalPlanNode::Expand { edge_var, .. } => assert_eq!(edge_var.as_deref(), Some("r")),
+                other => panic!("expected Expand, got {:?}", other),
+            },
+            other => panic!("expected Filter on top, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_filter_on_source_is_pushed_below_expand_with_edge_var() {
+        let plan = filter(expand(scan("a"), "a", "b", Some("r")), prop_eq("a"));
+        match push_filters_down(plan) {
+            LogicalPlanNode::Expand { input, edge_var, .. } => {
+                assert_eq!(edge_var.as_deref(), Some("r"));
+                assert!(matches!(*input, LogicalPlanNode::Filter { .. }));
+            }
+            other => panic!("expected Expand on top, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_pushdown_recurses_through_expand_into_join_and_cartesian() {
+        // Each child subtree holds Filter(Expand(Scan)) with a pushable predicate.
+        let pushable = || filter(expand(scan("a"), "a", "b", None), prop_eq("a"));
+        let is_pushed = |p: &LogicalPlanNode| matches!(p, LogicalPlanNode::Expand { input, .. } if matches!(**input, LogicalPlanNode::Filter { .. }));
+
+        match push_filters_down(expand_into(pushable(), "a", "b")) {
+            LogicalPlanNode::ExpandInto { input, .. } => assert!(is_pushed(&input)),
+            other => panic!("{:?}", other),
+        }
+        match push_filters_down(LogicalPlanNode::Join { left: Box::new(pushable()), right: Box::new(pushable()), join_keys: vec!["a".into()] }) {
+            LogicalPlanNode::Join { left, right, join_keys } => {
+                assert!(is_pushed(&left) && is_pushed(&right));
+                assert_eq!(join_keys, vec!["a".to_string()]);
+            }
+            other => panic!("{:?}", other),
+        }
+        match push_filters_down(LogicalPlanNode::CartesianProduct { left: Box::new(pushable()), right: Box::new(pushable()) }) {
+            LogicalPlanNode::CartesianProduct { left, right } => assert!(is_pushed(&left) && is_pushed(&right)),
+            other => panic!("{:?}", other),
+        }
+        // Expand over Filter(Expand): the inner expand is optimised too.
+        match push_filters_down(expand(pushable(), "b", "c", None)) {
+            LogicalPlanNode::Expand { input, .. } => assert!(is_pushed(&input)),
+            other => panic!("{:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_insert_expand_into_recurses_through_wrappers() {
+        let convertible = || expand(LogicalPlanNode::CartesianProduct { left: Box::new(scan("a")), right: Box::new(scan("b")) }, "a", "b", None);
+
+        match insert_expand_into(filter(convertible(), prop_eq("a"))) {
+            LogicalPlanNode::Filter { input, .. } => assert!(matches!(*input, LogicalPlanNode::ExpandInto { .. })),
+            other => panic!("{:?}", other),
+        }
+        match insert_expand_into(expand_into(convertible(), "a", "b")) {
+            LogicalPlanNode::ExpandInto { input, .. } => assert!(matches!(*input, LogicalPlanNode::ExpandInto { .. })),
+            other => panic!("{:?}", other),
+        }
+        match insert_expand_into(LogicalPlanNode::Join { left: Box::new(convertible()), right: Box::new(scan("c")), join_keys: vec![] }) {
+            LogicalPlanNode::Join { left, right, .. } => {
+                assert!(matches!(*left, LogicalPlanNode::ExpandInto { .. }));
+                assert!(matches!(*right, LogicalPlanNode::LabelScan { .. }));
+            }
+            other => panic!("{:?}", other),
+        }
+        match insert_expand_into(LogicalPlanNode::CartesianProduct { left: Box::new(scan("c")), right: Box::new(convertible()) }) {
+            LogicalPlanNode::CartesianProduct { right, .. } => assert!(matches!(*right, LogicalPlanNode::ExpandInto { .. })),
+            other => panic!("{:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_trie_join_when_expand_introduces_the_into_target() {
+        // ExpandInto(a -> c) over Expand(b -> c): c is the ExpandInto's target,
+        // so the second constraint is c ∈ N_out(a).
+        let plan = expand_into(expand(expand(scan("a"), "a", "b", None), "b", "c", Some("r")), "a", "c");
+        match merge_cyclic_to_trie_join(plan) {
+            LogicalPlanNode::TrieJoin { target_var, constraints, .. } => {
+                assert_eq!(target_var, "c");
+                assert_eq!(constraints[0].bound_var, "b");
+                assert_eq!(constraints[0].edge_var.as_deref(), Some("r"));
+                assert_eq!(constraints[1].bound_var, "a");
+                assert_eq!(constraints[1].direction, ExpandDirection::Forward);
+            }
+            other => panic!("expected TrieJoin, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_expand_into_on_top_of_trie_join_adds_constraint() {
+        // 4-clique style: a second ExpandInto touching the TrieJoin's target
+        // becomes a third constraint on the same TrieJoin.
+        let triangle = expand_into(expand(expand(scan("a"), "a", "b", None), "b", "c", None), "c", "a");
+        let as_source = expand_into(triangle.clone(), "c", "d");
+        match merge_cyclic_to_trie_join(as_source) {
+            LogicalPlanNode::TrieJoin { target_var, constraints, .. } => {
+                assert_eq!(target_var, "c");
+                assert_eq!(constraints.len(), 3);
+                assert_eq!(constraints[2].bound_var, "d");
+                assert_eq!(constraints[2].direction, ExpandDirection::Reverse);
+            }
+            other => panic!("expected TrieJoin, got {:?}", other),
+        }
+        let as_target = expand_into(triangle, "d", "c");
+        match merge_cyclic_to_trie_join(as_target) {
+            LogicalPlanNode::TrieJoin { constraints, .. } => {
+                assert_eq!(constraints.len(), 3);
+                assert_eq!(constraints[2].bound_var, "d");
+                assert_eq!(constraints[2].direction, ExpandDirection::Forward);
+            }
+            other => panic!("expected TrieJoin, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_expand_into_not_touching_new_variable_is_kept() {
+        // ExpandInto(x -> y) over Expand(a -> b): b is neither endpoint.
+        let plan = expand_into(expand(scan("a"), "a", "b", None), "x", "y");
+        match merge_cyclic_to_trie_join(plan) {
+            LogicalPlanNode::ExpandInto { source_var, input, .. } => {
+                assert_eq!(source_var, "x");
+                assert!(matches!(*input, LogicalPlanNode::Expand { .. }));
+            }
+            other => panic!("expected ExpandInto, got {:?}", other),
+        }
+        // Same for a TrieJoin whose target is not an endpoint.
+        let tj = LogicalPlanNode::TrieJoin { input: Box::new(scan("a")), target_var: "t".into(), constraints: vec![] };
+        match merge_cyclic_to_trie_join(expand_into(tj, "x", "y")) {
+            LogicalPlanNode::ExpandInto { input, .. } => assert!(matches!(*input, LogicalPlanNode::TrieJoin { .. })),
+            other => panic!("expected ExpandInto, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_trie_join_merge_recurses_through_wrappers() {
+        let triangle = || expand_into(expand(expand(scan("a"), "a", "b", None), "b", "c", None), "c", "a");
+        let is_tj = |p: &LogicalPlanNode| matches!(p, LogicalPlanNode::TrieJoin { .. });
+
+        match merge_cyclic_to_trie_join(filter(triangle(), prop_eq("a"))) {
+            LogicalPlanNode::Filter { input, .. } => assert!(is_tj(&input)),
+            other => panic!("{:?}", other),
+        }
+        match merge_cyclic_to_trie_join(LogicalPlanNode::Join { left: Box::new(triangle()), right: Box::new(triangle()), join_keys: vec![] }) {
+            LogicalPlanNode::Join { left, right, .. } => assert!(is_tj(&left) && is_tj(&right)),
+            other => panic!("{:?}", other),
+        }
+        match merge_cyclic_to_trie_join(LogicalPlanNode::CartesianProduct { left: Box::new(triangle()), right: Box::new(scan("z")) }) {
+            LogicalPlanNode::CartesianProduct { left, .. } => assert!(is_tj(&left)),
+            other => panic!("{:?}", other),
+        }
+        let outer = LogicalPlanNode::TrieJoin { input: Box::new(triangle()), target_var: "q".into(), constraints: vec![] };
+        match merge_cyclic_to_trie_join(outer) {
+            LogicalPlanNode::TrieJoin { input, target_var, .. } => {
+                assert_eq!(target_var, "q");
+                assert!(is_tj(&input));
+            }
+            other => panic!("{:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_optimize_full_triangle_pipeline() {
+        // Scan(a) -> Expand(a->b) -> Expand(b->c) -> Expand(c->a) where a is bound:
+        // insert_expand_into turns the last hop into ExpandInto, then the
+        // cyclic merge produces a TrieJoin solving for c.
+        let plan = expand(expand(expand(scan("a"), "a", "b", None), "b", "c", None), "c", "a", None);
+        match optimize(plan) {
+            LogicalPlanNode::TrieJoin { target_var, constraints, .. } => {
+                assert_eq!(target_var, "c");
+                assert_eq!(constraints.len(), 2);
+            }
+            other => panic!("expected TrieJoin, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_collect_vars_unary_function_case_index() {
+        assert_eq!(sorted_vars(&where_expr("NOT a.x")), vec!["a"]);
+        assert_eq!(sorted_vars(&where_expr("toUpper(a.name) = b.name")), vec!["a", "b"]);
+        assert_eq!(
+            sorted_vars(&where_expr("CASE a.x WHEN b.y THEN a ELSE b END = 1")),
+            vec!["a", "b"]
+        );
+        assert_eq!(sorted_vars(&where_expr("CASE WHEN a.x > 1 THEN 1 END = 1")), vec!["a"]);
+        assert_eq!(sorted_vars(&where_expr("a.list[b.i] = 1")), vec!["a", "b"]);
+        assert!(sorted_vars(&where_expr("1 = 1")).is_empty());
+    }
+
+    #[test]
+    fn test_collect_vars_exists_subquery_includes_pattern_and_where() {
+        let vars = sorted_vars(&where_expr("EXISTS { MATCH (a)-[r:KNOWS]->(c) WHERE c.age > b.age }"));
+        assert_eq!(vars, vec!["a", "b", "c", "r"]);
+    }
+
+    #[test]
+    fn test_collect_vars_list_comprehension_predicate_function_reduce() {
+        let lc = sorted_vars(&where_expr("size([x IN a.list WHERE x > b.min | x * 2]) > 0"));
+        assert!(lc.contains(&"a".to_string()) && lc.contains(&"b".to_string()), "{:?}", lc);
+        let lc_no_filter = sorted_vars(&where_expr("size([x IN a.list | x]) > 0"));
+        assert!(lc_no_filter.contains(&"a".to_string()), "{:?}", lc_no_filter);
+        let pf = sorted_vars(&where_expr("any(x IN a.list WHERE x = b.v)"));
+        assert!(pf.contains(&"a".to_string()) && pf.contains(&"b".to_string()), "{:?}", pf);
+        let rd = sorted_vars(&where_expr("reduce(acc = b.start, x IN a.list | acc + x) > 0"));
+        assert!(rd.contains(&"a".to_string()) && rd.contains(&"b".to_string()), "{:?}", rd);
+    }
+
+    #[test]
+    fn test_exists_filter_is_not_pushed_below_the_expand_that_binds_it() {
+        // The subquery references `b`, which the Expand introduces.
+        let plan = filter(expand(scan("a"), "a", "b", None), where_expr("EXISTS { MATCH (b)-->(c) }"));
+        assert!(matches!(push_filters_down(plan), LogicalPlanNode::Filter { .. }));
+    }
+
     #[test]
     fn test_trie_join_bound_variables() {
         use super::super::logical_plan::TrieJoinConstraint;

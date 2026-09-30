@@ -1095,6 +1095,443 @@ mod tests {
         assert!(detect_with_binding(&q).is_none());
     }
 
+    fn q(s: &str) -> Query {
+        parse_query(s).unwrap_or_else(|e| panic!("parse {}: {:?}", s, e))
+    }
+
+    fn d(s: &str) -> Option<AdjacencyAggPattern> {
+        detect(&q(s), &GraphStore::new())
+    }
+
+    fn dw(s: &str) -> Option<AdjacencyAggWithBindingPattern> {
+        detect_with_binding(&q(s))
+    }
+
+    fn dae(s: &str) -> Option<AggregateThenExpandPattern> {
+        detect_aggregate_then_expand(&q(s), &GraphStore::new())
+    }
+
+    fn truth() -> WhereClauseAlias {
+        crate::query::ast::WhereClause {
+            predicate: Expression::Literal(crate::graph::PropertyValue::Boolean(true)),
+        }
+    }
+    type WhereClauseAlias = crate::query::ast::WhereClause;
+
+    const P1: &str = "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) RETURN j.title, count(a) AS n";
+
+    // ——— Phase 1 detector: remaining rejection paths ———
+
+    #[test]
+    fn phase1_detects_variable_group_by_and_generated_alias() {
+        let p = d("MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) RETURN j, count(a)").unwrap();
+        assert_eq!(p.group_by_items, vec![("j".to_string(), None)]);
+        assert_eq!(p.count_alias, "count_1");
+        assert!(p.prefilter.is_none());
+    }
+
+    #[test]
+    fn phase1_counting_target_groups_on_start() {
+        // (j)<-(a) with count(a): grouped = j (start), Incoming => Reverse.
+        let p = d("MATCH (j:Journal)<-[:PUBLISHED_IN]-(a) RETURN j.title, count(a) AS n").unwrap();
+        assert_eq!(p.neighbor_label, None);
+        assert_eq!(p.direction, ExpandDirection::Reverse);
+        // (a)<-(j) with count(a): grouped = j (target), Incoming => Forward.
+        let p = d("MATCH (a:Article)<-[:CITES]-(j:Journal) RETURN j.title, count(a) AS n").unwrap();
+        assert_eq!(p.grouped_var, "j");
+        assert_eq!(p.direction, ExpandDirection::Forward);
+    }
+
+    #[test]
+    fn phase1_rejects_query_shapes() {
+        for s in [
+            // two MATCH clauses
+            "MATCH (a:Article)-[:P]->(j:Journal) MATCH (x) RETURN j.title, count(a) AS n",
+            // a WITH split
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH a, j RETURN j.title, count(a) AS n",
+            // OPTIONAL MATCH
+            "OPTIONAL MATCH (a:Article)-[:P]->(j:Journal) RETURN j.title, count(a) AS n",
+            // two paths
+            "MATCH (a:Article)-[:P]->(j:Journal), (x) RETURN j.title, count(a) AS n",
+            // variable length
+            "MATCH (a:Article)-[:P*1..2]->(j:Journal) RETURN j.title, count(a) AS n",
+            // anonymous endpoint
+            "MATCH (a:Article)-[:P]->(:Journal) RETURN count(a) AS n",
+            // undirected
+            "MATCH (a:Article)-[:P]-(j:Journal) RETURN j.title, count(a) AS n",
+            // RETURN DISTINCT
+            "MATCH (a:Article)-[:P]->(j:Journal) RETURN DISTINCT j.title, count(a) AS n",
+            // two counts
+            "MATCH (a:Article)-[:P]->(j:Journal) RETURN j.title, count(a) AS n, count(a) AS m",
+            // count of a property
+            "MATCH (a:Article)-[:P]->(j:Journal) RETURN j.title, count(a.x) AS n",
+            // counting something that is not an endpoint
+            "MATCH (a:Article)-[r:P]->(j:Journal) RETURN j.title, count(r) AS n",
+            // no grouping key
+            "MATCH (a:Article)-[:P]->(j:Journal) RETURN count(a) AS n",
+            // grouped endpoint unlabelled / multi-labelled
+            "MATCH (a:Article)-[:P]->(j) RETURN j.title, count(a) AS n",
+            "MATCH (a:Article)-[:P]->(j:Journal:Venue) RETURN j.title, count(a) AS n",
+            // neighbour multi-labelled
+            "MATCH (a:Article:Paper)-[:P]->(j:Journal) RETURN j.title, count(a) AS n",
+            // property on the counted side
+            "MATCH (a:Article {x: 1})-[:P]->(j:Journal) RETURN j.title, count(a) AS n",
+        ] {
+            assert!(d(s).is_none(), "should reject: {}", s);
+        }
+    }
+
+    #[test]
+    fn phase1_rejects_clause_fields_set_programmatically() {
+        let mut query = q(P1);
+        query.with_clause = q("MATCH (m:M) WITH m LIMIT 1 MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c").with_clause;
+        assert!(detect(&query, &GraphStore::new()).is_none());
+
+        let mut query = q(P1);
+        query.post_with_where_clause = Some(truth());
+        assert!(detect(&query, &GraphStore::new()).is_none());
+
+        let mut query = q(P1);
+        query.unwind_clause = q("UNWIND [1] AS x RETURN x").unwind_clause;
+        assert!(detect(&query, &GraphStore::new()).is_none());
+
+        let mut query = q(P1);
+        query.return_clause = None;
+        assert!(detect(&query, &GraphStore::new()).is_none());
+
+        let mut query = q(P1);
+        if let Expression::Function { args, .. } = &mut query.return_clause.as_mut().unwrap().items[1].expression {
+            args.push(Expression::Variable("a".into()));
+        }
+        assert!(detect(&query, &GraphStore::new()).is_none());
+    }
+
+    #[test]
+    fn phase1_where_must_reference_only_grouped_side() {
+        let p = d("MATCH (a:Article)-[:P]->(j:Journal) WHERE NOT j.hidden AND toUpper(j.title) <> 'X' AND j = j \
+                   RETURN j.title, count(a) AS n")
+            .expect("grouped-only WHERE accepted");
+        assert!(p.prefilter.is_some());
+        assert!(d("MATCH (a:Article)-[:P]->(j:Journal) WHERE CASE WHEN j.x THEN true END \
+                   RETURN j.title, count(a) AS n")
+            .is_none());
+        assert!(d("MATCH (a:Article)-[:P]->(j:Journal) WHERE j.x = $p RETURN j.title, count(a) AS n").is_some());
+    }
+
+    // ——— Phase 3a WITH-bound detector ———
+
+    const W: &str = "MATCH (m:MeSHTerm) WITH m LIMIT 5 MATCH (a:Article)-[:ANNOTATED_WITH]->(m) RETURN m.name, count(a) AS c";
+
+    #[test]
+    fn with_binding_grouped_as_start_and_directions() {
+        let p = dw("MATCH (m:MeSHTerm) WITH m MATCH (m)-[:TAGS]->(a) RETURN m, count(a)").unwrap();
+        assert_eq!(p.core.direction, ExpandDirection::Forward);
+        assert_eq!(p.core.neighbor_label, None);
+        assert_eq!(p.core.group_by_items, vec![("m".to_string(), None)]);
+        assert_eq!(p.core.count_alias, "count_1");
+        assert_eq!(p.grouped_scan_limit, None);
+
+        let p = dw("MATCH (m:MeSHTerm) WITH m MATCH (m:MeSHTerm)<-[:TAGS]-(a) RETURN m.name, count(a) AS c").unwrap();
+        assert_eq!(p.core.direction, ExpandDirection::Reverse);
+
+        let p = dw("MATCH (m:MeSHTerm) WITH m SKIP 2 MATCH (a)<-[:TAGS]-(m) RETURN m.name, count(a) AS c").unwrap();
+        assert_eq!(p.core.direction, ExpandDirection::Forward);
+        assert_eq!(p.grouped_scan_skip, Some(2));
+
+        let p = dw("MATCH (m:MeSHTerm) WITH m AS m MATCH (a)-[:TAGS]->(m) RETURN m.name, count(DISTINCT a) AS c").unwrap();
+        assert!(p.core.count_distinct);
+        assert_eq!(p.core.direction, ExpandDirection::Reverse);
+    }
+
+    #[test]
+    fn with_binding_rejects_shapes() {
+        for s in [
+            // no WITH
+            P1,
+            // two MATCH clauses before the WITH
+            "MATCH (m:MeSHTerm) MATCH (z:Z) WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            // WITH carrying a second item
+            "MATCH (m:MeSHTerm) WITH m, 1 AS k MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            // pre-MATCH optional
+            "OPTIONAL MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            // post-MATCH optional
+            "MATCH (m:MeSHTerm) WITH m OPTIONAL MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            // two pre-MATCH paths
+            "MATCH (m:MeSHTerm), (z) WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            // pre node without label / two labels / properties
+            "MATCH (m) WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            "MATCH (m:A:B) WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm {k: 1}) WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            // WITH DISTINCT / WHERE / ORDER BY / two items / non-variable item
+            "MATCH (m:MeSHTerm) WITH DISTINCT m MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m WHERE m.k = 1 MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m ORDER BY m.k MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm), (z:Z) WITH m, z MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m.k AS m MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            // pre-WITH WHERE the detector cannot vet
+            "MATCH (m:MeSHTerm) WHERE CASE WHEN m.k THEN true END WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c",
+            // post path: two paths / two segments / var-length
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m), (q) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m)-[:Y]->(q) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X*1..3]->(m) RETURN m.name, count(a) AS c",
+            // anonymous endpoint in post path
+            "MATCH (m:MeSHTerm) WITH m MATCH ()-[:X]->(m) RETURN m.name, count(*) AS c",
+            // grouped var not in post path
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(b) RETURN m.name, count(a) AS c",
+            // edge type count / undirected
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-->(m) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]-(m) RETURN m.name, count(a) AS c",
+            // grouped node properties / wrong label
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m {k: 1}) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m:Other) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m:MeSHTerm:Other) RETURN m.name, count(a) AS c",
+            // neighbour properties / two labels
+            "MATCH (m:MeSHTerm) WITH m MATCH (a {k: 1})-[:X]->(m) RETURN m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a:A:B)-[:X]->(m) RETURN m.name, count(a) AS c",
+            // RETURN DISTINCT / two counts / count(*) / count(prop) / other expression
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m) RETURN DISTINCT m.name, count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c, count(a) AS d",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(*) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(a.k) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m) RETURN m.k + 1, count(a) AS c",
+            // no grouping key / no count
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m) RETURN count(a) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m) RETURN m.name",
+            // counting the grouped side / grouping on the neighbour
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m) RETURN m.name, count(m) AS c",
+            "MATCH (m:MeSHTerm) WITH m MATCH (a)-[:X]->(m) RETURN a.name, count(a) AS c",
+        ] {
+            assert!(dw(s).is_none(), "should reject: {}", s);
+        }
+    }
+
+    #[test]
+    fn with_binding_rejects_clause_fields_set_programmatically() {
+        let mut query = q(W);
+        query.with_split_index = None;
+        assert!(detect_with_binding(&query).is_none());
+
+        let mut query = q(W);
+        let stage = query.with_clause.clone().unwrap();
+        query.extra_with_stages.push((stage, None, vec![], None));
+        assert!(detect_with_binding(&query).is_none());
+
+        let mut query = q(W);
+        query.set_clauses = q("MATCH (n) SET n.x = 1").set_clauses;
+        assert!(detect_with_binding(&query).is_none());
+
+        let mut query = q(W);
+        query.with_split_index = Some(9);
+        assert!(detect_with_binding(&query).is_none());
+
+        let mut query = q(W);
+        query.match_clauses[0].pattern.paths.clear();
+        assert!(detect_with_binding(&query).is_none());
+
+        let mut query = q(W);
+        query.match_clauses[1].pattern.paths.clear();
+        assert!(detect_with_binding(&query).is_none());
+
+        let mut query = q(W);
+        query.return_clause = None;
+        assert!(detect_with_binding(&query).is_none());
+
+        let mut query = q(W);
+        if let Expression::Function { args, .. } = &mut query.return_clause.as_mut().unwrap().items[1].expression {
+            args.push(Expression::Variable("a".into()));
+        }
+        assert!(detect_with_binding(&query).is_none());
+    }
+
+    // ——— Phase 4: aggregate-then-expand ———
+
+    const AE: &str = "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) \
+                      WITH j, count(a) AS c ORDER BY c DESC SKIP 1 LIMIT 3 \
+                      MATCH (j)-[:EDITED_BY]->(e:Editor) RETURN j.title, c, e.name";
+
+    #[test]
+    fn aggregate_then_expand_detects_single_with() {
+        let p = dae(AE).expect("should detect");
+        assert_eq!(p.core.grouped_var, "j");
+        assert_eq!(p.core.count_alias, "c");
+        assert_eq!(p.expand_neighbor_var, "e");
+        assert_eq!(p.expand_neighbor_label.as_ref().map(|l| l.as_str()), Some("Editor"));
+        assert_eq!(p.expand_edge_type.as_str(), "EDITED_BY");
+        assert_eq!(p.expand_direction, Direction::Outgoing);
+        assert_eq!(p.post_aggregate_skip, Some(1));
+        assert_eq!(p.post_aggregate_limit, Some(3));
+        assert_eq!(p.post_aggregate_order_by, Some(vec![(Expression::Variable("c".into()), false)]));
+        assert!(p.post_aggregate_filter.is_none());
+    }
+
+    #[test]
+    fn aggregate_then_expand_directions_and_post_filter() {
+        let p = dae("MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c WHERE c > 2 \
+                     MATCH (e)-[:EDITS]->(j:Journal) RETURN j, c, e")
+            .expect("should detect");
+        assert_eq!(p.expand_direction, Direction::Incoming);
+        assert_eq!(p.expand_neighbor_label, None);
+        assert!(p.post_aggregate_filter.is_some());
+        assert!(p.post_aggregate_order_by.is_none());
+
+        let p = dae("MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c \
+                     MATCH (j)<-[:EDITS]-(e) RETURN j, c, e")
+            .unwrap();
+        assert_eq!(p.expand_direction, Direction::Incoming);
+        let p = dae("MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c \
+                     MATCH (e)<-[:EDITS]-(j) RETURN j, c, e")
+            .unwrap();
+        assert_eq!(p.expand_direction, Direction::Outgoing);
+    }
+
+    #[test]
+    fn aggregate_then_expand_rejects_shapes() {
+        for s in [
+            // no WITH
+            P1,
+            // post-aggregate filter on the grouped node
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c WHERE j.k = 1 MATCH (j)-[:E]->(e) RETURN j, c, e",
+            // DISTINCT aggregate WITH
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH DISTINCT j, count(a) AS c MATCH (j)-[:E]->(e) RETURN j, c, e",
+            // two MATCH clauses before / after the WITH
+            "MATCH (a:Article)-[:P]->(j:Journal) MATCH (z:Z) WITH j, count(a) AS c MATCH (j)-[:E]->(e) RETURN j, c, e",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e) MATCH (z:Z) RETURN j, c, e, z",
+            // pre-WITH WHERE
+            "MATCH (a:Article)-[:P]->(j:Journal) WHERE j.k = 1 WITH j, count(a) AS c MATCH (j)-[:E]->(e) RETURN j, c, e",
+            // pre-WITH not an adjacency aggregate
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, sum(a.x) AS c MATCH (j)-[:E]->(e) RETURN j, c, e",
+            // post-MATCH optional / multiple paths / multi-hop / var-length / no type / undirected
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c OPTIONAL MATCH (j)-[:E]->(e) RETURN j, c, e",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e), (z) RETURN j, c, e",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e)-[:F]->(z) RETURN j, c, e",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E*1..2]->(e) RETURN j, c, e",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-->(e) RETURN j, c, e",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]-(e) RETURN j, c, e",
+            // anonymous neighbour / grouped var absent
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->() RETURN j, c",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (x)-[:E]->(e) RETURN j, c, e",
+            // bound node properties / wrong label / two labels
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j {k: 1})-[:E]->(e) RETURN j, c, e",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j:Other)-[:E]->(e) RETURN j, c, e",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j:Journal:Other)-[:E]->(e) RETURN j, c, e",
+            // neighbour properties / two labels
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e {k: 1}) RETURN j, c, e",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e:A:B) RETURN j, c, e",
+        ] {
+            assert!(dae(s).is_none(), "should reject: {}", s);
+        }
+    }
+
+    #[test]
+    fn aggregate_then_expand_rejects_clause_fields_set_programmatically() {
+        let mut query = q(AE);
+        query.post_with_where_clause = Some(truth());
+        assert!(detect_aggregate_then_expand(&query, &GraphStore::new()).is_none());
+
+        let mut query = q(AE);
+        query.unwind_clause = q("UNWIND [1] AS x RETURN x").unwind_clause;
+        assert!(detect_aggregate_then_expand(&query, &GraphStore::new()).is_none());
+
+        let mut query = q(AE);
+        let stage = query.with_clause.clone().unwrap();
+        query.extra_with_stages.push((stage.clone(), None, vec![], None));
+        query.extra_with_stages.push((stage, None, vec![], None));
+        assert!(detect_aggregate_then_expand(&query, &GraphStore::new()).is_none());
+
+        let mut query = q(AE);
+        query.with_split_index = Some(9);
+        assert!(detect_aggregate_then_expand(&query, &GraphStore::new()).is_none());
+    }
+
+    /// Builds the two-WITH form directly: `extra_with_stages[0]` holds the
+    /// aggregating WITH, `with_clause` the pass-through that feeds the MATCH.
+    fn two_stage(agg: &str, passthrough: &str) -> Query {
+        let agg_q = q(&format!("MATCH (a:Article)-[:P]->(j:Journal) {} RETURN j, c", agg));
+        let pt_q = q(&format!("MATCH (j), (c) {} RETURN j", passthrough));
+        let mut query = q("MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e) RETURN j, c, e");
+        query.extra_with_stages = vec![(agg_q.with_clause.unwrap(), None, vec![], None)];
+        query.with_clause = pt_q.with_clause;
+        query
+    }
+
+    fn dae_q(query: &Query) -> Option<AggregateThenExpandPattern> {
+        detect_aggregate_then_expand(query, &GraphStore::new())
+    }
+
+    #[test]
+    fn aggregate_then_expand_two_stage_takes_limits_from_either_with() {
+        let p = dae_q(&two_stage("WITH j, count(a) AS c ORDER BY c DESC", "WITH j, c SKIP 1 LIMIT 4")).expect("detect");
+        assert_eq!(p.post_aggregate_order_by, Some(vec![(Expression::Variable("c".into()), false)]));
+        assert_eq!(p.post_aggregate_skip, Some(1));
+        assert_eq!(p.post_aggregate_limit, Some(4));
+
+        let p = dae_q(&two_stage("WITH j, count(a) AS c SKIP 2 LIMIT 5", "WITH j AS j, c ORDER BY c")).expect("detect");
+        assert_eq!(p.post_aggregate_order_by, Some(vec![(Expression::Variable("c".into()), true)]));
+        assert_eq!(p.post_aggregate_skip, Some(2));
+        assert_eq!(p.post_aggregate_limit, Some(5));
+    }
+
+    #[test]
+    fn aggregate_then_expand_detects_parsed_two_with_query() {
+        let p = dae("MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c \
+                     WITH j, c ORDER BY c DESC LIMIT 4 \
+                     MATCH (j)-[:E]->(e) RETURN j, c, e")
+            .expect("two-WITH form should detect");
+        assert_eq!(p.post_aggregate_limit, Some(4));
+        assert_eq!(p.post_aggregate_order_by, Some(vec![(Expression::Variable("c".into()), false)]));
+    }
+
+    #[test]
+    fn aggregate_then_expand_two_stage_rejections() {
+        for (agg, pt) in [
+            ("WITH j, count(a) AS c", "WITH DISTINCT j, c"),
+            ("WITH j, count(a) AS c", "WITH j"),
+            ("WITH j, count(a) AS c", "WITH j, c.x AS c"),
+            ("WITH j, count(a) AS c", "WITH j AS k, c"),
+            ("WITH j, count(a) AS c", "WITH j, c WHERE c > 1"),
+            ("WITH j, count(a) AS c ORDER BY c", "WITH j, c ORDER BY c"),
+            ("WITH j, count(a) AS c SKIP 1", "WITH j, c SKIP 1"),
+            ("WITH j, count(a) AS c LIMIT 1", "WITH j, c LIMIT 1"),
+        ] {
+            assert!(dae_q(&two_stage(agg, pt)).is_none(), "should reject: {} / {}", agg, pt);
+        }
+    }
+
+    #[test]
+    fn aggregate_then_expand_two_stage_rejects_stage_extras() {
+        let base = two_stage("WITH j, count(a) AS c", "WITH j, c");
+        assert!(dae_q(&base).is_some());
+
+        let mut query = base.clone();
+        query.extra_with_stages[0].2 = q("MATCH (x) RETURN x").match_clauses;
+        assert!(dae_q(&query).is_none());
+
+        let mut query = base.clone();
+        query.extra_with_stages[0].3 = Some(truth());
+        assert!(dae_q(&query).is_none());
+
+        let mut query = base.clone();
+        query.extra_with_stages[0].1 = q("UNWIND [1] AS x RETURN x").unwind_clause;
+        assert!(query.extra_with_stages[0].1.is_some());
+        assert!(dae_q(&query).is_none());
+
+        let mut query = base;
+        query.with_clause = None;
+        assert!(dae_q(&query).is_none());
+    }
+
+    #[test]
+    fn expression_references_only_covers_each_kind() {
+        let parse_where = |s: &str| q(&format!("MATCH (x), (y) WHERE {} RETURN x", s)).where_clause.unwrap().predicate;
+        assert!(expression_references_only(&Expression::Variable("x".into()), "x"));
+        assert!(!expression_references_only(&Expression::Variable("y".into()), "x"));
+        assert!(expression_references_only(&parse_where("NOT x.a"), "x"));
+        assert!(!expression_references_only(&parse_where("NOT y.a"), "x"));
+        assert!(expression_references_only(&parse_where("toUpper(x.a) = $p"), "x"));
+        assert!(!expression_references_only(&parse_where("toUpper(y.a) = 'A'"), "x"));
+        assert!(!expression_references_only(&parse_where("x.l[0] = 1"), "x"));
+    }
+
     /// Phase 1 shape must not be accidentally matched by the Phase 3
     /// detector — the two are mutually exclusive by design.
     #[test]

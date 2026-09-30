@@ -286,4 +286,271 @@ mod tests {
         assert_eq!(forward_results[0], (p1, c1));
         assert_eq!(reverse_results[0], (p1, c1));
     }
+
+    fn drain(op: &mut OperatorBox, store: &GraphStore) -> Vec<crate::query::executor::record::Record> {
+        let mut out = Vec::new();
+        while let Some(r) = op.next(store).unwrap() {
+            out.push(r);
+        }
+        out
+    }
+
+    fn person_ages(store: &mut GraphStore, ages: &[i64]) -> Vec<crate::graph::NodeId> {
+        use crate::graph::PropertyValue;
+        ages.iter()
+            .map(|&age| {
+                let id = store.create_node("Person");
+                store.set_node_property("default", id, "age", PropertyValue::Integer(age)).unwrap();
+                id
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_label_scan_without_label_scans_all_nodes() {
+        let mut store = GraphStore::new();
+        store.create_node("Person");
+        store.create_node("Company");
+        let plan = LogicalPlanNode::LabelScan { variable: "n".to_string(), label: None };
+        let mut op = logical_to_physical(&plan);
+        assert_eq!(op.describe().name, "NodeScan");
+        assert_eq!(drain(&mut op, &store).len(), 2);
+    }
+
+    #[test]
+    fn test_index_lookup_with_literal_becomes_index_scan() {
+        use crate::graph::PropertyValue;
+        use crate::query::ast::BinaryOp;
+        let mut store = GraphStore::new();
+        store.property_index.create_index(Label::new("Person"), "age".to_string());
+        let ids = person_ages(&mut store, &[20, 30, 40]);
+
+        let plan = LogicalPlanNode::IndexLookup {
+            variable: "n".to_string(),
+            label: Label::new("Person"),
+            property: "age".to_string(),
+            op: BinaryOp::Eq,
+            value: Expression::Literal(PropertyValue::Integer(30)),
+        };
+        let mut op = logical_to_physical(&plan);
+        assert_eq!(op.describe().name, "IndexScan");
+        let rows = drain(&mut op, &store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("n").unwrap().node_id(), Some(ids[1]));
+    }
+
+    #[test]
+    fn test_index_lookup_with_non_literal_falls_back_to_label_scan() {
+        use crate::query::ast::BinaryOp;
+        let mut store = GraphStore::new();
+        person_ages(&mut store, &[1, 2]);
+        store.create_node("Company");
+
+        let plan = LogicalPlanNode::IndexLookup {
+            variable: "n".to_string(),
+            label: Label::new("Person"),
+            property: "age".to_string(),
+            op: BinaryOp::Eq,
+            value: Expression::Parameter("p".to_string()),
+        };
+        let mut op = logical_to_physical(&plan);
+        let desc = op.describe();
+        assert_eq!(desc.name, "NodeScan");
+        assert!(desc.details.contains("Person"));
+        // Falls back to scanning every Person, not only the matching one.
+        assert_eq!(drain(&mut op, &store).len(), 2);
+    }
+
+    #[test]
+    fn test_filter_conversion_applies_predicate() {
+        use crate::graph::PropertyValue;
+        use crate::query::ast::BinaryOp;
+        let mut store = GraphStore::new();
+        let ids = person_ages(&mut store, &[10, 50, 70]);
+
+        let plan = LogicalPlanNode::Filter {
+            input: Box::new(LogicalPlanNode::LabelScan { variable: "n".to_string(), label: Some(Label::new("Person")) }),
+            predicate: Expression::Binary {
+                left: Box::new(Expression::Property { variable: "n".to_string(), property: "age".to_string() }),
+                op: BinaryOp::Gt,
+                right: Box::new(Expression::Literal(PropertyValue::Integer(40))),
+            },
+        };
+        let mut op = logical_to_physical(&plan);
+        assert_eq!(op.describe().name, "Filter");
+        let mut got: Vec<_> = drain(&mut op, &store).iter().map(|r| r.get("n").unwrap().node_id().unwrap()).collect();
+        got.sort();
+        assert_eq!(got, vec![ids[1], ids[2]]);
+    }
+
+    #[test]
+    fn test_cartesian_product_conversion_multiplies_rows() {
+        let mut store = GraphStore::new();
+        store.create_node("Person");
+        store.create_node("Person");
+        store.create_node("Company");
+        store.create_node("Company");
+        store.create_node("Company");
+        let plan = LogicalPlanNode::CartesianProduct {
+            left: Box::new(LogicalPlanNode::LabelScan { variable: "p".to_string(), label: Some(Label::new("Person")) }),
+            right: Box::new(LogicalPlanNode::LabelScan { variable: "c".to_string(), label: Some(Label::new("Company")) }),
+        };
+        let mut op = logical_to_physical(&plan);
+        assert_eq!(op.describe().name, "CartesianProduct");
+        let rows = drain(&mut op, &store);
+        assert_eq!(rows.len(), 6);
+        assert!(rows.iter().all(|r| r.has("p") && r.has("c")));
+    }
+
+    #[test]
+    fn test_join_conversion_joins_on_first_key() {
+        let mut store = GraphStore::new();
+        let both = store.create_node_with_labels(vec![Label::new("Person"), Label::new("Employee")]);
+        store.create_node("Person");
+        store.create_node("Employee");
+
+        let plan = LogicalPlanNode::Join {
+            left: Box::new(LogicalPlanNode::LabelScan { variable: "n".to_string(), label: Some(Label::new("Person")) }),
+            right: Box::new(LogicalPlanNode::LabelScan { variable: "n".to_string(), label: Some(Label::new("Employee")) }),
+            join_keys: vec!["n".to_string(), "ignored".to_string()],
+        };
+        let mut op = logical_to_physical(&plan);
+        let rows = drain(&mut op, &store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("n").unwrap().node_id(), Some(both));
+    }
+
+    #[test]
+    fn test_join_conversion_with_no_keys_uses_empty_join_var() {
+        let plan = LogicalPlanNode::Join {
+            left: Box::new(LogicalPlanNode::LabelScan { variable: "a".to_string(), label: None }),
+            right: Box::new(LogicalPlanNode::LabelScan { variable: "b".to_string(), label: None }),
+            join_keys: vec![],
+        };
+        let op = logical_to_physical(&plan);
+        let desc = op.describe();
+        assert_eq!(desc.children.len(), 2);
+    }
+
+    #[test]
+    fn test_expand_into_with_multiple_types_matches_any_type() {
+        let mut store = GraphStore::new();
+        let a = store.create_node("Person");
+        let b = store.create_node("Person");
+        store.create_edge(a, b, "LIKES").unwrap();
+
+        let make = |types: Vec<EdgeType>| LogicalPlanNode::ExpandInto {
+            input: Box::new(LogicalPlanNode::CartesianProduct {
+                left: Box::new(LogicalPlanNode::LabelScan { variable: "a".to_string(), label: Some(Label::new("Person")) }),
+                right: Box::new(LogicalPlanNode::LabelScan { variable: "b".to_string(), label: Some(Label::new("Person")) }),
+            }),
+            source_var: "a".to_string(),
+            target_var: "b".to_string(),
+            edge_types: types,
+            edge_var: None,
+        };
+        // Two types: the physical operator receives "any type" and finds the LIKES edge.
+        let mut op = logical_to_physical(&make(vec![EdgeType::new("KNOWS"), EdgeType::new("HATES")]));
+        let rows = drain(&mut op, &store);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("a").unwrap().node_id(), Some(a));
+        assert_eq!(rows[0].get("b").unwrap().node_id(), Some(b));
+
+        // One non-matching type filters it out.
+        let mut op = logical_to_physical(&make(vec![EdgeType::new("KNOWS")]));
+        assert!(drain(&mut op, &store).is_empty());
+    }
+
+    #[test]
+    fn test_trie_join_conversion_finds_triangle() {
+        use super::super::logical_plan::TrieJoinConstraint;
+        let mut store = GraphStore::new();
+        let a = store.create_node("Node");
+        let b = store.create_node("Node");
+        let c = store.create_node("Node");
+        store.create_edge(a, b, "EDGE").unwrap();
+        store.create_edge(b, c, "EDGE").unwrap();
+        store.create_edge(c, a, "EDGE").unwrap();
+        store.compact_adjacency();
+
+        let plan = LogicalPlanNode::TrieJoin {
+            input: Box::new(LogicalPlanNode::Expand {
+                input: Box::new(LogicalPlanNode::LabelScan { variable: "a".to_string(), label: Some(Label::new("Node")) }),
+                source_var: "a".to_string(),
+                target_var: "b".to_string(),
+                edge_var: None,
+                edge_types: vec![EdgeType::new("EDGE")],
+                direction: ExpandDirection::Forward,
+            }),
+            target_var: "c".to_string(),
+            constraints: vec![
+                TrieJoinConstraint { bound_var: "b".to_string(), direction: ExpandDirection::Forward, edge_types: vec![EdgeType::new("EDGE")], edge_var: None },
+                TrieJoinConstraint { bound_var: "a".to_string(), direction: ExpandDirection::Reverse, edge_types: vec![], edge_var: None },
+            ],
+        };
+        let mut op = logical_to_physical(&plan);
+        let desc = op.describe();
+        assert_eq!(desc.name, "TrieJoin");
+        assert!(desc.details.contains("N_out(b)[:EDGE]"), "{}", desc.details);
+        assert!(desc.details.contains("N_in(a)"), "{}", desc.details);
+        let rows = drain(&mut op, &store);
+        assert_eq!(rows.len(), 3, "one triangle, three rotations");
+    }
+
+    fn degree_graph() -> (GraphStore, crate::graph::NodeId, crate::graph::NodeId) {
+        let mut store = GraphStore::new();
+        let hub = store.create_node("Person");
+        let leaf = store.create_node("Person");
+        let x = store.create_node("Person");
+        store.create_edge(hub, leaf, "KNOWS").unwrap();
+        store.create_edge(hub, x, "KNOWS").unwrap();
+        store.create_edge(leaf, x, "KNOWS").unwrap();
+        (store, hub, leaf)
+    }
+
+    fn adjacency_plan(direction: ExpandDirection) -> LogicalPlanNode {
+        LogicalPlanNode::AdjacencyCountAggregate {
+            input: Box::new(LogicalPlanNode::LabelScan { variable: "p".to_string(), label: Some(Label::new("Person")) }),
+            grouped_var: "p".to_string(),
+            neighbor_var: "f".to_string(),
+            edge_type: EdgeType::new("KNOWS"),
+            direction,
+            neighbor_label: None,
+            distinct: false,
+            count_alias: "friends".to_string(),
+        }
+    }
+
+    fn counts_by_node(rows: &[crate::query::executor::record::Record]) -> std::collections::HashMap<crate::graph::NodeId, i64> {
+        use crate::graph::PropertyValue;
+        rows.iter()
+            .map(|r| {
+                let id = r.get("p").unwrap().node_id().unwrap();
+                let n = match r.get("friends").unwrap() {
+                    Value::Property(PropertyValue::Integer(n)) => *n,
+                    other => panic!("count should be an integer, got {:?}", other),
+                };
+                (id, n)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_adjacency_count_aggregate_forward_counts_out_degree() {
+        let (store, hub, leaf) = degree_graph();
+        let mut op = logical_to_physical(&adjacency_plan(ExpandDirection::Forward));
+        assert_eq!(op.describe().name, "AdjacencyCountAggregate");
+        let counts = counts_by_node(&drain(&mut op, &store));
+        assert_eq!(counts.get(&hub), Some(&2));
+        assert_eq!(counts.get(&leaf), Some(&1));
+    }
+
+    #[test]
+    fn test_adjacency_count_aggregate_reverse_counts_in_degree() {
+        let (store, hub, leaf) = degree_graph();
+        let mut op = logical_to_physical(&adjacency_plan(ExpandDirection::Reverse));
+        let counts = counts_by_node(&drain(&mut op, &store));
+        assert_eq!(counts.get(&hub).copied().unwrap_or(0), 0);
+        assert_eq!(counts.get(&leaf), Some(&1));
+    }
 }
