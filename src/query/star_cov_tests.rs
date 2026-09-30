@@ -82,6 +82,11 @@ fn pipeline_star_sees_load_csv_and_call_yield_bindings() {
     assert!(q.needs_clause_pipeline);
     assert_eq!(return_columns(&q), vec!["n", "row"]);
 
+    let q = parse_query("CREATE (n) WITH * LOAD PARQUET FROM 'file:///x.parquet' AS row RETURN *")
+        .unwrap();
+    assert!(q.needs_clause_pipeline);
+    assert_eq!(return_columns(&q), vec!["n", "row"]);
+
     let q = parse_query("CREATE (n) WITH * CALL db.labels() YIELD label AS l RETURN *").unwrap();
     assert!(q.needs_clause_pipeline);
     assert_eq!(return_columns(&q), vec!["n", "l"]);

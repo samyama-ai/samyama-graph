@@ -145,6 +145,8 @@ pub struct Query {
     pub unwind_clause: Option<UnwindClause>,
     /// `LOAD CSV` clause (optional) — a reading clause, like `unwind_clause`.
     pub load_csv_clause: Option<LoadCsvClause>,
+    /// `LOAD PARQUET` clause (optional) — a reading clause, like `load_csv_clause`.
+    pub load_parquet_clause: Option<LoadParquetClause>,
     /// Every clause of the query, in the order it was written.
     ///
     /// The fields above describe a query by *kind* — all the MATCHes here, the
@@ -345,6 +347,21 @@ pub struct LoadCsvClause {
     pub field_terminator: Option<char>,
 }
 
+/// `LOAD PARQUET FROM <expr> AS <var>` (LANG-09, #1098).
+///
+/// A reading clause, like [`LoadCsvClause`]: one row per Parquet record, bound as a
+/// map of column name to value. There is no `WITH HEADERS` and no
+/// `FIELDTERMINATOR` — a Parquet file carries its own schema, so the column names
+/// and the delimiting are the file's, not the query's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadParquetClause {
+    /// The source, evaluated per row of the input, so `LOAD PARQUET FROM $path`
+    /// works.
+    pub source: Expression,
+    /// The variable each record is bound to.
+    pub variable: String,
+}
+
 /// One clause of a query, as written.
 ///
 /// A flat, ordered alternative to the by-kind fields on [`Query`]. Cypher is a
@@ -359,6 +376,8 @@ pub enum Clause {
     Unwind(UnwindClause),
     /// `LOAD CSV` — a reading clause, like `Unwind`.
     LoadCsv(LoadCsvClause),
+    /// `LOAD PARQUET` — a reading clause, like `LoadCsv`.
+    LoadParquet(LoadParquetClause),
     With(WithClause),
     Create(CreateClause),
     Merge(MergeClause),
@@ -395,6 +414,7 @@ impl Clause {
             Clause::Where(_) => "WHERE",
             Clause::Unwind(_) => "UNWIND",
             Clause::LoadCsv(_) => "LOAD CSV",
+            Clause::LoadParquet(_) => "LOAD PARQUET",
             Clause::With(_) => "WITH",
             Clause::Create(_) => "CREATE",
             Clause::Merge(_) => "MERGE",
@@ -1260,6 +1280,7 @@ impl Query {
             foreach_clause: None,
             unwind_clause: None,
             load_csv_clause: None,
+            load_parquet_clause: None,
             clauses: Vec::new(),
             needs_clause_pipeline: false,
             extra_unwind_clauses: Vec::new(),

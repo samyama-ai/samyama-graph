@@ -183,6 +183,7 @@ fn expand_stars_pipeline(clauses: &mut [Clause]) -> bool {
             }
             Clause::Unwind(u) => push_unique(&mut scope, &u.variable),
             Clause::LoadCsv(l) => push_unique(&mut scope, &l.variable),
+            Clause::LoadParquet(l) => push_unique(&mut scope, &l.variable),
             Clause::Call(call) => {
                 for item in &call.yield_items {
                     push_unique(&mut scope, item.alias.as_ref().unwrap_or(&item.name));

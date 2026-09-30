@@ -445,6 +445,7 @@ fn detect_cross_hierarchy_driven(query: &Query, store: &GraphStore) -> Option<Hi
         || query.correlated_call.is_some()
         || query.unwind_clause.is_some()
         || query.load_csv_clause.is_some()
+        || query.load_parquet_clause.is_some()
         || query.merge_clause.is_some()
         || query.foreach_clause.is_some()
         || !query.set_clauses.is_empty()

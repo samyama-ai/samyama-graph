@@ -1079,7 +1079,8 @@ async fn start_server() {
         config.data_path = Some(path);
     }
 
-    // Parse --import-dir <dir>: the directory `LOAD CSV` may read under (LANG-09).
+    // Parse --import-dir <dir>: the directory `LOAD CSV` and `LOAD PARQUET` may read
+    // under (LANG-09).
     //
     // Absent by default, and absent means the clause is refused rather than reading
     // from the working directory. `LOAD CSV FROM 'file:///etc/passwd'` on a server

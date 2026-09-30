@@ -44,6 +44,9 @@ const PROBES: &[(&str, &str, &str, usize)] = &[
      "LOAD CSV WITH HEADERS FROM \"{CSV}\" AS row RETURN row.a", 1),
     ("LANG-09", "LOAD CSV with a field terminator",
      "LOAD CSV FROM \"{CSV_SEMI}\" AS row FIELDTERMINATOR \";\" RETURN row", 1),
+    // `{PARQUET}` is a file this engine's own exporter wrote (#1098).
+    ("LANG-09", "LOAD PARQUET",
+     "LOAD PARQUET FROM \"{PARQUET}\" AS row RETURN row.a", 1),
 
     // LANG-11 — CALL … YIELD composed inside a larger query.
     ("LANG-11", "CALL after MATCH, yielding into the same scope",
@@ -179,11 +182,23 @@ fn main() {
     let csv_url = format!("file://{}", csv_path.display());
     let csv_url_semicolon =
         format!("file://{}", csv_dir.join("probe-semicolon.csv").display());
+    let parquet_path = csv_dir.join("probe.parquet");
+    let parquet_rows = QueryExecutor::new(&GraphStore::new())
+        .execute(&parse_query("RETURN 1 AS a, 2 AS b").expect("probe fixture parses"))
+        .expect("probe fixture runs");
+    match samyama::export::to_parquet(&parquet_rows) {
+        Ok(bytes) => {
+            let _ = std::fs::write(&parquet_path, bytes);
+        }
+        Err(e) => eprintln!("could not write the Parquet probe file: {e}"),
+    }
+    let parquet_url = format!("file://{}", parquet_path.display());
 
     let mut rows = Vec::new();
     for (req, what, cypher_template, min_rows) in PROBES {
         let cypher = cypher_template
             .replace("{CSV_SEMI}", &csv_url_semicolon)
+            .replace("{PARQUET}", &parquet_url)
             .replace("{CSV}", &csv_url);
         let cypher = cypher.as_str();
         // The mutating executor, so DDL is measured on the same footing as a

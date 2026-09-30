@@ -1626,11 +1626,12 @@ impl QueryPlanner {
         // `LOAD CSV` is the same shape and needed the same exclusion: without it
         // `LOAD CSV ... AS row CREATE (:P {n: row.name})` was planned as a bare CREATE
         // and failed with "`n` refers to a variable that is not bound here", the file
-        // never opened.
+        // never opened. `LOAD PARQUET` likewise.
         if query.match_clauses.is_empty()
             && query.call_clause.is_none()
             && !Self::has_any_unwind(query)
             && query.load_csv_clause.is_none()
+            && query.load_parquet_clause.is_none()
         {
             if let Some(create_clause) = &query.create_clause {
                 let mut plan = self.plan_create_only(create_clause)?;
@@ -1839,7 +1840,8 @@ impl QueryPlanner {
                 if query.unwind_leading
                     && query.extra_unwind_clauses.is_empty()
                     && query.call_clause.is_none()
-                    && query.load_csv_clause.is_none() =>
+                    && query.load_csv_clause.is_none()
+                    && query.load_parquet_clause.is_none() =>
             {
                 pre_where_preds.iter().zip(&owners).any(|(pred, owner)| {
                     let mut vars = HashSet::new();
@@ -2163,6 +2165,16 @@ impl QueryPlanner {
             operator = Some(Box::new(LoadCsvOperator::new(base, load.clone())));
             known_vars.insert(load.variable.clone());
         }
+        // `LOAD PARQUET` is a source in exactly the same way.
+        if let Some(load) = &query.load_parquet_clause {
+            use crate::query::executor::operator::{LoadParquetOperator, SingleRowOperator};
+            let base: OperatorBox = match operator.take() {
+                Some(op) => op,
+                None => Box::new(SingleRowOperator::new()),
+            };
+            operator = Some(Box::new(LoadParquetOperator::new(base, load.clone())));
+            known_vars.insert(load.variable.clone());
+        }
 
         if unwind_before_barrier && !unwind_at_base {
             // A batch lookup against an index is planned as an index probe per
@@ -2172,6 +2184,7 @@ impl QueryPlanner {
                     if query.unwind_leading
                         && query.extra_unwind_clauses.is_empty()
                         && query.load_csv_clause.is_none()
+                        && query.load_parquet_clause.is_none()
                         && query.call_clause.is_none()
                         && pre_with_clauses.len() == 1 =>
                 {
@@ -7100,7 +7113,11 @@ impl QueryPlanner {
             .position(|c| {
                 !matches!(
                     c,
-                    Clause::Match(_) | Clause::Where(_) | Clause::Unwind(_) | Clause::LoadCsv(_)
+                    Clause::Match(_)
+                        | Clause::Where(_)
+                        | Clause::Unwind(_)
+                        | Clause::LoadCsv(_)
+                        | Clause::LoadParquet(_)
                 )
             })
             .unwrap_or(clauses.len());
@@ -7124,6 +7141,7 @@ impl QueryPlanner {
                         }
                     }
                     Clause::LoadCsv(l) => prefix.load_csv_clause = Some(l.clone()),
+                    Clause::LoadParquet(l) => prefix.load_parquet_clause = Some(l.clone()),
                     _ => unreachable!("split stops at the first non-reading clause"),
                 }
             }
@@ -7148,6 +7166,7 @@ impl QueryPlanner {
                 }
                 Clause::Unwind(u) => { bound.insert(u.variable.clone()); }
                 Clause::LoadCsv(l) => { bound.insert(l.variable.clone()); }
+                Clause::LoadParquet(l) => { bound.insert(l.variable.clone()); }
                 _ => {}
             }
         }
@@ -7333,6 +7352,15 @@ impl QueryPlanner {
                     operator = Box::new(
                         crate::query::executor::operator::LoadCsvOperator::new(operator, l.clone()),
                     );
+                    bound.insert(l.variable.clone());
+                }
+                // `WITH ... LOAD PARQUET ...`, for the same reason.
+                Clause::LoadParquet(l) => {
+                    operator =
+                        Box::new(crate::query::executor::operator::LoadParquetOperator::new(
+                            operator,
+                            l.clone(),
+                        ));
                     bound.insert(l.variable.clone());
                 }
                 Clause::Unwind(u) => {
@@ -9291,6 +9319,7 @@ mod tests {
             deferred_skip: None,
             deferred_limit: None,
             load_csv_clause: None,
+            load_parquet_clause: None,
             match_clauses: vec![],
             where_clause: None,
             return_clause: None,

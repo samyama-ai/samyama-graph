@@ -1340,6 +1340,25 @@ fn load_csv_plans_as_the_source_of_the_pipeline() {
 }
 
 #[test]
+fn load_parquet_plans_as_the_source_of_the_pipeline() {
+    let s = people();
+    let plan = plan_of(&s, "LOAD PARQUET FROM 'people.parquet' AS row MATCH (p:Person) WHERE p.name = row.name RETURN p.age");
+    let names = op_names(&plan);
+    assert!(names.contains(&"LoadParquet".to_string()), "{names:?}");
+    let plan = plan_of(&s, "LOAD PARQUET FROM 'x.parquet' AS row RETURN row");
+    assert!(op_names(&plan).contains(&"LoadParquet".to_string()));
+    assert!(!plan.is_write);
+    // Plans at all: the CREATE-only fast path would refuse `row` as unbound.
+    // (That it runs once per record is `tests/load_parquet.rs`; a create's
+    // plan description does not show its input.)
+    let plan = plan_of(
+        &s,
+        "LOAD PARQUET FROM 'x.parquet' AS row CREATE (:N {a: row.a})",
+    );
+    assert!(plan.is_write);
+}
+
+#[test]
 fn procedure_call_joins_with_a_match() {
     let mut s = GraphStore::new();
     run(&mut s, "CREATE (:Doc {title: 'graph databases'}), (:Doc {title: 'graph theory'}), (:Doc {title: 'pasta'})");
@@ -2160,6 +2179,27 @@ fn pipeline_load_csv_plans_in_either_position() {
     );
     assert!(
         op_names(&plan).contains(&"LoadCsv".to_string()),
+        "{:?}",
+        op_names(&plan)
+    );
+    assert!(plan.is_write);
+}
+
+#[test]
+fn pipeline_load_parquet_plans_in_either_position() {
+    let s = GraphStore::new();
+    let query =
+        "LOAD PARQUET FROM 'x.parquet' AS row CREATE (:N {v: row.a}) WITH row RETURN count(*) AS c";
+    assert_pipeline(query);
+    let plan = plan_of(&s, query);
+    assert!(plan.is_write);
+    assert_eq!(plan.output_columns, vec!["c".to_string()]);
+    let plan = plan_of(
+        &s,
+        "CREATE (t:T) WITH t LOAD PARQUET FROM 'x.parquet' AS row RETURN count(*) AS c",
+    );
+    assert!(
+        op_names(&plan).contains(&"LoadParquet".to_string()),
         "{:?}",
         op_names(&plan)
     );

@@ -565,7 +565,28 @@ pub mod import {
         pub skipped_columns: Vec<String>,
     }
 
-    fn cell(col: &dyn Array, row: usize) -> Option<PropertyValue> {
+    /// Whether a column of this Arrow type has a `PropertyValue` — the types
+    /// [`cell`] converts. Checked against a file's schema up front by
+    /// `LOAD PARQUET`, which has no response to name a skipped column in.
+    pub(crate) fn converts(data_type: &DataType) -> bool {
+        match data_type {
+            DataType::Boolean
+            | DataType::Int64
+            | DataType::Float64
+            | DataType::Utf8
+            | DataType::LargeUtf8 => true,
+            DataType::List(field) => matches!(
+                field.data_type(),
+                DataType::Int64 | DataType::Float64 | DataType::Utf8
+            ),
+            _ => false,
+        }
+    }
+
+    /// One cell as a `PropertyValue`: `None` for a null, and for a type
+    /// [`converts`] rejects. Shared with `LOAD PARQUET` (#1098), so a file reads
+    /// the same through the clause as through `/api/import/parquet`.
+    pub(crate) fn cell(col: &dyn Array, row: usize) -> Option<PropertyValue> {
         if col.is_null(row) {
             return None;
         }
