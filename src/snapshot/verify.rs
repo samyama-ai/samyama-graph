@@ -662,8 +662,7 @@ mod tests {
         catalog.entries[0].rows = 5;
         catalog.entries[1].rows = 1;
         let report = verify(&store, &catalog).unwrap();
-        let classes: Vec<Option<FailureClass>> =
-            report.results.iter().map(|r| r.failure).collect();
+        let classes: Vec<Option<FailureClass>> = report.results.iter().map(|r| r.failure).collect();
         assert_eq!(
             classes,
             vec![
