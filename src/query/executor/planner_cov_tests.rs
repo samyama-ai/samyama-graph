@@ -1771,7 +1771,6 @@ fn aggregate_then_expand_plans_filter_order_skip_limit() {
 }
 
 #[test]
-#[ignore = "bug: aggregate-then-expand plan projects RETURN items verbatim, so an aggregate in the final RETURN fails with 'Unknown function: count' (planner.rs plan_aggregate_then_expand)"]
 fn aggregate_then_expand_supports_an_aggregate_in_the_final_return() {
     let s = people();
     // In-degrees: B 1, C 2, D 1; walking back those in-edges gives 4 rows.
@@ -2709,7 +2708,6 @@ fn aggregate_then_expand_groups_by_a_property_too() {
 }
 
 #[test]
-#[ignore = "bug: aggregate-then-expand plan drops a WITH alias for a grouping property, so RETURN nm fails with 'Variable not found: nm' (planner.rs plan_aggregate_then_expand)"]
 fn aggregate_then_expand_keeps_with_aliases_of_grouping_properties() {
     let s = people();
     let b = read(

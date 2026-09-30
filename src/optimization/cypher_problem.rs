@@ -45,8 +45,10 @@ pub struct CypherProblem {
     /// lists. Useful for discrete / mixed problems where embedding CASE
     /// expressions in `sum()` is awkward.
     pub custom_subs: Option<CustomSubsFn>,
-    /// Memoization cache: quantized vector hash -> (objective, optional penalty).
-    cache: Mutex<HashMap<u64, (f64, Option<f64>)>>,
+    /// Memoization cache: quantized vector hash -> (objective, penalty). Either may be
+    /// missing: a penalty evaluated first leaves the objective unset rather than caching a
+    /// placeholder that `objective` would read back as a result (#1574).
+    cache: Mutex<HashMap<u64, (Option<f64>, Option<f64>)>>,
     stats: Mutex<CypherProblemStats>,
 }
 
@@ -141,7 +143,7 @@ impl Problem for CypherProblem {
 
     fn objective(&self, variables: &Array1<f64>) -> f64 {
         let key = hash_quantized(variables, self.quantize);
-        if let Some(&(obj, _)) = self.cache.lock().unwrap().get(&key) {
+        if let Some(&(Some(obj), _)) = self.cache.lock().unwrap().get(&key) {
             self.stats.lock().unwrap().hits += 1;
             return obj;
         }
@@ -159,7 +161,12 @@ impl Problem for CypherProblem {
             s.total_eval_ms += elapsed;
         }
         if val.is_finite() {
-            self.cache.lock().unwrap().insert(key, (val, None));
+            self.cache
+                .lock()
+                .unwrap()
+                .entry(key)
+                .or_insert((None, None))
+                .0 = Some(val);
         }
         val
     }
@@ -182,7 +189,7 @@ impl Problem for CypherProblem {
             s.penalty_evals += 1;
         }
         let mut cache = self.cache.lock().unwrap();
-        let entry = cache.entry(key).or_insert((f64::INFINITY, None));
+        let entry = cache.entry(key).or_insert((None, None));
         entry.1 = Some(val);
         val
     }
@@ -433,7 +440,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: CypherProblem::penalty() evaluated before objective() caches (INFINITY, pen), so the next objective() returns INFINITY from cache instead of evaluating"]
     fn penalty_first_does_not_poison_objective_cache() {
         let p = one_dim("RETURN $x0 AS f").with_penalty("RETURN 0 AS p");
         let x = Array1::from(vec![3.0]);

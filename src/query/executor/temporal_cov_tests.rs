@@ -266,7 +266,6 @@ fn an_ambiguous_local_time_resolves_to_the_earlier_offset() {
 }
 
 #[test]
-#[ignore = "bug: resolve_offset errors on a local time in a DST gap, though its doc says such times resolve to an offset"]
 fn a_skipped_local_time_still_resolves() {
     // 02:30 does not exist on 2017-03-26 in Stockholm (clocks jump 02:00 -> 03:00).
     let spec = parse_timezone_spec("Europe/Stockholm").unwrap();
@@ -448,7 +447,6 @@ fn datetime_offset_uses_the_dash_after_the_t() {
 }
 
 #[test]
-#[ignore = "bug: split_offset treats the last dash of a bare date ('2015-07-21') as a UTC offset, though its doc says every dash there belongs to the date"]
 fn datetime_offset_leaves_a_bare_date_alone() {
     assert_eq!(
         parse_datetime_offset("2015-07-21").unwrap(),

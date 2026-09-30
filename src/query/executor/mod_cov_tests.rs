@@ -405,7 +405,6 @@ fn parameters_in_merge_actions() {
 }
 
 #[test]
-#[ignore = "bug: SET n += {k: <non-literal>} is refused with 'expects a map ... got Map(...)': a map expression evaluates to Value::Map, which the entity SET does not accept"]
 fn set_plus_equals_a_map_holding_a_parameter() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:Q)", &BoundParams::new());
@@ -418,7 +417,6 @@ fn set_plus_equals_a_map_holding_a_parameter() {
 }
 
 #[test]
-#[ignore = "bug: MERGE ... ON MATCH SET n += {extra: 10} silently sets nothing: RETURN n.extra is null (literal map as well as a parameterised one)"]
 fn merge_on_match_plus_equals_a_map() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:M {k: 1})", &BoundParams::new());

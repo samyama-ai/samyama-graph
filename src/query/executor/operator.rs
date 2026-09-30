@@ -18745,6 +18745,36 @@ impl SetPropertyOperator {
     ) -> ExecutionResult<HashMap<String, PropertyValue>> {
         match value {
             Value::Property(PropertyValue::Map(m)) => Ok(m.clone().into_iter().collect()),
+            // A map literal holding anything but literals (`{tag: $v}`, `{k: x.k}`)
+            // evaluates to `Value::Map`; refusing it made `SET n += {tag: $v}` an
+            // error that named a map as not a map (#1562).
+            Value::Map(entries) => {
+                let storable = |k: &str, v: &Value| -> ExecutionResult<PropertyValue> {
+                    let plain = |v: &Value| match v {
+                        Value::Property(p) => Some(p.clone()),
+                        Value::Null => Some(PropertyValue::Null),
+                        _ => None,
+                    };
+                    let p = match v {
+                        Value::List(items) => items
+                            .iter()
+                            .map(plain)
+                            .collect::<Option<Vec<_>>>()
+                            .map(PropertyValue::Array),
+                        other => plain(other),
+                    };
+                    p.ok_or_else(|| {
+                        ExecutionError::TypeError(format!(
+                            "SET <entity> = {{{k}: ...}}: a property value cannot hold a \
+                             node, relationship or path"
+                        ))
+                    })
+                };
+                entries
+                    .iter()
+                    .map(|(k, v)| Ok((k.clone(), storable(k, v)?)))
+                    .collect()
+            }
             Value::Node(id, _) | Value::NodeRef(id) => {
                 Ok(store.node_properties_full(*id).into_iter().collect())
             }
@@ -20022,6 +20052,10 @@ impl PhysicalOperator for MergeOperator {
                     }
                 }
             }
+            // `ON MATCH SET n += {...}` / `n = {...}`: the create branch applied
+            // these and this one never did, so the update was silently lost (#1560).
+            let entity_sets = self.on_match_entity_set.clone();
+            self.apply_entity_sets(&entity_sets, &record, store, tenant_id)?;
             Self::apply_labels(&self.on_match_labels, &record, store, tenant_id);
 
             // The rest of the matches, each its own row. ON MATCH SET applies
@@ -20037,6 +20071,7 @@ impl PhysicalOperator for MergeOperator {
                         }
                     }
                 }
+                self.apply_entity_sets(&entity_sets, &r, store, tenant_id)?;
                 Self::apply_labels(&self.on_match_labels, &r, store, tenant_id);
                 self.pending.push_back(r);
             }

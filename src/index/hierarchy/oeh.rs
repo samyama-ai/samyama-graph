@@ -1627,7 +1627,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: a Float measure written into an index built from Int measures is truncated (Fenwick::add casts the delta to i128), so SUM roll-ups lose the fraction"]
     fn a_float_update_to_an_integer_index_is_not_truncated() {
         let p = balanced_tree(2, 2);
         let n = p.n();

@@ -679,6 +679,30 @@ pub fn detect_aggregate_then_expand(
     });
     let core = detect(&probe, store)?;
 
+    // The plan below binds only the grouped node and the count, then projects the
+    // final RETURN row by row after the expand. So the aggregating WITH may carry
+    // nothing else: `WITH b, b.name AS nm, count(a) AS c` left `nm` unbound, and
+    // `RETURN nm` failed with "Variable not found" (#1559).
+    for it in &agg_with.items {
+        match &it.expression {
+            Expression::Variable(v)
+                if v == &core.grouped_var && it.alias.as_ref().map_or(true, |a| a == v) => {}
+            Expression::Function { name, .. } if name.eq_ignore_ascii_case("count") => {}
+            _ => return None,
+        }
+    }
+    // Nor can the final RETURN aggregate: projected row by row, `count(*)` there
+    // reached the scalar function table and failed with "Unknown function: count"
+    // (#1558). The general planner aggregates it correctly.
+    let final_return = query.return_clause.as_ref()?;
+    if final_return
+        .items
+        .iter()
+        .any(|i| super::planner::expression_has_aggregate(&i.expression))
+    {
+        return None;
+    }
+
     let post_aggregate_filter = agg_with.where_clause.as_ref().map(|wc| wc.predicate.clone());
     if let Some(pred) = &post_aggregate_filter {
         if !expression_references_only(pred, &core.count_alias) {
@@ -1417,6 +1441,12 @@ mod tests {
             // neighbour properties / two labels
             "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e {k: 1}) RETURN j, c, e",
             "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e:A:B) RETURN j, c, e",
+            // an aggregate in the final RETURN (#1558)
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e) RETURN count(*) AS n",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e) RETURN j, sum(c) AS s",
+            // the aggregating WITH carries a property or renames the grouped node (#1559)
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, j.title AS t, count(a) AS c MATCH (j)-[:E]->(e) RETURN t, c, e",
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j AS k, count(a) AS c MATCH (k)-[:E]->(e) RETURN k, c, e",
         ] {
             assert!(dae(s).is_none(), "should reject: {}", s);
         }

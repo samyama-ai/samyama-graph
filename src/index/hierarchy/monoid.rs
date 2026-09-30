@@ -193,12 +193,19 @@ impl Fenwick {
     /// A Fenwick tree updates in place because SUM has an inverse — the caller supplies the
     /// difference and every covering node absorbs it. This is what lets a measure write
     /// avoid invalidating the whole index (#351).
+    ///
+    /// A Float delta promotes an Int tree to a Float one first, as `build` does when any
+    /// measure is a Float; casting the delta instead would drop its fraction (#1568).
+    /// Every node holds a sum of measures, so converting node by node keeps the tree valid.
     pub fn add(&mut self, pos: usize, delta: RollupValue) {
+        if let (Fenwick::Int(t), RollupValue::Float(_)) = (&*self, &delta) {
+            *self = Fenwick::Float(t.iter().map(|&x| x as f64).collect());
+        }
         match self {
             Fenwick::Int(t) => {
                 let d = match delta {
                     RollupValue::Int(v) => v,
-                    RollupValue::Float(f) => f as i128,
+                    RollupValue::Float(_) => unreachable!("promoted to a Float tree above"),
                     RollupValue::Null => return,
                 };
                 let n = t.len() - 1;

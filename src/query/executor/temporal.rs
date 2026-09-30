@@ -179,8 +179,11 @@ pub fn parse_timezone_spec(tz: &str) -> Result<TzSpec, ExecutionError> {
 ///
 /// A local time can be ambiguous (the hour repeated when clocks go back) or
 /// non-existent (the hour skipped when they go forward). Cypher resolves both
-/// toward the earlier offset, which is what `LocalResult::earliest` gives;
-/// picking arbitrarily would make one hour a year silently wrong.
+/// toward the earlier offset: `LocalResult::earliest` for a repeated hour, and
+/// for a skipped one the offset in effect just before the gap, which names the
+/// same instant as shifting the time forward past it (02:30 in a 02:00 -> 03:00
+/// gap is 03:30 at the later offset). Picking arbitrarily would make one hour a
+/// year silently wrong; refusing, as this did before #1571, made it an error.
 pub fn resolve_offset(spec: &TzSpec, local_days: i64, local_nanos: i64) -> Result<i32, ExecutionError> {
     match spec {
         TzSpec::Offset(o) => Ok(*o),
@@ -192,13 +195,22 @@ pub fn resolve_offset(spec: &TzSpec, local_days: i64, local_nanos: i64) -> Resul
             )
             .ok_or_else(|| err("date-time out of range"))?
             .naive_utc();
-            let resolved = tz
-                .from_local_datetime(&naive)
-                .earliest()
-                .or_else(|| tz.from_local_datetime(&naive).latest())
-                .ok_or_else(|| err(format!("{tz} has no offset for {naive}")))?;
             use chrono::Offset as _;
-            Ok(resolved.offset().fix().local_minus_utc())
+            if let Some(resolved) = tz.from_local_datetime(&naive).earliest() {
+                return Ok(resolved.offset().fix().local_minus_utc());
+            }
+            // In a gap: step back to the last local time that exists. Gaps are
+            // whole quarter hours, and none has been longer than a day (Samoa
+            // skipped 2011-12-30), so the walk is bounded.
+            let step = chrono::Duration::minutes(15);
+            let mut probe = naive;
+            for _ in 0..(26 * 4) {
+                probe -= step;
+                if let Some(before) = tz.from_local_datetime(&probe).latest() {
+                    return Ok(before.offset().fix().local_minus_utc());
+                }
+            }
+            Err(err(format!("{tz} has no offset for {naive}")))
         }
     }
 }
@@ -238,8 +250,9 @@ pub fn parse_time_parts(s: &str) -> Result<(i64, Option<i32>), ExecutionError> {
 ///
 /// Care is needed with `-`: in `2015-07-21T21:40:32-04` the offset dash is the
 /// last one, but in `2015-07-21` every dash belongs to the date. The rule used
-/// here is that an offset dash must come after a `T` when one is present, and
-/// otherwise after the time has started.
+/// here is that an offset dash must come after a `T` when one is present.
+/// Without one the string must be a time, so its last sign is the offset's;
+/// a bare date never reaches this (see [`parse_datetime_offset`]).
 fn split_offset(t: &str) -> Result<(&str, Option<i32>), ExecutionError> {
     if let Some(stripped) = t.strip_suffix('Z').or_else(|| t.strip_suffix('z')) {
         return Ok((stripped, Some(0)));
@@ -611,7 +624,13 @@ pub fn parse_iso_time(s: &str) -> Result<i64, ExecutionError> {
 /// Public because the `datetime()` string form needs the same dash rule the
 /// time parser uses: in `2015-07-21T21:40:32-04` the offset dash is the last
 /// one *after the `T`*, while in `2015-07-21` every dash belongs to the date.
+/// A date-time with no `T` is a bare date, with no time for an offset to
+/// follow; `split_offset` alone would read its last dash as one (#1572), since
+/// without a `T` it expects a time.
 pub fn parse_datetime_offset(t: &str) -> Result<(&str, Option<i32>), ExecutionError> {
+    if !t.contains('T') {
+        return Ok((t, None));
+    }
     split_offset(t)
 }
 

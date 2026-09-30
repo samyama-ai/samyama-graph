@@ -80,7 +80,7 @@ impl GraphMlReport {
 }
 
 /// The GraphML type a value needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GmlType {
     Boolean,
     Long,
@@ -98,12 +98,16 @@ impl GmlType {
         }
     }
 
-    /// The narrowest type holding both. `Ord` is declared so that this is the
-    /// maximum, and the variant order above is the widening order: anything
-    /// mixed with `String` is `String`, and a long mixed with a double is a
-    /// double.
+    /// The narrowest type holding both. A long mixed with a double is a
+    /// double; any other mix is `String`. A boolean mixed with a long is not a
+    /// long: `true` has no `long` text, so declaring one would write invalid
+    /// GraphML (#1575).
     fn widen(self, other: GmlType) -> GmlType {
-        self.max(other)
+        match (self, other) {
+            (a, b) if a == b => a,
+            (GmlType::Long, GmlType::Double) | (GmlType::Double, GmlType::Long) => GmlType::Double,
+            _ => GmlType::String,
+        }
     }
 }
 
@@ -215,7 +219,10 @@ pub fn to_graphml(store: &GraphStore) -> (String, GraphMlReport) {
             match node_types.get(&key) {
                 Some(prev) if *prev != t => {
                     let w = prev.widen(t);
-                    if w == GmlType::String && *prev != GmlType::String {
+                    // Whichever side was the string, a conflict that ends in
+                    // `String` is reported, so the report does not depend on
+                    // element order (#1576).
+                    if w == GmlType::String {
                         widened.push(format!("node.{key}"));
                     }
                     node_types.insert(key, w);
@@ -235,7 +242,10 @@ pub fn to_graphml(store: &GraphStore) -> (String, GraphMlReport) {
             match edge_types.get(&key) {
                 Some(prev) if *prev != t => {
                     let w = prev.widen(t);
-                    if w == GmlType::String && *prev != GmlType::String {
+                    // Whichever side was the string, a conflict that ends in
+                    // `String` is reported, so the report does not depend on
+                    // element order (#1576).
+                    if w == GmlType::String {
                         widened.push(format!("edge.{key}"));
                     }
                     edge_types.insert(key, w);
@@ -383,10 +393,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn widening_order_is_the_variant_order() {
+    fn only_long_and_double_widen_to_a_number() {
         assert_eq!(GmlType::Long.widen(GmlType::Double), GmlType::Double);
         assert_eq!(GmlType::Long.widen(GmlType::String), GmlType::String);
-        assert_eq!(GmlType::Boolean.widen(GmlType::Long), GmlType::Long);
+        assert_eq!(GmlType::Boolean.widen(GmlType::Long), GmlType::String);
+        assert_eq!(GmlType::Double.widen(GmlType::Boolean), GmlType::String);
         assert_eq!(GmlType::String.widen(GmlType::Boolean), GmlType::String);
         assert_eq!(GmlType::Long.widen(GmlType::Long), GmlType::Long);
     }
@@ -500,7 +511,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: a string-then-integer conflict widens to string but is not listed in attributes_widened_to_string (only a non-string first value is reported), so the report depends on node order"]
     fn a_string_seen_before_an_integer_is_still_reported_as_widened() {
         let mut g = GraphStore::new();
         let a = g.create_node("N");
@@ -513,7 +523,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bug: a boolean/integer conflict widens to `long` (Boolean < Long in GmlType order), so `true` is written under attr.type=\"long\" and the conflict is not reported"]
     fn a_boolean_integer_conflict_widens_to_string() {
         let mut g = GraphStore::new();
         let a = g.create_node("N");

@@ -640,7 +640,7 @@ fn and_into(target: &mut Expression, pred: Expression) {
     *target = Expression::Binary { left: Box::new(old), op: BinaryOp::And, right: Box::new(pred) };
 }
 
-fn expression_has_aggregate(expr: &Expression) -> bool {
+pub(crate) fn expression_has_aggregate(expr: &Expression) -> bool {
     match expr {
         Expression::Function { name, args, .. } => {
             const AGGREGATES: &[&str] = &[

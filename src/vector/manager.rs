@@ -4,7 +4,7 @@
 
 use crate::graph::NodeId;
 use crate::vector::index::Quantization;
-use crate::vector::index::{VectorIndex, DistanceMetric, VectorResult};
+use crate::vector::index::{VectorIndex, DistanceMetric, VectorError, VectorResult};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -181,21 +181,20 @@ impl VectorIndexManager {
         match self.get_index(label, property_key) {
             Some(index_lock) => {
                 let mut index = index_lock.write().unwrap();
-                index.add(node_id, vector)?;
+                index.add(node_id, vector)
             }
             // Returning Ok here made a vector added to a non-existent index indistinguishable
             // from one that was stored, which is how auto-embed could generate thousands of
             // embeddings that went nowhere without a single error (#310). Callers that treat
             // a missing index as acceptable can still ignore the result; they can no longer
-            // do so unknowingly.
-            None => {
-                tracing::warn!(
-                    "no vector index for {}.{}; vector for node {} was not stored",
-                    label, property_key, node_id.as_u64()
-                );
-            }
+            // do so unknowingly (#1569).
+            None => Err(VectorError::IndexError(format!(
+                "no vector index for {}.{}; vector for node {} was not stored",
+                label,
+                property_key,
+                node_id.as_u64()
+            ))),
         }
-        Ok(())
     }
 
     /// Search an index
@@ -478,9 +477,10 @@ mod tests {
     #[test]
     fn adding_to_a_missing_index_stores_nothing_and_searching_it_finds_nothing() {
         let mgr = VectorIndexManager::new();
-        assert!(mgr
-            .add_vector("Nope", "v", NodeId::new(1), &vec![1.0, 0.0])
-            .is_ok());
+        assert!(matches!(
+            mgr.add_vector("Nope", "v", NodeId::new(1), &vec![1.0, 0.0]),
+            Err(VectorError::IndexError(_))
+        ));
         assert!(mgr.list_indices().is_empty());
         assert!(mgr.search("Nope", "v", &[1.0, 0.0], 3).unwrap().is_empty());
     }

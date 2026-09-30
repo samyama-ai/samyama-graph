@@ -335,7 +335,6 @@ async fn vector_dimension_mismatches_are_vector_errors() {
 }
 
 #[tokio::test]
-#[ignore = "bug: VectorIndexManager::add_vector returns Ok(()) for a missing index though its comment (#310) says it must now error"]
 async fn adding_a_vector_to_a_missing_index_is_an_error() {
     let c = EmbeddedClient::new();
     let err = c
