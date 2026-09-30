@@ -1213,12 +1213,19 @@ async fn start_server() {
     //
     // Unset flags leave the shipped defaults exactly as they were. This adds a
     // way to raise the ceiling; it does not move it.
-    if let Some(q) = quota_overrides_from_args() {
+    let quota_overrides = match quota_overrides_from_args() {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("{e}");
+            exit_closing(persistence, 2);
+        }
+    };
+    if let Some(q) = quota_overrides {
         match shared_tenants.update_quotas("default", q) {
             Ok(()) => tracing::info!("default tenant quotas overridden from the command line"),
             Err(e) => {
                 eprintln!("error: could not apply quota overrides: {e}");
-                std::process::exit(2);
+                exit_closing(persistence, 2);
             }
         }
     }
@@ -1236,7 +1243,7 @@ async fn start_server() {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("EMBED_ENABLED is true but the provider is unusable: {e}");
-                    std::process::exit(2);
+                    exit_closing(persistence, 2);
                 }
             };
             let model     = std::env::var("EMBED_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
@@ -1379,47 +1386,63 @@ async fn start_server() {
 ///
 /// Returns `None` when the flag is absent, so an unset flag is distinguishable
 /// from one explicitly set to unlimited. `Some(None)` is "no ceiling".
-fn quota_arg(name: &str) -> Option<Option<usize>> {
+fn quota_arg(name: &str) -> Result<Option<Option<usize>>, String> {
     let args: Vec<String> = std::env::args().collect();
-    let i = args.iter().position(|a| a == name)?;
+    let Some(i) = args.iter().position(|a| a == name) else {
+        return Ok(None);
+    };
     // A following token that is itself a flag means the value was omitted.
     // Without this, `--max-nodes --http-port 8080` reports that `--http-port`
     // is not a number, which sends the reader after the wrong argument.
     let raw = match args.get(i + 1) {
         Some(v) if !v.starts_with("--") => v,
         _ => {
-            eprintln!("error: {name} requires a value (a number, or `unlimited`)");
-            std::process::exit(2);
+            return Err(format!(
+                "error: {name} requires a value (a number, or `unlimited`)"
+            ))
         }
     };
     if raw.eq_ignore_ascii_case("unlimited") || raw.eq_ignore_ascii_case("none") {
-        return Some(None);
+        return Ok(Some(None));
     }
     match raw.replace('_', "").parse::<usize>() {
-        Ok(v) => Some(Some(v)),
-        Err(_) => {
-            eprintln!("error: {name} expects a number or `unlimited`, got {raw:?}");
-            std::process::exit(2);
-        }
+        Ok(v) => Ok(Some(Some(v))),
+        Err(_) => Err(format!(
+            "error: {name} expects a number or `unlimited`, got {raw:?}"
+        )),
     }
 }
 
 /// The default tenant's quotas with any `--max-*` flag applied, or `None` when
 /// no flag was given so the shipped defaults are left untouched.
-fn quota_overrides_from_args() -> Option<samyama::persistence::tenant::ResourceQuotas> {
-    let nodes = quota_arg("--max-nodes");
-    let edges = quota_arg("--max-edges");
-    let memory = quota_arg("--max-memory-bytes");
-    let storage = quota_arg("--max-storage-bytes");
+fn quota_overrides_from_args(
+) -> Result<Option<samyama::persistence::tenant::ResourceQuotas>, String> {
+    let nodes = quota_arg("--max-nodes")?;
+    let edges = quota_arg("--max-edges")?;
+    let memory = quota_arg("--max-memory-bytes")?;
+    let storage = quota_arg("--max-storage-bytes")?;
     if nodes.is_none() && edges.is_none() && memory.is_none() && storage.is_none() {
-        return None;
+        return Ok(None);
     }
     let mut q = samyama::persistence::tenant::ResourceQuotas::default();
     if let Some(v) = nodes { q.max_nodes = v; }
     if let Some(v) = edges { q.max_edges = v; }
     if let Some(v) = memory { q.max_memory_bytes = v; }
     if let Some(v) = storage { q.max_storage_bytes = v; }
-    Some(q)
+    Ok(Some(q))
+}
+
+/// Exit with `code`, closing persistence first.
+///
+/// `std::process::exit` with RocksDB still open runs the process's static
+/// destructors while RocksDB's background threads are working, and the process
+/// segfaulted about one run in ten instead of exiting with `code` (#1577).
+/// Every exit taken after persistence is opened goes through here. `main`
+/// holds the only reference to the manager at those points, so dropping it
+/// closes the database.
+fn exit_closing(persistence: Option<Arc<samyama::PersistenceManager>>, code: i32) -> ! {
+    drop(persistence);
+    std::process::exit(code)
 }
 
 #[cfg(test)]

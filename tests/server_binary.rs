@@ -7,10 +7,10 @@
 //! sequence -- demo data, recovery, quotas, the embed pipeline, the indexer --
 //! run for real without leaving a server behind.
 //!
-//! A run with persistence open must stop that way, never through an early
-//! `std::process::exit`: exiting while RocksDB's background threads run races
-//! its static destructors and segfaults about one run in ten. Refusals are
-//! exercised on `--ephemeral` servers instead.
+//! Runs with persistence open that are not about a refusal stop that way too.
+//! A refusal after persistence opens used to segfault about one run in ten,
+//! because `std::process::exit` raced RocksDB's background threads (#1577);
+//! `a_refusal_with_persistence_open_exits_with_its_status` covers that.
 //!
 //! Every run gets a fresh working directory, so the default `./samyama_data`
 //! never lands in the repository, and a bounded wait: a run that does not exit
@@ -724,6 +724,26 @@ fn a_committed_snapshot_is_replayed_when_there_is_nothing_to_recover() {
         .assert_code(0)
         .err_has("[snapshot-persist] Restore error")
         .out_has("Total nodes: 0");
+}
+
+/// Before #1577 a refusal taken with RocksDB open segfaulted about one run in
+/// ten. Twenty runs catch that rate most of the time; each must exit with the
+/// refusal's own status, never a signal.
+#[test]
+fn a_refusal_with_persistence_open_exits_with_its_status() {
+    for _ in 0..20 {
+        let data = tempfile::tempdir().unwrap();
+        run(&["--data-path", s(data.path()), "--max-nodes", "?"], &[])
+            .assert_code(2)
+            .err_has("--max-nodes expects a number");
+    }
+    let data = tempfile::tempdir().unwrap();
+    run(
+        &["--data-path", s(data.path())],
+        &[("EMBED_ENABLED", "true"), ("EMBED_PROVIDER", "bogus")],
+    )
+    .assert_code(2)
+    .err_has("the provider is unusable");
 }
 
 #[test]

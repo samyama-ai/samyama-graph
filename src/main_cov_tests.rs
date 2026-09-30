@@ -776,6 +776,6 @@ fn a_graphalytics_vertex_limit_caps_the_vertices_and_drops_their_edges() {
 #[test]
 fn no_quota_flag_leaves_the_shipped_defaults_alone() {
     // The test harness is not given any `--max-*` flag.
-    assert_eq!(quota_arg("--max-nodes"), None);
-    assert!(quota_overrides_from_args().is_none());
+    assert_eq!(quota_arg("--max-nodes"), Ok(None));
+    assert_eq!(quota_overrides_from_args().map(|q| q.is_none()), Ok(true));
 }
