@@ -829,3 +829,307 @@ fn an_embed_pipeline_that_cannot_be_built_is_a_warning_not_a_refusal() {
     .err_has("Warning: failed to build embed pipeline from EMBED_* vars")
     .out_has("Server ready.");
 }
+
+// ───────────────────────────────────────────────────────────── a real crash
+
+/// One RESP reply, as far as these tests need to read one.
+#[derive(Debug)]
+// Status and error payloads are read through `Debug`, in failure messages.
+#[allow(dead_code)]
+enum Reply {
+    Status(String),
+    Error(String),
+    Int(i64),
+    Bulk(Option<String>),
+    Array(Vec<Reply>),
+    Null,
+}
+
+fn read_reply(r: &mut impl std::io::BufRead) -> std::io::Result<Reply> {
+    let mut line = String::new();
+    if r.read_line(&mut line)? == 0 {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    let line = line.trim_end_matches("\r\n");
+    let bad = || std::io::Error::new(std::io::ErrorKind::InvalidData, line.to_string());
+    let (tag, rest) = line.split_at(1.min(line.len()));
+    Ok(match tag {
+        "+" => Reply::Status(rest.to_string()),
+        "-" => Reply::Error(rest.to_string()),
+        ":" => Reply::Int(rest.parse().map_err(|_| bad())?),
+        "_" => Reply::Null,
+        "$" => {
+            let n: i64 = rest.parse().map_err(|_| bad())?;
+            if n < 0 {
+                Reply::Bulk(None)
+            } else {
+                let mut buf = vec![0u8; n as usize + 2];
+                r.read_exact(&mut buf)?;
+                buf.truncate(n as usize);
+                Reply::Bulk(Some(String::from_utf8_lossy(&buf).into_owned()))
+            }
+        }
+        "*" => {
+            let n: i64 = rest.parse().map_err(|_| bad())?;
+            let mut items = Vec::new();
+            for _ in 0..n.max(0) {
+                items.push(read_reply(r)?);
+            }
+            Reply::Array(items)
+        }
+        _ => return Err(bad()),
+    })
+}
+
+/// A RESP connection that sends `GRAPH.QUERY default <cypher>`.
+struct Resp {
+    reader: std::io::BufReader<std::net::TcpStream>,
+    writer: std::net::TcpStream,
+}
+
+impl Resp {
+    fn connect(port: u16) -> std::io::Result<Self> {
+        let stream = std::net::TcpStream::connect(("127.0.0.1", port))?;
+        stream.set_read_timeout(Some(DEADLINE))?;
+        Ok(Self {
+            reader: std::io::BufReader::new(stream.try_clone()?),
+            writer: stream,
+        })
+    }
+
+    fn query(&mut self, cypher: &str) -> std::io::Result<Reply> {
+        let mut frame = Vec::new();
+        for arg in ["GRAPH.QUERY", "default", cypher] {
+            frame.extend_from_slice(format!("${}\r\n{arg}\r\n", arg.len()).as_bytes());
+        }
+        let mut cmd = b"*3\r\n".to_vec();
+        cmd.extend_from_slice(&frame);
+        self.writer.write_all(&cmd)?;
+        read_reply(&mut self.reader)
+    }
+}
+
+/// A server on `data`, its output in files there, so an unread pipe cannot
+/// stall it and a failure can show what it printed.
+fn spawn_server(data: &Path, resp_port: u16) -> std::process::Child {
+    let log = |name: &str| std::fs::File::create(data.join(name)).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_samyama"));
+    cmd.args([
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &resp_port.to_string(),
+        "--http-port",
+        &free_port().to_string(),
+        "--data-path",
+        s(&data.join("db")),
+    ])
+    .current_dir(data)
+    .stdin(Stdio::null())
+    .stdout(log("stdout.log"))
+    .stderr(log("stderr.log"));
+    for k in ENV {
+        cmd.env_remove(k);
+    }
+    // The stock configuration: no fsync, so what survives is what the kernel
+    // already had when the process died.
+    cmd.env_remove("SAMYAMA_FSYNC");
+    cmd.spawn().expect("spawn the samyama binary")
+}
+
+fn server_output(data: &Path) -> String {
+    let read = |n: &str| std::fs::read_to_string(data.join(n)).unwrap_or_default();
+    format!(
+        "--- stdout\n{}\n--- stderr\n{}",
+        read("stdout.log"),
+        read("stderr.log")
+    )
+}
+
+/// Poll until the server answers a query, for at most `DEADLINE`. Readiness is
+/// the answer, not a sleep: a debug build recovering a store is slow, and how
+/// slow depends on the host.
+fn wait_until_serving(child: &mut std::process::Child, port: u16, data: &Path) -> Resp {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "the server exited ({status}) before serving\n{}",
+                server_output(data)
+            );
+        }
+        if let Ok(mut c) = Resp::connect(port) {
+            if let Ok(Reply::Array(_)) = c.query("RETURN 1") {
+                return c;
+            }
+        }
+        if start.elapsed() > DEADLINE {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "the server did not serve within {DEADLINE:?}\n{}",
+                server_output(data)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// REL-15's "process killed mid-write" and "recovery after a real crash"
+/// (#1311), as a `cargo test` rather than a script run by hand.
+///
+/// A writer issues `CREATE (:Crash {seq: i})` over RESP, with a `SET` on every
+/// fifth node, and records each write the server acknowledged. Once enough are
+/// acknowledged the server gets `SIGKILL` -- no shutdown path runs -- while the
+/// writer is still sending, so the signal lands wherever it lands. A restart on
+/// the same directory must then hold every acknowledged `CREATE` and every
+/// acknowledged `SET`, and nothing that was never issued.
+///
+/// Correctness does not depend on when the kill lands: every acknowledged write
+/// is checked whatever the count is. The one write in flight at the kill is
+/// neither acknowledged nor refused, and may or may not survive.
+///
+/// What recovery reads is RocksDB, which replays its own log on open. The
+/// server does not replay samyama's `wal/` directory at start-up at all, so
+/// this is not a test of `Wal::replay`.
+#[cfg(unix)]
+#[test]
+fn every_acknowledged_write_survives_a_sigkill_mid_write() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// Acknowledged writes to wait for before the kill: enough that the
+    /// recovered store is not trivially small, few enough for a debug build.
+    const ACKED_BEFORE_KILL: usize = 150;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let port = free_port();
+    let mut server = spawn_server(data, port);
+    let mut conn = wait_until_serving(&mut server, port, data);
+
+    let acked_creates = Arc::new(Mutex::new(Vec::<i64>::new()));
+    let acked_sets = Arc::new(Mutex::new(Vec::<i64>::new()));
+    let acked = Arc::new(AtomicUsize::new(0));
+    let issued = Arc::new(AtomicUsize::new(0));
+    let writer = {
+        let (creates, sets) = (acked_creates.clone(), acked_sets.clone());
+        let (acked, issued) = (acked.clone(), issued.clone());
+        std::thread::spawn(move || -> String {
+            for seq in 1i64.. {
+                issued.store(seq as usize, Ordering::SeqCst);
+                match conn.query(&format!("CREATE (:Crash {{seq: {seq}}})")) {
+                    Ok(Reply::Array(_)) => creates.lock().unwrap().push(seq),
+                    Ok(other) => return format!("CREATE {seq} was refused: {other:?}"),
+                    // The connection died with the server.
+                    Err(_) => return String::new(),
+                }
+                if seq % 5 == 0 {
+                    let q = format!("MATCH (n:Crash {{seq: {seq}}}) SET n.touched = true");
+                    match conn.query(&q) {
+                        Ok(Reply::Array(_)) => sets.lock().unwrap().push(seq),
+                        Ok(other) => return format!("SET {seq} was refused: {other:?}"),
+                        Err(_) => return String::new(),
+                    }
+                }
+                acked.fetch_add(1, Ordering::SeqCst);
+            }
+            unreachable!()
+        })
+    };
+
+    let start = Instant::now();
+    while acked.load(Ordering::SeqCst) < ACKED_BEFORE_KILL {
+        if writer.is_finished() || start.elapsed() > DEADLINE {
+            let _ = server.kill();
+            let _ = server.wait();
+            panic!(
+                "the writer stopped at {} acknowledged writes: {:?}\n{}",
+                acked.load(Ordering::SeqCst),
+                writer.join(),
+                server_output(data)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // `Child::kill` is SIGKILL on Unix. The status is checked below, so a
+    // server that exited some other way cannot pass for a crash.
+    server.kill().unwrap();
+    let status = server.wait().unwrap();
+    let refusal = writer.join().unwrap();
+    assert!(refusal.is_empty(), "{refusal}\n{}", server_output(data));
+    assert_eq!(
+        status.signal(),
+        Some(9),
+        "the server was not killed: {status}"
+    );
+
+    let creates = acked_creates.lock().unwrap().clone();
+    let sets = acked_sets.lock().unwrap().clone();
+    let last_issued = issued.load(Ordering::SeqCst) as i64;
+    assert!(creates.len() >= ACKED_BEFORE_KILL, "{}", creates.len());
+
+    let mut restarted = spawn_server(data, port);
+    let mut conn = wait_until_serving(&mut restarted, port, data);
+    let rows = conn.query("MATCH (n:Crash) RETURN n.seq AS seq, n.touched AS touched ORDER BY seq");
+    let _ = restarted.kill();
+    let _ = restarted.wait();
+    let Ok(Reply::Array(rows)) = rows else {
+        panic!(
+            "the recovered store did not answer: {rows:?}\n{}",
+            server_output(data)
+        );
+    };
+
+    let mut survived = Vec::new();
+    let mut touched = Vec::new();
+    for row in rows.iter().skip(1) {
+        let Reply::Array(cells) = row else {
+            panic!("row {row:?}")
+        };
+        let Reply::Int(seq) = cells[0] else {
+            panic!("seq {row:?}")
+        };
+        survived.push(seq);
+        if matches!(&cells[1], Reply::Bulk(Some(b)) if b == "true") {
+            touched.push(seq);
+        }
+    }
+
+    println!(
+        "acknowledged {} CREATEs and {} SETs, last issued {last_issued}, recovered {} nodes",
+        creates.len(),
+        sets.len(),
+        survived.len()
+    );
+    let lost: Vec<i64> = creates
+        .iter()
+        .filter(|s| !survived.contains(s))
+        .copied()
+        .collect();
+    assert!(
+        lost.is_empty(),
+        "{} of {} acknowledged CREATEs were lost: {lost:?}",
+        lost.len(),
+        creates.len()
+    );
+    let lost_sets: Vec<i64> = sets
+        .iter()
+        .filter(|s| !touched.contains(s))
+        .copied()
+        .collect();
+    assert!(
+        lost_sets.is_empty(),
+        "acknowledged SETs lost: {lost_sets:?}"
+    );
+    // Nothing that was never issued, and each node once: the in-flight write
+    // may be present, anything beyond it may not.
+    assert!(
+        survived.iter().all(|&s| (1..=last_issued).contains(&s)),
+        "a node the writer never issued: {survived:?} (last issued {last_issued})"
+    );
+    let mut unique = survived.clone();
+    unique.dedup();
+    assert_eq!(unique.len(), survived.len(), "a node recovered twice");
+}

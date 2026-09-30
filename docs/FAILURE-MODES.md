@@ -3,10 +3,11 @@
 What happens when something goes wrong, what the data guarantee is afterwards,
 and what the operator should do.
 
-**32 of the 33 rows name the test that observed the behaviour**, at the
-`path:line` of the test's signature. A row without a test is a guess about the
-most important moment in a database's life, so the gaps are listed at the
-bottom as gaps rather than filled in with what ought to happen.
+**37 of the 38 rows name the test that observed the behaviour**, at the
+`path:line` of the test's signature. (Two rows carry the number 33, one under
+snapshots and one under the WAL; both are counted.) A row without a test is a
+guess about the most important moment in a database's life, so the gaps are
+listed at the bottom as gaps rather than filled in with what ought to happen.
 
 The one exception is row **6** (power loss after COMMIT). It carries "not
 tested" in place of an observation, and it is in the table rather than only in
@@ -34,6 +35,7 @@ restart, not a power cut.
 | 3 | Restart after a whole-graph delete, then one write | The restart finds exactly the one new node, not the deleted three | Id reuse after a delete does not resurrect data | None | `a_deleted_graph_does_not_come_back_around_the_next_write` (`tests/graph_delete.rs:70`) |
 | 4 | Restart after a snapshot import plus a later write | The recovered node carries the imported properties *and* the later write | An import and a write compose | None | `an_imported_node_keeps_the_properties_a_later_write_did_not_touch` (`tests/write_durability.rs:202`) |
 | 5 | Restart, then re-run every query | A query corpus answers identically before and after; every divergence is reported | Recovery is answer-preserving, not merely count-preserving | None | `every_query_answers_the_same_after_a_persistence_restart` (`tests/query_parity_after_import.rs:188`) |
+| 34 | **The server process is killed (`SIGKILL`) while a client is writing** | Every write the server acknowledged is there after a restart on the same directory: each `CREATE` over RESP, and each `SET` on every fifth node. Nothing that was never issued is present and no node comes back twice. The one write in flight at the kill is neither acknowledged nor refused; repeated runs of the test have recovered it in some runs and not in others. What recovery read is RocksDB, which replays its own log on open: the server does not replay samyama's `wal/` directory at start-up at all | An acknowledged auto-commit write survives the process dying, with the stock configuration (no `SAMYAMA_FSYNC`). A process kill, not a power cut: row 6 still applies | Restart on the same `--data-path`; check whether the write that had no reply landed before re-sending it | `every_acknowledged_write_survives_a_sigkill_mid_write` (`tests/server_binary.rs:997`) |
 | 6 | **Power loss or host reset after COMMIT** | **Not tested — see the gaps below** | **None claimed** by default. The write is in the OS page cache, not on the platter (#1309). With `SAMYAMA_FSYNC=1` both halves are synced before the reply, but no test cuts power to confirm it | Treat recent writes as at risk; snapshot for anything that must survive | — |
 
 ## Partial writes and corrupt files
@@ -48,6 +50,7 @@ restart, not a power cut.
 | 11 | A restore that silently loses values | `verify` fails with `ValuesDiffer` even though the row counts match | A count-only check is not the check | Do not promote the restore | `properties_lost_by_a_restore_are_caught_as_values_differing` (`tests/snapshot_verify.rs:128`) |
 | 12 | A restore that comes back empty but consistent | `everything_empty` is set and the report is not OK | An all-empty run fails even when every expectation matches | Investigate the source snapshot | `an_all_empty_run_fails_even_when_expectations_match` (`tests/snapshot_verify.rs:95`) |
 | 13 | A snapshot catalog in an unrecognised format | Refused, with a message containing "refusing to guess" | An unknown format is never interpreted | Supply a supported catalog | `an_unknown_catalog_format_is_refused` (`tests/snapshot_verify.rs:213`) |
+| 36 | A snapshot property whose temporal tag is malformed (`{"__type": "Date"}` with no `days`, or, for `Date`, a `days` that is not a number) | Not refused. It comes back as the map it is, `__type` and all -- for all six temporal tags -- rather than as `Date(0)`, `Null` or a missing property | A corrupt temporal is never read as a plausible value. It is not reported either: the conversion flags nothing | Look for `__type` keys in map-valued properties after an import from an untrusted source | `a_malformed_temporal_tag_does_not_become_a_plausible_value` (`src/snapshot/mod.rs:2492`) |
 | 14 | A dangling edge arriving through the recovery path | `insert_recovered_edge` refuses an edge whose target does not exist | Recovery cannot introduce corruption | Check the WAL/snapshot source | `a_dangling_edge_cannot_be_created_through_a_public_api` (`tests/db_check_integrity.rs:62`) |
 
 | 32 | **A WAL whose last record is torn** (killed between writing a length prefix and the bytes it promised) | Replay stops at the torn record and keeps every complete record before it. A short length prefix and a short record body now behave the same way; the second used to fail the whole replay | Complete records replay; the unfinished one does not. The tests write and flush in-process, so nothing was acknowledged to a client and no process died. A record written in full and then damaged is a different case: row 33 | None; the log is replayable | `a_record_cut_in_its_body_does_not_discard_the_records_before_it` (`tests/wal_torn_tail.rs:68`), `a_record_cut_in_its_length_prefix_also_replays_the_rest` (`tests/wal_torn_tail.rs:83`), control `an_untouched_wal_replays_everything` (`tests/wal_torn_tail.rs:114`) |
@@ -69,6 +72,7 @@ restart, not a power cut.
 
 | # | Failure | Observed behaviour | Data guarantee | Operator action | Test |
 |---|---|---|---|---|---|
+| 35 | **A read query runs past its deadline** | Stopped with an error containing `Query timed out`, and no rows. The same engine answers the next query: the deadline is per query. Driven through `QueryEngine`, which sets the deadline from `SAMYAMA_QUERY_TIMEOUT` (whole seconds, default 120; the test uses 1) | A read cannot hold the store past its deadline by more than the gap to the next check: the check is cooperative, between batches, not a preemption. **Write statements get no deadline** -- `execute_mut` sets none | Narrow the query, or raise `SAMYAMA_QUERY_TIMEOUT` | `a_query_past_the_engine_deadline_is_stopped_with_a_timeout_error` (`tests/query_deadline.rs:30`) |
 | 22 | A query that would explode | Refused with `ROW_BUDGET_EXCEEDED`, the budget, and the operator that blew it named in the message | A refusal identifies the cause, not just the fact | Add a filter, or raise `SAMYAMA_ROW_BUDGET` | `an_exploding_operator_is_refused_by_name` (`src/query/executor/budget.rs:311`) |
 | 23 | A large but legitimate scan | 500 rows come back under a 100-row budget: the budget bounds explosions, not scans | The guard does not cause false refusals | None | `a_large_scan_is_not_an_explosion_and_is_not_refused` (`src/query/executor/budget.rs:425`) |
 | 24 | An unparseable budget setting | Falls back to the default, not to unlimited | A typo cannot silently disable the guard | Fix the variable | `an_unparseable_budget_falls_back_to_the_default_not_to_unlimited` (`src/query/executor/budget.rs:448`) |
@@ -80,6 +84,12 @@ restart, not a power cut.
 | 30 | An out-of-range integer literal | Refused with "out of range" — control returns, nothing panics | Bad input is an error, not a crash | Fix the query | `an_out_of_range_literal_is_refused_rather_than_crashing` (`tests/integer_literals.rs:66`) |
 | 31 | A malformed HTTP body or missing content type | 400 and 415 respectively | Malformed requests are rejected by status, not by guesswork | Fix the client | `test_query_handler_malformed_json_returns_error` (`src/http/handler.rs:2574`), `test_query_handler_missing_content_type` (`src/http/handler.rs:2591`) |
 
+## Replication
+
+| # | Failure | Observed behaviour | Data guarantee | Operator action | Test |
+|---|---|---|---|---|---|
+| 37 | A write sent to a Raft node before `initialize` | Refused with `RaftError::Raft("Raft not initialized")`. Nothing is applied: the store holds no node and the log index and applied index stay at 0. The same write after `initialize` lands | An uninitialised node applies nothing. That is all it says: an initialised node applies locally and is leader unconditionally, so there is no replication to fail yet (#1309) | Initialise the node | `test_raft_node_write_before_init` (`src/raft/node.rs:232`) |
+
 ## Weak assertions
 
 These tests exist and pass. They are not rows above, because of what they do
@@ -89,9 +99,7 @@ stronger evidence than they are.
 | Test | What it asserts | What it is not evidence of |
 |---|---|---|
 | `an_altered_byte_fails` (`src/snapshot/encryption.rs:365`) | `open()` returns `is_err()` after one flipped bit | That corruption is detected and named. No error class, no message |
-| `test_quota_enforcement_connections` (`src/persistence/tenant.rs:1119`) | `check_quota` returns `is_err()` at 2/2 connections | What a client sees. No error class is checked |
-| `a_malformed_temporal_tag_does_not_become_a_plausible_value` (`src/snapshot/mod.rs:2335`) | One `assert_ne!`: a `Date` tag with no `days` is not `Date(0)` | That the malformed tag errors. It pins what the value is not, not that anything is refused |
-| `test_raft_node_write_before_init` (`src/raft/node.rs:228`) | `node.write()` returns `is_err()` before `initialize` | Anything about the error a caller gets |
+| `test_quota_enforcement_connections` (`src/persistence/tenant.rs:1119`) | `QuotaExceeded { tenant: "t1", resource: "connections (2/2)" }` at 2/2, allowed at 1/2 and again after a decrement | What a client sees. The API's error is pinned, but no server path counts or checks connections (see the gaps), so a client never meets it |
 | `test_quota_enforcement_memory` (`src/persistence/tenant.rs:1096`) | `TenantError::QuotaExceeded` at 1024/1024 bytes | OOM behaviour. It measures a bookkeeping counter, not process memory |
 
 ## Gaps — failures with no test, so no row
@@ -103,10 +111,11 @@ is more misleading than one that admits it. Each is a test to write, tracked in
 | Failure | Why it is not written down |
 |---|---|
 | **Disk full, or any IO error on a write path** | Only row 33 injects a real `io::Error` (a directory where the snapshot's tmp file goes). Nothing injects `ENOSPC` or a read-only directory on the WAL or RocksDB paths. The two commit-refused tests in row 16 call `pm.fail_next_apply_for_test()`: injection at the apply layer, not real IO. They pin the rollback, not what a filesystem error does on the way to it |
-| **Process killed mid-write (SIGKILL)** | No `cargo test` spawns and kills a process. Rows 7 and 20 are the nearest proxies and neither is a real crash. A separate harness, `scripts/crash_consistency.py`, does `kill -9` a real server mid-write; it is run by hand, not in CI, and its measured result is below the table (#1355) |
-| **WAL replay after a crash** | Every WAL test replays a WAL the same process just wrote and flushed. Row 32 truncates one deliberately, which is not the same as replaying one a killed process left behind |
-| **A query deadline exceeded** | `with_deadline` and `check_deadline` exist and nothing drives a query past one. The *transaction* timeout is row 21; the query deadline is still untested |
-| **`max_query_time_ms` enforcement** | The field exists (`src/persistence/tenant.rs:55`) and four tests serialise it (`:918, :1355, :1618, :1700`). Nothing reads it to stop a query, so there is no behaviour to record |
+| **Process killed mid-write, beyond one kill point** | Row 34 kills one server once per run, over RESP auto-commit, after about 150 acknowledged writes. A kill inside an HTTP transaction's COMMIT, a kill against a large store, and many kill points are the hand-run harness below (#1355), not a `cargo test` |
+| **samyama's WAL replayed after a crash** | The server never replays `wal/` at start-up: `Wal::replay` is called only from tests, and recovery reads RocksDB (whose own log RocksDB replays on open -- what row 34 exercises). Every WAL test replays a WAL the same process wrote; rows 32 and 33 damage one deliberately. Until something reads the WAL on start-up, replaying one a killed process left behind is not a behaviour of the server |
+| **A deadline on writes, and on the served paths** | Row 35 drives a read through `QueryEngine`. `execute_mut` sets no deadline, so a write statement has none to exceed. The RESP and HTTP handlers and the streaming read path (`execute_streaming_with_params`, which sets the same deadline) are not driven past it |
+| **`max_query_time_ms` enforcement** | The field exists (`src/persistence/tenant.rs:55`) and four tests serialise it (`:918, :1382, :1645, :1727`). Nothing reads it to stop a query -- the only deadline is the process-wide `SAMYAMA_QUERY_TIMEOUT` of row 35 -- so there is no per-tenant behaviour to record |
+| **The connection quota** | `check_quota(tenant, "connections")` refuses at the limit with the count in the message (see the weak assertions), but nothing outside `src/persistence/tenant.rs` increments, decrements or checks `"connections"`. A client opening connections past `max_connections` is not refused |
 | **Out of memory** | The memory quota checks a bookkeeping counter, not process memory, and no test exercises an allocation failure |
 | **Replica lag, or a node losing leadership** | Neither exists to test: `RaftNode::write` applies locally and `initialize` makes the node leader unconditionally (#1309) |
 
@@ -117,7 +126,9 @@ is more misleading than one that admits it. Each is a test to write, tracked in
 a `SET` on every fifth write, a read on every seventh), sends `SIGKILL` to the
 server's process group after a random delay, restarts it on the same
 directory and asks which writes survived. It is a Python harness run by hand,
-not a `cargo test`, so it is not a row above and CI does not run it.
+not a `cargo test`, so it is not a row above and CI does not run it. Row 34
+is its counterpart inside the suite: the same one-sided check, one kill point
+per run, over RESP rather than HTTP.
 
 The run recorded in #1355 — binary pinned at `f8c0300`, kill delay uniform in
 [0.05, 0.8] s:
@@ -144,7 +155,7 @@ What it does not say:
 - REL-04's H2 and H3 — 10,000 kill points, torn-write simulation,
   fault-injected fsync failures — are not attempted.
 - Survival is checked by the `seq` of each `CREATE`d node; the `SET` the
-  workload also issues is not checked after restart.
+  workload also issues is not checked after restart. Row 34 checks it.
 
 Reproduce (build first with `cargo build --release --bin samyama`; copy the
 binary and pass `--binary` for a long sweep, because a rebuild replaces

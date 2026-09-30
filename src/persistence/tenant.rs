@@ -1128,9 +1128,36 @@ mod tests {
         };
         manager.create_tenant("t1".to_string(), "T1".to_string(), Some(quotas)).unwrap();
 
-        manager.increment_usage("t1", "connections", 2).unwrap();
-        let result = manager.check_quota("t1", "connections");
-        assert!(result.is_err());
+        manager.increment_usage("t1", "connections", 1).unwrap();
+        manager
+            .check_quota("t1", "connections")
+            .expect("one of two connections in use is under the quota");
+
+        manager.increment_usage("t1", "connections", 1).unwrap();
+        // Was `assert!(result.is_err())` alone (#1311). The error names the
+        // tenant, the resource and the count, and that is the whole of what a
+        // caller of this API is told.
+        let err = manager
+            .check_quota("t1", "connections")
+            .expect_err("the third connection is over the quota of two");
+        match &err {
+            TenantError::QuotaExceeded { tenant, resource } => {
+                assert_eq!(tenant, "t1");
+                assert_eq!(resource, "connections (2/2)");
+            }
+            other => panic!("refused for the wrong reason: {other:?}"),
+        }
+        assert_eq!(
+            err.to_string(),
+            "Quota exceeded for tenant t1: connections (2/2)"
+        );
+
+        // Closing one frees the slot again: the refusal is the count, not a
+        // latch.
+        manager.decrement_usage("t1", "connections", 1).unwrap();
+        manager
+            .check_quota("t1", "connections")
+            .expect("back under the quota after a connection closes");
     }
 
     #[test]
