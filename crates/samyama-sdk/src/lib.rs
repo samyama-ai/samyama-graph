@@ -143,3 +143,7 @@ pub use ndarray::Array1;
 // ============================================================
 
 pub use samyama::VERSION;
+
+#[cfg(test)]
+#[path = "lib_cov_tests.rs"]
+mod cov_tests;
