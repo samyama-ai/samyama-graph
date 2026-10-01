@@ -515,6 +515,18 @@ impl TenantManager {
             .ok_or_else(|| TenantError::NotFound(id.to_string()))
     }
 
+    /// How long one of the tenant's queries may run: its `max_query_time_ms`,
+    /// or `None` for no limit of its own or a tenant that does not exist. The
+    /// query engine takes the shorter of this and the server's (#1593).
+    pub fn query_time_limit(&self, id: &str) -> Option<std::time::Duration> {
+        let tenants = self.tenants.read().unwrap();
+        tenants
+            .get(id)?
+            .quotas
+            .max_query_time_ms
+            .map(std::time::Duration::from_millis)
+    }
+
     /// List all tenants
     pub fn list_tenants(&self) -> Vec<Tenant> {
         let tenants = self.tenants.read().unwrap();

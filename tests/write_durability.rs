@@ -148,16 +148,17 @@ fn repeated_writes_to_one_node_do_not_inflate_the_tenant_count() {
     assert_eq!(db.restart().0.len(), 1);
 }
 
-/// A statement that fails partway does not undo what it already wrote — the engine
-/// has no statement rollback (LANG-07: transactions are "none"). So the question is
-/// not whether to persist a failed statement's log but whether disk is allowed to
-/// disagree with memory, and REL-06 says it is not.
+/// A statement that fails partway leaves nothing, in memory or on disk (#1593).
+///
+/// This used to pin weaker ground: the engine had no statement rollback
+/// (LANG-07), so the rows before the failure stayed, and the test asserted that
+/// disk at least agreed with memory about them. The statement is undone now,
+/// and what it journalled is dropped with it, so both agree on nothing.
 ///
 /// `UNWIND [1, 2, 0] AS n CREATE (:M {v: 10 / n})` errors on the last row with rows
-/// already in the store. Dropping the log there left memory holding rows that a
-/// restart threw away.
+/// already written.
 #[test]
-fn a_partial_failure_leaves_disk_agreeing_with_memory() {
+fn a_partial_failure_leaves_nothing_in_memory_or_on_disk() {
     let mut db = Db::new();
 
     let result = db.engine.execute_mut(
@@ -166,24 +167,16 @@ fn a_partial_failure_leaves_disk_agreeing_with_memory() {
         T,
     );
     assert!(result.is_err(), "the statement is supposed to fail");
-    // How many rows got through before the error is an evaluation-order detail and
-    // not what this test is about; that any did is the whole point.
-    let in_memory = db.store.node_count();
-    assert!(in_memory > 0, "the failure left nothing visible, so there is nothing to lose");
+    assert_eq!(db.store.node_count(), 0, "the rows before the failure stayed in memory");
 
     // Persisted the way the server persists it: on the outcome of the *store*, not
     // the outcome of the statement.
     let muts = db.store.take_write_log();
+    assert!(muts.is_empty(), "the failed statement's writes were left to persist: {muts:?}");
     db.pm.apply_mutations(T, &db.store, &muts).expect("persist");
 
     let (nodes, _) = db.restart();
-    assert_eq!(
-        nodes.len(),
-        in_memory,
-        "restart found {} of the {} rows the failed statement left visible",
-        nodes.len(),
-        in_memory
-    );
+    assert!(nodes.is_empty(), "restart found {} rows of a failed statement", nodes.len());
 }
 
 /// Restore a snapshot, change one property, restart: everything else survives.

@@ -724,6 +724,9 @@ pub struct MutQueryExecutor<'a> {
     row_budget: u64,
     /// See `QueryExecutor::with_plan_hash`.
     plan_hash: bool,
+    /// See `QueryExecutor::with_deadline`. Writes had none, so a runaway
+    /// `MATCH … SET` ran unbounded (#1593).
+    deadline: Option<std::time::Instant>,
 }
 
 impl<'a> MutQueryExecutor<'a> {
@@ -736,7 +739,17 @@ impl<'a> MutQueryExecutor<'a> {
             params: HashMap::new(),
             row_budget: 0,
             plan_hash: false,
+            deadline: None,
         }
+    }
+
+    /// Stop the statement with "Query timed out" once `deadline` passes,
+    /// checked where the read path checks it. The executor does not undo what
+    /// the statement wrote before then; `GraphStore::atomically`, which
+    /// `QueryEngine` runs every write in, does (#1593).
+    pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 
     /// Refuse the query if any single operator produces more than `rows`.
@@ -786,7 +799,9 @@ impl<'a> MutQueryExecutor<'a> {
         // without this the fix would be invisible to almost every caller.
         if let Some(inner) = &query.call_subquery {
             let store_ref: &GraphStore = self.store;
-            return QueryExecutor::new(store_ref).execute_call_subquery(query, inner);
+            let mut reader = QueryExecutor::new(store_ref);
+            reader.deadline = self.deadline;
+            return reader.execute_call_subquery(query, inner);
         }
 
         // Plan the query (need immutable borrow temporarily)
@@ -846,11 +861,29 @@ impl<'a> MutQueryExecutor<'a> {
         let mut records = Vec::new();
         let batch_size = 1024;
 
+        // The same two checks as the read path: the thread-local one inside
+        // the materialising operators, and one per batch here.
+        operator::set_query_deadline(self.deadline);
         // Pull records from the root operator in batches
         // Use next_batch_mut to allow operators to modify the graph store
-        while let Some(batch) = plan.root.next_batch_mut(self.store, &self.tenant_id, batch_size)? {
-            records.extend(batch.records);
-        }
+        let result = (|| {
+            while let Some(batch) = plan.root.next_batch_mut(self.store, &self.tenant_id, batch_size)? {
+                records.extend(batch.records);
+                // `>=`, so a limit of zero stops the statement after its
+                // first batch without depending on the clock having ticked.
+                if let Some(deadline) = self.deadline {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(ExecutionError::RuntimeError(format!(
+                            "Query timed out after {} rows",
+                            records.len()
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        })();
+        operator::set_query_deadline(None);
+        result?;
 
         Ok(RecordBatch {
             records,

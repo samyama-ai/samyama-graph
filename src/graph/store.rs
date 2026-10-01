@@ -5032,6 +5032,43 @@ NodeDeleted { .. } => {
         Ok(txn.version)
     }
 
+    /// Run one write statement so that it lands whole or not at all (#1593).
+    ///
+    /// The statement runs as a session transaction of its own: on `Err` it is
+    /// rolled back, and what it journalled for persistence is dropped with it,
+    /// since none of it reached disk; on `Ok` it is committed and the undo
+    /// history it recorded is collected, because nothing can read at the
+    /// version before it once it is over.
+    ///
+    /// Inside a transaction the caller already opened, `body` just runs: that
+    /// transaction is the unit of atomicity, and ROLLBACK undoes the statement
+    /// along with the rest of it.
+    pub fn atomically<T, E>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        if self.session_txn.is_some() || self.begin_session_transaction().is_err() {
+            return body(self);
+        }
+        let journalled = self.write_log.as_ref().map(Vec::len);
+        let tally = self.admission_births;
+        let outcome = body(self);
+        match outcome {
+            Ok(_) => {
+                let _ = self.commit_session_transaction();
+                self.gc_auto();
+            }
+            Err(_) => {
+                let _ = self.rollback_session_transaction();
+                if let (Some(log), Some(len)) = (&mut self.write_log, journalled) {
+                    log.truncate(len);
+                }
+                self.admission_births = tally;
+            }
+        }
+        outcome
+    }
+
     /// ROLLBACK: put the store back as it was when the transaction began.
     ///
     /// In order: what it deleted (nodes before the relationships that need

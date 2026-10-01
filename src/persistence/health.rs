@@ -22,10 +22,10 @@
 //!
 //! The transaction path does not need this: it persists *before* committing in
 //! memory, rolls the transaction back when persistence fails, and repairs the
-//! disk (`PersistenceManager::commit_session_transaction`). A statement has no
-//! rollback — the engine has no statement-level undo (LANG-07) — so the rows
-//! it already wrote stay in memory, and refusing what comes next is the only
-//! remaining lever.
+//! disk (`PersistenceManager::commit_session_transaction`). A statement is
+//! undone only when it *fails* (#1593); one that succeeded and then did not
+//! persist is not undone, so its rows stay in memory, and refusing what comes
+//! next is the only remaining lever.
 //!
 //! # Clearing it
 //!
