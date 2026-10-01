@@ -509,6 +509,25 @@ fn cmd_catalog_build(argv: &[String]) -> i32 {
     match samyama::snapshot::verify::build_catalog(&store, &queries, &[]) {
         Err(e) => { eprintln!("{e}"); 1 }
         Ok(mut catalog) => {
+            // A release catalog leaves the building, and its sample values
+            // are excerpts of the graph: one taken from a row that may not be
+            // redistributed fails the check an export of that row fails
+            // (#1159, TRUST-03). A private build is not refused.
+            if release {
+                let withheld =
+                    samyama::snapshot::verify::withheld_samples(&store, &catalog.entries);
+                if !withheld.is_empty() {
+                    for w in &withheld {
+                        eprintln!("refused: {w}");
+                    }
+                    eprintln!(
+                        "not written: {} sample value(s) come from rows that may not be \
+                         redistributed, and --release was given",
+                        withheld.len()
+                    );
+                    return 1;
+                }
+            }
             catalog.tenant = tenant;
             catalog.publishable = Some(release);
             let json = serde_json::to_string_pretty(&catalog).expect("serialize");
@@ -530,6 +549,25 @@ fn cmd_catalog_build(argv: &[String]) -> i32 {
             }
             0
         }
+    }
+}
+
+/// Why `entries` may not be published from `snap`: each sample value that is
+/// an excerpt of a row marked not redistributable, or why the snapshot could
+/// not be read to tell. Empty when there is nothing to refuse.
+fn withheld_sample_reasons(
+    snap: &str,
+    entries: &[samyama::snapshot::verify::CatalogEntry],
+) -> Vec<String> {
+    let mut store = GraphStore::new();
+    let restored = std::fs::File::open(snap)
+        .map_err(|e| e.to_string())
+        .and_then(|f| samyama::snapshot::import_tenant(&mut store, f).map_err(|e| e.to_string()));
+    match restored {
+        Err(e) => vec![format!(
+            "cannot restore {snap} to check the samples against it: {e}"
+        )],
+        Ok(_) => samyama::snapshot::verify::withheld_samples(&store, entries),
     }
 }
 
@@ -732,6 +770,14 @@ fn cmd_catalog_gate(argv: &[String]) -> i32 {
         match linked {
             Ok(()) => println!("  snapshot {snap} names this catalog"),
             Err(e) => pair_refusal = Some(e),
+        }
+        // The pair is checked, so the graph is at hand: check the samples
+        // against it too, which also covers a catalog edited after its build
+        // (#1159, TRUST-03).
+        let withheld = withheld_sample_reasons(snap, &catalog.entries);
+        if !withheld.is_empty() {
+            v.reasons.extend(withheld);
+            v.publishable = false;
         }
     }
 

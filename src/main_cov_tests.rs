@@ -527,6 +527,86 @@ fn catalog_gate_refuses_a_release_catalog_with_an_entry_that_records_no_work() {
     assert_eq!(cmd_catalog_gate(&argv(&["catalog-gate", s(&path)])), 1);
 }
 
+/// `things()` with one row marked not redistributable, whose name is the
+/// sample of the one query.
+fn things_with_a_withheld_row() -> (GraphStore, serde_json::Value) {
+    let mut store = things();
+    let mut props = PropertyMap::new();
+    props.insert("name".into(), PropertyValue::String("restricted".into()));
+    props.insert(
+        samyama::provenance::REDISTRIBUTABLE.into(),
+        PropertyValue::Boolean(false),
+    );
+    store.create_node_with_properties("default", vec![Label::new("Thing")], props);
+    let queries = serde_json::json!([{
+        "id": "q_by_name",
+        "question": "Is there a thing called {n}?",
+        "difficulty": "easy",
+        "cypher": "MATCH (t:Thing) WHERE t.name = $n RETURN t.name",
+        "params": [{"name": "n", "type": "string", "sample": "restricted"}]
+    }]);
+    (store, queries)
+}
+
+/// #1159 requirement 3: a sample value is a data excerpt, so a release build
+/// refuses one taken from a row that may not be redistributed, and writes
+/// nothing. A private build of the same catalog is not refused.
+#[test]
+fn catalog_build_release_refuses_a_sample_from_a_withheld_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, queries) = things_with_a_withheld_row();
+    let snap = write_snapshot(dir.path(), "things.sgsnap", &store);
+    let queries = write_json(dir.path(), "q.json", &queries);
+    let build = |out: &Path, release: bool| {
+        let mut args = vec![
+            "catalog-build",
+            s(&snap),
+            "--queries",
+            s(&queries),
+            "--out",
+            s(out),
+        ];
+        if release {
+            args.push("--release");
+        }
+        cmd_catalog_build(&argv(&args))
+    };
+
+    let released = dir.path().join("released.json");
+    assert_eq!(build(&released, true), 1);
+    assert!(
+        !released.exists(),
+        "a refused release catalog must not be written"
+    );
+
+    let private = dir.path().join("private.json");
+    assert_eq!(build(&private, false), 0);
+}
+
+/// The gate, given the snapshot, checks the samples against it too: that is
+/// what catches a catalog edited after its build.
+#[test]
+fn catalog_gate_with_a_snapshot_refuses_a_sample_from_a_withheld_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, queries) = things_with_a_withheld_row();
+    let snap = write_snapshot(dir.path(), "things.sgsnap", &store);
+    let specs: Vec<QuerySpec> = serde_json::from_value(queries).unwrap();
+    let mut catalog = build_catalog(&store, &specs, &[]).unwrap();
+    let reasons = withheld_sample_reasons(s(&snap), &catalog.entries);
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert!(reasons[0].contains("q_by_name.params.n"), "{reasons:?}");
+
+    // The same entry with a sample a redistributable row carries passes.
+    catalog.entries[0].params[0].sample = serde_json::json!("n03");
+    assert!(withheld_sample_reasons(s(&snap), &catalog.entries).is_empty());
+
+    // A snapshot that cannot be read refuses rather than passing unchecked.
+    let missing = dir.path().join("missing.sgsnap");
+    let reasons = withheld_sample_reasons(s(&missing), &catalog.entries);
+    assert_eq!(reasons.len(), 1);
+    assert!(reasons[0].contains("cannot restore"), "{reasons:?}");
+}
+
 #[test]
 fn catalog_build_reports_unreadable_queries() {
     let dir = tempfile::tempdir().unwrap();

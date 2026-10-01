@@ -181,9 +181,14 @@ catalog passes before it is published beside a snapshot, and it refuses:
   does not silence this: agreeing to publish the questions is not agreeing to
   publish a card number inside one.
 
-Not yet checked: whether a parameter sample comes from a source whose licence
-permits redistribution (TRUST-03). A sample is a data excerpt, and should fail
-the same check an export from a non-redistributable source does.
+- **A sample that is an excerpt of a row that may not leave** (TRUST-03). A
+  string sample or declared enum value carried only by rows marked
+  `__redistributable = false`, or derived through `DERIVED_FROM` from one, is
+  refused by `catalog-build --release` (which then writes nothing) and by
+  `catalog-gate --snapshot`. A value some other row also carries is not an
+  excerpt of the withheld one and passes; numbers and booleans are not
+  compared, since a year or `true` matches by coincidence. Rows with no
+  provenance are unknown, not withheld (`samyama::provenance`).
 
 ## What we would have to change for this page to stop being true
 

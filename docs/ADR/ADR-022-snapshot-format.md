@@ -63,6 +63,11 @@ published, so `sha256sum` on the release asset gives the same string.
   (`true` only under `--release`), and `catalog-gate` refuses anything else.
   Stamped in the catalog because the stamp is about the questions, and the
   header's SHA-256 already binds the two; see `docs/DATA-HANDLING.md`.
+- **A release catalog's samples are checked against the data's licence**
+  (#1159, TRUST-03). A sample is drawn from the graph, so it is an excerpt:
+  `catalog-build --release`, and `catalog-gate --snapshot`, refuse a string
+  sample or enum value found only on rows marked `__redistributable = false`
+  or derived from one (`samyama::provenance`).
 
 **Each catalog entry records its work** (`work`, added 2026-10-01 for #1156):
 the rows every operator produced, summed, when the entry ran with its sample

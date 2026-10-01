@@ -747,6 +747,101 @@ pub fn check_queries_ref(
     ))
 }
 
+/// The string sample and enum values in `entries` that are excerpts of rows
+/// the graph says may not leave (#1159, TRUST-03).
+///
+/// A sample value is drawn from the data so the build has something to run,
+/// which makes it an excerpt, and an excerpt of a row marked
+/// `__redistributable = false` -- or derived, through `DERIVED_FROM`, from one
+/// -- fails the check an export of that row fails. One finding per
+/// (entry, parameter, value), naming the node it was found on.
+///
+/// Strings only. A string sample is the name, title or identifier the issue is
+/// about; a number or a boolean matches thousands of rows by coincidence (a
+/// year, a tier, `true`), and refusing on that would refuse every catalog.
+/// `__`-prefixed properties are the provenance itself, not data, and are not
+/// compared. A value some other row also carries is not refused: it is not an
+/// excerpt of the withheld row. Unmarked rows are not withheld: absent means
+/// unknown, and the policy for unknown is the caller's
+/// (see [`crate::provenance`]).
+pub fn withheld_samples(store: &GraphStore, entries: &[CatalogEntry]) -> Vec<String> {
+    use crate::graph::PropertyValue;
+    use crate::provenance::{derivation_path, redistributable, Redistributable};
+    use std::collections::{HashMap, HashSet};
+
+    // value -> the (entry, parameter) places it is used.
+    let mut wanted: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+    for e in entries {
+        for p in &e.params {
+            let enums = p.enum_values.iter().flatten();
+            for v in std::iter::once(&p.sample).chain(enums) {
+                if let serde_json::Value::String(v) = v {
+                    let at = wanted.entry(v.as_str()).or_default();
+                    if !at.contains(&(e.id.as_str(), p.name.as_str())) {
+                        at.push((e.id.as_str(), p.name.as_str()));
+                    }
+                }
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+
+    // value -> the first withheld row carrying it, and whether any row that
+    // is not withheld carries it too.
+    let mut withheld_on: HashMap<&str, (u64, String)> = HashMap::new();
+    let mut public: HashSet<&str> = HashSet::new();
+    for node in store.all_nodes() {
+        let props = store.node_properties_merged(node.id);
+        let mut is_withheld: Option<bool> = None;
+        for (key, value) in props.iter() {
+            if key.starts_with("__") {
+                continue;
+            }
+            let PropertyValue::String(text) = value else {
+                continue;
+            };
+            let Some((&value, _)) = wanted.get_key_value(text.as_str()) else {
+                continue;
+            };
+            let withheld = *is_withheld.get_or_insert_with(|| {
+                redistributable(store, node.id) == Redistributable::No
+                    || derivation_path(store, node.id)
+                        .iter()
+                        .any(|d| d.redistributable == Redistributable::No)
+            });
+            if withheld {
+                withheld_on
+                    .entry(value)
+                    .or_insert_with(|| (node.id.as_u64(), key.to_string()));
+            } else {
+                public.insert(value);
+            }
+        }
+    }
+
+    let mut found: Vec<String> = Vec::new();
+    for (value, (node, key)) in &withheld_on {
+        // A value some redistributable or unmarked row also carries is not an
+        // excerpt of the withheld one: it could have come from either, and a
+        // country or a status shared with public rows identifies nothing.
+        if public.contains(value) {
+            continue;
+        }
+        for (entry, param) in &wanted[value] {
+            found.push(format!(
+                "{entry}.params.{param}: {value:?} appears only on rows that may not \
+                 be redistributed (the {key} of node {node}, marked \
+                 __redistributable = false or derived from a row that is). A sample \
+                 is a data excerpt; declare a value a redistributable row carries."
+            ));
+        }
+    }
+    found.sort();
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
