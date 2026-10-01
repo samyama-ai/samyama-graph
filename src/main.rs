@@ -29,6 +29,8 @@ async fn main() {
         Some("auth-user") => std::process::exit(cmd_auth_user(&argv)),
         Some("pii-scan") => std::process::exit(cmd_pii_scan(&argv)),
         Some("queries") => std::process::exit(cmd_queries(&argv)),
+        Some("snapshot-read-only") => std::process::exit(cmd_snapshot_read_only(&argv)),
+        Some("results-build") => std::process::exit(cmd_results_build(&argv)),
         _ => {}
     }
 
@@ -48,7 +50,7 @@ async fn main() {
 }
 
 /// `samyama queries list <catalog>`
-/// `samyama queries run <catalog> --snapshot <snapshot.sgsnap> --entry <id> [--param name=value]...`
+/// `samyama queries run <catalog> --snapshot <snapshot.sgsnap> --entry <id> [--param name=value]... [--computed]`
 ///
 /// Runs one template from a question catalog against a snapshot with the
 /// caller's values (#1154). The values are bound, never substituted, and held
@@ -56,13 +58,16 @@ async fn main() {
 /// (`run_template`, #1156), so this runs exactly what was published and
 /// nothing a value could turn it into. A parameter not given keeps its sample.
 ///
-/// Prints one JSON object per row on stdout. Exits 64 on a usage error, 65
+/// Prints one JSON object per row on stdout, then a trailer
+/// `{"done": true, "rows": n, "source": "materialized" | "computed"}`: a
+/// read-only snapshot's stored answer is served for exactly its sample values
+/// unless `--computed` is given (#1158). Exits 64 on a usage error, 65
 /// when the catalog cannot be read, 66 when the snapshot cannot be restored,
 /// and 1 when the template refuses the call or fails.
 fn cmd_queries(argv: &[String]) -> i32 {
     const USAGE: &str = "usage: samyama queries list <catalog>\n       \
         samyama queries run <catalog> --snapshot <snapshot.sgsnap> --entry <id> \
-        [--param name=value]...";
+        [--param name=value]... [--computed]";
     let (Some(verb), Some(path)) = (
         argv.get(2).map(String::as_str),
         argv.get(3).filter(|s| !s.starts_with("--")),
@@ -159,26 +164,62 @@ fn cmd_queries(argv: &[String]) -> i32 {
         eprintln!("could not restore {snapshot}: {e}");
         return 66;
     }
-    match samyama::snapshot::verify::run_template(&store, entry, &values) {
-        Err(e) => {
-            eprintln!("{e}");
-            1
-        }
-        Ok(batch) => {
-            for rec in &batch.records {
-                let row: serde_json::Map<String, serde_json::Value> = batch
-                    .columns
-                    .iter()
-                    .map(|c| {
-                        (
-                            c.clone(),
-                            rec.get(c).map_or(serde_json::Value::Null, cell_json),
-                        )
-                    })
-                    .collect();
-                println!("{}", serde_json::Value::Object(row));
+    // A read-only snapshot may carry stored answers (#1158). They answer only
+    // the exact Cypher with exactly its sample values, and `--computed` asks
+    // for execution regardless. A results file that does not check out is
+    // reported and not used: the question is still answered, by executing.
+    use samyama::snapshot::results::{self, Source};
+    let materialized = if argv.iter().any(|a| a == "--computed") {
+        None
+    } else {
+        materialized_beside(snapshot).map(|m| m.bind(&store))
+    };
+    let mut full = results::sample_values(&entry.params);
+    full.extend(values.iter().map(|(k, v)| (k.clone(), v.clone())));
+    let (rows, source) = match materialized
+        .as_ref()
+        .and_then(|m| m.lookup(&store, &entry.cypher, &full))
+    {
+        Some(stored) => (stored.rows.clone(), Source::Materialized),
+        None => match samyama::snapshot::verify::run_template(&store, entry, &values) {
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
             }
-            0
+            Ok(batch) => (results::rows_json(&batch), Source::Computed),
+        },
+    };
+    for row in &rows {
+        println!("{}", serde_json::Value::Object(row.clone()));
+    }
+    // The trailer says where the answer came from (TRUST-06), as the HTTP
+    // stream's trailer does.
+    println!(
+        "{}",
+        serde_json::json!({ "done": true, "rows": rows.len(), "source": source.as_str() })
+    );
+    0
+}
+
+/// The results published beside `snapshot`, loaded and checked, or `None`
+/// when it links none or they do not check out (said on stderr).
+fn materialized_beside(snapshot: &str) -> Option<samyama::snapshot::results::Materialized> {
+    let header = std::fs::File::open(snapshot)
+        .ok()
+        .and_then(|f| samyama::snapshot::peek_header(f).ok())?;
+    let link = header.results.as_ref()?;
+    let path = std::path::Path::new(snapshot)
+        .parent()
+        .unwrap_or(std::path::Path::new(""))
+        .join(&link.file);
+    let loaded = std::fs::read(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
+        .and_then(|b| samyama::snapshot::results::Materialized::load(&b, &header));
+    match loaded {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("note: not serving stored results: {e}");
+            None
         }
     }
 }
@@ -214,26 +255,248 @@ fn param_value(
     }
 }
 
-fn cell_json(v: &samyama::query::executor::record::Value) -> serde_json::Value {
-    use samyama::query::executor::record::Value as V;
-    use serde_json::json;
-    match v {
-        V::Null => serde_json::Value::Null,
-        V::Property(p) => p.to_json(),
-        V::List(items) => serde_json::Value::Array(items.iter().map(cell_json).collect()),
-        V::Map(entries) => serde_json::Value::Object(
-            entries
-                .iter()
-                .map(|(k, v)| (k.clone(), cell_json(v)))
-                .collect(),
-        ),
-        V::Node(id, _) | V::NodeRef(id) => json!({ "node_id": id.as_u64() }),
-        V::Edge(id, _) | V::EdgeRef(id, _, _, _) => json!({ "edge_id": id.as_u64() }),
-        V::Path { nodes, edges } => json!({
-            "nodes": nodes.iter().map(|n| n.as_u64()).collect::<Vec<_>>(),
-            "edges": edges.iter().map(|e| e.as_u64()).collect::<Vec<_>>(),
-        }),
+/// Rewrite `snapshot`'s header with `edit`, through a temporary file renamed
+/// into place, so a failure leaves the original as it was.
+fn rewrite_header(
+    snapshot: &str,
+    edit: impl FnOnce(
+        &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<samyama::snapshot::format::SnapshotHeader, String> {
+    let tmp = format!("{snapshot}.header.tmp");
+    let result = std::fs::File::open(snapshot)
+        .map_err(|e| e.to_string())
+        .and_then(|src| {
+            let dst = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+            let mut dst = std::io::BufWriter::new(dst);
+            let header = samyama::snapshot::edit_header(BufReader::new(src), &mut dst, edit)
+                .map_err(|e| e.to_string())?;
+            use std::io::Write;
+            dst.flush().map_err(|e| e.to_string())?;
+            Ok(header)
+        })
+        .and_then(|h| {
+            std::fs::rename(&tmp, snapshot)
+                .map(|()| h)
+                .map_err(|e| e.to_string())
+        });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
+    result
+}
+
+/// `samyama snapshot-read-only <snapshot.sgsnap> [--off]`
+///
+/// Marks a snapshot as served without writes, which is what allows results to
+/// be materialized for it (#1158). `--off` withdraws the promise and unlinks
+/// any results with it: stored answers are only true of a graph nobody writes.
+fn cmd_snapshot_read_only(argv: &[String]) -> i32 {
+    let Some(snapshot) = argv.get(2).filter(|s| !s.starts_with("--")) else {
+        eprintln!("usage: samyama snapshot-read-only <snapshot.sgsnap> [--off]");
+        return 64;
+    };
+    let on = !argv.iter().any(|a| a == "--off");
+    match rewrite_header(snapshot, |h| {
+        if on {
+            h.insert("read_only".into(), serde_json::Value::Bool(true));
+        } else {
+            h.remove("read_only");
+            h.remove("results");
+        }
+        Ok(())
+    }) {
+        Ok(_) => {
+            println!(
+                "{snapshot}: {}",
+                if on {
+                    "marked read-only"
+                } else {
+                    "no longer read-only; any linked results were unlinked"
+                }
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("could not rewrite {snapshot}: {e}");
+            74
+        }
+    }
+}
+
+/// `samyama results-build <snapshot.sgsnap> --queries <catalog> --out <file.sgresults>
+///  [--max-result-bytes N] [--max-total-bytes N] [--max-total-pct P] [--link]`
+///
+/// Materializes the answers to a read-only snapshot's catalog (#1158). Every
+/// entry is executed with its samples and checked against the catalog before it
+/// is stored; the smallest answers are admitted first, within a per-result and
+/// a total cap, and what did not fit is printed with the reason. `--link`
+/// records the file in the snapshot header by name and SHA-256.
+fn cmd_results_build(argv: &[String]) -> i32 {
+    use samyama::snapshot::results::{self, Limits};
+    let flag = |name: &str| {
+        argv.iter()
+            .position(|a| a == name)
+            .and_then(|i| argv.get(i + 1))
+    };
+    let (Some(snapshot), Some(catalog_path), Some(out)) = (
+        argv.get(2).filter(|s| !s.starts_with("--")),
+        flag("--queries"),
+        flag("--out"),
+    ) else {
+        eprintln!(
+            "usage: samyama results-build <snapshot.sgsnap> --queries <catalog> \
+             --out <file.sgresults> [--max-result-bytes N] [--max-total-bytes N] \
+             [--max-total-pct P] [--link]"
+        );
+        return 64;
+    };
+    let mut limits = Limits::default();
+    for (name, slot) in [("--max-result-bytes", 0), ("--max-total-bytes", 1)] {
+        if let Some(v) = flag(name) {
+            match v.parse::<u64>() {
+                Ok(n) if slot == 0 => limits.max_result_bytes = n,
+                Ok(n) => limits.max_total_bytes = Some(n),
+                Err(_) => {
+                    eprintln!("results-build: {name} needs a byte count, got {v:?}");
+                    return 64;
+                }
+            }
+        }
+    }
+    if let Some(v) = flag("--max-total-pct") {
+        match v.parse::<f64>() {
+            Ok(p) => limits.max_total_pct = p,
+            Err(_) => {
+                eprintln!("results-build: --max-total-pct needs a percentage, got {v:?}");
+                return 64;
+            }
+        }
+    }
+
+    let catalog_bytes = match std::fs::read(catalog_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("could not read {catalog_path}: {e}");
+            return 65;
+        }
+    };
+    let catalog: samyama::snapshot::verify::QueryCatalog =
+        match serde_json::from_slice(&catalog_bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("could not read {catalog_path}: {e}");
+                return 65;
+            }
+        };
+    let (header, snapshot_bytes) = match std::fs::File::open(snapshot)
+        .map_err(|e| e.to_string())
+        .and_then(|f| {
+            let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+            samyama::snapshot::peek_header(f)
+                .map(|h| (h, len))
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("could not read {snapshot}: {e}");
+            return 66;
+        }
+    };
+    // The results answer the snapshot's own catalog, so the snapshot must
+    // name it: otherwise nothing ties these answers to these questions.
+    match &header.queries {
+        None => {
+            eprintln!(
+                "{snapshot} names no catalog in its header. Link one first with \
+                 `samyama catalog-build ... --link`; stored answers to an unlinked \
+                 catalog could not be checked against anything."
+            );
+            return 1;
+        }
+        Some(link) => {
+            if let Err(e) = samyama::snapshot::verify::check_queries_ref(link, &catalog_bytes) {
+                eprintln!("refusing {catalog_path}: {e}");
+                return 1;
+            }
+        }
+    }
+    let mut store = GraphStore::new();
+    if let Err(e) = std::fs::File::open(snapshot)
+        .map_err(|e| e.to_string())
+        .and_then(|f| samyama::snapshot::import_tenant(&mut store, f).map_err(|e| e.to_string()))
+    {
+        eprintln!("could not restore {snapshot}: {e}");
+        return 66;
+    }
+    let sha = samyama::snapshot::verify::queries_sha256(&catalog_bytes);
+    let file = match results::build(&store, &header, snapshot_bytes, &catalog, &sha, limits) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let json = serde_json::to_string_pretty(&file).expect("serialize");
+    if let Err(e) = std::fs::write(out, &json) {
+        eprintln!("could not write {out}: {e}");
+        return 74;
+    }
+    print_results_summary(out, &file);
+    for s in &file.skipped {
+        println!("  skipped {}: {}", s.id, s.reason);
+    }
+    if argv.iter().any(|a| a == "--link") {
+        let Some(name) = std::path::Path::new(out)
+            .file_name()
+            .and_then(|f| f.to_str())
+        else {
+            eprintln!("cannot link {out}: it has no file name");
+            return 64;
+        };
+        let link = samyama::snapshot::format::QueriesRef {
+            file: name.to_string(),
+            sha256: samyama::snapshot::verify::queries_sha256(json.as_bytes()),
+        };
+        let value = match serde_json::to_value(&link) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("cannot link {out}: {e}");
+                return 74;
+            }
+        };
+        if let Err(e) = rewrite_header(snapshot, |h| {
+            h.insert("results".into(), value);
+            Ok(())
+        }) {
+            eprintln!("could not link {out} into {snapshot}: {e}");
+            return 74;
+        }
+        println!("linked {snapshot} -> {name} (sha256 {})", link.sha256);
+    }
+    0
+}
+
+/// The two numbers #1158 asks to be printed wherever results are: what the
+/// stored answers cost, against the caps they were built under.
+fn print_results_summary(path: &str, file: &samyama::snapshot::results::ResultsFile) {
+    let c = &file.caps;
+    println!(
+        "results {path}: {} stored, {} skipped; {} of {} bytes ({:.2}% of a {}-byte \
+         snapshot, cap {}%), per-result cap {} bytes",
+        file.entries.len(),
+        file.skipped.len(),
+        c.used_bytes,
+        c.max_total_bytes,
+        if c.snapshot_bytes == 0 {
+            0.0
+        } else {
+            100.0 * c.used_bytes as f64 / c.snapshot_bytes as f64
+        },
+        c.snapshot_bytes,
+        c.max_total_pct,
+        c.max_result_bytes
+    );
 }
 
 /// `samyama pii-scan [--waivers <file>] <snapshot.sgsnap>...`
@@ -632,9 +895,51 @@ fn cmd_verify(argv: &[String]) -> i32 {
                   looks like run against an empty graph, so the run is not evidence \
                   of a good restore whatever the expectations say.");
     }
-    if report.is_ok() {
+    // Stored answers are re-executed too (#1158): one that disagrees with
+    // execution is the worst failure that design has, and verify is where a
+    // release finds it. Refused, not skipped, when the header promises a file
+    // that is not there.
+    let mut results_ok = true;
+    if let Some(link) = &header.results {
+        let beside = std::path::Path::new(snapshot)
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .join(&link.file);
+        let shown = beside.display().to_string();
+        match std::fs::read(&beside)
+            .map_err(|e| {
+                format!(
+                    "{snapshot} names results {:?}, but {shown} cannot be read: {e}",
+                    link.file
+                )
+            })
+            .and_then(|b| samyama::snapshot::results::read_checked(&b, &header))
+        {
+            Err(e) => {
+                println!("  FAIL results: {e}");
+                results_ok = false;
+            }
+            Ok(file) => {
+                print!("  ");
+                print_results_summary(&shown, &file);
+                let problems = samyama::snapshot::results::reverify(&store, &file);
+                for p in &problems {
+                    println!("  FAIL {p}");
+                }
+                if problems.is_empty() {
+                    println!("  OK  {} stored results reproduced", file.entries.len());
+                } else {
+                    results_ok = false;
+                }
+            }
+        }
+    }
+
+    if report.is_ok() && results_ok {
         println!("  OK  {total} entries reproduced");
         0
+    } else if report.is_ok() {
+        1
     } else {
         println!("  {} of {total} entries failed", failed.len().max(1));
         1

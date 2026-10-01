@@ -321,6 +321,137 @@ fn queries_run_prints_the_rows_of_one_template_with_the_callers_values() {
 }
 
 #[test]
+fn a_read_only_snapshot_serves_its_stored_answers_and_says_so() {
+    // #1158 end to end: link a catalog, mark the snapshot read-only, build and
+    // link its results, serve them, and refuse what does not check out.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = samyama::GraphStore::new();
+    for (name, n) in [("alpha", 1i64), ("beta", 2), ("gamma", 3)] {
+        let id = store.create_node("Thing");
+        let node = store.get_node_mut(id).unwrap();
+        node.set_property("name", name);
+        node.set_property("n", n);
+    }
+    let snap = dir.path().join("s.sgsnap");
+    samyama::snapshot::export_tenant(&store, std::fs::File::create(&snap).unwrap()).unwrap();
+    let queries = dir.path().join("q.json");
+    std::fs::write(
+        &queries,
+        r#"[{"id": "by_n", "question": "Which thing has number {n}?", "difficulty": "easy",
+             "cypher": "MATCH (t:Thing) WHERE t.n = $n RETURN t.name AS name",
+             "params": [{"name": "n", "type": "int", "sample": 1}]},
+            {"id": "count", "question": "How many things?", "difficulty": "easy",
+             "cypher": "MATCH (t:Thing) RETURN count(t) AS c"}]"#,
+    )
+    .unwrap();
+    let cat = dir.path().join("s.sgqueries");
+    let results = dir.path().join("s.sgresults");
+    let out = |p: &Path| s(p).to_string();
+    let (snap_s, cat_s, results_s) = (out(&snap), out(&cat), out(&results));
+    let q = |extra: &[&str]| {
+        let mut a = vec!["queries", "run", &cat_s, "--snapshot", &snap_s, "--entry"];
+        a.extend_from_slice(extra);
+        run(&a, &[])
+    };
+    run(
+        &[
+            "catalog-build",
+            &snap_s,
+            "--queries",
+            s(&queries),
+            "--out",
+            &cat_s,
+            "--link",
+        ],
+        &[],
+    )
+    .assert_code(0);
+
+    // Not read-only yet: no results are built.
+    run(
+        &[
+            "results-build",
+            &snap_s,
+            "--queries",
+            &cat_s,
+            "--out",
+            &results_s,
+        ],
+        &[],
+    )
+    .assert_code(1)
+    .err_has("not marked read-only");
+    run(&["snapshot-read-only", &snap_s], &[]).assert_code(0);
+    run(
+        &[
+            "results-build",
+            &snap_s,
+            "--queries",
+            &cat_s,
+            "--out",
+            &results_s,
+            "--max-total-pct",
+            "100",
+            "--link",
+        ],
+        &[],
+    )
+    .assert_code(0)
+    .out_has("2 stored, 0 skipped")
+    .out_has("per-result cap");
+
+    // The sample values: served from the file, and the trailer says so.
+    q(&["by_n"])
+        .assert_code(0)
+        .out_has(r#"{"name":"alpha"}"#)
+        .out_has(r#""source":"materialized""#);
+    q(&["count"])
+        .assert_code(0)
+        .out_has(r#""source":"materialized""#);
+    // Another value is executed, and says so.
+    q(&["by_n", "--param", "n=2"])
+        .assert_code(0)
+        .out_has(r#"{"name":"beta"}"#)
+        .out_has(r#""source":"computed""#);
+    // The sample value, asked for explicitly: still the stored answer.
+    q(&["by_n", "--param", "n=1"]).out_has(r#""source":"materialized""#);
+    // A caller can bypass.
+    q(&["by_n", "--computed"])
+        .assert_code(0)
+        .out_has(r#"{"name":"alpha"}"#)
+        .out_has(r#""source":"computed""#);
+    // verify re-executes the stored answers and prints the caps.
+    run(&["verify", &snap_s], &[])
+        .assert_code(0)
+        .out_has("2 stored results reproduced")
+        .out_has("% of a");
+
+    // A results file edited after it was published is not served, and verify
+    // fails the pair.
+    let mut text = std::fs::read_to_string(&results).unwrap();
+    text = text.replacen("alpha", "omega", 1);
+    std::fs::write(&results, &text).unwrap();
+    q(&["by_n"])
+        .assert_code(0)
+        .out_has(r#"{"name":"alpha"}"#)
+        .out_has(r#""source":"computed""#)
+        .err_has("not serving stored results");
+    run(&["verify", &snap_s], &[])
+        .assert_code(1)
+        .out_has("FAIL results");
+
+    // Withdrawing read-only unlinks the results with it.
+    run(&["snapshot-read-only", &snap_s, "--off"], &[]).assert_code(0);
+    let r = q(&["count"]);
+    r.assert_code(0).out_has(r#""source":"computed""#);
+    assert!(
+        !r.stderr.contains("not serving"),
+        "nothing is linked now: {}",
+        r.stderr
+    );
+}
+
+#[test]
 fn pii_scan_names_what_it_found() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = samyama::GraphStore::new();

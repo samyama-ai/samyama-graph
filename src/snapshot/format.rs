@@ -38,9 +38,22 @@ pub struct SnapshotHeader {
     /// was before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queries: Option<QueriesRef>,
+    /// The publisher's promise that this snapshot is served without writes
+    /// (#1158). Only a read-only snapshot may carry materialized results: an
+    /// answer baked into a file is true only of the graph it was computed on.
+    /// Set after export with `samyama snapshot-read-only`. Additive, and not
+    /// written when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+    /// The materialized results published beside this snapshot (`.sgresults`,
+    /// #1158), by name and SHA-256 like the catalog. A sidecar for the same
+    /// reason the catalog is one: the body format does not change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<QueriesRef>,
 }
 
-/// Where a snapshot's query catalog lives, and what its bytes hash to (#1154).
+/// Where a snapshot's sidecar -- its query catalog (#1154) or its materialized
+/// results (#1158) -- lives, and what its bytes hash to.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueriesRef {
     /// File name of the catalog, resolved against the snapshot's own directory.

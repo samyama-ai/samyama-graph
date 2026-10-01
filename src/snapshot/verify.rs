@@ -57,7 +57,7 @@ pub const INTERPOLATION_MARKERS: &[&str] = &["{{", "${", "%s", "%d", "#{", "<<",
 /// `n.age = $x` with `$x` as the string "30" against `age = 30` returns 0 rows,
 /// while the float 30.0 returns 1, so numeric coercion works and only the
 /// string case is silent.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParamSpec {
     pub name: String,
     /// "int" | "float" | "string" | "bool"

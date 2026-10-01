@@ -13,6 +13,7 @@ pub mod encryption;
 pub mod format;
 pub mod persist;
 pub mod verify;
+pub mod results;
 pub mod publish_gate;
 
 use std::collections::{HashMap, HashSet};
@@ -174,6 +175,8 @@ pub fn export_tenant_with_compression(
         samyama_version: crate::VERSION.to_string(),
         dropped: dropped.clone(),
         queries: None,
+        read_only: false,
+        results: None,
     };
     let header_json = serde_json::to_string(&header)?;
     gz.write_all(header_json.as_bytes())?;
@@ -494,9 +497,32 @@ pub fn peek_header_maybe_encrypted(
 /// Refuses an encrypted snapshot: re-sealing needs the key and would be a
 /// second place that writes ciphertext. Link before encrypting.
 pub fn relink_queries(
-    mut reader: impl Read,
+    reader: impl Read,
     writer: impl Write,
     queries: Option<format::QueriesRef>,
+) -> Result<SnapshotHeader, Box<dyn std::error::Error>> {
+    edit_header(reader, writer, |obj| {
+        match &queries {
+            Some(q) => obj.insert("queries".to_string(), serde_json::to_value(q)?),
+            None => obj.remove("queries"),
+        };
+        Ok(())
+    })
+}
+
+/// Rewrite a snapshot with its header changed by `edit`, and everything after
+/// the header copied through. [`relink_queries`] is one such edit; marking a
+/// snapshot read-only and linking its results (#1158) are the others. The
+/// same guarantees hold for all of them: the header is edited as a JSON object
+/// so fields this build does not know survive, the body is copied byte for
+/// byte, a truncated source fails rather than producing a partial file, and an
+/// encrypted snapshot is refused.
+pub fn edit_header(
+    mut reader: impl Read,
+    writer: impl Write,
+    edit: impl FnOnce(
+        &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<SnapshotHeader, Box<dyn std::error::Error>> {
     let mut head = [0u8; 12];
     let mut filled = 0usize;
@@ -508,7 +534,11 @@ pub fn relink_queries(
     }
     let head = &head[..filled];
     if encryption::looks_encrypted(head) {
-        return Err("this snapshot is encrypted; link its catalog before encrypting it".into());
+        return Err(
+            "this snapshot is encrypted; edit its header (link a catalog or results, \
+             mark it read-only) before encrypting it"
+                .into(),
+        );
     }
 
     let mut src = BufReader::new(GzDecoder::new(head.chain(reader)));
@@ -522,10 +552,7 @@ pub fn relink_queries(
     if format != "sgsnap" {
         return Err(format!("invalid snapshot format: expected \"sgsnap\", got {format}").into());
     }
-    match &queries {
-        Some(q) => obj.insert("queries".to_string(), serde_json::to_value(q)?),
-        None => obj.remove("queries"),
-    };
+    edit(&mut obj)?;
     let header_json = serde_json::to_string(&obj)?;
     let header: SnapshotHeader = serde_json::from_str(&header_json)?;
 
@@ -1851,6 +1878,8 @@ mod tests {
             samyama_version: "0.6.1".to_string(),
             dropped: Vec::new(),
             queries: None,
+            read_only: false,
+            results: None,
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();
@@ -1879,6 +1908,8 @@ mod tests {
             samyama_version: "0.6.1".to_string(),
             dropped: Vec::new(),
             queries: None,
+            read_only: false,
+            results: None,
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();

@@ -697,6 +697,91 @@ fn a_param_value_is_read_as_its_declared_type() {
     assert_eq!(param_value(&entry, "undeclared", "7"), json!("7"));
 }
 
+/// #1158: every refusal of `results-build` and `snapshot-read-only` is a
+/// status, and the happy path writes a file `verify` accepts.
+#[test]
+fn results_build_exits_with_a_status_for_each_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = things();
+    let snap = write_snapshot(dir.path(), "things.sgsnap", &store);
+    let queries = write_json(dir.path(), "q.json", &specs_json(&thing_queries()));
+    let cat = dir.path().join("things.sgqueries");
+    let out = dir.path().join("things.sgresults");
+    let (sn, q, c, o) = (s(&snap), s(&queries), s(&cat), s(&out));
+    let rb = |extra: &[&str]| {
+        let mut a = vec!["results-build", sn, "--queries", c, "--out", o];
+        a.extend_from_slice(extra);
+        cmd_results_build(&argv(&a))
+    };
+
+    assert_eq!(cmd_results_build(&argv(&["results-build"])), 64);
+    assert_eq!(
+        cmd_results_build(&argv(&["results-build", sn, "--out", o])),
+        64
+    );
+    assert_eq!(cmd_snapshot_read_only(&argv(&["snapshot-read-only"])), 64);
+    assert_eq!(
+        cmd_snapshot_read_only(&argv(&["snapshot-read-only", "/no/such.sgsnap"])),
+        74
+    );
+    assert_eq!(rb(&[]), 65, "the catalog does not exist yet");
+    assert_eq!(
+        cmd_catalog_build(&argv(&["catalog-build", sn, "--queries", q, "--out", c])),
+        0
+    );
+    assert_eq!(rb(&[]), 1, "the snapshot names no catalog");
+    assert_eq!(
+        cmd_catalog_build(&argv(&[
+            "catalog-build",
+            sn,
+            "--queries",
+            q,
+            "--out",
+            c,
+            "--link"
+        ])),
+        0
+    );
+    assert_eq!(rb(&[]), 1, "not read-only");
+    assert_eq!(
+        cmd_snapshot_read_only(&argv(&["snapshot-read-only", sn])),
+        0
+    );
+    assert_eq!(rb(&["--max-result-bytes", "lots"]), 64);
+    assert_eq!(rb(&["--max-total-bytes", "-1"]), 64);
+    assert_eq!(rb(&["--max-total-pct", "most"]), 64);
+    assert_eq!(rb(&["--max-total-pct", "250"]), 1, "not a percentage");
+    let missing = dir.path().join("missing.sgsnap");
+    assert_eq!(
+        cmd_results_build(&argv(&[
+            "results-build",
+            s(&missing),
+            "--queries",
+            c,
+            "--out",
+            o
+        ])),
+        66
+    );
+    assert_eq!(rb(&["--max-total-pct", "100", "--link"]), 0);
+    let file: samyama::snapshot::results::ResultsFile =
+        serde_json::from_reader(File::open(&out).unwrap()).unwrap();
+    assert_eq!(file.entries.len(), 2);
+    assert_eq!(cmd_verify(&argv(&["verify", sn])), 0);
+    // An output that cannot be written.
+    assert_eq!(
+        cmd_results_build(&argv(&[
+            "results-build",
+            sn,
+            "--queries",
+            c,
+            "--out",
+            "/no/such/dir/x.sgresults"
+        ])),
+        74
+    );
+}
+
 /// An entry with one parameter of each declared type.
 fn typed_entry() -> samyama::snapshot::verify::CatalogEntry {
     let specs: Vec<QuerySpec> = serde_json::from_value(serde_json::json!([{

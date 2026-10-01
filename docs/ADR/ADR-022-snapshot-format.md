@@ -86,6 +86,36 @@ published snapshot by `.github/workflows/kg-catalogs.yml` (`catalog-gate
 snapshots predate the header link, so linking them is a re-upload of each
 asset with `catalog-build ... --link`; until then `verify` takes `--queries`.
 
+**A read-only snapshot may carry materialized results** (`read_only`,
+`results: {file, sha256}`, added 2026-10-01 for #1158). A second sidecar,
+`<kg>.sgresults` (`samyama.results/1`), beside the catalog; the body format does
+not change, and neither key is written unless set, so every existing snapshot
+is byte-for-byte what it was.
+
+- **Read-only only.** `samyama snapshot-read-only` sets the flag; `results-build`
+  refuses without it, and nothing is served for a snapshot without it.
+  `snapshot-read-only --off` withdraws the flag and unlinks the results.
+- **Bound to the epoch.** The loaded results bind to the store's epoch right
+  after restore. The first write bumps it, and from then on nothing is served
+  and a warning is logged once — the result cache's coarse rule, with no
+  dependency tracking.
+- **Capped, smallest first.** A per-result cap (64 KiB by default) and a total
+  cap: the lesser of `--max-total-bytes` and `--max-total-pct` of the snapshot
+  file (5% by default). Answers are admitted smallest first, so scalars and
+  aggregates go in before row sets, and what did not fit is listed with the
+  reason. `results-build` and `verify` both print what was used against both caps.
+- **Re-verified.** The build executes every entry and refuses the whole file
+  if any answer disagrees with the catalog. `verify` re-executes every stored
+  answer. Loading refuses a file whose bytes are not the linked ones, which
+  answers a different catalog, or whose stored rows no longer match their own
+  SHA-256.
+- **Exact match, bypassable, disclosed.** An answer is served only for its own
+  Cypher with exactly its sample values. `queries run --computed` bypasses it,
+  and the trailer line says `"source": "materialized"` or `"computed"`
+  (TRUST-06). Only `queries run` consults the file: the query engine, the
+  server and every benchmark never do, so a benchmark measures the engine, not
+  the file.
+
 **The file carries the index catalog** (`"t":"i"`, added 2026-09-29 for #1506).
 One line right after the header, holding every property index, unique
 constraint, full-text index and vector index the exporting store declared, as
