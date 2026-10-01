@@ -34,9 +34,8 @@ function canned(
 describe("nlq", () => {
   test("posts the question to /api/nlq and returns the cypher", async () => {
     const s = await canned(200, JSON.stringify({ cypher: "MATCH (n) RETURN n LIMIT 10" }));
-    // timeoutMs is passed because an omitted one reaches the transport as
-    // `undefined` and overrides its default; that is a separate defect.
-    const client = new SamyamaClient({ url: s.url, timeoutMs: 5000, maxRetries: 0 });
+    // No `timeoutMs`: a client built without one used to fail every call (#1595).
+    const client = new SamyamaClient({ url: s.url, maxRetries: 0 });
     assert.equal(await client.nlq("Show me some nodes"), "MATCH (n) RETURN n LIMIT 10");
     assert.equal(s.seen.length, 1);
     assert.equal(s.seen[0].method, "POST");

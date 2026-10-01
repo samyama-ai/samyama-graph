@@ -2466,6 +2466,16 @@ NodeDeleted { .. } => {
         }
         node.version = current_version;
 
+        // The node's values leave the label's property and constraint indexes
+        // with it, or `MATCH (n:L {p: v})` keeps finding a node that is no
+        // longer `:L`, and its key stays taken under `:L`'s unique constraint
+        // (#1590). Read from the columns, where the values are (#1188).
+        for (key, value) in &self.node_properties_full(node_id) {
+            self.property_index.index_remove(label, key, value, node_id);
+            self.property_index
+                .constraint_remove(label, key, value, node_id);
+        }
+
         // `label_index` changes here, so the derived bitsets are stale (#730).
         self.invalidate_label_bits();
         if let Some(members) = self.label_index.get_mut(label) {
@@ -2488,25 +2498,98 @@ NodeDeleted { .. } => {
         node_id: NodeId,
         label: impl Into<Label>
     ) -> GraphResult<()> {
-        self.invalidate_statistics_cache();
-        let label = label.into();
-        let idx = node_id.as_u64() as usize;
+        self.add_label_to_node_inner(tenant_id, node_id, label.into(), true)
+    }
 
+    /// `add_label_to_node`, with the unique-constraint check optional.
+    ///
+    /// Only a rollback passes `enforce_unique: false`: it puts back a label the
+    /// transaction removed, and a node the same transaction created with the
+    /// same key is still there until the rollback deletes it a step later.
+    fn add_label_to_node_inner(
+        &mut self,
+        tenant_id: &str,
+        node_id: NodeId,
+        label: Label,
+        enforce_unique: bool,
+    ) -> GraphResult<()> {
+        let idx = node_id.as_u64() as usize;
+        let (had, last_write) = self
+            .get_node(node_id)
+            .map(|n| (n.labels.contains(&label), n.version))
+            .ok_or(GraphError::NodeNotFound(node_id))?;
+
+        // The node's values become indexable under the new label. Read from the
+        // columns: the row copy has been empty since #1188, so reading it indexed
+        // nothing, and a node that gained a label was missing from that label's
+        // property index and unique constraints (#1590). A label the node already
+        // carries has its entries already.
+        let properties = if had {
+            PropertyMap::new()
+        } else {
+            self.node_properties_full(node_id)
+        };
+        let constrained: Vec<(&String, &PropertyValue)> =
+            if self.property_index.has_any_unique_constraints() {
+                properties
+                    .iter()
+                    .filter(|(k, v)| {
+                        !v.is_null() && self.property_index.has_unique_constraint(&label, k)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        // Refused before anything changes, so a refused label leaves the node,
+        // its indexes and its history as they were.
+        if enforce_unique {
+            for (key, value) in &constrained {
+                let other = self
+                    .property_index
+                    .unique_constraint_holders(&label, key, value)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|&holder| holder != node_id)
+                    .min();
+                if let Some(holder) = other {
+                    return Err(GraphError::ConstraintViolation(format!(
+                        ":{}({}) already has value {:?} on node {}",
+                        label.as_str(),
+                        key,
+                        value,
+                        holder
+                    )));
+                }
+            }
+        }
+        for (key, value) in &constrained {
+            self.property_index
+                .constraint_insert(&label, key, (*value).clone(), node_id);
+        }
+
+        self.invalidate_statistics_cache();
         // Get the node and add the label
         // Invalidated before the mutable borrow below, not after: the derived
         // bitsets are stale either way, and taking `&self` while `node` is
         // borrowed mutably does not compile (#730).
         self.invalidate_label_bits();
 
-        let prior = self.get_node(node_id).map(|n| (n.labels.contains(&label), n.version));
-        let had = prior.is_some_and(|(had, _)| had);
-        if let Some((false, last_write)) = prior {
-            if self.undo_needed(node_id, last_write, |e| {
-                matches!(e, NodeUndo::Label { label: l, .. } if *l == label)
-            }) {
-                let at = self.current_version;
-                self.push_node_undo(node_id, NodeUndo::Label { at, label: label.clone(), had: false });
-            }
+        if !had
+            && self.undo_needed(
+                node_id,
+                last_write,
+                |e| matches!(e, NodeUndo::Label { label: l, .. } if *l == label),
+            )
+        {
+            let at = self.current_version;
+            self.push_node_undo(
+                node_id,
+                NodeUndo::Label {
+                    at,
+                    label: label.clone(),
+                    had: false,
+                },
+            );
         }
         let current_version = self.current_version;
 
@@ -2529,7 +2612,7 @@ NodeDeleted { .. } => {
             tenant_id: tenant_id.to_string(),
             id: node_id,
             label: label.clone(),
-            properties: node.properties.clone(),
+            properties,
         };
 
         // A label makes the node's properties indexable under that label, and
@@ -5022,7 +5105,7 @@ NodeDeleted { .. } => {
                     }
                     NodeUndo::Property { key, old: None, .. } => self.remove_node_property(id, &key),
                     NodeUndo::Label { label, had: true, .. } => {
-                        let _ = self.add_label_to_node("default", id, label);
+                        let _ = self.add_label_to_node_inner("default", id, label, false);
                     }
                     NodeUndo::Label { label, had: false, .. } => {
                         let _ = self.remove_label_from_node(id, &label);
@@ -9170,6 +9253,42 @@ mod tests {
             COLUMN_READS.with(|c| c.get()) - before >= 2_000,
             "the counter does not see a scan, so it cannot see its absence"
         );
+    }
+
+    /// With a subscriber attached, a label added after creation is indexed on
+    /// the writing thread, and the event the subscriber gets carries the
+    /// node's values, read from the columns rather than the empty row (#1590).
+    #[test]
+    fn test_add_label_with_subscriber_indexes_and_sends_real_properties() {
+        let (mut store, mut rx) = GraphStore::with_async_indexing();
+        store.create_property_index(&Label::new("M"), "p");
+        let n = store.create_node("N");
+        store.set_node_property("default", n, "p", 5i64).unwrap();
+        while rx.try_recv().is_ok() {}
+
+        store.add_label_to_node("default", n, "M").unwrap();
+
+        let index = store
+            .property_index
+            .get_index(&Label::new("M"), "p")
+            .unwrap();
+        assert_eq!(
+            index.read().unwrap().get(&PropertyValue::Integer(5)),
+            vec![n]
+        );
+        match rx.try_recv() {
+            Ok(crate::graph::event::IndexEvent::LabelAdded { properties, .. }) => {
+                assert_eq!(properties.get("p"), Some(&PropertyValue::Integer(5)));
+            }
+            other => panic!("expected LabelAdded, got {other:?}"),
+        }
+
+        store.remove_label_from_node(n, &Label::new("M")).unwrap();
+        assert!(index
+            .read()
+            .unwrap()
+            .get(&PropertyValue::Integer(5))
+            .is_empty());
     }
 }
 
