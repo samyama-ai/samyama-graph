@@ -69,7 +69,11 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # A warm run takes about 40 minutes on ARM; a cold-cache one (a new stable
+    # toolchain, an evicted cache) needs about 50. At 45 a cold ARM run was
+    # cancelled before its post-run cache save, so every following run on the
+    # branch started cold too and could never pass (#1608).
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
