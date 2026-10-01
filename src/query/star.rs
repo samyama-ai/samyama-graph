@@ -209,6 +209,11 @@ fn expand_stars_pipeline(clauses: &mut [Clause]) -> bool {
 /// Walks the query in execution order so that each star sees the scope that
 /// actually reaches it, including through `WITH` stages that narrow it.
 pub fn expand_stars(query: &mut Query) {
+    // Each UNION branch is a query of its own, with its own scope: nothing
+    // either side binds is visible to the other.
+    for (branch, _) in query.union_queries.iter_mut() {
+        expand_stars(branch);
+    }
     // Both representations, always. The parser fills `clauses` even when the
     // by-kind fields can express the query, and mirrors the RETURN into
     // `return_clause` -- so expanding only one left a literal `*` in the other
@@ -242,9 +247,27 @@ pub fn expand_stars(query: &mut Query) {
         .min(query.match_clauses.len());
     bind_match(&mut scope, &query.match_clauses[..pre_with]);
     bind_unwind(&mut scope, query.unwind_clause.as_ref());
+    for u in &query.extra_unwind_clauses {
+        push_unique(&mut scope, &u.variable);
+    }
+    if let Some(l) = &query.load_csv_clause {
+        push_unique(&mut scope, &l.variable);
+    }
+    if let Some(l) = &query.load_parquet_clause {
+        push_unique(&mut scope, &l.variable);
+    }
     if let Some(call) = &query.call_clause {
         for item in &call.yield_items {
             push_unique(&mut scope, item.alias.as_ref().unwrap_or(&item.name));
+        }
+    }
+    if let Some(cc) = &query.correlated_call {
+        // `CALL { WITH a ... RETURN b }` adds the columns its body returns.
+        // The grammar admits it only before the first WITH.
+        if let Some(rc) = &cc.body.return_clause {
+            for name in with_output(&rc.items) {
+                push_unique(&mut scope, &name);
+            }
         }
     }
     if let Some(create) = &query.create_clause {
@@ -256,7 +279,7 @@ pub fn expand_stars(query: &mut Query) {
     // against the scope that reaches it, and everything after sees only its
     // output.
     let mut empty_star = false;
-    let mut apply_with = |wc: &mut WithClause, scope: &mut Vec<String>| {
+    let apply_with = |wc: &mut WithClause, scope: &mut Vec<String>| {
         let _ = expand_into(&mut wc.items, scope);
         *scope = with_output(&wc.items);
     };
@@ -267,21 +290,30 @@ pub fn expand_stars(query: &mut Query) {
         bind_match(&mut scope, &query.match_clauses);
     }
 
+    // The WITHs in written order. `extra_with_stages` holds the *earlier*
+    // ones, each with the clauses that follow it, and `with_clause` holds the
+    // **last**. Expanding `with_clause` first gave the last `WITH *` the scope
+    // of the first WITH, so a variable bound by a MATCH between them was
+    // dropped: `MATCH (a) WITH a MATCH (a)-->(b) WITH * RETURN b` failed with
+    // "Variable not found: b" (#1591).
+    for (wc, unwind, post_matches, _) in query.extra_with_stages.iter_mut() {
+        apply_with(wc, &mut scope);
+        bind_unwind(&mut scope, unwind.as_ref());
+        bind_match(&mut scope, post_matches);
+    }
+
     if let Some(wc) = query.with_clause.as_mut() {
         apply_with(wc, &mut scope);
-        // Matches written after the WITH re-bind into the narrowed scope. The
-        // AST keeps every MATCH in one list and records the boundary in
+        for u in &query.post_with_unwind_clauses {
+            push_unique(&mut scope, &u.variable);
+        }
+        // Matches written after the last WITH re-bind into the narrowed scope.
+        // The AST keeps them in the one list and records the boundary in
         // `with_split_index`, so the tail is what follows the WITH.
         let split = query.with_split_index.unwrap_or(query.match_clauses.len());
         if split < query.match_clauses.len() {
             bind_match(&mut scope, &query.match_clauses[split..]);
         }
-    }
-
-    for (wc, unwind, post_matches, _) in query.extra_with_stages.iter_mut() {
-        apply_with(wc, &mut scope);
-        bind_unwind(&mut scope, unwind.as_ref());
-        bind_match(&mut scope, post_matches);
     }
 
     if let Some(rc) = query.return_clause.as_mut() {
