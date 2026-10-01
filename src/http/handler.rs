@@ -1860,20 +1860,49 @@ fn multipart_refusal(
     context: &str,
     e: axum::extract::multipart::MultipartError,
 ) -> axum::response::Response {
+    multipart_refusal_hinted(
+        context,
+        e,
+        "the upload is larger than this server accepts for an import; \
+         see --import-max-bytes",
+    )
+}
+
+/// [`multipart_refusal`] for a route whose body limit is not the one
+/// `--import-max-bytes` sets: `too_large` is the hint a 413 carries (#1596).
+fn multipart_refusal_hinted(
+    context: &str,
+    e: axum::extract::multipart::MultipartError,
+    too_large: &str,
+) -> axum::response::Response {
     let (status, hint) = if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            " (the upload is larger than this server accepts for an import; \
-             see --import-max-bytes)",
-        )
+        (StatusCode::PAYLOAD_TOO_LARGE, format!(" ({too_large})"))
     } else {
-        (StatusCode::BAD_REQUEST, "")
+        (StatusCode::BAD_REQUEST, String::new())
     };
     (
         status,
         Json(json!({ "error": format!("{context}: {}{hint}", e.body_text()) })),
     )
         .into_response()
+}
+
+/// A multipart read failure on `/api/snapshot/import`, whose body limit is
+/// [`SNAPSHOT_IMPORT_BODY_LIMIT`](crate::http::server::SNAPSHOT_IMPORT_BODY_LIMIT)
+/// and not `--import-max-bytes` (#1596).
+fn snapshot_multipart_refusal(
+    context: &str,
+    e: axum::extract::multipart::MultipartError,
+) -> axum::response::Response {
+    let gib = crate::http::server::SNAPSHOT_IMPORT_BODY_LIMIT >> 30;
+    multipart_refusal_hinted(
+        context,
+        e,
+        &format!(
+            "the snapshot is larger than this server accepts; /api/snapshot/import \
+             takes at most {gib} GiB, and no flag raises it"
+        ),
+    )
 }
 
 /// An RFC 4180 reader fed one upload chunk at a time (#336).
@@ -2847,27 +2876,20 @@ pub async fn restore_snapshot_handler(
     // Read the snapshot file from multipart
     let mut snapshot_data: Option<Vec<u8>> = None;
 
+    // A read error used to end this loop as the end of the form would, so an
+    // upload past the body limit or cut off in transit was answered "No file
+    // field" (#1596).
     loop {
-        let field_result: Result<Option<axum::extract::multipart::Field<'_>>, _> =
-            multipart.next_field().await;
-        match field_result {
-            Ok(Some(field)) => {
-                let name = field.name().unwrap_or("").to_string();
-                if name == "file" {
-                    match field.bytes().await {
-                        Ok(bytes) => snapshot_data = Some(bytes.to_vec()),
-                        Err(e) => {
-                            return (
-                                axum::http::StatusCode::BAD_REQUEST,
-                                Json(json!({ "error": format!("Failed to read file: {}", e) })),
-                            )
-                                .into_response()
-                        }
-                    }
-                }
-            }
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
             Ok(None) => break,
-            Err(_) => break,
+            Err(e) => return snapshot_multipart_refusal("Failed to read multipart request", e),
+        };
+        if field.name().unwrap_or("") == "file" {
+            match field.bytes().await {
+                Ok(bytes) => snapshot_data = Some(bytes.to_vec()),
+                Err(e) => return snapshot_multipart_refusal("Failed to read file", e),
+            }
         }
     }
 
