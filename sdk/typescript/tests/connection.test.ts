@@ -49,6 +49,41 @@ describe("connection management", () => {
     assert.ok(t.connectionOptions.maxRetries > 0);
   });
 
+  test("an option passed as undefined keeps its default (#1595)", () => {
+    const t = new HttpTransport("http://127.0.0.1:1", {
+      timeoutMs: undefined,
+      maxRetries: undefined,
+      retryBaseDelayMs: undefined,
+    });
+    assert.deepEqual(t.connectionOptions, {
+      timeoutMs: 30_000,
+      maxRetries: 2,
+      retryBaseDelayMs: 100,
+    });
+  });
+
+  test("an explicit option still overrides its default", () => {
+    const t = new HttpTransport("http://127.0.0.1:1", { timeoutMs: 5, maxRetries: 0 });
+    assert.deepEqual(t.connectionOptions, { timeoutMs: 5, maxRetries: 0, retryBaseDelayMs: 100 });
+  });
+
+  test("a client built with only a url gets the transport's defaults (#1595)", () => {
+    // `SamyamaClient` forwards each option it was not given as `undefined`.
+    // That used to overwrite every default, so `AbortSignal.timeout(undefined)`
+    // threw on every call of every client built without a `timeoutMs`.
+    for (const client of [
+      new SamyamaClient({ url: "http://127.0.0.1:1" }),
+      SamyamaClient.connectHttp("http://127.0.0.1:1"),
+    ]) {
+      const http = (client as unknown as { http: HttpTransport }).http;
+      assert.deepEqual(http.connectionOptions, {
+        timeoutMs: 30_000,
+        maxRetries: 2,
+        retryBaseDelayMs: 100,
+      });
+    }
+  });
+
   test("a timeout is retried the configured number of times", async () => {
     // Counted at the server: one connection per attempt. Timing alone would
     // pass for a client that never retried and simply waited longer.

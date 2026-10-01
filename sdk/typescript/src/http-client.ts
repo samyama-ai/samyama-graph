@@ -57,7 +57,14 @@ export class HttpTransport {
 
   constructor(baseUrl: string, options: ConnectionOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
-    this.options = { ...DEFAULTS, ...options };
+    // An option passed as `undefined` means "not set", but a spread copies it
+    // over the default all the same. `SamyamaClient` forwards every option it
+    // was not given as `undefined`, so every client built without a
+    // `timeoutMs` had no deadline at all and every call threw (#1595).
+    const given = Object.fromEntries(
+      Object.entries(options).filter(([, v]) => v !== undefined),
+    ) as ConnectionOptions;
+    this.options = { ...DEFAULTS, ...given };
   }
 
   /** The settings this transport was built with. */
