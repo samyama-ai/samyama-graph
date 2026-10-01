@@ -140,18 +140,22 @@ fn the_count_does_not_exceed_the_limit_it_refused_at() {
 
     // The reported shape: batches that step over the ceiling rather than land on
     // it. Four batches of four against a limit of ten used to leave sixteen.
+    //
+    // Eight, not ten: the third batch would cross the ceiling, and a statement
+    // that fails is undone whole (#1593), so it leaves none of its four rather
+    // than the two that fitted.
     for _ in 0..4 {
         let _ = run(&pm, &engine, &mut store, "UNWIND range(1,4) AS i CREATE (:Q {id:i})");
     }
 
     assert_eq!(
         store.node_count(),
-        10,
+        8,
         "the ceiling is the ceiling: the store held 1.2x the limit when the check ran at persist time"
     );
     assert_eq!(
         pm.tenants().get_usage(T).unwrap().node_count,
-        10,
+        8,
         "and the counter the quota is read from agrees with it"
     );
     assert!(!health::is_degraded());

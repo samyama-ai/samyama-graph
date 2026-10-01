@@ -128,6 +128,28 @@ fn canonical(s: &str) -> String {
     out
 }
 
+/// Blank a node's MVCC `version` in its `Debug` rendering.
+///
+/// The version is bookkeeping, not part of an answer: no HTTP or RESP reply
+/// carries it, and neither a persistence restart nor a snapshot round trip
+/// keeps it -- both load every node at version 1. Since every write statement
+/// runs as a transaction of its own (#1593), the built graph's nodes sit at the
+/// versions of the statements that wrote them, so leaving it in would report
+/// every node-returning query as a divergence. Properties, labels and
+/// timestamps are still compared.
+fn without_mvcc_version(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.find("version: ") {
+        let (head, tail) = rest.split_at(at + "version: ".len());
+        out.push_str(head);
+        out.push('_');
+        rest = tail.trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A result rendered as a comparable string. Column order and row order are part of
 /// the answer, so nothing is sorted there — the queries that need an order say so.
 fn answer(engine: &QueryEngine, store: &GraphStore, q: &str) -> String {
@@ -140,7 +162,7 @@ fn answer(engine: &QueryEngine, store: &GraphStore, q: &str) -> String {
                 let cells: Vec<String> = batch
                     .columns
                     .iter()
-                    .map(|c| canonical(&format!("{:?}", rec.get(c))))
+                    .map(|c| canonical(&without_mvcc_version(&format!("{:?}", rec.get(c)))))
                     .collect();
                 out.push_str(&cells.join("|"));
             }
