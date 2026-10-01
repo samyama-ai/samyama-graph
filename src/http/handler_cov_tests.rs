@@ -2031,6 +2031,56 @@ async fn snapshot_import_refusals() {
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
 }
 
+/// Cut off before the file, a snapshot upload was answered "No file field in
+/// multipart request": a read error ended the field loop as the end of the
+/// form would (#1596). It is answered with the error itself.
+#[tokio::test]
+async fn a_snapshot_upload_cut_off_before_the_file_names_the_multipart_error() {
+    let s = state();
+    let r = post_truncated(routes(s.clone()), "/api/snapshot/import", "", "note").await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.text());
+    let e = r.json()["error"].as_str().unwrap().to_string();
+    assert!(e.starts_with("Failed to read multipart request: "), "{e}");
+    assert_ne!(e, "Failed to read multipart request: ");
+    assert_eq!(s.store.read().await.node_count(), 0);
+}
+
+/// Past the route's body limit a snapshot upload is a 413 that says which
+/// limit it hit, not "No file field" (#1596); under it the same router imports.
+#[tokio::test]
+async fn a_snapshot_past_the_body_limit_is_a_413() {
+    let src = state();
+    run(&src, "CREATE (:S {name: 'a'})-[:L]->(:S {name: 'b'})").await;
+    let data = snapshot_bytes(&src).await;
+    let s = state();
+    let app = Router::new()
+        .route(
+            "/api/snapshot/import",
+            post(restore_snapshot_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(data.len() + 4096)),
+        )
+        .with_state(s.clone());
+
+    let pad = "x".repeat(16 * 1024);
+    for parts in [
+        vec![field("pad", &pad), file(data.clone())],
+        vec![file([data.clone(), pad.clone().into_bytes()].concat())],
+    ] {
+        let r = post_multipart(app.clone(), "/api/snapshot/import", parts).await;
+        assert_eq!(r.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", r.text());
+        let e = r.json()["error"].as_str().unwrap().to_string();
+        assert!(e.contains("/api/snapshot/import"), "{e}");
+        assert!(e.contains("no flag raises it"), "{e}");
+        assert!(!e.contains("--import-max-bytes"), "{e}");
+    }
+    assert_eq!(s.store.read().await.node_count(), 0);
+
+    let r = post_multipart(app, "/api/snapshot/import", vec![file(data)]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert_eq!(r.json()["nodes_imported"], 2);
+    assert_eq!(s.store.read().await.node_count(), 2);
+}
+
 #[tokio::test]
 async fn a_snapshot_past_the_quota_is_refused_whole() {
     let src = state();

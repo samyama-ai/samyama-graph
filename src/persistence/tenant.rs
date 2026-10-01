@@ -415,6 +415,35 @@ pub struct TenantManager {
     usage: Arc<RwLock<HashMap<String, ResourceUsage>>>,
 }
 
+/// A connection counted against its tenant's `max_connections`, given back
+/// when dropped (#1594). From [`TenantManager::admit_connection`].
+#[derive(Debug)]
+pub struct ConnectionSlot {
+    usage: Option<Arc<RwLock<HashMap<String, ResourceUsage>>>>,
+    tenant: String,
+}
+
+impl ConnectionSlot {
+    /// The tenant the connection is counted against.
+    pub fn tenant(&self) -> &str {
+        &self.tenant
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        if let Some(usage) = &self.usage {
+            // A poisoned lock is a panic elsewhere; the count is then the least
+            // of the problems, and panicking again inside a drop would abort.
+            if let Ok(mut usage) = usage.write() {
+                if let Some(u) = usage.get_mut(&self.tenant) {
+                    u.active_connections = u.active_connections.saturating_sub(1);
+                }
+            }
+        }
+    }
+}
+
 impl TenantManager {
     /// Create a new tenant manager
     pub fn new() -> Self {
@@ -484,6 +513,18 @@ impl TenantManager {
         tenants.get(id)
             .cloned()
             .ok_or_else(|| TenantError::NotFound(id.to_string()))
+    }
+
+    /// How long one of the tenant's queries may run: its `max_query_time_ms`,
+    /// or `None` for no limit of its own or a tenant that does not exist. The
+    /// query engine takes the shorter of this and the server's (#1593).
+    pub fn query_time_limit(&self, id: &str) -> Option<std::time::Duration> {
+        let tenants = self.tenants.read().unwrap();
+        tenants
+            .get(id)?
+            .quotas
+            .max_query_time_ms
+            .map(std::time::Duration::from_millis)
     }
 
     /// List all tenants
@@ -556,6 +597,44 @@ impl TenantManager {
         tenant.enabled
             && fits(new_nodes, used.node_count, tenant.quotas.max_nodes)
             && fits(new_edges, used.edge_count, tenant.quotas.max_edges)
+    }
+
+    /// Count one connection against the tenant's `max_connections`, or refuse
+    /// it at the limit (#1594).
+    ///
+    /// The check and the increment are one step under the usage lock, so two
+    /// connections arriving together cannot both take the last slot. The slot
+    /// gives the connection back when it is dropped, which is what makes every
+    /// way a connection can end -- a clean close, an error, a panic in its task
+    /// -- release it.
+    ///
+    /// A tenant that does not exist has no quota to count against, and is
+    /// admitted with a slot that counts nothing.
+    pub fn admit_connection(&self, tenant_id: &str) -> TenantResult<ConnectionSlot> {
+        let max = match self.tenants.read().unwrap().get(tenant_id) {
+            Some(t) => t.quotas.max_connections,
+            None => {
+                return Ok(ConnectionSlot {
+                    usage: None,
+                    tenant: tenant_id.to_string(),
+                })
+            }
+        };
+        let mut usage = self.usage.write().unwrap();
+        let tenant_usage = usage.entry(tenant_id.to_string()).or_default();
+        if let Some(max) = max {
+            if tenant_usage.active_connections >= max {
+                return Err(TenantError::QuotaExceeded {
+                    tenant: tenant_id.to_string(),
+                    resource: format!("connections ({}/{})", tenant_usage.active_connections, max),
+                });
+            }
+        }
+        tenant_usage.active_connections += 1;
+        Ok(ConnectionSlot {
+            usage: Some(Arc::clone(&self.usage)),
+            tenant: tenant_id.to_string(),
+        })
     }
 
     /// Increment resource usage

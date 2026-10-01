@@ -479,6 +479,7 @@ pub async fn query_handler(
     // Writes are never served from the result cache -- `execute_mut` has no
     // cached form, so this is structural rather than a rule to remember.
     let use_cache = !is_write && payload.cache.unwrap_or_else(result_cache_default);
+    let time_limit = state.query_time_limit(&payload.graph);
     let mut served_from_cache = false;
 
     // A write refused because an earlier one did not reach disk (#1274). Asked
@@ -500,9 +501,13 @@ pub async fn query_handler(
         // memory only, and returned 200 all the same (#1094).
         let (result, version, props) = state
             .mutate(&payload.graph, |store| {
-                let result = state
-                    .engine
-                    .execute_mut_with_params(&payload.query, store, &payload.graph, &params);
+                let result = state.engine.execute_mut_with_params_within(
+                    &payload.query,
+                    store,
+                    &payload.graph,
+                    &params,
+                    time_limit,
+                );
                 let props = result
                     .as_ref()
                     .map(|b| merged_node_properties(&b.records, store))
@@ -515,10 +520,12 @@ pub async fn query_handler(
     } else {
         let store_guard = state.store.read().await;
         let result = if use_cache {
-            match state
-                .engine
-                .execute_cached_with_params(&payload.query, &*store_guard, &params)
-            {
+            match state.engine.execute_cached_with_params_within(
+                &payload.query,
+                &*store_guard,
+                &params,
+                time_limit,
+            ) {
                 Ok((batch, hit)) => {
                     served_from_cache = hit;
                     Ok(batch)
@@ -526,9 +533,12 @@ pub async fn query_handler(
                 Err(e) => Err(e),
             }
         } else {
-            state
-                .engine
-                .execute_with_params(&payload.query, &*store_guard, &params)
+            state.engine.execute_with_params_within(
+                &payload.query,
+                &*store_guard,
+                &params,
+                time_limit,
+            )
         };
         // Read while the guard is still held: taken afterwards it could name a
         // version this result was not computed against, which is worse than
@@ -657,6 +667,7 @@ async fn stream_query(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamMsg>(STREAM_CHANNEL_CHUNKS);
     let guard = std::sync::Arc::clone(&state.store).read_owned().await;
     let engine = std::sync::Arc::clone(&state.engine);
+    let time_limit = state.query_time_limit(&payload.graph);
     let runtime = tokio::runtime::Handle::current();
     let stall = stream_stall_budget();
     let query = payload.query;
@@ -688,7 +699,7 @@ async fn stream_query(
 
         let mut started = false;
         let mut sent_rows = 0usize;
-        let outcome = engine.execute_streaming_with_params(
+        let outcome = engine.execute_streaming_with_params_within(
             &query,
             &guard,
             &params,
@@ -713,6 +724,7 @@ async fn stream_query(
                 sent_rows += n;
                 Ok(())
             },
+            time_limit,
         );
         let notifications = crate::query::executor::operator::notifications::take();
         // The last row has been handed over: nothing the trailer says needs
@@ -805,12 +817,19 @@ async fn query_in_transaction(
         .engine
         .statement_is_write(&payload.query)
         .unwrap_or(false);
+    let time_limit = state.query_time_limit(&payload.graph);
     let result = if is_write {
+        state.engine.execute_mut_with_params_within(
+            &payload.query,
+            store,
+            &payload.graph,
+            params,
+            time_limit,
+        )
+    } else {
         state
             .engine
-            .execute_mut_with_params(&payload.query, store, &payload.graph, params)
-    } else {
-        state.engine.execute_with_params(&payload.query, store, params)
+            .execute_with_params_within(&payload.query, store, params, time_limit)
     };
     let props = result
         .as_ref()
@@ -1860,20 +1879,49 @@ fn multipart_refusal(
     context: &str,
     e: axum::extract::multipart::MultipartError,
 ) -> axum::response::Response {
+    multipart_refusal_hinted(
+        context,
+        e,
+        "the upload is larger than this server accepts for an import; \
+         see --import-max-bytes",
+    )
+}
+
+/// [`multipart_refusal`] for a route whose body limit is not the one
+/// `--import-max-bytes` sets: `too_large` is the hint a 413 carries (#1596).
+fn multipart_refusal_hinted(
+    context: &str,
+    e: axum::extract::multipart::MultipartError,
+    too_large: &str,
+) -> axum::response::Response {
     let (status, hint) = if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            " (the upload is larger than this server accepts for an import; \
-             see --import-max-bytes)",
-        )
+        (StatusCode::PAYLOAD_TOO_LARGE, format!(" ({too_large})"))
     } else {
-        (StatusCode::BAD_REQUEST, "")
+        (StatusCode::BAD_REQUEST, String::new())
     };
     (
         status,
         Json(json!({ "error": format!("{context}: {}{hint}", e.body_text()) })),
     )
         .into_response()
+}
+
+/// A multipart read failure on `/api/snapshot/import`, whose body limit is
+/// [`SNAPSHOT_IMPORT_BODY_LIMIT`](crate::http::server::SNAPSHOT_IMPORT_BODY_LIMIT)
+/// and not `--import-max-bytes` (#1596).
+fn snapshot_multipart_refusal(
+    context: &str,
+    e: axum::extract::multipart::MultipartError,
+) -> axum::response::Response {
+    let gib = crate::http::server::SNAPSHOT_IMPORT_BODY_LIMIT >> 30;
+    multipart_refusal_hinted(
+        context,
+        e,
+        &format!(
+            "the snapshot is larger than this server accepts; /api/snapshot/import \
+             takes at most {gib} GiB, and no flag raises it"
+        ),
+    )
 }
 
 /// An RFC 4180 reader fed one upload chunk at a time (#336).
@@ -2847,27 +2895,20 @@ pub async fn restore_snapshot_handler(
     // Read the snapshot file from multipart
     let mut snapshot_data: Option<Vec<u8>> = None;
 
+    // A read error used to end this loop as the end of the form would, so an
+    // upload past the body limit or cut off in transit was answered "No file
+    // field" (#1596).
     loop {
-        let field_result: Result<Option<axum::extract::multipart::Field<'_>>, _> =
-            multipart.next_field().await;
-        match field_result {
-            Ok(Some(field)) => {
-                let name = field.name().unwrap_or("").to_string();
-                if name == "file" {
-                    match field.bytes().await {
-                        Ok(bytes) => snapshot_data = Some(bytes.to_vec()),
-                        Err(e) => {
-                            return (
-                                axum::http::StatusCode::BAD_REQUEST,
-                                Json(json!({ "error": format!("Failed to read file: {}", e) })),
-                            )
-                                .into_response()
-                        }
-                    }
-                }
-            }
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
             Ok(None) => break,
-            Err(_) => break,
+            Err(e) => return snapshot_multipart_refusal("Failed to read multipart request", e),
+        };
+        if field.name().unwrap_or("") == "file" {
+            match field.bytes().await {
+                Ok(bytes) => snapshot_data = Some(bytes.to_vec()),
+                Err(e) => return snapshot_multipart_refusal("Failed to read file", e),
+            }
         }
     }
 

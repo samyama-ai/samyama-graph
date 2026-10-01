@@ -209,6 +209,43 @@ pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::a
     Role::Read
 }
 
+/// Count a request against the tenant's `max_connections` for as long as it
+/// is in flight, or refuse it with 429 at the limit (#1594).
+///
+/// Over HTTP a "connection" is a request being served, not a TCP connection: a
+/// keep-alive connection between requests holds no lock, no transaction and
+/// no memory a quota would be protecting, while a request does. The count is
+/// the same one RESP connections take, so the quota bounds the tenant's
+/// concurrent clients across both. A streamed response holds its slot until
+/// the body is finished, which is when the work it stands for is.
+async fn hold_connection_slot(
+    tenants: Arc<TenantManager>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::body::HttpBody;
+    let slot = match tenants.admit_connection("default") {
+        Ok(slot) => slot,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let res = next.run(req).await;
+    if res.body().size_hint().exact().is_some() {
+        return res;
+    }
+    let (parts, body) = res.into_parts();
+    let held = futures::StreamExt::map(body.into_data_stream(), move |chunk| {
+        let _ = &slot;
+        chunk
+    });
+    axum::response::Response::from_parts(parts, axum::body::Body::from_stream(held))
+}
+
 async fn require_credential(
     credentials: Arc<Vec<Credential>>,
     req: axum::extract::Request,
@@ -490,6 +527,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The graph's tenant time limit, for the engine to weigh against the
+    /// server's (#1593). `None` without a tenant manager.
+    pub fn query_time_limit(&self, graph: &str) -> Option<std::time::Duration> {
+        self.tenant_manager.as_ref()?.query_time_limit(graph)
+    }
+
     /// Take the write lock, run a mutation, and persist whatever it changed.
     ///
     /// Every HTTP path that mutates the graph goes through here. Five did not
@@ -499,10 +542,11 @@ impl AppState {
     /// each handler took the lock itself, so the fix to `query_handler` was not
     /// something the others could inherit.
     ///
-    /// The log is applied on the outcome of the *store*, not of `body`. A statement
-    /// that fails partway does not undo the rows it already wrote — the engine has
-    /// no statement rollback (LANG-07) — and REL-06 does not let disk disagree with
-    /// memory about rows that are visible.
+    /// The log is applied on the outcome of the *store*, not of `body`. A Cypher
+    /// statement that fails is undone, journal included (#1593), but an import or
+    /// enrichment body has no such undo: the rows it wrote before failing stay,
+    /// and REL-06 does not let disk disagree with memory about rows that are
+    /// visible.
     ///
     /// `GraphStore` is passed by `&mut` rather than the guard so that a body cannot
     /// hold the lock past the persist.
@@ -619,6 +663,14 @@ pub struct HttpServer {
 /// Parquet are still read whole, and a JSON document parses to several times
 /// its size, which is why this is 1 GiB and not the snapshot route's 64 GB.
 pub const DEFAULT_IMPORT_BODY_LIMIT: usize = 1024 * 1024 * 1024;
+
+/// The snapshot import route's body limit, which no flag changes (#1596).
+///
+/// PubMed-v2 (11 GB) and trifecta-pubmed (12 GB) need headroom; 64 GB lets
+/// per-source snapshots up to ~50 GB through. The body is buffered in memory by
+/// the multipart extractor — see #197 follow-up for streaming-to-disk to drop
+/// the RAM ceiling.
+pub const SNAPSHOT_IMPORT_BODY_LIMIT: usize = 64 * 1024 * 1024 * 1024;
 
 impl HttpServer {
     /// Create a new HTTP server
@@ -850,11 +902,7 @@ impl HttpServer {
             .route("/api/vector-search", post(search_handler))
             .route("/api/snapshot/export", post(export_snapshot_handler))
             .route("/api/snapshot/import", post(restore_snapshot_handler)
-                // 64 GB cap. PubMed-v2 (11 GB) and trifecta-pubmed (12 GB) need
-                // headroom; 64 GB lets per-source snapshots up to ~50 GB through.
-                // Body is buffered in memory by the multipart extractor — see #197
-                // follow-up for streaming-to-disk to drop the RAM ceiling.
-                .layer(DefaultBodyLimit::max(64 * 1024 * 1024 * 1024)))
+                .layer(DefaultBodyLimit::max(SNAPSHOT_IMPORT_BODY_LIMIT)))
             .with_state(state);
 
         let mut app = main_router
@@ -872,6 +920,16 @@ impl HttpServer {
         // preflight. `require_credential` lets `OPTIONS` through for the same
         // reason, so the ordering and the exemption agree rather than one
         // covering for the other.
+        // Inside authentication, so a request refused for its credential never
+        // takes a slot.
+        if let Some(tm) = self.tenants.as_ref() {
+            let tm = Arc::clone(tm);
+            app = app.layer(axum::middleware::from_fn(move |req, next| {
+                let tm = Arc::clone(&tm);
+                async move { hold_connection_slot(tm, req, next).await }
+            }));
+        }
+
         if !self.credentials.is_empty() {
             let creds = Arc::new(self.credentials.clone());
             app = app.layer(axum::middleware::from_fn(move |req, next| {

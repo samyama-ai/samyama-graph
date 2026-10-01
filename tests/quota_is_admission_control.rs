@@ -140,18 +140,22 @@ fn the_count_does_not_exceed_the_limit_it_refused_at() {
 
     // The reported shape: batches that step over the ceiling rather than land on
     // it. Four batches of four against a limit of ten used to leave sixteen.
+    //
+    // Eight, not ten: the third batch would cross the ceiling, and a statement
+    // that fails is undone whole (#1593), so it leaves none of its four rather
+    // than the two that fitted.
     for _ in 0..4 {
         let _ = run(&pm, &engine, &mut store, "UNWIND range(1,4) AS i CREATE (:Q {id:i})");
     }
 
     assert_eq!(
         store.node_count(),
-        10,
+        8,
         "the ceiling is the ceiling: the store held 1.2x the limit when the check ran at persist time"
     );
     assert_eq!(
         pm.tenants().get_usage(T).unwrap().node_count,
-        10,
+        8,
         "and the counter the quota is read from agrees with it"
     );
     assert!(!health::is_degraded());
@@ -212,21 +216,16 @@ fn an_edge_quota_is_enforced_before_the_edge_exists() {
     assert!(!health::is_degraded());
 }
 
-/// A batch that crosses the ceiling stops at it and keeps what it wrote.
+/// A batch that crosses the ceiling is refused whole.
 ///
-/// The engine has no statement rollback (LANG-07), so a statement that fails
-/// partway already leaves its earlier rows in the store, and the write paths
-/// persist on the outcome of the *store* rather than of the statement. Those
-/// rows are therefore on disk as well as in memory, which is the property that
-/// matters: the statement fails, and nothing diverges.
-///
-/// The alternative — refuse the whole batch — would mean undoing rows the engine
-/// cannot undo. Restoring a `SET` in the same statement is not possible at all,
-/// the old value is gone, so "fail whole" could only ever be conditional on the
-/// statement's shape. A rule that holds for pure creates and silently does not
-/// hold otherwise is worse than one that always holds.
+/// This test used to pin the opposite: the batch stopped at the ceiling and
+/// kept the six rows it had written, because the engine had no statement
+/// rollback (LANG-07) and refusing the whole batch would have meant undoing rows
+/// it could not undo. A failed statement is undone now (#1593), journal
+/// included, so the refusal is all-or-nothing and still leaves memory and disk
+/// agreeing -- on nothing having happened.
 #[test]
-fn a_batch_that_crosses_the_ceiling_stops_at_it_and_keeps_what_it_wrote() {
+fn a_batch_that_crosses_the_ceiling_is_refused_whole() {
     let _serial = guard();
     health::reset_for_test();
     let (pm, _dir) = manager(Some(6), None);
@@ -236,12 +235,16 @@ fn a_batch_that_crosses_the_ceiling_stops_at_it_and_keeps_what_it_wrote() {
     let (stmt, persist) = run(&pm, &engine, &mut store, "UNWIND range(1,100) AS i CREATE (:Q {id:i})");
     assert!(stmt.is_some(), "a batch of 100 against a ceiling of 6 must fail");
     assert_eq!(persist, None, "and must not fail at persist time");
-    assert_eq!(store.node_count(), 6, "it stopped at the ceiling");
+    assert_eq!(store.node_count(), 0, "the rows before the ceiling stayed");
     assert_eq!(
         pm.tenants().get_usage(T).unwrap().node_count,
-        6,
-        "and the six it wrote reached disk, so memory and disk agree"
+        0,
+        "and memory and disk agree on none of them"
     );
+    // The quota is still all there: a batch that fits is admitted in full.
+    let (stmt, _) = run(&pm, &engine, &mut store, "UNWIND range(1,6) AS i CREATE (:Q {id:i})");
+    assert_eq!(stmt, None);
+    assert_eq!(store.node_count(), 6);
     assert!(!health::is_degraded());
 }
 
