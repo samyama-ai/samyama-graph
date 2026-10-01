@@ -19718,17 +19718,22 @@ impl MergeOperator {
         record: &Record,
         store: &mut GraphStore,
         tenant_id: &str,
-    ) {
+    ) -> ExecutionResult<()> {
         for (var, labels) in items {
             let node_id = match record.get(var) {
                 Some(Value::NodeRef(id)) => *id,
                 Some(Value::Node(id, _)) => *id,
                 _ => continue,
             };
+            // A label refused under a unique constraint is the statement's
+            // error, not a label silently left off (#1590).
             for label in labels {
-                let _ = store.add_label_to_node(tenant_id, node_id, label.clone());
+                store
+                    .add_label_to_node(tenant_id, node_id, label.clone())
+                    .map_err(write_error)?;
             }
         }
+        Ok(())
     }
 
     /// Does a node satisfy the pattern's labels and inline properties?
@@ -20023,7 +20028,7 @@ impl MergeOperator {
             let entity_sets = self.on_match_entity_set.clone();
             self.apply_entity_sets(&entity_sets, &record, store, tenant_id)?;
             let labels = self.on_match_labels.clone();
-            Self::apply_labels(&labels, &record, store, tenant_id);
+            Self::apply_labels(&labels, &record, store, tenant_id)?;
             return Ok(Some(record));
         }
 
@@ -20339,7 +20344,7 @@ impl PhysicalOperator for MergeOperator {
             // these and this one never did, so the update was silently lost (#1560).
             let entity_sets = self.on_match_entity_set.clone();
             self.apply_entity_sets(&entity_sets, &record, store, tenant_id)?;
-            Self::apply_labels(&self.on_match_labels, &record, store, tenant_id);
+            Self::apply_labels(&self.on_match_labels, &record, store, tenant_id)?;
 
             // The rest of the matches, each its own row. ON MATCH SET applies
             // to every one of them, not only the first.
@@ -20355,7 +20360,7 @@ impl PhysicalOperator for MergeOperator {
                     }
                 }
                 self.apply_entity_sets(&entity_sets, &r, store, tenant_id)?;
-                Self::apply_labels(&self.on_match_labels, &r, store, tenant_id);
+                Self::apply_labels(&self.on_match_labels, &r, store, tenant_id)?;
                 self.pending.push_back(r);
             }
         } else {
@@ -20393,7 +20398,7 @@ impl PhysicalOperator for MergeOperator {
             }
             let entity_sets = self.on_create_entity_set.clone();
             self.apply_entity_sets(&entity_sets, &record, store, tenant_id)?;
-            Self::apply_labels(&self.on_create_labels, &record, store, tenant_id);
+            Self::apply_labels(&self.on_create_labels, &record, store, tenant_id)?;
         }
 
         Ok(Some(record))
