@@ -501,15 +501,13 @@ pub async fn query_handler(
         // memory only, and returned 200 all the same (#1094).
         let (result, version, props) = state
             .mutate(&payload.graph, |store| {
-                let result = state
-                    .engine
-                    .execute_mut_with_params_within(
-                        &payload.query,
-                        store,
-                        &payload.graph,
-                        &params,
-                        time_limit,
-                    );
+                let result = state.engine.execute_mut_with_params_within(
+                    &payload.query,
+                    store,
+                    &payload.graph,
+                    &params,
+                    time_limit,
+                );
                 let props = result
                     .as_ref()
                     .map(|b| merged_node_properties(&b.records, store))
@@ -522,10 +520,12 @@ pub async fn query_handler(
     } else {
         let store_guard = state.store.read().await;
         let result = if use_cache {
-            match state
-                .engine
-                .execute_cached_with_params_within(&payload.query, &*store_guard, &params, time_limit)
-            {
+            match state.engine.execute_cached_with_params_within(
+                &payload.query,
+                &*store_guard,
+                &params,
+                time_limit,
+            ) {
                 Ok((batch, hit)) => {
                     served_from_cache = hit;
                     Ok(batch)
@@ -533,9 +533,12 @@ pub async fn query_handler(
                 Err(e) => Err(e),
             }
         } else {
-            state
-                .engine
-                .execute_with_params_within(&payload.query, &*store_guard, &params, time_limit)
+            state.engine.execute_with_params_within(
+                &payload.query,
+                &*store_guard,
+                &params,
+                time_limit,
+            )
         };
         // Read while the guard is still held: taken afterwards it could name a
         // version this result was not computed against, which is worse than
@@ -816,9 +819,13 @@ async fn query_in_transaction(
         .unwrap_or(false);
     let time_limit = state.query_time_limit(&payload.graph);
     let result = if is_write {
-        state
-            .engine
-            .execute_mut_with_params_within(&payload.query, store, &payload.graph, params, time_limit)
+        state.engine.execute_mut_with_params_within(
+            &payload.query,
+            store,
+            &payload.graph,
+            params,
+            time_limit,
+        )
     } else {
         state
             .engine

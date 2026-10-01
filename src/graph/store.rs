@@ -4960,7 +4960,10 @@ NodeDeleted { .. } => {
     /// Inside a transaction the caller already opened, `body` just runs: that
     /// transaction is the unit of atomicity, and ROLLBACK undoes the statement
     /// along with the rest of it.
-    pub fn atomically<T, E>(&mut self, body: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E> {
+    pub fn atomically<T, E>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
         if self.session_txn.is_some() || self.begin_session_transaction().is_err() {
             return body(self);
         }
