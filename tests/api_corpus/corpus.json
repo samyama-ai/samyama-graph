@@ -21,7 +21,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -47,7 +47,7 @@
           1.5
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -73,7 +73,7 @@
           "x"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -99,7 +99,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -125,7 +125,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -155,7 +155,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -184,7 +184,7 @@
           }
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -212,7 +212,7 @@
           2
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -238,7 +238,7 @@
           6
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -264,7 +264,7 @@
           4
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -312,7 +312,7 @@
           }
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -362,7 +362,7 @@
           }
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -426,7 +426,7 @@
           }
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -461,7 +461,7 @@
           }
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -496,7 +496,7 @@
           "Dan"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -522,7 +522,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -557,7 +557,7 @@
           "Alice"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -586,7 +586,7 @@
           "Carol"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -618,7 +618,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -647,7 +647,7 @@
           "Dan"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -673,7 +673,7 @@
           "Alice"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -699,7 +699,7 @@
           "Carol"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -725,7 +725,7 @@
           2
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -765,7 +765,7 @@
           "Globex"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -791,7 +791,7 @@
           129
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -817,7 +817,7 @@
           32.25
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -845,7 +845,7 @@
           41
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -876,7 +876,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -912,7 +912,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -940,7 +940,7 @@
           2
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -972,7 +972,7 @@
           6
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1001,7 +1001,7 @@
           2
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1030,7 +1030,7 @@
           "Bob"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1056,7 +1056,7 @@
           2
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1082,7 +1082,7 @@
           "Carol"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1111,7 +1111,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1140,7 +1140,7 @@
           "WORKS_AT"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1170,7 +1170,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1196,7 +1196,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1222,7 +1222,7 @@
           "unknown"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1257,7 +1257,7 @@
           "younger"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1289,7 +1289,7 @@
           5
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1325,7 +1325,7 @@
           -1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1358,7 +1358,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1388,7 +1388,7 @@
           "7"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1414,7 +1414,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1440,7 +1440,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1466,7 +1466,7 @@
           "Project (p)\n+- NodeScan (var=p, labels=[\"Person\"])\n\n--- Row budget ---\nper-operator row budget: 50000000 rows; an operator producing more is refused with Samyama.ClientError.Statement.RowBudgetExceeded\n\n--- Statistics ---\nGraph Statistics:\n  Total nodes: 6\n  Total edges: 4\n  Avg out-degree: 0.67\n  Labels:\n    :Person = 4 nodes\n    :Company = 2 nodes\n    :Employee = 1 nodes\n  Edge types:\n    :KNOWS = 2 edges\n    :WORKS_AT = 2 edges\n"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1495,7 +1495,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1521,7 +1521,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1550,7 +1550,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1579,7 +1579,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1609,7 +1609,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1637,7 +1637,7 @@
           "azc"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1667,7 +1667,7 @@
           "cba"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1699,7 +1699,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1725,7 +1725,7 @@
           3
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1751,7 +1751,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1781,7 +1781,7 @@
           false
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1811,7 +1811,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1839,7 +1839,7 @@
           8.0
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1867,7 +1867,7 @@
           3.5
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1893,7 +1893,7 @@
           "2024-01-15"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1919,7 +1919,7 @@
           "2024-01-15T10:30Z"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1950,7 +1950,7 @@
           }
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -1976,7 +1976,7 @@
           2024
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2002,7 +2002,7 @@
           4
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2028,7 +2028,7 @@
           2
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2068,7 +2068,7 @@
           25
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2090,7 +2090,7 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2112,7 +2112,7 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2138,7 +2138,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2164,7 +2164,7 @@
           4
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2190,7 +2190,7 @@
           4
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2216,7 +2216,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2245,7 +2245,7 @@
           "ops"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2274,7 +2274,7 @@
           "Dan"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2300,7 +2300,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2332,7 +2332,7 @@
           "Person"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2361,7 +2361,7 @@
           "WORKS_AT"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2402,7 +2402,7 @@
           "since"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2442,7 +2442,7 @@
           "Company"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2468,7 +2468,7 @@
           6
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2494,7 +2494,7 @@
           6
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2520,7 +2520,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 11
     },
     "status": 200
   },
@@ -2540,7 +2540,7 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 1
+      "snapshot_version": 12
     },
     "status": 200
   },
@@ -2584,7 +2584,7 @@
           }
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 13
     },
     "status": 200
   },
@@ -2604,7 +2604,7 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 1
+      "snapshot_version": 14
     },
     "status": 200
   },
@@ -2630,7 +2630,7 @@
           99
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 15
     },
     "status": 200
   },
@@ -2658,7 +2658,7 @@
           "x"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 16
     },
     "status": 200
   },
@@ -2684,7 +2684,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 17
     },
     "status": 200
   },
@@ -2713,7 +2713,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 18
     },
     "status": 200
   },
@@ -2741,7 +2741,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 19
     },
     "status": 200
   },
@@ -2767,7 +2767,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 20
     },
     "status": 200
   },
@@ -2793,7 +2793,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 21
     },
     "status": 200
   },
@@ -2819,7 +2819,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 22
     },
     "status": 200
   },
@@ -2839,7 +2839,7 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 1
+      "snapshot_version": 23
     },
     "status": 200
   },
@@ -2859,7 +2859,7 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 1
+      "snapshot_version": 24
     },
     "status": 200
   },
@@ -2879,7 +2879,7 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 1
+      "snapshot_version": 25
     },
     "status": 200
   },
@@ -2905,7 +2905,7 @@
           0
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 25
     },
     "status": 200
   },
@@ -2927,7 +2927,7 @@
       "records": [
         []
       ],
-      "snapshot_version": 1
+      "snapshot_version": 26
     },
     "status": 200
   },
@@ -2949,7 +2949,7 @@
       "records": [
         []
       ],
-      "snapshot_version": 1
+      "snapshot_version": 27
     },
     "status": 200
   },
@@ -2979,7 +2979,7 @@
           "BTREE"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 27
     },
     "status": 200
   },
@@ -3001,7 +3001,7 @@
       "records": [
         []
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3031,7 +3031,7 @@
           "UNIQUE"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3057,7 +3057,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3092,7 +3092,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3121,7 +3121,7 @@
           "Globex"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3143,7 +3143,7 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3176,7 +3176,7 @@
           }
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3210,7 +3210,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3236,7 +3236,7 @@
           []
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3262,7 +3262,7 @@
           {}
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3290,7 +3290,7 @@
           -1.5
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3316,7 +3316,7 @@
           9223372036854775807
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3366,7 +3366,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3404,7 +3404,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3430,7 +3430,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3456,7 +3456,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3482,7 +3482,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3508,7 +3508,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3534,7 +3534,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3560,7 +3560,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3586,7 +3586,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3612,7 +3612,7 @@
           0
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3641,7 +3641,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3667,7 +3667,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3689,7 +3689,7 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3711,7 +3711,7 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3740,7 +3740,7 @@
           2
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3766,7 +3766,7 @@
           0
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3792,7 +3792,7 @@
           6
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3818,7 +3818,7 @@
           2
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3856,7 +3856,7 @@
           2
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3882,7 +3882,7 @@
           2
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3908,7 +3908,7 @@
           4
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3937,7 +3937,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3967,7 +3967,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -3995,7 +3995,7 @@
           "Dan"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4031,7 +4031,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4057,7 +4057,7 @@
           "Bob"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4083,7 +4083,7 @@
           4
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4123,7 +4123,7 @@
           41
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4149,7 +4149,7 @@
           "n=1"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4178,7 +4178,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4204,7 +4204,7 @@
           false
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4230,7 +4230,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4256,7 +4256,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4286,7 +4286,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4312,7 +4312,7 @@
           "Project (a, b)\n+- Expand ((a)-[:KNOWS]->(b))\n   +- NodeScan (var=a, labels=[\"Person\"])\n\n--- Row budget ---\nper-operator row budget: 50000000 rows; an operator producing more is refused with Samyama.ClientError.Statement.RowBudgetExceeded\n\n--- Statistics ---\nGraph Statistics:\n  Total nodes: 8\n  Total edges: 4\n  Avg out-degree: 0.50\n  Labels:\n    :Person = 4 nodes\n    :Company = 2 nodes\n    :Employee = 1 nodes\n    :Merged = 1 nodes\n    :Merged2 = 1 nodes\n    :Temp = 0 nodes\n    :Temp2 = 0 nodes\n  Edge types:\n    :KNOWS = 2 edges\n    :WORKS_AT = 2 edges\n    :TMP = 0 edges\n"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4338,7 +4338,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4364,7 +4364,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4390,7 +4390,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4416,7 +4416,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4442,7 +4442,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4468,7 +4468,7 @@
           5
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4494,7 +4494,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4520,7 +4520,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4564,7 +4564,7 @@
           "Temp2"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4590,7 +4590,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4620,7 +4620,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4650,7 +4650,7 @@
           }
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4678,7 +4678,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4704,7 +4704,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4732,7 +4732,7 @@
           "Bob"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4758,7 +4758,7 @@
           "KNOWS"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4784,7 +4784,7 @@
           false
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4810,7 +4810,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4836,7 +4836,7 @@
           36
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4862,7 +4862,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4892,7 +4892,7 @@
           "true"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4918,7 +4918,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4944,7 +4944,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -4974,7 +4974,7 @@
           "a"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5002,7 +5002,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5034,7 +5034,7 @@
           0.0
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5064,7 +5064,7 @@
           0.0
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5092,7 +5092,7 @@
           0.0
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5118,7 +5118,7 @@
           31.5
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5144,7 +5144,7 @@
           6.701989754294367
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5314,7 +5314,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5340,7 +5340,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5366,7 +5366,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5392,7 +5392,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5418,7 +5418,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5444,7 +5444,7 @@
           5
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5470,7 +5470,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5496,7 +5496,7 @@
           8
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5540,7 +5540,7 @@
           "Temp2"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5570,7 +5570,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5600,7 +5600,7 @@
           }
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5628,7 +5628,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5654,7 +5654,7 @@
           1
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5682,7 +5682,7 @@
           "Bob"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5708,7 +5708,7 @@
           "KNOWS"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5734,7 +5734,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5760,7 +5760,7 @@
           36
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5786,7 +5786,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5816,7 +5816,7 @@
           "true"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5842,7 +5842,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5868,7 +5868,7 @@
           null
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5898,7 +5898,7 @@
           "a"
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5926,7 +5926,7 @@
           true
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5958,7 +5958,7 @@
           0.0
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -5988,7 +5988,7 @@
           0.0
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -6016,7 +6016,7 @@
           0.0
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -6042,7 +6042,7 @@
           31.5
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -6068,7 +6068,7 @@
           6.701989754294367
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
@@ -6373,7 +6373,7 @@
           ]
         ]
       ],
-      "snapshot_version": 1
+      "snapshot_version": 28
     },
     "status": 200
   },
