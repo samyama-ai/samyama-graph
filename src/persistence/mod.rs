@@ -8,12 +8,25 @@
 //! - **Isolation**: concurrent transactions don't interfere with each other
 //! - **Durability**: once a write is committed, it survives crashes and power loss
 //!
-//! ## Write-Ahead Log (WAL)
+//! ## Which log recovery reads (#1592)
 //!
-//! The WAL is the standard technique for durability. The idea: write the operation to a
-//! sequential log file BEFORE modifying the actual data. If the process crashes mid-write,
-//! the log can be replayed on recovery to reconstruct the correct state. This same pattern
-//! is used by PostgreSQL, SQLite, and RocksDB internally.
+//! **RocksDB is the recovery source.** A restart loads every node and edge from
+//! RocksDB ([`PersistenceManager::recover`]), and RocksDB replays its *own*
+//! write-ahead log when it opens, so a write that reached RocksDB survives a
+//! crash of this process; with `SAMYAMA_FSYNC=1` it also survives a crash of
+//! the machine.
+//!
+//! Samyama's logical WAL (`wal/`, [`Wal`]) is **not** read at start-up and is
+//! not part of recovery. It is a record of graph operations in the order they
+//! were persisted, kept for audit, offline inspection and as the feed a future
+//! replication or change-data-capture consumer would read. [`Wal::replay`]
+//! exists for those readers. Deleting `wal/` loses no data, which
+//! `tests/recovery_reads_rocksdb_alone.rs` pins.
+//!
+//! Both are written *after* the in-memory mutation, from the statement's write
+//! log ([`PersistenceManager::apply_mutations`]): this is write-behind, not
+//! write-ahead, and a crash between the mutation and that call loses the write
+//! (`docs/ACID_GUARANTEES.md` §1).
 //!
 //! ## RocksDB
 //!
@@ -31,10 +44,11 @@
 //!
 //! ## PersistenceManager
 //!
-//! The `PersistenceManager` orchestrates WAL + RocksDB + TenantManager. All writes flow
-//! through the WAL first (for durability), then to RocksDB (for indexed storage). On
-//! startup, any WAL entries written after the last checkpoint are replayed to bring the
-//! in-memory graph state up to date.
+//! The `PersistenceManager` orchestrates WAL + RocksDB + TenantManager. A
+//! statement's changes are appended to the logical WAL and then put into RocksDB;
+//! on start-up the in-memory graph is rebuilt from RocksDB alone. This comment
+//! used to say the WAL was written first and replayed on start-up; neither has
+//! been true (#1592).
 
 pub mod health;
 pub mod storage;

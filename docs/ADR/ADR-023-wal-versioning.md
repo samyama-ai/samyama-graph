@@ -45,6 +45,33 @@ We will:
 ### Neutral
 - Existing `.wal` files continue to read because the `serde(default)` envelope-version field treats them as v0.
 
+## Amendment (2026-10-01, #1592): RocksDB's log is the recovery source
+
+Decision 5 is **withdrawn**. The server has never replayed the logical WAL at
+start-up: recovery (`PersistenceManager::recover`) rebuilds the graph from
+RocksDB, and RocksDB replays its own WAL when it opens. So disabling RocksDB's
+WAL would not have halved the sync cost of a durable system; it would have
+removed the only log recovery reads.
+
+The decision is now:
+
+- **RocksDB's WAL is the recovery source.** It stays enabled, and
+  `SAMYAMA_FSYNC=1` syncs it per write (`storage.rs`, `set_sync`).
+- **The logical WAL is kept, and is not a recovery mechanism.** It is a record
+  of graph operations in persistence order, for audit, offline inspection and a
+  future replication or change-data-capture reader. Nothing on the start-up
+  path reads it, and deleting `wal/` loses no data
+  (`tests/recovery_reads_rocksdb_alone.rs`).
+- Making the logical WAL the recovery source instead would need replay from the
+  last checkpoint before serving, and a write path that appends and syncs it
+  *before* the in-memory mutation; today both logs are written after it
+  (`docs/ACID_GUARANTEES.md` §1). That is not planned.
+
+The alternative this ADR rejected -- "rely solely on RocksDB's" -- is in effect
+what has shipped. Its stated drawback, that replay would have to re-derive graph
+operations from KV diffs, does not arise: recovery does not replay operations
+at all, it loads the entities RocksDB holds.
+
 ## Alternatives Considered
 
 | Option | Rejected because |

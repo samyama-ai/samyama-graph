@@ -8,12 +8,15 @@
 //! expensive random I/O. If the process crashes after writing to the log but before
 //! updating the main data, we can reconstruct the correct state from the log.
 //!
-//! ## Recovery
+//! ## Not the recovery source
 //!
-//! On startup, the WAL is scanned from the beginning (or from the last checkpoint).
-//! Each entry is replayed against the in-memory graph to reconstruct state. Checkpoints
-//! record a "safe point" — all data before the checkpoint is known to be persisted to
-//! RocksDB, so the WAL can be truncated to prevent unbounded growth.
+//! The server does not replay this log at start-up: it rebuilds from RocksDB,
+//! whose own write-ahead log is what makes a persisted write survive a crash
+//! (#1592, `src/persistence/mod.rs`). This log is appended just before the
+//! RocksDB write, both after the in-memory mutation, as a record of graph
+//! operations for audit, inspection and a future replication or CDC reader;
+//! [`Wal::replay`] is for those readers. Checkpoints record a "safe point" -- everything before
+//! it is in RocksDB -- so the log can be truncated.
 //!
 //! ## Record format and checksums
 //!
