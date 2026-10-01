@@ -229,6 +229,9 @@ pub struct QueryExecutor<'a> {
     /// Record the executed plan's structural hash on the result. See
     /// `with_plan_hash`.
     plan_hash: bool,
+    /// Counts, and optionally caps, the rows every operator produces. See
+    /// `with_work_meter`.
+    work_meter: Option<std::sync::Arc<budget::WorkMeter>>,
 }
 
 impl<'a> QueryExecutor<'a> {
@@ -241,6 +244,7 @@ impl<'a> QueryExecutor<'a> {
             deadline: None,
             row_budget: 0,
             plan_hash: false,
+            work_meter: None,
         }
     }
 
@@ -253,12 +257,21 @@ impl<'a> QueryExecutor<'a> {
             deadline: None,
             row_budget: 0,
             plan_hash: false,
+            work_meter: None,
         }
     }
 
     /// Set a query execution deadline
     pub fn with_deadline(mut self, deadline: std::time::Instant) -> Self {
         self.deadline = deadline.into();
+        self
+    }
+
+    /// Charge every row every operator produces to `meter`, which refuses the
+    /// query once its ceiling is passed (#1156). A catalog template records
+    /// its work at build time and is run against a multiple of it.
+    pub fn with_work_meter(mut self, meter: std::sync::Arc<budget::WorkMeter>) -> Self {
+        self.work_meter = Some(meter);
         self
     }
 
@@ -679,6 +692,9 @@ impl<'a> QueryExecutor<'a> {
 
         // A no-op at budget 0, so the ordinary path allocates nothing.
         budget::enforce(&mut plan.root, self.row_budget);
+        if let Some(m) = &self.work_meter {
+            budget::meter(&mut plan.root, m);
+        }
 
         let batch_size = batch_size.max(1);
         let columns = plan.output_columns;

@@ -113,6 +113,7 @@ fn an_all_empty_run_fails_even_when_expectations_match() {
                 .execute("MATCH (x:Absent) RETURN x", &store).unwrap()),
             unanswerable: true,
             params: vec![],
+            work: None,
         }],
     };
     let report = verify(&store, &catalog).expect("verify");

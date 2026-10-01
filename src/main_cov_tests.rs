@@ -510,6 +510,23 @@ fn catalog_build_stamps_the_tenant_and_is_private_without_release() {
     assert_eq!(cmd_catalog_gate(&argv(&["catalog-gate", s(&released)])), 0);
 }
 
+/// #1156: a published template must carry the work it did at build time, or a
+/// caller's value cannot be held to a ceiling. A catalog built before the
+/// field existed is refused for release until it is rebuilt.
+#[test]
+fn catalog_gate_refuses_a_release_catalog_with_an_entry_that_records_no_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let fine = authored_catalog();
+    assert!(fine.entries.iter().all(|e| e.work.is_some()));
+    let path = write_catalog(dir.path(), "fine.json", &fine);
+    assert_eq!(cmd_catalog_gate(&argv(&["catalog-gate", s(&path)])), 0);
+
+    let mut old = authored_catalog();
+    old.entries[0].work = None;
+    let path = write_catalog(dir.path(), "old.json", &old);
+    assert_eq!(cmd_catalog_gate(&argv(&["catalog-gate", s(&path)])), 1);
+}
+
 #[test]
 fn catalog_build_reports_unreadable_queries() {
     let dir = tempfile::tempdir().unwrap();

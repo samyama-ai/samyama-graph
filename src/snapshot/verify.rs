@@ -165,6 +165,36 @@ pub struct CatalogEntry {
     /// every entry here must be referenced by the query (#1156).
     #[serde(default)]
     pub params: Vec<ParamSpec>,
+    /// Rows every operator produced, summed, when the entry ran with its
+    /// sample values at build time (#1156). `run_template` refuses a call that
+    /// does more than `work_ceiling(work)`. Absent in a catalog built before
+    /// it was recorded, and `run_template` refuses such an entry rather than
+    /// run it unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<u64>,
+}
+
+/// How many times the recorded work a call may do before it is refused.
+///
+/// Stated, not tuned: a template blessed against its samples may legitimately
+/// see values that match ten times as much, and a value that matches far more
+/// than that has turned the template into a different query -- the index
+/// lookup it was written as into the scan it was not.
+pub const WORK_CEILING_FACTOR: u64 = 10;
+
+/// The smallest ceiling a template gets, whatever its recorded work.
+///
+/// A sample that matches three rows would otherwise give a ceiling of thirty,
+/// refusing ordinary values for no reason. Ten thousand rows is cheap on any
+/// graph we publish, so a floor this size removes the false refusals without
+/// letting through anything that threatens PERF-19's five-second ceiling.
+pub const MIN_WORK_CEILING: u64 = 10_000;
+
+/// The ceiling a call is held to, from the work recorded at build time.
+pub fn work_ceiling(recorded: u64) -> u64 {
+    recorded
+        .saturating_mul(WORK_CEILING_FACTOR)
+        .max(MIN_WORK_CEILING)
 }
 
 /// A shipped query catalog.
@@ -318,15 +348,128 @@ pub fn run_bound(
     cypher: &str,
     params: &[ParamSpec],
 ) -> Result<RecordBatch, String> {
+    run_metered(store, cypher, params, None).map(|(batch, _)| batch)
+}
+
+/// `run_bound`, charging every row every operator produces to a meter that
+/// refuses past `ceiling`. Returns the rows and the work the run did.
+fn run_metered(
+    store: &GraphStore,
+    cypher: &str,
+    params: &[ParamSpec],
+    ceiling: Option<u64>,
+) -> Result<(RecordBatch, u64), String> {
     let parsed = crate::query::parse_query(cypher).map_err(|e| e.to_string())?;
     let mut bound = std::collections::HashMap::new();
     for p in params {
         bound.insert(p.name.clone(), p.to_property()?);
     }
-    crate::query::QueryExecutor::new(store)
+    let meter = crate::query::executor::budget::WorkMeter::new(ceiling);
+    let batch = crate::query::QueryExecutor::new(store)
         .with_params(bound)
+        .with_work_meter(std::sync::Arc::clone(&meter))
         .execute(&parsed)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok((batch, meter.produced()))
+}
+
+/// Run a catalog entry with caller-supplied parameter values (#1156).
+///
+/// This is the path by which a published template is *used*, as opposed to
+/// verified, so it is where the declared contract is enforced:
+///
+/// * a value for a parameter the entry does not declare is refused;
+/// * a value of the wrong type is refused, before the query runs, because the
+///   engine answers a string compared to an integer property with zero rows
+///   and no error;
+/// * a value outside a declared enum is refused;
+/// * an omitted parameter takes its declared sample;
+/// * the run is held to `work_ceiling(entry.work)` rows across all operators,
+///   and refused, naming the values, if it goes past it -- so a legal value
+///   that turns an index lookup into a scan of most of the graph cannot defeat
+///   PERF-19's five-second ceiling.
+///
+/// An entry with no recorded work predates the ceiling and is refused rather
+/// than run unbounded. Rebuild the catalog to record it.
+pub fn run_template(
+    store: &GraphStore,
+    entry: &CatalogEntry,
+    values: &BTreeMap<String, serde_json::Value>,
+) -> Result<RecordBatch, String> {
+    validate_entry_shape(&entry.id, &entry.cypher, &entry.params)?;
+    let Some(recorded) = entry.work else {
+        return Err(format!(
+            "{}: the catalog records no work for this entry, so a call cannot be \
+             held to a ceiling. It was built before #1156; rebuild it with \
+             `samyama catalog-build`.",
+            entry.id
+        ));
+    };
+    for name in values.keys() {
+        if !entry.params.iter().any(|p| &p.name == name) {
+            return Err(format!(
+                "{}: no parameter named {name:?}. Declared: {}",
+                entry.id,
+                entry
+                    .params
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    let mut bound = Vec::with_capacity(entry.params.len());
+    for p in &entry.params {
+        let mut spec = p.clone();
+        if let Some(v) = values.get(&p.name) {
+            spec.sample = v.clone();
+        }
+        // `to_property` checks the value against the declared type.
+        spec.to_property()
+            .map_err(|e| format!("{}: {e}", entry.id))?;
+        if let Some(allowed) = &p.enum_values {
+            if !allowed.contains(&spec.sample) {
+                return Err(format!(
+                    "{}: {} = {} is not one of the declared values {}",
+                    entry.id,
+                    p.name,
+                    spec.sample,
+                    serde_json::Value::Array(allowed.clone())
+                ));
+            }
+        }
+        bound.push(spec);
+    }
+    let ceiling = work_ceiling(recorded);
+    run_metered(store, &entry.cypher, &bound, Some(ceiling))
+        .map(|(batch, _)| batch)
+        .map_err(|e| {
+            if e.contains(crate::query::error_code::TEMPLATE_COST_EXCEEDED) {
+                let given = bound
+                    .iter()
+                    .filter(|p| values.contains_key(&p.name))
+                    .map(|p| format!("{} = {}", p.name, p.sample))
+                    .collect::<Vec<_>>();
+                format!(
+                    "{}: refused -- with {} this template does more than {ceiling} rows \
+                     of work, the ceiling for it ({WORK_CEILING_FACTOR}x the {recorded} \
+                     rows it did with its sample values, at least {MIN_WORK_CEILING}). \
+                     A value that matches far more of the graph than the samples turns \
+                     the template into a different query. Narrow the value, or run the \
+                     Cypher directly where the engine's own limits apply. [{}]",
+                    entry.id,
+                    if given.is_empty() {
+                        "its sample values".to_string()
+                    } else {
+                        given.join(", ")
+                    },
+                    crate::query::error_code::TEMPLATE_COST_EXCEEDED
+                )
+            } else {
+                format!("{}: {e}", entry.id)
+            }
+        })
 }
 
 /// Refuse a query that is assembled rather than parameterized, and a parameter
@@ -416,7 +559,7 @@ pub fn build_catalog(
     for q in queries {
         let (id, cypher) = (&q.id, &q.cypher);
         validate_entry_shape(id, cypher, &q.params)?;
-        let batch = run_bound(store, cypher, &q.params)
+        let (batch, work) = run_metered(store, cypher, &q.params, None)
             .map_err(|e| format!("{id}: query failed while building the catalog: {e}"))?;
         let rows = batch.records.len();
         let is_unanswerable = q.unanswerable || unanswerable.contains(id);
@@ -442,6 +585,7 @@ pub fn build_catalog(
             hash: canonical_hash(&batch),
             unanswerable: is_unanswerable,
             params: q.params.clone(),
+            work: Some(work),
         });
     }
     Ok(QueryCatalog {

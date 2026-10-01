@@ -455,7 +455,7 @@ fn an_observed_catalog_is_published_only_with_a_recorded_signoff() {
         &cat,
         r#"{"format":"samyama.queries/1","generated_by":"test","provenance":"observed",
             "publishable":true,
-            "entries":[{"id":"q1","cypher":"MATCH (t:Thing) RETURN t","rows":1,"hash":"x"}]}"#,
+            "entries":[{"id":"q1","cypher":"MATCH (t:Thing) RETURN t","rows":1,"hash":"x","work":1}]}"#,
     )
     .unwrap();
     run(&["catalog-gate", s(&cat)], &[])

@@ -299,6 +299,163 @@ pub fn enforce(root: &mut OperatorBox, budget: u64) {
     wrap(root, budget, &total);
 }
 
+/// Rows produced by **every** operator of one plan, optionally refused past a
+/// ceiling (#1156).
+///
+/// The row budget above wraps only amplifying operators, because its job is to
+/// stop explosions without refusing a large scan. A catalog template's ceiling
+/// answers a different question: whether *this call* does far more work than
+/// the template did when it was built. That is decided by every operator. A
+/// selective predicate handed a value that matches most of the graph produces
+/// no cartesian product -- its scan, filter and expand simply hand up many more
+/// rows -- and only a meter over all of them sees it.
+///
+/// Measured rather than estimated on purpose. The default planner path records
+/// no plan cost (`chosen_plan_cost` is `0.0` there), so a ceiling read off the
+/// cost model would compare zero with zero and never refuse anything.
+#[derive(Debug)]
+pub struct WorkMeter {
+    produced: std::sync::atomic::AtomicU64,
+    ceiling: Option<u64>,
+}
+
+impl WorkMeter {
+    /// A meter that refuses once more than `ceiling` rows have been produced,
+    /// or only counts when `ceiling` is `None`.
+    pub fn new(ceiling: Option<u64>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            produced: std::sync::atomic::AtomicU64::new(0),
+            ceiling,
+        })
+    }
+
+    /// Rows produced so far, across every operator of the plan.
+    pub fn produced(&self) -> u64 {
+        self.produced.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn charge(&self, rows: usize, operator: &str) -> ExecutionResult<()> {
+        if rows == 0 {
+            return Ok(());
+        }
+        let total = self
+            .produced
+            .fetch_add(rows as u64, std::sync::atomic::Ordering::Relaxed)
+            + rows as u64;
+        match self.ceiling {
+            Some(ceiling) if total > ceiling => Err(ExecutionError::Coded {
+                code: error_code::TEMPLATE_COST_EXCEEDED,
+                message: format!(
+                    "the query produced more than {ceiling} rows across its operators \
+                     (the work ceiling) and was refused rather than run to \
+                     completion; operator {operator} crossed it"
+                ),
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Wraps one operator and charges every row it hands upward to a shared meter.
+struct MeteredOperator {
+    inner: OperatorBox,
+    name: String,
+    meter: std::sync::Arc<WorkMeter>,
+}
+
+impl PhysicalOperator for MeteredOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        let out = self.inner.next(store)?;
+        self.meter.charge(usize::from(out.is_some()), &self.name)?;
+        Ok(out)
+    }
+
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
+        let out = self.inner.next_mut(store, tenant_id)?;
+        self.meter.charge(usize::from(out.is_some()), &self.name)?;
+        Ok(out)
+    }
+
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
+        let out = self.inner.next_batch(store, batch_size)?;
+        self.meter
+            .charge(out.as_ref().map_or(0, |b| b.records.len()), &self.name)?;
+        Ok(out)
+    }
+
+    fn next_batch_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
+        let out = self.inner.next_batch_mut(store, tenant_id, batch_size)?;
+        self.meter
+            .charge(out.as_ref().map_or(0, |b| b.records.len()), &self.name)?;
+        Ok(out)
+    }
+
+    // Forwarded for the reasons `BudgetedOperator` gives: metering must not
+    // change the plan it meters.
+    fn try_push_limit(&mut self, n: usize) -> bool {
+        self.inner.try_push_limit(n)
+    }
+
+    fn hint_early_stop(&mut self, n: usize) -> bool {
+        self.inner.hint_early_stop(n)
+    }
+
+    fn retain_property_reads(&mut self, variable: &str, property: &str) -> bool {
+        self.inner.retain_property_reads(variable, property)
+    }
+
+    fn take_retained_reads(&mut self) -> Option<Vec<Option<crate::graph::PropertyValue>>> {
+        self.inner.take_retained_reads()
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset()
+    }
+
+    fn is_mutating(&self) -> bool {
+        self.inner.is_mutating()
+    }
+
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        self.inner.children_mut()
+    }
+
+    fn amplifies_rows(&self) -> bool {
+        self.inner.amplifies_rows()
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        self.inner.describe()
+    }
+}
+
+/// Wrap every node of `root` so the rows it produces are charged to `meter`.
+pub fn meter(root: &mut OperatorBox, meter: &std::sync::Arc<WorkMeter>) {
+    let name = root.describe().name;
+    for child in root.children_mut() {
+        self::meter(child, meter);
+    }
+    let inner = std::mem::replace(root, Box::new(Vacated));
+    *root = Box::new(MeteredOperator {
+        inner,
+        name,
+        meter: std::sync::Arc::clone(meter),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

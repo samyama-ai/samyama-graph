@@ -64,6 +64,14 @@ published, so `sha256sum` on the release asset gives the same string.
   Stamped in the catalog because the stamp is about the questions, and the
   header's SHA-256 already binds the two; see `docs/DATA-HANDLING.md`.
 
+**Each catalog entry records its work** (`work`, added 2026-10-01 for #1156):
+the rows every operator produced, summed, when the entry ran with its sample
+values at build time. `run_template` holds a call with caller-supplied values to
+`max(10 x work, 10,000)` rows and refuses past it, naming the values. Measured
+rather than read off the planner because the default planner path records no
+plan cost. Optional in the file, so older catalogs still load and verify, but
+`catalog-gate` refuses a release catalog with an entry that lacks it.
+
 **The file carries the index catalog** (`"t":"i"`, added 2026-09-29 for #1506).
 One line right after the header, holding every property index, unique
 constraint, full-text index and vector index the exporting store declared, as

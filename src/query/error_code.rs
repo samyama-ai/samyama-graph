@@ -86,6 +86,15 @@ pub const PLANNING: &str = "Samyama.ClientError.Statement.PlanningFailed";
 /// branch on it and retry with a narrower pattern.
 pub const ROW_BUDGET_EXCEEDED: &str = "Samyama.ClientError.Statement.RowBudgetExceeded";
 
+/// A catalog template refused because a call's parameters made it do more work
+/// than the template is allowed (#1156).
+///
+/// The ceiling is recorded when the catalog is built, from the rows every
+/// operator produced with the template's sample values, and a call may use a
+/// stated multiple of it. Its own code so a caller can tell "these parameter
+/// values are too broad for this template" from a broken query.
+pub const TEMPLATE_COST_EXCEEDED: &str = "Samyama.ClientError.Statement.TemplateCostExceeded";
+
 /// A write refused because it would take the tenant past a configured
 /// resource quota (#1483).
 ///

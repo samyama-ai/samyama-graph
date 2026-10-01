@@ -670,6 +670,25 @@ fn cmd_catalog_gate(argv: &[String]) -> i32 {
         v.reasons.push(r);
         v.publishable = false;
     }
+    // Every published template carries the work it did at build time, or a
+    // caller's value could not be held to a ceiling (#1156).
+    let unmetered: Vec<&str> = catalog
+        .entries
+        .iter()
+        .filter(|e| e.work.is_none())
+        .map(|e| e.id.as_str())
+        .collect();
+    if !unmetered.is_empty() {
+        v.reasons.push(format!(
+            "{} entr{} record no work ({}), so a call could not be held to a cost \
+             ceiling. The catalog was built before #1156; rebuild it with \
+             `samyama catalog-build`.",
+            unmetered.len(),
+            if unmetered.len() == 1 { "y" } else { "ies" },
+            unmetered.join(", ")
+        ));
+        v.publishable = false;
+    }
     println!("catalog-gate {path}");
     println!("  provenance: {:?}, {} entries", catalog.provenance, catalog.entries.len());
     println!("  digest: {}", samyama::snapshot::verify::catalog_digest(
