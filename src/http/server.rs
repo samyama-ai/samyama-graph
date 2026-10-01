@@ -620,6 +620,14 @@ pub struct HttpServer {
 /// its size, which is why this is 1 GiB and not the snapshot route's 64 GB.
 pub const DEFAULT_IMPORT_BODY_LIMIT: usize = 1024 * 1024 * 1024;
 
+/// The snapshot import route's body limit, which no flag changes (#1596).
+///
+/// PubMed-v2 (11 GB) and trifecta-pubmed (12 GB) need headroom; 64 GB lets
+/// per-source snapshots up to ~50 GB through. The body is buffered in memory by
+/// the multipart extractor — see #197 follow-up for streaming-to-disk to drop
+/// the RAM ceiling.
+pub const SNAPSHOT_IMPORT_BODY_LIMIT: usize = 64 * 1024 * 1024 * 1024;
+
 impl HttpServer {
     /// Create a new HTTP server
     pub fn new(store: Arc<RwLock<GraphStore>>, port: u16) -> Self {
@@ -850,11 +858,7 @@ impl HttpServer {
             .route("/api/vector-search", post(search_handler))
             .route("/api/snapshot/export", post(export_snapshot_handler))
             .route("/api/snapshot/import", post(restore_snapshot_handler)
-                // 64 GB cap. PubMed-v2 (11 GB) and trifecta-pubmed (12 GB) need
-                // headroom; 64 GB lets per-source snapshots up to ~50 GB through.
-                // Body is buffered in memory by the multipart extractor — see #197
-                // follow-up for streaming-to-disk to drop the RAM ceiling.
-                .layer(DefaultBodyLimit::max(64 * 1024 * 1024 * 1024)))
+                .layer(DefaultBodyLimit::max(SNAPSHOT_IMPORT_BODY_LIMIT)))
             .with_state(state);
 
         let mut app = main_router
