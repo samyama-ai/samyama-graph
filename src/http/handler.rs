@@ -479,6 +479,7 @@ pub async fn query_handler(
     // Writes are never served from the result cache -- `execute_mut` has no
     // cached form, so this is structural rather than a rule to remember.
     let use_cache = !is_write && payload.cache.unwrap_or_else(result_cache_default);
+    let time_limit = state.query_time_limit(&payload.graph);
     let mut served_from_cache = false;
 
     // A write refused because an earlier one did not reach disk (#1274). Asked
@@ -502,7 +503,13 @@ pub async fn query_handler(
             .mutate(&payload.graph, |store| {
                 let result = state
                     .engine
-                    .execute_mut_with_params(&payload.query, store, &payload.graph, &params);
+                    .execute_mut_with_params_within(
+                        &payload.query,
+                        store,
+                        &payload.graph,
+                        &params,
+                        time_limit,
+                    );
                 let props = result
                     .as_ref()
                     .map(|b| merged_node_properties(&b.records, store))
@@ -517,7 +524,7 @@ pub async fn query_handler(
         let result = if use_cache {
             match state
                 .engine
-                .execute_cached_with_params(&payload.query, &*store_guard, &params)
+                .execute_cached_with_params_within(&payload.query, &*store_guard, &params, time_limit)
             {
                 Ok((batch, hit)) => {
                     served_from_cache = hit;
@@ -528,7 +535,7 @@ pub async fn query_handler(
         } else {
             state
                 .engine
-                .execute_with_params(&payload.query, &*store_guard, &params)
+                .execute_with_params_within(&payload.query, &*store_guard, &params, time_limit)
         };
         // Read while the guard is still held: taken afterwards it could name a
         // version this result was not computed against, which is worse than
@@ -657,6 +664,7 @@ async fn stream_query(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamMsg>(STREAM_CHANNEL_CHUNKS);
     let guard = std::sync::Arc::clone(&state.store).read_owned().await;
     let engine = std::sync::Arc::clone(&state.engine);
+    let time_limit = state.query_time_limit(&payload.graph);
     let runtime = tokio::runtime::Handle::current();
     let stall = stream_stall_budget();
     let query = payload.query;
@@ -688,7 +696,7 @@ async fn stream_query(
 
         let mut started = false;
         let mut sent_rows = 0usize;
-        let outcome = engine.execute_streaming_with_params(
+        let outcome = engine.execute_streaming_with_params_within(
             &query,
             &guard,
             &params,
@@ -713,6 +721,7 @@ async fn stream_query(
                 sent_rows += n;
                 Ok(())
             },
+            time_limit,
         );
         let notifications = crate::query::executor::operator::notifications::take();
         // The last row has been handed over: nothing the trailer says needs
@@ -805,12 +814,15 @@ async fn query_in_transaction(
         .engine
         .statement_is_write(&payload.query)
         .unwrap_or(false);
+    let time_limit = state.query_time_limit(&payload.graph);
     let result = if is_write {
         state
             .engine
-            .execute_mut_with_params(&payload.query, store, &payload.graph, params)
+            .execute_mut_with_params_within(&payload.query, store, &payload.graph, params, time_limit)
     } else {
-        state.engine.execute_with_params(&payload.query, store, params)
+        state
+            .engine
+            .execute_with_params_within(&payload.query, store, params, time_limit)
     };
     let props = result
         .as_ref()

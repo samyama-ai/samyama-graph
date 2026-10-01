@@ -419,6 +419,18 @@ impl QueryEngine {
         store: &crate::graph::GraphStore,
         params: &BoundParams,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        self.execute_with_params_within(query_str, store, params, None)
+    }
+
+    /// `execute_with_params` under the tenant's own time limit as well as the
+    /// server's: whichever is shorter (#1593). `None` is the server's alone.
+    pub fn execute_with_params_within(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+        time_limit: Option<std::time::Duration>,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         let query = self.cached_parse(query_str)?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
@@ -428,10 +440,8 @@ impl QueryEngine {
         } else {
             QueryExecutor::new(store)
         };
-        if self.query_timeout_secs > 0 {
-            executor = executor.with_deadline(
-                std::time::Instant::now() + std::time::Duration::from_secs(self.query_timeout_secs)
-            );
+        if let Some(deadline) = self.deadline(time_limit) {
+            executor = executor.with_deadline(deadline);
         }
         // Both sides of this: the span on the error (#1358) and the timing
         // for the slow-query log. Taking either alone would silently revert
@@ -475,6 +485,20 @@ impl QueryEngine {
         chunk_rows: usize,
         sink: &mut dyn FnMut(&[String], Vec<executor::Record>) -> Result<(), String>,
     ) -> Result<StreamedResult, Box<dyn std::error::Error>> {
+        self.execute_streaming_with_params_within(query_str, store, params, chunk_rows, sink, None)
+    }
+
+    /// `execute_streaming_with_params` under the tenant's time limit too. See
+    /// `execute_with_params_within`.
+    pub fn execute_streaming_with_params_within(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+        chunk_rows: usize,
+        sink: &mut dyn FnMut(&[String], Vec<executor::Record>) -> Result<(), String>,
+        time_limit: Option<std::time::Duration>,
+    ) -> Result<StreamedResult, Box<dyn std::error::Error>> {
         let query = self.cached_parse(query_str)?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
@@ -484,10 +508,8 @@ impl QueryEngine {
         } else {
             QueryExecutor::new(store)
         };
-        if self.query_timeout_secs > 0 {
-            executor = executor.with_deadline(
-                std::time::Instant::now() + std::time::Duration::from_secs(self.query_timeout_secs)
-            );
+        if let Some(deadline) = self.deadline(time_limit) {
+            executor = executor.with_deadline(deadline);
         }
         let executor = executor
             .with_row_budget(self.row_budget)
@@ -550,6 +572,18 @@ impl QueryEngine {
         store: &crate::graph::GraphStore,
         params: &BoundParams,
     ) -> Result<(RecordBatch, bool), Box<dyn std::error::Error>> {
+        self.execute_cached_with_params_within(query_str, store, params, None)
+    }
+
+    /// `execute_cached_with_params` under the tenant's time limit too. A hit
+    /// costs no time, so the limit applies to a miss only.
+    pub fn execute_cached_with_params_within(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+        time_limit: Option<std::time::Duration>,
+    ) -> Result<(RecordBatch, bool), Box<dyn std::error::Error>> {
         let query = self.cached_parse(query_str)?;
         let mut effective = query.params.clone();
         effective.extend(params.clone());
@@ -568,7 +602,7 @@ impl QueryEngine {
         }
         self.result_stats.record_miss();
 
-        let batch = self.execute_with_params(query_str, store, params)?;
+        let batch = self.execute_with_params_within(query_str, store, params, time_limit)?;
 
         // Re-read the epoch rather than reusing the one read above. A write can
         // land while the query runs, and caching the result under the *old*
@@ -640,6 +674,19 @@ impl QueryEngine {
         }
     }
 
+    /// When a statement started now must stop: the server's
+    /// `SAMYAMA_QUERY_TIMEOUT` or the tenant's `max_query_time_ms`, whichever
+    /// comes first (#1593). `None` when neither is set.
+    fn deadline(&self, time_limit: Option<std::time::Duration>) -> Option<std::time::Instant> {
+        let server = (self.query_timeout_secs > 0)
+            .then(|| std::time::Duration::from_secs(self.query_timeout_secs));
+        let limit = match (server, time_limit) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }?;
+        Some(std::time::Instant::now() + limit)
+    }
+
     /// Drop every cached result. For tests and for an operator who wants the
     /// memory back; correctness never depends on calling this.
     pub fn clear_result_cache(&self) {
@@ -671,18 +718,43 @@ impl QueryEngine {
         tenant_id: &str,
         params: &BoundParams,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        let query = self.cached_parse(query_str)?;
+        self.execute_mut_with_params_within(query_str, store, tenant_id, params, None)
+    }
 
-        let mut executor =
-            MutQueryExecutor::new(store, tenant_id.to_string()).with_params(params.clone());
+    /// The write path under the same deadline as reads, the tenant's time
+    /// limit included (#1593).
+    ///
+    /// Writes had no deadline at all, so a runaway `MATCH … SET` held the
+    /// writer's lock for as long as it ran. A deadline alone would make that
+    /// worse -- a statement stopped halfway, its first rows written -- so the
+    /// statement runs through `GraphStore::atomically`: a statement that fails,
+    /// by timing out or otherwise, leaves the store as it found it.
+    pub fn execute_mut_with_params_within(
+        &self,
+        query_str: &str,
+        store: &mut crate::graph::GraphStore,
+        tenant_id: &str,
+        params: &BoundParams,
+        time_limit: Option<std::time::Duration>,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        let query = self.cached_parse(query_str)?;
+        let deadline = self.deadline(time_limit);
+
         // Both sides of this: the span on the error (#1358) and the timing
         // for the slow-query log. Taking either alone would silently revert
         // the other -- two correct fixes at one call site.
         let started = std::time::Instant::now();
-        let outcome = executor
-            .with_row_budget(self.row_budget)
-            .with_plan_hash(self.plan_hash)
-            .execute(&query);
+        let outcome = store.atomically(|store| {
+            let mut executor =
+                MutQueryExecutor::new(store, tenant_id.to_string()).with_params(params.clone());
+            if let Some(deadline) = deadline {
+                executor = executor.with_deadline(deadline);
+            }
+            executor
+                .with_row_budget(self.row_budget)
+                .with_plan_hash(self.plan_hash)
+                .execute(&query)
+        });
         // Logged before the `?`, so a query that ran for two minutes and then
         // failed is in the log. That one is usually the more interesting of
         // the two.

@@ -490,6 +490,12 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The graph's tenant time limit, for the engine to weigh against the
+    /// server's (#1593). `None` without a tenant manager.
+    pub fn query_time_limit(&self, graph: &str) -> Option<std::time::Duration> {
+        self.tenant_manager.as_ref()?.query_time_limit(graph)
+    }
+
     /// Take the write lock, run a mutation, and persist whatever it changed.
     ///
     /// Every HTTP path that mutates the graph goes through here. Five did not
@@ -499,10 +505,11 @@ impl AppState {
     /// each handler took the lock itself, so the fix to `query_handler` was not
     /// something the others could inherit.
     ///
-    /// The log is applied on the outcome of the *store*, not of `body`. A statement
-    /// that fails partway does not undo the rows it already wrote — the engine has
-    /// no statement rollback (LANG-07) — and REL-06 does not let disk disagree with
-    /// memory about rows that are visible.
+    /// The log is applied on the outcome of the *store*, not of `body`. A Cypher
+    /// statement that fails is undone, journal included (#1593), but an import or
+    /// enrichment body has no such undo: the rows it wrote before failing stay,
+    /// and REL-06 does not let disk disagree with memory about rows that are
+    /// visible.
     ///
     /// `GraphStore` is passed by `&mut` rather than the guard so that a body cannot
     /// hold the lock past the persist.

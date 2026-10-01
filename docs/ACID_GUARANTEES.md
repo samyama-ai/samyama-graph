@@ -31,9 +31,9 @@ Persistence path: the in-memory state is mutated first, and the **Samyama logica
 
 **The logical WAL is not read at startup.** Recovery is `PersistenceManager::recover` (`src/persistence/mod.rs:561-580`), which scans nodes and edges out of RocksDB and nothing else; `Wal::replay` has no caller outside tests (the unit tests in `src/persistence/wal.rs` and `tests/wal_torn_tail.rs`). What a restart finds is what RocksDB holds. The module comment at `src/persistence/mod.rs:33-37` still describes a WAL-first write and a replay on startup; neither happens. RocksDB's internal WAL is separate; the two are not collapsed.
 
-*Pinned by:* `a_partial_failure_leaves_disk_agreeing_with_memory` (`tests/write_durability.rs:160`), for a statement that fails part-way. The write-behind window itself is not tested — it needs a crash between two lines — and is read from the code above.
+*Pinned by:* `a_partial_failure_leaves_nothing_in_memory_or_on_disk` (`tests/write_durability.rs`), for a statement that fails part-way. The write-behind window itself is not tested — it needs a crash between two lines — and is read from the code above.
 
-Within the in-memory structures the all-or-nothing claim holds: no dangling edges, no orphan index entries, no half-applied multi-label changes. **A single statement is not atomic if it fails partway.** The engine has no statement rollback (LANG-07), so a `CREATE` that fails on its tenth row keeps the nine before it, in memory and on disk. Multi-statement transactions do roll back, through the undo log (§3); `a_transaction_that_cannot_be_persisted_is_rolled_back_in_memory` (`tests/persist_failure_is_reported.rs:118`) pins that for a commit that cannot be persisted.
+Within the in-memory structures the all-or-nothing claim holds: no dangling edges, no orphan index entries, no half-applied multi-label changes. **A single statement is atomic: one that fails partway is undone** (#1593). `QueryEngine` runs every write statement as a transaction of its own (`GraphStore::atomically`), so a `CREATE` that fails on its tenth row, or a `SET` stopped by its deadline, leaves neither the nine rows before it nor anything in the write log; the cost is one undo-log entry per first write to an existing entity, collected when the statement commits. Until #1593 there was no statement rollback (LANG-07) and the nine rows stayed, in memory and on disk. A statement inside a transaction the client opened is undone by that transaction's ROLLBACK, not on its own. Multi-statement transactions do roll back, through the undo log (§3); `a_transaction_that_cannot_be_persisted_is_rolled_back_in_memory` (`tests/persist_failure_is_reported.rs:118`) pins that for a commit that cannot be persisted.
 
 ### 2. Consistency — "valid state transitions"
 
@@ -157,9 +157,9 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
   - A **transaction** is persisted *before* it commits in memory, so a
     persistence failure rolls it back and repairs the disk: memory and disk
     still agree afterwards.
-  - A **single statement** has no rollback — the engine has no statement-level
-    undo (LANG-07) — so its rows stay in memory and the disk does not have
-    them. Over RESP the client gets an error saying exactly that; over HTTP it
+  - A **single statement** that succeeded and then could not be persisted is
+    not undone — only a statement that *fails* is (#1593) — so its rows stay
+    in memory and the disk does not have them. Over RESP the client gets an error saying exactly that; over HTTP it
     gets a success reply and only the next write is refused (§3, last bullet).
     Either way every later write is refused, because once the store is ahead of the disk each further write
     widens the gap and a restart replays a prefix that does not include the

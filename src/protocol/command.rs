@@ -186,14 +186,16 @@ impl CommandHandler {
         }
 
         let is_write = self.query_engine.statement_is_write(&query_str).unwrap_or(false);
+        let time_limit = self.tenant_manager.query_time_limit(&graph_name);
         if read_only && is_write {
             return RespValue::Error("ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY".to_string());
         }
         let result = if is_write {
             self.query_engine
-                .execute_mut_with_params(&query_str, store, &graph_name, &params)
+                .execute_mut_with_params_within(&query_str, store, &graph_name, &params, time_limit)
         } else {
-            self.query_engine.execute_with_params(&query_str, store, &params)
+            self.query_engine
+                .execute_with_params_within(&query_str, store, &params, time_limit)
         };
         match result {
             Ok(batch) => self.format_query_result(batch),
@@ -293,13 +295,16 @@ impl CommandHandler {
             .statement_is_write(&query_str)
             .unwrap_or(false);
 
+        let time_limit = self.tenant_manager.query_time_limit(&graph_name);
+
         // Execute query with appropriate method
         let result = if is_write_query {
             // Once one write has not reached disk, the store is ahead of the
             // disk and every later write widens the gap: a restart replays a
             // prefix that does not include the first failure and may not
-            // include anything after it. Refusing is the only lever a
-            // statement has, because it has no rollback (#1274).
+            // include anything after it. Refusing is the only lever: the
+            // statement that failed to persist had succeeded, and a success
+            // is not rolled back (#1274).
             if crate::persistence::health::is_degraded() {
                 return RespValue::Error(format!(
                     "ERR {}",
@@ -326,19 +331,19 @@ impl CommandHandler {
 
             // Set current tenant for indexing events
             // In a more complex architecture, the store_guard would be isolated
-            let res = self.query_engine.execute_mut_with_params(
+            let res = self.query_engine.execute_mut_with_params_within(
                 &query_str,
                 &mut *store_guard,
                 &graph_name,
                 &params,
+                time_limit,
             );
 
             // Persist on the outcome of the *store*, not of the statement. A
-            // statement that fails partway does not undo the rows it already wrote
-            // -- the engine has no statement rollback (LANG-07) -- so skipping the
-            // log on error left those rows visible in memory and absent from disk,
-            // which is the REL-06 violation rather than the guard against one
-            // (#1106).
+            // statement that fails is now undone along with what it journalled
+            // (#1593), so the log holds nothing of it; skipping the log on error
+            // was the REL-06 violation when it did not (#1106), and reading the
+            // store keeps this right whichever way a statement ends.
             let persist_failed = if let Some(ref persist_mgr) = self.persistence {
                 let mutations = store_guard.take_write_log();
                 match persist_mgr.apply_mutations(&graph_name, &store_guard, &mutations) {
@@ -350,9 +355,9 @@ impl CommandHandler {
                         // Was a `warn!` and a success reply. The client was
                         // told the write landed, the store kept it and the
                         // disk did not, so a restart silently threw it away
-                        // (#1274). A statement has no rollback, so the rows
-                        // stay in memory; what changes is that the client is
-                        // told, and that nothing further is accepted.
+                        // (#1274). The statement succeeded and is not undone,
+                        // so the rows stay in memory; what changes is that the
+                        // client is told, and that nothing further is accepted.
                         warn!("Failed to persist write: {}", e);
                         crate::persistence::health::mark_degraded(e.to_string());
                         Some(e.to_string())
@@ -374,7 +379,7 @@ impl CommandHandler {
             let store_guard = store.read().await;
             let res = self
                 .query_engine
-                .execute_with_params(&query_str, &*store_guard, &params);
+                .execute_with_params_within(&query_str, &*store_guard, &params, time_limit);
             drop(store_guard);
             res
         };
