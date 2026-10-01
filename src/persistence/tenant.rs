@@ -601,7 +601,12 @@ impl TenantManager {
     pub fn admit_connection(&self, tenant_id: &str) -> TenantResult<ConnectionSlot> {
         let max = match self.tenants.read().unwrap().get(tenant_id) {
             Some(t) => t.quotas.max_connections,
-            None => return Ok(ConnectionSlot { usage: None, tenant: tenant_id.to_string() }),
+            None => {
+                return Ok(ConnectionSlot {
+                    usage: None,
+                    tenant: tenant_id.to_string(),
+                })
+            }
         };
         let mut usage = self.usage.write().unwrap();
         let tenant_usage = usage.entry(tenant_id.to_string()).or_default();
@@ -614,7 +619,10 @@ impl TenantManager {
             }
         }
         tenant_usage.active_connections += 1;
-        Ok(ConnectionSlot { usage: Some(Arc::clone(&self.usage)), tenant: tenant_id.to_string() })
+        Ok(ConnectionSlot {
+            usage: Some(Arc::clone(&self.usage)),
+            tenant: tenant_id.to_string(),
+        })
     }
 
     /// Increment resource usage

@@ -164,7 +164,9 @@ impl RespServer {
 
             // Spawn a new task for each connection
             tokio::spawn(async move {
-                if let Err(e) = admit_and_serve(socket, store, handler, router, proxy, cluster, creds).await {
+                if let Err(e) =
+                    admit_and_serve(socket, store, handler, router, proxy, cluster, creds).await
+                {
                     error!("Error handling connection from {}: {}", peer_addr, e);
                 }
             });
@@ -641,8 +643,14 @@ mod tests {
     async fn connections_past_the_tenants_limit_are_refused_and_slots_come_back() {
         use crate::persistence::{ResourceQuotas, TenantManager};
         let tm = Arc::new(TenantManager::new());
-        tm.update_quotas("default", ResourceQuotas { max_connections: Some(2), ..ResourceQuotas::unlimited() })
-            .unwrap();
+        tm.update_quotas(
+            "default",
+            ResourceQuotas {
+                max_connections: Some(2),
+                ..ResourceQuotas::unlimited()
+            },
+        )
+        .unwrap();
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let handler = Arc::new(CommandHandler::new_with_tenants(None, Arc::clone(&tm)));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -694,15 +702,25 @@ mod tests {
         let mut reply = vec![0u8; 256];
         let n = c3.read(&mut reply).await.unwrap();
         let r3 = String::from_utf8_lossy(&reply[..n]).to_string();
-        assert!(r3.starts_with("-ERR") && r3.contains("connections (2/2)"), "the third connection got {r3:?}");
+        assert!(
+            r3.starts_with("-ERR") && r3.contains("connections (2/2)"),
+            "the third connection got {r3:?}"
+        );
         let mut rest = [0u8; 16];
-        assert_eq!(c3.read(&mut rest).await.unwrap_or(0), 0, "a refused connection was left open");
+        assert_eq!(
+            c3.read(&mut rest).await.unwrap_or(0),
+            0,
+            "a refused connection was left open"
+        );
         assert_eq!(active(), 2, "a refused connection took a slot");
 
         drop(c1);
         settle(1).await;
         let (c4, r4) = open(ping.clone()).await;
-        assert!(r4.contains("PONG"), "a slot given back was not reusable: {r4:?}");
+        assert!(
+            r4.contains("PONG"),
+            "a slot given back was not reusable: {r4:?}"
+        );
 
         drop((c2, c4));
         settle(0).await;
