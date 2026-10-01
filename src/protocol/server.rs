@@ -164,7 +164,7 @@ impl RespServer {
 
             // Spawn a new task for each connection
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(socket, store, handler, router, proxy, cluster, creds).await {
+                if let Err(e) = admit_and_serve(socket, store, handler, router, proxy, cluster, creds).await {
                     error!("Error handling connection from {}: {}", peer_addr, e);
                 }
             });
@@ -290,6 +290,36 @@ async fn respond(
         ),
         (_, None) => handler.handle_command(value, store, txn.authenticated_as.as_ref()).await,
     }
+}
+
+/// Count the connection against the tenant's `max_connections`, then serve
+/// it (#1594).
+///
+/// The quota existed, defaulted to 100, and nothing counted against it. This
+/// build serves one graph, `default`, so every connection is that tenant's.
+/// At the limit the client gets the quota error and the socket is closed; under
+/// it, the slot is held for as long as the connection is served and given back
+/// however it ends, because dropping the slot is what gives it back.
+async fn admit_and_serve(
+    mut socket: TcpStream,
+    store: Arc<RwLock<GraphStore>>,
+    handler: Arc<CommandHandler>,
+    router: Option<Arc<Router>>,
+    proxy: Option<Arc<Proxy>>,
+    cluster: Option<Arc<ClusterManager>>,
+    credentials: Option<Arc<Vec<crate::auth::Credential>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _slot = match handler.tenant_manager().admit_connection("default") {
+        Ok(slot) => slot,
+        Err(e) => {
+            let mut buf = Vec::new();
+            RespValue::Error(format!("ERR {e}")).encode(&mut buf)?;
+            socket.write_all(&buf).await?;
+            socket.shutdown().await?;
+            return Ok(());
+        }
+    };
+    handle_connection(socket, store, handler, router, proxy, cluster, credentials).await
 }
 
 /// Handle a single client connection
@@ -601,6 +631,81 @@ mod tests {
         assert!(is_error(&r), "RO_QUERY ran a write inside a transaction");
         respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await;
         assert!(is_error(&respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await));
+    }
+
+    /// #1594: `max_connections` was configured, defaulted to 100, and nothing
+    /// counted against it. With a limit of two, the third connection is told
+    /// why and closed; when one of the two leaves, a new one is admitted; when
+    /// all have gone the count is back to zero.
+    #[tokio::test]
+    async fn connections_past_the_tenants_limit_are_refused_and_slots_come_back() {
+        use crate::persistence::{ResourceQuotas, TenantManager};
+        let tm = Arc::new(TenantManager::new());
+        tm.update_quotas("default", ResourceQuotas { max_connections: Some(2), ..ResourceQuotas::unlimited() })
+            .unwrap();
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let handler = Arc::new(CommandHandler::new_with_tenants(None, Arc::clone(&tm)));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (s, h) = (Arc::clone(&store), Arc::clone(&handler));
+        tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let (s, h) = (Arc::clone(&s), Arc::clone(&h));
+                tokio::spawn(async move {
+                    let _ = admit_and_serve(socket, s, h, None, None, None, None).await;
+                });
+            }
+        });
+
+        let mut ping = Vec::new();
+        cmd(&["PING"]).encode(&mut ping).unwrap();
+        // Connect and get an answer to PING, or whatever the server said first.
+        let open = |ping: Vec<u8>| async move {
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            let _ = c.write_all(&ping).await;
+            let mut reply = vec![0u8; 256];
+            let n = c.read(&mut reply).await.unwrap_or(0);
+            (c, String::from_utf8_lossy(&reply[..n]).to_string())
+        };
+        let active = || tm.get_usage("default").unwrap().active_connections;
+        let settle = |want: usize| {
+            let tm = Arc::clone(&tm);
+            async move {
+                for _ in 0..1000 {
+                    if tm.get_usage("default").unwrap().active_connections == want {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                panic!("active connections never settled at {want}");
+            }
+        };
+
+        let (c1, r1) = open(ping.clone()).await;
+        let (c2, r2) = open(ping.clone()).await;
+        assert!(r1.contains("PONG") && r2.contains("PONG"), "{r1:?} {r2:?}");
+        assert_eq!(active(), 2);
+
+        // Sends nothing: the refusal is the server's first word, and a client
+        // that had sent bytes the server never read would see the close as a
+        // reset that can arrive before the refusal does.
+        let mut c3 = TcpStream::connect(addr).await.unwrap();
+        let mut reply = vec![0u8; 256];
+        let n = c3.read(&mut reply).await.unwrap();
+        let r3 = String::from_utf8_lossy(&reply[..n]).to_string();
+        assert!(r3.starts_with("-ERR") && r3.contains("connections (2/2)"), "the third connection got {r3:?}");
+        let mut rest = [0u8; 16];
+        assert_eq!(c3.read(&mut rest).await.unwrap_or(0), 0, "a refused connection was left open");
+        assert_eq!(active(), 2, "a refused connection took a slot");
+
+        drop(c1);
+        settle(1).await;
+        let (c4, r4) = open(ping.clone()).await;
+        assert!(r4.contains("PONG"), "a slot given back was not reusable: {r4:?}");
+
+        drop((c2, c4));
+        settle(0).await;
     }
 
     #[tokio::test]

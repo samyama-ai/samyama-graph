@@ -43,7 +43,7 @@ pub mod wal;
 
 pub use storage::{PersistentStorage, StorageError, StorageResult};
 pub use tenant::{
-    ResourceQuotas, ResourceUsage, Tenant, TenantError, TenantManager, TenantResult,
+    ConnectionSlot, ResourceQuotas, ResourceUsage, Tenant, TenantError, TenantManager, TenantResult,
     AutoEmbedConfig, NLQConfig, AgentConfig, ToolConfig, LLMProvider,
 };
 pub use wal::{Wal, WalEntry, WalError, WalResult};
