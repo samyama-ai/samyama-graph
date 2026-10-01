@@ -1,0 +1,550 @@
+{
+  "format": "samyama.queries/1",
+  "generated_by": "samyama 1.10.0",
+  "provenance": "authored",
+  "tenant": "default",
+  "publishable": true,
+  "entries": [
+    {
+      "id": "sv_country_count",
+      "question": "How many countries does the surveillance graph cover?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (c:Country) RETURN count(c) AS countries",
+      "rows": 1,
+      "hash": "fnv1a64:8d7cf18068565247",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "sv_regions",
+      "question": "What are the WHO regions and their codes?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (r:Region) RETURN r.who_code AS code, r.name AS region ORDER BY code",
+      "rows": 6,
+      "hash": "fnv1a64:c228bc2a35b5d300",
+      "unanswerable": false,
+      "params": [],
+      "work": 18
+    },
+    {
+      "id": "sv_diseases",
+      "question": "Which disease indicators are tracked?",
+      "paraphrases": [
+        "List the notifiable diseases in the graph."
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Disease) RETURN d.indicator_code AS code, d.name AS disease ORDER BY code",
+      "rows": 15,
+      "hash": "fnv1a64:4d4a121eb50aa0cc",
+      "unanswerable": false,
+      "params": [],
+      "work": 45
+    },
+    {
+      "id": "sv_health_indicators",
+      "question": "Which general health indicators are recorded, and how many observations each?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (h:HealthIndicator) RETURN h.indicator_code AS code, h.name AS indicator, count(h) AS observations ORDER BY observations DESC, code",
+      "rows": 7,
+      "hash": "fnv1a64:1349834af6f33139",
+      "unanswerable": false,
+      "params": [],
+      "work": 163971
+    },
+    {
+      "id": "sv_antigens",
+      "question": "Which vaccine antigens have coverage records?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (v:VaccineCoverage) RETURN v.antigen AS antigen, count(v) AS records, min(v.year) AS first_year, max(v.year) AS last_year ORDER BY antigen",
+      "rows": 2,
+      "hash": "fnv1a64:27a58273e02036ad",
+      "unanswerable": false,
+      "params": [],
+      "work": 10218
+    },
+    {
+      "id": "sv_country_region",
+      "question": "Which WHO region is {iso} in?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (c:Country {iso_code: $iso})-[:IN_REGION]->(r:Region) RETURN c.name AS country, r.name AS region",
+      "rows": 1,
+      "hash": "fnv1a64:ffb36c79b74fede5",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "iso",
+          "type": "string",
+          "sample": "NGA",
+          "enum_values": null
+        }
+      ],
+      "work": 178
+    },
+    {
+      "id": "sv_region_members",
+      "question": "Which countries belong to the {code} region?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (c:Country)-[:IN_REGION]->(r:Region {who_code: $code}) RETURN c.name AS country ORDER BY country",
+      "rows": 11,
+      "hash": "fnv1a64:42756e967bcef781",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "code",
+          "type": "string",
+          "sample": "SEAR",
+          "enum_values": [
+            "AFR",
+            "AMR",
+            "SEAR",
+            "EUR",
+            "EMR",
+            "WPR"
+          ]
+        }
+      ],
+      "work": 40
+    },
+    {
+      "id": "sv_unregioned",
+      "question": "How many countries carry no WHO region?",
+      "paraphrases": [
+        "Data check: which countries are missing a region link?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Country) WHERE NOT (c)-[:IN_REGION]->() RETURN count(c) AS without_region",
+      "rows": 1,
+      "hash": "fnv1a64:0e59b126a9d8453d",
+      "unanswerable": false,
+      "params": [],
+      "work": 300
+    },
+    {
+      "id": "sv_reports_per_disease",
+      "question": "How many country-year reports are there for each disease indicator?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (r:DiseaseReport)-[:REPORT_OF]->(d:Disease) RETURN d.name AS disease, count(r) AS reports ORDER BY reports DESC, disease",
+      "rows": 11,
+      "hash": "fnv1a64:72eface9096f6cf7",
+      "unanswerable": false,
+      "params": [],
+      "work": 48
+    },
+    {
+      "id": "sv_unattributed_reports",
+      "question": "How many disease reports are not attributed to any country?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (r:DiseaseReport) WHERE NOT ()-[:REPORTED]->(r) RETURN count(r) AS unattributed",
+      "rows": 1,
+      "hash": "fnv1a64:405e7d1f68460d5d",
+      "unanswerable": false,
+      "params": [],
+      "work": 44461
+    },
+    {
+      "id": "sv_silent_diseases",
+      "question": "Which tracked disease indicators have no reports at all?",
+      "paraphrases": [
+        "Data check: which diseases are defined but never reported?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Disease) WHERE NOT (d)<-[:REPORT_OF]-() RETURN d.indicator_code AS code, d.name AS disease ORDER BY code",
+      "rows": 4,
+      "hash": "fnv1a64:bc8fb516ac228fca",
+      "unanswerable": false,
+      "params": [],
+      "work": 27
+    },
+    {
+      "id": "sv_country_disease_profile",
+      "question": "Which diseases has {iso} reported, and in how many years?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Country {iso_code: $iso})-[:REPORTED]->(r:DiseaseReport)-[:REPORT_OF]->(d:Disease) RETURN d.name AS disease, count(r) AS reports, min(r.year) AS first_year, max(r.year) AS last_year ORDER BY disease",
+      "rows": 9,
+      "hash": "fnv1a64:9b629d2d13b820cc",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "iso",
+          "type": "string",
+          "sample": "IND",
+          "enum_values": null
+        }
+      ],
+      "work": 698
+    },
+    {
+      "id": "sv_top_reporters",
+      "question": "Which countries filed the most reports of {code}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Country)-[:REPORTED]->(r:DiseaseReport)-[:REPORT_OF]->(d:Disease {indicator_code: $code}) RETURN c.name AS country, count(r) AS reports ORDER BY reports DESC, country LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:acc9d5b751c220d4",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "code",
+          "type": "string",
+          "sample": "CHOLERA_0000000001",
+          "enum_values": null
+        }
+      ],
+      "work": 610
+    },
+    {
+      "id": "sv_cholera_peak",
+      "question": "In which years were the most cholera cases reported worldwide?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (r:DiseaseReport)-[:REPORT_OF]->(d:Disease {indicator_code: 'CHOLERA_0000000001'}) RETURN r.year AS year, round(sum(r.value)) AS cases ORDER BY cases DESC, year LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:9f94a0144d594296",
+      "unanswerable": false,
+      "params": [],
+      "work": 254
+    },
+    {
+      "id": "sv_disease_by_year",
+      "question": "What was the worldwide reported total of {code} in {year}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (r:DiseaseReport)-[:REPORT_OF]->(d:Disease {indicator_code: $code}) WHERE r.year = $year RETURN d.name AS disease, round(sum(r.value)) AS total, count(r) AS reporting_countries",
+      "rows": 1,
+      "hash": "fnv1a64:7ad8cb208e0ca43c",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "code",
+          "type": "string",
+          "sample": "HIV_0000000026",
+          "enum_values": null
+        },
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2020,
+          "enum_values": null
+        }
+      ],
+      "work": 3926
+    },
+    {
+      "id": "sv_highest_burden_country",
+      "question": "Which countries reported the highest totals of {code} across all years?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Country)-[:REPORTED]->(r:DiseaseReport)-[:REPORT_OF]->(d:Disease {indicator_code: $code}) RETURN c.name AS country, round(sum(r.value)) AS total ORDER BY total DESC, country LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:e6f39d190c7cb037",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "code",
+          "type": "string",
+          "sample": "WHS3_41",
+          "enum_values": null
+        }
+      ],
+      "work": 18043
+    },
+    {
+      "id": "sv_region_burden",
+      "question": "How is the reported burden of {code} split across WHO regions?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (reg:Region)<-[:IN_REGION]-(c:Country)-[:REPORTED]->(r:DiseaseReport)-[:REPORT_OF]->(d:Disease {indicator_code: $code}) RETURN reg.name AS region, round(sum(r.value)) AS total, count(DISTINCT c) AS countries ORDER BY total DESC, region",
+      "rows": 6,
+      "hash": "fnv1a64:e67d6c4fa662c0c3",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "code",
+          "type": "string",
+          "sample": "WHS3_41",
+          "enum_values": null
+        }
+      ],
+      "work": 24569
+    },
+    {
+      "id": "sv_coverage_country",
+      "question": "What was {iso}'s immunization coverage by antigen in {year}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (c:Country {iso_code: $iso})-[:HAS_COVERAGE]->(v:VaccineCoverage) WHERE v.year = $year RETURN v.antigen AS antigen, v.coverage_pct AS coverage_pct ORDER BY antigen",
+      "rows": 2,
+      "hash": "fnv1a64:288170b84f9c4e3a",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "iso",
+          "type": "string",
+          "sample": "IND",
+          "enum_values": null
+        },
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2024,
+          "enum_values": null
+        }
+      ],
+      "work": 243
+    },
+    {
+      "id": "sv_coverage_trend",
+      "question": "How has {iso}'s DTP3 coverage changed since 2000?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Country {iso_code: $iso})-[:HAS_COVERAGE]->(v:VaccineCoverage {antigen: 'DTP3 immunization coverage (%)'}) RETURN v.year AS year, v.coverage_pct AS coverage_pct ORDER BY year",
+      "rows": 25,
+      "hash": "fnv1a64:63034bc0ee0889dc",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "iso",
+          "type": "string",
+          "sample": "NGA",
+          "enum_values": null
+        }
+      ],
+      "work": 360
+    },
+    {
+      "id": "sv_lowest_coverage_year",
+      "question": "Which countries had the lowest MCV1 coverage in {year}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Country)-[:HAS_COVERAGE]->(v:VaccineCoverage {antigen: 'MCV1 immunization coverage (%)'}) WHERE v.year = $year RETURN c.name AS country, v.coverage_pct AS coverage_pct ORDER BY coverage_pct ASC, country LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:7bcc51bc4b8605da",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2024,
+          "enum_values": null
+        }
+      ],
+      "work": 1040
+    },
+    {
+      "id": "sv_global_coverage_trend",
+      "question": "How has the average DTP3 coverage across countries moved year by year?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (v:VaccineCoverage {antigen: 'DTP3 immunization coverage (%)'}) RETURN v.year AS year, round(avg(v.coverage_pct)) AS avg_coverage_pct, count(v) AS countries ORDER BY year",
+      "rows": 25,
+      "hash": "fnv1a64:5343810dff0403e7",
+      "unanswerable": false,
+      "params": [],
+      "work": 15393
+    },
+    {
+      "id": "sv_coverage_gap",
+      "question": "In 2024, which countries had the widest gap between DTP3 and MCV1 coverage?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (c:Country)-[:HAS_COVERAGE]->(d:VaccineCoverage {antigen: 'DTP3 immunization coverage (%)'}) WHERE d.year = 2024 MATCH (c)-[:HAS_COVERAGE]->(m:VaccineCoverage {antigen: 'MCV1 immunization coverage (%)'}) WHERE m.year = 2024 RETURN c.name AS country, d.coverage_pct - m.coverage_pct AS gap ORDER BY gap DESC, country LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:40c27410bb5e6b1d",
+      "unanswerable": false,
+      "params": [],
+      "work": 15727
+    },
+    {
+      "id": "sv_coverage_drop",
+      "question": "Which countries' DTP3 coverage fell most between 2019 and 2021?",
+      "paraphrases": [
+        "Where did routine immunization slip during the pandemic?"
+      ],
+      "difficulty": "hard",
+      "cypher": "MATCH (c:Country)-[:HAS_COVERAGE]->(a:VaccineCoverage {antigen: 'DTP3 immunization coverage (%)'}) WHERE a.year = 2019 MATCH (c)-[:HAS_COVERAGE]->(b:VaccineCoverage {antigen: 'DTP3 immunization coverage (%)'}) WHERE b.year = 2021 RETURN c.name AS country, a.coverage_pct - b.coverage_pct AS fall ORDER BY fall DESC, country LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:8357363b6c2dcc15",
+      "unanswerable": false,
+      "params": [],
+      "work": 15727
+    },
+    {
+      "id": "sv_region_coverage",
+      "question": "What was the average MCV1 coverage by WHO region in {year}?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (reg:Region)<-[:IN_REGION]-(c:Country)-[:HAS_COVERAGE]->(v:VaccineCoverage {antigen: 'MCV1 immunization coverage (%)'}) WHERE v.year = $year RETURN reg.name AS region, round(avg(v.coverage_pct)) AS avg_coverage_pct, count(c) AS countries ORDER BY avg_coverage_pct DESC, region",
+      "rows": 6,
+      "hash": "fnv1a64:7f45570bfb16720c",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2023,
+          "enum_values": null
+        }
+      ],
+      "work": 870
+    },
+    {
+      "id": "sv_life_expectancy_range",
+      "question": "What range of life expectancy at birth is recorded for {iso} in {year}?",
+      "paraphrases": [
+        "How long can people in a country expect to live?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Country {iso_code: $iso})-[:HAS_INDICATOR]->(h:HealthIndicator {indicator_code: 'WHOSIS_000001'}) WHERE h.year = $year RETURN round(min(h.value)) AS lowest, round(max(h.value)) AS highest, count(h) AS observations",
+      "rows": 1,
+      "hash": "fnv1a64:b08819c8957fa01f",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "iso",
+          "type": "string",
+          "sample": "IND",
+          "enum_values": null
+        },
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2021,
+          "enum_values": null
+        }
+      ],
+      "work": 269
+    },
+    {
+      "id": "sv_highest_u5mr",
+      "question": "Which countries recorded the highest under-five mortality in {year}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Country)-[:HAS_INDICATOR]->(h:HealthIndicator {indicator_code: 'MDG_0000000007'}) WHERE h.year = $year RETURN c.name AS country, round(max(h.value)) AS per_1000 ORDER BY per_1000 DESC, country LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:5a85b3ea38486c7a",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2020,
+          "enum_values": null
+        }
+      ],
+      "work": 7019
+    },
+    {
+      "id": "sv_indicator_years",
+      "question": "Which years does indicator {code} cover?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (h:HealthIndicator {indicator_code: $code}) RETURN min(h.year) AS first_year, max(h.year) AS last_year, count(h) AS observations",
+      "rows": 1,
+      "hash": "fnv1a64:0b8801a58e827fea",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "code",
+          "type": "string",
+          "sample": "WSH_WATER_SAFELY_MANAGED",
+          "enum_values": null
+        }
+      ],
+      "work": 172963
+    },
+    {
+      "id": "sv_water_lowest",
+      "question": "Which countries have the lowest share of safely managed drinking water on their latest record?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Country)-[:HAS_INDICATOR]->(h:HealthIndicator {indicator_code: 'WSH_WATER_SAFELY_MANAGED'}) WITH c, max(h.year) AS latest MATCH (c)-[:HAS_INDICATOR]->(h2:HealthIndicator {indicator_code: 'WSH_WATER_SAFELY_MANAGED'}) WHERE h2.year = latest RETURN c.name AS country, latest AS year, round(min(h2.value)) AS pct ORDER BY pct ASC, country LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:63f4617bc37745b8",
+      "unanswerable": false,
+      "params": [],
+      "work": 280229
+    },
+    {
+      "id": "sv_burden_and_coverage",
+      "question": "Among countries that reported yellow fever cases, which had the lowest average MCV1 coverage?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (c:Country)-[:REPORTED]->(:DiseaseReport)-[:REPORT_OF]->(:Disease {indicator_code: 'WHS3_41'}) WITH DISTINCT c MATCH (c)-[:HAS_COVERAGE]->(v:VaccineCoverage {antigen: 'MCV1 immunization coverage (%)'}) RETURN c.name AS country, round(avg(v.coverage_pct)) AS avg_mcv1 ORDER BY avg_mcv1 ASC, country LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:b24ee2e9ae1e21a7",
+      "unanswerable": false,
+      "params": [],
+      "work": 32710
+    },
+    {
+      "id": "sv_reporting_breadth",
+      "question": "Which countries report on the most distinct disease indicators?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (c:Country)-[:REPORTED]->(:DiseaseReport)-[:REPORT_OF]->(d:Disease) RETURN c.name AS country, count(DISTINCT d) AS diseases ORDER BY diseases DESC, country LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:dafd4c652f15bff4",
+      "unanswerable": false,
+      "params": [],
+      "work": 82416
+    },
+    {
+      "id": "sv_reports_by_decade",
+      "question": "How many disease reports fall in each decade?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (r:DiseaseReport) RETURN (r.year / 10) * 10 AS decade, count(r) AS reports ORDER BY decade",
+      "rows": 9,
+      "hash": "fnv1a64:9564d25438038fd9",
+      "unanswerable": false,
+      "params": [],
+      "work": 42163
+    },
+    {
+      "id": "sv_unanswerable_covid",
+      "question": "How many COVID-19 cases did each country report?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (c:Country)-[:REPORTED]->(r:DiseaseReport)-[:REPORT_OF]->(d:Disease) WHERE d.name CONTAINS 'COVID' RETURN c.name AS country, sum(r.value) AS cases",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [],
+      "work": 15
+    },
+    {
+      "id": "sv_unanswerable_hospital_beds",
+      "question": "How many hospital beds per 1000 people does each country have?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Country)-[:HAS_INDICATOR]->(h:HealthIndicator) WHERE h.name CONTAINS 'hospital beds' RETURN c.name AS country, h.value AS beds",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [],
+      "work": 149537
+    },
+    {
+      "id": "sv_unanswerable_subnational",
+      "question": "Which province of India reported the most cholera cases?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (p:Province)-[:REPORTED]->(r:DiseaseReport)-[:REPORT_OF]->(:Disease {indicator_code: 'CHOLERA_0000000001'}) RETURN p.name AS province, sum(r.value) AS cases",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [],
+      "work": 232
+    }
+  ]
+}

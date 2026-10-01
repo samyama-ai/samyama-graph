@@ -1,0 +1,268 @@
+[
+  {
+    "id": "db_topics",
+    "difficulty": "easy",
+    "question": "Which research topics does the graph organise problems under?",
+    "cypher": "MATCH (t:Topic) RETURN t.num AS num, t.name AS topic ORDER BY num"
+  },
+  {
+    "id": "db_problem_count",
+    "difficulty": "easy",
+    "question": "How many research problems are recorded?",
+    "cypher": "MATCH (p:Problem) RETURN count(p) AS problems"
+  },
+  {
+    "id": "db_status_breakdown",
+    "difficulty": "easy",
+    "question": "How many problems are open, partially solved, empirically open, or solved but impractical?",
+    "paraphrases": [
+      "What is the status breakdown of the problems?"
+    ],
+    "cypher": "MATCH (p:Problem) RETURN p.status AS status, count(p) AS problems ORDER BY problems DESC, status"
+  },
+  {
+    "id": "db_problems_per_topic",
+    "difficulty": "easy",
+    "question": "How many problems does each topic hold?",
+    "cypher": "MATCH (p:Problem)-[:IN_TOPIC]->(t:Topic) RETURN t.name AS topic, count(p) AS problems ORDER BY problems DESC, topic"
+  },
+  {
+    "id": "db_open_in_topic",
+    "difficulty": "easy",
+    "question": "Which problems in topic {slug} have status {status}?",
+    "cypher": "MATCH (p:Problem)-[:IN_TOPIC]->(t:Topic {slug: $slug}) WHERE p.status = $status RETURN p.title AS problem ORDER BY problem",
+    "params": [
+      {
+        "name": "slug",
+        "type": "string",
+        "sample": "02-query-optimization"
+      },
+      {
+        "name": "status",
+        "type": "string",
+        "sample": "open",
+        "enum_values": [
+          "open",
+          "partially-solved",
+          "empirically-open",
+          "solved-but-impractical"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "db_topic_status_mix",
+    "difficulty": "medium",
+    "question": "Which topics have the largest share of fully open problems?",
+    "cypher": "MATCH (p:Problem)-[:IN_TOPIC]->(t:Topic) WITH t, count(p) AS total, sum(CASE WHEN p.status = 'open' THEN 1 ELSE 0 END) AS open RETURN t.name AS topic, open, total, round(100.0 * open / total) AS open_pct ORDER BY open_pct DESC, topic LIMIT 10"
+  },
+  {
+    "id": "db_impractical",
+    "difficulty": "easy",
+    "question": "Which problems are solved, but only impractically?",
+    "cypher": "MATCH (p:Problem {status: 'solved-but-impractical'})-[:IN_TOPIC]->(t:Topic) RETURN p.title AS problem, t.name AS topic ORDER BY problem"
+  },
+  {
+    "id": "db_problem_by_slug",
+    "difficulty": "easy",
+    "question": "What does problem {slug} state, and what is its status?",
+    "cypher": "MATCH (p:Problem {slug: $slug}) RETURN p.title AS title, p.status AS status, p.statement AS statement",
+    "params": [
+      {
+        "name": "slug",
+        "type": "string",
+        "sample": "cardinality-error-propagation"
+      }
+    ]
+  },
+  {
+    "id": "db_most_cited_papers",
+    "difficulty": "medium",
+    "question": "Which papers are cited by the most problems?",
+    "paraphrases": [
+      "Which papers underpin the most open questions?"
+    ],
+    "cypher": "MATCH (:Problem)-[:CITES]->(paper:Paper) RETURN paper.title AS paper, paper.year AS year, count(*) AS cited_by ORDER BY cited_by DESC, paper LIMIT 10"
+  },
+  {
+    "id": "db_venues",
+    "difficulty": "easy",
+    "question": "Which venues published the most papers in the corpus?",
+    "cypher": "MATCH (p:Paper)-[:APPEARED_AT]->(v:Venue) RETURN v.name AS venue, count(p) AS papers ORDER BY papers DESC, venue LIMIT 10"
+  },
+  {
+    "id": "db_venue_papers",
+    "difficulty": "easy",
+    "question": "How many papers in the corpus appeared at {venue}?",
+    "cypher": "MATCH (p:Paper)-[:APPEARED_AT]->(v:Venue {name: $venue}) RETURN count(p) AS papers",
+    "params": [
+      {
+        "name": "venue",
+        "type": "string",
+        "sample": "PODS"
+      }
+    ]
+  },
+  {
+    "id": "db_papers_by_decade",
+    "difficulty": "medium",
+    "question": "How many papers fall in each decade, counting only plausible publication years?",
+    "cypher": "MATCH (p:Paper) WHERE p.year >= '1950' AND p.year <= '2026' RETURN substring(p.year, 0, 3) + '0s' AS decade, count(p) AS papers ORDER BY decade"
+  },
+  {
+    "id": "db_implausible_years",
+    "difficulty": "medium",
+    "question": "How many papers carry a year outside 1950-2026?",
+    "paraphrases": [
+      "Data check: which paper years look like identifiers rather than years?"
+    ],
+    "cypher": "MATCH (p:Paper) WHERE p.year IS NOT NULL AND (p.year < '1950' OR p.year > '2026') RETURN count(p) AS implausible"
+  },
+  {
+    "id": "db_unverified_papers",
+    "difficulty": "easy",
+    "question": "How many papers are not verified?",
+    "cypher": "MATCH (p:Paper) WHERE p.verified = 'False' RETURN count(p) AS unverified"
+  },
+  {
+    "id": "db_prolific_authors",
+    "difficulty": "medium",
+    "question": "Which authors appear on the most papers in the corpus?",
+    "cypher": "MATCH (paper:Paper)-[:AUTHORED_BY]->(a:Person) RETURN a.name AS author, count(paper) AS papers ORDER BY papers DESC, author LIMIT 10"
+  },
+  {
+    "id": "db_institutions",
+    "difficulty": "medium",
+    "question": "Which institutions have the most affiliated researchers in the graph?",
+    "cypher": "MATCH (p:Person)-[:AFFILIATED_WITH]->(i:Institution) RETURN i.name AS institution, count(p) AS researchers ORDER BY researchers DESC, institution LIMIT 10"
+  },
+  {
+    "id": "db_institution_problems",
+    "difficulty": "hard",
+    "question": "Which problems are researchers at {institution} active on?",
+    "cypher": "MATCH (i:Institution {name: $institution})<-[:AFFILIATED_WITH]-(p:Person)-[:ACTIVE_ON]->(pr:Problem) RETURN DISTINCT pr.title AS problem, pr.status AS status ORDER BY problem",
+    "params": [
+      {
+        "name": "institution",
+        "type": "string",
+        "sample": "MIT"
+      }
+    ]
+  },
+  {
+    "id": "db_bound_kinds",
+    "difficulty": "easy",
+    "question": "How many recorded bounds are upper or lower, by kind?",
+    "cypher": "MATCH (b:Bound) RETURN b.direction AS direction, b.kind AS kind, count(b) AS bounds ORDER BY bounds DESC, direction, kind"
+  },
+  {
+    "id": "db_best_characterized",
+    "difficulty": "medium",
+    "question": "Which problems have the most formal bounds recorded?",
+    "cypher": "MATCH (p:Problem)-[:HAS_BOUND]->(b:Bound) RETURN p.title AS problem, count(b) AS bounds ORDER BY bounds DESC, problem LIMIT 10"
+  },
+  {
+    "id": "db_bounds_by_model",
+    "difficulty": "medium",
+    "question": "How many bounds are stated in each model of computation?",
+    "cypher": "MATCH (b:Bound)-[:IN_MODEL]->(m:ComputationModel) RETURN m.name AS model, count(b) AS bounds ORDER BY bounds DESC, model"
+  },
+  {
+    "id": "db_impossibility_topics",
+    "difficulty": "hard",
+    "question": "Which topics carry the most impossibility results?",
+    "cypher": "MATCH (t:Topic)<-[:IN_TOPIC]-(p:Problem)-[:HAS_BOUND]->(b:Bound {kind: 'impossibility'}) RETURN t.name AS topic, count(b) AS impossibility_results ORDER BY impossibility_results DESC, topic LIMIT 10"
+  },
+  {
+    "id": "db_gap_problems",
+    "difficulty": "hard",
+    "question": "Which open problems have both an upper and a lower time bound recorded?",
+    "paraphrases": [
+      "Where is the gap between known upper and lower bounds being tracked?"
+    ],
+    "cypher": "MATCH (p:Problem {status: 'open'})-[:HAS_BOUND]->(u:Bound {direction: 'upper', kind: 'time'}) MATCH (p)-[:HAS_BOUND]->(l:Bound {direction: 'lower', kind: 'time'}) RETURN DISTINCT p.title AS problem ORDER BY problem"
+  },
+  {
+    "id": "db_state_of_art_algorithms",
+    "difficulty": "medium",
+    "question": "Which algorithms are state of the art for the most problems?",
+    "cypher": "MATCH (p:Problem)-[:STATE_OF_ART]->(a:Algorithm) RETURN a.name AS algorithm, count(p) AS problems ORDER BY problems DESC, algorithm LIMIT 10"
+  },
+  {
+    "id": "db_systems",
+    "difficulty": "medium",
+    "question": "Which production systems are named as state of the art, and for how many problems?",
+    "cypher": "MATCH (p:Problem)-[:STATE_OF_ART]->(s:System) RETURN s.name AS system, count(p) AS problems ORDER BY problems DESC, system LIMIT 10"
+  },
+  {
+    "id": "db_concepts",
+    "difficulty": "medium",
+    "question": "Which theoretical concepts do the most problems rest on?",
+    "cypher": "MATCH (p:Problem)-[:RESTS_ON]->(c:Concept) RETURN c.name AS concept, count(p) AS problems ORDER BY problems DESC, concept LIMIT 10"
+  },
+  {
+    "id": "db_concept_problems",
+    "difficulty": "easy",
+    "question": "Which problems rest on the concept {concept}?",
+    "cypher": "MATCH (p:Problem)-[:RESTS_ON]->(c:Concept {name: $concept}) RETURN p.title AS problem, p.status AS status ORDER BY problem",
+    "params": [
+      {
+        "name": "concept",
+        "type": "string",
+        "sample": "Datalog"
+      }
+    ]
+  },
+  {
+    "id": "db_future_directions",
+    "difficulty": "medium",
+    "question": "Which problems list the most future directions needed to close them?",
+    "cypher": "MATCH (p:Problem)-[:CLOSING_REQUIRES]->(f:FutureDirection) RETURN p.title AS problem, count(f) AS directions ORDER BY directions DESC, problem LIMIT 10"
+  },
+  {
+    "id": "db_related_hubs",
+    "difficulty": "hard",
+    "question": "Which problems are related to the most other problems?",
+    "cypher": "MATCH (p:Problem)-[:RELATED_TO]-(q:Problem) RETURN p.title AS problem, count(DISTINCT q) AS related ORDER BY related DESC, problem LIMIT 10"
+  },
+  {
+    "id": "db_cross_topic_links",
+    "difficulty": "hard",
+    "question": "Which pairs of topics are most often linked by related problems?",
+    "cypher": "MATCH (t1:Topic)<-[:IN_TOPIC]-(p:Problem)-[:RELATED_TO]->(q:Problem)-[:IN_TOPIC]->(t2:Topic) WHERE t1.num < t2.num RETURN t1.name AS topic_a, t2.name AS topic_b, count(*) AS links ORDER BY links DESC, topic_a, topic_b LIMIT 10"
+  },
+  {
+    "id": "db_topic_venues",
+    "difficulty": "hard",
+    "question": "At which venues did the papers cited by {slug} problems appear?",
+    "cypher": "MATCH (t:Topic {slug: $slug})<-[:IN_TOPIC]-(:Problem)-[:CITES]->(paper:Paper)-[:APPEARED_AT]->(v:Venue) RETURN v.name AS venue, count(DISTINCT paper) AS papers ORDER BY papers DESC, venue LIMIT 10",
+    "params": [
+      {
+        "name": "slug",
+        "type": "string",
+        "sample": "05-concurrency-control"
+      }
+    ]
+  },
+  {
+    "id": "db_unanswerable_funding",
+    "difficulty": "easy",
+    "unanswerable": true,
+    "question": "How much grant funding has each problem received?",
+    "cypher": "MATCH (p:Problem) WHERE p.funding IS NOT NULL RETURN p.title AS problem, p.funding AS funding"
+  },
+  {
+    "id": "db_unanswerable_citations_count",
+    "difficulty": "medium",
+    "unanswerable": true,
+    "question": "How many times has each paper been cited across all of computer science?",
+    "cypher": "MATCH (paper:Paper) WHERE paper.global_citations IS NOT NULL RETURN paper.title AS paper, paper.global_citations AS citations"
+  },
+  {
+    "id": "db_unanswerable_benchmarks",
+    "difficulty": "hard",
+    "unanswerable": true,
+    "question": "Which system is fastest on TPC-H?",
+    "cypher": "MATCH (s:System)-[:BENCHMARKED_ON]->(b:Benchmark {name: 'TPC-H'}) RETURN s.name AS system, b.score AS score"
+  }
+]

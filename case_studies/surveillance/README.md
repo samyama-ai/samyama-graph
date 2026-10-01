@@ -40,6 +40,30 @@ lets you join this graph to health-systems (workforce, preparedness) and
 health-determinants (pollution, water) — cross-domain public-health analysis
 without a single hand-written join key.
 
+## Question catalog
+
+[`surveillance.sgqueries`](./surveillance.sgqueries) holds 34 questions (easy to hard, three unanswerable), built with `catalog-build --release` against the pinned snapshot
+(#1154). [`questions.json`](questions.json) is its source. Every entry is checked
+weekly against the published snapshot by
+[`kg-catalogs.yml`](../../.github/workflows/kg-catalogs.yml).
+
+```bash
+samyama queries list case_studies/surveillance/surveillance.sgqueries
+samyama queries run  case_studies/surveillance/surveillance.sgqueries --snapshot surveillance.sgsnap \
+    --entry <id> [--param name=value]...
+samyama verify surveillance.sgsnap --queries case_studies/surveillance/surveillance.sgqueries
+```
+
+A template runs with bound values only, held to its declared types and enums
+and to ten times the work its sample did (#1156).
+
+**Data caveats the catalog surfaces** (#1609). Four of the fifteen disease
+indicators (both malaria series, leprosy, yaws) have no reports
+(`sv_silent_diseases`); 64 countries have no WHO region (`sv_unregioned`);
+2,323 reports name no country (`sv_unattributed_reports`). Health indicators
+carry several values per country and year with no breakdown recorded, so the
+catalog asks for ranges and extremes rather than a single value.
+
 ## Data & license
 
 Source: [WHO Global Health Observatory](https://www.who.int/data/gho). Snapshot

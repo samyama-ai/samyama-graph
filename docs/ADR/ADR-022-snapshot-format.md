@@ -77,6 +77,15 @@ rather than read off the planner because the default planner path records no
 plan cost. Optional in the file, so older catalogs still load and verify, but
 `catalog-gate` refuses a release catalog with an entry that lacks it.
 
+**Catalogs ship with three published KGs** (#1154): `case_studies/<kg>/<kg>.sgqueries`
+for health-systems, dbms-research and surveillance, built from each
+`questions.json` with `--release`, and checked weekly against the pinned
+published snapshot by `.github/workflows/kg-catalogs.yml` (`catalog-gate
+--kg08` and `verify`). `samyama queries run <catalog> --snapshot <s> --entry
+<id> --param k=v` runs one template through `run_template`. The published
+snapshots predate the header link, so linking them is a re-upload of each
+asset with `catalog-build ... --link`; until then `verify` takes `--queries`.
+
 **The file carries the index catalog** (`"t":"i"`, added 2026-09-29 for #1506).
 One line right after the header, holding every property index, unique
 constraint, full-text index and vector index the exporting store declared, as

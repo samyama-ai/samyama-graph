@@ -28,6 +28,7 @@ async fn main() {
         Some("schema") => std::process::exit(cmd_schema(&argv)),
         Some("auth-user") => std::process::exit(cmd_auth_user(&argv)),
         Some("pii-scan") => std::process::exit(cmd_pii_scan(&argv)),
+        Some("queries") => std::process::exit(cmd_queries(&argv)),
         _ => {}
     }
 
@@ -44,6 +45,195 @@ async fn main() {
     println!();
 
     start_server().await;
+}
+
+/// `samyama queries list <catalog>`
+/// `samyama queries run <catalog> --snapshot <snapshot.sgsnap> --entry <id> [--param name=value]...`
+///
+/// Runs one template from a question catalog against a snapshot with the
+/// caller's values (#1154). The values are bound, never substituted, and held
+/// to the template's declared contract and to its recorded cost ceiling
+/// (`run_template`, #1156), so this runs exactly what was published and
+/// nothing a value could turn it into. A parameter not given keeps its sample.
+///
+/// Prints one JSON object per row on stdout. Exits 64 on a usage error, 65
+/// when the catalog cannot be read, 66 when the snapshot cannot be restored,
+/// and 1 when the template refuses the call or fails.
+fn cmd_queries(argv: &[String]) -> i32 {
+    const USAGE: &str = "usage: samyama queries list <catalog>\n       \
+        samyama queries run <catalog> --snapshot <snapshot.sgsnap> --entry <id> \
+        [--param name=value]...";
+    let (Some(verb), Some(path)) = (
+        argv.get(2).map(String::as_str),
+        argv.get(3).filter(|s| !s.starts_with("--")),
+    ) else {
+        eprintln!("{USAGE}");
+        return 64;
+    };
+    if verb != "list" && verb != "run" {
+        eprintln!("{USAGE}");
+        return 64;
+    }
+    let catalog: samyama::snapshot::verify::QueryCatalog = match std::fs::read(path)
+        .map_err(|e| e.to_string())
+        .and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("could not read {path}: {e}");
+            return 65;
+        }
+    };
+
+    if verb == "list" {
+        for e in &catalog.entries {
+            let params: Vec<String> = e
+                .params
+                .iter()
+                .map(|p| format!("{}:{}={}", p.name, p.kind, p.sample))
+                .collect();
+            println!(
+                "{}\t{}\t{}\t{}",
+                e.id,
+                if e.difficulty.is_empty() {
+                    "-"
+                } else {
+                    &e.difficulty
+                },
+                if params.is_empty() {
+                    "-".to_string()
+                } else {
+                    params.join(" ")
+                },
+                e.question
+            );
+        }
+        return 0;
+    }
+
+    let flag = |name: &str| -> Result<Option<&str>, String> {
+        match argv.iter().position(|a| a == name) {
+            None => Ok(None),
+            Some(i) => argv
+                .get(i + 1)
+                .filter(|v| !v.starts_with("--"))
+                .map(|v| Some(v.as_str()))
+                .ok_or_else(|| format!("{name} needs a value")),
+        }
+    };
+    let (snapshot, id) = match (flag("--snapshot"), flag("--entry")) {
+        (Ok(Some(s)), Ok(Some(e))) => (s, e),
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("queries run: {e}");
+            return 64;
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            return 64;
+        }
+    };
+    let Some(entry) = catalog.entries.iter().find(|e| e.id == id) else {
+        let ids: Vec<&str> = catalog.entries.iter().map(|e| e.id.as_str()).collect();
+        eprintln!("{path} has no entry {id:?}. Entries: {}", ids.join(", "));
+        return 64;
+    };
+
+    let mut values: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+    for (i, a) in argv.iter().enumerate() {
+        if a != "--param" {
+            continue;
+        }
+        let Some((name, raw)) = argv.get(i + 1).and_then(|kv| kv.split_once('=')) else {
+            eprintln!("queries run: --param needs name=value");
+            return 64;
+        };
+        values.insert(name.to_string(), param_value(entry, name, raw));
+    }
+
+    let mut store = GraphStore::new();
+    if let Err(e) = std::fs::File::open(snapshot)
+        .map_err(|e| e.to_string())
+        .and_then(|f| samyama::snapshot::import_tenant(&mut store, f).map_err(|e| e.to_string()))
+    {
+        eprintln!("could not restore {snapshot}: {e}");
+        return 66;
+    }
+    match samyama::snapshot::verify::run_template(&store, entry, &values) {
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+        Ok(batch) => {
+            for rec in &batch.records {
+                let row: serde_json::Map<String, serde_json::Value> = batch
+                    .columns
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.clone(),
+                            rec.get(c).map_or(serde_json::Value::Null, cell_json),
+                        )
+                    })
+                    .collect();
+                println!("{}", serde_json::Value::Object(row));
+            }
+            0
+        }
+    }
+}
+
+/// A `--param` value read as its declared type. One that does not parse as
+/// that type is passed on as text, so `run_template` refuses it with the
+/// declared type in the message rather than this parser guessing.
+fn param_value(
+    entry: &samyama::snapshot::verify::CatalogEntry,
+    name: &str,
+    raw: &str,
+) -> serde_json::Value {
+    use serde_json::json;
+    let kind = entry
+        .params
+        .iter()
+        .find(|p| p.name == name)
+        .map(|p| p.kind.as_str());
+    match kind {
+        Some("int") => raw
+            .parse::<i64>()
+            .map(|v| json!(v))
+            .unwrap_or_else(|_| json!(raw)),
+        Some("float") => raw
+            .parse::<f64>()
+            .map(|v| json!(v))
+            .unwrap_or_else(|_| json!(raw)),
+        Some("bool") => raw
+            .parse::<bool>()
+            .map(|v| json!(v))
+            .unwrap_or_else(|_| json!(raw)),
+        _ => json!(raw),
+    }
+}
+
+fn cell_json(v: &samyama::query::executor::record::Value) -> serde_json::Value {
+    use samyama::query::executor::record::Value as V;
+    use serde_json::json;
+    match v {
+        V::Null => serde_json::Value::Null,
+        V::Property(p) => p.to_json(),
+        V::List(items) => serde_json::Value::Array(items.iter().map(cell_json).collect()),
+        V::Map(entries) => serde_json::Value::Object(
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), cell_json(v)))
+                .collect(),
+        ),
+        V::Node(id, _) | V::NodeRef(id) => json!({ "node_id": id.as_u64() }),
+        V::Edge(id, _) | V::EdgeRef(id, _, _, _) => json!({ "edge_id": id.as_u64() }),
+        V::Path { nodes, edges } => json!({
+            "nodes": nodes.iter().map(|n| n.as_u64()).collect::<Vec<_>>(),
+            "edges": edges.iter().map(|e| e.as_u64()).collect::<Vec<_>>(),
+        }),
+    }
 }
 
 /// `samyama pii-scan [--waivers <file>] <snapshot.sgsnap>...`

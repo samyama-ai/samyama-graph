@@ -1,0 +1,365 @@
+[
+  {
+    "id": "hs_country_count",
+    "difficulty": "easy",
+    "question": "How many countries and territories does the graph hold?",
+    "paraphrases": [
+      "How many countries are in the health systems graph?"
+    ],
+    "cypher": "MATCH (c:Country) RETURN count(c) AS countries"
+  },
+  {
+    "id": "hs_assessment_count",
+    "difficulty": "easy",
+    "question": "How many capacity assessments are recorded?",
+    "cypher": "MATCH (e:EmergencyResponse) RETURN count(e) AS assessments"
+  },
+  {
+    "id": "hs_capacities",
+    "difficulty": "easy",
+    "question": "Which IHR core capacities does SPAR score?",
+    "paraphrases": [
+      "List the SPAR capacity areas."
+    ],
+    "cypher": "MATCH (e:EmergencyResponse) RETURN DISTINCT e.capacity_code AS code, e.capacity_name AS capacity ORDER BY code"
+  },
+  {
+    "id": "hs_years",
+    "difficulty": "easy",
+    "question": "Which years do the scored assessments cover, and how many are there per year?",
+    "cypher": "MATCH (e:EmergencyResponse) WHERE e.year IS NOT NULL RETURN e.year AS year, count(e) AS assessments ORDER BY year"
+  },
+  {
+    "id": "hs_country_by_iso",
+    "difficulty": "easy",
+    "question": "What is the name of the country with ISO code {iso}?",
+    "cypher": "MATCH (c:Country {iso_code: $iso}) RETURN c.name AS country",
+    "params": [
+      {
+        "name": "iso",
+        "type": "string",
+        "sample": "IND"
+      }
+    ]
+  },
+  {
+    "id": "hs_country_scores",
+    "difficulty": "easy",
+    "question": "What did {iso} score on each capacity in {year}?",
+    "paraphrases": [
+      "Show the SPAR profile of a country for one year."
+    ],
+    "cypher": "MATCH (c:Country {iso_code: $iso})-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.year = $year RETURN e.capacity_code AS code, e.capacity_name AS capacity, e.score AS score ORDER BY code",
+    "params": [
+      {
+        "name": "iso",
+        "type": "string",
+        "sample": "IND"
+      },
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2023,
+        "enum_values": [
+          2021,
+          2022,
+          2023
+        ]
+      }
+    ]
+  },
+  {
+    "id": "hs_country_trend",
+    "difficulty": "medium",
+    "question": "How has {iso}'s average capacity score changed across years?",
+    "cypher": "MATCH (c:Country {iso_code: $iso})-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.year IS NOT NULL RETURN e.year AS year, round(avg(e.score)) AS avg_score ORDER BY year",
+    "params": [
+      {
+        "name": "iso",
+        "type": "string",
+        "sample": "BRA"
+      }
+    ]
+  },
+  {
+    "id": "hs_capacity_global_avg",
+    "difficulty": "medium",
+    "question": "What is the global average score for each capacity in {year}?",
+    "cypher": "MATCH (e:EmergencyResponse) WHERE e.year = $year RETURN e.capacity_code AS code, e.capacity_name AS capacity, round(avg(e.score)) AS avg_score ORDER BY code",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2022,
+        "enum_values": [
+          2021,
+          2022,
+          2023
+        ]
+      }
+    ]
+  },
+  {
+    "id": "hs_weakest_capacity",
+    "difficulty": "medium",
+    "question": "Which capacity is weakest worldwide on average?",
+    "paraphrases": [
+      "Where are countries least prepared, by capacity?"
+    ],
+    "cypher": "MATCH (e:EmergencyResponse) WHERE e.year IS NOT NULL RETURN e.capacity_name AS capacity, round(avg(e.score)) AS avg_score ORDER BY avg_score ASC, capacity LIMIT 3"
+  },
+  {
+    "id": "hs_strongest_capacity",
+    "difficulty": "medium",
+    "question": "Which capacity is strongest worldwide on average?",
+    "cypher": "MATCH (e:EmergencyResponse) WHERE e.year IS NOT NULL RETURN e.capacity_name AS capacity, round(avg(e.score)) AS avg_score ORDER BY avg_score DESC, capacity LIMIT 3"
+  },
+  {
+    "id": "hs_least_prepared",
+    "difficulty": "medium",
+    "question": "Which countries have the lowest average capacity score in {year}?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.year = $year RETURN c.name AS country, round(avg(e.score)) AS avg_score ORDER BY avg_score ASC, country LIMIT 10",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2023,
+        "enum_values": [
+          2021,
+          2022,
+          2023
+        ]
+      }
+    ]
+  },
+  {
+    "id": "hs_best_prepared",
+    "difficulty": "medium",
+    "question": "Which countries have the highest average capacity score in {year}?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.year = $year RETURN c.name AS country, round(avg(e.score)) AS avg_score ORDER BY avg_score DESC, country LIMIT 10",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2023,
+        "enum_values": [
+          2021,
+          2022,
+          2023
+        ]
+      }
+    ]
+  },
+  {
+    "id": "hs_perfect_scores",
+    "difficulty": "medium",
+    "question": "How many countries scored 100 on {code} in {year}?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse {capacity_code: $code}) WHERE e.year = $year AND e.score = 100 RETURN count(DISTINCT c) AS countries",
+    "params": [
+      {
+        "name": "code",
+        "type": "string",
+        "sample": "C04"
+      },
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2023,
+        "enum_values": [
+          2021,
+          2022,
+          2023
+        ]
+      }
+    ]
+  },
+  {
+    "id": "hs_zero_scores",
+    "difficulty": "medium",
+    "question": "Which countries reported a score of 0 on any capacity, and on which?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.year IS NOT NULL AND e.score = 0 RETURN c.name AS country, e.capacity_code AS code, e.year AS year ORDER BY country, code, year"
+  },
+  {
+    "id": "hs_below_threshold",
+    "difficulty": "medium",
+    "question": "Which countries scored below {threshold} on {code} in 2023?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse {capacity_code: $code}) WHERE e.year = 2023 AND e.score < $threshold RETURN c.name AS country, e.score AS score ORDER BY score, country",
+    "params": [
+      {
+        "name": "code",
+        "type": "string",
+        "sample": "C15"
+      },
+      {
+        "name": "threshold",
+        "type": "int",
+        "sample": 40
+      }
+    ]
+  },
+  {
+    "id": "hs_unassessed",
+    "difficulty": "medium",
+    "question": "Which countries have no capacity assessment at all?",
+    "paraphrases": [
+      "Which territories are missing from SPAR?"
+    ],
+    "cypher": "MATCH (c:Country) WHERE NOT (c)-[:CAPACITY_FOR]-() RETURN c.name AS country ORDER BY country"
+  },
+  {
+    "id": "hs_coverage_depth",
+    "difficulty": "medium",
+    "question": "How many countries were assessed in one, two or all three years?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.year IS NOT NULL WITH c, count(DISTINCT e.year) AS years RETURN years, count(c) AS countries ORDER BY years"
+  },
+  {
+    "id": "hs_single_year_countries",
+    "difficulty": "medium",
+    "question": "Which countries were assessed in only one year, and which?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.year IS NOT NULL WITH c, collect(DISTINCT e.year) AS years WHERE size(years) = 1 RETURN c.name AS country, years[0] AS year ORDER BY country"
+  },
+  {
+    "id": "hs_most_improved",
+    "difficulty": "hard",
+    "question": "Which countries improved their average score most between 2021 and 2023?",
+    "paraphrases": [
+      "Who made the largest preparedness gains over the period?"
+    ],
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(a:EmergencyResponse) WHERE a.year = 2021 WITH c, avg(a.score) AS s21 MATCH (c)-[:CAPACITY_FOR]-(b:EmergencyResponse) WHERE b.year = 2023 WITH c, s21, avg(b.score) AS s23 RETURN c.name AS country, round(s23 - s21) AS gain ORDER BY gain DESC, country LIMIT 10"
+  },
+  {
+    "id": "hs_most_declined",
+    "difficulty": "hard",
+    "question": "Which countries' average score fell most between 2021 and 2023?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(a:EmergencyResponse) WHERE a.year = 2021 WITH c, avg(a.score) AS s21 MATCH (c)-[:CAPACITY_FOR]-(b:EmergencyResponse) WHERE b.year = 2023 WITH c, s21, avg(b.score) AS s23 RETURN c.name AS country, round(s23 - s21) AS change ORDER BY change ASC, country LIMIT 10"
+  },
+  {
+    "id": "hs_capacity_spread",
+    "difficulty": "hard",
+    "question": "For each capacity in 2023, how wide is the gap between the best and worst country?",
+    "cypher": "MATCH (e:EmergencyResponse) WHERE e.year = 2023 RETURN e.capacity_code AS code, min(e.score) AS lowest, max(e.score) AS highest, max(e.score) - min(e.score) AS spread ORDER BY spread DESC, code"
+  },
+  {
+    "id": "hs_uneven_countries",
+    "difficulty": "hard",
+    "question": "Which countries have the most uneven capacity profile in 2023 (largest gap between their best and worst capacity)?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.year = 2023 WITH c, max(e.score) - min(e.score) AS gap RETURN c.name AS country, gap ORDER BY gap DESC, country LIMIT 10"
+  },
+  {
+    "id": "hs_all_above",
+    "difficulty": "hard",
+    "question": "Which countries scored at least {floor} on every scored capacity in 2023?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.year = 2023 WITH c, min(e.score) AS weakest WHERE weakest >= $floor RETURN c.name AS country, weakest ORDER BY weakest DESC, country",
+    "params": [
+      {
+        "name": "floor",
+        "type": "int",
+        "sample": 80
+      }
+    ]
+  },
+  {
+    "id": "hs_capacity_trend",
+    "difficulty": "medium",
+    "question": "How has the global average for {code} moved year by year?",
+    "cypher": "MATCH (e:EmergencyResponse {capacity_code: $code}) WHERE e.year IS NOT NULL RETURN e.year AS year, round(avg(e.score)) AS avg_score, count(e) AS countries ORDER BY year",
+    "params": [
+      {
+        "name": "code",
+        "type": "string",
+        "sample": "C05"
+      }
+    ]
+  },
+  {
+    "id": "hs_country_rank",
+    "difficulty": "hard",
+    "question": "How many countries scored higher than {iso} on average in 2023?",
+    "cypher": "MATCH (me:Country {iso_code: $iso})-[:CAPACITY_FOR]-(m:EmergencyResponse) WHERE m.year = 2023 WITH avg(m.score) AS mine MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.year = 2023 WITH mine, c, avg(e.score) AS theirs WHERE theirs > mine RETURN count(c) AS ahead",
+    "params": [
+      {
+        "name": "iso",
+        "type": "string",
+        "sample": "IND"
+      }
+    ]
+  },
+  {
+    "id": "hs_policy_rows_have_no_year",
+    "difficulty": "medium",
+    "question": "How many C1 (Policy) records carry no assessment year?",
+    "paraphrases": [
+      "Data check: are C1 records missing their year?"
+    ],
+    "cypher": "MATCH (e:EmergencyResponse {capacity_code: 'C01'}) WHERE e.year IS NULL RETURN count(e) AS undated"
+  },
+  {
+    "id": "hs_country_assessments",
+    "difficulty": "easy",
+    "question": "How many capacity assessments does {iso} have on record?",
+    "cypher": "MATCH (c:Country {iso_code: $iso})-[:CAPACITY_FOR]-(e:EmergencyResponse) RETURN count(e) AS assessments",
+    "params": [
+      {
+        "name": "iso",
+        "type": "string",
+        "sample": "KEN"
+      }
+    ]
+  },
+  {
+    "id": "hs_name_search",
+    "difficulty": "easy",
+    "question": "Which countries have names starting with {prefix}?",
+    "cypher": "MATCH (c:Country) WHERE c.name STARTS WITH $prefix RETURN c.name AS country, c.iso_code AS iso ORDER BY country",
+    "params": [
+      {
+        "name": "prefix",
+        "type": "string",
+        "sample": "South"
+      }
+    ]
+  },
+  {
+    "id": "hs_capacity_leaders",
+    "difficulty": "medium",
+    "question": "Which countries scored highest on {code} in 2023?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse {capacity_code: $code}) WHERE e.year = 2023 RETURN c.name AS country, e.score AS score ORDER BY score DESC, country LIMIT 10",
+    "params": [
+      {
+        "name": "code",
+        "type": "string",
+        "sample": "C11"
+      }
+    ]
+  },
+  {
+    "id": "hs_score_bands",
+    "difficulty": "hard",
+    "question": "How are the 2023 capacity scores distributed across bands of 20 points?",
+    "cypher": "MATCH (e:EmergencyResponse) WHERE e.year = 2023 RETURN (e.score / 20) * 20 AS band, count(e) AS assessments ORDER BY band"
+  },
+  {
+    "id": "hs_unanswerable_population",
+    "difficulty": "easy",
+    "unanswerable": true,
+    "question": "What is the population of each country?",
+    "cypher": "MATCH (c:Country) WHERE c.population IS NOT NULL RETURN c.name AS country, c.population AS population"
+  },
+  {
+    "id": "hs_unanswerable_spending",
+    "difficulty": "medium",
+    "unanswerable": true,
+    "question": "How much did each country spend on emergency preparedness?",
+    "cypher": "MATCH (c:Country)-[:CAPACITY_FOR]-(e:EmergencyResponse) WHERE e.budget IS NOT NULL RETURN c.name AS country, sum(e.budget) AS spend"
+  },
+  {
+    "id": "hs_unanswerable_2019",
+    "difficulty": "medium",
+    "unanswerable": true,
+    "question": "What were the SPAR scores in 2019?",
+    "paraphrases": [
+      "How prepared were countries before COVID-19?"
+    ],
+    "cypher": "MATCH (e:EmergencyResponse) WHERE e.year = 2019 RETURN e.capacity_code AS code, avg(e.score) AS avg_score"
+  }
+]

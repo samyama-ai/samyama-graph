@@ -247,6 +247,80 @@ fn schema_prints_a_diagram_of_the_snapshot() {
 }
 
 #[test]
+fn queries_run_prints_the_rows_of_one_template_with_the_callers_values() {
+    // #1154: one template, run from the published catalog with a value the
+    // caller chose, bound and held to the template's contract.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = samyama::GraphStore::new();
+    for (name, n) in [("alpha", 1i64), ("beta", 2), ("gamma", 3)] {
+        let id = store.create_node("Thing");
+        let node = store.get_node_mut(id).unwrap();
+        node.set_property("name", name);
+        node.set_property("n", n);
+    }
+    let snap = dir.path().join("s.sgsnap");
+    samyama::snapshot::export_tenant(&store, std::fs::File::create(&snap).unwrap()).unwrap();
+    let specs: Vec<samyama::snapshot::verify::QuerySpec> =
+        serde_json::from_value(serde_json::json!([{
+            "id": "by_n",
+            "question": "Which thing has number {n}?",
+            "difficulty": "easy",
+            "cypher": "MATCH (t:Thing) WHERE t.n = $n RETURN t.name AS name",
+            "params": [{"name": "n", "type": "int", "sample": 1}]
+        }]))
+        .unwrap();
+    let catalog = samyama::snapshot::verify::build_catalog(&store, &specs, &[]).unwrap();
+    let cat = dir.path().join("c.sgqueries");
+    std::fs::write(&cat, serde_json::to_string(&catalog).unwrap()).unwrap();
+
+    run(&["queries", "list", s(&cat)], &[])
+        .assert_code(0)
+        .out_has("by_n\teasy\tn:int=1\tWhich thing has number {n}?");
+    let base = [
+        "queries",
+        "run",
+        s(&cat),
+        "--snapshot",
+        s(&snap),
+        "--entry",
+        "by_n",
+    ];
+    // No --param: the sample.
+    run(&base, &[])
+        .assert_code(0)
+        .out_has(r#"{"name":"alpha"}"#);
+    let mut with = base.to_vec();
+    with.extend(["--param", "n=3"]);
+    let r = run(&with, &[]);
+    r.assert_code(0).out_has(r#"{"name":"gamma"}"#);
+    assert!(!r.stdout.contains("alpha"), "{}", r.stdout);
+    // A value that is not the declared type is refused, not run as text.
+    let mut bad = base.to_vec();
+    bad.extend(["--param", "n=three"]);
+    run(&bad, &[]).assert_code(1).err_has("declared type");
+    let mut unknown = base.to_vec();
+    unknown.extend(["--param", "limit=5"]);
+    run(&unknown, &[])
+        .assert_code(1)
+        .err_has("no parameter named");
+    run(
+        &[
+            "queries",
+            "run",
+            s(&cat),
+            "--snapshot",
+            s(&snap),
+            "--entry",
+            "nope",
+        ],
+        &[],
+    )
+    .assert_code(64)
+    .err_has("Entries: by_n");
+    run(&["queries"], &[]).assert_code(64).err_has("usage");
+}
+
+#[test]
 fn pii_scan_names_what_it_found() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = samyama::GraphStore::new();

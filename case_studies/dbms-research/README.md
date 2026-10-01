@@ -48,6 +48,28 @@ semantic search reproduces offline.
 > Vector search is also covered directly in the engine suite — see
 > `benches/vector_benchmark.rs` and `tests/vector_search_test.rs`.
 
+## Question catalog
+
+[`dbms-research.sgqueries`](./dbms-research.sgqueries) holds 33 questions (easy to hard, three unanswerable), built with `catalog-build --release` against the pinned snapshot
+(#1154). [`questions.json`](questions.json) is its source. Every entry is checked
+weekly against the published snapshot by
+[`kg-catalogs.yml`](../../.github/workflows/kg-catalogs.yml).
+
+```bash
+samyama queries list case_studies/dbms-research/dbms-research.sgqueries
+samyama queries run  case_studies/dbms-research/dbms-research.sgqueries --snapshot dbms-research.sgsnap \
+    --entry <id> [--param name=value]...
+samyama verify dbms-research.sgsnap --queries case_studies/dbms-research/dbms-research.sgqueries
+```
+
+A template runs with bound values only, held to its declared types and enums
+and to ten times the work its sample did (#1156).
+
+**Data caveat the catalog surfaces** (#1609). `Paper.year` is text, and 23 papers
+carry a value outside 1950-2026 (`2211`, `1405`, …) that reads like an arXiv
+identifier rather than a year (`db_implausible_years`). Decade questions count
+only plausible years. Samples avoid person names.
+
 ## Data & license
 
 Source: [`dbms_research`](https://github.com/samyama-ai/dbms_research) — Samyama's

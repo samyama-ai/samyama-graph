@@ -583,6 +583,139 @@ fn catalog_build_release_refuses_a_sample_from_a_withheld_row() {
     assert_eq!(build(&private, false), 0);
 }
 
+/// `queries run` (#1154): every refusal is a status, and a usable call runs.
+#[test]
+fn queries_exits_with_a_status_for_each_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = things();
+    let snap = write_snapshot(dir.path(), "things.sgsnap", &store);
+    let specs: Vec<QuerySpec> = serde_json::from_value(serde_json::json!([{
+        "id": "by_id",
+        "question": "What is thing {i} called?",
+        "difficulty": "easy",
+        "cypher": "MATCH (t:Thing) WHERE t.id = $i RETURN t.name",
+        "params": [{"name": "i", "type": "int", "sample": 3}]
+    }]))
+    .unwrap();
+    let cat = write_catalog(
+        dir.path(),
+        "c.json",
+        &build_catalog(&store, &specs, &[]).unwrap(),
+    );
+    let (c, sn) = (s(&cat), s(&snap));
+    let q = |args: &[&str]| cmd_queries(&argv(args));
+
+    assert_eq!(q(&["queries"]), 64);
+    assert_eq!(q(&["queries", "drop", c]), 64);
+    assert_eq!(q(&["queries", "list", c]), 0);
+    assert_eq!(q(&["queries", "list", "/no/such/catalog"]), 65);
+    assert_eq!(
+        q(&["queries", "run", c, "--entry", "by_id"]),
+        64,
+        "no snapshot"
+    );
+    assert_eq!(q(&["queries", "run", c, "--snapshot", sn]), 64, "no entry");
+    assert_eq!(
+        q(&["queries", "run", c, "--snapshot", "--entry", "by_id"]),
+        64
+    );
+    assert_eq!(
+        q(&["queries", "run", c, "--snapshot", sn, "--entry", "x"]),
+        64
+    );
+    assert_eq!(
+        q(&[
+            "queries",
+            "run",
+            c,
+            "--snapshot",
+            sn,
+            "--entry",
+            "by_id",
+            "--param",
+            "i"
+        ]),
+        64,
+        "a --param without ="
+    );
+    assert_eq!(
+        q(&[
+            "queries",
+            "run",
+            c,
+            "--snapshot",
+            "/no/such.sgsnap",
+            "--entry",
+            "by_id"
+        ]),
+        66
+    );
+    assert_eq!(
+        q(&["queries", "run", c, "--snapshot", sn, "--entry", "by_id"]),
+        0
+    );
+    assert_eq!(
+        q(&[
+            "queries",
+            "run",
+            c,
+            "--snapshot",
+            sn,
+            "--entry",
+            "by_id",
+            "--param",
+            "i=7"
+        ]),
+        0
+    );
+    assert_eq!(
+        q(&[
+            "queries",
+            "run",
+            c,
+            "--snapshot",
+            sn,
+            "--entry",
+            "by_id",
+            "--param",
+            "i=x"
+        ]),
+        1,
+        "the wrong type is refused"
+    );
+}
+
+#[test]
+fn a_param_value_is_read_as_its_declared_type() {
+    let entry = typed_entry();
+    use serde_json::json;
+    assert_eq!(param_value(&entry, "i", "7"), json!(7));
+    assert_eq!(param_value(&entry, "i", "x"), json!("x"));
+    assert_eq!(param_value(&entry, "f", "1.5"), json!(1.5));
+    assert_eq!(param_value(&entry, "b", "true"), json!(true));
+    assert_eq!(param_value(&entry, "s", "7"), json!("7"));
+    assert_eq!(param_value(&entry, "undeclared", "7"), json!("7"));
+}
+
+/// An entry with one parameter of each declared type.
+fn typed_entry() -> samyama::snapshot::verify::CatalogEntry {
+    let specs: Vec<QuerySpec> = serde_json::from_value(serde_json::json!([{
+        "id": "typed",
+        "cypher": "MATCH (t:Thing) WHERE t.id = $i AND $f > 0.0 AND $b AND $s <> '' RETURN t",
+        "params": [
+            {"name": "i", "type": "int", "sample": 1},
+            {"name": "f", "type": "float", "sample": 1.0},
+            {"name": "b", "type": "bool", "sample": true},
+            {"name": "s", "type": "string", "sample": "x"}
+        ]
+    }]))
+    .unwrap();
+    build_catalog(&things(), &specs, &[])
+        .unwrap()
+        .entries
+        .remove(0)
+}
+
 /// The gate, given the snapshot, checks the samples against it too: that is
 /// what catches a catalog edited after its build.
 #[test]

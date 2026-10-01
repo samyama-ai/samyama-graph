@@ -1,0 +1,101 @@
+name: Question catalogs of published KGs
+
+# #1154 / KG-08: each KG with a catalog in `case_studies/<kg>/<kg>.sgqueries`
+# ships at least 30 questions that verify against the snapshot it is
+# published as.
+#
+# Like `pii-scan.yml`, this checks the *published* snapshots, not a build
+# artifact: they are uploaded to their releases by hand, so a check in a
+# release job would never see them. Each case study's `case.env` pins the
+# snapshot URL and SHA-256 its catalog was built against, and a download that
+# does not match fails here rather than verifying against some other graph.
+#
+# Three checks per KG, each of which fails the job:
+#   1. the catalog is the one its `questions.json` describes (same ids, same
+#      Cypher, same parameters), so an edit to one without a rebuild is caught;
+#   2. `catalog-gate --kg08`: publishable, 30+ entries, unanswerable items,
+#      every entry metered (#1156), no personal data in a sample (#1159);
+#   3. `verify`: every entry reproduces its recorded rows and hash on the
+#      published snapshot.
+#
+# Weekly, on demand, and on any change to a catalog or its questions.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "case_studies/*/questions.json"
+      - "case_studies/*/*.sgqueries"
+      - "case_studies/*/case.env"
+      - ".github/workflows/kg-catalogs.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  catalogs:
+    name: Verify every KG catalog against its published snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: kg-catalogs
+
+      - name: Build
+        run: cargo build --release --bin samyama
+
+      - name: Check every catalog
+        run: |
+          set -euo pipefail
+          found=0
+          for cat in case_studies/*/*.sgqueries; do
+            dir=$(dirname "$cat")
+            kg=$(basename "$dir")
+            found=$((found + 1))
+            echo "::group::$kg"
+
+            # 1. The catalog matches the questions it was built from.
+            python3 - "$dir/questions.json" "$cat" <<'EOF'
+          import json, sys
+          questions = json.load(open(sys.argv[1]))
+          catalog = json.load(open(sys.argv[2]))
+          # An absent field and a null one are the same declaration.
+          params = lambda e: json.dumps([{k: v for k, v in p.items() if v is not None}
+                                         for p in e.get("params", [])], sort_keys=True)
+          key = lambda e: (e["id"], e["cypher"], params(e), bool(e.get("unanswerable", False)))
+          want = sorted(key(q) for q in questions)
+          have = sorted(key(e) for e in catalog["entries"])
+          if want != have:
+              print(f"::error::{sys.argv[2]} is not the catalog {sys.argv[1]} describes; "
+                    "rebuild it with `samyama catalog-build ... --release`")
+              sys.exit(1)
+          print(f"{len(have)} entries match {sys.argv[1]}")
+          EOF
+
+            # The snapshot the catalog was built against, by pinned digest.
+            # shellcheck disable=SC1091
+            . "$dir/case.env"
+            snap="$RUNNER_TEMP/$kg.sgsnap"
+            curl -fsSL --retry 3 -o "$snap" "$SNAPSHOT_URL"
+            echo "$SNAPSHOT_SHA256  $snap" | sha256sum -c -
+
+            # 2. Publishable, and KG-08 conformant.
+            ./target/release/samyama catalog-gate "$cat" --kg08
+            # 3. Every entry reproduces on the published snapshot.
+            ./target/release/samyama verify "$snap" --queries "$cat"
+
+            rm -f "$snap"
+            echo "::endgroup::"
+          done
+          # A glob that matched nothing must not read as a pass.
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no case_studies/*/*.sgqueries found -- this check verified nothing"
+            exit 1
+          fi
+          echo "verified $found catalog(s)"

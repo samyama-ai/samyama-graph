@@ -1,0 +1,466 @@
+{
+  "format": "samyama.queries/1",
+  "generated_by": "samyama 1.10.0",
+  "provenance": "authored",
+  "tenant": "dbms-research",
+  "publishable": true,
+  "entries": [
+    {
+      "id": "db_topics",
+      "question": "Which research topics does the graph organise problems under?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (t:Topic) RETURN t.num AS num, t.name AS topic ORDER BY num",
+      "rows": 35,
+      "hash": "fnv1a64:0a68565b7f118e8e",
+      "unanswerable": false,
+      "params": [],
+      "work": 105
+    },
+    {
+      "id": "db_problem_count",
+      "question": "How many research problems are recorded?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Problem) RETURN count(p) AS problems",
+      "rows": 1,
+      "hash": "fnv1a64:ebdc2b6ae2a7def9",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "db_status_breakdown",
+      "question": "How many problems are open, partially solved, empirically open, or solved but impractical?",
+      "paraphrases": [
+        "What is the status breakdown of the problems?"
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Problem) RETURN p.status AS status, count(p) AS problems ORDER BY problems DESC, status",
+      "rows": 4,
+      "hash": "fnv1a64:d9bb8bd95651bfeb",
+      "unanswerable": false,
+      "params": [],
+      "work": 1065
+    },
+    {
+      "id": "db_problems_per_topic",
+      "question": "How many problems does each topic hold?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Problem)-[:IN_TOPIC]->(t:Topic) RETURN t.name AS topic, count(p) AS problems ORDER BY problems DESC, topic",
+      "rows": 35,
+      "hash": "fnv1a64:4346add26601e7b7",
+      "unanswerable": false,
+      "params": [],
+      "work": 140
+    },
+    {
+      "id": "db_open_in_topic",
+      "question": "Which problems in topic {slug} have status {status}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Problem)-[:IN_TOPIC]->(t:Topic {slug: $slug}) WHERE p.status = $status RETURN p.title AS problem ORDER BY problem",
+      "rows": 15,
+      "hash": "fnv1a64:db0f033eaad349f3",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "slug",
+          "type": "string",
+          "sample": "02-query-optimization",
+          "enum_values": null
+        },
+        {
+          "name": "status",
+          "type": "string",
+          "sample": "open",
+          "enum_values": [
+            "open",
+            "partially-solved",
+            "empirically-open",
+            "solved-but-impractical"
+          ]
+        }
+      ],
+      "work": 112
+    },
+    {
+      "id": "db_topic_status_mix",
+      "question": "Which topics have the largest share of fully open problems?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Problem)-[:IN_TOPIC]->(t:Topic) WITH t, count(p) AS total, sum(CASE WHEN p.status = 'open' THEN 1 ELSE 0 END) AS open RETURN t.name AS topic, open, total, round(100.0 * open / total) AS open_pct ORDER BY open_pct DESC, topic LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:1c4973093369b40d",
+      "unanswerable": false,
+      "params": [],
+      "work": 1153
+    },
+    {
+      "id": "db_impractical",
+      "question": "Which problems are solved, but only impractically?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Problem {status: 'solved-but-impractical'})-[:IN_TOPIC]->(t:Topic) RETURN p.title AS problem, t.name AS topic ORDER BY problem",
+      "rows": 7,
+      "hash": "fnv1a64:736e9523e20e22f6",
+      "unanswerable": false,
+      "params": [],
+      "work": 1109
+    },
+    {
+      "id": "db_problem_by_slug",
+      "question": "What does problem {slug} state, and what is its status?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Problem {slug: $slug}) RETURN p.title AS title, p.status AS status, p.statement AS statement",
+      "rows": 1,
+      "hash": "fnv1a64:43600f204f3ef1aa",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "slug",
+          "type": "string",
+          "sample": "cardinality-error-propagation",
+          "enum_values": null
+        }
+      ],
+      "work": 1055
+    },
+    {
+      "id": "db_most_cited_papers",
+      "question": "Which papers are cited by the most problems?",
+      "paraphrases": [
+        "Which papers underpin the most open questions?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Problem)-[:CITES]->(paper:Paper) RETURN paper.title AS paper, paper.year AS year, count(*) AS cited_by ORDER BY cited_by DESC, paper LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:4a7046c8aca0c594",
+      "unanswerable": false,
+      "params": [],
+      "work": 13088
+    },
+    {
+      "id": "db_venues",
+      "question": "Which venues published the most papers in the corpus?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Paper)-[:APPEARED_AT]->(v:Venue) RETURN v.name AS venue, count(p) AS papers ORDER BY papers DESC, venue LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:fde712c2d2d141e0",
+      "unanswerable": false,
+      "params": [],
+      "work": 1460
+    },
+    {
+      "id": "db_venue_papers",
+      "question": "How many papers in the corpus appeared at {venue}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Paper)-[:APPEARED_AT]->(v:Venue {name: $venue}) RETURN count(p) AS papers",
+      "rows": 1,
+      "hash": "fnv1a64:9f3566c93a48d5ec",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "venue",
+          "type": "string",
+          "sample": "PODS",
+          "enum_values": null
+        }
+      ],
+      "work": 825
+    },
+    {
+      "id": "db_papers_by_decade",
+      "question": "How many papers fall in each decade, counting only plausible publication years?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Paper) WHERE p.year >= '1950' AND p.year <= '2026' RETURN substring(p.year, 0, 3) + '0s' AS decade, count(p) AS papers ORDER BY decade",
+      "rows": 8,
+      "hash": "fnv1a64:2523189d826f2b09",
+      "unanswerable": false,
+      "params": [],
+      "work": 5879
+    },
+    {
+      "id": "db_implausible_years",
+      "question": "How many papers carry a year outside 1950-2026?",
+      "paraphrases": [
+        "Data check: which paper years look like identifiers rather than years?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Paper) WHERE p.year IS NOT NULL AND (p.year < '1950' OR p.year > '2026') RETURN count(p) AS implausible",
+      "rows": 1,
+      "hash": "fnv1a64:c169842d6de442c5",
+      "unanswerable": false,
+      "params": [],
+      "work": 2978
+    },
+    {
+      "id": "db_unverified_papers",
+      "question": "How many papers are not verified?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Paper) WHERE p.verified = 'False' RETURN count(p) AS unverified",
+      "rows": 1,
+      "hash": "fnv1a64:adf3940d6ed14c3c",
+      "unanswerable": false,
+      "params": [],
+      "work": 2968
+    },
+    {
+      "id": "db_prolific_authors",
+      "question": "Which authors appear on the most papers in the corpus?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (paper:Paper)-[:AUTHORED_BY]->(a:Person) RETURN a.name AS author, count(paper) AS papers ORDER BY papers DESC, author LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:7abd0c79369d27ba",
+      "unanswerable": false,
+      "params": [],
+      "work": 11355
+    },
+    {
+      "id": "db_institutions",
+      "question": "Which institutions have the most affiliated researchers in the graph?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person)-[:AFFILIATED_WITH]->(i:Institution) RETURN i.name AS institution, count(p) AS researchers ORDER BY researchers DESC, institution LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:1d6d33eda0c81a1c",
+      "unanswerable": false,
+      "params": [],
+      "work": 3840
+    },
+    {
+      "id": "db_institution_problems",
+      "question": "Which problems are researchers at {institution} active on?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (i:Institution {name: $institution})<-[:AFFILIATED_WITH]-(p:Person)-[:ACTIVE_ON]->(pr:Problem) RETURN DISTINCT pr.title AS problem, pr.status AS status ORDER BY problem",
+      "rows": 50,
+      "hash": "fnv1a64:e36084824b63ee86",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "institution",
+          "type": "string",
+          "sample": "MIT",
+          "enum_values": null
+        }
+      ],
+      "work": 1622
+    },
+    {
+      "id": "db_bound_kinds",
+      "question": "How many recorded bounds are upper or lower, by kind?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (b:Bound) RETURN b.direction AS direction, b.kind AS kind, count(b) AS bounds ORDER BY bounds DESC, direction, kind",
+      "rows": 6,
+      "hash": "fnv1a64:aeac338e54329b60",
+      "unanswerable": false,
+      "params": [],
+      "work": 2124
+    },
+    {
+      "id": "db_best_characterized",
+      "question": "Which problems have the most formal bounds recorded?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Problem)-[:HAS_BOUND]->(b:Bound) RETURN p.title AS problem, count(b) AS bounds ORDER BY bounds DESC, problem LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:0f0088aae8edd9d2",
+      "unanswerable": false,
+      "params": [],
+      "work": 3175
+    },
+    {
+      "id": "db_bounds_by_model",
+      "question": "How many bounds are stated in each model of computation?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (b:Bound)-[:IN_MODEL]->(m:ComputationModel) RETURN m.name AS model, count(b) AS bounds ORDER BY bounds DESC, model",
+      "rows": 8,
+      "hash": "fnv1a64:7a358d663ec748da",
+      "unanswerable": false,
+      "params": [],
+      "work": 32
+    },
+    {
+      "id": "db_impossibility_topics",
+      "question": "Which topics carry the most impossibility results?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (t:Topic)<-[:IN_TOPIC]-(p:Problem)-[:HAS_BOUND]->(b:Bound {kind: 'impossibility'}) RETURN t.name AS topic, count(b) AS impossibility_results ORDER BY impossibility_results DESC, topic LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:12b018ac08f0743a",
+      "unanswerable": false,
+      "params": [],
+      "work": 4083
+    },
+    {
+      "id": "db_gap_problems",
+      "question": "Which open problems have both an upper and a lower time bound recorded?",
+      "paraphrases": [
+        "Where is the gap between known upper and lower bounds being tracked?"
+      ],
+      "difficulty": "hard",
+      "cypher": "MATCH (p:Problem {status: 'open'})-[:HAS_BOUND]->(u:Bound {direction: 'upper', kind: 'time'}) MATCH (p)-[:HAS_BOUND]->(l:Bound {direction: 'lower', kind: 'time'}) RETURN DISTINCT p.title AS problem ORDER BY problem",
+      "rows": 92,
+      "hash": "fnv1a64:5cb887606f1e2175",
+      "unanswerable": false,
+      "params": [],
+      "work": 3971
+    },
+    {
+      "id": "db_state_of_art_algorithms",
+      "question": "Which algorithms are state of the art for the most problems?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Problem)-[:STATE_OF_ART]->(a:Algorithm) RETURN a.name AS algorithm, count(p) AS problems ORDER BY problems DESC, algorithm LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:2cf10e1153b66e13",
+      "unanswerable": false,
+      "params": [],
+      "work": 8441
+    },
+    {
+      "id": "db_systems",
+      "question": "Which production systems are named as state of the art, and for how many problems?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Problem)-[:STATE_OF_ART]->(s:System) RETURN s.name AS system, count(p) AS problems ORDER BY problems DESC, system LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:007861c8b70c5b03",
+      "unanswerable": false,
+      "params": [],
+      "work": 344
+    },
+    {
+      "id": "db_concepts",
+      "question": "Which theoretical concepts do the most problems rest on?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Problem)-[:RESTS_ON]->(c:Concept) RETURN c.name AS concept, count(p) AS problems ORDER BY problems DESC, concept LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:e858dedb089ceed8",
+      "unanswerable": false,
+      "params": [],
+      "work": 122
+    },
+    {
+      "id": "db_concept_problems",
+      "question": "Which problems rest on the concept {concept}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Problem)-[:RESTS_ON]->(c:Concept {name: $concept}) RETURN p.title AS problem, p.status AS status ORDER BY problem",
+      "rows": 36,
+      "hash": "fnv1a64:ccb609586a8dbbb1",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "concept",
+          "type": "string",
+          "sample": "Datalog",
+          "enum_values": null
+        }
+      ],
+      "work": 143
+    },
+    {
+      "id": "db_future_directions",
+      "question": "Which problems list the most future directions needed to close them?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Problem)-[:CLOSING_REQUIRES]->(f:FutureDirection) RETURN p.title AS problem, count(f) AS directions ORDER BY directions DESC, problem LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:18408abdd7e5e871",
+      "unanswerable": false,
+      "params": [],
+      "work": 3031
+    },
+    {
+      "id": "db_related_hubs",
+      "question": "Which problems are related to the most other problems?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (p:Problem)-[:RELATED_TO]-(q:Problem) RETURN p.title AS problem, count(DISTINCT q) AS related ORDER BY related DESC, problem LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:6128b16eeeb3dc4e",
+      "unanswerable": false,
+      "params": [],
+      "work": 2899
+    },
+    {
+      "id": "db_cross_topic_links",
+      "question": "Which pairs of topics are most often linked by related problems?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (t1:Topic)<-[:IN_TOPIC]-(p:Problem)-[:RELATED_TO]->(q:Problem)-[:IN_TOPIC]->(t2:Topic) WHERE t1.num < t2.num RETURN t1.name AS topic_a, t2.name AS topic_b, count(*) AS links ORDER BY links DESC, topic_a, topic_b LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:f5410174d9ab3c44",
+      "unanswerable": false,
+      "params": [],
+      "work": 2541
+    },
+    {
+      "id": "db_topic_venues",
+      "question": "At which venues did the papers cited by {slug} problems appear?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (t:Topic {slug: $slug})<-[:IN_TOPIC]-(:Problem)-[:CITES]->(paper:Paper)-[:APPEARED_AT]->(v:Venue) RETURN v.name AS venue, count(DISTINCT paper) AS papers ORDER BY papers DESC, venue LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:cb9ded27c926c7b5",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "slug",
+          "type": "string",
+          "sample": "05-concurrency-control",
+          "enum_values": null
+        }
+      ],
+      "work": 1488
+    },
+    {
+      "id": "db_unanswerable_funding",
+      "question": "How much grant funding has each problem received?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Problem) WHERE p.funding IS NOT NULL RETURN p.title AS problem, p.funding AS funding",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [],
+      "work": 1053
+    },
+    {
+      "id": "db_unanswerable_citations_count",
+      "question": "How many times has each paper been cited across all of computer science?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (paper:Paper) WHERE paper.global_citations IS NOT NULL RETURN paper.title AS paper, paper.global_citations AS citations",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [],
+      "work": 2954
+    },
+    {
+      "id": "db_unanswerable_benchmarks",
+      "question": "Which system is fastest on TPC-H?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (s:System)-[:BENCHMARKED_ON]->(b:Benchmark {name: 'TPC-H'}) RETURN s.name AS system, b.score AS score",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [],
+      "work": 108
+    }
+  ]
+}

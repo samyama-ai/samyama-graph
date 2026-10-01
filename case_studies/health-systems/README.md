@@ -35,6 +35,30 @@ outbreak signal in [surveillance](../surveillance)** *and* **poor determinants i
 [health-determinants](../health-determinants)** is a triple-risk nation — one
 join key (`Country.iso_code`) across three graphs.
 
+## Question catalog
+
+[`health-systems.sgqueries`](./health-systems.sgqueries) holds 33 questions (easy to hard, three unanswerable), built with `catalog-build --release` against the pinned snapshot
+(#1154). [`questions.json`](questions.json) is its source. Every entry is checked
+weekly against the published snapshot by
+[`kg-catalogs.yml`](../../.github/workflows/kg-catalogs.yml).
+
+```bash
+samyama queries list case_studies/health-systems/health-systems.sgqueries
+samyama queries run  case_studies/health-systems/health-systems.sgqueries --snapshot health-systems.sgsnap \
+    --entry <id> [--param name=value]...
+samyama verify health-systems.sgsnap --queries case_studies/health-systems/health-systems.sgqueries
+```
+
+A template runs with bound values only, held to its declared types and enums
+and to ten times the work its sample did (#1156).
+
+**Data caveat the catalog surfaces** (#1609). Every C1 (Policy) assessment carries
+no `year`, and its `score` holds the assessment year (2021-2023) instead of a
+score — a column shift in the load. Score questions therefore filter on a
+year, which excludes C1; `hs_policy_rows_have_no_year` counts the affected
+rows so a corrected snapshot shows up as a changed answer. The averages in
+`queries.cypher` above still include C1 and are inflated by it.
+
 ## Data & license
 
 Source: [WHO SPAR](https://extranet.who.int/e-spar) (IHR State Party

@@ -57,6 +57,12 @@ laptop, so anyone can reproduce it.
 | [football](football) | Football Knowledge Graph — top scorers, winning nations, busiest stadiums, multi-tournament veterans | `football.sgsnap` (0.4 MB) | 16K nodes / 12K edges | ![](football/demo.gif) |
 | [legal-judgments](legal-judgments) | Indian Supreme Court judgments (2016) — most-cited sections (IPC §302), strongest bench pairings, laws by topic breadth (reproduces a Postgres + AGE + pgvector demo in one engine) | `legal-judgments.sgsnap` (0.14 MB) | 4.5K nodes / 8.4K edges | ![](legal-judgments/demo.gif) |
 
+**Question catalogs.** [health-systems](health-systems),
+[dbms-research](dbms-research) and [surveillance](surveillance) also ship a
+verified `.sgqueries` catalog of 30+ questions (KG-08, #1154), run with
+`samyama queries run` and re-verified weekly against the published snapshot by
+`.github/workflows/kg-catalogs.yml`. See each case study's README.
+
 *(Snapshots are GitHub release assets on
 [`samyama-ai/samyama-graph`](https://github.com/samyama-ai/samyama-graph/releases)
 — tags `kg-snapshots-v1…v8` — with sha256 pinned in each `case.env`.)*
