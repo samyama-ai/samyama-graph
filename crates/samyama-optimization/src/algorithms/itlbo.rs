@@ -34,7 +34,7 @@ impl ITLBOSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -46,7 +46,7 @@ impl ITLBOSolver {
                 println!("ITLBO Solver: Iteration {}/{}", iter, self.config.max_iterations);
             }
             // Sort to find elites
-            population.sort_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap());
+            population.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
             
             // Save elites
             let elites: Vec<Individual> = population.iter().take(self.elite_size).cloned().collect();
@@ -73,7 +73,7 @@ impl ITLBOSolver {
                         new_vars[j] = (ind.variables[j] + delta).clamp(lower[j], upper[j]);
                     }
 
-                    let new_fitness = problem.fitness(&new_vars);
+                    let new_fitness = crate::common::evaluate(problem, &new_vars);
                     if new_fitness < ind.fitness {
                         ind.variables = new_vars;
                         ind.fitness = new_fitness;
@@ -113,7 +113,7 @@ impl ITLBOSolver {
                         new_vars[k] = (ind.variables[k] + delta).clamp(lower[k], upper[k]);
                     }
 
-                    let new_fitness = problem.fitness(&new_vars);
+                    let new_fitness = crate::common::evaluate(problem, &new_vars);
                     if new_fitness < ind.fitness {
                         ind.variables = new_vars;
                         ind.fitness = new_fitness;
@@ -124,7 +124,7 @@ impl ITLBOSolver {
 
             // 3. Elitism: Replace worst individuals with preserved elites
             // We need to sort again to find the worst
-            population.sort_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap());
+            population.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
             
             let len = population.len();
             for k in 0..self.elite_size {

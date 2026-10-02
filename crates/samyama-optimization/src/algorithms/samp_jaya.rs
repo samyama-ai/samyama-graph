@@ -44,7 +44,7 @@ impl SAMPJayaSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -65,7 +65,7 @@ impl SAMPJayaSolver {
             }
 
             // Sort by fitness then partition into m contiguous sub-populations.
-            population.sort_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap());
+            population.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
             let chunk = (pop_size + m - 1) / m;
             let mut new_pop: Vec<Individual> = Vec::with_capacity(pop_size);
 
@@ -87,7 +87,7 @@ impl SAMPJayaSolver {
                                 - r2 * (sw_vars[j] - ind.variables[j].abs());
                             new_vars[j] = val.clamp(lower[j], upper[j]);
                         }
-                        let new_fitness = problem.fitness(&new_vars);
+                        let new_fitness = crate::common::evaluate(problem, &new_vars);
                         if new_fitness < ind.fitness {
                             Individual::new(new_vars, new_fitness)
                         } else {

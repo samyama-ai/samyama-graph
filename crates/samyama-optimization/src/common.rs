@@ -64,6 +64,58 @@ impl MultiObjectiveIndividual {
     }
 }
 
+/// `problem.fitness(x)`, with a NaN ranked as the worst possible value (#1634).
+///
+/// Every solver here minimises, and every one of them compares fitness with
+/// `<`, `>` or a sort. A NaN breaks all three: a sort that unwraps
+/// `partial_cmp` panics, `<` never lets a NaN incumbent be replaced, and
+/// `f64::total_cmp` orders the negative NaN that `0.0 / 0.0` produces on x86
+/// *before* every number -- so a minimiser would return it as the best
+/// solution. Mapping it to `+inf` here, at the one place every solver
+/// evaluates, makes it lose every comparison in every algorithm at once.
+pub fn evaluate<P: Problem + ?Sized>(problem: &P, variables: &Array1<f64>) -> f64 {
+    worst_if_nan(problem.fitness(variables))
+}
+
+/// `problem.objectives(x)`, each NaN objective ranked worst, as [`evaluate`].
+pub fn evaluate_objectives<P: MultiObjectiveProblem + ?Sized>(
+    problem: &P,
+    variables: &Array1<f64>,
+) -> Vec<f64> {
+    problem
+        .objectives(variables)
+        .into_iter()
+        .map(worst_if_nan)
+        .collect()
+}
+
+/// A NaN as `+inf`, the worst value under minimisation; anything else as is.
+pub fn worst_if_nan(v: f64) -> f64 {
+    if v.is_nan() {
+        f64::INFINITY
+    } else {
+        v
+    }
+}
+
+/// Ascending order for minimisation with a NaN last (worst), never a panic.
+///
+/// For a sort that may still meet a NaN -- a fitness built outside
+/// [`evaluate`], or a ratio such as a crowding distance computed from
+/// infinite objectives. `partial_cmp(..).unwrap()` panics on it, and
+/// `total_cmp` puts a negative NaN first.
+pub fn ascending_nan_last(a: f64, b: f64) -> std::cmp::Ordering {
+    a.partial_cmp(&b)
+        .unwrap_or_else(|| a.is_nan().cmp(&b.is_nan()))
+}
+
+/// Descending order with a NaN last: the mirror rule, for crowding distance,
+/// where larger is better and an undefined distance is the least preferred.
+pub fn descending_nan_last(a: f64, b: f64) -> std::cmp::Ordering {
+    b.partial_cmp(&a)
+        .unwrap_or_else(|| a.is_nan().cmp(&b.is_nan()))
+}
+
 /// Defines a multi-objective optimization problem.
 pub trait MultiObjectiveProblem: Send + Sync {
     /// Multiple objective functions to minimize.

@@ -32,7 +32,7 @@ impl JayaSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -69,7 +69,7 @@ impl JayaSolver {
                         new_vars[j] = val.clamp(lower[j], upper[j]);
                     }
 
-                    let new_fitness = problem.fitness(&new_vars);
+                    let new_fitness = crate::common::evaluate(problem, &new_vars);
                     if new_fitness < ind.fitness {
                         ind.variables = new_vars;
                         ind.fitness = new_fitness;

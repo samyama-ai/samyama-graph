@@ -120,3 +120,47 @@ fn refused_shapes() {
         assert!(r.is_err(), "`{q}` should be refused");
     }
 }
+
+/// `RETURN *` and `WITH *` inside a `CALL { }` body expand to the columns the
+/// explicit list names (#1606). The body's `RETURN *` returns what the body
+/// binds, not what it imports: returning an imported name is refused, above.
+#[test]
+fn a_star_inside_the_body_is_its_explicit_column_list() {
+    check(
+        "MATCH (p:P) CALL { WITH p MATCH (p)-[:K]->(q) RETURN * } RETURN p.n, q.n",
+        &["a|b", "b|c", "d|d"],
+    );
+    check(
+        "MATCH (p:P) CALL { WITH p MATCH (p)-[:K]->(q) RETURN q } RETURN p.n, q.n",
+        &["a|b", "b|c", "d|d"],
+    );
+    // `WITH *` inside the body keeps the import and what the body bound.
+    check(
+        "MATCH (p:P) CALL { WITH p MATCH (p)-[r:K]->(q) WITH * RETURN r.w AS w } RETURN p.n, w",
+        &["a|1", "b|2", "d|3"],
+    );
+    // An importing `WITH *` and a returning `RETURN *` together.
+    check(
+        "MATCH (p:P) WHERE p.v <= 2 CALL { WITH * MATCH (p)-[:K]->(q) RETURN * } RETURN p.n, q.n",
+        &["a|b", "b|c"],
+    );
+}
+
+/// An uncorrelated `CALL { }`: its star sees only what the body binds.
+#[test]
+fn a_star_in_an_uncorrelated_call_body() {
+    check(
+        "CALL { MATCH (x:P) WHERE x.v > 3 RETURN * } RETURN x.n",
+        &["d"],
+    );
+}
+
+/// A star in a subquery nested in a subquery's body. `b`'s `q` is `c`, which
+/// has no `:K` out, so the inner body returns nothing and drops the row.
+#[test]
+fn a_star_in_a_nested_subquery() {
+    check(
+        "MATCH (p:P) CALL { WITH p MATCH (p)-[:K]->(q) CALL { WITH q MATCH (q)-[:K]->(z) RETURN * } RETURN * } RETURN p.n, q.n, z.n",
+        &["a|b|c", "d|d|d"],
+    );
+}

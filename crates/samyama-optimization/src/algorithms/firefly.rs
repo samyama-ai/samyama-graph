@@ -45,7 +45,7 @@ impl FireflySolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -117,7 +117,7 @@ impl FireflySolver {
             // Apply updates
             for (i, new_pos) in new_positions.into_iter().enumerate() {
                 if let Some(vars) = new_pos {
-                    let new_fitness = problem.fitness(&vars);
+                    let new_fitness = crate::common::evaluate(problem, &vars);
                     // Selection: greedy acceptance? Standard FA moves anyway.
                     // We'll accept if better or just move. 
                     // Standard FA just moves. But ensuring elitism is good.

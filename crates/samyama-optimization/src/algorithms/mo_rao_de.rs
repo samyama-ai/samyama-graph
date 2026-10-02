@@ -53,7 +53,7 @@ impl MORaoDESolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.objectives(&vars);
+                let fitness = crate::common::evaluate_objectives(problem, &vars);
                 let viol: f64 = problem.penalties(&vars).iter().sum();
                 MultiObjectiveIndividual::new(vars, fitness, viol)
             })
@@ -114,7 +114,7 @@ impl MORaoDESolver {
                         new_vars[j] = val.clamp(lower[j], upper[j]);
                     }
                 }
-                let fit = problem.objectives(&new_vars);
+                let fit = crate::common::evaluate_objectives(problem, &new_vars);
                 let viol: f64 = problem.penalties(&new_vars).iter().sum();
                 offspring.push(MultiObjectiveIndividual::new(new_vars, fit, viol));
             }
@@ -125,9 +125,7 @@ impl MORaoDESolver {
                 if a.rank != b.rank {
                     a.rank.cmp(&b.rank)
                 } else {
-                    b.crowding_distance
-                        .partial_cmp(&a.crowding_distance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    crate::common::descending_nan_last(a.crowding_distance, b.crowding_distance)
                 }
             });
             population.truncate(pop_size);

@@ -49,7 +49,7 @@ impl QORaoSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -61,12 +61,12 @@ impl QORaoSolver {
                 .map(|(__idx, ind)| {
                 let mut local_rng = crate::common::rng::child_rng(self.seed, 0, __idx);
                 let qo_vars = quasi_oppose(&ind.variables, &lower, &upper, &mut local_rng);
-                let fitness = problem.fitness(&qo_vars);
+                let fitness = crate::common::evaluate(problem, &qo_vars);
                 Individual::new(qo_vars, fitness)
             })
             .collect();
         population.extend(qo_init);
-        population.sort_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap());
+        population.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
         population.truncate(pop_size);
 
         let mut history = Vec::with_capacity(self.config.max_iterations);
@@ -101,7 +101,7 @@ impl QORaoSolver {
                         }
                     }
                     let rand_fitness = if need_rand {
-                        problem.fitness(&rand_vars)
+                        crate::common::evaluate(problem, &rand_vars)
                     } else {
                         0.0
                     };
@@ -132,7 +132,7 @@ impl QORaoSolver {
                         };
                         new_vars[j] = (ind.variables[j] + delta).clamp(lower[j], upper[j]);
                     }
-                    let rao_fitness = problem.fitness(&new_vars);
+                    let rao_fitness = crate::common::evaluate(problem, &new_vars);
                     if rao_fitness < ind.fitness {
                         ind.variables = new_vars;
                         ind.fitness = rao_fitness;
@@ -140,7 +140,7 @@ impl QORaoSolver {
 
                     // 2. QOBL on the (possibly updated) individual
                     let qo_vars = quasi_oppose(&ind.variables, &lower, &upper, &mut local_rng);
-                    let qo_fitness = problem.fitness(&qo_vars);
+                    let qo_fitness = crate::common::evaluate(problem, &qo_vars);
                     if qo_fitness < ind.fitness {
                         ind.variables = qo_vars;
                         ind.fitness = qo_fitness;

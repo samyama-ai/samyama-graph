@@ -37,7 +37,7 @@ impl NSGA2Solver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.objectives(&vars);
+                let fitness = crate::common::evaluate_objectives(problem, &vars);
                 let penalties = problem.penalties(&vars);
                 let violation: f64 = penalties.iter().sum();
                 MultiObjectiveIndividual::new(vars, fitness, violation)
@@ -59,12 +59,12 @@ impl NSGA2Solver {
                 self.mutate(&mut c1_vars, &lower, &upper);
                 self.mutate(&mut c2_vars, &lower, &upper);
                 
-                let f1 = problem.objectives(&c1_vars);
+                let f1 = crate::common::evaluate_objectives(problem, &c1_vars);
                 let v1 = problem.penalties(&c1_vars).iter().sum();
                 offspring.push(MultiObjectiveIndividual::new(c1_vars.clone(), f1, v1));
 
                 if offspring.len() < pop_size {
-                    let f2 = problem.objectives(&c2_vars);
+                    let f2 = crate::common::evaluate_objectives(problem, &c2_vars);
                     let v2 = problem.penalties(&c2_vars).iter().sum();
                     offspring.push(MultiObjectiveIndividual::new(c2_vars.clone(), f2, v2));
                 }
@@ -83,7 +83,7 @@ impl NSGA2Solver {
                     a.rank.cmp(&b.rank)
                 } else {
                     // Larger crowding distance is better
-                    b.crowding_distance.partial_cmp(&a.crowding_distance).unwrap()
+                    crate::common::descending_nan_last(a.crowding_distance, b.crowding_distance)
                 }
             });
             
@@ -194,7 +194,7 @@ impl NSGA2Solver {
 
         for m in 0..num_objectives {
             let mut sorted_indices = indices.to_vec();
-            sorted_indices.sort_by(|&a, &b| population[a].fitness[m].partial_cmp(&population[b].fitness[m]).unwrap_or(std::cmp::Ordering::Equal));
+            sorted_indices.sort_by(|&a, &b| crate::common::ascending_nan_last(population[a].fitness[m], population[b].fitness[m]));
             
             let min_val = population[*sorted_indices.first().unwrap()].fitness[m];
             let max_val = population[*sorted_indices.last().unwrap()].fitness[m];

@@ -44,7 +44,7 @@ impl EHRJayaSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -59,7 +59,7 @@ impl EHRJayaSolver {
                 );
             }
             // Rank — index 0 = best, last = worst
-            population.sort_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap());
+            population.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
             let best_vars = population[0].variables.clone();
             let worst_vars = population[pop_size - 1].variables.clone();
             history.push(population[0].fitness);
@@ -91,7 +91,7 @@ impl EHRJayaSolver {
                         }
                     }
 
-                    let new_fitness = problem.fitness(&new_vars);
+                    let new_fitness = crate::common::evaluate(problem, &new_vars);
                     if new_fitness < ind.fitness {
                         ind.variables = new_vars;
                         ind.fitness = new_fitness;
@@ -101,7 +101,7 @@ impl EHRJayaSolver {
                 .collect();
         }
 
-        population.sort_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap());
+        population.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
         let best = &population[0];
         OptimizationResult {
             best_variables: best.variables.clone(),

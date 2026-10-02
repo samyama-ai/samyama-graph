@@ -39,7 +39,7 @@ impl ABCSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -73,7 +73,7 @@ impl ABCSolver {
                 let phi: f64 = rng.gen_range(-1.0..1.0);
                 new_vars[j] = (foods[i].variables[j] + phi * (foods[i].variables[j] - foods[k].variables[j])).clamp(lower[j], upper[j]);
 
-                let new_fitness = problem.fitness(&new_vars);
+                let new_fitness = crate::common::evaluate(problem, &new_vars);
                 if new_fitness < foods[i].fitness {
                     foods[i] = Individual::new(new_vars, new_fitness);
                     trial_counters[i] = 0;
@@ -117,7 +117,7 @@ impl ABCSolver {
                     let phi: f64 = rng.gen_range(-1.0..1.0);
                     new_vars[j] = (foods[i].variables[j] + phi * (foods[i].variables[j] - foods[k].variables[j])).clamp(lower[j], upper[j]);
 
-                    let new_fitness = problem.fitness(&new_vars);
+                    let new_fitness = crate::common::evaluate(problem, &new_vars);
                     if new_fitness < foods[i].fitness {
                         foods[i] = Individual::new(new_vars, new_fitness);
                         trial_counters[i] = 0;
@@ -136,7 +136,7 @@ impl ABCSolver {
                     for j in 0..dim {
                         vars[j] = rng.gen_range(lower[j]..upper[j]);
                     }
-                    let fitness = problem.fitness(&vars);
+                    let fitness = crate::common::evaluate(problem, &vars);
                     foods[i] = Individual::new(vars, fitness);
                     trial_counters[i] = 0;
                 }

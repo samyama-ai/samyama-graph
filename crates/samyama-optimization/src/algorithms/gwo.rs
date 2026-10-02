@@ -32,7 +32,7 @@ impl GWOSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -100,7 +100,7 @@ impl GWOSolver {
                 }
 
                 population[i].variables = new_vars;
-                population[i].fitness = problem.fitness(&population[i].variables);
+                population[i].fitness = crate::common::evaluate(problem, &population[i].variables);
             }
         }
 

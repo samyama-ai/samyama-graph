@@ -170,8 +170,8 @@ fn bind_pattern(scope: &mut Vec<String>, pattern: &Pattern) {
 ///
 /// The star is the reason to walk in order: scope is what has been bound so
 /// far, and a `WITH` replaces it (#892).
-fn expand_stars_pipeline(clauses: &mut [Clause]) -> bool {
-    let mut scope: Vec<String> = Vec::new();
+fn expand_stars_pipeline(clauses: &mut [Clause], outer: &[String], hidden: &[String]) -> bool {
+    let mut scope: Vec<String> = outer.to_vec();
     let mut empty_star = false;
     for clause in clauses.iter_mut() {
         match clause {
@@ -197,7 +197,9 @@ fn expand_stars_pipeline(clauses: &mut [Clause]) -> bool {
                 let _ = expand_into(&mut wc.items, &scope);
                 scope = with_output(&wc.items);
             }
-            Clause::Return(rc) => empty_star |= expand_into(&mut rc.items, &scope),
+            Clause::Return(rc) => {
+                empty_star |= expand_into(&mut rc.items, &returnable(&scope, hidden))
+            }
             Clause::Where(_) | Clause::Set(_) | Clause::Remove(_) | Clause::Delete(_) => {}
         }
     }
@@ -209,17 +211,35 @@ fn expand_stars_pipeline(clauses: &mut [Clause]) -> bool {
 /// Walks the query in execution order so that each star sees the scope that
 /// actually reaches it, including through `WITH` stages that narrow it.
 pub fn expand_stars(query: &mut Query) {
+    expand_stars_in(query, &[], &[]);
+}
+
+/// The names a `RETURN *` may produce: everything in scope but `hidden`.
+fn returnable(scope: &[String], hidden: &[String]) -> Vec<String> {
+    scope
+        .iter()
+        .filter(|n| !hidden.contains(n))
+        .cloned()
+        .collect()
+}
+
+/// [`expand_stars`] for a query that starts with `outer` already in scope: the
+/// body of a correlated `CALL { WITH a ... }`, which sees what it imports
+/// (#1606). Its `RETURN *` leaves out `hidden` -- the imports -- since a
+/// subquery may not return a name the outer query already binds, and Neo4j
+/// refuses the explicit form of exactly that.
+fn expand_stars_in(query: &mut Query, outer: &[String], hidden: &[String]) {
     // Each UNION branch is a query of its own, with its own scope: nothing
     // either side binds is visible to the other.
     for (branch, _) in query.union_queries.iter_mut() {
-        expand_stars(branch);
+        expand_stars_in(branch, outer, hidden);
     }
     // Both representations, always. The parser fills `clauses` even when the
     // by-kind fields can express the query, and mirrors the RETURN into
     // `return_clause` -- so expanding only one left a literal `*` in the other
     // for whatever reads it next.
     if !query.clauses.is_empty() {
-        query.star_expanded_to_nothing |= expand_stars_pipeline(&mut query.clauses);
+        query.star_expanded_to_nothing |= expand_stars_pipeline(&mut query.clauses, outer, hidden);
     }
     if query.needs_clause_pipeline {
         // The parser mirrors the pipeline's RETURN into `return_clause` before
@@ -237,7 +257,7 @@ pub fn expand_stars(query: &mut Query) {
         return;
     }
 
-    let mut scope: Vec<String> = Vec::new();
+    let mut scope: Vec<String> = outer.to_vec();
 
     // Only the matches *before* the first WITH are in scope when that WITH is
     // evaluated; the rest are added after it narrows scope.
@@ -261,7 +281,24 @@ pub fn expand_stars(query: &mut Query) {
             push_unique(&mut scope, item.alias.as_ref().unwrap_or(&item.name));
         }
     }
-    if let Some(cc) = &query.correlated_call {
+    if let Some(sub) = query.call_subquery.as_mut() {
+        // An uncorrelated `CALL { ... }` sees nothing from outside, so its
+        // stars expand against its own scope alone (#1606); the columns it
+        // returns then join the outer scope.
+        expand_stars_in(sub, &[], &[]);
+        if let Some(rc) = &sub.return_clause {
+            for name in with_output(&rc.items) {
+                push_unique(&mut scope, &name);
+            }
+        }
+    }
+    if let Some(cc) = query.correlated_call.as_mut() {
+        // A star in the body sees what the leading `WITH` imports -- every
+        // variable in scope here, for `WITH *` -- plus what the body binds
+        // (#1606). Expanded before the body's columns are read below, so a
+        // `RETURN *` in it exposes real names to the outer query.
+        let imported = cc.imports.clone().unwrap_or_else(|| scope.clone());
+        expand_stars_in(&mut cc.body, &imported, &imported);
         // `CALL { WITH a ... RETURN b }` adds the columns its body returns.
         // The grammar admits it only before the first WITH.
         if let Some(rc) = &cc.body.return_clause {
@@ -317,7 +354,7 @@ pub fn expand_stars(query: &mut Query) {
     }
 
     if let Some(rc) = query.return_clause.as_mut() {
-        empty_star |= expand_into(&mut rc.items, &scope);
+        empty_star |= expand_into(&mut rc.items, &returnable(&scope, hidden));
     }
     query.star_expanded_to_nothing |= empty_star;
 }

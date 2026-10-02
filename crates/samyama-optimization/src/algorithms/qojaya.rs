@@ -33,7 +33,7 @@ impl QOJayaSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -60,12 +60,12 @@ impl QOJayaSolver {
                 new_vars[j] = xqo.clamp(lower[j], upper[j]);
             }
             
-            let fitness = problem.fitness(&new_vars);
+            let fitness = crate::common::evaluate(problem, &new_vars);
             Individual::new(new_vars, fitness)
         }).collect();
         
         population.append(&mut qo_population);
-        population.sort_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap());
+        population.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
         population.truncate(self.config.population_size);
 
         let mut history = Vec::with_capacity(self.config.max_iterations);
@@ -100,7 +100,7 @@ impl QOJayaSolver {
                         new_vars[j] = val.clamp(lower[j], upper[j]);
                     }
 
-                    let jaya_fitness = problem.fitness(&new_vars);
+                    let jaya_fitness = crate::common::evaluate(problem, &new_vars);
                     if jaya_fitness < ind.fitness {
                         ind.variables = new_vars.clone();
                         ind.fitness = jaya_fitness;
@@ -123,7 +123,7 @@ impl QOJayaSolver {
                         qo_vars[j] = xqo.clamp(lower[j], upper[j]);
                     }
                     
-                    let qo_fitness = problem.fitness(&qo_vars);
+                    let qo_fitness = crate::common::evaluate(problem, &qo_vars);
                     if qo_fitness < ind.fitness {
                         ind.variables = qo_vars;
                         ind.fitness = qo_fitness;

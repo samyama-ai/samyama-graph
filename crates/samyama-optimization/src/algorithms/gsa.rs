@@ -39,7 +39,7 @@ impl GSASolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -114,7 +114,7 @@ impl GSASolver {
                     velocities[i][k] = rng.gen::<f64>() * velocities[i][k] + accelerations[i][k];
                     population[i].variables[k] = (population[i].variables[k] + velocities[i][k]).clamp(lower[k], upper[k]);
                 }
-                population[i].fitness = problem.fitness(&population[i].variables);
+                population[i].fitness = crate::common::evaluate(problem, &population[i].variables);
             }
         }
 

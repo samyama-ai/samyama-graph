@@ -42,7 +42,7 @@ impl BatSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -91,7 +91,7 @@ impl BatSolver {
                         temp_vars[j] = (temp_vars[j] + epsilon * avg_loudness).clamp(lower[j], upper[j]);
                     }
                     
-                    let temp_fitness = problem.fitness(&temp_vars);
+                    let temp_fitness = crate::common::evaluate(problem, &temp_vars);
                     
                     // Accept new solution
                     if temp_fitness < population[i].fitness && rng.gen::<f64>() < loudnesses[i] {
@@ -103,7 +103,8 @@ impl BatSolver {
                         emission_rates[i] = r0 * (1.0 - (-self.gamma * (iter as f64)).exp());
                     }
                 } else {
-                    population[i].fitness = problem.fitness(&population[i].variables);
+                    population[i].fitness =
+                        crate::common::evaluate(problem, &population[i].variables);
                 }
 
                 // Update global best

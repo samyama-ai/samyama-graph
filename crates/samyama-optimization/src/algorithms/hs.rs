@@ -40,7 +40,7 @@ impl HSSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -81,7 +81,7 @@ impl HSSolver {
                 }
             }
 
-            let new_fitness = problem.fitness(&new_vars);
+            let new_fitness = crate::common::evaluate(problem, &new_vars);
 
             // 3. Update Harmony Memory
             if new_fitness < hm[worst_idx].fitness {
@@ -90,7 +90,7 @@ impl HSSolver {
         }
 
         // Final sort to find best
-        hm.sort_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap());
+        hm.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
         let best = &hm[0];
 
         OptimizationResult {

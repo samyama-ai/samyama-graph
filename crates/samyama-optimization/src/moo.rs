@@ -113,9 +113,7 @@ pub fn crowding_distance(
     for m in 0..num_objectives {
         let mut sorted = indices.to_vec();
         sorted.sort_by(|&a, &b| {
-            population[a].fitness[m]
-                .partial_cmp(&population[b].fitness[m])
-                .unwrap_or(std::cmp::Ordering::Equal)
+            crate::common::ascending_nan_last(population[a].fitness[m], population[b].fitness[m])
         });
 
         let min_val = population[*sorted.first().unwrap()].fitness[m];
@@ -177,9 +175,7 @@ impl EliteArchive {
         // If still over capacity, drop lowest crowding distance (most crowded).
         if self.members.len() > self.capacity {
             self.members.sort_by(|a, b| {
-                b.crowding_distance
-                    .partial_cmp(&a.crowding_distance)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                crate::common::descending_nan_last(a.crowding_distance, b.crowding_distance)
             });
             self.members.truncate(self.capacity);
         }

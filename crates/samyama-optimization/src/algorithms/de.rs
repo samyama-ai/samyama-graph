@@ -38,7 +38,7 @@ impl DESolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -92,7 +92,7 @@ impl DESolver {
                     }
 
                     // Selection
-                    let trial_fitness = problem.fitness(&trial_vars);
+                    let trial_fitness = crate::common::evaluate(problem, &trial_vars);
                     if trial_fitness < target.fitness {
                         target.variables = trial_vars;
                         target.fitness = trial_fitness;

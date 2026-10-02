@@ -33,7 +33,7 @@ impl TLBOSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -66,7 +66,7 @@ impl TLBOSolver {
                         new_vars[j] = (ind.variables[j] + delta).clamp(lower[j], upper[j]);
                     }
 
-                    let new_fitness = problem.fitness(&new_vars);
+                    let new_fitness = crate::common::evaluate(problem, &new_vars);
                     if new_fitness < ind.fitness {
                         ind.variables = new_vars;
                         ind.fitness = new_fitness;
@@ -98,7 +98,7 @@ impl TLBOSolver {
                     new_vars[k] = (ind_i.variables[k] + delta).clamp(lower[k], upper[k]);
                 }
 
-                let new_fitness = problem.fitness(&new_vars);
+                let new_fitness = crate::common::evaluate(problem, &new_vars);
                 if new_fitness < population[i].fitness {
                     population[i].variables = new_vars;
                     population[i].fitness = new_fitness;

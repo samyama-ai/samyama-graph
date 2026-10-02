@@ -36,7 +36,7 @@ impl SASolver {
         for i in 0..dim {
             current_vars[i] = rng.gen_range(lower[i]..upper[i]);
         }
-        let mut current_fitness = problem.fitness(&current_vars);
+        let mut current_fitness = crate::common::evaluate(problem, &current_vars);
 
         let mut best_vars = current_vars.clone();
         let mut best_fitness = current_fitness;
@@ -64,7 +64,7 @@ impl SASolver {
                 next_vars[i] = (next_vars[i] + delta).clamp(lower[i], upper[i]);
             }
 
-            let next_fitness = problem.fitness(&next_vars);
+            let next_fitness = crate::common::evaluate(problem, &next_vars);
 
             // Acceptance probability
             let delta_e = next_fitness - current_fitness;

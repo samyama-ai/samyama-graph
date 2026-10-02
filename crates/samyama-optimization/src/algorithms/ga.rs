@@ -38,7 +38,7 @@ impl GASolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -78,11 +78,11 @@ impl GASolver {
                 self.mutate(&mut c2_vars, &lower, &upper);
 
                 // Add to new population
-                let f1 = problem.fitness(&c1_vars);
+                let f1 = crate::common::evaluate(problem, &c1_vars);
                 new_population.push(Individual::new(c1_vars, f1));
                 
                 if new_population.len() < self.config.population_size {
-                    let f2 = problem.fitness(&c2_vars);
+                    let f2 = crate::common::evaluate(problem, &c2_vars);
                     new_population.push(Individual::new(c2_vars, f2));
                 }
             }

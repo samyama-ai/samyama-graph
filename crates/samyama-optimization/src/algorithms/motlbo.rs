@@ -33,7 +33,7 @@ impl MOTLBOSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.objectives(&vars);
+                let fitness = crate::common::evaluate_objectives(problem, &vars);
                 let penalties = problem.penalties(&vars);
                 let violation: f64 = penalties.iter().sum();
                 MultiObjectiveIndividual::new(vars, fitness, violation)
@@ -61,7 +61,7 @@ impl MOTLBOSolver {
                     new_vars[j] = (ind.variables[j] + r * (teacher_vars[j] - tf * mean_vars[j])).clamp(lower[j], upper[j]);
                 }
                 
-                let fitness = problem.objectives(&new_vars);
+                let fitness = crate::common::evaluate_objectives(problem, &new_vars);
                 let penalties = problem.penalties(&new_vars);
                 let violation: f64 = penalties.iter().sum();
                 offspring.push(MultiObjectiveIndividual::new(new_vars, fitness, violation));
@@ -98,7 +98,7 @@ impl MOTLBOSolver {
                     }
                 }
                 
-                let fitness = problem.objectives(&new_vars);
+                let fitness = crate::common::evaluate_objectives(problem, &new_vars);
                 let penalties = problem.penalties(&new_vars);
                 let violation: f64 = penalties.iter().sum();
                 offspring.push(MultiObjectiveIndividual::new(new_vars, fitness, violation));
@@ -114,7 +114,7 @@ impl MOTLBOSolver {
                 if a.rank != b.rank {
                     a.rank.cmp(&b.rank)
                 } else {
-                    b.crowding_distance.partial_cmp(&a.crowding_distance).unwrap()
+                    crate::common::descending_nan_last(a.crowding_distance, b.crowding_distance)
                 }
             });
             
@@ -239,7 +239,7 @@ impl MOTLBOSolver {
 
         for m in 0..num_objectives {
             let mut sorted_indices = indices.to_vec();
-            sorted_indices.sort_by(|&a, &b| population[a].fitness[m].partial_cmp(&population[b].fitness[m]).unwrap());
+            sorted_indices.sort_by(|&a, &b| crate::common::ascending_nan_last(population[a].fitness[m], population[b].fitness[m]));
             
             let min_val = population[*sorted_indices.first().unwrap()].fitness[m];
             let max_val = population[*sorted_indices.last().unwrap()].fitness[m];

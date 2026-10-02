@@ -66,7 +66,7 @@ impl CuckooSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -107,7 +107,7 @@ impl CuckooSolver {
                     new_vars[j] = (current_vars[j] + delta_simple).clamp(lower[j], upper[j]);
                 }
 
-                let new_fitness = problem.fitness(&new_vars);
+                let new_fitness = crate::common::evaluate(problem, &new_vars);
                 
                 // Random selection of nest to replace?
                 // Standard: Pick a random nest j, replace if new is better.
@@ -123,7 +123,7 @@ impl CuckooSolver {
             // 3. Abandon worst nests (Alien eggs discovery)
             // Sort to find worst? Or just random pairwise?
             // Standard: Sort nests by fitness
-            nests.sort_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap());
+            nests.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
             
             // Keep best (elitism), replace fraction pa of the rest (the worst ones)
             let num_abandon = (self.config.population_size as f64 * self.pa) as usize;
@@ -143,7 +143,7 @@ impl CuckooSolver {
                     vars[j] = (nests[i].variables[j] + step).clamp(lower[j], upper[j]);
                 }
                 
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 nests[i] = Individual::new(vars, fitness);
                 
                 if fitness < best_ind.fitness {

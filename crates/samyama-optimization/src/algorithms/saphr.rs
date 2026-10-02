@@ -43,7 +43,7 @@ impl SAPHRSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -103,7 +103,7 @@ impl SAPHRSolver {
                         }
                     }
                     let rand_fit = if need_rand {
-                        problem.fitness(&rand_vars)
+                        crate::common::evaluate(problem, &rand_vars)
                     } else {
                         0.0
                     };
@@ -133,7 +133,7 @@ impl SAPHRSolver {
                         };
                         new_vars[j] = (ind.variables[j] + delta).clamp(lower[j], upper[j]);
                     }
-                    let new_fit = problem.fitness(&new_vars);
+                    let new_fit = crate::common::evaluate(problem, &new_vars);
                     let improved = new_fit < ind.fitness;
                     let updated = if improved {
                         Individual::new(new_vars, new_fit)

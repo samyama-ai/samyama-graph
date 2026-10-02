@@ -139,7 +139,7 @@ fn pipeline_pass_sets_the_empty_flag_only_for_return() {
             ..parse_query("RETURN 1").unwrap().return_clause.unwrap()
         }),
     ];
-    assert!(expand_stars_pipeline(&mut clauses));
+    assert!(expand_stars_pipeline(&mut clauses, &[], &[]));
 
     let mut only_with = vec![Clause::With(WithClause {
         items: vec![star_item()],
@@ -148,7 +148,7 @@ fn pipeline_pass_sets_the_empty_flag_only_for_return() {
             .with_clause
             .unwrap()
     })];
-    assert!(!expand_stars_pipeline(&mut only_with));
+    assert!(!expand_stars_pipeline(&mut only_with, &[], &[]));
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn pipeline_pass_ignores_foreach_and_non_binding_clauses() {
             ..parse_query("RETURN 1").unwrap().return_clause.unwrap()
         }),
     ];
-    assert!(!expand_stars_pipeline(&mut clauses));
+    assert!(!expand_stars_pipeline(&mut clauses, &[], &[]));
     match &clauses[2] {
         Clause::Return(rc) => {
             let names: Vec<String> = rc.items.iter().map(|i| i.column_name(0)).collect();

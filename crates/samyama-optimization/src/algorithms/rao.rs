@@ -41,7 +41,7 @@ impl RaoSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -82,7 +82,7 @@ impl RaoSolver {
                     // We assume fitness of random point is worse? Or compare?
                     // Standard Rao compares fitness. We'll compute it if needed.
                     let rand_fitness = if matches!(self.variant, RaoVariant::Rao2 | RaoVariant::Rao3) {
-                        problem.fitness(&rand_vars)
+                        crate::common::evaluate(problem, &rand_vars)
                     } else {
                         0.0
                     };
@@ -117,7 +117,7 @@ impl RaoSolver {
                         new_vars[j] = (ind.variables[j] + delta).clamp(lower[j], upper[j]);
                     }
 
-                    let new_fitness = problem.fitness(&new_vars);
+                    let new_fitness = crate::common::evaluate(problem, &new_vars);
                     if new_fitness < ind.fitness {
                         ind.variables = new_vars;
                         ind.fitness = new_fitness;

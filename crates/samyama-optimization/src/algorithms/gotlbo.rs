@@ -33,7 +33,7 @@ impl GOTLBOSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -67,7 +67,7 @@ impl GOTLBOSolver {
                         new_vars[j] = (ind.variables[j] + delta).clamp(lower[j], upper[j]);
                     }
 
-                    let new_fitness = problem.fitness(&new_vars);
+                    let new_fitness = crate::common::evaluate(problem, &new_vars);
                     
                     // Accept if better
                     if new_fitness < ind.fitness {
@@ -81,7 +81,7 @@ impl GOTLBOSolver {
                         // O = a + b - X
                         opp_vars[j] = (lower[j] + upper[j] - ind.variables[j]).clamp(lower[j], upper[j]);
                     }
-                    let opp_fitness = problem.fitness(&opp_vars);
+                    let opp_fitness = crate::common::evaluate(problem, &opp_vars);
 
                     if opp_fitness < ind.fitness {
                         ind.variables = opp_vars;
@@ -115,7 +115,7 @@ impl GOTLBOSolver {
                     new_vars[k] = (ind_i.variables[k] + delta).clamp(lower[k], upper[k]);
                 }
 
-                let new_fitness = problem.fitness(&new_vars);
+                let new_fitness = crate::common::evaluate(problem, &new_vars);
                 if new_fitness < population[i].fitness {
                     population[i].variables = new_vars;
                     population[i].fitness = new_fitness;
@@ -127,7 +127,7 @@ impl GOTLBOSolver {
                 for k in 0..dim {
                     opp_vars[k] = (lower[k] + upper[k] - ind_i_curr.variables[k]).clamp(lower[k], upper[k]);
                 }
-                let opp_fitness = problem.fitness(&opp_vars);
+                let opp_fitness = crate::common::evaluate(problem, &opp_vars);
 
                 if opp_fitness < population[i].fitness {
                     population[i].variables = opp_vars;

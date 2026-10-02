@@ -41,7 +41,7 @@ impl PSOSolver {
                 for i in 0..dim {
                     vars[i] = rng.gen_range(lower[i]..upper[i]);
                 }
-                let fitness = problem.fitness(&vars);
+                let fitness = crate::common::evaluate(problem, &vars);
                 Individual::new(vars, fitness)
             })
             .collect();
@@ -93,7 +93,7 @@ impl PSOSolver {
                         new_vars[j] = (particle.variables[j] + v).clamp(lower[j], upper[j]);
                     }
 
-                    let new_fitness = problem.fitness(&new_vars);
+                    let new_fitness = crate::common::evaluate(problem, &new_vars);
                     let new_ind = Individual::new(new_vars, new_fitness);
                     
                     let new_pbest = if new_fitness < pbest.fitness {
