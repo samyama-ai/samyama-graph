@@ -66,8 +66,15 @@ impl SASolver {
 
             let next_fitness = crate::common::evaluate(problem, &next_vars);
 
-            // Acceptance probability
-            let delta_e = next_fitness - current_fitness;
+            // Acceptance probability. Equal fitness is a zero step, accepted
+            // outright: `inf - inf` is NaN, which fails both tests below, so
+            // a walk that started where the objective is undefined (#1634
+            // maps NaN to +inf) could never leave that plateau.
+            let delta_e = if next_fitness == current_fitness {
+                0.0
+            } else {
+                next_fitness - current_fitness
+            };
             
             if delta_e < 0.0 || rng.gen::<f64>() < (-delta_e / temp).exp() {
                 current_vars = next_vars;
