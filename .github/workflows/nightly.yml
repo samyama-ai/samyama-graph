@@ -8,7 +8,7 @@ name: Nightly sweep
 #
 # It is nightly rather than per-PR (see ci.yml for the fast lane).
 #
-# ONE JOB PER STAGE, THIN LTO (#1626). As a single job it was cancelled at its
+# ONE JOB PER STAGE, LTO OFF (#1626). As a single job it was cancelled at its
 # 180-minute timeout on 29 of 30 nights through September 2026, still inside the
 # tests stage: `cargo test --workspace --release` links ~200 test binaries, and
 # [profile.release] is fat LTO with codegen-units = 1, at -j2 on a 4-vCPU
@@ -18,7 +18,14 @@ name: Nightly sweep
 # The CARGO_PROFILE_RELEASE_* overrides below apply to this workflow only.
 # Cargo.toml is untouched, so release artifacts and every published bench
 # number keep fat LTO. Here they buy link time, which is all this job needs:
-# it answers pass/fail, and thin and fat LTO do not change program semantics.
+# it answers pass/fail, and LTO does not change program semantics (opt-level
+# stays 3, so release-only code paths are still the ones tested).
+#
+# Off, not thin: the workspace links ~520 binaries (397 integration tests,
+# 120 examples, benches). Measured on vm-1, the same 20 test binaries at -j4
+# took 1,262 s with thin LTO and 115 s with LTO off (63 s vs 5.8 s each); the
+# library itself took ~595 s either way. With thin LTO the branch run still
+# had not finished the tests stage after 2h47m, and the examples job died.
 #
 # PASS/FAIL ONLY. The bench timings produced here are on a shared hosted
 # runner and are not comparable between runs -- do not quote them. Published
@@ -34,7 +41,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
-  CARGO_PROFILE_RELEASE_LTO: thin
+  CARGO_PROFILE_RELEASE_LTO: "off"
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
 jobs:
