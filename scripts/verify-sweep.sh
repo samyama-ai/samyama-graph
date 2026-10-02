@@ -141,8 +141,16 @@ if ! step benches; then
   echo "=== benches ===" > "${RESULTS}/benches.txt"
   for b in $(find benches -maxdepth 1 -name '*.rs' -exec basename {} .rs \; | sort); do
     start=$(date +%s)
-    timeout 1800 cargo bench --bench "$b" -- \
-      --warm-up-time 1 --measurement-time 3 --sample-size 10 \
+    # The short settings are criterion flags. A bench with its own harness
+    # (`harness = false` and no `criterion_main!`) refuses flags it does not
+    # know -- deliberately, so an ignored setting cannot produce a number
+    # nobody chose -- and ldbc_benchmark exited 64 here on every run.
+    if grep -q "criterion_main!" "benches/${b}.rs"; then
+      flags=(--warm-up-time 1 --measurement-time 3 --sample-size 10)
+    else
+      flags=()
+    fi
+    timeout 1800 cargo bench --bench "$b" -- "${flags[@]}" \
       >"${LOGS}/bench-${b}.log" 2>&1
     rc=$?
     printf "%-10s %-34s %4ss\n" \
