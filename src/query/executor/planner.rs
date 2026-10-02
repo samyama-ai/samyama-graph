@@ -1957,6 +1957,20 @@ impl QueryPlanner {
             // standalone and joined: `MATCH (m:Post {id: $id})-[:HAS_CREATOR]->(op)
             // MATCH (op)-[:KNOWS]-(f) RETURN count(f)` scanned every `:Person`
             // and hash-joined back to the one node already resolved (#711).
+            if operator.is_some() {
+                if let Some(path) = Self::bound_shortest_path(match_clause, &known_vars) {
+                    let upstream = operator.take().unwrap();
+                    let (current_op, new_vars) = self.plan_bound_shortest_path(
+                        path,
+                        per_match_where[match_idx].as_ref(),
+                        &known_vars,
+                        upstream,
+                    );
+                    operator = Some(current_op);
+                    known_vars.extend(new_vars);
+                    continue;
+                }
+            }
             if Self::can_pushdown_match(match_clause, &known_vars) && operator.is_some() {
                 let upstream = operator.take().unwrap();
                 let (current_op, new_vars) = self.plan_pushed_down_match(
@@ -2515,7 +2529,23 @@ impl QueryPlanner {
 
             // Plan each MATCH clause
             for (match_idx, match_clause) in stage_matches.iter().enumerate() {
-                if Self::can_pushdown_match(match_clause, &known_vars) && operator.is_some() {
+                let bound_shortest = if operator.is_some() {
+                    Self::bound_shortest_path(match_clause, &known_vars)
+                } else {
+                    None
+                };
+                if let Some(path) = bound_shortest {
+                    let upstream = operator.take().unwrap();
+                    let (current_op, new_vars) = self.plan_bound_shortest_path(
+                        path,
+                        per_match_where[match_idx].as_ref(),
+                        &known_vars,
+                        upstream,
+                    );
+                    operator = Some(current_op);
+                    known_vars.extend(new_vars);
+                } else if Self::can_pushdown_match(match_clause, &known_vars) && operator.is_some()
+                {
                     let upstream = operator.take().unwrap();
                     let (current_op, new_vars) = self.plan_pushed_down_match(
                         match_clause,
@@ -8495,6 +8525,153 @@ impl QueryPlanner {
             return None;
         }
         Some(introduced)
+    }
+
+    /// A `shortestPath` clause whose start the pipeline already bound (#1633).
+    ///
+    /// `can_pushdown_match` declines every shortest path, so the clause was
+    /// planned standalone -- a scan of each endpoint's label crossed with the
+    /// other, a search per pair -- and hash-joined back to the rows that had
+    /// already pinned both ends:
+    ///
+    /// ```text
+    /// MATCH (a:Account), (b:Account) WHERE a.id = 5 AND b.id = 40
+    /// MATCH p = shortestPath((a)-[:TRANSFER*]-(b)) RETURN length(p)
+    /// ```
+    ///
+    /// ran N^2 searches to keep one: 28 s and 8 GB at 1,000 nodes, killed by
+    /// the OOM killer at 40,000, where the same query with inline properties
+    /// took 60 us. The search only needs each incoming row's two endpoints, so
+    /// it runs over the incoming rows instead.
+    ///
+    /// Only the shape the standalone plan handles the same way: one path, one
+    /// segment, no relationship variable or relationship properties (neither
+    /// plan binds or checks them), and a path variable not already bound.
+    fn bound_shortest_path<'a>(
+        match_clause: &'a MatchClause,
+        known_vars: &HashSet<String>,
+    ) -> Option<&'a PathPattern> {
+        if match_clause.optional || match_clause.pattern.paths.len() != 1 {
+            return None;
+        }
+        let path = &match_clause.pattern.paths[0];
+        if !matches!(path.path_type, PathType::Shortest | PathType::AllShortest)
+            || path.segments.len() != 1
+        {
+            return None;
+        }
+        let seg = &path.segments[0];
+        let start = path.start.variable.as_ref()?;
+        let target = seg.node.variable.as_ref()?;
+        if !known_vars.contains(start) || start == target {
+            return None;
+        }
+        if seg.edge.variable.is_some()
+            || seg.edge.properties.as_ref().is_some_and(|p| !p.is_empty())
+            || seg.edge.property_exprs.is_some()
+            || path.start.property_exprs.is_some()
+            || seg.node.property_exprs.is_some()
+        {
+            return None;
+        }
+        if path
+            .path_variable
+            .as_ref()
+            .is_some_and(|v| known_vars.contains(v))
+        {
+            return None;
+        }
+        Some(path)
+    }
+
+    /// Plan the clause `bound_shortest_path` accepted over `upstream`.
+    ///
+    /// The start is bound, so its labels and inline properties become a
+    /// filter on the incoming rows. A bound target is treated the same way; an
+    /// unbound one is scanned once and crossed with the incoming rows, which
+    /// is what the standalone plan did with it too. Returns the operator and
+    /// the variables the clause introduced.
+    fn plan_bound_shortest_path(
+        &self,
+        path: &PathPattern,
+        where_clause: Option<&WhereClause>,
+        known_vars: &HashSet<String>,
+        upstream: OperatorBox,
+    ) -> (OperatorBox, HashSet<String>) {
+        let seg = &path.segments[0];
+        let start = path.start.variable.clone().unwrap();
+        let target = seg.node.variable.clone().unwrap();
+        let mut new_vars = HashSet::new();
+
+        let endpoint_filter = |var: &str, node: &NodePattern| -> Vec<Expression> {
+            let mut conds = Vec::new();
+            if !node.labels.is_empty() {
+                conds.push(Expression::Function {
+                    name: "hasLabels".to_string(),
+                    args: vec![
+                        Expression::Variable(var.to_string()),
+                        Expression::Literal(PropertyValue::Array(
+                            node.labels
+                                .iter()
+                                .map(|l| PropertyValue::String(l.as_str().to_string()))
+                                .collect(),
+                        )),
+                    ],
+                    distinct: false,
+                });
+            }
+            if let Some(props) = node.properties.as_ref().filter(|p| !p.is_empty()) {
+                conds.push(self.build_property_filter(var, props));
+            }
+            conds
+        };
+
+        let mut input = upstream;
+        let mut conds = endpoint_filter(&start, &path.start);
+        if known_vars.contains(&target) {
+            conds.extend(endpoint_filter(&target, &seg.node));
+        } else {
+            let mut scan: OperatorBox = Box::new(NodeScanOperator::new(
+                target.clone(),
+                seg.node.labels.clone(),
+            ));
+            if let Some(props) = seg.node.properties.as_ref().filter(|p| !p.is_empty()) {
+                scan = Box::new(FilterOperator::new(
+                    scan,
+                    self.build_property_filter(&target, props),
+                ));
+            }
+            input = Box::new(CartesianProductOperator::new(input, scan));
+            new_vars.insert(target.clone());
+        }
+        if let Some(pred) = conds.into_iter().reduce(|acc, c| Expression::Binary {
+            left: Box::new(acc),
+            op: BinaryOp::And,
+            right: Box::new(c),
+        }) {
+            input = Box::new(FilterOperator::new(input, pred));
+        }
+
+        let mut op: OperatorBox = Box::new(ShortestPathOperator::new(
+            input,
+            start,
+            target,
+            path.path_variable.clone(),
+            seg.edge
+                .types
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect(),
+            seg.edge.direction.clone(),
+            matches!(path.path_type, PathType::AllShortest),
+        ));
+        if let Some(pv) = &path.path_variable {
+            new_vars.insert(pv.clone());
+        }
+        if let Some(wc) = where_clause {
+            op = Box::new(FilterOperator::new(op, wc.predicate.clone()));
+        }
+        (op, new_vars)
     }
 
     fn can_pushdown_match(match_clause: &MatchClause, known_vars: &HashSet<String>) -> bool {

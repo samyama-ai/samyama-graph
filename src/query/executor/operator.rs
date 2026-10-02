@@ -20616,6 +20616,18 @@ impl ShortestPathOperator {
         let type_filter = type_ids.as_deref();
 
         while let Some(record) = self.input.next(store)? {
+            // A null endpoint -- an OPTIONAL MATCH upstream that found
+            // nothing -- has no path, as it has no match when the endpoints
+            // are scanned and joined (#1633).
+            let is_null = |var: &str| {
+                matches!(
+                    record.get(var),
+                    Some(Value::Null | Value::Property(PropertyValue::Null))
+                )
+            };
+            if is_null(&self.source_var) || is_null(&self.target_var) {
+                continue;
+            }
             let source_id = record.get(&self.source_var)
                 .and_then(|v| v.node_id())
                 .ok_or_else(|| ExecutionError::RuntimeError("shortestPath source not a node".to_string()))?;
