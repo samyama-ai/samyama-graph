@@ -37,7 +37,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
     let one = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
-    let data_dir = one("--data-dir").map(PathBuf::from).expect("--data-dir <path> is required");
+    let data_dir = one("--data-dir").map(PathBuf::from).unwrap_or_else(|| {
+            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
+            std::process::exit(2)
+        });
     let runs: usize = one("--runs").map(|s| s.parse()).transpose()?.unwrap_or(11);
     let explain = args.iter().any(|a| a == "--explain");
 

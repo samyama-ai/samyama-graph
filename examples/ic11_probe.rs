@@ -40,9 +40,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
-    let data_dir = arg("--data-dir").map(PathBuf::from).expect("--data-dir <path> is required");
-    let person_id: i64 = arg("--person-id").expect("--person-id <id> is required").parse()?;
-    let org_name = arg("--org-name").expect("--org-name <name> is required").clone();
+    let data_dir = arg("--data-dir").map(PathBuf::from).unwrap_or_else(|| {
+            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
+            std::process::exit(2)
+        });
+    let person_id: i64 = arg("--person-id").unwrap_or_else(|| {
+            eprintln!("--person-id <id> is required (this example needs input; see the header comment)");
+            std::process::exit(2)
+        }).parse()?;
+    let org_name = arg("--org-name").unwrap_or_else(|| {
+            eprintln!("--org-name <name> is required (this example needs input; see the header comment)");
+            std::process::exit(2)
+        }).clone();
     let runs: usize = arg("--runs").map(|s| s.parse()).transpose()?.unwrap_or(7);
 
     let mut graph = GraphStore::new();

@@ -44,7 +44,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .position(|a| a == "--data-dir")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
-        .expect("--data-dir <path> is required");
+        .unwrap_or_else(|| {
+            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
+            std::process::exit(2)
+        });
 
     let arm = std::env::var("SAMYAMA_EXISTS_PIN_LOOKUP").unwrap_or_else(|_| "1".into());
 
