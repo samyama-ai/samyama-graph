@@ -916,7 +916,10 @@ fn handle_index_event_maintains_property_and_vector_indexes() {
         None,
     );
     assert!(idx.read().unwrap().get(&s("a")).contains(&id));
-    let hits = store.vector_search("Doc", "v", &[1.0, 0.0], 1).unwrap();
+    let hits = store
+        .vector_index
+        .search("Doc", "v", &[1.0, 0.0], 1)
+        .unwrap();
     assert_eq!(hits[0].0, id);
 
     store.handle_index_event(
@@ -945,7 +948,10 @@ fn handle_index_event_maintains_property_and_vector_indexes() {
         },
         None,
     );
-    let hits = store.vector_search("Doc", "v", &[0.0, 1.0], 1).unwrap();
+    let hits = store
+        .vector_index
+        .search("Doc", "v", &[0.0, 1.0], 1)
+        .unwrap();
     assert_eq!(hits[0].0, other);
 
     let third = NodeId::new(9);
@@ -960,7 +966,11 @@ fn handle_index_event_maintains_property_and_vector_indexes() {
     );
     assert!(idx.read().unwrap().get(&s("c")).contains(&third));
     assert_eq!(
-        store.vector_search("Doc", "v", &[0.7, 0.7], 1).unwrap()[0].0,
+        store
+            .vector_index
+            .search("Doc", "v", &[0.7, 0.7], 1)
+            .unwrap()[0]
+            .0,
         third
     );
 

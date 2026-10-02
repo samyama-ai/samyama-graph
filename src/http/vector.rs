@@ -768,6 +768,14 @@ mod tests {
         std::fs::write(&meta_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let old = state_with_model(Some("model-b"));
         old.store.read().await.vector_index.load_all(dir.path()).unwrap();
+        // The graph the index was dumped beside: search returns only nodes
+        // that exist and carry the label (#1605).
+        {
+            let mut store = old.store.write().await;
+            for _ in 0..2 {
+                store.create_node("Doc");
+            }
+        }
         assert_eq!(old.store.read().await.vector_index.model_id("Doc", "embedding"), None);
         let (status, body) = text_search(&old, Some("Doc")).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{}", body);

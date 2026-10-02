@@ -15345,7 +15345,9 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                                         store.remove_edge_property(edge_id, prop);
                                     }
                                     Value::Property(pv) => {
-                                        let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                        store
+                                            .set_edge_property(edge_id, prop.clone(), pv)
+                                            .map_err(write_error)?;
                                     }
                                     _ => {}
                                 }
@@ -15381,7 +15383,9 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                             .map_err(write_error)?;
 
                         for (key, value) in properties {
-                            let _ = store.set_edge_property(edge_id, key.clone(), value.clone());
+                            store
+                                .set_edge_property(edge_id, key.clone(), value.clone())
+                                .map_err(write_error)?;
                         }
 
                         for (var, prop, expr) in &self.on_create_set {
@@ -15393,7 +15397,9 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                                         store.remove_edge_property(edge_id, prop);
                                     }
                                     Value::Property(pv) => {
-                                        let _ = store.set_edge_property(edge_id, prop.clone(), pv);
+                                        store
+                                            .set_edge_property(edge_id, prop.clone(), pv)
+                                            .map_err(write_error)?;
                                     }
                                     _ => {}
                                 }
@@ -17791,7 +17797,14 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             if let Some(best) = res.pareto_front.first() {
                 for (i, &val) in best.variables.iter().enumerate() {
                     let node_id = node_ids[i];
-                    let _ = store.set_node_property(tenant_id, node_id, property.to_string(), PropertyValue::Float(val));
+                    store
+                        .set_node_property(
+                            tenant_id,
+                            node_id,
+                            property.to_string(),
+                            PropertyValue::Float(val),
+                        )
+                        .map_err(write_error)?;
                 }
             }
 
@@ -17853,7 +17866,14 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             // 4. Write back results
             for (i, &val) in result.best_variables.iter().enumerate() {
                 let node_id = node_ids[i];
-                let _ = store.set_node_property(tenant_id, node_id, property.to_string(), PropertyValue::Float(val));
+                store
+                    .set_node_property(
+                        tenant_id,
+                        node_id,
+                        property.to_string(),
+                        PropertyValue::Float(val),
+                    )
+                    .map_err(write_error)?;
             }
 
             // 5. Return result record
@@ -18793,7 +18813,7 @@ fn apply_entity_assignment(
                 }
             }
             for (k, v) in incoming {
-                let _ = store.set_edge_property(id, k, v);
+                store.set_edge_property(id, k, v).map_err(write_error)?;
             }
         }
         _ => {}
@@ -18980,7 +19000,9 @@ impl PhysicalOperator for SetPropertyOperator {
                             if remove {
                                 store.remove_edge_property(*id, prop);
                             } else {
-                                let _ = store.set_edge_property(*id, prop.clone(), val.clone());
+                                store
+                                    .set_edge_property(*id, prop.clone(), val.clone())
+                                    .map_err(write_error)?;
                             }
                         }
                         _ => {}
@@ -20197,7 +20219,9 @@ self.apply_sets(&sets, &record, store, tenant_id)?;
                     store.remove_node_property(node_id, prop);
                 }
                 Value::Property(pv) => {
-                    let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+                    store
+                        .set_node_property(tenant_id, node_id, prop.clone(), pv)
+                        .map_err(write_error)?;
                 }
                 _ => {}
             }
@@ -20336,7 +20360,9 @@ impl PhysicalOperator for MergeOperator {
                 if var == &start_var {
                     let val = eval_expression(expr, &record, store)?;
                     if let Value::Property(pv) = val {
-                        let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+                        store
+                            .set_node_property(tenant_id, node_id, prop.clone(), pv)
+                            .map_err(write_error)?;
                     }
                 }
             }
@@ -20355,7 +20381,9 @@ impl PhysicalOperator for MergeOperator {
                     if var == &start_var {
                         let val = eval_expression(expr, &r, store)?;
                         if let Value::Property(pv) = val {
-                            let _ = store.set_node_property(tenant_id, *extra, prop.clone(), pv);
+                            store
+                                .set_node_property(tenant_id, *extra, prop.clone(), pv)
+                                .map_err(write_error)?;
                         }
                     }
                 }
@@ -20390,7 +20418,9 @@ impl PhysicalOperator for MergeOperator {
                             store.remove_node_property(node_id, prop);
                         }
                         Value::Property(pv) => {
-                            let _ = store.set_node_property(tenant_id, node_id, prop.clone(), pv);
+                            store
+                                .set_node_property(tenant_id, node_id, prop.clone(), pv)
+                                .map_err(write_error)?;
                         }
                         _ => {}
                     }

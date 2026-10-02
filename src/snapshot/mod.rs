@@ -696,9 +696,22 @@ pub fn import_tenant_with_dedup(
     // so the caller saw an error and a partially-populated graph, with no way to tell how
     // much of it had landed (#199). Track what this import creates and undo it on failure.
     let mut created_nodes: Vec<crate::graph::NodeId> = Vec::new();
-    match import_tenant_inner(store, reader, dedup_keys, &mut created_nodes) {
+    // What a dedup merge added to nodes that existed before this import, undone
+    // too: a refused import must leave existing nodes as it found them (#1604).
+    let mut merged: Vec<MergeUndo> = Vec::new();
+    match import_tenant_inner(store, reader, dedup_keys, &mut created_nodes, &mut merged) {
         Ok(stats) => Ok(stats),
         Err(e) => {
+            for undo in merged.into_iter().rev() {
+                match undo {
+                    MergeUndo::Label(id, label) => {
+                        let _ = store.remove_label_from_node(id, &label);
+                    }
+                    MergeUndo::Property(id, key) => {
+                        store.remove_node_property(id, &key);
+                    }
+                }
+            }
             // Reverse order so edges go with their endpoints.
             for id in created_nodes.iter().rev() {
                 let _ = store.delete_node("default", *id);
@@ -708,11 +721,18 @@ pub fn import_tenant_with_dedup(
     }
 }
 
+/// One addition a dedup merge made to a node that existed before the import.
+enum MergeUndo {
+    Label(NodeId, Label),
+    Property(NodeId, String),
+}
+
 fn import_tenant_inner(
     store: &mut GraphStore,
     reader: impl Read,
     dedup_keys: &[&str],
     created_nodes: &mut Vec<crate::graph::NodeId>,
+    merged: &mut Vec<MergeUndo>,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
     let decoder = GzDecoder::new(reader);
     let buf_reader = BufReader::new(decoder);
@@ -866,6 +886,7 @@ fn import_tenant_inner(
                             match existing {
                                 PropertyValue::Null => {
                                     store.set_column_property(eid, key, pv);
+                                    merged.push(MergeUndo::Property(eid, key.clone()));
                                 }
                                 _ => {} // Keep existing value
                             }
@@ -880,6 +901,7 @@ fn import_tenant_inner(
                                 PropertyValue::Null
                             ) {
                                 store.set_column_property(eid, key, pv.clone());
+                                merged.push(MergeUndo::Property(eid, key.clone()));
                             }
                             if let Some(node) = store.get_node_mut(eid) {
                                 if node.get_property(key).is_none() {
@@ -892,8 +914,29 @@ fn import_tenant_inner(
 
                 // Same reason as above: through the store, so `label_index`
                 // learns about a label a deduped node did not already carry.
+                //
+                // A label the store refuses -- one that would give a UNIQUE key a
+                // second holder (#1590) -- refuses the import: the node would
+                // otherwise arrive short of a label, and the import report success
+                // (#1604).
                 for label in &snap_node.labels {
-                    let _ = store.add_label_to_node("default", eid, Label::new(label.as_str()));
+                    let label = Label::new(label.as_str());
+                    let had = store
+                        .get_node(eid)
+                        .is_some_and(|n| n.labels.contains(&label));
+                    store
+                        .add_label_to_node("default", eid, label.clone())
+                        .map_err(|e| {
+                            format!(
+                                "snapshot node {} merged into node {}: label :{} refused: {e}",
+                                snap_node.id,
+                                eid.as_u64(),
+                                label.as_str()
+                            )
+                        })?;
+                    if !had {
+                        merged.push(MergeUndo::Label(eid, label));
+                    }
                 }
 
                 // Track labels

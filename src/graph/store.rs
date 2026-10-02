@@ -1792,7 +1792,62 @@ NodeDeleted { .. } => {
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
     }
 
-    /// Create a node with multiple labels and properties
+    /// Create a node with multiple labels and properties, refusing one that
+    /// would give a `UNIQUE` key a second holder (#1603).
+    ///
+    /// Checked before anything is written, so a refused node leaves no id, no
+    /// label entry and no index entry behind. The refusal has the form
+    /// [`set_node_property`](Self::set_node_property) uses. Use this wherever
+    /// constraints can exist; [`create_node_with_properties`] does not check.
+    ///
+    /// [`create_node_with_properties`]: Self::create_node_with_properties
+    pub fn try_create_node_with_properties(
+        &mut self,
+        tenant_id: &str,
+        labels: Vec<Label>,
+        properties: PropertyMap,
+    ) -> GraphResult<NodeId> {
+        if self.property_index.has_any_unique_constraints() {
+            for label in &labels {
+                for (key, value) in &properties {
+                    if value.is_null() || !self.property_index.has_unique_constraint(label, key) {
+                        continue;
+                    }
+                    // Holders checked against the node as it stands, as
+                    // `find_node_by_unique` does, so an index entry a delete
+                    // failed to drop does not refuse a legal node.
+                    let holder = self
+                        .property_index
+                        .unique_constraint_holders(label, key, value)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|&id| {
+                            self.get_node(id).is_some_and(|n| n.labels.contains(label))
+                                && self.node_property(id, key).as_ref() == Some(value)
+                        })
+                        .min();
+                    if let Some(holder) = holder {
+                        return Err(GraphError::ConstraintViolation(format!(
+                            ":{}({}) already has value {:?} on node {}",
+                            label.as_str(),
+                            key,
+                            value,
+                            holder
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(self.create_node_with_properties(tenant_id, labels, properties))
+    }
+
+    /// Create a node with multiple labels and properties.
+    ///
+    /// **Unchecked**: it does not enforce `UNIQUE` constraints, because it
+    /// cannot refuse (#1603). It is for bulk loads into a graph that declares
+    /// its constraints afterwards, where checking every node would only cost.
+    /// Anywhere a constraint may already exist, use
+    /// [`try_create_node_with_properties`](Self::try_create_node_with_properties).
     pub fn create_node_with_properties(
         &mut self,
         tenant_id: &str,
@@ -2476,6 +2531,9 @@ NodeDeleted { .. } => {
                 .constraint_remove(label, key, value, node_id);
         }
 
+        // The planner's count for the label goes down with it (#1605).
+        self.catalog.on_label_removed(label);
+
         // `label_index` changes here, so the derived bitsets are stale (#730).
         self.invalidate_label_bits();
         if let Some(members) = self.label_index.get_mut(label) {
@@ -2605,8 +2663,12 @@ NodeDeleted { .. } => {
             .or_default()
             .insert(node_id);
 
-        // Update catalog label count
-        self.catalog.on_label_added(&label);
+        // Counted once per node: adding a label the node already has is not a
+        // new member, and counting it again left the planner's cardinality for
+        // the label too high (#1605).
+        if !had {
+            self.catalog.on_label_added(&label);
+        }
 
         let event = crate::graph::event::IndexEvent::LabelAdded {
             tenant_id: tenant_id.to_string(),
@@ -5870,8 +5932,8 @@ NodeDeleted { .. } => {
     /// Each candidate is checked against the node as it stands -- alive, still
     /// carrying `label`, still holding `value` -- so an index entry some write
     /// path failed to drop answers `None`, not the wrong node. Two nodes
-    /// holding the key, which only `create_node_with_properties` can produce
-    /// because it cannot refuse, is a `ConstraintViolation` rather than a pick.
+    /// holding the key, which only the unchecked `create_node_with_properties`
+    /// can produce, is a `ConstraintViolation` rather than a pick.
     pub fn find_node_by_unique(
         &self,
         label: &Label,
@@ -6144,13 +6206,26 @@ NodeDeleted { .. } => {
         query: &[f32],
         k: usize,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
-        self.vector_index.search(label, property_key, query, k)
+        // Only nodes that still carry the label: the HNSW graph cannot drop a
+        // node, so one that lost the label, or was deleted, is still in it and
+        // must not be returned (#1605).
+        let label_key = Label::new(label);
+        self.vector_index
+            .search_filtered(label, property_key, query, k, |id| {
+                self.get_node(id)
+                    .is_some_and(|n| n.labels.contains(&label_key))
+            })
     }
 
     /// Vector search across ALL indices (every label + property), merged to a
     /// global top-k. Backs the "no label given" default in the vector-search API.
     pub fn vector_search_all(&self, query: &[f32], k: usize) -> VectorResult<Vec<(NodeId, f32)>> {
-        self.vector_index.search_all(query, k)
+        // Per index, only nodes that still carry its label (#1605).
+        self.vector_index
+            .search_all_filtered(query, k, |label, id| {
+                self.get_node(id)
+                    .is_some_and(|n| n.labels.iter().any(|l| l.as_str() == label))
+            })
     }
 
     /// Resolve the FULL property set of a node: inline `Node.properties` HashMap
@@ -7618,14 +7693,15 @@ mod tests {
 
     #[test]
     fn test_vector_search_with_data() {
-        let store = GraphStore::new();
+        let mut store = GraphStore::new();
         // Create a 4-dimensional index
         store.create_vector_index("Document", "embedding", 4, crate::vector::DistanceMetric::Cosine).unwrap();
 
-        // Add some vectors
-        let n1 = NodeId::new(1);
-        let n2 = NodeId::new(2);
-        let n3 = NodeId::new(3);
+        // Add some vectors, for nodes that exist and carry the label: search
+        // returns no other (#1605).
+        let n1 = store.create_node("Document");
+        let n2 = store.create_node("Document");
+        let n3 = store.create_node("Document");
         let v1 = vec![1.0, 0.0, 0.0, 0.0];
         let v2 = vec![0.0, 1.0, 0.0, 0.0];
         let v3 = vec![0.9, 0.1, 0.0, 0.0]; // close to v1

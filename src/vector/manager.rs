@@ -286,6 +286,64 @@ impl VectorIndexManager {
         Ok(merged)
     }
 
+    /// [`search`](Self::search), keeping only the nodes `keep` accepts, still
+    /// returning up to `k` of them (#1605).
+    ///
+    /// The HNSW graph has no delete, so a node that lost the indexed label (or
+    /// was deleted) is still in it. Asking for `k` and filtering would return
+    /// fewer than `k`, so the search widens until it has `k` kept nodes or has
+    /// looked at every vector. A node indexed twice -- it lost the label and
+    /// regained it -- is returned once, at its best distance.
+    pub fn search_filtered(
+        &self,
+        label: &str,
+        property_key: &str,
+        query: &[f32],
+        k: usize,
+        keep: impl Fn(NodeId) -> bool,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        let Some(index_lock) = self.get_index(label, property_key) else {
+            return Ok(Vec::new());
+        };
+        let index = index_lock.read().unwrap();
+        widen(index.len(), k, |fetch| index.search(query, fetch), &keep)
+    }
+
+    /// [`search_all`](Self::search_all), keeping only the `(label, node)` pairs
+    /// `keep` accepts (#1605).
+    pub fn search_all_filtered(
+        &self,
+        query: &[f32],
+        k: usize,
+        keep: impl Fn(&str, NodeId) -> bool,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        let mut best: HashMap<NodeId, f32> = HashMap::new();
+        for key in self.list_indices() {
+            if let Some(index_lock) = self.get_index(&key.label, &key.property_key) {
+                let index = index_lock.read().unwrap();
+                if index.dimensions() != query.len() {
+                    continue;
+                }
+                let kept = widen(index.len(), k, |fetch| index.search(query, fetch), &|id| {
+                    keep(&key.label, id)
+                })?;
+                for (node_id, distance) in kept {
+                    best.entry(node_id)
+                        .and_modify(|d| {
+                            if distance < *d {
+                                *d = distance;
+                            }
+                        })
+                        .or_insert(distance);
+                }
+            }
+        }
+        let mut merged: Vec<(NodeId, f32)> = best.into_iter().collect();
+        merged.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        merged.truncate(k);
+        Ok(merged)
+    }
+
     /// Drop and rebuild a specific HNSW index from a caller-supplied vector list.
     ///
     /// Snapshot import (create_node_stub / create_node) bypasses the event loop
@@ -578,5 +636,32 @@ mod tests {
         std::fs::write(dir.path().join("metadata.json"), b"not json").unwrap();
         let mgr = VectorIndexManager::new();
         assert!(mgr.load_all(dir.path()).is_err());
+    }
+}
+
+/// Search with a growing fetch size until `k` results pass `keep`, or the
+/// index has nothing more to give. Results keep the search's order, which is
+/// nearest first; a node already taken is skipped.
+fn widen(
+    len: usize,
+    k: usize,
+    search: impl Fn(usize) -> VectorResult<Vec<(NodeId, f32)>>,
+    keep: &dyn Fn(NodeId) -> bool,
+) -> VectorResult<Vec<(NodeId, f32)>> {
+    // No shortcut for an empty index or `k == 0`: the search itself runs at
+    // least once, so its checks -- a query of the wrong dimension -- still
+    // refuse.
+    let mut fetch = k.min(len);
+    loop {
+        let mut seen = std::collections::HashSet::new();
+        let kept: Vec<(NodeId, f32)> = search(fetch)?
+            .into_iter()
+            .filter(|(id, _)| seen.insert(*id) && keep(*id))
+            .take(k)
+            .collect();
+        if kept.len() >= k || fetch >= len {
+            return Ok(kept);
+        }
+        fetch = (fetch * 2).min(len);
     }
 }
