@@ -40,9 +40,11 @@ impl Problem for HospitalGraphProblem {
         let store = self.graph.read().unwrap();
 
         for (i, &dept_id) in self.dept_ids.iter().enumerate() {
-            let dept_node = store.get_node(dept_id).expect("Node missing");
-            let demand = match dept_node.properties.get("demand").unwrap() {
-                PropertyValue::Float(v) => *v,
+            // `node_property`, not `node.properties`: properties set through
+            // `create_node_with_properties` live in the columnar store, and the
+            // node's own map is empty, so this panicked on every run.
+            let demand = match store.node_property(dept_id, "demand").expect("demand missing") {
+                PropertyValue::Float(v) => v,
                 _ => 10.0,
             };
 
@@ -52,9 +54,8 @@ impl Problem for HospitalGraphProblem {
                 let quantity = variables[var_idx];
 
                 let res_id = self.resource_ids[j];
-                let res_node = store.get_node(res_id).expect("Res missing");
-                let efficiency = match res_node.properties.get("efficiency").unwrap() {
-                    PropertyValue::Float(v) => *v,
+                let efficiency = match store.node_property(res_id, "efficiency").expect("efficiency missing") {
+                    PropertyValue::Float(v) => v,
                     _ => 1.0,
                 };
 
@@ -76,9 +77,8 @@ impl Problem for HospitalGraphProblem {
 
         for j in 0..num_resources_per_dept {
             let res_id = self.resource_ids[j];
-            let res_node = store.get_node(res_id).unwrap();
-            let cost = match res_node.properties.get("cost").unwrap() {
-                PropertyValue::Float(v) => *v,
+            let cost = match store.node_property(res_id, "cost").expect("cost missing") {
+                PropertyValue::Float(v) => v,
                 _ => 0.0,
             };
 
