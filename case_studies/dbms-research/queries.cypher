@@ -11,10 +11,13 @@ RETURN t.name AS topic, count(p) AS open_problems
 ORDER BY open_problems DESC
 LIMIT 8;
 
-// @query Most-cited papers in the corpus | Citation impact within the research graph
-MATCH (p:Paper)<-[:CITES]-(citing:Paper)
-RETURN p.title AS paper, p.year AS year, count(citing) AS citations
-ORDER BY citations DESC
+// CITES runs Problem -> Paper in this KG (6,107 edges, none Paper -> Paper), so
+// the citing side is the problem. A Paper -> Paper pattern returned 0 rows and
+// failed the DoD gate on every run.
+// @query Most-cited papers in the corpus | Papers the most open problems cite as evidence
+MATCH (p:Paper)<-[:CITES]-(problem:Problem)
+RETURN p.title AS paper, p.year AS year, count(problem) AS citing_problems
+ORDER BY citing_problems DESC
 LIMIT 5;
 
 // @query Most prolific authors | Researchers attached to the most papers in the corpus
