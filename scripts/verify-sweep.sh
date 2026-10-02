@@ -53,6 +53,30 @@ mkdir -p "$LOGS" "$RESULTS" "$MARKS"
 # A stage is skipped when it already ran (its marker exists) or when --only
 # names other stages. A skipped stage writes no results file, and the summary
 # and exit code below count only the stages that ran.
+# Run one example with a 300 s timeout and a resident-memory cap. Exit 251
+# means the cap fired. Without it, one runaway example (#1633: 31 GB) takes the
+# whole job down -- on a 16 GB hosted runner the job died with exit 143 and
+# uploaded nothing, so every other example's result was lost with it. RSS is
+# polled rather than capped with `ulimit -v`, because an address-space limit
+# also counts mimalloc's reserved-but-unused ranges and would fire falsely.
+EXAMPLE_MEM_MB="${EXAMPLE_MEM_MB:-6144}"
+run_capped() {
+  timeout 300 "$1" >"$2" 2>&1 &
+  local pid=$! child rss
+  while kill -0 "$pid" 2>/dev/null; do
+    child=$(pgrep -P "$pid" | head -1)
+    rss=$(awk '/^VmRSS:/{print int($2/1024)}' "/proc/${child:-$pid}/status" 2>/dev/null)
+    if [ -n "$rss" ] && [ "$rss" -gt "$EXAMPLE_MEM_MB" ]; then
+      kill -9 "${child:-$pid}" "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      echo "verify-sweep: killed at ${rss} MB RSS (cap EXAMPLE_MEM_MB=${EXAMPLE_MEM_MB})" >>"$2"
+      return 251
+    fi
+    sleep 1
+  done
+  wait "$pid"
+}
+
 step() {
   [ -f "${MARKS}/$1" ] && return 0
   [ -n "$ONLY" ] && [[ ",${ONLY}," != *",$1,"* ]] && return 0
@@ -118,10 +142,12 @@ if ! step examples; then
       *_server*|server_*|*_client*|agentic_enrichment_demo|mesh_scale_bench|ontology_loader|hier_export_csv)
         printf "%-14s %s\n" "SKIP" "$ex" >> "${RESULTS}/examples.txt"; continue ;;
     esac
-    timeout 300 "./target/release/examples/${ex}" >"${LOGS}/example-${ex}.log" 2>&1
+    run_capped "./target/release/examples/${ex}" "${LOGS}/example-${ex}.log"
     rc=$?
     if [ $rc -eq 0 ]; then
       r="OK"
+    elif [ $rc -eq 251 ]; then
+      r="OOM"
     elif grep -q "panicked at" "${LOGS}/example-${ex}.log"; then
       r="PANIC${rc}"
     else
@@ -196,7 +222,7 @@ cat "${RESULTS}/run.txt"
 R="${RESULTS}"
 c() { grep -c "$1" "$2"; }
 [ -f "$R/tests.txt" ]        && echo "tests:        $(sed -n 2p "$R/tests.txt")"
-[ -f "$R/examples.txt" ]     && echo "examples:     OK=$(c '^OK' "$R/examples.txt") PANIC=$(c '^PANIC' "$R/examples.txt") other=$(grep -cE '^(NEEDS-INPUT|SKIP)' "$R/examples.txt")"
+[ -f "$R/examples.txt" ]     && echo "examples:     OK=$(c '^OK' "$R/examples.txt") PANIC=$(c '^PANIC' "$R/examples.txt") OOM=$(c '^OOM' "$R/examples.txt") other=$(grep -cE '^(NEEDS-INPUT|SKIP)' "$R/examples.txt")"
 [ -f "$R/benches.txt" ]      && echo "benches:      OK=$(c '^OK' "$R/benches.txt") FAIL=$(c '^FAIL' "$R/benches.txt")"
 [ -f "$R/case-studies.txt" ] && echo "case studies: OK=$(c '^OK' "$R/case-studies.txt") SKIP=$(c '^SKIP' "$R/case-studies.txt") FAIL=$(c '^FAIL' "$R/case-studies.txt")"
 echo
@@ -207,7 +233,7 @@ echo "results in ${RESULTS}"
 fails=0
 [ ! -f "$R/tests.txt" ]        || grep -q "failed=0" "$R/tests.txt" || fails=1
 [ ! -f "$R/tests.txt" ]        || grep -q "^exit=0" "$R/tests.txt" || fails=1
-[ ! -f "$R/examples.txt" ]     || [ "$(c '^PANIC' "$R/examples.txt")" -eq 0 ] || fails=1
+[ ! -f "$R/examples.txt" ]     || [ "$(grep -cE '^(PANIC|OOM)' "$R/examples.txt")" -eq 0 ] || fails=1
 [ ! -f "$R/examples.txt" ]     || grep -q "^build=0" "$R/examples.txt" || fails=1
 [ ! -f "$R/benches.txt" ]      || [ "$(c '^FAIL' "$R/benches.txt")" -eq 0 ] || fails=1
 [ ! -f "$R/case-studies.txt" ] || [ "$(c '^FAIL' "$R/case-studies.txt")" -eq 0 ] || fails=1
