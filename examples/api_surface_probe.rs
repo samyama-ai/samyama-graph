@@ -81,19 +81,56 @@ async fn main() {
     println!("TRUST-06 proxies: {}/3 {proxies:?}", proxies.len());
     println!("  response keys: {top:?}");
 
-    // API-07 -- streamed or buffered. A `Content-Length` means the whole body
-    // was materialized before the first byte went out; chunked would not have
-    // one. This reads the actual response rather than the handler's type.
+    // API-07 -- streamed or buffered. Asked twice, because streaming is opt-in
+    // (#1554): without `Accept: application/x-ndjson` the server answers one
+    // JSON document, and that is the expected answer, not a failure.
+    //
+    // The first version of this check looked for `transfer-encoding: chunked`.
+    // That header is added by hyper on a real connection; a router called with
+    // `oneshot`, as here, never carries it, so the check could only ever print
+    // "buffered" -- it kept reading buffered after #1554 shipped a stream. What
+    // the router does show is the body itself: a buffered body is one frame with
+    // a Content-Length, a streamed one arrives as several frames with none.
     let len = headers.get("content-length").and_then(|v| v.to_str().ok()).map(str::to_string);
-    let te = headers.get("transfer-encoding").and_then(|v| v.to_str().ok()).map(str::to_string);
     let rows = body.get("records").and_then(|r| r.as_array()).map(|a| a.len()).unwrap_or(0);
     println!(
-        "API-07 rows={rows} content-length={} transfer-encoding={}",
-        len.clone().unwrap_or_else(|| "-".into()),
-        te.clone().unwrap_or_else(|| "-".into())
+        "API-07 default rows={rows} content-length={}",
+        len.clone().unwrap_or_else(|| "-".into())
     );
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/query")
+        .header("content-type", "application/json")
+        .header("accept", "application/x-ndjson")
+        .body(Body::from(
+            serde_json::json!({ "query": "MATCH (n:Row) RETURN n.i", "graph": "default" })
+                .to_string(),
+        ))
+        .unwrap();
+    let resp = server.router().oneshot(req).await.expect("router answers");
+    let nd_len = resp.headers().get("content-length").is_some();
+    let mut body = resp.into_body();
+    let (mut frames, mut text) = (0usize, Vec::new());
+    while let Some(frame) = body.frame().await {
+        if let Ok(data) = frame.expect("body frame").into_data() {
+            frames += 1;
+            text.extend_from_slice(&data);
+        }
+    }
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&text)
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let nd_rows = lines.iter().filter(|v| v.get("row").is_some()).count();
+    let done = lines.last().and_then(|v| v.get("done")).and_then(|v| v.as_bool()) == Some(true);
     println!(
-        "  verdict: {}",
-        if te.as_deref() == Some("chunked") { "streamed" } else { "buffered" }
+        "API-07 ndjson frames={frames} content-length={} rows={nd_rows} trailer_done={done}",
+        if nd_len { "present" } else { "-" }
     );
+    // All four, because each alone has a cheap false positive: one frame is a
+    // buffered body in a different format, a missing trailer is a truncated
+    // stream, a short row count is a stream that lost rows.
+    let streamed = frames > 1 && !nd_len && nd_rows == 2_000 && done;
+    println!("  verdict: {}", if streamed { "streamed" } else { "buffered" });
 }
