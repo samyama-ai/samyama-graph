@@ -137,7 +137,7 @@ jobs:
           .venv/bin/python -m pytest -q -rs \
             tests/test_embedded.py tests/test_vector.py \
             tests/test_async_client.py tests/test_notebook_magic.py \
-            tests/test_connection.py \
+            tests/test_connection.py tests/test_stream.py \
             | tee /tmp/pytest.out
           if grep -qE '[0-9]+ skipped' /tmp/pytest.out; then
             echo "::error::a suite skipped. These tests exist because the thing \

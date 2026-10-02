@@ -55,7 +55,7 @@ except ImportError as exc:  # pragma: no cover
         "`maturin develop` in sdk/python."
     ) from exc
 
-__all__ = ["AsyncSamyamaClient"]
+__all__ = ["AsyncSamyamaClient", "AsyncQueryStream"]
 
 _T = TypeVar("_T")
 
@@ -130,6 +130,18 @@ class AsyncSamyamaClient:
 
     async def query_readonly(self, cypher: str, graph: str = "default") -> Any:
         return await _to_thread(self._client.query_readonly, cypher, graph)
+
+    async def query_stream(self, cypher: str, graph: str = "default") -> "AsyncQueryStream":
+        """Stream a read query's rows (#1632); see ``SamyamaClient.query_stream``.
+
+        Each row is fetched on a worker thread, so the loop keeps running
+        while the server produces it::
+
+            async for row in await db.query_stream("MATCH (n) RETURN n.name AS name"):
+                ...
+        """
+        stream = await _to_thread(self._client.query_stream, cypher, graph)
+        return AsyncQueryStream(stream)
 
     async def nlq(self, question: str) -> str:
         return await _to_thread(self._client.nlq, question)
@@ -221,3 +233,42 @@ class AsyncSamyamaClient:
 
     def __repr__(self) -> str:
         return f"AsyncSamyamaClient({self._client!r})"
+
+
+class AsyncQueryStream:
+    """An async iterator over a :class:`samyama.QueryStream` (#1632).
+
+    ``aclose()`` -- or leaving an ``async with`` block -- closes the connection,
+    so the server stops producing rows the caller will not read.
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    @property
+    def columns(self) -> List[str]:
+        return list(self._stream.columns)
+
+    def __aiter__(self) -> "AsyncQueryStream":
+        return self
+
+    async def __anext__(self) -> Dict[str, Any]:
+        row = await _to_thread(_next_or_none, self._stream)
+        if row is None:
+            raise StopAsyncIteration
+        return row
+
+    async def aclose(self) -> None:
+        self._stream.close()
+
+    async def __aenter__(self) -> "AsyncQueryStream":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        self._stream.close()
+
+
+def _next_or_none(stream: Any) -> Optional[Dict[str, Any]]:
+    """`next(stream)`, with the end as ``None`` -- a StopIteration cannot cross
+    the thread boundary as one."""
+    return next(stream, None)

@@ -67,9 +67,30 @@ export class SamyamaClient {
     return this.http.query(cypher, graph);
   }
 
-  /** Execute a read-only Cypher query */
+  /**
+   * Execute a read-only Cypher query. The server refuses it, before it runs,
+   * if it writes (#1628).
+   */
   async queryReadonly(cypher: string, graph: string = "default"): Promise<QueryResult> {
-    return this.http.query(cypher, graph);
+    return this.http.query(cypher, graph, { readOnly: true });
+  }
+
+  /**
+   * Stream a read query's rows as they are produced, each an object keyed by
+   * column (#1632). Stop early with `break`; the server stops with you.
+   *
+   * ```ts
+   * for await (const row of client.queryStream("MATCH (n) RETURN n.name AS name")) {
+   *   console.log(row.name);
+   * }
+   * ```
+   */
+  queryStream(
+    cypher: string,
+    graph: string = "default",
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<Record<string, unknown>, void, undefined> {
+    return this.http.queryStream(cypher, graph, opts);
   }
 
   /**

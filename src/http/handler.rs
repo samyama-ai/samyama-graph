@@ -39,6 +39,15 @@ pub struct QueryRequest {
     /// [`crate::query::bind`] for the JSON type mapping.
     #[serde(default)]
     pub params: HashMap<String, serde_json::Value>,
+    /// Refuse the statement if it writes (#1628).
+    ///
+    /// What the SDKs' `query_readonly` / `queryReadonly` set. They used to post
+    /// to this route with nothing that said so, and a `DETACH DELETE` handed to
+    /// the "read-only" call ran. The parser decides, as it does for
+    /// `GRAPH.RO_QUERY` and `/api/nlq`; a refused statement is answered 403
+    /// before anything runs.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// The request's parameters as bound values, or the 400 the caller gets.
@@ -405,6 +414,33 @@ fn merged_node_properties(
         .collect()
 }
 
+/// The 403 a `read_only` request gets for a statement that writes (#1628),
+/// or `None` when it may run.
+///
+/// A statement that does not parse is let through: it fails with its parse
+/// error on the read path, which cannot write.
+fn read_only_refusal(state: &AppState, payload: &QueryRequest) -> Option<axum::response::Response> {
+    if !payload.read_only
+        || !state
+            .engine
+            .statement_is_write(&payload.query)
+            .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "this request is read-only (`read_only: true`) and the statement \
+                          writes; it was not run. Send it without `read_only` to write.",
+                "code": crate::query::error_code::WRITE_IN_READ,
+            })),
+        )
+            .into_response(),
+    )
+}
+
 pub async fn query_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
@@ -441,6 +477,10 @@ pub async fn query_handler(
             })),
         )
             .into_response();
+    }
+
+    if let Some(refusal) = read_only_refusal(&state, &payload) {
+        return refusal;
     }
 
     let params = match bound_params(&payload) {

@@ -7,7 +7,7 @@ use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::types::PyDict;
 use samyama_sdk::{
-    ConnectionConfig, EmbeddedClient, RemoteClient, SamyamaClient as SamyamaClientTrait,
+    ConnectionConfig, EmbeddedClient, RemoteClient, RowStream, SamyamaClient as SamyamaClientTrait,
     QueryResult as SdkQueryResult,
     AlgorithmClient, PageRankConfig, PcaConfig,
     VectorClient, DistanceMetric, NodeId,
@@ -60,6 +60,79 @@ impl QueryResult {
     #[getter]
     fn edges(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         json_to_py(py, &serde_json::Value::Array(self.edges_json.clone()))
+    }
+}
+
+/// The rows of a streamed query, one dict per row keyed by column (#1632).
+///
+/// Iterating pulls rows from the server as they are needed; nothing is
+/// buffered whole. Stopping early -- `break`, `close()`, leaving a `with`
+/// block, or dropping the iterator -- closes the connection, and the server
+/// stops producing rows. A server error, or a body that ends without its
+/// trailer, raises `RuntimeError` from the iteration.
+#[pyclass]
+struct QueryStream {
+    #[pyo3(get)]
+    columns: Vec<String>,
+    inner: Option<StreamSource>,
+}
+
+enum StreamSource {
+    Remote(RowStream),
+    /// Embedded mode: the engine is in-process, so there is no connection to
+    /// stream over; the rows are the query's result, iterated.
+    Buffered(std::vec::IntoIter<Vec<serde_json::Value>>),
+}
+
+#[pymethods]
+impl QueryStream {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let row = match slf.inner.as_mut() {
+            None => return Ok(None),
+            Some(StreamSource::Buffered(rows)) => rows.next(),
+            Some(StreamSource::Remote(stream)) => {
+                let next = py.detach(|| get_runtime().block_on(stream.next_row()));
+                match next {
+                    Ok(row) => row,
+                    Err(e) => {
+                        slf.inner = None;
+                        return Err(PyRuntimeError::new_err(e.to_string()));
+                    }
+                }
+            }
+        };
+        let Some(row) = row else {
+            slf.inner = None;
+            return Ok(None);
+        };
+        let dict = PyDict::new(py);
+        for (col, value) in slf.columns.iter().zip(row.iter()) {
+            dict.set_item(col, json_to_py(py, value)?)?;
+        }
+        Ok(Some(dict.into_any().unbind()))
+    }
+
+    /// Stop reading: closes the connection, so the server stops producing.
+    fn close(&mut self) {
+        self.inner = None;
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc: Option<Py<PyAny>>,
+        _tb: Option<Py<PyAny>>,
+    ) -> bool {
+        self.inner = None;
+        false
     }
 }
 
@@ -264,6 +337,41 @@ impl SamyamaClient {
         match result {
             Ok(r) => convert_query_result(r),
             Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
+    /// Run a read query and iterate its rows as the server produces them,
+    /// one dict per row (#1632).
+    ///
+    /// ```python
+    /// for row in client.query_stream("MATCH (n:Person) RETURN n.name AS name"):
+    ///     print(row["name"])
+    /// ```
+    ///
+    /// Remote mode streams with backpressure over `application/x-ndjson`; a
+    /// write is refused before it runs. Embedded mode has no connection to
+    /// stream over and iterates the read query's result.
+    #[pyo3(signature = (cypher, graph="default"))]
+    fn query_stream(&self, py: Python<'_>, cypher: &str, graph: &str) -> PyResult<QueryStream> {
+        match &*self.inner {
+            ClientInner::Remote(c) => {
+                let stream = py
+                    .detach(|| get_runtime().block_on(c.query_stream(graph, cypher)))
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                Ok(QueryStream {
+                    columns: stream.columns().to_vec(),
+                    inner: Some(StreamSource::Remote(stream)),
+                })
+            }
+            ClientInner::Embedded(c) => {
+                let result = py
+                    .detach(|| get_runtime().block_on(c.query_readonly(graph, cypher)))
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                Ok(QueryStream {
+                    columns: result.columns,
+                    inner: Some(StreamSource::Buffered(result.records.into_iter())),
+                })
+            }
         }
     }
 
@@ -586,5 +694,6 @@ fn samyama(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SamyamaClient>()?;
     m.add_class::<QueryResult>()?;
     m.add_class::<ServerStatus>()?;
+    m.add_class::<QueryStream>()?;
     Ok(())
 }

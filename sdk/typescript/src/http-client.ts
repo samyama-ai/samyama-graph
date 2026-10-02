@@ -147,17 +147,113 @@ export class HttpTransport {
   async query(
     cypher: string,
     graph: string = "default",
-    opts?: RequestOptions,
+    opts?: RequestOptions & { readOnly?: boolean },
   ): Promise<QueryResult> {
+    // `read_only` makes the server refuse a write before it runs (#1628);
+    // only sent when asked, so a plain query's body is what it always was.
+    const body: Record<string, unknown> = { query: cypher, graph };
+    if (opts?.readOnly) body.read_only = true;
     return this.json<QueryResult>(
       "/api/query",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: cypher, graph }),
+        body: JSON.stringify(body),
       },
       opts,
     );
+  }
+
+  /**
+   * Stream a read query's rows as the server produces them (API-07, #1632).
+   *
+   * Sends `Accept: application/x-ndjson` and reads the body incrementally, so
+   * a large result is never held whole on either end. Each row is an object
+   * keyed by column. Stopping early (`break` out of `for await`) cancels the
+   * body, which closes the connection and stops the server producing rows.
+   *
+   * The stream ends with the server's trailer: `{"done": true}` ends it,
+   * `{"error": ...}` throws, and a body that ends with no trailer throws too,
+   * since that is a result cut off rather than a complete one (#1554). The
+   * request is sent `read_only`, so a write is refused before it runs.
+   *
+   * The transport's timeout bounds the wait for the response, not the stream:
+   * a long result that keeps arriving is not cut off.
+   */
+  async *queryStream(
+    cypher: string,
+    graph: string = "default",
+    opts: { signal?: AbortSignal } = {},
+  ): AsyncGenerator<Record<string, unknown>, void, undefined> {
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(opts.signal?.reason);
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    const deadline = setTimeout(
+      () => controller.abort(new DOMException("timed out", "TimeoutError")),
+      this.options.timeoutMs,
+    );
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/api/query`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/x-ndjson",
+        },
+        body: JSON.stringify({ query: cypher, graph, read_only: true }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(deadline);
+    }
+    if (!response.ok) return HttpTransport.fail(response);
+    if (!response.body) throw new Error("the stream response has no body");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    let columns: string[] | undefined;
+    let finished = false;
+    try {
+      for (;;) {
+        let nl: number;
+        while ((nl = buffered.indexOf("\n")) >= 0) {
+          const text = buffered.slice(0, nl).trim();
+          buffered = buffered.slice(nl + 1);
+          if (!text) continue;
+          const line = JSON.parse(text) as Record<string, unknown>;
+          if (columns === undefined) {
+            if (!Array.isArray(line.columns)) {
+              throw new Error(`the stream's first line is not a header: ${text}`);
+            }
+            columns = line.columns as string[];
+          } else if (Array.isArray(line.row)) {
+            const row: Record<string, unknown> = {};
+            (line.row as unknown[]).forEach((v, i) => (row[columns![i]] = v));
+            yield row;
+          } else if (line.done === true) {
+            finished = true;
+            return;
+          } else if ("error" in line) {
+            finished = true;
+            throw new Error(String(line.error));
+          } else {
+            throw new Error(`unexpected line in the stream: ${text}`);
+          }
+        }
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffered += decoder.decode(value, { stream: true });
+      }
+      throw new Error("the stream ended without a trailer; the result is incomplete");
+    } finally {
+      opts.signal?.removeEventListener("abort", onAbort);
+      if (!finished) {
+        // An early stop, or an error: release the connection so the server
+        // stops producing rows nobody will read.
+        await reader.cancel().catch(() => undefined);
+      }
+    }
   }
 
   /**

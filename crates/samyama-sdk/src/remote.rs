@@ -283,7 +283,7 @@ impl RemoteClient {
             quote(property)
         );
         let params = serde_json::json!({ "key": value.to_json() });
-        let result = self.post_query_with(graph, &cypher, params).await?;
+        let result = self.post_query_with(graph, &cypher, params, true).await?;
         let ids = result
             .records
             .iter()
@@ -302,21 +302,99 @@ impl RemoteClient {
         }
     }
 
+    /// Run a read query and receive its rows as they are produced (API-07,
+    /// #1632), rather than as one buffered document.
+    ///
+    /// Sends `Accept: application/x-ndjson`, so the server streams the result
+    /// with backpressure: rows are read from the socket as
+    /// [`RowStream::next_row`] asks for them, and dropping the stream closes
+    /// the connection, which stops the server producing more. Only autocommit
+    /// reads stream; the server refuses a write (406), and the request is sent
+    /// `read_only`, so a write is refused before it runs.
+    ///
+    /// [`ConnectionConfig::timeout`] bounds the wait for the response and for
+    /// each chunk after it, not the stream as a whole: a large result that
+    /// keeps arriving is not cut off at 30 s, and one that stalls is.
+    pub async fn query_stream(&self, graph: &str, cypher: &str) -> SamyamaResult<RowStream> {
+        let url = format!("{}/api/query", self.http_base_url);
+        let body = serde_json::json!({ "query": cypher, "graph": graph, "read_only": true });
+        // The client-wide timeout is a deadline for the whole body, which a
+        // stream must not have; the per-wait bound below replaces it.
+        let whole_stream = std::time::Duration::from_secs(60 * 60 * 24 * 365);
+        let send = self.send_with_retry(|| {
+            self.http_client
+                .post(&url)
+                .header(reqwest::header::ACCEPT, NDJSON)
+                .timeout(whole_stream)
+                .json(&body)
+        });
+        let response = bounded(self.config.timeout, send).await??;
+        if !response.status().is_success() {
+            let error_body: serde_json::Value = response
+                .json()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({"error": "Unknown error"}));
+            let msg = error_body
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error")
+                .to_string();
+            return Err(SamyamaError::QueryError(msg));
+        }
+        let mut stream = RowStream {
+            response,
+            buffer: Vec::new(),
+            columns: Vec::new(),
+            stall: self.config.timeout,
+            finished: false,
+        };
+        // The header line names the columns; reading it here means a caller
+        // has them before the first row.
+        match stream.next_line().await? {
+            Some(line) => match line.get("columns").and_then(|c| c.as_array()) {
+                Some(cols) => {
+                    stream.columns = cols
+                        .iter()
+                        .map(|c| c.as_str().unwrap_or_default().to_string())
+                        .collect()
+                }
+                None => {
+                    return Err(SamyamaError::ProtocolError(format!(
+                        "the stream's first line is not a header: {line}"
+                    )))
+                }
+            },
+            None => {
+                return Err(SamyamaError::ProtocolError(
+                    "the stream ended before its header".to_string(),
+                ))
+            }
+        }
+        Ok(stream)
+    }
+
     /// Execute a POST request to /api/query
     async fn post_query(&self, graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
-        self.post_query_with(graph, cypher, serde_json::json!({}))
+        self.post_query_with(graph, cypher, serde_json::json!({}), false)
             .await
     }
 
     /// Execute a POST request to /api/query with bound `params`.
+    ///
+    /// `read_only` asks the server to refuse the statement if it writes
+    /// (#1628), rather than trusting the method name the caller chose.
     async fn post_query_with(
         &self,
         graph: &str,
         cypher: &str,
         params: serde_json::Value,
+        read_only: bool,
     ) -> SamyamaResult<QueryResult> {
         let url = format!("{}/api/query", self.http_base_url);
         let mut body = serde_json::json!({ "query": cypher, "graph": graph });
+        if read_only {
+            body["read_only"] = serde_json::Value::Bool(true);
+        }
         // Only when there are some, so a plain query's body is what it always was.
         if params.as_object().is_some_and(|p| !p.is_empty()) {
             body["params"] = params;
@@ -347,8 +425,10 @@ impl SamyamaClient for RemoteClient {
         self.post_query(graph, cypher).await
     }
 
+    /// Refused by the server, before it runs, if the statement writes (#1628).
     async fn query_readonly(&self, graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
-        self.post_query(graph, cypher).await
+        self.post_query_with(graph, cypher, serde_json::json!({}), true)
+            .await
     }
 
     async fn delete_graph(&self, graph: &str) -> SamyamaResult<()> {
@@ -385,6 +465,97 @@ impl SamyamaClient for RemoteClient {
             Err(SamyamaError::ConnectionError(
                 format!("Server unhealthy: {}", status.status)
             ))
+        }
+    }
+}
+
+const NDJSON: &str = "application/x-ndjson";
+
+/// `fut`, or a timeout error if `limit` passes first. `None` waits forever.
+async fn bounded<T>(
+    limit: Option<std::time::Duration>,
+    fut: impl std::future::Future<Output = T>,
+) -> SamyamaResult<T> {
+    match limit {
+        None => Ok(fut.await),
+        Some(d) => tokio::time::timeout(d, fut).await.map_err(|_| {
+            SamyamaError::ConnectionError(format!("no data from the server for {d:?}"))
+        }),
+    }
+}
+
+/// The rows of a streamed query ([`RemoteClient::query_stream`]).
+///
+/// Each row is a list of values in [`columns`](Self::columns) order, as in
+/// `QueryResult::records`. The stream ends with the server's trailer: `Ok(None)`
+/// after `{"done": true}`, an error after `{"error": ...}`, and an error too if
+/// the body ends with no trailer at all, since that is a result cut off rather
+/// than a complete one (#1554).
+pub struct RowStream {
+    response: reqwest::Response,
+    buffer: Vec<u8>,
+    columns: Vec<String>,
+    stall: Option<std::time::Duration>,
+    finished: bool,
+}
+
+impl RowStream {
+    /// The result's column names, from the stream's header.
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+
+    /// The next row, `None` once the stream has ended cleanly.
+    pub async fn next_row(&mut self) -> SamyamaResult<Option<Vec<serde_json::Value>>> {
+        if self.finished {
+            return Ok(None);
+        }
+        let Some(line) = self.next_line().await? else {
+            self.finished = true;
+            return Err(SamyamaError::ProtocolError(
+                "the stream ended without a trailer; the result is incomplete".to_string(),
+            ));
+        };
+        if let Some(row) = line.get("row").and_then(|r| r.as_array()) {
+            return Ok(Some(row.clone()));
+        }
+        self.finished = true;
+        if line.get("done").and_then(|d| d.as_bool()) == Some(true) {
+            return Ok(None);
+        }
+        if let Some(err) = line.get("error") {
+            return Err(SamyamaError::QueryError(
+                err.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| err.to_string()),
+            ));
+        }
+        Err(SamyamaError::ProtocolError(format!(
+            "unexpected line in the stream: {line}"
+        )))
+    }
+
+    /// The next complete line as JSON, reading chunks as needed. `None` at the
+    /// end of the body.
+    async fn next_line(&mut self) -> SamyamaResult<Option<serde_json::Value>> {
+        loop {
+            if let Some(nl) = self.buffer.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = self.buffer.drain(..=nl).collect();
+                let text = &line[..line.len() - 1];
+                if text.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
+                return Ok(Some(serde_json::from_slice(text)?));
+            }
+            match bounded(self.stall, self.response.chunk()).await?? {
+                Some(chunk) => self.buffer.extend_from_slice(&chunk),
+                None if self.buffer.iter().all(u8::is_ascii_whitespace) => return Ok(None),
+                // A last line without its newline is still a line.
+                None => {
+                    let rest = std::mem::take(&mut self.buffer);
+                    return Ok(Some(serde_json::from_slice(&rest)?));
+                }
+            }
         }
     }
 }

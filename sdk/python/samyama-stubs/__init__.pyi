@@ -19,7 +19,7 @@ argument gets one value and is told another.
 
 from typing import Any, Final
 
-__all__ = ["SamyamaClient", "QueryResult", "ServerStatus"]
+__all__ = ["SamyamaClient", "QueryResult", "QueryStream", "ServerStatus"]
 
 class QueryResult:
     """One query's answer: a table, plus the graph elements it referenced."""
@@ -49,6 +49,21 @@ class ServerStatus:
     @property
     def edges(self) -> int: ...
     def __repr__(self) -> str: ...
+
+class QueryStream:
+    """Rows of a streamed query, one dict per row keyed by column (#1632).
+
+    Stopping early (`break`, `close()`, leaving a `with` block) closes the
+    connection and the server stops producing rows.
+    """
+
+    @property
+    def columns(self) -> list[str]: ...
+    def __iter__(self) -> "QueryStream": ...
+    def __next__(self) -> dict[str, Any]: ...
+    def close(self) -> None: ...
+    def __enter__(self) -> "QueryStream": ...
+    def __exit__(self, *exc: Any) -> bool: ...
 
 class SamyamaClient:
     """Embedded or remote. `embedded()` and `connect()` are the constructors.
@@ -80,6 +95,9 @@ class SamyamaClient:
     def query(self, cypher: str, graph: str = "default") -> QueryResult: ...
     def query_readonly(self, cypher: str, graph: str = "default") -> QueryResult:
         """Refuses a write rather than performing one."""
+        ...
+    def query_stream(self, cypher: str, graph: str = "default") -> QueryStream:
+        """Iterate a read query's rows as the server produces them, one dict per row."""
         ...
     def nlq(self, question: str) -> str:
         """Translate a question into read-only Cypher on the server; remote mode only.
