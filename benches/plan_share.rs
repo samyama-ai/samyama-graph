@@ -52,7 +52,9 @@ fn main() {
         let label = samyama::Label::new("Person");
         let nodes = store.get_nodes_by_label(&label);
         let node = nodes.first().expect("no Person nodes loaded");
-        node.properties.get("id").map(|v| format!("{v}"))
+        // `node_property`, not `node.properties`: the loader's columnar store
+        // can hold the id, and the node's own map is then empty for it.
+        store.node_property(node.id, "id").map(|v| format!("{v}"))
             .expect("Person has no id property")
     };
     eprintln!("using personId {person_id}");
