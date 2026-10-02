@@ -221,20 +221,27 @@ cat "${RESULTS}/run.txt"
 # read as a failure of the others.
 R="${RESULTS}"
 c() { grep -c "$1" "$2"; }
-[ -f "$R/tests.txt" ]        && echo "tests:        $(sed -n 2p "$R/tests.txt")"
-[ -f "$R/examples.txt" ]     && echo "examples:     OK=$(c '^OK' "$R/examples.txt") PANIC=$(c '^PANIC' "$R/examples.txt") OOM=$(c '^OOM' "$R/examples.txt") other=$(grep -cE '^(NEEDS-INPUT|SKIP)' "$R/examples.txt")"
-[ -f "$R/benches.txt" ]      && echo "benches:      OK=$(c '^OK' "$R/benches.txt") FAIL=$(c '^FAIL' "$R/benches.txt")"
-[ -f "$R/case-studies.txt" ] && echo "case studies: OK=$(c '^OK' "$R/case-studies.txt") SKIP=$(c '^SKIP' "$R/case-studies.txt") FAIL=$(c '^FAIL' "$R/case-studies.txt")"
+# With --only, judge only the named stages. A results file another run left
+# behind (a resumed local sweep) must not fail -- or pass -- this one.
+judged() { [ -z "$ONLY" ] || [[ ",${ONLY}," == *",$1,"* ]]; }
+T="$R/tests.txt";        judged tests       || T=/nonexistent
+E="$R/examples.txt";     judged examples    || E=/nonexistent
+B="$R/benches.txt";      judged benches     || B=/nonexistent
+C="$R/case-studies.txt"; judged casestudies || C=/nonexistent
+[ -f "$T" ] && echo "tests:        $(sed -n 2p "$T")"
+[ -f "$E" ] && echo "examples:     OK=$(c '^OK' "$E") PANIC=$(c '^PANIC' "$E") OOM=$(c '^OOM' "$E") other=$(grep -cE '^(NEEDS-INPUT|SKIP)' "$E")"
+[ -f "$B" ] && echo "benches:      OK=$(c '^OK' "$B") FAIL=$(c '^FAIL' "$B")"
+[ -f "$C" ] && echo "case studies: OK=$(c '^OK' "$C") SKIP=$(c '^SKIP' "$C") FAIL=$(c '^FAIL' "$C")"
 echo
 echo "results in ${RESULTS}"
 
 # Fail the run if anything actually broke. A NEEDS-INPUT example and a SKIP
 # case study are not breakage; a panic, a failed bench, or a failed test is.
 fails=0
-[ ! -f "$R/tests.txt" ]        || grep -q "failed=0" "$R/tests.txt" || fails=1
-[ ! -f "$R/tests.txt" ]        || grep -q "^exit=0" "$R/tests.txt" || fails=1
-[ ! -f "$R/examples.txt" ]     || [ "$(grep -cE '^(PANIC|OOM)' "$R/examples.txt")" -eq 0 ] || fails=1
-[ ! -f "$R/examples.txt" ]     || grep -q "^build=0" "$R/examples.txt" || fails=1
-[ ! -f "$R/benches.txt" ]      || [ "$(c '^FAIL' "$R/benches.txt")" -eq 0 ] || fails=1
-[ ! -f "$R/case-studies.txt" ] || [ "$(c '^FAIL' "$R/case-studies.txt")" -eq 0 ] || fails=1
+[ ! -f "$T" ] || grep -q "failed=0" "$T" || fails=1
+[ ! -f "$T" ] || grep -q "^exit=0" "$T" || fails=1
+[ ! -f "$E" ] || [ "$(grep -cE '^(PANIC|OOM)' "$E")" -eq 0 ] || fails=1
+[ ! -f "$E" ] || grep -q "^build=0" "$E" || fails=1
+[ ! -f "$B" ] || [ "$(c '^FAIL' "$B")" -eq 0 ] || fails=1
+[ ! -f "$C" ] || [ "$(c '^FAIL' "$C")" -eq 0 ] || fails=1
 exit $fails
