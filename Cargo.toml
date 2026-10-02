@@ -366,6 +366,10 @@ name = "filter_throughput"
 harness = false
 
 [[bench]]
+name = "scan_filter_fusion"
+harness = false
+
+[[bench]]
 name = "record_ops"
 harness = false
 

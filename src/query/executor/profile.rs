@@ -72,6 +72,10 @@ pub struct ProfileNode {
     pub depth: usize,
     /// Index into the same `Vec`; `None` for the root.
     pub parent: Option<usize>,
+    /// Rows the operator was expected to produce, from the graph's statistics
+    /// (#1624). `None` where the operator has no model, or the plan was
+    /// instrumented without a store to estimate from.
+    pub estimated: Option<f64>,
     counters: Arc<NodeCounters>,
 }
 
@@ -90,7 +94,20 @@ impl ProfileNode {
     pub fn calls(&self) -> u64 {
         self.counters.calls.load(Ordering::Relaxed)
     }
+
+    /// How far the estimate was from what happened: the larger of the two
+    /// over the smaller, so 1.0 is exact and over- and under-estimates read
+    /// alike. Zero counts as one row, or every empty result would be infinitely
+    /// wrong.
+    pub fn q_error(&self) -> Option<f64> {
+        let estimated = self.estimated?.max(1.0);
+        let actual = (self.rows() as f64).max(1.0);
+        Some(estimated.max(actual) / estimated.min(actual))
+    }
 }
+
+/// The q-error above which PROFILE flags an estimate (#1624).
+pub const Q_ERROR_FLAG: f64 = 2.0;
 
 /// A wrapper that times the operator it holds and forwards everything else.
 ///
@@ -176,6 +193,10 @@ impl PhysicalOperator for ProfiledOperator {
         self.inner.take_retained_reads()
     }
 
+    fn take_internal_rows(&mut self) -> usize {
+        self.inner.take_internal_rows()
+    }
+
     fn reset(&mut self) {
         self.inner.reset()
     }
@@ -190,6 +211,10 @@ impl PhysicalOperator for ProfiledOperator {
 
     fn describe(&self) -> OperatorDescription {
         self.inner.describe()
+    }
+
+    fn estimate_rows(&self, store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        self.inner.estimate_rows(store, children)
     }
 }
 
@@ -210,11 +235,27 @@ impl PhysicalOperator for Vacated {
 /// plan the planner produced rather than a tree of wrappers.
 pub fn instrument(root: &mut OperatorBox) -> Vec<ProfileNode> {
     let mut nodes = Vec::new();
-    wrap(root, None, 0, &mut nodes);
+    wrap(root, None, 0, &mut nodes, None);
     nodes
 }
 
-fn wrap(slot: &mut OperatorBox, parent: Option<usize>, depth: usize, nodes: &mut Vec<ProfileNode>) {
+/// [`instrument`], and estimate each operator's rows from `store`'s statistics
+/// so the report can set them beside the actual counts (#1624).
+pub fn instrument_with_estimates(root: &mut OperatorBox, store: &GraphStore) -> Vec<ProfileNode> {
+    let mut nodes = Vec::new();
+    wrap(root, None, 0, &mut nodes, Some(store));
+    nodes
+}
+
+/// Wrap `slot` and its subtree; returns `slot`'s row estimate, which its
+/// parent's estimate is built from.
+fn wrap(
+    slot: &mut OperatorBox,
+    parent: Option<usize>,
+    depth: usize,
+    nodes: &mut Vec<ProfileNode>,
+    store: Option<&GraphStore>,
+) -> Option<f64> {
     let description = slot.describe();
     let index = nodes.len();
     let counters = Arc::new(NodeCounters::default());
@@ -223,15 +264,21 @@ fn wrap(slot: &mut OperatorBox, parent: Option<usize>, depth: usize, nodes: &mut
         details: description.details,
         depth,
         parent,
+        estimated: None,
         counters: Arc::clone(&counters),
     });
 
-    for child in slot.children_mut() {
-        wrap(child, Some(index), depth + 1, nodes);
-    }
+    let children: Vec<Option<f64>> = slot
+        .children_mut()
+        .into_iter()
+        .map(|child| wrap(child, Some(index), depth + 1, nodes, store))
+        .collect();
+    let estimated = store.and_then(|store| slot.estimate_rows(store, &children));
+    nodes[index].estimated = estimated;
 
     let inner = std::mem::replace(slot, Box::new(Vacated));
     *slot = Box::new(ProfiledOperator { inner, counters });
+    estimated
 }
 
 /// Exclusive time per node: its own total minus its children's totals.
@@ -251,6 +298,45 @@ fn self_times(nodes: &[ProfileNode]) -> Vec<Duration> {
         .zip(&child_totals)
         .map(|(node, children)| node.inclusive().saturating_sub(*children))
         .collect()
+}
+
+/// Each operator's estimated rows against its actual rows (#1624), one line
+/// per operator in plan order, flagged where the q-error exceeds
+/// [`Q_ERROR_FLAG`].
+///
+/// One `key=value` line per operator because that is what a plan viewer reads:
+/// the table above is for people, and a column header is not attached to the
+/// number under it once the line is taken on its own. An operator with no
+/// estimate prints `estimated=-` rather than a number it does not have.
+fn estimate_section(nodes: &[ProfileNode], selves: &[Duration]) -> String {
+    if nodes.iter().all(|n| n.estimated.is_none()) {
+        return String::new();
+    }
+    let mut out = format!(
+        "\nEstimated vs actual rows (q-error = larger / smaller; ! above {Q_ERROR_FLAG}):\n"
+    );
+    for (node, self_time) in nodes.iter().zip(selves) {
+        let mut label = format!("{}{}", "  ".repeat(node.depth), node.name);
+        if !node.details.is_empty() {
+            let detail: String = node.details.chars().take(24).collect();
+            label.push_str(&format!(" ({detail})"));
+        }
+        label.truncate(38);
+        let (estimated, q_error, flag) = match (node.estimated, node.q_error()) {
+            (Some(e), Some(q)) => (
+                format!("{}", e.round() as u64),
+                format!("{q:.2}"),
+                if q > Q_ERROR_FLAG { " !" } else { "" },
+            ),
+            _ => ("-".to_string(), "-".to_string(), ""),
+        };
+        out.push_str(&format!(
+            "  {label:<38} estimated={estimated} actual={} q-error={q_error} time={:.3}ms{flag}\n",
+            node.rows(),
+            self_time.as_secs_f64() * 1000.0,
+        ));
+    }
+    out
 }
 
 /// Render the profile: the plan tree annotated with time and rows, then the
@@ -321,6 +407,8 @@ pub fn report(nodes: &[ProfileNode], wall: Duration, uninstrumented: Option<Dura
             nodes[*index].rows(),
         ));
     }
+
+    out.push_str(&estimate_section(nodes, &selves));
 
     out.push_str(&format!(
         "\nInstrumented execution: {:.2}ms; attributed to operators: {:.2}ms ({:.1}%)\n",

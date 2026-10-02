@@ -5985,6 +5985,44 @@ pub trait PhysicalOperator: Send {
         Vec::new()
     }
 
+    /// Whether this operator can take over the `Filter` directly above it and
+    /// test rows as it produces them (#1615). See [`fuse_scan_filters`].
+    fn can_absorb_filter(&self) -> bool {
+        false
+    }
+
+    /// Take over `filter`, which the caller has detached from this operator.
+    /// Only called after `can_absorb_filter` said yes.
+    fn absorb_filter(&mut self, _filter: FilterOperator) {
+        unreachable!("absorb_filter on an operator that declined it")
+    }
+
+    /// If this is a `Filter` its input can absorb, hand the input back with
+    /// the filter inside it; the caller puts it where the filter was.
+    fn fuse_into_input(&mut self) -> Option<OperatorBox> {
+        None
+    }
+
+    /// Rows this operator produced and consumed itself since the last call,
+    /// on top of the ones it returned: a fused scan's every tested node, which
+    /// unfused was the scan's output (#1615). The work meter (#1156) charges
+    /// them, so fusion does not make a template's work look smaller than the
+    /// scan it still does.
+    fn take_internal_rows(&mut self) -> usize {
+        0
+    }
+
+    /// Rows this operator is expected to produce, from the graph's statistics
+    /// and its children's estimates in `children_mut` order (#1624).
+    ///
+    /// For PROFILE, to set an estimate beside each operator's actual count.
+    /// The default is no estimate: an operator without a model says so rather
+    /// than passing on a number that does not describe it. Operators that
+    /// neither add nor drop rows opt in with [`pass_through_estimate`].
+    fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
+        None
+    }
+
     /// Returns true if this operator mutates the graph store
     fn is_mutating(&self) -> bool {
         false
@@ -6200,6 +6238,101 @@ fn format_expression(expr: &Expression) -> String {
 /// Type alias for boxed operators
 pub type OperatorBox = Box<dyn PhysicalOperator>;
 
+/// Selectivity assumed for an equality whose statistics are not to hand.
+const EQUALITY_SELECTIVITY: f64 = 0.1;
+/// Selectivity assumed for a range comparison.
+const RANGE_SELECTIVITY: f64 = 1.0 / 3.0;
+
+/// The estimate of an operator that neither adds nor drops rows (#1624).
+fn pass_through_estimate(children: &[Option<f64>]) -> Option<f64> {
+    match children {
+        [only] => *only,
+        _ => None,
+    }
+}
+
+fn comparison_selectivity(op: &BinaryOp) -> f64 {
+    match op {
+        BinaryOp::Eq => EQUALITY_SELECTIVITY,
+        BinaryOp::Ne => 1.0 - EQUALITY_SELECTIVITY,
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => RANGE_SELECTIVITY,
+        _ => 0.5,
+    }
+}
+
+/// The fraction of rows a predicate is expected to keep (#1624).
+///
+/// Fixed guesses by shape, combined assuming independence: the filter does not
+/// know which label its variable carries, so the per-property statistics an
+/// index scan uses are out of reach here. PROFILE prints the estimate beside
+/// the actual count precisely so a guess this coarse is visible when it is
+/// wrong.
+fn predicate_selectivity(expr: &Expression) -> f64 {
+    match expr {
+        Expression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => predicate_selectivity(left) * predicate_selectivity(right),
+        Expression::Binary {
+            left,
+            op: BinaryOp::Or,
+            right,
+        } => {
+            let (a, b) = (predicate_selectivity(left), predicate_selectivity(right));
+            a + b - a * b
+        }
+        Expression::Binary { op, .. } => comparison_selectivity(op),
+        Expression::Unary {
+            op: UnaryOp::Not,
+            expr,
+        } => 1.0 - predicate_selectivity(expr),
+        Expression::Unary {
+            op: UnaryOp::IsNull,
+            ..
+        } => EQUALITY_SELECTIVITY,
+        Expression::Unary {
+            op: UnaryOp::IsNotNull,
+            ..
+        } => 1.0 - EQUALITY_SELECTIVITY,
+        _ => 0.5,
+    }
+}
+
+/// Fuse every `Filter` that sits directly on a scan into the scan (#1615).
+///
+/// `MATCH (p:P) WHERE p.city = 'a'` planned `Filter` over `NodeScan`: the scan
+/// built a record for every node in the label, handed the batch across, and the
+/// filter dropped most of them on the other side. Fused, the scan tests each
+/// node as it reaches it and builds a record only for the ones that pass.
+///
+/// This is not predicate pushdown. Pushdown decides *where* a filter sits, and
+/// the planner has already done it by the time this runs; this removes the
+/// boundary between the two operators once the filter is next to the scan.
+///
+/// Run once, on the finished plan. A filter keeps its own operator when it
+/// evaluates across threads, or when a consumer has already asked it to keep
+/// the values it reads.
+///
+/// `SAMYAMA_SCAN_FILTER_FUSION=off` leaves the plan unfused, so
+/// `benches/scan_filter_fusion.rs` can measure both in one process and a test
+/// can compare their answers. Not for normal use.
+pub fn fuse_scan_filters(slot: &mut OperatorBox) {
+    if std::env::var_os("SAMYAMA_SCAN_FILTER_FUSION").is_some_and(|v| v == "off") {
+        return;
+    }
+    fuse_subtree(slot);
+}
+
+fn fuse_subtree(slot: &mut OperatorBox) {
+    for child in slot.children_mut() {
+        fuse_subtree(child);
+    }
+    if let Some(fused) = slot.fuse_into_input() {
+        *slot = fused;
+    }
+}
+
 /// Node scan operator: MATCH (n:Person)
 pub struct NodeScanOperator {
     /// Variable name to bind nodes to
@@ -6219,6 +6352,14 @@ pub struct NodeScanOperator {
     early_limit: Option<usize>,
     /// Count of rows produced (for early limit tracking)
     produced: usize,
+    /// A filter fused into the scan (#1615): a node is bound and tested here,
+    /// and becomes a row only if it passes. `produced` counts rows that
+    /// passed, so a pushed-down LIMIT still means the LIMIT of the query.
+    filter: Option<Box<FilterOperator>>,
+    /// The fused filter's retained reads for the last batch (#593).
+    retained: Option<Vec<Option<PropertyValue>>>,
+    /// Nodes the fused filter tested since `take_internal_rows` last asked.
+    tested: usize,
 }
 
 impl NodeScanOperator {
@@ -6232,6 +6373,9 @@ impl NodeScanOperator {
             current: 0,
             early_limit: None,
             produced: 0,
+            filter: None,
+            retained: None,
+            tested: 0,
         }
     }
 
@@ -6334,6 +6478,23 @@ impl PhysicalOperator for NodeScanOperator {
             }
         }
 
+        if let Some(filter) = &self.filter {
+            // One record, rebound per node, until a node passes: a node
+            // that fails costs no allocation.
+            let mut record = Record::new();
+            while self.current < self.node_ids.len() {
+                let node_id = self.node_ids[self.current];
+                self.current += 1;
+                self.tested += 1;
+                record.bind(self.variable.as_str(), Value::NodeRef(node_id));
+                if filter.evaluate_predicate(&record, store)? {
+                    self.produced += 1;
+                    return Ok(Some(record));
+                }
+            }
+            return Ok(None);
+        }
+
         let node_id = self.node_ids[self.current];
         self.current += 1;
         self.produced += 1;
@@ -6342,6 +6503,54 @@ impl PhysicalOperator for NodeScanOperator {
         record.bind(self.variable.clone(), Value::NodeRef(node_id));
 
         Ok(Some(record))
+    }
+
+    fn can_absorb_filter(&self) -> bool {
+        // A LIMIT already pushed here counted unfiltered rows; it cannot be
+        // reinterpreted as counting filtered ones.
+        self.filter.is_none() && self.early_limit.is_none()
+    }
+
+    fn absorb_filter(&mut self, filter: FilterOperator) {
+        self.filter = Some(Box::new(filter));
+    }
+
+    fn filter_predicate(&self) -> Option<&Expression> {
+        self.filter.as_ref().map(|f| &f.predicate)
+    }
+
+    fn retain_property_reads(&mut self, variable: &str, property: &str) -> bool {
+        self.filter
+            .as_mut()
+            .is_some_and(|f| f.retain_property_reads(variable, property))
+    }
+
+    fn take_retained_reads(&mut self) -> Option<Vec<Option<PropertyValue>>> {
+        self.retained.take()
+    }
+
+    fn take_internal_rows(&mut self) -> usize {
+        std::mem::take(&mut self.tested)
+    }
+
+    fn estimate_rows(&self, store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
+        let scanned = if self.labels.is_empty() {
+            store.node_count()
+        } else {
+            self.labels
+                .iter()
+                .map(|l| store.label_node_count(l))
+                .min()
+                .unwrap_or(0)
+        } as f64;
+        let mut rows = match &self.filter {
+            Some(f) => scanned * predicate_selectivity(&f.predicate),
+            None => scanned,
+        };
+        if let Some(limit) = self.early_limit {
+            rows = rows.min(limit as f64);
+        }
+        Some(rows)
     }
 
     fn try_push_limit(&mut self, n: usize) -> bool {
@@ -6368,6 +6577,38 @@ impl PhysicalOperator for NodeScanOperator {
         } else {
             batch_size
         };
+
+        if let Some(filter) = &self.filter {
+            // Fill the batch with passing rows, testing each node on one
+            // reused record and cloning only the ones that pass.
+            let variable: std::sync::Arc<str> = self.variable.as_str().into();
+            let mut retained = filter.retain.as_ref().map(|_| Vec::new());
+            let mut records = Vec::new();
+            let mut probe = Record::new();
+            while records.len() < effective_batch && self.current < self.node_ids.len() {
+                let node_id = self.node_ids[self.current];
+                self.current += 1;
+                self.tested += 1;
+                probe.bind(variable.clone(), Value::NodeRef(node_id));
+                let (passed, value) = filter.admit(&probe, store)?;
+                if passed {
+                    records.push(probe.clone());
+                    if let Some(kept) = retained.as_mut() {
+                        kept.push(value);
+                    }
+                }
+            }
+            self.produced += records.len();
+            if records.is_empty() {
+                return Ok(None);
+            }
+            self.retained = retained;
+            return Ok(Some(RecordBatch {
+                records,
+                columns: vec![self.variable.clone()],
+                plan_hash: None,
+            }));
+        }
 
         let end = (self.current + effective_batch).min(self.node_ids.len());
         let slice = &self.node_ids[self.current..end];
@@ -6400,16 +6641,26 @@ impl PhysicalOperator for NodeScanOperator {
     fn reset(&mut self) {
         self.current = 0;
         self.produced = 0;
+        self.retained = None;
     }
 
     fn describe(&self) -> OperatorDescription {
-        let details = if self.labels.is_empty() {
+        let mut details = if self.labels.is_empty() {
             format!("var={}, all labels", self.variable)
         } else {
             format!("var={}, labels={:?}", self.variable, self.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>())
         };
+        // One operator, named for both halves so a reader of EXPLAIN still
+        // finds the scan and the filter in it (#1615).
+        let name = match &self.filter {
+            Some(f) => {
+                details.push_str(&format!(", predicate={}", format_expression(&f.predicate)));
+                "FilteredNodeScan"
+            }
+            None => "NodeScan",
+        };
         OperatorDescription {
-            name: "NodeScan".to_string(),
+            name: name.to_string(),
             details,
             children: Vec::new(),
         }
@@ -6435,6 +6686,10 @@ impl LabelCountOperator {
 }
 
 impl PhysicalOperator for LabelCountOperator {
+    fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
+        Some(1.0)
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.emitted {
             return Ok(None);
@@ -6512,6 +6767,10 @@ impl EdgeCountOperator {
 }
 
 impl PhysicalOperator for EdgeCountOperator {
+    fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
+        Some(1.0)
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
@@ -6562,6 +6821,10 @@ impl EdgeTypeCountOperator {
 }
 
 impl PhysicalOperator for EdgeTypeCountOperator {
+    fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
+        Some(1.0)
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             let stats = store.statistics();
@@ -6847,6 +7110,22 @@ impl FilterOperator {
     }
 
 
+    /// Test one row the way `next_batch` does, with the value of the retained
+    /// property when one is being kept (#593). For a scan the filter is fused
+    /// into (#1615).
+    fn admit(
+        &self,
+        record: &Record,
+        store: &GraphStore,
+    ) -> ExecutionResult<(bool, Option<PropertyValue>)> {
+        if self.retain.is_none() {
+            return Ok((self.evaluate_predicate(record, store)?, None));
+        }
+        self.captured.set(None);
+        let passed = self.evaluate_predicate(record, store)?;
+        Ok((passed, self.captured.take()))
+    }
+
     fn evaluate_predicate(&self, record: &Record, _store: &GraphStore) -> ExecutionResult<bool> {
         let result = self.evaluate_expression(&self.predicate, record, _store)?;
 
@@ -7041,6 +7320,26 @@ impl PhysicalOperator for FilterOperator {
 
     fn filter_predicate(&self) -> Option<&Expression> {
         Some(&self.predicate)
+    }
+
+    fn fuse_into_input(&mut self) -> Option<OperatorBox> {
+        if self.parallel || self.retain.is_some() || !self.input.can_absorb_filter() {
+            return None;
+        }
+        let mut input = std::mem::replace(
+            &mut self.input,
+            Box::new(MaterializedOperator::new(Vec::new())),
+        );
+        let detached = FilterOperator::new(
+            Box::new(MaterializedOperator::new(Vec::new())),
+            self.predicate.clone(),
+        );
+        input.absorb_filter(detached);
+        Some(input)
+    }
+
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        Some(children.first().copied().flatten()? * predicate_selectivity(&self.predicate))
     }
 
     /// Accepted when the predicate reads `variable.property` itself, and only
@@ -8066,6 +8365,43 @@ impl ExpandOperator {
 }
 
 impl PhysicalOperator for ExpandOperator {
+    fn estimate_rows(&self, store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        let input = children.first().copied().flatten()?;
+        let nodes = store.node_count().max(1) as f64;
+        let edges = if self.edge_types.is_empty() {
+            store.edge_count()
+        } else {
+            self.edge_types
+                .iter()
+                .map(|t| store.edge_type_count(&EdgeType::new(t.as_str())))
+                .sum()
+        } as f64;
+        // Average edges per node, both ends of each edge for an undirected hop.
+        let mut fanout = edges / nodes;
+        if matches!(self.direction, Direction::Both) {
+            fanout *= 2.0;
+        }
+        if let Some(smallest) = self
+            .target_labels
+            .iter()
+            .map(|l| store.label_node_count(l))
+            .min()
+        {
+            fanout *= smallest as f64 / nodes;
+        }
+        fanout *= EQUALITY_SELECTIVITY.powi(self.target_props.len() as i32);
+        for c in &self.target_comparisons {
+            fanout *= comparison_selectivity(&c.op);
+        }
+        let rows = input * fanout;
+        // An optional expand keeps every input row.
+        Some(if self.optional_null_vars.is_some() {
+            rows.max(input)
+        } else {
+            rows
+        })
+    }
+
     // A write beneath this operator refused with "requires mutable store
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
@@ -9891,6 +10227,10 @@ impl ProjectOperator {
 }
 
 impl PhysicalOperator for ProjectOperator {
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        pass_through_estimate(children)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -10626,6 +10966,15 @@ impl AggregateOperator {
 }
 
 impl PhysicalOperator for AggregateOperator {
+    /// One row with no grouping key. With one, the square root of the input:
+    /// the usual guess for a group count the statistics do not record.
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        if self.group_by.is_empty() {
+            return Some(1.0);
+        }
+        Some(children.first().copied().flatten()?.sqrt().max(1.0))
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -11598,6 +11947,10 @@ impl EagerOperator {
 }
 
 impl PhysicalOperator for EagerOperator {
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        pass_through_estimate(children)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -11695,6 +12048,10 @@ impl BindPathOperator {
 }
 
 impl PhysicalOperator for BindPathOperator {
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        pass_through_estimate(children)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -11737,6 +12094,10 @@ impl LimitOperator {
 }
 
 impl PhysicalOperator for LimitOperator {
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        Some(children.first().copied().flatten()?.min(self.limit as f64))
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -12094,6 +12455,10 @@ impl SortOperator {
 }
 
 impl PhysicalOperator for SortOperator {
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        pass_through_estimate(children)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -12565,6 +12930,18 @@ impl IndexScanOperator {
 }
 
 impl PhysicalOperator for IndexScanOperator {
+    fn estimate_rows(&self, store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
+        let selectivity = match self.op {
+            BinaryOp::Eq => store.statistics().estimate_equality_selectivity_for_value(
+                &self.label,
+                &self.property,
+                &self.value,
+            ),
+            _ => RANGE_SELECTIVITY,
+        };
+        Some(store.label_node_count(&self.label) as f64 * selectivity)
+    }
+
     /// What this scan has already decided, so the planner does not add a
     /// Filter that re-checks it (#1380). `None` for anything but `=`.
     fn filter_predicate(&self) -> Option<&Expression> {
@@ -12774,6 +13151,13 @@ impl CartesianProductOperator {
 }
 
 impl PhysicalOperator for CartesianProductOperator {
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        match children {
+            [Some(l), Some(r)] => Some(l * r),
+            _ => None,
+        }
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.left, &mut self.right]
     }
@@ -12992,6 +13376,15 @@ impl JoinOperator {
 }
 
 impl PhysicalOperator for JoinOperator {
+    /// An equi-join on node variables: each row of the smaller side meets about
+    /// one row of the larger.
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        match children {
+            [Some(l), Some(r)] => Some(l.min(*r)),
+            _ => None,
+        }
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.left, &mut self.right]
     }
@@ -14004,6 +14397,10 @@ impl DistinctOperator {
 }
 
 impl PhysicalOperator for DistinctOperator {
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        pass_through_estimate(children)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -15464,6 +15861,10 @@ impl SingleRowOperator {
 }
 
 impl PhysicalOperator for SingleRowOperator {
+    fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
+        Some(1.0)
+    }
+
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.emitted {
             Ok(None)
@@ -18501,6 +18902,10 @@ impl SkipOperator {
 }
 
 impl PhysicalOperator for SkipOperator {
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        Some((children.first().copied().flatten()? - self.skip as f64).max(0.0))
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -20954,6 +21359,10 @@ impl ShortestPathOperator {
 }
 
 impl PhysicalOperator for ShortestPathOperator {
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        pass_through_estimate(children)
+    }
+
     // A write beneath this operator refused with "requires mutable store
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
@@ -21412,6 +21821,10 @@ impl WithBarrierOperator {
 }
 
 impl PhysicalOperator for WithBarrierOperator {
+    fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
+        pass_through_estimate(children)
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -21647,6 +22060,10 @@ impl NodeByIdOperator {
 }
 
 impl PhysicalOperator for NodeByIdOperator {
+    fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
+        Some(self.node_ids.len() as f64)
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         while self.position < self.node_ids.len() {
             let node_id = self.node_ids[self.position];

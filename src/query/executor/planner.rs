@@ -1235,14 +1235,19 @@ impl QueryPlanner {
             query
         };
         Self::reject_unevaluated_property_exprs(query)?;
-        if query.needs_clause_pipeline {
-            return self.plan_clause_pipeline(query, store);
-        }
-        // `DISTINCT` is inserted inside `plan_inner`, below SKIP and LIMIT.
-        // Wrapping the finished plan here put it *above* them, so `LIMIT n`
-        // took n duplicate-bearing rows and DISTINCT then collapsed them --
-        // `RETURN DISTINCT p.city LIMIT 3` returned one row (#522).
-        self.plan_inner(query, store)
+        let mut plan = if query.needs_clause_pipeline {
+            self.plan_clause_pipeline(query, store)?
+        } else {
+            // `DISTINCT` is inserted inside `plan_inner`, below SKIP and LIMIT.
+            // Wrapping the finished plan here put it *above* them, so `LIMIT n`
+            // took n duplicate-bearing rows and DISTINCT then collapsed them --
+            // `RETURN DISTINCT p.city LIMIT 3` returned one row (#522).
+            self.plan_inner(query, store)?
+        };
+        // Last, on the finished tree: every rewrite above may still be looking
+        // for a `Filter` over a scan (#1615).
+        crate::query::executor::operator::fuse_scan_filters(&mut plan.root);
+        Ok(plan)
     }
 
     /// Plan `query` to run against one row the caller supplies (#1236): `seed`

@@ -91,7 +91,8 @@ pub fn cpufreq_mhz() -> Option<f64> {
         .filter(|e| {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            name.strip_prefix("cpu").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            name.strip_prefix("cpu")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
         })
         .filter_map(|e| std::fs::read_to_string(e.path().join("cpufreq/scaling_cur_freq")).ok())
         .filter_map(|khz| khz.trim().parse::<f64>().ok())
@@ -122,7 +123,10 @@ impl HostState {
         // instead, and a host with neither reports unknown (#1044).
         let cpu_mhz = cpuinfo_mhz().or_else(cpufreq_mhz);
 
-        HostState { load_average, cpu_mhz }
+        HostState {
+            load_average,
+            cpu_mhz,
+        }
     }
 
     pub fn format(&self) -> String {
@@ -195,7 +199,9 @@ fn procs_running() -> Option<u64> {
 /// large and two of them were almost entirely the load, and the drift check
 /// reported the host had held still — because it had (#715).
 pub fn warn_if_busy(host: &HostState) {
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1) as f64;
     if let Some(why) = busy_reason(host, cores) {
         eprintln!(
             "  WARNING: {why}. These timings are not comparable with a quiet-host\n  \
@@ -229,9 +235,9 @@ fn busy_reason_from(running: Option<u64>, load_average: Option<f64>, cores: f64)
         return None;
     }
     match load_average {
-        Some(load) if load > BUSY_LOAD_PER_CORE * cores => {
-            Some(format!("1-minute load average {load:.2} on {cores:.0} cores"))
-        }
+        Some(load) if load > BUSY_LOAD_PER_CORE * cores => Some(format!(
+            "1-minute load average {load:.2} on {cores:.0} cores"
+        )),
         _ => None,
     }
 }
@@ -239,7 +245,9 @@ fn busy_reason_from(running: Option<u64>, load_average: Option<f64>, cores: f64)
 /// Whether the host is quiet enough to quote, for callers that would rather
 /// refuse than warn.
 pub fn host_is_quiet() -> bool {
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1) as f64;
     busy_reason(&HostState::read(), cores).is_none()
 }
 

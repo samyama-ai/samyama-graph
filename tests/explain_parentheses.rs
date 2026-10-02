@@ -144,11 +144,15 @@ fn a_rendered_predicate_reparses_to_the_same_predicate() {
         let original = format!("MATCH (r:R) WHERE {predicate} RETURN r");
         let plan = plan_of(&store, &original);
 
-        // Pull the rendered predicate back out of the Filter line.
+        // Pull the rendered predicate back out of the Filter line, or out of
+        // the scan it was fused into (#1615).
         let rendered = plan
             .lines()
             .find_map(|l| {
-                let i = l.find("Filter (")? + "Filter (".len();
+                let i = l
+                    .find("Filter (")
+                    .map(|i| i + "Filter (".len())
+                    .or_else(|| l.find("predicate=").map(|i| i + "predicate=".len()))?;
                 let body = &l[i..];
                 body.rfind(')').map(|j| body[..j].to_string())
             })

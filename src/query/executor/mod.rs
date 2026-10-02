@@ -564,7 +564,7 @@ impl<'a> QueryExecutor<'a> {
             let plan_text = plan.root.describe().format(0);
 
             let mut instrumented = plan;
-            let nodes = profile::instrument(&mut instrumented.root);
+            let nodes = profile::instrument_with_estimates(&mut instrumented.root, self.store);
             let profiled_start = std::time::Instant::now();
             let _ = self.execute_plan(instrumented)?;
             let profiled_elapsed = profiled_start.elapsed();

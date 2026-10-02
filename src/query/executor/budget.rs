@@ -221,6 +221,10 @@ impl PhysicalOperator for BudgetedOperator {
         self.inner.take_retained_reads()
     }
 
+    fn take_internal_rows(&mut self) -> usize {
+        self.inner.take_internal_rows()
+    }
+
     fn reset(&mut self) {
         self.produced = 0;
         self.inner.reset()
@@ -366,7 +370,9 @@ struct MeteredOperator {
 impl PhysicalOperator for MeteredOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         let out = self.inner.next(store)?;
-        self.meter.charge(usize::from(out.is_some()), &self.name)?;
+        let internal = self.inner.take_internal_rows();
+        self.meter
+            .charge(usize::from(out.is_some()) + internal, &self.name)?;
         Ok(out)
     }
 
@@ -376,7 +382,9 @@ impl PhysicalOperator for MeteredOperator {
         tenant_id: &str,
     ) -> ExecutionResult<Option<Record>> {
         let out = self.inner.next_mut(store, tenant_id)?;
-        self.meter.charge(usize::from(out.is_some()), &self.name)?;
+        let internal = self.inner.take_internal_rows();
+        self.meter
+            .charge(usize::from(out.is_some()) + internal, &self.name)?;
         Ok(out)
     }
 
@@ -386,8 +394,11 @@ impl PhysicalOperator for MeteredOperator {
         batch_size: usize,
     ) -> ExecutionResult<Option<RecordBatch>> {
         let out = self.inner.next_batch(store, batch_size)?;
-        self.meter
-            .charge(out.as_ref().map_or(0, |b| b.records.len()), &self.name)?;
+        let internal = self.inner.take_internal_rows();
+        self.meter.charge(
+            out.as_ref().map_or(0, |b| b.records.len()) + internal,
+            &self.name,
+        )?;
         Ok(out)
     }
 
@@ -398,8 +409,11 @@ impl PhysicalOperator for MeteredOperator {
         batch_size: usize,
     ) -> ExecutionResult<Option<RecordBatch>> {
         let out = self.inner.next_batch_mut(store, tenant_id, batch_size)?;
-        self.meter
-            .charge(out.as_ref().map_or(0, |b| b.records.len()), &self.name)?;
+        let internal = self.inner.take_internal_rows();
+        self.meter.charge(
+            out.as_ref().map_or(0, |b| b.records.len()) + internal,
+            &self.name,
+        )?;
         Ok(out)
     }
 
