@@ -15,6 +15,8 @@
 #   scripts/verify-sweep.sh --provision      # also install toolchain + system deps
 #   scripts/verify-sweep.sh --out DIR        # where results and logs go
 #   scripts/verify-sweep.sh --jobs 4         # cargo -j (default: nproc-2, min 2)
+#   scripts/verify-sweep.sh --only tests     # one stage (repeatable, or comma-separated):
+#                                            # tests, examples, benches, casestudies
 #
 # On a clean cloud host the usual invocation is `--provision`, launched under
 # `setsid nohup` so a dropped SSH connection does not take the run with it.
@@ -25,12 +27,14 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${REPO}/target/verify-sweep"
 PROVISION=0
 JOBS=""
+ONLY=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --provision) PROVISION=1; shift ;;
     --out) OUT="$2"; shift 2 ;;
     --jobs) JOBS="$2"; shift 2 ;;
+    --only) ONLY="${ONLY},$2"; shift 2 ;;
     -h|--help) sed -n '2,25p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -46,7 +50,14 @@ RESULTS="${OUT}/results"
 MARKS="${OUT}/.marks"
 mkdir -p "$LOGS" "$RESULTS" "$MARKS"
 
-step() { [ -f "${MARKS}/$1" ]; }
+# A stage is skipped when it already ran (its marker exists) or when --only
+# names other stages. A skipped stage writes no results file, and the summary
+# and exit code below count only the stages that ran.
+step() {
+  [ -f "${MARKS}/$1" ] && return 0
+  [ -n "$ONLY" ] && [[ ",${ONLY}," != *",$1,"* ]] && return 0
+  return 1
+}
 mark() { touch "${MARKS}/$1"; }
 
 if [ "$PROVISION" = "1" ] && ! step provision; then
@@ -172,18 +183,24 @@ echo "ALL DONE $(date -Is)" > "${RESULTS}/COMPLETE.txt"
 echo
 echo "===== summary ====="
 cat "${RESULTS}/run.txt"
-echo "tests:        $(sed -n 2p "${RESULTS}/tests.txt")"
-echo "examples:     OK=$(grep -c '^OK' "${RESULTS}/examples.txt") PANIC=$(grep -c '^PANIC' "${RESULTS}/examples.txt") other=$(grep -cE '^(NEEDS-INPUT|SKIP)' "${RESULTS}/examples.txt")"
-echo "benches:      OK=$(grep -c '^OK' "${RESULTS}/benches.txt") FAIL=$(grep -c '^FAIL' "${RESULTS}/benches.txt")"
-echo "case studies: OK=$(grep -c '^OK' "${RESULTS}/case-studies.txt") SKIP=$(grep -c '^SKIP' "${RESULTS}/case-studies.txt") FAIL=$(grep -c '^FAIL' "${RESULTS}/case-studies.txt")"
+# Each line reports a stage only if it ran, so a one-stage run (--only) does not
+# read as a failure of the others.
+R="${RESULTS}"
+c() { grep -c "$1" "$2"; }
+[ -f "$R/tests.txt" ]        && echo "tests:        $(sed -n 2p "$R/tests.txt")"
+[ -f "$R/examples.txt" ]     && echo "examples:     OK=$(c '^OK' "$R/examples.txt") PANIC=$(c '^PANIC' "$R/examples.txt") other=$(grep -cE '^(NEEDS-INPUT|SKIP)' "$R/examples.txt")"
+[ -f "$R/benches.txt" ]      && echo "benches:      OK=$(c '^OK' "$R/benches.txt") FAIL=$(c '^FAIL' "$R/benches.txt")"
+[ -f "$R/case-studies.txt" ] && echo "case studies: OK=$(c '^OK' "$R/case-studies.txt") SKIP=$(c '^SKIP' "$R/case-studies.txt") FAIL=$(c '^FAIL' "$R/case-studies.txt")"
 echo
 echo "results in ${RESULTS}"
 
 # Fail the run if anything actually broke. A NEEDS-INPUT example and a SKIP
 # case study are not breakage; a panic, a failed bench, or a failed test is.
 fails=0
-grep -q "failed=0" "${RESULTS}/tests.txt" || fails=1
-[ "$(grep -c '^PANIC' "${RESULTS}/examples.txt")" -eq 0 ] || fails=1
-[ "$(grep -c '^FAIL' "${RESULTS}/benches.txt")" -eq 0 ] || fails=1
-[ "$(grep -c '^FAIL' "${RESULTS}/case-studies.txt")" -eq 0 ] || fails=1
+[ ! -f "$R/tests.txt" ]        || grep -q "failed=0" "$R/tests.txt" || fails=1
+[ ! -f "$R/tests.txt" ]        || grep -q "^exit=0" "$R/tests.txt" || fails=1
+[ ! -f "$R/examples.txt" ]     || [ "$(c '^PANIC' "$R/examples.txt")" -eq 0 ] || fails=1
+[ ! -f "$R/examples.txt" ]     || grep -q "^build=0" "$R/examples.txt" || fails=1
+[ ! -f "$R/benches.txt" ]      || [ "$(c '^FAIL' "$R/benches.txt")" -eq 0 ] || fails=1
+[ ! -f "$R/case-studies.txt" ] || [ "$(c '^FAIL' "$R/case-studies.txt")" -eq 0 ] || fails=1
 exit $fails
