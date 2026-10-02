@@ -33,8 +33,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
     let arg = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1));
-    let data_dir = arg("--data-dir").map(PathBuf::from).expect("--data-dir <path>");
-    let post_id: i64 = arg("--post-id").expect("--post-id <id>").parse()?;
+    let data_dir = arg("--data-dir").map(PathBuf::from).unwrap_or_else(|| {
+            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
+            std::process::exit(2)
+        });
+    let post_id: i64 = arg("--post-id").unwrap_or_else(|| {
+            eprintln!("--post-id <id> is required (this example needs input; see the header comment)");
+            std::process::exit(2)
+        }).parse()?;
     let runs: usize = arg("--runs").map(|s| s.parse()).transpose()?.unwrap_or(11);
 
     let mut graph = GraphStore::new();
