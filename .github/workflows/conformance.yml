@@ -1,0 +1,56 @@
+name: conformance
+
+# What this job asserts, and what it does not.
+#
+# It asserts that this checkout still computes what the committed baseline says it
+# computes for the ISO/IEC 39075 path patterns -- every construct, in both directions.
+# A cell that gets worse is a semantics regression. A cell that gets better also fails,
+# because a baseline that no longer describes the engine cannot catch the next
+# regression: the stale line hides it.
+#
+# It does not assert conformance. Ten cells in the baseline are DIVERGES today, and
+# they are the open dialect questions in #1646, not regressions. Turning them green is
+# work; keeping them from moving silently is this job.
+#
+# #1140 was found by an external suite rather than by our tests, and #1142 existed to
+# fix that and was closed without anything in the repository running the suite. This is
+# that, actually wired up.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'src/query/**'
+      - 'src/http/**'
+      - 'tools/conformance/**'
+      - '.github/workflows/conformance.yml'
+  workflow_dispatch:
+
+jobs:
+  gpml:
+    name: GPML path-pattern conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+
+      - name: Build the engine
+        run: cargo build --release --bin samyama
+
+      - name: Run the suite against the baseline
+        run: ./tools/conformance/run.sh
+
+      - name: Keep the map, whatever the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-map
+          path: |
+            target/conformance/suite/results/map.json
+            target/conformance/suite/results/summary.json
+          if-no-files-found: warn
