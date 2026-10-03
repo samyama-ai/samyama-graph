@@ -147,3 +147,44 @@ fn execute_without_a_dialect_is_cypher() {
     let plain = QueryEngine::new().execute(BOUNDED, &s).unwrap().records.len();
     assert_eq!(plain, rows(&s, BOUNDED, Dialect::Cypher));
 }
+
+// ---------------------------------------------------------------------------
+// #1648 -- the rewrite must not smuggle a query past validation
+// ---------------------------------------------------------------------------
+
+/// An unbounded quantifier under WALK is refused (#1141): this engine enumerates
+/// candidates before a selector gets a turn, so the candidate set is infinite on any
+/// graph with a cycle. The parser checks that -- and checks it against the *parsed*
+/// restrictor, which for `MATCH (x)-[:E*]->(y)` is TRAIL and therefore passes.
+///
+/// The dialect pass then turns that TRAIL into a WALK. Before #1648 the rewrite ran
+/// after validation and nothing re-checked it, so the statement reached the executor
+/// as the one shape the engine refuses to run, and the server hung instead of
+/// answering or refusing.
+#[test]
+fn gql_does_not_smuggle_an_unbounded_walk_past_validation() {
+    let s = fixture();
+    let q = "MATCH (x:N)-[:E*]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid";
+    // Well-formed under openCypher: the implicit TRAIL bounds it.
+    assert!(QueryEngine::new().execute_with_dialect(q, &s, Dialect::Cypher).is_ok());
+    // Ill-formed under GQL, and refused rather than run.
+    let err = QueryEngine::new()
+        .execute_with_dialect(q, &s, Dialect::Gql)
+        .expect_err("an unbounded WALK must be refused, not executed");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("walk") || msg.contains("unbounded"),
+        "the refusal must say which limit was hit: {msg}"
+    );
+}
+
+/// The same pattern with a restrictor named out loud stays runnable in both dialects:
+/// the rewrite only touches what the parser defaulted, so an explicit TRAIL is still
+/// bounded by the edge count.
+#[test]
+fn an_explicit_restrictor_keeps_an_unbounded_quantifier_runnable() {
+    let s = fixture();
+    let q = "MATCH TRAIL (x:N)-[:E*]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid";
+    assert_eq!(rows(&s, q, Dialect::Cypher), 8);
+    assert_eq!(rows(&s, q, Dialect::Gql), 9, "GQL reads the bare * as {{0,}}");
+}

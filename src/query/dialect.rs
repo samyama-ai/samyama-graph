@@ -28,9 +28,9 @@ use crate::query::ast::{Clause, Dialect, PathPattern, PathRestrictor, Query};
 /// `Dialect::Cypher` is a no-op by construction: the parser already fills in the
 /// openCypher defaults, so nothing is rewritten and no existing caller changes
 /// behaviour.
-pub fn apply(query: &mut Query, dialect: Dialect) {
+pub fn apply(query: &mut Query, dialect: Dialect) -> Result<(), crate::query::validate::ValidationError> {
     if dialect == Dialect::Cypher {
-        return;
+        return Ok(());
     }
     for mc in &mut query.match_clauses {
         for path in &mut mc.pattern.paths {
@@ -44,6 +44,17 @@ pub fn apply(query: &mut Query, dialect: Dialect) {
             }
         }
     }
+    // Validate *again*, because this pass can make a statement ill-formed that was
+    // well-formed when the parser checked it.
+    //
+    // The parser refuses an unbounded quantifier under WALK (#1141): on a graph with a
+    // cycle the candidate set is infinite, and this engine enumerates candidates before
+    // a selector gets a turn. `MATCH (x)-[:E*]->(y)` passes that check under openCypher
+    // because its restrictor is TRAIL, which is bounded by the edge count -- and then
+    // this pass turns it into WALK. Without re-validating, the rewrite smuggles a query
+    // past the one check that exists to stop it, and the server hangs rather than
+    // answering or refusing (#1648).
+    crate::query::validate::validate(query)
 }
 
 fn gql_defaults(path: &mut PathPattern) {
@@ -78,7 +89,7 @@ mod tests {
     fn cypher_changes_nothing() {
         let before = parsed("MATCH (a)-[:E*]->(b) RETURN a");
         let mut after = before.clone();
-        apply(&mut after, Dialect::Cypher);
+        apply(&mut after, Dialect::Cypher).unwrap();
         assert_eq!(before, after);
     }
 
@@ -86,7 +97,7 @@ mod tests {
     fn gql_makes_an_unprefixed_pattern_a_walk() {
         let mut q = parsed("MATCH (a)-[:E*1..3]->(b) RETURN a");
         assert_eq!(first_path(&q).restrictor, PathRestrictor::Trail);
-        apply(&mut q, Dialect::Gql);
+        apply(&mut q, Dialect::Gql).unwrap();
         assert_eq!(first_path(&q).restrictor, PathRestrictor::Walk);
     }
 
@@ -98,7 +109,7 @@ mod tests {
             ("MATCH SIMPLE (a)-[:E*1..3]->(b) RETURN a", PathRestrictor::Simple),
         ] {
             let mut q = parsed(text);
-            apply(&mut q, Dialect::Gql);
+            apply(&mut q, Dialect::Gql).unwrap();
             assert_eq!(first_path(&q).restrictor, want, "{text}");
         }
     }
@@ -106,7 +117,7 @@ mod tests {
     #[test]
     fn gql_moves_only_a_bare_star() {
         let mut bare = parsed("MATCH TRAIL (a)-[:E*]->(b) RETURN a");
-        apply(&mut bare, Dialect::Gql);
+        apply(&mut bare, Dialect::Gql).unwrap();
         let seg = &first_path(&bare).segments[0];
         assert_eq!(seg.edge.length.as_ref().unwrap().min, Some(0));
 
@@ -115,7 +126,7 @@ mod tests {
             "MATCH TRAIL (a)-[:E*1..3]->(b) RETURN a",
         ] {
             let mut q = parsed(text);
-            apply(&mut q, Dialect::Gql);
+            apply(&mut q, Dialect::Gql).unwrap();
             let seg = &first_path(&q).segments[0];
             assert_eq!(
                 seg.edge.length.as_ref().unwrap().min,
@@ -128,7 +139,7 @@ mod tests {
     #[test]
     fn a_fixed_length_pattern_has_no_quantifier_to_move() {
         let mut q = parsed("MATCH (a)-[:E]->(b) RETURN a");
-        apply(&mut q, Dialect::Gql);
+        apply(&mut q, Dialect::Gql).unwrap();
         assert!(first_path(&q).segments[0].edge.length.is_none());
     }
 }

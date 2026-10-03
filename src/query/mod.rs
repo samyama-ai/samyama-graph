@@ -479,7 +479,15 @@ impl QueryEngine {
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         let mut query = self.cached_parse(query_str)?;
-        crate::query::dialect::apply(&mut query, dialect);
+        crate::query::dialect::apply(&mut query, dialect).map_err(|e| {
+            with_span(
+                Box::new(crate::query::ParseError::Coded {
+                    code: e.code(),
+                    message: e.to_string(),
+                }),
+                query_str,
+            )
+        })?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
