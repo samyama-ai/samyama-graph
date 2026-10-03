@@ -71,6 +71,7 @@
 
 pub mod ast;
 pub mod bind;
+pub mod dialect;
 pub mod error_code;
 pub mod parser;
 pub mod star;
@@ -86,7 +87,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use lru::LruCache;
 
 // Re-export main types
-pub use ast::Query;
+pub use ast::{Dialect, Query};
 pub use parser::{parse_query, ParseError, ParseResult};
 pub use executor::{
     QueryExecutor, ExecutionError, ExecutionResult,
@@ -408,6 +409,23 @@ impl QueryEngine {
         self.execute_with_params(query_str, store, &BoundParams::new())
     }
 
+    /// The same read path, read under `dialect`'s defaults.
+    ///
+    /// Two defaults differ between openCypher and ISO GQL -- the path mode of an
+    /// unprefixed variable-length pattern, and what a bare `*` abbreviates -- and
+    /// changing either unconditionally would change the answer to every query a user
+    /// already has. So the reading is chosen per statement. `Dialect::Cypher` is
+    /// exactly `execute`: the rewrite is a no-op by construction, because the parser
+    /// already fills in the openCypher defaults.
+    pub fn execute_with_dialect(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        dialect: crate::query::ast::Dialect,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        self.execute_with_params_and_dialect(query_str, store, &BoundParams::new(), dialect)
+    }
+
     /// The same read path with the caller's parameters **bound** (#1463).
     ///
     /// The values reach the executor as bindings, never as text: nothing on
@@ -431,7 +449,37 @@ impl QueryEngine {
         params: &BoundParams,
         time_limit: Option<std::time::Duration>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        let query = self.cached_parse(query_str)?;
+        self.execute_within_with_dialect(
+            query_str, store, params, time_limit, crate::query::ast::Dialect::Cypher)
+    }
+
+    /// `execute_with_params`, under a chosen dialect (#1642, #1644).
+    pub fn execute_with_params_and_dialect(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+        dialect: crate::query::ast::Dialect,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        self.execute_within_with_dialect(query_str, store, params, None, dialect)
+    }
+
+    /// The one read path the others delegate to: parameters, an optional tenant time
+    /// limit, and the dialect the statement is read under.
+    ///
+    /// The dialect rewrite happens **after** the parse cache, on the owned clone the
+    /// cache hands back, so a statement read one way never poisons the entry for the
+    /// other. `Dialect::Cypher` rewrites nothing by construction.
+    pub fn execute_within_with_dialect(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+        time_limit: Option<std::time::Duration>,
+        dialect: crate::query::ast::Dialect,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        let mut query = self.cached_parse(query_str)?;
+        crate::query::dialect::apply(&mut query, dialect);
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(

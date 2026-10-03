@@ -18,6 +18,16 @@ pub struct QueryRequest {
     pub query: String,
     #[serde(default = "default_graph")]
     pub graph: String,
+    /// Which language's defaults to read this statement under (#1642, #1644).
+    ///
+    /// `"cypher"` (the default, and what every existing caller gets) keeps the
+    /// openCypher readings: an unprefixed variable-length pattern is a TRAIL and a
+    /// bare `*` is `{1,}`. `"gql"` selects the ISO/IEC 39075 readings -- WALK and
+    /// `{0,}`. Per query rather than per server, because a deployment serves both
+    /// kinds of client, and changing either default globally would change the answer
+    /// to every query a Cypher user already has.
+    #[serde(default)]
+    pub dialect: Option<String>,
     /// Per-query override of the result cache (#1153).
     ///
     /// `None` uses the server default, which is off unless
@@ -559,6 +569,11 @@ pub async fn query_handler(
         (result, props)
     } else {
         let store_guard = state.store.read().await;
+        // The result cache is keyed on the statement text, which does not say which
+        // dialect it was read under, so a GQL request must not be served from it until
+        // the key carries the dialect. Bypassing is the conservative half of that:
+        // a slower answer rather than a Cypher answer to a GQL question.
+        let use_cache = use_cache && requested_dialect(&payload) == crate::query::Dialect::Cypher;
         let result = if use_cache {
             match state.engine.execute_cached_with_params_within(
                 &payload.query,
@@ -573,11 +588,12 @@ pub async fn query_handler(
                 Err(e) => Err(e),
             }
         } else {
-            state.engine.execute_with_params_within(
+            state.engine.execute_within_with_dialect(
                 &payload.query,
                 &*store_guard,
                 &params,
                 time_limit,
+                requested_dialect(&payload),
             )
         };
         // Read while the guard is still held: taken afterwards it could name a
@@ -4867,6 +4883,19 @@ mod tests {
              `AppState::mutate`, or write a `// persistence: <how>` note above the line if \
              the path is durable by another mechanism: {offenders:?}"
         );
+    }
+}
+
+/// Which dialect a request asked for, defaulting to openCypher.
+///
+/// An unrecognised value is read as Cypher rather than refused: the field is an
+/// opt-in to a different reading, and a typo should give the historical behaviour
+/// rather than an error on a query that is otherwise fine. The chosen dialect is
+/// echoed in the response so a caller can see which reading it got.
+fn requested_dialect(payload: &QueryRequest) -> crate::query::Dialect {
+    match payload.dialect.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("gql") | Some("iso") | Some("iso-gql") => crate::query::Dialect::Gql,
+        _ => crate::query::Dialect::Cypher,
     }
 }
 

@@ -2201,20 +2201,23 @@ fn parse_length_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<Length
                 None
             };
 
-            return Ok(LengthPattern { min, max });
+            return Ok(LengthPattern { min, max, bare_star: false });
         } else if inner.as_rule() == Rule::integer {
             let exact = parse_length_bound(inner.as_str().trim(), "exact")?;
             return Ok(LengthPattern {
                 min: Some(exact),
                 max: Some(exact),
+                bare_star: false,
             });
         }
     }
 
-    // Just * means 1..unbounded
+    // A bare `*`. openCypher reads it as 1..unbounded; GQL reads it as 0..unbounded,
+    // and the dialect pass rewrites the lower bound when a statement asks for GQL.
     Ok(LengthPattern {
         min: Some(1),
         max: None,
+        bare_star: true,
     })
 }
 

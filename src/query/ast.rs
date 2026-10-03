@@ -631,6 +631,29 @@ pub struct LengthPattern {
     pub min: Option<usize>,
     /// Maximum length (None = unbounded)
     pub max: Option<usize>,
+    /// The pattern was written as a bare `*`, with no bounds at all.
+    ///
+    /// `*` and `*1..` produce the same bounds in this dialect and a different pair in
+    /// GQL, where `*` abbreviates `{0,}`. Without this flag the two are
+    /// indistinguishable after parsing, and the dialect switch would have to move
+    /// `*1..` as well -- which is unambiguous in both languages and must not move.
+    pub bare_star: bool,
+}
+
+/// Which language's defaults a statement is read under.
+///
+/// Two readings differ and neither can be changed unilaterally: the path mode of an
+/// unprefixed variable-length pattern (openCypher says TRAIL, ISO/IEC 39075 says WALK)
+/// and what a bare `*` abbreviates (openCypher `{1,}`, GQL `{0,}`). Flipping either by
+/// default would change the answer to every query a user already has, so the reading is
+/// selected per statement and `Cypher` stays the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dialect {
+    /// openCypher defaults. Unchanged behaviour, and what every existing caller gets.
+    #[default]
+    Cypher,
+    /// ISO/IEC 39075 (GQL) and ISO/IEC 9075-16 (SQL/PGQ) defaults.
+    Gql,
 }
 
 /// WHERE clause with predicates
