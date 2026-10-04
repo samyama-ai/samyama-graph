@@ -173,3 +173,94 @@ fn the_planner_agrees_across_representations() {
         );
     }
 }
+
+/// `ORDER BY` on a projected aggregate alias must work in both shapes (#1810).
+///
+/// `MATCH (a:Article)<-[:CITES]-() RETURN a, count(*) AS c ORDER BY c DESC
+/// LIMIT 10` answered in the by-kind fields and failed in the pipeline with
+/// `RuntimeError("Unknown function: count")`: the pipeline's `Clause::Return`
+/// arm placed the `Sort` below the projection unconditionally and resolved the
+/// key with `SortPosition::BeforeProjection`, which substitutes the alias for
+/// the expression it names — so the sort evaluated `count(*)` as a scalar,
+/// beneath the `Aggregate` that implements it.
+///
+/// Ninth of the same class. The pipeline is only reachable through a write, so
+/// this pair needs the mutable executor rather than `rows` above.
+#[test]
+fn order_by_an_aggregate_alias_reaches_both_representations() {
+    use samyama::graph::PropertyValue;
+    use samyama::query::executor::{MutQueryExecutor, Value};
+
+    /// Three `:N` nodes grouped by `g`: two `"a"` and one `"b"`.
+    fn fixture() -> GraphStore {
+        let mut store = GraphStore::new();
+        for g in ["a", "a", "b"] {
+            let id = store.create_node("N");
+            let _ = store.set_node_property(
+                "default",
+                id,
+                "g".to_string(),
+                PropertyValue::String(g.to_string()),
+            );
+        }
+        store
+    }
+
+    fn answer(cypher: &str) -> Result<Vec<(String, i64)>, String> {
+        let mut store = fixture();
+        let q = parse_query(cypher).map_err(|e| format!("parse: {e:?}"))?;
+        let batch = MutQueryExecutor::new(&mut store, "default".to_string())
+            .execute(&q)
+            .map_err(|e| format!("exec: {e:?}"))?;
+        Ok(batch
+            .records
+            .iter()
+            .map(|r| {
+                let g = match r.get("g") {
+                    Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                    other => panic!("g: {other:?}"),
+                };
+                let c = match r.get("c") {
+                    Some(Value::Property(PropertyValue::Integer(n))) => *n,
+                    other => panic!("c: {other:?}"),
+                };
+                (g, c)
+            })
+            .collect())
+    }
+
+    let pairs: &[(&str, &str, &str)] = &[
+        (
+            "ORDER BY the alias",
+            "MATCH (n:N) RETURN n.g AS g, count(*) AS c ORDER BY c DESC",
+            "CREATE (x:X) WITH x MATCH (n:N) RETURN n.g AS g, count(*) AS c ORDER BY c DESC",
+        ),
+        (
+            "ORDER BY the aggregate expression",
+            "MATCH (n:N) RETURN n.g AS g, count(*) AS c ORDER BY count(*) DESC",
+            "CREATE (x:X) WITH x MATCH (n:N) RETURN n.g AS g, count(*) AS c ORDER BY count(*) DESC",
+        ),
+        (
+            "ORDER BY the alias with a LIMIT",
+            "MATCH (n:N) RETURN n.g AS g, count(*) AS c ORDER BY c DESC LIMIT 1",
+            "CREATE (x:X) WITH x MATCH (n:N) RETURN n.g AS g, count(*) AS c ORDER BY c DESC LIMIT 1",
+        ),
+    ];
+    for (what, one, two) in pairs {
+        assert_eq!(shape(one), "by-kind", "{what}: `{one}` changed shape");
+        assert_eq!(shape(two), "pipeline", "{what}: `{two}` changed shape");
+        let (a, b) = (answer(one), answer(two));
+        assert!(a.is_ok(), "{what}: `{one}` -> {a:?}");
+        assert!(b.is_ok(), "{what}: `{two}` -> {b:?}");
+        assert_eq!(
+            a.as_ref().unwrap(),
+            b.as_ref().unwrap(),
+            "{what}: the two shapes disagree"
+        );
+    }
+    // Not vacuous: the answer is the one the question has.
+    assert_eq!(
+        answer(pairs[0].1).unwrap(),
+        vec![("a".to_string(), 2), ("b".to_string(), 1)]
+    );
+}
