@@ -9,10 +9,17 @@
 //!   returned copy. Nothing beyond it.
 //! - `Sort` itself added two calls per row for any key type: a `Vec` for the
 //!   row's key, and a clone of every row as it was handed on. Both are gone.
-//! - A string sort key still costs one copy per row: the column hands back an
-//!   owned `PropertyValue::String`. Removing it needs a borrowed read from the
-//!   column; that is still open on #750, and this test records it rather than
-//!   bounding it.
+//! - A string sort key cost one copy per row. It is now borrowed from the
+//!   column and costs nothing beyond the returned value, which the last
+//!   assertion bounds rather than merely records.
+//!
+//! What is left is the returned copy, and it is one call per row per projected
+//! string column — the count this file pins. Whether it is worth removing is a
+//! question about time, not calls, and the answer depends on the allocator:
+//! #750's +139 ns/row for a projected string was measured under glibc, and
+//! under the mimalloc the server and the LDBC benchmarks ship (ADR-038) the
+//! same A/B on SF1 reads +5 to +11 ns/row. A call count is allocator-independent
+//! and a cost is not, so do not read the count below as a cost.
 //!
 //! Counts calls through a global allocator, so this file holds one test.
 
