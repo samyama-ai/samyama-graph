@@ -1054,6 +1054,22 @@ pub struct GraphStore {
     /// Edge type index for fast lookups
     edge_type_index: HashMap<EdgeType, HashSet<EdgeId>>,
 
+    /// How many `begin_deferred_bulk_load` calls are outstanding (#1807).
+    ///
+    /// Non-zero means `finish_bulk_load` records what it owes instead of doing
+    /// it, so N snapshot imports back to back pay for the accumulated store
+    /// once rather than N times. Counted rather than a bool so nested
+    /// sequences compose.
+    bulk_load_defer_depth: u32,
+    /// Whether a deferred `finish_bulk_load` is owed.
+    bulk_load_pending: bool,
+    /// How many times the deferred part of `finish_bulk_load` has actually run.
+    ///
+    /// Exists so a test can assert "N imports, one finish" directly rather
+    /// than inferring it from the segment count, which a later change to
+    /// compaction could make a false proxy for.
+    bulk_load_finishes: u64,
+
     /// Vector indices manager
     pub vector_index: Arc<VectorIndexManager>,
     /// Named full-text indexes (NDS-06). Not behind an `Arc` like the vector
@@ -1192,6 +1208,9 @@ impl GraphStore {
             label_index: HashMap::new(),
             label_bits: std::sync::RwLock::new(HashMap::new()),
             edge_type_index: HashMap::new(),
+            bulk_load_defer_depth: 0,
+            bulk_load_pending: false,
+            bulk_load_finishes: 0,
             vector_index: Arc::new(VectorIndexManager::new()),
             fulltext: Default::default(),
             property_index: Arc::new(IndexManager::new()),
@@ -4270,13 +4289,66 @@ NodeDeleted { .. } => {
     /// themselves. What was missing was the guarantee for every other caller —
     /// the HTTP handler and three sites in the executor walk this vector
     /// directly, so before this their row order was unpinnable.
+    /// # Why this asks `edge_type_index_is_complete` first
+    ///
+    /// It read `edge_type_index` unconditionally, with no guard and no
+    /// fallback, so a graph whose index was short came back **short** — and
+    /// for a bulk load that had put every edge in through `create_edge_stub`
+    /// and not yet rebuilt the index, short means empty. The index's two other
+    /// readers both ask the completeness question (#1806); this one did not,
+    /// and it is the one the HTTP handler and three executor sites walk
+    /// directly as an answer rather than as an estimate.
+    ///
+    /// Nothing observed it before #1807 only because `import_tenant` always
+    /// rebuilt the index before returning, so no caller held the store in that
+    /// state. Deferring the rebuild across a sequence of imports creates
+    /// exactly that window, which is why the guard goes in with it.
     pub fn get_edges_by_type(&self, edge_type: &EdgeType) -> Vec<Edge> {
-        let Some(edge_ids) = self.edge_type_index.get(edge_type) else {
-            return Vec::new();
+        let mut ids: Vec<EdgeId> = if self.edge_type_index_is_complete() {
+            let Some(edge_ids) = self.edge_type_index.get(edge_type) else {
+                return Vec::new();
+            };
+            edge_ids.iter().copied().collect()
+        } else {
+            self.edge_ids_of_type_by_scan(edge_type)
         };
-        let mut ids: Vec<EdgeId> = edge_ids.iter().copied().collect();
         ids.sort_unstable_by_key(|id| id.as_u64());
         ids.into_iter().filter_map(|id| self.get_edge(id)).collect()
+    }
+
+    /// Every live edge id of `edge_type`, read from `edge_type_ids` rather than
+    /// from `edge_type_index`.
+    ///
+    /// The authoritative answer and the fallback for a short index. Applies the
+    /// same three rules `rebuild_edge_type_index` does — an unset type is a
+    /// tombstone, a zeroed endpoint pair is a freed id, and a type id past the
+    /// end of the table is not a type — so the set is exactly what a rebuild
+    /// would have filed under this type. O(next_edge_id).
+    fn edge_ids_of_type_by_scan(&self, edge_type: &EdgeType) -> Vec<EdgeId> {
+        let Some(wanted) = self
+            .edge_type_table
+            .iter()
+            .position(|t| t == edge_type)
+            .and_then(|i| u16::try_from(i).ok())
+        else {
+            return Vec::new();
+        };
+        if wanted == Self::EDGE_TYPE_UNSET {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for idx in 0..self.edge_type_ids.len() {
+            if self.edge_type_ids[idx] != wanted {
+                continue;
+            }
+            match self.edge_endpoints.get(idx) {
+                Some(&(src, tgt)) if src.as_u64() == 0 && tgt.as_u64() == 0 => continue,
+                Some(_) => {}
+                None => continue,
+            }
+            out.push(EdgeId::new(idx as u64));
+        }
+        out
     }
 
     /// Get total number of nodes
@@ -4470,12 +4542,126 @@ NodeDeleted { .. } => {
     ///
     /// So the list lives here, and callers take all of it or none. Each step
     /// no-ops on an empty store, so this is safe to call unconditionally.
+    /// Three of the four may be held back across a sequence of bulk loads; the
+    /// vector index may not. See [`Self::begin_deferred_bulk_load`].
     pub fn finish_bulk_load(&mut self) {
         self.bump_epoch();
+        // Never deferred, and run first so a deferred sequence still leaves
+        // every embedding searchable between imports.
+        self.rebuild_vector_index();
+        if self.bulk_load_defer_depth > 0 {
+            self.bulk_load_pending = true;
+            return;
+        }
+        self.run_deferred_bulk_load_finish();
+    }
+
+    /// The part of `finish_bulk_load` that a sequence may hold back.
+    fn run_deferred_bulk_load_finish(&mut self) {
         self.compact_adjacency();
         self.rebuild_edge_type_index();
         self.rebuild_catalog();
-        self.rebuild_vector_index();
+        self.bulk_load_pending = false;
+        self.bulk_load_finishes += 1;
+    }
+
+    /// Hold back the whole-store part of `finish_bulk_load` until
+    /// [`Self::end_deferred_bulk_load`] (#1807).
+    ///
+    /// # Why
+    ///
+    /// `finish_bulk_load` reads the **accumulated store**, not the snapshot
+    /// that was just imported, so importing N snapshots back to back pays N
+    /// times for a graph that only grows. Measured per phase at 8M nodes and
+    /// 16M edges (`examples/import_tax_probe.rs`): `rebuild_catalog` 4.836 s,
+    /// `rebuild_edge_type_index` 1.830 s, `compact_adjacency` 0.088 s. The
+    /// catalog is 72% of it and compaction is 1.3% — the tax tracks edges
+    /// roughly twice as strongly as nodes, and segment count third-order. In
+    /// the field an eleventh import of a 1,098-node snapshot into a 103M-node
+    /// store took 201.3 s.
+    ///
+    /// # What a query sees mid-sequence
+    ///
+    /// The same answers. Deferring is safe because each held-back structure is
+    /// already guarded against being read short:
+    ///
+    /// * **compaction** is a layout change only. Every adjacency read walks
+    ///   the frozen segments *and* the write buffer, so an uncompacted buffer
+    ///   is read in full. Only the *order* neighbours come back in differs,
+    ///   which no read promises.
+    /// * **the edge-type index** is left short, which
+    ///   `edge_type_index_is_complete` detects by comparing the indexed count
+    ///   against `edge_count()`; both readers consult it and fall back to a
+    ///   scan. `create_edge_stub` already leaves it short mid-import — this
+    ///   holds an existing state for longer, it does not create a new one.
+    /// * **the catalog**'s degree maps are already refused by
+    ///   `GraphCatalog::degrees_are_exact_for` from the first stub edge, which
+    ///   calls `note_degrees_may_be_stale` and which only `rebuild_catalog`
+    ///   clears. Label counts are maintained by `create_node_stub`, so they
+    ///   stay exact. What is left stale is the triple statistics, which are
+    ///   planner estimates: a worse plan, never a different answer.
+    ///
+    /// The **vector index is deliberately not deferred**. A vector query reads
+    /// the HNSW graph rather than the node rows, and an HNSW graph missing a
+    /// node returns fewer rows with nothing for the reader to check against —
+    /// there is no `..._is_complete` to guard it. That is #1467's class, and a
+    /// wrong answer is worse than a slow load. It is also not part of the tax:
+    /// it is O(nodes carrying an embedding) and a no-op when no vector index is
+    /// registered.
+    ///
+    /// One read *is* degraded mid-sequence, and it is introspection rather than
+    /// a query answer: `/api/schema` derives its edge-type endpoints from the
+    /// catalog's triple statistics, so inside a sequence it reports the edge
+    /// types of the imports that have already been finished. The same is true
+    /// on `main` between the first `create_edge_stub` and the end of the
+    /// import; a sequence widens that window. A caller that serves schema
+    /// introspection during a load should call
+    /// [`Self::force_bulk_load_finish`] first.
+    ///
+    /// A caller that wants plan quality back mid-sequence calls
+    /// [`Self::force_bulk_load_finish`].
+    ///
+    /// Nests: N `begin` calls need N `end` calls, and only the last one does
+    /// the work. An `end` without a `begin` is a no-op, so a caller that drops
+    /// out of a sequence early cannot wedge the store into permanent deferral —
+    /// it only delays the finish until the next `end`.
+    pub fn begin_deferred_bulk_load(&mut self) {
+        self.bulk_load_defer_depth = self.bulk_load_defer_depth.saturating_add(1);
+    }
+
+    /// Close a deferred bulk-load sequence, running the held-back finish once
+    /// if any import happened inside it.
+    pub fn end_deferred_bulk_load(&mut self) {
+        self.bulk_load_defer_depth = self.bulk_load_defer_depth.saturating_sub(1);
+        if self.bulk_load_defer_depth == 0 && self.bulk_load_pending {
+            self.bump_epoch();
+            self.run_deferred_bulk_load_finish();
+        }
+    }
+
+    /// Run the held-back finish now without closing the sequence.
+    ///
+    /// For a caller that will run a query mid-sequence and wants the planner's
+    /// statistics to be current as well as its answers correct. A no-op when
+    /// nothing is owed.
+    pub fn force_bulk_load_finish(&mut self) {
+        if self.bulk_load_pending {
+            self.bump_epoch();
+            self.run_deferred_bulk_load_finish();
+        }
+    }
+
+    /// Whether a deferred `finish_bulk_load` is owed.
+    pub fn bulk_load_finish_pending(&self) -> bool {
+        self.bulk_load_pending
+    }
+
+    /// How many times the deferrable part of `finish_bulk_load` has run.
+    ///
+    /// The direct measure of "N imports, one finish". A test should assert on
+    /// this rather than on the frozen segment count, which is only a proxy.
+    pub fn bulk_load_finish_count(&self) -> u64 {
+        self.bulk_load_finishes
     }
 
     /// Recompute the catalog from the current store contents.
@@ -6685,6 +6871,7 @@ mod tests {
         // once X stops bumping.
         const EXEMPT: &[(&str, &str)] = &[
             ("enable_write_log", "recording flag; the writes it records bump on their own path"),
+            ("begin_deferred_bulk_load", "raises the deferral counter; it changes when the held-back finish runs, not what any read returns -- every structure it holds back is guarded against being read short (#1807)"),
             ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
             ("set_write_admission", "stores the quota ceiling this statement is admitted under; it refuses writes, it does not change one (#1483)"),
             ("log_edge_write", "records what an edge write replaces for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),

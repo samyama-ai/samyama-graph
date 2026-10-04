@@ -433,6 +433,16 @@ async fn main() -> Result<(), Error> {
     .collect();
     dedup_sources.extend(extra_snaps.iter().cloned());
 
+    // One finish for the whole snapshot phase, not one per snapshot (#1807).
+    // `finish_bulk_load` reads the accumulated store -- the catalog recompute
+    // is 72% of it -- so eagerly the eleventh import of a 1,098-node snapshot
+    // paid for 103M nodes and took 201.3 s. Measured on a 8M-node / 24M-edge
+    // base store, 11 small imports: 95.8 s eager, 8.8 s deferred, with
+    // identical node and edge counts. Reads stay correct throughout; see
+    // `GraphStore::begin_deferred_bulk_load` for why, and for the one piece
+    // (the vector index) that is never deferred.
+    client.store_write().await.begin_deferred_bulk_load();
+
     for (name, p) in &dedup_sources {
         if dedup_keys.is_empty() {
             eprint!("Importing {} snapshot... ", name);
@@ -475,6 +485,11 @@ async fn main() -> Result<(), Error> {
             );
         }
     }
+
+    // Every snapshot is in: compact once, rebuild the edge-type index once,
+    // recompute the catalog once. Before the direct loaders and before any
+    // query, so nothing downstream sees a deferred state.
+    client.store_write().await.end_deferred_bulk_load();
 
     // ── Phase 2: Run direct loaders (HashMap properties, correct IDs) ──
     {
