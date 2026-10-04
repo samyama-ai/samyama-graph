@@ -273,6 +273,26 @@ impl GraphStatistics {
         self.label_counts.get(label).copied().unwrap_or(self.total_nodes)
     }
 
+    /// Whether `edge_type_counts` accounts for every edge in the graph.
+    ///
+    /// `compute_statistics` builds the per-type counts by summing the lengths
+    /// of `edge_type_index`, and `create_edge_stub` -- the bulk-load path --
+    /// deliberately does not maintain that index while still invalidating the
+    /// statistics cache. Mid-load the counts are therefore *short*: low for a
+    /// type that has some ordinary edges, and absent entirely for a type that
+    /// has only stubs. `rebuild_edge_type_index` (via `finish_bulk_load`)
+    /// repairs it afterwards.
+    ///
+    /// Anything that answers a question with these counts rather than
+    /// estimating with them has to ask this first, because a short count is a
+    /// wrong answer rather than a slow one -- the same reasoning that guards
+    /// the fast build in `GraphStore::type_adjacency`. Free to call: both
+    /// sides come from the snapshot in hand, so there is no second pass over
+    /// the store and no chance of reading the two from different states.
+    pub fn edge_type_counts_are_complete(&self) -> bool {
+        self.edge_type_counts.values().sum::<usize>() == self.total_edges
+    }
+
     /// Estimate the number of rows after an expand (edge traversal)
     pub fn estimate_expand(&self, edge_type: Option<&EdgeType>) -> f64 {
         match edge_type {
@@ -3960,9 +3980,56 @@ NodeDeleted { .. } => {
     /// and `rebuild_edge_type_index` repairs it afterwards, so mid-load it is
     /// **short** — and a type index built from a short set is a wrong answer
     /// rather than a slow one.
+    ///
+    /// The type index is not the only structure derived from that set:
+    /// `compute_statistics` fills `edge_type_counts` the same way, so a short
+    /// index makes an edge-type *count* low. That read is guarded by
+    /// [`GraphStatistics::edge_type_counts_are_complete`], which asks the same
+    /// question of a statistics snapshot rather than of the live store.
     fn edge_type_index_is_complete(&self) -> bool {
         let indexed: usize = self.edge_type_index.values().map(|s| s.len()).sum();
         indexed == self.edge_count()
+    }
+
+    /// Live edge counts per type, read from the adjacency rather than from
+    /// `edge_type_index`.
+    ///
+    /// The authoritative answer, and the fallback for a graph whose edge-type
+    /// index is incomplete. One pass over every node's outgoing adjacency, so
+    /// each edge is counted exactly once — the same set a full
+    /// `Expand` + `Aggregate` would visit, with the same tombstone rule
+    /// (`edge_type_matches` rejects `EDGE_TYPE_UNSET`).
+    ///
+    /// O(edges). Only worth calling when the index cannot be trusted; when it
+    /// can, `statistics().edge_type_counts` is already O(1).
+    pub(crate) fn edge_type_counts_by_scan(&self) -> HashMap<EdgeType, usize> {
+        let mut per_id = vec![0usize; self.edge_type_table.len()];
+        let node_capacity = self
+            .frozen_outgoing
+            .node_capacity()
+            .max(self.outgoing.len());
+        for idx in 0..node_capacity {
+            let node = NodeId::new(idx as u64);
+            self.for_each_outgoing_neighbor(node, None, |_, eid| {
+                let tid = self
+                    .edge_type_ids
+                    .get(eid.as_u64() as usize)
+                    .copied()
+                    .unwrap_or(Self::EDGE_TYPE_UNSET);
+                // `for_each_outgoing_neighbor` already dropped `UNSET`, but a
+                // type id past the end of the table would panic the index
+                // below, so it is checked rather than assumed.
+                if let Some(slot) = per_id.get_mut(tid as usize) {
+                    *slot += 1;
+                }
+            });
+        }
+        per_id
+            .into_iter()
+            .enumerate()
+            .filter(|&(_, n)| n > 0)
+            .map(|(tid, n)| (self.edge_type_table[tid].clone(), n))
+            .collect()
     }
 
     /// Build a type index from `edge_type_index`, or `None` if that cannot be

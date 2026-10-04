@@ -6753,15 +6753,32 @@ impl EdgeCountOperator {
     }
 
     fn count(&self, store: &GraphStore) -> i64 {
+        // `edge_type_counts` is derived from `edge_type_index`, which
+        // `create_edge_stub` (the bulk-load path) deliberately does not
+        // maintain while still invalidating the statistics cache. On such a
+        // graph the recomputed counts are *short* by every stub edge, so the
+        // shortcut would answer low: a fast, confident, wrong number. The
+        // sibling read in `type_adjacency()` guards itself the same way.
         let stats = store.statistics();
+        if stats.edge_type_counts_are_complete() {
+            return match &self.edge_type {
+                Some(t) => stats
+                    .edge_type_counts
+                    .iter()
+                    .find(|(et, _)| et.as_str() == t.as_str())
+                    .map(|(_, c)| *c as i64)
+                    .unwrap_or(0),
+                None => stats.edge_type_counts.values().map(|c| *c as i64).sum(),
+            };
+        }
+        let scanned = store.edge_type_counts_by_scan();
         match &self.edge_type {
-            Some(t) => stats
-                .edge_type_counts
+            Some(t) => scanned
                 .iter()
                 .find(|(et, _)| et.as_str() == t.as_str())
                 .map(|(_, c)| *c as i64)
                 .unwrap_or(0),
-            None => stats.edge_type_counts.values().map(|c| *c as i64).sum(),
+            None => scanned.values().map(|c| *c as i64).sum(),
         }
     }
 }
@@ -6827,9 +6844,17 @@ impl PhysicalOperator for EdgeTypeCountOperator {
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
+            // Same short-index hazard as `EdgeCountOperator::count`: a
+            // stub-loaded graph omits whole types from `edge_type_counts`, so
+            // the grouped form would lose rows, not just undercount them.
             let stats = store.statistics();
+            let counts = if stats.edge_type_counts_are_complete() {
+                stats.edge_type_counts.clone()
+            } else {
+                store.edge_type_counts_by_scan()
+            };
             let mut records = Vec::new();
-            for (edge_type, count) in &stats.edge_type_counts {
+            for (edge_type, count) in &counts {
                 let mut record = Record::new();
                 record.bind(
                     self.type_alias.clone(),
@@ -6849,9 +6874,17 @@ impl PhysicalOperator for EdgeTypeCountOperator {
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
+            // Same short-index hazard as `EdgeCountOperator::count`: a
+            // stub-loaded graph omits whole types from `edge_type_counts`, so
+            // the grouped form would lose rows, not just undercount them.
             let stats = store.statistics();
+            let counts = if stats.edge_type_counts_are_complete() {
+                stats.edge_type_counts.clone()
+            } else {
+                store.edge_type_counts_by_scan()
+            };
             let mut records = Vec::new();
-            for (edge_type, count) in &stats.edge_type_counts {
+            for (edge_type, count) in &counts {
                 let mut record = Record::new();
                 record.bind(
                     self.type_alias.clone(),
