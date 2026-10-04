@@ -454,6 +454,51 @@ fn create_node_operator_refuses_an_unbound_property_reference() {
 // CreateEdgeOperator (never produced by the planner)
 // ---------------------------------------------------------------------------
 
+/// `CreateEdgeOperator` describes itself, and keeps its input in the tree.
+///
+/// Checked here rather than through EXPLAIN because nothing in the planner
+/// builds this operator -- `MATCH ... CREATE (a)-[r]->(b)` plans a
+/// `MatchCreateEdgeOperator` -- so no query can reach it. It took the
+/// `describe` default along with the ten operators the planner does build
+/// (#1826), and would truncate a plan the day something plans it.
+#[test]
+fn create_edge_operator_describes_itself_and_its_input() {
+    let mut store = GraphStore::new();
+    let a = store.create_node("N");
+    let b = store.create_node("N");
+    let mut record = Record::new();
+    record.bind("s", Value::NodeRef(a));
+    record.bind("t", Value::NodeRef(b));
+    let input: OperatorBox = Box::new(MaterializedOperator::new(vec![record]));
+    let op = CreateEdgeOperator::new(
+        Some(input),
+        "s".into(),
+        "t".into(),
+        EdgeType::new("R"),
+        HashMap::from([("w".to_string(), PropertyValue::Integer(5))]),
+        Some("e".into()),
+    );
+    let d = op.describe();
+    assert_eq!(d.name, "CreateEdge");
+    assert_eq!(d.details, "(s)-[e:R {w: Integer(5)}]->(t)");
+    assert_eq!(d.children.len(), 1, "the input must stay in the tree");
+    assert_eq!(d.children[0].name, "Materialized");
+    assert!(d.unknown_nodes().is_empty());
+
+    // With no input it is a leaf, and says so rather than claiming a child.
+    let leaf = CreateEdgeOperator::new(
+        None,
+        "s".into(),
+        "t".into(),
+        EdgeType::new("R"),
+        HashMap::new(),
+        None,
+    );
+    let d = leaf.describe();
+    assert_eq!(d.details, "(s)-[:R]->(t)");
+    assert!(d.children.is_empty());
+}
+
 #[test]
 fn create_edge_operator_wires_each_input_row() {
     let mut store = GraphStore::new();

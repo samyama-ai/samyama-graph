@@ -7601,10 +7601,48 @@ impl QueryPlanner {
             Box::new(SingleRowOperator::new())
         } else {
             let mut prefix = Query::new();
+            // The pattern of the OPTIONAL MATCH the next clause follows, if it
+            // is one: its WHERE belongs to that clause and must not become a
+            // required filter. Mirrors `after_optional` in
+            // `parse_match_statement` — same rule, same reset (#1823, #1231).
+            let mut after_optional: Option<Pattern> = None;
             for clause in &clauses[..split] {
+                if !matches!(clause, Clause::Where(_))
+                    && !matches!(clause, Clause::Match(m) if m.optional)
+                {
+                    after_optional = None;
+                }
                 match clause {
-                    Clause::Match(m) => prefix.match_clauses.push(m.clone()),
-                    Clause::Where(w) => prefix.where_clause = Some(w.clone()),
+                    Clause::Match(m) => {
+                        prefix.match_clauses.push(m.clone());
+                        if m.optional {
+                            after_optional = Some(m.pattern.clone());
+                        }
+                    }
+                    // Accumulate, never assign. Cypher permits a `WHERE` after
+                    // each `MATCH` and the parser ANDs them into one chain; this
+                    // fold overwrote, so a second `WHERE` in the leading reading
+                    // run silently deleted the first and the query returned rows
+                    // the dropped predicate excluded (#1823). The nesting is
+                    // left-associative to match the parser exactly — other code
+                    // pattern-matches on the AND chain's shape.
+                    Clause::Where(w) => {
+                        if let Some(pattern) = after_optional.clone() {
+                            for c in flatten_and_predicates(&w.predicate) {
+                                prefix.optional_where.push((pattern.clone(), c));
+                            }
+                        }
+                        prefix.where_clause = match prefix.where_clause.take() {
+                            Some(existing) => Some(WhereClause {
+                                predicate: Expression::Binary {
+                                    left: Box::new(existing.predicate),
+                                    op: BinaryOp::And,
+                                    right: Box::new(w.predicate.clone()),
+                                },
+                            }),
+                            None => Some(w.clone()),
+                        };
+                    }
                     Clause::Unwind(u) => {
                         if prefix.unwind_clause.is_none() {
                             prefix.unwind_clause = Some(u.clone());

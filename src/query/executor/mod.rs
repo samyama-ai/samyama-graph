@@ -95,7 +95,7 @@ pub mod planner;
 pub mod record;
 
 // Export operators - added CreateNodeOperator, CreateEdgeOperator, CartesianProductOperator for CREATE support
-pub use operator::{PhysicalOperator, OperatorBox, OperatorDescription, CreateNodeOperator, CreateEdgeOperator, MatchCreateEdgeOperator, CartesianProductOperator};
+pub use operator::{PhysicalOperator, OperatorBox, OperatorDescription, CreateNodeOperator, CreateEdgeOperator, MatchCreateEdgeOperator, CartesianProductOperator, undescribed_plan_lines};
 pub use planner::{QueryPlanner, ExecutionPlan, PlannerConfig};
 pub use record::{PropertyCursor, Record, RecordBatch, Value};
 
