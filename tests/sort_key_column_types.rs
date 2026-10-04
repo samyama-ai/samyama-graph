@@ -57,3 +57,58 @@ fn a_column_holding_strings_and_numbers() {
     write(&mut s, "CREATE (:Q {v: 'b', i: 1}), (:Q {v: 3, i: 2}), (:Q {v: 'a', i: 3}), (:Q {v: 1, i: 4})");
     assert_eq!(col(&s, "MATCH (q:Q) RETURN q.i AS c ORDER BY q.v"), vec!["3", "1", "4", "2"]);
 }
+
+/// The empty string and non-ASCII values order as their owned form does.
+///
+/// The key is borrowed from the column rather than copied (#750), so the
+/// comparison is `str::cmp` where it used to be `PropertyValue`'s `Ord` over
+/// an owned `String`. Those agree -- both are byte-wise over UTF-8 -- and this
+/// pins that they do rather than asserting a hand-written order, which would
+/// only restate whichever one was written down. The empty string is the case
+/// that distinguishes a borrowed read from an absent property: both are
+/// falsy-looking, and only one of them is a value.
+#[test]
+fn an_empty_and_non_ascii_string_key() {
+    let values = ["", "zebra", "Zebra", "éclair", "日本", "a", "Ähre", "apple"];
+    let mut s = GraphStore::new();
+    for (i, v) in values.iter().enumerate() {
+        write(&mut s, &format!("CREATE (:S {{k: '{v}', i: {i}}})"));
+    }
+
+    // `sort` on `&str` is byte-wise `str::cmp` — the comparison the borrowed
+    // key uses, and the one an owned `String` key used before it.
+    let mut expected: Vec<&str> = values.to_vec();
+    expected.sort();
+    assert_eq!(col(&s, "MATCH (n:S) RETURN n.k AS c ORDER BY n.k"), expected);
+
+    // Descending is the same order reversed, and the empty string is a row at
+    // the other end rather than a dropped one.
+    expected.reverse();
+    assert_eq!(col(&s, "MATCH (n:S) RETURN n.k AS c ORDER BY n.k DESC"), expected);
+
+    // The projected value is the value, not a prefix or a copy that lost its
+    // multi-byte characters.
+    assert_eq!(col(&s, "MATCH (n:S) WHERE n.i = 4 RETURN n.k AS c"), vec!["日本"]);
+}
+
+/// An absent string property is null, and null sorts after every string --
+/// which is what distinguishes it from the empty string above.
+#[test]
+fn an_absent_string_key_is_not_the_empty_string() {
+    let mut s = GraphStore::new();
+    write(&mut s, "CREATE (:T {k: '', i: 1}), (:T {i: 2}), (:T {k: 'a', i: 3})");
+    assert_eq!(col(&s, "MATCH (n:T) RETURN n.i AS c ORDER BY n.k"), vec!["1", "3", "2"]);
+}
+
+/// A relationship property reaches the cursor's edge branch, which caches
+/// whether the relationship column holds strings separately from the node one.
+#[test]
+fn a_string_key_on_a_relationship() {
+    let mut s = GraphStore::new();
+    write(&mut s, "CREATE (:U {n: 1}), (:U {n: 2}), (:U {n: 3})");
+    write(&mut s, "MATCH (a:U {n: 1}), (b:U {n: 2}), (c:U {n: 3}) CREATE (a)-[:R {k: 'pear'}]->(b), (a)-[:R {k: ''}]->(c), (b)-[:R {k: 'ähre'}]->(c)");
+    assert_eq!(
+        col(&s, "MATCH ()-[r:R]->() RETURN r.k AS c ORDER BY r.k"),
+        vec!["", "pear", "ähre"]
+    );
+}
