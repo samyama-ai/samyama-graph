@@ -15,6 +15,11 @@
 //! It asserts the gap rather than printing it: if `multiplicity_is_observable`
 //! ever stops recognising this shape, IC1 silently starts enumerating again and
 //! the only symptom is a benchmark getting slower.
+
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor};
 use samyama::query::parser::parse_query;

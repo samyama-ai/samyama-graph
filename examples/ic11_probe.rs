@@ -18,6 +18,10 @@
 //!   cargo run --release --example ic11_probe -- --data-dir <ldbc-sf1-dir> \
 //!       --person-id <id> --org-name <name>
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "../benches/ldbc_common/mod.rs"]
 mod ldbc_common;
 

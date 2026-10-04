@@ -19,6 +19,10 @@
 //! cargo run --release --example parallel_scaling -- --json scaling.json
 //! ```
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::collections::HashMap;
 use std::time::Instant;
 

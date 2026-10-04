@@ -2,6 +2,11 @@
 //!
 //! Bidirectional BFS did not move CR-3 at all (541 ms -> 547 ms on SF10), so
 //! the BFS was not the cost. This asks what the plan actually is.
+
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor};
 use samyama::query::parser::parse_query;

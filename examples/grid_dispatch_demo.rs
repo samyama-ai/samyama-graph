@@ -23,6 +23,10 @@
 //!       [--data-dir PATH] [--seeds 3] [--emission-weight 50.0]
 //!       [--demand-penalty 100.0] [--ramp-penalty 50.0]
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use ndarray::Array1;
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::QueryEngine;

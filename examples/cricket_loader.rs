@@ -8,6 +8,10 @@
 //!   cargo run --release --example cricket_loader -- --data-dir data/cricket --max-matches 1000
 //!   cargo run --release --example cricket_loader -- --data-dir data/cricket --snapshot cricket.sgsnap
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;

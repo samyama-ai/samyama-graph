@@ -10,6 +10,10 @@
 //!   cargo run --release --example hgnc_ensembl_loader -- \
 //!     --hgnc data/hgnc/hgnc_complete_set.txt --snapshot hgnc.sgsnap
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;

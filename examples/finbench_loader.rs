@@ -9,6 +9,10 @@
 //!   cargo run --release --example finbench_loader -- --data-dir /path      # Load from existing CSV files
 //!   cargo run --release --example finbench_loader -- --query               # Drop into query loop after loading
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;

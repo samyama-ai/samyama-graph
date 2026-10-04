@@ -23,6 +23,10 @@
 //! cargo run --release --example mesh_scale_bench -- --mesh mtrees2025.bin --articles 500000 --export-csv /tmp/mesh-csv
 //! ```
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::time::Instant;

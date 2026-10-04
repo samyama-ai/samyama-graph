@@ -23,6 +23,10 @@
 //! Read it against the base branch's binary for a before/after: the same
 //! example compiles on both.
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::time::Instant;
 
 use samyama::graph::{GraphStore, PropertyValue};

@@ -19,6 +19,10 @@
 //!
 //! [[Use-Case 4 — Biomedical KG Edge-Completion Scoring]]
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama_sdk::{
     Array1, EmbeddedClient, Problem, QOJayaSolver, SamyamaClient, SolverConfig,
 };

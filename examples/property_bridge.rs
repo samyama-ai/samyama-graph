@@ -28,6 +28,10 @@
 //!     --edge-type SAME_AS \
 //!     --snapshot-out data/phase1b_chained_v4.sgsnap
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;

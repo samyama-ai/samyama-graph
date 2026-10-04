@@ -18,6 +18,10 @@
 //!     --snapshot data/baseline/chembl.sgsnap \
 //!     --queries-dir ../genomoncology-demo/queries
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::path::PathBuf;
 use std::time::Instant;
 
