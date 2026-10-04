@@ -27,8 +27,12 @@ use crate::query::ast::{Direction, Expression, MatchClause, Query};
 pub struct AdjacencyAggPattern {
     /// Variable bound to the endpoint the aggregate groups on.
     pub grouped_var: String,
-    /// Label of the grouped endpoint (required — used as the NodeScan target).
-    pub grouped_label: Label,
+    /// Label of the grouped endpoint, used as the NodeScan target.
+    ///
+    /// `None` for the unlabelled form `MATCH (a)<-[:CITES]-()`, which #304
+    /// also asks for: the fallback scan then has no label to narrow on, and
+    /// the catalog shortcut sums every triple of the type.
+    pub grouped_label: Option<Label>,
     /// Variable bound to the counted neighbor.
     pub neighbor_var: String,
     /// Optional label on the neighbor side. Phase 1 requires schema uniqueness
@@ -73,6 +77,10 @@ pub struct AdjacencyAggPattern {
 /// unique per node. This is enforced by checking for a UNIQUE constraint
 /// on `(grouped_label, property)`. Variable-only group-by
 /// (`RETURN g, count(n)`) is always safe (one row per node by definition).
+/// Stands in for the counted variable when the aggregate counts rows rather
+/// than a named binding (`count(*)`, `count(<relationship>)`).
+const COUNT_ROWS: &str = "\u{0}adj_count_rows";
+
 pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> {
     // Shape constraint: exactly one MATCH, no WITH split, no extra WITH stages.
     if query.match_clauses.len() != 1 {
@@ -125,10 +133,21 @@ pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> 
     let target = &path.segments[0].node;
     let edge = &path.segments[0].edge;
 
-    // Both endpoints must have variables bound (we need to reference them in
-    // the aggregate + group-by).
-    let start_var = start.variable.as_ref()?.clone();
-    let target_var = target.variable.as_ref()?.clone();
+    // The grouped endpoint needs a variable — the group-by names it. The other
+    // endpoint does not: `MATCH (a:Article)<-[:CITES]-()` is #304's own Q19 and
+    // nothing refers to the far side. A placeholder stands in so the rest of
+    // the detector can compare variable names uniformly; it is never emitted,
+    // because a pattern with an anonymous endpoint cannot group or count on it.
+    const ANON_START: &str = "\u{0}adj_anon_start";
+    const ANON_TARGET: &str = "\u{0}adj_anon_target";
+    let start_var = start
+        .variable
+        .clone()
+        .unwrap_or_else(|| ANON_START.to_string());
+    let target_var = target
+        .variable
+        .clone()
+        .unwrap_or_else(|| ANON_TARGET.to_string());
 
     // Concrete single edge type.
     if edge.types.len() != 1 {
@@ -165,13 +184,36 @@ pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> 
                 if count_info.is_some() {
                     return None; // multiple count()s not supported
                 }
-                if args.len() != 1 {
-                    return None;
-                }
-                // Only count(variable) is a degree-equivalent — count(*) or
-                // count(b.prop) aren't handled by Phase 1.
-                let arg_var = match &args[0] {
-                    Expression::Variable(v) => v.clone(),
+                // `count(*)` parses to zero arguments and is the form #304
+                // writes. It counts rows, and one non-optional segment
+                // produces one row per matching edge — which is the degree,
+                // the same number `count(<far endpoint>)` gives, since a
+                // required match never binds that endpoint to null. The
+                // relationship variable counts the same rows for the same
+                // reason. `count(DISTINCT *)` is not a thing, and
+                // `count(DISTINCT r)` dedupes edge ids, which are already
+                // unique — but it is declined rather than reasoned about.
+                let arg_var = match args.len() {
+                    0 => {
+                        if *distinct {
+                            return None;
+                        }
+                        COUNT_ROWS.to_string()
+                    }
+                    1 => match &args[0] {
+                        Expression::Variable(v) => {
+                            if Some(v) == edge.variable.as_ref() {
+                                if *distinct {
+                                    return None;
+                                }
+                                COUNT_ROWS.to_string()
+                            } else {
+                                v.clone()
+                            }
+                        }
+                        // count(b.prop) skips nulls, so it is not a row count.
+                        _ => return None,
+                    },
                     _ => return None,
                 };
                 // Projection must carry an explicit alias so downstream
@@ -212,15 +254,25 @@ pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> 
     // handles parallel edges + same-neighbor-across-grouped-nodes).
 
     // The counted variable must be one endpoint; the grouped side must be the
-    // OTHER endpoint and must provide every group-by variable.
-    let (grouped_var, grouped_node, neighbor_var, neighbor_node) =
-        if count_arg_var == start_var {
-            (target_var.clone(), target, start_var.clone(), start)
-        } else if count_arg_var == target_var {
+    // OTHER endpoint and must provide every group-by variable. For a row count
+    // (`count(*)`, `count(r)`) neither endpoint is named by the aggregate, so
+    // the group-by picks the grouped side instead.
+    let (grouped_var, grouped_node, neighbor_var, neighbor_node) = if count_arg_var == COUNT_ROWS {
+        let keyed = &group_by_items.first()?.0;
+        if keyed == &start_var {
             (start_var.clone(), start, target_var.clone(), target)
+        } else if keyed == &target_var {
+            (target_var.clone(), target, start_var.clone(), start)
         } else {
             return None;
-        };
+        }
+    } else if count_arg_var == start_var {
+        (target_var.clone(), target, start_var.clone(), start)
+    } else if count_arg_var == target_var {
+        (start_var.clone(), start, target_var.clone(), target)
+    } else {
+        return None;
+    };
 
     // Every group-by entry must target the grouped endpoint.
     for (v, _) in &group_by_items {
@@ -229,11 +281,20 @@ pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> 
         }
     }
 
-    // Grouped endpoint must have a single concrete label (needed for the scan).
-    if grouped_node.labels.len() != 1 {
+    // Grouped endpoint carries at most one label. Two labels would need the
+    // scan to intersect them and the catalog to pick between two triples, so
+    // they are out of scope; none is the `MATCH (a)<-[:CITES]-()` form.
+    let grouped_label = match grouped_node.labels.len() {
+        0 => None,
+        1 => Some(grouped_node.labels[0].clone()),
+        _ => return None,
+    };
+
+    // An anonymous grouped endpoint cannot be grouped on: the group-by names a
+    // variable, and the placeholder above is not one the user wrote.
+    if grouped_var == ANON_START || grouped_var == ANON_TARGET {
         return None;
     }
-    let grouped_label = grouped_node.labels[0].clone();
 
     // GROUP BY safety: the AdjacencyCountAggregateOperator emits one record
     // per grouped node — for property-based GROUP BY this is per-node, not
@@ -562,7 +623,7 @@ pub fn detect_with_binding(query: &Query) -> Option<AdjacencyAggWithBindingPatte
     Some(AdjacencyAggWithBindingPattern {
         core: AdjacencyAggPattern {
             grouped_var,
-            grouped_label,
+            grouped_label: Some(grouped_label),
             neighbor_var,
             neighbor_label,
             edge_type,
@@ -792,7 +853,8 @@ pub fn detect_aggregate_then_expand(
         return None;
     }
     if !bound_node.labels.is_empty()
-        && (bound_node.labels.len() != 1 || bound_node.labels[0] != core.grouped_label)
+        && (bound_node.labels.len() != 1
+            || Some(&bound_node.labels[0]) != core.grouped_label.as_ref())
     {
         return None;
     }
@@ -850,7 +912,7 @@ mod tests {
         .unwrap();
         let p = detect(&q, &GraphStore::new()).expect("should detect");
         assert_eq!(p.grouped_var, "j");
-        assert_eq!(p.grouped_label.as_str(), "Journal");
+        assert_eq!(p.grouped_label.as_ref().map(|l| l.as_str()), Some("Journal"));
         assert_eq!(p.neighbor_var, "a");
         assert_eq!(p.neighbor_label.as_ref().unwrap().as_str(), "Article");
         assert_eq!(p.edge_type.as_str(), "PUBLISHED_IN");
@@ -934,15 +996,55 @@ mod tests {
         assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
-    /// count(*) is semantically close but needs care around nulls — defer to
-    /// a later phase.
+    /// `count(*)` is accepted since #304.
+    ///
+    /// The null care this test was deferring does not arise: a non-optional
+    /// segment binds both endpoints on every row it produces, so the rows
+    /// `count(*)` counts and the non-null bindings `count(<endpoint>)` counts
+    /// are the same rows. Declining it mattered — it is the form #304's Q19 is
+    /// written in, so the query that timed out at 1.4 billion edges took the
+    /// generic `Expand` + `Aggregate` while `count(b)` over the same pattern
+    /// took this rewrite.
     #[test]
-    fn rejects_count_star() {
+    fn accepts_count_star() {
         let q = parse_query(
             "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) \
              RETURN j.title, count(*) AS articles",
         )
         .unwrap();
+        let p = detect(&q, &GraphStore::new()).expect("count(*) is a row count");
+        assert_eq!(p.grouped_var, "j");
+        assert_eq!(p.count_alias, "articles");
+        assert!(!p.count_distinct);
+    }
+
+    /// The counted endpoint may be anonymous, which `count(*)` allows and
+    /// nothing else does. `MATCH (a:Article)<-[:CITES]-()` is #304's Q19.
+    #[test]
+    fn accepts_an_anonymous_counted_endpoint() {
+        let q = parse_query(
+            "MATCH (a:Article)<-[:CITES]-() RETURN a.title, count(*) AS c",
+        )
+        .unwrap();
+        let p = detect(&q, &GraphStore::new()).expect("Q19's own shape");
+        assert_eq!(p.grouped_var, "a");
+        assert_eq!(p.direction, ExpandDirection::Reverse);
+    }
+
+    /// An unlabelled grouped endpoint is the label-free form #304 also lists.
+    /// The scan beneath has no label to narrow on; the catalog does not need
+    /// one.
+    #[test]
+    fn accepts_an_unlabelled_grouped_endpoint() {
+        let q = parse_query("MATCH (a)<-[:CITES]-() RETURN a, count(*) AS c").unwrap();
+        let p = detect(&q, &GraphStore::new()).expect("unlabelled grouped endpoint");
+        assert_eq!(p.grouped_label, None);
+    }
+
+    /// Both endpoints anonymous leaves nothing to group on.
+    #[test]
+    fn rejects_two_anonymous_endpoints() {
+        let q = parse_query("MATCH ()<-[:CITES]-() RETURN count(*) AS c").unwrap();
         assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
@@ -1022,7 +1124,7 @@ mod tests {
         .unwrap();
         let p = detect_with_binding(&q).expect("should detect");
         assert_eq!(p.core.grouped_var, "m");
-        assert_eq!(p.core.grouped_label.as_str(), "MeSHTerm");
+        assert_eq!(p.core.grouped_label.as_ref().map(|l| l.as_str()), Some("MeSHTerm"));
         assert_eq!(p.core.neighbor_var, "a");
         assert_eq!(p.core.neighbor_label.as_ref().unwrap().as_str(), "Article");
         assert_eq!(p.core.edge_type.as_str(), "ANNOTATED_WITH");
@@ -1047,7 +1149,7 @@ mod tests {
         .unwrap();
         let p = detect_with_binding(&q).expect("should detect");
         assert_eq!(p.core.grouped_var, "au");
-        assert_eq!(p.core.grouped_label.as_str(), "Author");
+        assert_eq!(p.core.grouped_label.as_ref().map(|l| l.as_str()), Some("Author"));
         assert_eq!(p.core.direction, ExpandDirection::Reverse);
         assert_eq!(p.grouped_scan_limit, Some(100));
         assert!(p.prefilter.is_some(), "WHERE on grouped side must be kept");
@@ -1190,11 +1292,9 @@ mod tests {
             // count of a property
             "MATCH (a:Article)-[:P]->(j:Journal) RETURN j.title, count(a.x) AS n",
             // counting something that is not an endpoint
-            "MATCH (a:Article)-[r:P]->(j:Journal) RETURN j.title, count(r) AS n",
             // no grouping key
             "MATCH (a:Article)-[:P]->(j:Journal) RETURN count(a) AS n",
-            // grouped endpoint unlabelled / multi-labelled
-            "MATCH (a:Article)-[:P]->(j) RETURN j.title, count(a) AS n",
+            // grouped endpoint multi-labelled
             "MATCH (a:Article)-[:P]->(j:Journal:Venue) RETURN j.title, count(a) AS n",
             // neighbour multi-labelled
             "MATCH (a:Article:Paper)-[:P]->(j:Journal) RETURN j.title, count(a) AS n",
@@ -1203,6 +1303,23 @@ mod tests {
         ] {
             assert!(d(s).is_none(), "should reject: {}", s);
         }
+    }
+
+    /// Two rows moved out of `phase1_rejects_query_shapes` by #304, because
+    /// the detector now takes them. `count(r)` counts the rows one segment
+    /// binds, which is the degree; an unlabelled grouped endpoint only means
+    /// the fallback scan has no label to narrow on.
+    #[test]
+    fn accepts_what_phase_1_used_to_reject() {
+        for s in [
+            "MATCH (a:Article)-[r:P]->(j:Journal) RETURN j.title, count(r) AS n",
+            "MATCH (a:Article)-[:P]->(j) RETURN j.title, count(a) AS n",
+        ] {
+            assert!(d(s).is_some(), "should accept: {}", s);
+        }
+        // `count(DISTINCT r)` is still declined: edge ids are unique, so it is
+        // the same number, but it is not reasoned about here.
+        assert!(d("MATCH (a:Article)-[r:P]->(j:Journal) RETURN j.title, count(DISTINCT r) AS n").is_none());
     }
 
     #[test]

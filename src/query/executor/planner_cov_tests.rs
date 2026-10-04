@@ -1716,10 +1716,16 @@ fn adjacency_count_with_binding_skip_limit_where_and_distinct() {
         op_names(&plan_of(&s, query))
     );
     let b = read(&s, query);
-    // City Y scanned in node order C, D, E; SKIP 1 leaves D, E.
-    let names = strs(&b, "n");
-    assert_eq!(names.len(), 2);
-    assert!(ints(&b, "c").iter().all(|c| *c == 0 || *c == 1));
+    // City Y scanned in node order C, D, E; SKIP 1 leaves D and E, and
+    // neither has an outgoing KNOWS. A required MATCH yields no row for a node
+    // the pattern does not match, so the answer is no rows at all.
+    //
+    // This asserted two rows and tolerated a count of 0 in them, which is the
+    // #601 defect: `build_grouped_iter_distinct` never filtered empty groups
+    // the way `build_grouped_iter_sum` had since #601, so `count(DISTINCT f)`
+    // turned the required match into an optional one. Found while adding the
+    // degree-catalog source (#304).
+    assert!(strs(&b, "n").is_empty(), "{:?}", strs(&b, "n"));
     let query = "MATCH (p:Person) WITH p LIMIT 10 MATCH (f)-[:KNOWS]->(p) RETURN p.name AS n, count(f) AS c ORDER BY c DESC, n LIMIT 1";
     let b = read(&s, query);
     assert_eq!(strs(&b, "n"), vec!["C"]);

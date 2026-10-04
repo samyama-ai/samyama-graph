@@ -1520,7 +1520,7 @@ impl QueryPlanner {
             // correct for the query. The specialized plan short-circuits the
             // Expand→Aggregate path that causes MB049/MB054 to time out.
             if let Some(pat) = super::adjacency_agg_detector::detect(query, store) {
-                return self.plan_adjacency_count_aggregate(query, pat);
+                return self.plan_adjacency_count_aggregate(query, pat, store);
             }
             // ADR-017 Phase 3a: the WITH-bound variant handles MB053 and EX49,
             // where an explicit pre-WITH LIMIT caps the work per group but the
@@ -5662,6 +5662,7 @@ impl QueryPlanner {
         &self,
         query: &Query,
         pat: super::adjacency_agg_detector::AdjacencyAggPattern,
+        store: &GraphStore,
     ) -> ExecutionResult<ExecutionPlan> {
         use super::operator::{
             AdjacencyCountAggregateOperator, LimitOperator, NodeScanOperator, ProjectOperator,
@@ -5676,7 +5677,7 @@ impl QueryPlanner {
         // Scan + optional WHERE filter on grouped side + count.
         let scan: OperatorBox = Box::new(NodeScanOperator::new(
             pat.grouped_var.clone(),
-            vec![pat.grouped_label.clone()],
+            pat.grouped_label.clone().into_iter().collect(),
         ));
         let scan: OperatorBox = if let Some(pred) = &pat.prefilter {
             use super::operator::FilterOperator;
@@ -5718,6 +5719,29 @@ impl QueryPlanner {
         }
         if pat.count_distinct {
             adj_op = adj_op.with_count_distinct(true);
+        }
+        // The catalog holds the summed degree per node per triple, so the scan
+        // and the per-node adjacency walk both go away and the plan stops
+        // being O(nodes + edges) (#304). Three things have to be true, and the
+        // first two are the shape:
+        //
+        // * **no WHERE** — the maps hold node ids and degrees, not properties,
+        //   so a predicate that selects which nodes count cannot be pushed
+        //   into them, and applying it afterwards would have already summed the
+        //   wrong nodes;
+        // * **not `count(DISTINCT …)`** — a degree counts edges, and two
+        //   parallel edges to the same neighbour are one distinct neighbour;
+        // * **the degrees are exact for this edge type** — the stub-load,
+        //   multi-label and stale-label hazards, asked as one question.
+        //
+        // The operator asks the third again on its first pull, so a plan that
+        // outlives the mutation that invalidated it falls back rather than
+        // answering short.
+        if pat.prefilter.is_none()
+            && !pat.count_distinct
+            && store.catalog_degrees_are_exact_for(&pat.edge_type)
+        {
+            adj_op = adj_op.with_catalog_degrees(pat.grouped_label.clone());
         }
         let mut operator: OperatorBox = Box::new(adj_op);
 
@@ -5827,7 +5851,7 @@ impl QueryPlanner {
         // equivalent of PR #192's streaming idea, applied to the scan itself.
         let mut scan = NodeScanOperator::new(
             pat.core.grouped_var.clone(),
-            vec![pat.core.grouped_label.clone()],
+            pat.core.grouped_label.clone().into_iter().collect(),
         );
         // Only push early_limit down when there's no pre-filter — otherwise
         // we'd stop at the wrong rows. With a filter, we apply LIMIT after.
@@ -5983,7 +6007,7 @@ impl QueryPlanner {
 
         let scan: OperatorBox = Box::new(NodeScanOperator::new(
             pat.core.grouped_var.clone(),
-            vec![pat.core.grouped_label.clone()],
+            pat.core.grouped_label.clone().into_iter().collect(),
         ));
         let scan: OperatorBox = if let Some(pred) = &pat.core.prefilter {
             Box::new(FilterOperator::new(scan, pred.clone()))

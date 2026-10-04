@@ -11548,6 +11548,23 @@ pub struct AdjacencyCountAggregateOperator {
     /// Lazy-built grouped output, populated on first `next()` when
     /// `group_by_props` is non-empty.
     grouped_iter: Option<std::vec::IntoIter<GroupedRow>>,
+    /// The label the pattern requires of the *grouped* endpoint, if any.
+    ///
+    /// Only the catalog path needs it — the scan beneath already applies it —
+    /// because the degree maps are keyed by the triple and the label picks
+    /// which triples are summed.
+    grouped_label: Option<Label>,
+    /// Read the degrees out of `GraphCatalog` instead of walking adjacency.
+    ///
+    /// Set by the planner when the shape allows it and the catalog's degrees
+    /// are exact (#304). Still re-checked on the first pull, because a plan
+    /// outlives the statistics it was built from: see `catalog_degree_pairs`.
+    catalog_degrees: bool,
+    /// The catalog's answer, pulled once. `None` after the check has run means
+    /// the catalog declined and the adjacency walk is in use.
+    catalog_rows: Option<std::vec::IntoIter<(NodeId, i64)>>,
+    /// Whether the catalog check has already run for this execution.
+    catalog_checked: bool,
 }
 
 /// One pre-aggregated row for the in-operator group-by mode.
@@ -11581,7 +11598,24 @@ impl AdjacencyCountAggregateOperator {
             count_distinct: false,
             neighbor_label: None,
             grouped_iter: None,
+            grouped_label: None,
+            catalog_degrees: false,
+            catalog_rows: None,
+            catalog_checked: false,
         }
+    }
+
+    /// Answer from `GraphCatalog`'s per-node degree maps rather than by
+    /// walking each node's adjacency.
+    ///
+    /// `grouped_label` is the label the grouped endpoint carries in the
+    /// pattern, `None` for the unlabelled form. The planner calls this only
+    /// when the catalog's degrees are exact for the edge type; the operator
+    /// asks again on its first pull.
+    pub fn with_catalog_degrees(mut self, grouped_label: Option<Label>) -> Self {
+        self.grouped_label = grouped_label;
+        self.catalog_degrees = true;
+        self
     }
 
     /// Require the counted neighbour to carry this label.
@@ -11620,28 +11654,44 @@ impl AdjacencyCountAggregateOperator {
         let mut groups: rustc_hash::FxHashMap<Vec<PropertyValue>, (NodeId, i64)> =
             rustc_hash::FxHashMap::default();
 
-        loop {
-            let input_record = match self.input.next(store)? {
-                Some(r) => r,
-                None => break,
-            };
-
-            let node_id = match input_record.get(&self.grouped_var) {
-                Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => *id,
-                _ => continue,
-            };
-
+        let mut accumulate = |node_id: NodeId, degree: i64, props: &[String]| {
             let value_for_lookup = Value::NodeRef(node_id);
-            let key: Vec<PropertyValue> = self
-                .group_by_props
+            let key: Vec<PropertyValue> = props
                 .iter()
                 .map(|p| value_for_lookup.resolve_property(p, store))
                 .collect();
-
-            let degree = self.degree_filtered(store, node_id) as i64;
             let entry = groups.entry(key).or_insert((node_id, 0));
             entry.1 += degree;
+        };
+
+        // The catalog already holds one summed degree per node, so the scan and
+        // the adjacency walk are both skipped. The property read per node
+        // stays: two nodes sharing a `title` are one group, and only their
+        // properties say so. Asked directly rather than through
+        // `catalog_pairs_once`, which exists to cache for the streaming path —
+        // this builds once, so a cache would only be a second place for the
+        // answer to live.
+        if let Some(pairs) = self.catalog_degree_pairs(store) {
+            for (node_id, degree) in pairs {
+                accumulate(node_id, degree, &self.group_by_props);
+            }
+        } else {
+            loop {
+                let input_record = match self.input.next(store)? {
+                    Some(r) => r,
+                    None => break,
+                };
+
+                let node_id = match input_record.get(&self.grouped_var) {
+                    Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => *id,
+                    _ => continue,
+                };
+
+                let degree = self.degree_filtered(store, node_id) as i64;
+                accumulate(node_id, degree, &self.group_by_props);
+            }
         }
+        drop(accumulate);
 
         let rows: Vec<GroupedRow> = groups
             .into_iter()
@@ -11692,6 +11742,15 @@ impl AdjacencyCountAggregateOperator {
 
         let rows: Vec<GroupedRow> = groups
             .into_iter()
+            // The same rule as the summing path above, which has had it since
+            // #601: a required MATCH yields no row for a node the pattern does
+            // not match, so an empty neighbour set is not a row with a zero in
+            // it. This path was missed, and `RETURN a.title, count(DISTINCT b)`
+            // answered with a row per *scanned* node -- a node nothing cites
+            // came back with 0, turning the required match into an optional
+            // one. Found while adding the degree-catalog source (#304); the two
+            // paths now agree.
+            .filter(|(_, (_, neighbor_set))| !neighbor_set.is_empty())
             .map(|(prop_values, (sample_node, neighbor_set))| GroupedRow {
                 prop_values,
                 count: neighbor_set.len() as i64,
@@ -11731,6 +11790,73 @@ impl AdjacencyCountAggregateOperator {
                 });
             }
         }
+    }
+
+    /// `(node, degree)` for every node the pattern matches, read straight out
+    /// of the catalog — or `None`, meaning walk the adjacency instead.
+    ///
+    /// `AdjacencyCountAggregate` exists because a generic `Expand` +
+    /// `Aggregate` materialises a row per edge. It does not materialise them,
+    /// but it is still O(nodes + edges): `outgoing_degree_for_type` walks the
+    /// whole adjacency list of the node and filters on the type id
+    /// (`store.rs:3560`), so the edge term stays. The catalog has held the
+    /// summed degree per node per triple since ADR-015, which makes this
+    /// O(nodes with a matching edge) and drops the edge term — the difference
+    /// between answering and timing out at 1.4 billion edges (#304).
+    ///
+    /// Asked here rather than trusted from plan time for the reason #1806
+    /// gives: a short or mis-keyed degree map is a fast wrong answer, and a
+    /// plan can be built before the mutation that invalidates it. When the
+    /// catalog says no, the walk below is still right.
+    fn catalog_degree_pairs(&self, store: &GraphStore) -> Option<Vec<(NodeId, i64)>> {
+        use crate::graph::catalog::DegreeSide;
+        if !self.catalog_degrees || self.count_distinct {
+            return None;
+        }
+        // A degree per direction is all the catalog holds. `Both` would be the
+        // sum of the two, which double-counts a self-loop, so it is declined
+        // rather than approximated. The detector rejects `--` anyway.
+        let (side, source_label, target_label) = match self.direction {
+            Direction::Outgoing => (
+                DegreeSide::Source,
+                self.grouped_label.as_ref(),
+                self.neighbor_label.as_ref(),
+            ),
+            Direction::Incoming => (
+                DegreeSide::Target,
+                self.neighbor_label.as_ref(),
+                self.grouped_label.as_ref(),
+            ),
+            Direction::Both => return None,
+        };
+        if !store.catalog_degrees_are_exact_for(&self.edge_type) {
+            return None;
+        }
+        let maps =
+            store
+                .catalog()
+                .degree_maps_for(&self.edge_type, source_label, target_label, side);
+        let mut acc: rustc_hash::FxHashMap<NodeId, i64> = rustc_hash::FxHashMap::default();
+        for degrees in maps {
+            for (node, degree) in degrees {
+                if *degree > 0 {
+                    *acc.entry(*node).or_insert(0) += *degree as i64;
+                }
+            }
+        }
+        // A node of degree zero is absent from the maps, which is what a
+        // required MATCH wants: it produces no row for a node the pattern does
+        // not match (#601).
+        Some(acc.into_iter().collect())
+    }
+
+    /// Run the catalog check once, caching its answer for this execution.
+    fn catalog_pairs_once(&mut self, store: &GraphStore) -> bool {
+        if !self.catalog_checked {
+            self.catalog_checked = true;
+            self.catalog_rows = self.catalog_degree_pairs(store).map(|v| v.into_iter());
+        }
+        self.catalog_rows.is_some()
     }
 
     /// Count the incident edges of `node_id` whose type matches
@@ -11840,6 +11966,25 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
             return Ok(Some(out));
         }
 
+        // Variable-only GROUP BY: one row per node, which is what the catalog
+        // hands over directly. The scan beneath is left unpulled.
+        if self.catalog_pairs_once(store) {
+            let next = self
+                .catalog_rows
+                .as_mut()
+                .expect("checked just above")
+                .next();
+            return Ok(next.map(|(node_id, count)| {
+                let mut out = Record::new();
+                out.bind(self.grouped_var.clone(), Value::NodeRef(node_id));
+                out.bind(
+                    self.count_alias.clone(),
+                    Value::Property(PropertyValue::Integer(count)),
+                );
+                out
+            }));
+        }
+
         loop {
             let input_record = match self.input.next(store)? {
                 Some(r) => r,
@@ -11875,6 +12020,8 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
     fn reset(&mut self) {
         self.input.reset();
         self.grouped_iter = None;
+        self.catalog_rows = None;
+        self.catalog_checked = false;
     }
 
     fn describe(&self) -> OperatorDescription {
@@ -11883,15 +12030,25 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
             Direction::Incoming => "<-",
             Direction::Both => "--",
         };
+        // The source is what distinguishes an O(nodes) plan from an
+        // O(nodes + edges) one, so EXPLAIN says which it is. It reports the
+        // plan-time decision; the operator re-asks the catalog on its first
+        // pull and walks the adjacency if the answer has changed since.
+        let source = if self.catalog_degrees {
+            " source=catalog"
+        } else {
+            " source=adjacency"
+        };
         OperatorDescription {
             name: "AdjacencyCountAggregate".to_string(),
             details: format!(
-                "({}){}[:{}]{} count AS {}",
+                "({}){}[:{}]{} count AS {}{}",
                 self.grouped_var,
                 dir,
                 self.edge_type.as_str(),
                 dir,
-                self.count_alias
+                self.count_alias,
+                source
             ),
             children: vec![self.input.describe()],
         }
