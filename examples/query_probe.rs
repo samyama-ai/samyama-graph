@@ -19,7 +19,13 @@
 //! warning are printed first, because a probe sharing the machine with a build
 //! measures the build (#715).
 
-// Measure what ships: the server's allocator, not the system default (ADR-038).
+/// The allocator the server and the LDBC benchmarks install (ADR-038).
+///
+/// Without this the probe ran on glibc while `ldbc_benchmark` ran on mimalloc,
+/// so a probe that attributed time to the allocator attributed it to an
+/// allocator the product does not ship: #750's 69%-allocator profile of IS3 is
+/// `_int_malloc`, `malloc_consolidate` and `unlink_chunk`, all glibc. A probe
+/// and the benchmark it explains have to agree about the ruler.
 #[global_allocator]
 static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
 
