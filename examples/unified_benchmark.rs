@@ -15,7 +15,15 @@
 //!     --surv-data ~/kg-data/surveillance \
 //!     --hd-data ~/kg-data/health-determinants \
 //!     --hs-data ~/kg-data/health-systems \
+//!     --extra-snap UMLS=~/samyama/umls.sgsnap \
+//!     --extra-snap SIDER=~/samyama/sider.sgsnap \
 //!     --queries ~/samyama
+//!
+//! `--extra-snap NAME=PATH` imports any further `.sgsnap` without a new flag:
+//! `NAME` is the label in the import log line, `PATH` the snapshot. It may be
+//! repeated, is split at the first `=` (so a path may contain one), and each
+//! snapshot joins the dedup phase after the flagged sources — see #316 for why
+//! that phase runs before the bulk loads.
 //!
 //! `--queries` takes a directory (every `.csv` in it) or a single `.csv`, and
 //! may be repeated. Every file considered is reported, including the ones that
@@ -309,6 +317,32 @@ fn get_arg(args: &[String], flag: &str) -> Option<PathBuf> {
     }
 }
 
+/// Every `--extra-snap NAME=PATH`, in command-line order.
+///
+/// A new KG used to need its own flag, parsed and threaded through by hand —
+/// 16 of them. `--extra-snap` carries the display label with the path, so a
+/// snapshot joins the dedup phase with no code change at all.
+///
+/// `NAME` is split off at the FIRST `=`: a path may contain one. An empty name
+/// or an empty path is an error, not an import with a blank log line. Repeats
+/// are kept as given — the same pair twice imports twice.
+fn parse_extra_snaps(args: &[String]) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut out = Vec::new();
+    for v in arg_values(args, "--extra-snap")? {
+        let (name, path) = v
+            .split_once('=')
+            .ok_or_else(|| format!("--extra-snap needs NAME=PATH, got `{v}`"))?;
+        if name.is_empty() {
+            return Err(format!("--extra-snap needs a non-empty NAME in `{v}`"));
+        }
+        if path.is_empty() {
+            return Err(format!("--extra-snap needs a non-empty PATH in `{v}`"));
+        }
+        out.push((name.to_string(), PathBuf::from(path)));
+    }
+    Ok(out)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().collect();
@@ -346,6 +380,13 @@ async fn main() -> Result<(), Error> {
     let hd_data = get_arg(&args, "--hd-data");
     let hs_data = get_arg(&args, "--hs-data");
     let study_refs = get_arg(&args, "--study-refs");
+    let extra_snaps: Vec<(String, PathBuf)> = match parse_extra_snaps(&args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    };
     let query_paths: Vec<PathBuf> = match arg_values(&args, "--queries") {
         Ok(v) if v.is_empty() => vec![PathBuf::from(".")],
         Ok(v) => v.into_iter().map(PathBuf::from).collect(),
@@ -368,7 +409,11 @@ async fn main() -> Result<(), Error> {
     // index by scanning `store.all_nodes()` on EVERY import, so deduping while the
     // store is still small keeps total scan cost ~65M node visits instead of ~2.5B
     // (which is what deduping after the 207M-node bulk load would cost). See #316.
-    for (name, path) in &[
+    //
+    // Anything given with `--extra-snap NAME=PATH` is appended here, after the
+    // flagged sources: still inside the dedup phase, still while the store is
+    // small, so a new KG needs no new flag and no new code.
+    let mut dedup_sources: Vec<(String, PathBuf)> = [
         ("HPO", &hpo_snap),
         ("MONDO", &mondo_snap),
         ("Health Systems", &hs_snap),
@@ -382,27 +427,31 @@ async fn main() -> Result<(), Error> {
         ("Clinical Trials", &ct_snap),
         ("FAERS", &faers_snap),
         ("ClinVar", &clinvar_snap),
-    ] {
-        if let Some(ref p) = path {
-            if dedup_keys.is_empty() {
-                eprint!("Importing {} snapshot... ", name);
-            } else {
-                eprint!("Importing {} snapshot (dedup)... ", name);
-            }
-            let t0 = Instant::now();
-            let stats = if dedup_keys.is_empty() {
-                client.import_snapshot("default", p).await?
-            } else {
-                client.import_snapshot_dedup("default", p, &dedup_keys).await?
-            };
-            eprintln!(
-                "{} nodes, {} edges, {} MERGED in {:.1}s",
-                stats.node_count,
-                stats.edge_count,
-                stats.merged_count,
-                t0.elapsed().as_secs_f64()
-            );
+    ]
+    .into_iter()
+    .filter_map(|(name, path)| path.clone().map(|p| (name.to_string(), p)))
+    .collect();
+    dedup_sources.extend(extra_snaps.iter().cloned());
+
+    for (name, p) in &dedup_sources {
+        if dedup_keys.is_empty() {
+            eprint!("Importing {} snapshot... ", name);
+        } else {
+            eprint!("Importing {} snapshot (dedup)... ", name);
         }
+        let t0 = Instant::now();
+        let stats = if dedup_keys.is_empty() {
+            client.import_snapshot("default", p).await?
+        } else {
+            client.import_snapshot_dedup("default", p, &dedup_keys).await?
+        };
+        eprintln!(
+            "{} nodes, {} edges, {} MERGED in {:.1}s",
+            stats.node_count,
+            stats.edge_count,
+            stats.merged_count,
+            t0.elapsed().as_secs_f64()
+        );
     }
 
     // ── Phase 2: Import bulk sources LAST, plain ──
@@ -929,5 +978,109 @@ mod tests {
         assert!(arg_value(&args, "--study-refs").is_err());
         assert_eq!(arg_value(&args, "--queries").unwrap().unwrap(), "d");
         assert_eq!(arg_value(&args, "--absent").unwrap(), None);
+    }
+
+    /// `--extra-snap NAME=PATH` is how a new KG joins the federation without a
+    /// new flag: one occurrence parses to one (label, path) pair.
+    #[test]
+    fn one_extra_snap_is_parsed() {
+        let args: Vec<String> = ["prog", "--extra-snap", "UMLS=/data/umls.sgsnap"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            parse_extra_snaps(&args).unwrap(),
+            vec![("UMLS".to_string(), PathBuf::from("/data/umls.sgsnap"))]
+        );
+    }
+
+    /// Repeated occurrences all count, in command-line order — import order is
+    /// the order the operator wrote, not a sorted or deduplicated one.
+    #[test]
+    fn repeated_extra_snap_flags_are_all_used_in_order() {
+        let args: Vec<String> = [
+            "prog",
+            "--extra-snap",
+            "UMLS=/d/umls.sgsnap",
+            "--queries",
+            "/q",
+            "--extra-snap",
+            "SIDER=/d/sider.sgsnap",
+            "--extra-snap",
+            "GOA=/d/goa.sgsnap",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            parse_extra_snaps(&args).unwrap(),
+            vec![
+                ("UMLS".to_string(), PathBuf::from("/d/umls.sgsnap")),
+                ("SIDER".to_string(), PathBuf::from("/d/sider.sgsnap")),
+                ("GOA".to_string(), PathBuf::from("/d/goa.sgsnap")),
+            ]
+        );
+    }
+
+    /// The same NAME=PATH twice imports twice. No argument-level dedup.
+    #[test]
+    fn the_same_extra_snap_twice_is_two_imports() {
+        let args: Vec<String> =
+            ["prog", "--extra-snap", "GO=/d/go.sgsnap", "--extra-snap", "GO=/d/go.sgsnap"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        assert_eq!(parse_extra_snaps(&args).unwrap().len(), 2);
+    }
+
+    /// Split on the FIRST `=` only: a path may legitimately contain one.
+    #[test]
+    fn an_extra_snap_path_may_contain_an_equals_sign() {
+        let args: Vec<String> = ["prog", "--extra-snap", "Mental Health=/d/a=b/mh.sgsnap"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            parse_extra_snaps(&args).unwrap(),
+            vec![("Mental Health".to_string(), PathBuf::from("/d/a=b/mh.sgsnap"))]
+        );
+    }
+
+    /// A value with no `=` is an error, not a path with an empty label.
+    #[test]
+    fn an_extra_snap_without_an_equals_is_rejected() {
+        let args: Vec<String> =
+            ["prog", "--extra-snap", "/d/umls.sgsnap"].iter().map(|s| s.to_string()).collect();
+        assert!(parse_extra_snaps(&args).is_err());
+    }
+
+    /// An unnamed snapshot would log as `Importing  snapshot...` — reject it.
+    #[test]
+    fn an_extra_snap_with_an_empty_name_is_rejected() {
+        let args: Vec<String> =
+            ["prog", "--extra-snap", "=/d/umls.sgsnap"].iter().map(|s| s.to_string()).collect();
+        assert!(parse_extra_snaps(&args).is_err());
+    }
+
+    /// A named nothing is an error too.
+    #[test]
+    fn an_extra_snap_with_an_empty_path_is_rejected() {
+        let args: Vec<String> =
+            ["prog", "--extra-snap", "UMLS="].iter().map(|s| s.to_string()).collect();
+        assert!(parse_extra_snaps(&args).is_err());
+    }
+
+    /// No `--extra-snap` is not an error: the list is simply empty.
+    #[test]
+    fn no_extra_snap_flag_yields_an_empty_list() {
+        let args: Vec<String> = ["prog", "--queries", "/q"].iter().map(|s| s.to_string()).collect();
+        assert!(parse_extra_snaps(&args).unwrap().is_empty());
+    }
+
+    /// `--extra-snap` with no value follows the existing `arg_values` error path.
+    #[test]
+    fn an_extra_snap_without_a_value_is_an_error_not_a_panic() {
+        let args: Vec<String> = ["prog", "--extra-snap"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(parse_extra_snaps(&args), Err("--extra-snap needs a value".into()));
     }
 }
