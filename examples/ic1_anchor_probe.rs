@@ -5,6 +5,11 @@
 //! looked like it should help. At SF10 it did not move IC1 at all. This asks
 //! why, at a KNOWS degree where three hops actually explode -- at low degree
 //! the whole query costs microseconds and the question cannot be asked.
+
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor};
 use samyama::query::parser::parse_query;

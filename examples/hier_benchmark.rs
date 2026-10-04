@@ -23,6 +23,10 @@
 //! cargo run --release --example hier_benchmark -- --reps 20 --out results.csv
 //! ```
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "../benches/hier_common/mod.rs"]
 mod hier_common;
 #[path = "../benches/hier_common/skip.rs"]

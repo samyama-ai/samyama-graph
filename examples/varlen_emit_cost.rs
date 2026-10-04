@@ -6,6 +6,11 @@
 //! target *labels* before buffering, so pointing the pattern at a label nothing
 //! carries traverses identically and emits nothing — the difference between the
 //! two is the cost of emission.
+
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor};
 use samyama::query::parser::parse_query;

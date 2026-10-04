@@ -49,6 +49,10 @@
 //! property of the device. REL-04's kill-point testing covers process death,
 //! which is the failure this already survived.
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::time::Instant;
 
 use samyama::graph::GraphStore;

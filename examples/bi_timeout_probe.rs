@@ -12,6 +12,11 @@
 //! `a` and `b`, so it can be decided the moment `b` is bound — before `c` is
 //! expanded at all. If it is applied after the whole pattern instead, the walk
 //! is doing roughly six times the work it needs to.
+
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::GraphStore;
 use samyama::query::executor::QueryExecutor;
 use samyama::query::parser::parse_query;

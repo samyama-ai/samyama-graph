@@ -11,6 +11,11 @@
 //! difference. Built at SF1's shape (~11K Person) because that is where
 //! CH-REGRESS runs; the SF10 run saw IC1 move 710ms -> 704ms, so whatever this
 //! is, it is scale-dependent.
+
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor};
 use samyama::query::parser::parse_query;

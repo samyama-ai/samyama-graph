@@ -16,6 +16,10 @@
 //!   SAMYAMA_EXISTS_PIN_LOOKUP=0 cargo run --release --example bi11_ab -- --data-dir <dir>
 //!   SAMYAMA_EXISTS_PIN_LOOKUP=1 cargo run --release --example bi11_ab -- --data-dir <dir>
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "../benches/ldbc_bi_common/mod.rs"]
 mod ldbc_bi_common;
 

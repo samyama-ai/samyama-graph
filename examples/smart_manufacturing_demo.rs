@@ -8,6 +8,10 @@
 //! 5. Quality traceability - defect root cause analysis
 //! 6. Machine criticality analysis using PageRank
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama_sdk::{
     EmbeddedClient, SamyamaClient, AlgorithmClient,
     Label, PropertyValue, PageRankConfig,

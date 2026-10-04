@@ -9,6 +9,10 @@
 //!   cargo run --release --example druginteractions_loader -- --data-dir data/druginteractions --phases drugbank_dgidb
 //!   cargo run --release --example druginteractions_loader -- --data-dir data/druginteractions --query
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;

@@ -19,6 +19,10 @@
 //! warning are printed first, because a probe sharing the machine with a build
 //! measures the build (#715).
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "../benches/ldbc_common/mod.rs"]
 mod ldbc_common;
 

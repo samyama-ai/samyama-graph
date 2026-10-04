@@ -23,6 +23,11 @@
 //! Usage:
 //!   cargo run --release --example ldbc_http_serve -- \
 //!       --data-dir /root/bench/data/ldbc-sf10/social_network-sf10-... [--port 8080]
+
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;

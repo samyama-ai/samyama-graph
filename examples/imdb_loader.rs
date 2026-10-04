@@ -20,6 +20,10 @@
 //!   cargo run --release --example imdb_loader -- --data-dir data/imdb --snapshot imdb.sgsnap
 //!   cargo run --release --example imdb_loader -- --data-dir data/imdb --query
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;

@@ -5,6 +5,11 @@
 //! the planner has to lower the inline-property MATCH to an IndexScan, and a
 //! benchmark cannot tell you whether it did -- it only tells you the query got
 //! faster, which a warm cache also does.
+
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor};
 use samyama::query::parser::parse_query;

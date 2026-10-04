@@ -19,6 +19,10 @@
 //! Run: cargo run --release --example import_tax_probe -- [nodes] [edges] [segments]
 //!      cargo run --release --example import_tax_probe -- sequence [nodes] [edges] [imports]
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::GraphStore;
 use samyama::snapshot::{export_tenant, import_tenant};
 use std::time::Instant;

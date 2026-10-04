@@ -9,6 +9,10 @@
 //!   cargo run --release --example pathways_loader -- --data-dir data/pathways --string-threshold 900
 //!   cargo run --release --example pathways_loader -- --data-dir data/pathways --snapshot pathways.sgsnap
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;

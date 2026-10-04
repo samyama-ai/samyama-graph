@@ -1,3 +1,7 @@
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 // Paper 5 B3 — Samyama-side benchmark runner.
 // Loads N snapshots into a single GraphStore and runs queries from a CSV
 // (one row per query: id,name,kg,category,hops,cypher).

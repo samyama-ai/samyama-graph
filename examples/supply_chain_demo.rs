@@ -14,6 +14,10 @@
 //!
 //! Run: `cargo run --example supply_chain_demo`
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama_sdk::{
     EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
     Label, PropertyValue, PropertyMap,

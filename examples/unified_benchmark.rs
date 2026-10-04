@@ -29,6 +29,10 @@
 //! may be repeated. Every file considered is reported, including the ones that
 //! yielded nothing and why.
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};

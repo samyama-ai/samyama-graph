@@ -12,6 +12,10 @@
 //!       --nodes india_nodes.json --spec p3_spec.json \
 //!       --out /tmp/p8-snapshots/supplychain-india.sgsnap
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::QueryEngine;
 use std::fs::File;

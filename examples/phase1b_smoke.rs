@@ -21,6 +21,10 @@
 //!     --hgnc data/hgnc/hgnc_complete_set.txt \
 //!     --civic-variants data/civic/nightly-VariantSummaries.tsv
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;

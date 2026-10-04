@@ -32,6 +32,10 @@
 //!
 //! [[SGE + Optimization — Phase 2 Results]]
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use async_trait::async_trait;
 use samyama::agent::{AgentRuntime, Tool, ToolCall, ToolPlan};
 use samyama::agent::tools::CypherTool;
