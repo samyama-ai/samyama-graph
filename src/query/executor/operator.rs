@@ -6103,6 +6103,32 @@ impl OperatorDescription {
         walk(self, 0xcbf2_9ce4_8422_2325)
     }
 
+    /// Every operator in this tree that took the `describe` default, each with
+    /// the path of parents that reaches it.
+    ///
+    /// The default prints `Unknown` and **no children**, so the tree stops
+    /// there: an assertion about what lies below an undescribed operator is
+    /// satisfied by an empty tree whatever the planner did (#1826). A walk over
+    /// a plan asks this first and fails when it is non-empty.
+    pub fn unknown_nodes(&self) -> Vec<String> {
+        fn walk(d: &OperatorDescription, path: &str, out: &mut Vec<String>) {
+            let here = if path.is_empty() {
+                d.name.clone()
+            } else {
+                format!("{} -> {}", path, d.name)
+            };
+            if d.name == "Unknown" {
+                out.push(here.clone());
+            }
+            for child in &d.children {
+                walk(child, &here, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, "", &mut out);
+        out
+    }
+
     /// Format the operator tree as a string
     pub fn format(&self, indent: usize) -> String {
         let mut result = String::new();
@@ -6234,6 +6260,168 @@ fn format_expression(expr: &Expression) -> String {
         _ => "...".to_string(),
     }
 }
+
+/// Property literals, and the row-dependent expressions beside them, as
+/// EXPLAIN prints them: `{k: String("v")}`.
+///
+/// Keys are sorted. A `HashMap`'s iteration order is not stable between runs,
+/// and the plan text is what `structural_hash` hashes -- an unsorted render
+/// would make the same plan hash differently twice.
+fn format_properties(
+    literals: Option<&HashMap<String, PropertyValue>>,
+    expressions: Option<&HashMap<String, Expression>>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(literals) = literals {
+        parts.extend(literals.iter().map(|(k, v)| format!("{}: {:?}", k, v)));
+    }
+    if let Some(expressions) = expressions {
+        parts.extend(expressions.iter().map(|(k, e)| format!("{}: {}", k, format_expression(e))));
+    }
+    parts.sort();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {{{}}}", parts.join(", "))
+    }
+}
+
+/// A node a write operator creates: `(a:Person {name: String("x")})`.
+fn format_created_node(variable: Option<&str>, labels: &[Label], properties: &str) -> String {
+    let labels: String = labels.iter().map(|l| format!(":{}", l.as_str())).collect();
+    format!("({}{}{})", variable.unwrap_or(""), labels, properties)
+}
+
+/// An edge a write operator creates: `(a)-[r:KNOWS]->(b)`.
+fn format_created_edge(
+    source: &str,
+    target: &str,
+    edge_type: &EdgeType,
+    edge_var: Option<&str>,
+    properties: &str,
+) -> String {
+    format!(
+        "({})-[{}:{}{}]->({})",
+        source,
+        edge_var.unwrap_or(""),
+        edge_type.as_str(),
+        properties,
+        target
+    )
+}
+
+/// [`format_created_edge`] for the tuple the create operators carry.
+fn format_edge_to_create(edge: &EdgeToCreate) -> String {
+    let (source, target, edge_type, properties, edge_var, property_exprs) = edge;
+    format_created_edge(
+        source,
+        target,
+        edge_type,
+        edge_var.as_deref(),
+        &format_properties(Some(properties), property_exprs.as_ref()),
+    )
+}
+
+/// `ON CREATE SET` / `ON MATCH SET` as EXPLAIN prints it, or nothing when the
+/// MERGE carries none. Returned as an `Option` so a caller can `extend` with it.
+fn format_merge_sets(
+    label: &str,
+    items: &[(String, String, Expression)],
+    entity_items: &[(String, bool, Expression)],
+    label_items: &[(String, Vec<Label>)],
+) -> Option<String> {
+    let mut sets: Vec<String> = items
+        .iter()
+        .map(|(v, p, e)| format!("{}.{} = {}", v, p, format_expression(e)))
+        .collect();
+    sets.extend(entity_items.iter().map(|(v, merge, e)| {
+        format!("{} {} {}", v, if *merge { "+=" } else { "=" }, format_expression(e))
+    }));
+    sets.extend(label_items.iter().map(|(v, labels)| {
+        format!("{}{}", v, labels.iter().map(|l| format!(":{}", l.as_str())).collect::<String>())
+    }));
+    if sets.is_empty() {
+        None
+    } else {
+        Some(format!("{} {}", label, sets.join(", ")))
+    }
+}
+
+/// A MERGE pattern as EXPLAIN prints it: `(a:N {v: Integer(1)})-[:R]->(b)`.
+fn format_pattern(pattern: &Pattern) -> String {
+    let paths: Vec<String> = pattern
+        .paths
+        .iter()
+        .map(|path| {
+            let node = |n: &crate::query::ast::NodePattern| {
+                format_created_node(
+                    n.variable.as_deref(),
+                    &n.labels,
+                    &format_properties(n.properties.as_ref(), n.property_exprs.as_ref()),
+                )
+            };
+            let mut text = node(&path.start);
+            for segment in &path.segments {
+                let edge = &segment.edge;
+                let types: Vec<&str> = edge.types.iter().map(|t| t.as_str()).collect();
+                let types = if types.is_empty() {
+                    String::new()
+                } else {
+                    format!(":{}", types.join("|"))
+                };
+                let length = match &edge.length {
+                    Some(l) => match (l.min, l.max) {
+                        (None, None) => "*".to_string(),
+                        (min, max) => format!(
+                            "*{}..{}",
+                            min.map(|m| m.to_string()).unwrap_or_default(),
+                            max.map(|m| m.to_string()).unwrap_or_default()
+                        ),
+                    },
+                    None => String::new(),
+                };
+                let body = format!(
+                    "[{}{}{}{}]",
+                    edge.variable.as_deref().unwrap_or(""),
+                    types,
+                    length,
+                    format_properties(edge.properties.as_ref(), edge.property_exprs.as_ref())
+                );
+                let arrow = match edge.direction {
+                    Direction::Outgoing => format!("-{}->", body),
+                    Direction::Incoming => format!("<-{}-", body),
+                    Direction::Both => format!("-{}-", body),
+                };
+                text.push_str(&arrow);
+                text.push_str(&node(&segment.node));
+            }
+            match &path.path_variable {
+                Some(v) => format!("{} = {}", v, text),
+                None => text,
+            }
+        })
+        .collect();
+    paths.join(", ")
+}
+
+/// The lines of an EXPLAIN plan that name an operator with no `describe`.
+///
+/// The `PhysicalOperator::describe` default prints `Unknown` and **no
+/// children**, so the plan tree stops at such an operator and every assertion
+/// about what lies below it is satisfied for free: `index_scans(&plan).is_empty()`
+/// over a truncated tree cannot fail (#1826). A test that walks the plan text
+/// checks this first, so the hole fails loudly instead of passing quietly.
+pub fn undescribed_plan_lines(plan_text: &str) -> Vec<String> {
+    plan_text
+        .lines()
+        .filter(|line| {
+            let name = line.trim_start().trim_start_matches("+- ");
+            name == "Unknown" || name.starts_with("Unknown (")
+        })
+        .map(|line| line.to_string())
+        .collect()
+}
+
 
 /// Type alias for boxed operators
 pub type OperatorBox = Box<dyn PhysicalOperator>;
@@ -14341,6 +14529,24 @@ impl PhysicalOperator for CreateNodeOperator {
     fn is_mutating(&self) -> bool {
         true
     }
+    fn describe(&self) -> OperatorDescription {
+        let nodes: Vec<String> = self
+            .nodes_to_create
+            .iter()
+            .map(|(labels, properties, variable, property_exprs)| {
+                format_created_node(
+                    variable.as_deref(),
+                    labels,
+                    &format_properties(Some(properties), property_exprs.as_ref()),
+                )
+            })
+            .collect();
+        OperatorDescription {
+            name: "CreateNode".to_string(),
+            details: nodes.join(", "),
+            children: Vec::new(),
+        }
+    }
 }
 
 /// Create property index operator: CREATE INDEX ON :Person(id)
@@ -14384,6 +14590,13 @@ impl PhysicalOperator for CreateIndexOperator {
 
     fn is_mutating(&self) -> bool {
         true
+    }
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "CreateIndex".to_string(),
+            details: format!(":{}({})", self.label.as_str(), self.property),
+            children: Vec::new(),
+        }
     }
 }
 
@@ -14470,6 +14683,21 @@ impl PhysicalOperator for CreateVectorIndexOperator {
 
     fn is_mutating(&self) -> bool {
         true
+    }
+    fn describe(&self) -> OperatorDescription {
+        let target = format!(":{}({})", self.label.as_str(), self.property_key);
+        let named = match &self.name {
+            Some(name) => format!("{} ON {}", name, target),
+            None => target,
+        };
+        OperatorDescription {
+            name: "CreateVectorIndex".to_string(),
+            details: format!(
+                "{} dims={} {} quantization={:?}",
+                named, self.dimensions, self.similarity, self.quantization
+            ),
+            children: Vec::new(),
+        }
     }
 }
 
@@ -14573,6 +14801,13 @@ impl PhysicalOperator for DropFullTextIndexOperator {
 
     fn reset(&mut self) { self.executed = false; }
     fn is_mutating(&self) -> bool { true }
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "DropFullTextIndex".to_string(),
+            details: self.name.clone(),
+            children: Vec::new(),
+        }
+    }
 }
 
 /// `CALL db.index.fulltext.queryNodes(name, query)` YIELD node, score.
@@ -15659,6 +15894,23 @@ impl PhysicalOperator for CreateEdgeOperator {
     fn is_mutating(&self) -> bool {
         true
     }
+    fn describe(&self) -> OperatorDescription {
+        let (source, target, edge_type, properties, edge_var) = &self.edge_pattern;
+        OperatorDescription {
+            name: "CreateEdge".to_string(),
+            details: format_created_edge(
+                source,
+                target,
+                edge_type,
+                edge_var.as_deref(),
+                &format_properties(Some(properties), None),
+            ),
+            children: match &self.input {
+                Some(input) => vec![input.describe()],
+                None => Vec::new(),
+            },
+        }
+    }
 }
 
 /// Combined operator for CREATE patterns with both nodes and edges
@@ -15820,6 +16072,14 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
 
     fn is_mutating(&self) -> bool {
         true
+    }
+    fn describe(&self) -> OperatorDescription {
+        let edges: Vec<String> = self.edges_to_create.iter().map(format_edge_to_create).collect();
+        OperatorDescription {
+            name: "CreateNodesAndEdges".to_string(),
+            details: edges.join(", "),
+            children: vec![self.node_operator.describe()],
+        }
     }
 }
 
@@ -16051,6 +16311,25 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
     fn is_mutating(&self) -> bool {
         true
     }
+    fn describe(&self) -> OperatorDescription {
+        let mut parts: Vec<String> = self
+            .nodes_to_create
+            .iter()
+            .map(|(handle, labels, properties, property_exprs)| {
+                format_created_node(
+                    Some(handle),
+                    labels,
+                    &format_properties(Some(properties), property_exprs.as_ref()),
+                )
+            })
+            .collect();
+        parts.extend(self.edges_to_create.iter().map(format_edge_to_create));
+        OperatorDescription {
+            name: "MatchCreateEdge".to_string(),
+            details: parts.join(", "),
+            children: vec![self.input.describe()],
+        }
+    }
 }
 
 /// Operator for MATCH...MERGE edge patterns.
@@ -16281,6 +16560,42 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
     }
 
     fn is_mutating(&self) -> bool { true }
+    fn describe(&self) -> OperatorDescription {
+        let mut parts: Vec<String> = self
+            .edges_to_merge
+            .iter()
+            .map(|(source, target, edge_type, properties, edge_var, undirected)| {
+                let edge = format!(
+                    "[{}:{}{}]",
+                    edge_var.as_deref().unwrap_or(""),
+                    edge_type.as_str(),
+                    format_properties(Some(properties), None)
+                );
+                if *undirected {
+                    format!("({})-{}-({})", source, edge, target)
+                } else {
+                    format!("({})-{}->({})", source, edge, target)
+                }
+            })
+            .collect();
+        parts.extend(format_merge_sets(
+            "ON CREATE SET",
+            &self.on_create_set,
+            &self.on_create_entity_set,
+            &[],
+        ));
+        parts.extend(format_merge_sets(
+            "ON MATCH SET",
+            &self.on_match_set,
+            &self.on_match_entity_set,
+            &[],
+        ));
+        OperatorDescription {
+            name: "MatchMergeEdge".to_string(),
+            details: parts.join(" "),
+            children: vec![self.input.describe()],
+        }
+    }
 }
 
 /// Emits a single empty record. Used for standalone RETURN queries (CY-30).
@@ -19318,6 +19633,25 @@ impl PhysicalOperator for AlgorithmOperator {
         self.executed = false;
         self.results.clear();
     }
+    fn describe(&self) -> OperatorDescription {
+        let args: Vec<String> = self.args.iter().map(format_expression).collect();
+        let mut details = format!("{}({})", self.name, args.join(", "));
+        if !self.aliases.is_empty() {
+            let yielded: Vec<String> = self
+                .aliases
+                .iter()
+                .map(|(column, alias)| {
+                    if column == alias { column.clone() } else { format!("{} AS {}", column, alias) }
+                })
+                .collect();
+            details.push_str(&format!(" YIELD {}", yielded.join(", ")));
+        }
+        OperatorDescription {
+            name: "Algorithm".to_string(),
+            details,
+            children: Vec::new(),
+        }
+    }
 }
 
 /// Skip operator: SKIP n
@@ -21285,6 +21619,29 @@ impl PhysicalOperator for MergeOperator {
     fn reset(&mut self) {
         self.executed = false;
     }
+    fn describe(&self) -> OperatorDescription {
+        let mut parts = vec![format_pattern(&self.pattern)];
+        parts.extend(format_merge_sets(
+            "ON CREATE SET",
+            &self.on_create_set,
+            &self.on_create_entity_set,
+            &self.on_create_labels,
+        ));
+        parts.extend(format_merge_sets(
+            "ON MATCH SET",
+            &self.on_match_set,
+            &self.on_match_entity_set,
+            &self.on_match_labels,
+        ));
+        OperatorDescription {
+            name: "Merge".to_string(),
+            details: parts.join(" "),
+            children: match &self.input {
+                Some(input) => vec![input.describe()],
+                None => Vec::new(),
+            },
+        }
+    }
 }
 
 /// FOREACH operator: `FOREACH (x IN list | <updating clauses>)`.
@@ -21370,6 +21727,30 @@ impl PhysicalOperator for ForeachOperator {
 
     fn reset(&mut self) {
         self.input.reset();
+    }
+    fn describe(&self) -> OperatorDescription {
+        let body: Vec<&str> = self
+            .body
+            .iter()
+            .map(|clause| match clause {
+                crate::query::ast::ForeachBody::Set(_) => "SET",
+                crate::query::ast::ForeachBody::Remove(_) => "REMOVE",
+                crate::query::ast::ForeachBody::Delete(_) => "DELETE",
+                crate::query::ast::ForeachBody::Create(_) => "CREATE",
+                crate::query::ast::ForeachBody::Merge(_) => "MERGE",
+                crate::query::ast::ForeachBody::Foreach(_) => "FOREACH",
+            })
+            .collect();
+        OperatorDescription {
+            name: "Foreach".to_string(),
+            details: format!(
+                "{} IN {} | {}",
+                self.variable,
+                format_expression(&self.list_expr),
+                body.join(", ")
+            ),
+            children: vec![self.input.describe()],
+        }
     }
 }
 

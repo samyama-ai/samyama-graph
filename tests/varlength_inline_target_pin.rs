@@ -35,10 +35,27 @@ fn rows(store: &GraphStore, cypher: &str) -> Vec<String> {
     got
 }
 
-fn plan(store: &GraphStore, cypher: &str) -> String {
+fn plan_unchecked(store: &GraphStore, cypher: &str) -> String {
     let q = parse_query(&format!("EXPLAIN {cypher}")).unwrap();
     let out = QueryExecutor::new(store).execute(&q).unwrap();
     format!("{:?}", out.records[0].get("plan"))
+}
+
+/// [`plan_unchecked`], refusing a plan tree that stops early.
+///
+/// `PhysicalOperator::describe` has a default printing `Unknown` with no
+/// children, so an operator that does not implement it truncates the tree —
+/// and an assertion that the plan does *not* contain something is then
+/// satisfied by the missing half, whatever the planner did (#1826). Checked
+/// here, where the text is read, so the hole fails loudly rather than passing.
+fn plan(store: &GraphStore, cypher: &str) -> String {
+    let text = plan_unchecked(store, cypher);
+    assert!(
+        samyama::query::executor::undescribed_plan_lines(&text).is_empty(),
+        "the plan tree stops at an operator with no describe, so what is below \
+         it cannot be asserted about (#1826):\n{text}"
+    );
+    text
 }
 
 /// Forty people in a ring with chords, `id` unique.
