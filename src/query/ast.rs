@@ -526,6 +526,25 @@ impl PathSelector {
     pub fn is_single(self) -> bool {
         matches!(self, PathSelector::Any | PathSelector::AnyShortest)
     }
+
+    /// Whether this selector makes an otherwise unbounded search finite (#1648).
+    ///
+    /// ISO/IEC 39075 Sec. 5 lets a selector stand in for a restrictor in bounding an
+    /// unbounded quantifier. It does so here only for the selectors that want **one
+    /// path per endpoint pair**: a first-reach breadth-first traversal produces
+    /// exactly that and terminates through its visited set, with no bound on length.
+    ///
+    /// The answer it gives is admissible under every restrictor, which is the part
+    /// that makes this sound rather than merely convenient: a first-reach path never
+    /// revisits a node, so it is simple, and a simple path satisfies WALK, TRAIL,
+    /// ACYCLIC and SIMPLE alike. Being shortest, it also satisfies ANY SHORTEST.
+    ///
+    /// `ALL SHORTEST` is excluded. It wants *every* minimum-length path and
+    /// first-reach keeps one, so answering from first-reach would be a wrong answer
+    /// rather than a different legal choice.
+    pub fn bounds_an_unbounded_search(self) -> bool {
+        self.is_single()
+    }
 }
 
 /// Path type for path patterns (normal, shortest, allShortest)

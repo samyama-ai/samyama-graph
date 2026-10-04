@@ -349,9 +349,11 @@ impl std::fmt::Display for ValidationError {
                  edges and nodes, so any cycle makes the result infinite, and \
                  ISO/IEC 39075 forbids the combination. Give the quantifier an upper \
                  bound (`*1..4`), or use TRAIL, ACYCLIC or SIMPLE, each of which is \
-                 finite by construction. A shortest selector does not rescue it in \
-                 this engine: candidates are enumerated before the selector is \
-                 applied, so an unbounded walk never reaches it"
+                 finite by construction. A selector does not rescue it in this \
+                 engine: candidates are enumerated before the selector is applied, \
+                 so an unbounded walk never reaches it. Bounding the search from a \
+                 selector needs a traversal that can re-reach its own start node, \
+                 which the first-reach one cannot (#1648)"
             ),
             Self::CreateOnBoundRelationship(name) => write!(
                 f,
@@ -2808,17 +2810,31 @@ fn validate_function_argument_kinds(query: &Query) -> Result<(), ValidationError
 /// refusing until then is the honest position, and the message says which limit is
 /// being hit.
 fn validate_unbounded_walk_is_refused(query: &Query) -> Result<(), ValidationError> {
+    let mut refuse = |path: &crate::query::ast::PathPattern| {
+        if path.restrictor != crate::query::ast::PathRestrictor::Walk {
+            return Ok(());
+        }
+        for seg in &path.segments {
+            if let Some(len) = &seg.edge.length {
+                if len.max.is_none() {
+                    return Err(ValidationError::UnboundedWalk);
+                }
+            }
+        }
+        Ok(())
+    };
     for mc in &query.match_clauses {
         for path in &mc.pattern.paths {
-            if path.restrictor != crate::query::ast::PathRestrictor::Walk {
-                continue;
-            }
-            for seg in &path.segments {
-                if let Some(len) = &seg.edge.length {
-                    if len.max.is_none() {
-                        return Err(ValidationError::UnboundedWalk);
-                    }
-                }
+            refuse(path)?;
+        }
+    }
+    // The clause pipeline too. `ast::Query` carries by-kind fields for the common case
+    // and `clauses` for shapes the by-kind grammar cannot express; a rule written
+    // against one does nothing for queries that parse into the other, silently.
+    for clause in &query.clauses {
+        if let crate::query::ast::Clause::Match(mc) = clause {
+            for path in &mc.pattern.paths {
+                refuse(path)?;
             }
         }
     }
