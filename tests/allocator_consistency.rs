@@ -92,10 +92,10 @@ fn code_of(path: &str) -> String {
 /// The rule, stated once: **an example is a measurement example if its code reads
 /// a clock across a span of work** — `Instant::now()` paired with `.elapsed()`.
 ///
-/// Why this rule and not a looser one. Of the 122 examples, 71 contain both and 51
+/// Why this rule and not a looser one. Of the 123 examples, 72 contain both and 51
 /// contain neither; the two sets coincide exactly, and no example uses any other
 /// clock (no `SystemTime::now`, `chrono`, `quanta`, `rdtsc`, `getrusage`). In every
-/// one of the 71 the duration reaches the output — a latency, a throughput, a
+/// one of the 72 the duration reaches the output — a latency, a throughput, a
 /// per-row nanosecond figure, or an "imported in 12.3 s". None uses a clock only
 /// for control flow, so there is no example that times something without
 /// reporting it, and none that prints a timestamp without timing anything.
@@ -171,7 +171,12 @@ fn the_measurement_rule_still_selects_most_of_the_examples() {
     // A guard on the rule itself, not on the examples. If `measurement_examples`
     // ever returns nothing -- a renamed clock API, a refactor behind a helper, a
     // broken path -- the check above passes vacuously and stops protecting
-    // anything. The counts at the time of writing: 122 examples, 71 measuring.
+    // anything. The counts at the time of writing: 123 examples, 72 measuring.
+    //
+    // The floors are deliberately the counts at the time of writing and not a
+    // ratio: examples are only ever added here, and `import_tax_probe` -- which
+    // landed on main while this check was being written, and which the check
+    // caught on CI -- is what the floor is for.
     let total = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/examples"))
         .expect("examples/")
         .filter(|e| {
@@ -181,10 +186,10 @@ fn the_measurement_rule_still_selects_most_of_the_examples() {
         })
         .count();
     let measuring = measurement_examples().len();
-    assert!(total >= 122, "examples went from 122 to {total}; did the path change?");
+    assert!(total >= 123, "examples went from 123 to {total}; did the path change?");
     assert!(
-        measuring >= 71,
-        "the rule selects {measuring} of {total} examples, was 71. If timing moved behind a \
+        measuring >= 72,
+        "the rule selects {measuring} of {total} examples, was 72. If timing moved behind a \
          helper, the rule must follow it -- not shrink."
     );
 }
