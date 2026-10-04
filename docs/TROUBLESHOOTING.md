@@ -75,6 +75,70 @@ Note: Ensure Docker Desktop is running and you have an active internet connectio
 
 </details>
 
+<details>
+<summary><strong>Issue 5 — A query is refused with <code>RowBudgetExceeded</code></strong></summary>
+
+> ```
+> [Samyama.ClientError.Statement.RowBudgetExceeded] operator CartesianProduct produced
+> more than 50000000 rows (the per-operator row budget) and the query was refused
+> rather than run to completion
+> ```
+
+An operator produced more rows than the per-operator budget allows, so the
+query was refused instead of run to completion. The budget bounds *explosions*,
+not scans: a large but legitimate scan is never refused by it.
+
+**The limits**
+
+| Limit | Default | Set with |
+|---|---|---|
+| Rows one operator may produce | 50,000,000 | `SAMYAMA_ROW_BUDGET` (`0` disables enforcement) |
+| Rows the whole plan may produce, across every pass | 20 x the per-operator budget | the same variable |
+
+An unparseable value falls back to the default rather than to unlimited, so a
+typo cannot silently turn the guard off.
+
+**Usually it is an unintended cartesian product.** The message names the
+operator that crossed the budget; `CartesianProduct` means two patterns were
+combined with nothing joining them. Run `EXPLAIN <your query>` and look for it.
+
+Two patterns are joined by a **shared variable**. These are not joined:
+
+```cypher
+MATCH (a:Author)-[:WROTE]->(p1:Paper)
+MATCH (b:Author)-[:WROTE]->(p2:Paper)
+WHERE p1.year = p2.year
+RETURN a.name, b.name
+```
+
+`p1` and `p2` are different variables, so every `(a, p1)` pair is combined with
+every `(b, p2)` pair and the equality is checked afterwards. Write the join as
+a shared variable where you can:
+
+```cypher
+MATCH (a:Author)-[:WROTE]->(p:Paper)
+MATCH (b:Author)-[:WROTE]->(p)
+RETURN a.name, b.name
+```
+
+Where the two patterns genuinely differ, pin them to a value. An equality
+chain that reaches a constant — `p1.year = p2.year AND p1.year = 2026` — pins
+**both** sides, and an index on the property makes each one a point lookup
+(#1813):
+
+```cypher
+CREATE INDEX ON :Paper(year)
+```
+
+**Other things to try**
+
+- Add a filter that reduces one side before the product.
+- Raise `SAMYAMA_ROW_BUDGET` if the product is genuinely wanted and you can
+  afford the memory. Raising it does not make the query faster; it only stops
+  the refusal.
+
+</details>
+
 </details>
 
 <details>
