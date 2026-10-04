@@ -1,5 +1,6 @@
 // Health Systems KG — showcase queries
-// Schema: Country{iso_code,name} EmergencyResponse{indicator_name, score, year}
+// Schema: Country{iso_code,name} EmergencyResponse{capacity_code, capacity_name, country_code, score, year}
+//         `indicator_name` was never a property on this label (#1609).
 // Edges:  CAPACITY_FOR  (matched undirected)
 // WHO SPAR (IHR core-capacity) preparedness scores, country by country.
 
