@@ -506,8 +506,39 @@ impl GraphCatalog {
     }
 
     /// Recompute all catalog statistics from scratch using the graph store.
-    /// Used for consistency checks — result should match incrementally maintained stats.
+    ///
+    /// Dispatches to [`Self::recompute_full_parallel`] once the arena is large
+    /// enough for the split to pay for itself, and to
+    /// [`Self::recompute_full_serial`] below that. The two produce identical
+    /// catalogs — see `parallel_recompute_matches_serial` — and the serial one
+    /// is the reference, so a doubt about the parallel pass is settled by
+    /// comparing against it rather than by reasoning about it.
+    ///
+    /// # Why this is parallel at all
+    ///
+    /// `finish_bulk_load` is 1,380 s of a 4,219 s federation load and this
+    /// phase is ~72% of that, on one core of 96 (#1824). The work is per-node
+    /// and per-edge accumulation into counts, which splits cleanly by node
+    /// slot: each source node is visited by exactly one task, so out-degrees
+    /// never collide, and in-degrees and counts merge by integer addition —
+    /// associative, commutative, and exact, which is what makes the result
+    /// independent of thread count (`CH-DETERM-THREADS`).
     pub fn recompute_full(store: &super::store::GraphStore) -> Self {
+        // Below this the fold/merge costs more than the scan saves, and the
+        // whole pass is sub-millisecond anyway.
+        const PARALLEL_MIN_SLOTS: usize = 64 * 1024;
+        if store.node_slot_count() >= PARALLEL_MIN_SLOTS && rayon::current_num_threads() > 1 {
+            Self::recompute_full_parallel(store)
+        } else {
+            Self::recompute_full_serial(store)
+        }
+    }
+
+    /// The reference recompute: one thread, through `on_edge_created`.
+    ///
+    /// Kept as written rather than reimplemented, so it is an oracle for the
+    /// parallel pass and not a second thing to doubt.
+    pub(crate) fn recompute_full_serial(store: &super::store::GraphStore) -> Self {
         let mut catalog = GraphCatalog::new();
 
         // Recompute label counts
@@ -541,6 +572,65 @@ impl GraphCatalog {
 
         catalog.generation = 1;
         catalog
+    }
+
+    /// The same recompute, split over rayon's pool.
+    ///
+    /// Three things make this both fast and deterministic:
+    ///
+    /// * **Split by node slot, not by edge.** A slot range owns every outgoing
+    ///   edge of every node in it, so each source node's out-degree is
+    ///   accumulated by exactly one task. In-degrees and triple counts are
+    ///   touched by several tasks and merged by addition.
+    /// * **Integer accumulators, floats last.** `avg_out_degree` and
+    ///   `avg_in_degree` are divisions of two merged integers computed once at
+    ///   the end, so no float is ever summed across tasks and the result
+    ///   cannot depend on the merge order.
+    /// * **No per-node allocation.** Labels and edge types are interned to
+    ///   integers inside the task, the triple key is a `(u32, u16, u32)`
+    ///   `Copy` tuple, and the two per-node buffers are reused across nodes.
+    ///   A `String` is cloned once per distinct label and per distinct type in
+    ///   the whole catalog, not once per edge — #520 removed a per-edge type
+    ///   clone from the expansion path and #1457 records a naive `par_iter`
+    ///   putting it back.
+    pub(crate) fn recompute_full_parallel(store: &super::store::GraphStore) -> Self {
+        use rayon::prelude::*;
+
+        let slots = store.node_slot_count();
+        // Enough chunks for work stealing to even out a skewed degree
+        // distribution, few enough that the merge tree stays shallow.
+        let chunk = (slots / (rayon::current_num_threads() * 8).max(1)).max(8 * 1024);
+        let ranges: Vec<(usize, usize)> = (0..slots)
+            .step_by(chunk)
+            .map(|start| (start, (start + chunk).min(slots)))
+            .collect();
+
+        // `fold` gives one accumulator per rayon job split rather than one per
+        // node, which is what keeps this from allocating per edge.
+        let shards: Vec<Shard> = ranges
+            .par_iter()
+            .fold(Shard::new, |mut shard, &(start, end)| {
+                shard.scan_slots(store, start, end);
+                shard
+            })
+            .collect();
+
+        // Regroup, then merge per triple rather than pairwise over shards.
+        //
+        // A `reduce` tree looks like the obvious merge and caps the speedup at
+        // about 2x: its last merge is one thread combining two half-size
+        // shards, which is half the total work. Grouping each triple's
+        // accumulators together first makes every triple's merge independent,
+        // so the merge scales with the number of triples instead. Measured at
+        // 4M nodes / 8M edges: 0.768 s with the reduce tree, which is where
+        // the 2x ceiling shows up.
+        let (global, grouped) = Shard::regroup(shards);
+        let merged: Vec<(TripleKeyIds, TripleAcc)> = grouped
+            .into_par_iter()
+            .map(|(key, accs)| (key, TripleAcc::merge_all(accs)))
+            .collect();
+
+        global.into_catalog(store, merged)
     }
 
     /// Format catalog as human-readable text for EXPLAIN output
@@ -579,12 +669,431 @@ impl GraphCatalog {
     }
 }
 
+/// A triple keyed by interned ids: (source label, edge type, target label).
+///
+/// The point of the whole key being `Copy` integers is that hashing it costs
+/// 8 bytes rather than three `String`s.
+type TripleKeyIds = (u32, u16, u32);
+
+/// One triple's accumulated counters inside a single task.
+#[derive(Default)]
+struct TripleAcc {
+    count: usize,
+    source_degrees: HashMap<NodeId, usize>,
+    target_degrees: HashMap<NodeId, usize>,
+}
+
+impl TripleAcc {
+    /// Combine every task's view of one triple.
+    ///
+    /// Counts add and degrees add per node, so the result is the same whatever
+    /// order the accumulators arrive in — which is what lets the caller hand
+    /// them over from an unordered parallel iterator.
+    fn merge_all(mut accs: Vec<TripleAcc>) -> TripleAcc {
+        // Fold into the biggest one: the cost is one hash insert per entry
+        // moved, so moving the fewest entries is the cheapest order.
+        let biggest = accs
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, a)| a.source_degrees.len() + a.target_degrees.len())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        if accs.is_empty() {
+            return TripleAcc::default();
+        }
+        let mut base = accs.swap_remove(biggest);
+        for acc in accs {
+            base.count += acc.count;
+            // Out-degrees cannot actually collide — a source node lives in one
+            // slot range — but adding is correct whether they do or not.
+            for (node, degree) in acc.source_degrees {
+                *base.source_degrees.entry(node).or_insert(0) += degree;
+            }
+            for (node, degree) in acc.target_degrees {
+                *base.target_degrees.entry(node).or_insert(0) += degree;
+            }
+        }
+        base
+    }
+}
+
+/// One task's private accumulator for [`GraphCatalog::recompute_full_parallel`].
+///
+/// Labels are interned to task-local `u32`s and edge types carry the store's
+/// own `u16` id, so the triple key is a `Copy` 8-byte tuple rather than three
+/// `String`s. That is the difference between hashing ~40 bytes of text five
+/// times per edge and hashing 8 bytes once.
+struct Shard<'a> {
+    /// `&str` borrowed from the store, so interning allocates nothing.
+    label_ids: HashMap<&'a str, u32>,
+    labels: Vec<&'a Label>,
+    /// Node count per local label id, parallel to `labels`.
+    label_counts: Vec<usize>,
+    triples: HashMap<TripleKeyIds, TripleAcc>,
+    edges_counted: usize,
+    non_unit_types: std::collections::HashSet<u16>,
+}
+
+impl<'a> Shard<'a> {
+    fn new() -> Self {
+        Shard {
+            label_ids: HashMap::new(),
+            labels: Vec::new(),
+            label_counts: Vec::new(),
+            triples: HashMap::new(),
+            edges_counted: 0,
+            non_unit_types: std::collections::HashSet::new(),
+        }
+    }
+
+    /// The task-local id for a label, interning it on first sight.
+    ///
+    /// Keyed by `&str` borrowed from the store, so this allocates nothing; a
+    /// `Label` is cloned once per distinct label at the very end.
+    #[inline]
+    fn intern(&mut self, label: &'a Label) -> u32 {
+        if let Some(&id) = self.label_ids.get(label.as_str()) {
+            return id;
+        }
+        let id = self.labels.len() as u32;
+        self.labels.push(label);
+        self.label_counts.push(0);
+        self.label_ids.insert(label.as_str(), id);
+        id
+    }
+
+    /// Scan node slots `start..end`, which own every outgoing edge of every
+    /// node in them and so every out-degree those nodes have.
+    ///
+    /// The three buffers are declared once and cleared per node: a `Vec` per
+    /// node would be 328M allocations on the federation.
+    fn scan_slots(&mut self, store: &'a super::store::GraphStore, start: usize, end: usize) {
+        let mut src_labels: Vec<u32> = Vec::new();
+        let mut tgt_labels: Vec<u32> = Vec::new();
+        let mut edges: Vec<(NodeId, u16)> = Vec::new();
+
+        for idx in start..end {
+            // Every version in the slot, which is what `all_nodes()` yields.
+            for node in store.node_slot_versions(idx) {
+                src_labels.clear();
+                for label in &node.labels {
+                    let id = self.intern(label);
+                    self.label_counts[id as usize] += 1;
+                    src_labels.push(id);
+                }
+
+                edges.clear();
+                store.for_each_outgoing_neighbor(node.id, None, |target, eid| {
+                    // Both checks mirror `get_outgoing_edge_targets_owned`,
+                    // which resolves the type through `get_edge_type` and
+                    // silently drops an edge it cannot name.
+                    if let Some(type_id) = store.edge_type_id_at(eid) {
+                        if store.edge_type_name_at(type_id).is_some() {
+                            edges.push((target, type_id));
+                        }
+                    }
+                });
+
+                for &(target, type_id) in &edges {
+                    // The serial pass skips an edge whose target row is gone.
+                    let Some(target_node) = store.get_node(target) else {
+                        continue;
+                    };
+                    tgt_labels.clear();
+                    for label in &target_node.labels {
+                        let id = self.intern(label);
+                        tgt_labels.push(id);
+                    }
+
+                    for &s in &src_labels {
+                        for &t in &tgt_labels {
+                            let acc = self.triples.entry((s, type_id, t)).or_default();
+                            acc.count += 1;
+                            *acc.source_degrees.entry(node.id).or_insert(0) += 1;
+                            *acc.target_degrees.entry(target).or_insert(0) += 1;
+                        }
+                    }
+
+                    self.edges_counted += 1;
+                    // Exactly one filing is the only case where summing a
+                    // node's per-triple degrees gives its degree (#304).
+                    if src_labels.len() * tgt_labels.len() != 1 {
+                        self.non_unit_types.insert(type_id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Collapse the shards' task-local label numbering into one, and group
+    /// every shard's view of each triple together.
+    ///
+    /// Serial, and deliberately so: it is O(shards x distinct triples), with
+    /// no per-node or per-edge work at all — the accumulators move by pointer.
+    /// The expensive part, merging the degree maps, is left to the caller to
+    /// do per triple in parallel.
+    fn regroup(shards: Vec<Self>) -> (Self, HashMap<TripleKeyIds, Vec<TripleAcc>>) {
+        let mut global = Shard::new();
+        let mut grouped: HashMap<TripleKeyIds, Vec<TripleAcc>> = HashMap::new();
+        for shard in shards {
+            // A shard's label ids are its own: translate them into the
+            // global numbering before the keys can be compared.
+            let remap: Vec<u32> = shard.labels.iter().copied().map(|l| global.intern(l)).collect();
+            for (local, count) in shard.label_counts.iter().enumerate() {
+                global.label_counts[remap[local] as usize] += count;
+            }
+            for ((s, type_id, t), acc) in shard.triples {
+                grouped
+                    .entry((remap[s as usize], type_id, remap[t as usize]))
+                    .or_default()
+                    .push(acc);
+            }
+            global.edges_counted += shard.edges_counted;
+            global.non_unit_types.extend(shard.non_unit_types);
+        }
+        (global, grouped)
+    }
+
+    /// Turn the merged counters into a catalog, resolving names once per
+    /// distinct label and per distinct edge type.
+    ///
+    /// The two averages are computed here, from integers that are already
+    /// final, so no float is ever accumulated across tasks.
+    fn into_catalog(
+        self,
+        store: &super::store::GraphStore,
+        triples: Vec<(TripleKeyIds, TripleAcc)>,
+    ) -> GraphCatalog {
+        let Shard { labels, label_counts, edges_counted, non_unit_types, .. } = self;
+
+        let mut catalog = GraphCatalog::new();
+        for (local, &count) in label_counts.iter().enumerate() {
+            // A label interned only as an edge target is counted by whichever
+            // shard scanned its node's slot; a zero here would be a label on
+            // no node, which the serial pass also omits.
+            if count > 0 {
+                catalog.label_counts.insert(labels[local].clone(), count);
+            }
+        }
+
+        let mut type_names: HashMap<u16, EdgeType> = HashMap::new();
+        for ((s, type_id, t), acc) in triples {
+            let edge_type = match type_names.get(&type_id) {
+                Some(name) => name.clone(),
+                None => {
+                    let Some(name) = store.edge_type_name_at(type_id) else { continue };
+                    type_names.insert(type_id, name.clone());
+                    name.clone()
+                }
+            };
+            let distinct_sources = acc.source_degrees.len();
+            let distinct_targets = acc.target_degrees.len();
+            let max_out_degree = acc.source_degrees.values().copied().max().unwrap_or(0);
+            let pattern = TriplePattern::new(
+                labels[s as usize].clone(),
+                edge_type,
+                labels[t as usize].clone(),
+            );
+            catalog.triple_stats.insert(
+                pattern.clone(),
+                TripleStats {
+                    count: acc.count,
+                    avg_out_degree: acc.count as f64 / distinct_sources as f64,
+                    avg_in_degree: acc.count as f64 / distinct_targets as f64,
+                    distinct_sources,
+                    distinct_targets,
+                    max_out_degree,
+                },
+            );
+            catalog.source_degrees.insert(pattern.clone(), acc.source_degrees);
+            catalog.target_degrees.insert(pattern, acc.target_degrees);
+        }
+
+        for type_id in non_unit_types {
+            if let Some(name) = store.edge_type_name_at(type_id) {
+                catalog.non_unit_label_types.insert(name.clone());
+            }
+        }
+        catalog.edges_counted = edges_counted;
+        catalog.generation = 1;
+        catalog
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::slice::from_ref;
 
     // ---- TDD: Tests written first, then implementation verified ----
+
+    /// A graph with enough shape to tell the two recomputes apart if they
+    /// differ: several labels, several edge types, multi-label nodes (an edge
+    /// filed under four triples), unlabelled nodes (filed under none),
+    /// self-loops, parallel edges, and a skewed degree distribution so the
+    /// slot chunks carry unequal work.
+    ///
+    /// Above 8,192 slots so the parallel pass really splits (see
+    /// `recompute_full_parallel`'s chunk size) — a one-chunk graph would prove
+    /// nothing about merging.
+    fn many_shapes_store() -> crate::graph::store::GraphStore {
+        use crate::graph::store::GraphStore;
+        let mut store = GraphStore::new();
+        let labels = ["Person", "Company", "City", "Product", "Tag"];
+        let types = ["KNOWS", "WORKS_AT", "LIVES_IN", "RATED"];
+        let n = 30_000usize;
+
+        let ids: Vec<_> = (0..n)
+            .map(|i| {
+                if i >= n - 40 {
+                    // Two labels, and only in the last few slots. Every edge
+                    // touching one of these is filed under two or four
+                    // triples, which disqualifies its type from the degree
+                    // shortcut -- and because they sit in one slot range,
+                    // exactly one task learns that. A merge that forgets to
+                    // union `non_unit_types` therefore loses it, rather than
+                    // being covered up by every task having seen it.
+                    store.create_node_with_labels([
+                        Label::new(labels[i % 5]),
+                        Label::new(labels[(i + 2) % 5]),
+                    ])
+                } else if i % 11 == 1 {
+                    // No labels at all: filed under no triple.
+                    store.create_node_with_labels(Vec::<Label>::new())
+                } else {
+                    store.create_node(labels[i % 5])
+                }
+            })
+            .collect();
+
+        // A type carried only by the multi-label tail, so it is the one type
+        // whose disqualification lives in a single task's accumulator.
+        for i in (n - 40)..n {
+            store.create_edge(ids[i], ids[(i + 3) % n], "MULTI").unwrap();
+        }
+
+        for i in 0..n {
+            let t = types[i % 4];
+            store.create_edge(ids[i], ids[(i * 7 + 1) % n], t).unwrap();
+            // A skewed fan-out: the first few nodes carry many edges.
+            if i < 50 {
+                for j in 0..200 {
+                    store.create_edge(ids[i], ids[(i + j * 13) % n], types[j % 4]).unwrap();
+                }
+            }
+            if i % 1_000 == 0 {
+                // Self-loop and a parallel edge of the same type.
+                store.create_edge(ids[i], ids[i], "KNOWS").unwrap();
+                store.create_edge(ids[i], ids[(i + 1) % n], types[i % 4]).unwrap();
+                store.create_edge(ids[i], ids[(i + 1) % n], types[i % 4]).unwrap();
+            }
+        }
+        store
+    }
+
+    /// Equal in every field, with the two averages compared bit for bit
+    /// rather than within a tolerance: a tolerance would hide exactly the
+    /// order-dependence this test exists to rule out.
+    fn assert_catalogs_equal(expected: &GraphCatalog, actual: &GraphCatalog, what: &str) {
+        assert_eq!(expected.label_counts, actual.label_counts, "label_counts ({what})");
+        assert_eq!(
+            expected.triple_stats.len(),
+            actual.triple_stats.len(),
+            "triple count ({what})"
+        );
+        for (pattern, want) in &expected.triple_stats {
+            let got = actual
+                .triple_stats
+                .get(pattern)
+                .unwrap_or_else(|| panic!("missing triple {pattern:?} ({what})"));
+            assert_eq!(want.count, got.count, "count {pattern:?} ({what})");
+            assert_eq!(want.distinct_sources, got.distinct_sources, "sources {pattern:?} ({what})");
+            assert_eq!(want.distinct_targets, got.distinct_targets, "targets {pattern:?} ({what})");
+            assert_eq!(want.max_out_degree, got.max_out_degree, "max_out {pattern:?} ({what})");
+            assert_eq!(
+                want.avg_out_degree.to_bits(),
+                got.avg_out_degree.to_bits(),
+                "avg_out {pattern:?} ({what})"
+            );
+            assert_eq!(
+                want.avg_in_degree.to_bits(),
+                got.avg_in_degree.to_bits(),
+                "avg_in {pattern:?} ({what})"
+            );
+        }
+        assert_eq!(expected.source_degrees, actual.source_degrees, "source_degrees ({what})");
+        assert_eq!(expected.target_degrees, actual.target_degrees, "target_degrees ({what})");
+        assert_eq!(expected.edges_counted, actual.edges_counted, "edges_counted ({what})");
+        assert_eq!(
+            expected.non_unit_label_types, actual.non_unit_label_types,
+            "non_unit_label_types ({what})"
+        );
+        assert_eq!(expected.generation, actual.generation, "generation ({what})");
+    }
+
+    #[test]
+    fn parallel_recompute_matches_serial() {
+        let store = many_shapes_store();
+        let serial = GraphCatalog::recompute_full_serial(&store);
+        // Not an empty check in disguise: the graph has to have produced
+        // triples, degrees and a disqualified type for the comparison to mean
+        // anything.
+        assert!(serial.triple_stats.len() >= 20, "triples: {}", serial.triple_stats.len());
+        assert!(!serial.non_unit_label_types.is_empty(), "no multi-label edge was filed");
+        assert!(serial.edges_counted > 30_000, "edges: {}", serial.edges_counted);
+
+        let parallel = GraphCatalog::recompute_full_parallel(&store);
+        assert_catalogs_equal(&serial, &parallel, "default pool");
+    }
+
+    /// `CH-DETERM-THREADS`: the counts may not depend on how many threads ran.
+    ///
+    /// Driven through explicit rayon pools rather than `RAYON_NUM_THREADS`,
+    /// because the env var is read once per process and every other test in
+    /// this binary shares that process.
+    #[test]
+    fn parallel_recompute_is_independent_of_thread_count() {
+        let store = many_shapes_store();
+        let serial = GraphCatalog::recompute_full_serial(&store);
+        for threads in [1usize, 2, 3, 5, 8, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool");
+            let parallel = pool.install(|| GraphCatalog::recompute_full_parallel(&store));
+            assert_catalogs_equal(&serial, &parallel, &format!("{threads} threads"));
+        }
+    }
+
+    /// The dispatcher itself: above `PARALLEL_MIN_SLOTS`, `recompute_full`
+    /// must still agree with the serial pass. The two tests above call the
+    /// parallel pass directly, so without this one nothing checks that the
+    /// path production takes is the path that was checked (#1467's class).
+    #[test]
+    fn recompute_full_above_the_parallel_threshold_matches_serial() {
+        use crate::graph::store::GraphStore;
+        let mut store = GraphStore::new();
+        // More than 64 Ki slots, so the dispatcher chooses the parallel pass.
+        let n = 70_000usize;
+        let ids: Vec<_> = (0..n)
+            .map(|i| store.create_node(if i % 3 == 0 { "Person" } else { "Company" }))
+            .collect();
+        for i in 0..n {
+            store.create_edge(ids[i], ids[(i * 7 + 1) % n], if i % 2 == 0 { "KNOWS" } else { "RATED" }).unwrap();
+        }
+        let serial = GraphCatalog::recompute_full_serial(&store);
+        let dispatched = GraphCatalog::recompute_full(&store);
+        assert_catalogs_equal(&serial, &dispatched, "recompute_full");
+    }
+
+    #[test]
+    fn parallel_recompute_handles_an_empty_store() {
+        let store = crate::graph::store::GraphStore::new();
+        let serial = GraphCatalog::recompute_full_serial(&store);
+        let parallel = GraphCatalog::recompute_full_parallel(&store);
+        assert_catalogs_equal(&serial, &parallel, "empty");
+        assert!(parallel.label_counts.is_empty());
+    }
 
     #[test]
     fn test_empty_catalog() {

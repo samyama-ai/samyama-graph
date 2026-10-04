@@ -4406,6 +4406,40 @@ NodeDeleted { .. } => {
         self.nodes.iter().flatten().collect()
     }
 
+    /// How many node slots the arena has, live or not.
+    ///
+    /// Slot-indexed rather than node-indexed so a caller can split the arena
+    /// into disjoint ranges and scan them independently. `all_nodes()` cannot
+    /// be split that way: it allocates a `Vec` of every version of every node
+    /// first, which at 328M nodes is 2.6 GB of pointers before any work starts.
+    pub(crate) fn node_slot_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Every version held in one slot, oldest first; empty for a free slot.
+    ///
+    /// The same sequence `all_nodes()` yields for that slot, so a slot-ranged
+    /// scan sees exactly what the whole-arena scan does.
+    pub(crate) fn node_slot_versions(&self, idx: usize) -> &[Node] {
+        self.nodes.get(idx).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// An edge's interned type id, or `None` for an unallocated or deleted slot.
+    ///
+    /// The `u16` form of [`Self::get_edge_type`], which clones the type's
+    /// `String`. A per-edge pass that only needs to group by type should group
+    /// by the id and resolve the name once per type (#520's lesson applied to
+    /// the rebuild passes).
+    pub(crate) fn edge_type_id_at(&self, edge_id: EdgeId) -> Option<u16> {
+        let id = self.edge_type_ids.get(edge_id.as_u64() as usize).copied()?;
+        if id == Self::EDGE_TYPE_UNSET { None } else { Some(id) }
+    }
+
+    /// The name behind an interned edge-type id, borrowed.
+    pub(crate) fn edge_type_name_at(&self, type_id: u16) -> Option<&EdgeType> {
+        self.edge_type_table.get(type_id as usize)
+    }
+
     /// Get all edges in the graph (reconstructed from DS-07c)
     pub fn all_edges(&self) -> Vec<Edge> {
         let mut result = Vec::new();
@@ -4574,7 +4608,9 @@ NodeDeleted { .. } => {
     /// that was just imported, so importing N snapshots back to back pays N
     /// times for a graph that only grows. Measured per phase at 8M nodes and
     /// 16M edges (`examples/import_tax_probe.rs`): `rebuild_catalog` 4.836 s,
-    /// `rebuild_edge_type_index` 1.830 s, `compact_adjacency` 0.088 s. The
+    /// `rebuild_edge_type_index` 1.830 s, `compact_adjacency` 0.088 s. Those
+    /// are the serial, glibc-allocator figures; both rebuilds are parallel
+    /// since #1824 and read 0.555 s and 0.234 s on 16 cores at that size. The
     /// catalog is 72% of it and compaction is 1.3% — the tax tracks edges
     /// roughly twice as strongly as nodes, and segment count third-order. In
     /// the field an eleventh import of a 1,098-node snapshot into a 103M-node
@@ -4681,34 +4717,119 @@ NodeDeleted { .. } => {
         self.catalog = catalog;
     }
 
+    /// Rebuild the edge-type index from the edge arrays.
+    ///
+    /// Parallel above a threshold, and the two paths share
+    /// [`Self::indexable_edge_type`] so they cannot disagree about which edges
+    /// belong in the index. 27% of the deferred `finish_bulk_load` and, like
+    /// the catalog, it ran on one core of 96 (#1824).
     pub fn rebuild_edge_type_index(&mut self) {
-        self.edge_type_index.clear();
-        let len = self.edge_type_ids.len();
-        for idx in 0..len {
-            let type_id = self.edge_type_ids[idx];
-            if type_id == Self::EDGE_TYPE_UNSET {
-                continue;
-            }
-            // Skip free-listed (deleted) edges — their endpoints are zeroed.
-            // edge_endpoints is grown in lockstep with edge_type_ids; absence
-            // implies the edge has not been allocated.
-            if idx >= self.edge_endpoints.len() {
-                continue;
-            }
-            let (src, tgt) = self.edge_endpoints[idx];
-            if src.as_u64() == 0 && tgt.as_u64() == 0 {
-                continue;
-            }
-            if (type_id as usize) >= self.edge_type_table.len() {
-                continue;
-            }
-            let edge_type = self.edge_type_table[type_id as usize].clone();
-            self.edge_type_index
-                .entry(edge_type)
-                .or_default()
-                .insert(EdgeId::new(idx as u64));
-        }
+        // Below this the regroup costs more than the split saves.
+        const PARALLEL_MIN_EDGE_SLOTS: usize = 64 * 1024;
+        let index = if self.edge_type_ids.len() >= PARALLEL_MIN_EDGE_SLOTS
+            && rayon::current_num_threads() > 1
+        {
+            self.collect_edge_type_index_parallel()
+        } else {
+            self.collect_edge_type_index_serial()
+        };
+        self.edge_type_index = index;
         self.invalidate_statistics_cache();
+    }
+
+    /// Whether edge slot `idx` belongs in the edge-type index, and under which
+    /// interned type.
+    ///
+    /// The single definition of "an edge the index should hold": allocated,
+    /// typed, not free-listed, and with a type the table can name.
+    #[inline]
+    fn indexable_edge_type(&self, idx: usize) -> Option<u16> {
+        let type_id = *self.edge_type_ids.get(idx)?;
+        if type_id == Self::EDGE_TYPE_UNSET {
+            return None;
+        }
+        // Skip free-listed (deleted) edges — their endpoints are zeroed.
+        // edge_endpoints is grown in lockstep with edge_type_ids; absence
+        // implies the edge has not been allocated.
+        let (src, tgt) = *self.edge_endpoints.get(idx)?;
+        if src.as_u64() == 0 && tgt.as_u64() == 0 {
+            return None;
+        }
+        if (type_id as usize) >= self.edge_type_table.len() {
+            return None;
+        }
+        Some(type_id)
+    }
+
+    /// The reference build: one pass, one thread.
+    pub(crate) fn collect_edge_type_index_serial(&self) -> HashMap<EdgeType, HashSet<EdgeId>> {
+        let mut index: HashMap<EdgeType, HashSet<EdgeId>> = HashMap::new();
+        for idx in 0..self.edge_type_ids.len() {
+            if let Some(type_id) = self.indexable_edge_type(idx) {
+                index
+                    .entry(self.edge_type_table[type_id as usize].clone())
+                    .or_default()
+                    .insert(EdgeId::new(idx as u64));
+            }
+        }
+        index
+    }
+
+    /// The same index, built over rayon's pool.
+    ///
+    /// Two stages, because they have different shapes. The scan is per edge
+    /// slot and splits by slot range. The expensive part is not the scan but
+    /// filling one `HashSet` per type with up to a billion ids, so the sets
+    /// are built one per type in parallel rather than merged pairwise — a
+    /// pairwise merge ends with one thread combining half the ids.
+    ///
+    /// Deterministic because each type's set is the union of disjoint id
+    /// ranges: the same ids whatever order the chunks finish in. The grouping
+    /// stage carries `Vec`s of ids rather than sets, since ids within a slot
+    /// range are distinct by construction and need no hashing to dedupe.
+    pub(crate) fn collect_edge_type_index_parallel(&self) -> HashMap<EdgeType, HashSet<EdgeId>> {
+        use rayon::prelude::*;
+
+        let len = self.edge_type_ids.len();
+        let chunk = (len / (rayon::current_num_threads() * 8).max(1)).max(32 * 1024);
+        let ranges: Vec<(usize, usize)> = (0..len)
+            .step_by(chunk)
+            .map(|start| (start, (start + chunk).min(len)))
+            .collect();
+
+        let per_task: Vec<HashMap<u16, Vec<EdgeId>>> = ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let mut groups: HashMap<u16, Vec<EdgeId>> = HashMap::new();
+                for idx in start..end {
+                    if let Some(type_id) = self.indexable_edge_type(idx) {
+                        groups.entry(type_id).or_default().push(EdgeId::new(idx as u64));
+                    }
+                }
+                groups
+            })
+            .collect();
+
+        // Regroup by type. Serial, and O(tasks x types): the id vectors move
+        // by pointer, nothing is rehashed here.
+        let mut by_type: HashMap<u16, Vec<Vec<EdgeId>>> = HashMap::new();
+        for groups in per_task {
+            for (type_id, ids) in groups {
+                by_type.entry(type_id).or_default().push(ids);
+            }
+        }
+
+        by_type
+            .into_par_iter()
+            .map(|(type_id, batches)| {
+                let total: usize = batches.iter().map(|b| b.len()).sum();
+                let mut set: HashSet<EdgeId> = HashSet::with_capacity(total);
+                for batch in batches {
+                    set.extend(batch);
+                }
+                (self.edge_type_table[type_id as usize].clone(), set)
+            })
+            .collect()
     }
 
     /// Rebuild all HNSW vector indices from node HashMap properties.
@@ -6848,6 +6969,61 @@ fn spawn_auto_embed(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A graph above the parallel threshold, with several edge types and some
+    /// deleted edges, so the two index builds have something to disagree about.
+    fn many_typed_edges_store() -> GraphStore {
+        let mut store = GraphStore::new();
+        let types = ["KNOWS", "WORKS_AT", "LIVES_IN", "RATED", "TAGGED"];
+        let n = 20_000usize;
+        let ids: Vec<_> = (0..n).map(|i| store.create_node_stub(if i % 2 == 0 { "A" } else { "B" })).collect();
+        let mut edges = Vec::new();
+        for i in 0..n {
+            for k in 0..5 {
+                edges.push(
+                    store
+                        .create_edge_stub(ids[i], ids[(i * 7 + k) % n], types[k])
+                        .expect("edge"),
+                );
+            }
+        }
+        // Free-listed slots: the index must skip them on both paths.
+        for (slot, edge) in edges.iter().enumerate() {
+            if slot % 997 == 0 {
+                let _ = store.delete_edge(*edge);
+            }
+        }
+        store
+    }
+
+    #[test]
+    fn parallel_edge_type_index_matches_serial() {
+        let store = many_typed_edges_store();
+        let serial = store.collect_edge_type_index_serial();
+        // Not vacuous: there are five types and 100k edges to place.
+        assert_eq!(serial.len(), 5, "types: {}", serial.len());
+        assert!(serial.values().map(|s| s.len()).sum::<usize>() > 99_000);
+
+        let parallel = store.collect_edge_type_index_parallel();
+        assert_eq!(serial, parallel);
+    }
+
+    /// `CH-DETERM-THREADS`: the index may not depend on the thread count.
+    #[test]
+    fn parallel_edge_type_index_is_independent_of_thread_count() {
+        let store = many_typed_edges_store();
+        let serial = store.collect_edge_type_index_serial();
+        for threads in [1usize, 2, 3, 8, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool");
+            let parallel = pool.install(|| store.collect_edge_type_index_parallel());
+            assert_eq!(serial, parallel, "{threads} threads");
+        }
+    }
+
     /// Every public mutator either bumps the data epoch or says why it does not
     /// (#1153).
     ///
