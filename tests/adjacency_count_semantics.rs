@@ -189,3 +189,94 @@ fn the_answer_matches_expanding_the_pattern_by_hand() {
     );
     assert_eq!(by_rewrite, by_aggregate);
 }
+
+/// The neighbour-label probe costs a bit test per edge, not a SipHash (#1812).
+///
+/// #601 made the labelled-neighbour form walk the adjacency and test each
+/// neighbour for the label, which is what a correct answer costs. The probe
+/// read the label's `std::collections::HashSet<NodeId>`, so every edge walked
+/// paid a SipHash. That is invisible at low degree and is the whole query at
+/// high degree: on PubMed's `(:Article)-[:ANNOTATED_WITH]->(:MeSHTerm)`, 1.04
+/// billion edges over ~30k terms, it took the shape from 5.2 s to 32.4 s with
+/// an unchanged plan. The dense label bitset answers the same question with a
+/// shift and a mask.
+///
+/// Pinned as a **ratio measured in this process**, never a wall-clock bound:
+/// the labelled form against the unlabelled one over the same graph and the
+/// same walk. The only difference between them is the per-edge probe, so the
+/// ratio is what the probe costs, whatever the host or the build profile. A
+/// `WHERE` on the grouped node is what keeps both on the walk — the catalog's
+/// degree maps hold ids and degrees, not properties, so they decline it.
+#[test]
+fn the_neighbour_label_probe_is_not_a_hash_per_edge() {
+    use std::time::Instant;
+
+    // 150 hubs over 2,000 leaves, ~206k edges. The group count is low and the
+    // degree high on purpose: that is the shape the probe is multiplied by,
+    // and the shape #1812 measured. Degrees are distinct per hub so the top
+    // ten is one answer rather than an arbitrary ten of a hundred ties.
+    let mut store = GraphStore::new();
+    let mut leaves = Vec::new();
+    for i in 0..2_000 {
+        let id = store.create_node("Leaf");
+        let _ = store.set_node_property(
+            "default",
+            id,
+            "name".to_string(),
+            PropertyValue::String(format!("L{i}")),
+        );
+        leaves.push(id);
+    }
+    for h in 0..150 {
+        let hub = store.create_node("Hub");
+        let _ = store.set_node_property(
+            "default",
+            hub,
+            "name".to_string(),
+            PropertyValue::String(format!("H{h}")),
+        );
+        for leaf in leaves.iter().take(1_000 + h * 5) {
+            store.create_edge(hub, *leaf, "E").unwrap();
+        }
+    }
+
+    let labelled = "MATCH (h:Hub)-[:E]->(l:Leaf) WHERE h.name <> 'absent' \
+                    RETURN h.name AS g, count(l) AS c ORDER BY c DESC LIMIT 10";
+    let unlabelled = "MATCH (h:Hub)-[:E]->() WHERE h.name <> 'absent' \
+                      RETURN h.name AS g, count(*) AS c ORDER BY c DESC LIMIT 10";
+
+    // Both forms must still be answered by the rewrite and must agree on the
+    // counts: every leaf carries `:Leaf`, so the label excludes nothing. A
+    // ratio over two queries that disagree would be measuring two answers.
+    assert_eq!(rows(&store, labelled), rows(&store, unlabelled));
+
+    let best = |cypher: &str| {
+        let query = parse_query(cypher).unwrap();
+        let mut best = f64::MAX;
+        for _ in 0..9 {
+            let t = Instant::now();
+            let batch = QueryExecutor::new(&store).execute(&query).unwrap();
+            assert_eq!(batch.records.len(), 10);
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        best
+    };
+    // Warm the caches both paths share (the label bitset, the edge type id)
+    // so the first query measured does not pay for the second.
+    let _ = best(labelled);
+    let _ = best(unlabelled);
+
+    let with_label = best(labelled);
+    let without_label = best(unlabelled);
+    let ratio = with_label / without_label;
+    eprintln!(
+        "label probe: {with_label:.6}s labelled against {without_label:.6}s unlabelled, {ratio:.2}x"
+    );
+    assert!(
+        ratio < 7.0,
+        "the label probe costs {ratio:.2}x the same walk without it \
+         ({with_label:.4}s against {without_label:.4}s). The bitset measured \
+         3.1x here in release and 4.3x in debug, the `HashSet` 12.3x and \
+         15.7x, so 7x separates them in either profile (#1812)"
+    );
+}

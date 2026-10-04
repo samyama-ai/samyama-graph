@@ -12075,12 +12075,25 @@ impl AdjacencyCountAggregateOperator {
 
         // Constrained: walk and count the neighbours that carry the label.
         // O(degree) rather than O(1), which is what a correct answer costs --
-        // and still cheaper than materialising a row per edge. The membership
-        // probe is one hash of a `NodeId` (#592).
-        let Some(members) = store.nodes_with_label(label) else {
+        // and still cheaper than materialising a row per edge.
+        //
+        // The probe reads the **dense label bitset**, not the label's
+        // `HashSet<NodeId>` (#1812). It is one membership test per edge
+        // walked, so the probe's own cost is multiplied by the edge count:
+        // `label_index` is a `std::collections::HashSet`, whose hasher is
+        // SipHash, and at a billion edges that hash *is* the query. The bitset
+        // is a shift and a mask over a cached `Arc<Vec<u64>>`, it is the same
+        // structure the expand's membership test and `node_ids_by_label`
+        // already read, and it carries the same contract -- `None` means no
+        // node carries the label, which matches nothing, not "no label
+        // required" (#520). It is fetched once per grouped node, outside the
+        // walk, so the lock and the `Arc` clone are charged per node rather
+        // than per edge.
+        let Some(members) = store.label_bitset(label) else {
             // No node carries the label, so nothing matches.
             return 0;
         };
+        let members = members.as_slice();
         // `Some(&[])` matches no edge; a wildcard would be `None`, which is not
         // what an unknown edge type means (#520).
         let type_ids: Vec<u16> = store.edge_type_id(&self.edge_type).into_iter().collect();
@@ -12090,26 +12103,26 @@ impl AdjacencyCountAggregateOperator {
         match self.direction {
             Direction::Outgoing => {
                 store.for_each_outgoing_neighbor(node_id, filter, |target, _| {
-                    if members.contains(&target) {
+                    if GraphStore::bitset_contains(members, target) {
                         count += 1;
                     }
                 });
             }
             Direction::Incoming => {
                 store.for_each_incoming_neighbor(node_id, filter, |source, _| {
-                    if members.contains(&source) {
+                    if GraphStore::bitset_contains(members, source) {
                         count += 1;
                     }
                 });
             }
             Direction::Both => {
                 store.for_each_outgoing_neighbor(node_id, filter, |target, _| {
-                    if members.contains(&target) {
+                    if GraphStore::bitset_contains(members, target) {
                         count += 1;
                     }
                 });
                 store.for_each_incoming_neighbor(node_id, filter, |source, _| {
-                    if members.contains(&source) {
+                    if GraphStore::bitset_contains(members, source) {
                         count += 1;
                     }
                 });

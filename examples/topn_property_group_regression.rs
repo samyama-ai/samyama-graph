@@ -150,6 +150,14 @@ fn main() {
             "MATCH (a:Article)-[:ANNOTATED_WITH]->(m:MeSHTerm) RETURN m, count(a) AS n ORDER BY n DESC LIMIT 10",
         ),
         (
+            // A WHERE on the grouped node makes the catalog's degree maps
+            // unusable -- they hold node ids and degrees, not properties -- so
+            // this shape takes the per-node adjacency walk on every version,
+            // which is where the neighbour-label membership probe is paid.
+            "Q17 with WHERE (forces the walk)",
+            "MATCH (a:Article)-[:ANNOTATED_WITH]->(m:MeSHTerm) WHERE m.name <> 'absent' RETURN m.name, count(a) AS n ORDER BY n DESC LIMIT 10",
+        ),
+        (
             "Q17 without ORDER BY / LIMIT",
             "MATCH (a:Article)-[:ANNOTATED_WITH]->(m:MeSHTerm) RETURN m.name, count(a) AS n",
         ),
