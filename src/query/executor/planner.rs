@@ -692,6 +692,50 @@ pub(crate) fn expression_has_aggregate(expr: &Expression) -> bool {
     }
 }
 
+/// `(k, descending)` when `ORDER BY <the count> … LIMIT k` over an adjacency
+/// degree aggregate can be answered by a bounded selection inside the aggregate
+/// rather than a `Sort` above it.
+///
+/// `order_keys` pairs each RETURN item's written expression with the alias this
+/// plan emits for it, and `count_item_alias` is that alias for the single
+/// `count(...)` item. Both spellings of the key resolve to the same thing
+/// through `resolve_sort_key`: `ORDER BY c` is already the alias, and
+/// `ORDER BY count(*)` is rewritten to it.
+///
+/// Declined, and each decline has a test that it declines *and* answers right:
+///
+/// * **no `LIMIT`** — there is no k, so there is nothing to bound by, and every
+///   group is observable;
+/// * **no `ORDER BY`** — the k rows are then not defined by the count, and the
+///   `Limit` above already stops the pull after k;
+/// * **more than one `ORDER BY` key** — the second key reorders ties, and the
+///   count alone cannot decide which rows a `LIMIT` keeps;
+/// * **a key that is not the count alias** — `ORDER BY a.title`, or an
+///   expression over the count such as `ORDER BY c + 1`. A monotone expression
+///   would be equivalent, but deciding monotonicity is not something to guess
+///   at: `ORDER BY -c` is the other direction and `ORDER BY c % 3` is neither.
+///
+/// `SKIP s LIMIT k` is accepted as k = s + k. The rows are emitted in order, so
+/// the `Skip` above still trims the right head.
+fn adjacency_streaming_top_k(
+    query: &Query,
+    order_keys: &[(Expression, String)],
+    count_item_alias: &str,
+) -> Option<(usize, bool)> {
+    let order_by = query.order_by.as_ref()?;
+    if order_by.items.len() != 1 {
+        return None;
+    }
+    let limit = query.limit?;
+    let item = &order_by.items[0];
+    match resolve_sort_key(&item.expression, order_keys, SortPosition::AfterProjection) {
+        Expression::Variable(v) if v == count_item_alias => {}
+        _ => return None,
+    }
+    let k = query.skip.unwrap_or(0).saturating_add(limit);
+    Some((k, !item.ascending))
+}
+
 fn resolve_sort_key(
     key: &Expression,
     return_items: &[(Expression, String)],
@@ -5743,7 +5787,6 @@ impl QueryPlanner {
         {
             adj_op = adj_op.with_catalog_degrees(pat.grouped_label.clone());
         }
-        let mut operator: OperatorBox = Box::new(adj_op);
 
         // RETURN projections — the detector guarantees each item is either a
         // Property/Variable on the grouped side or the single count() aggregate,
@@ -5753,6 +5796,11 @@ impl QueryPlanner {
             .as_ref()
             .expect("detector enforces RETURN presence");
         let mut output_columns = Vec::new();
+        // The alias the count item is *projected* as, which is what an
+        // `ORDER BY` resolves to after the projection. It is not always
+        // `pat.count_alias`: `RETURN a, count(*)` with no `AS` is projected as
+        // the column name the RETURN item generates.
+        let mut count_item_alias: Option<String> = None;
         let projections: Vec<(Expression, String)> = return_clause
             .items
             .iter()
@@ -5769,6 +5817,7 @@ impl QueryPlanner {
                     Expression::Function { name, .. }
                         if name.eq_ignore_ascii_case("count") =>
                     {
+                        count_item_alias = Some(alias.clone());
                         Expression::Variable(pat.count_alias.clone())
                     }
                     other => other.clone(),
@@ -5789,6 +5838,23 @@ impl QueryPlanner {
                     .collect()
             })
             .unwrap_or_default();
+
+        // `ORDER BY <the count> … LIMIT k` is a bounded selection, and the
+        // aggregate can do it over `(node, count)` pairs instead of over
+        // `Record`s. #1809 measured the Q19 shape at 2M groups: 2.1 s with the
+        // sort, 10.5 ms with the `ORDER BY` removed, so the row source was 10 ms
+        // of it and the other 2.09 s was one `Record` per group. A bound pushed
+        // into the sort recovered 16% and could recover no more, because a
+        // bounded sort still receives every row. Pushed into the aggregate, the
+        // rows that cannot survive are never built -- and the `Sort` comes out
+        // of the plan, since the operator's output order is already the answer's.
+        let top_k = count_item_alias
+            .as_deref()
+            .and_then(|alias| adjacency_streaming_top_k(query, &order_keys, alias));
+        if let Some((k, descending)) = top_k {
+            adj_op = adj_op.with_top_k(k, descending);
+        }
+        let mut operator: OperatorBox = Box::new(adj_op);
         operator = Box::new(ProjectOperator::new(operator, projections));
 
         // (GROUP BY is now handled inside AdjacencyCountAggregateOperator
@@ -5796,18 +5862,26 @@ impl QueryPlanner {
 
         // ORDER BY — resolved against the projected aliases, since the sort runs after
         // the projection and the source variables are gone by then.
-        if let Some(order_by) = &query.order_by {
-            let sort_items: Vec<(Expression, bool)> = order_by
-                .items
-                .iter()
-                .map(|i| {
-                    (
-                        resolve_sort_key(&i.expression, &order_keys, SortPosition::AfterProjection),
-                        i.ascending,
-                    )
-                })
-                .collect();
-            operator = Box::new(SortOperator::new(operator, sort_items));
+        //
+        // Skipped entirely when the aggregate took the bound: it emits the k
+        // rows in order, so a `Sort` above would re-sort k rows to the same
+        // order and, worse, would have no rows to sort that the aggregate did
+        // not already decide. Leaving it in would also be the thing this change
+        // exists to remove.
+        if top_k.is_none() {
+            if let Some(order_by) = &query.order_by {
+                let sort_items: Vec<(Expression, bool)> = order_by
+                    .items
+                    .iter()
+                    .map(|i| {
+                        (
+                            resolve_sort_key(&i.expression, &order_keys, SortPosition::AfterProjection),
+                            i.ascending,
+                        )
+                    })
+                    .collect();
+                operator = Box::new(SortOperator::new(operator, sort_items));
+            }
         }
 
         if let Some(skip) = query.skip {
@@ -7600,16 +7674,71 @@ impl QueryPlanner {
                     operator = Box::new(FilterOperator::new(operator, w.predicate.clone()));
                 }
                 Clause::Return(rc) => {
-                    // ORDER BY goes **below** the projection, not after it.
+                    // An aggregate in RETURN needs an Aggregate below the
+                    // projection. Without this the pipeline projected
+                    // `count(*)` as an ordinary expression, it reached the
+                    // scalar evaluator, and the query died with "Unknown
+                    // function: count" — for every shape that opens with WITH,
+                    // which is what routes a query here in the first place.
                     //
-                    // `WITH p, count(q) AS rng RETURN p ORDER BY rng` sorts on
-                    // a column the RETURN does not carry. Sorting above the
-                    // projection leaves the key unbound, the sort silently
-                    // becomes a no-op, and the rows come back in whatever
-                    // order the barrier produced — which is hash order, so the
-                    // answer differs between processes. CH-DETERM caught
-                    // exactly this scenario after the pipeline landed.
-                    if let Some(order_by) = &query.order_by {
+                    // The `Clause::With` arm of this same function already did
+                    // this; only RETURN was missed, so the two clauses in one
+                    // pipeline disagreed about what an aggregate is.
+                    let mut agg_counter = 0usize;
+                    let mut aggregates: Vec<AggregateFunction> = Vec::new();
+                    let mut group_by: Vec<(Expression, String)> = Vec::new();
+                    let mut post_projections: Vec<(Expression, String)> = Vec::new();
+                    let mut has_aggregation = false;
+                    let mut rewritten_items: Vec<(Expression, Expression, String)> = Vec::new();
+
+                    for (idx, i) in rc.items.iter().enumerate() {
+                        let alias = i.column_name(idx);
+                        let (rewritten, extracted) =
+                            extract_nested_aggregates(&i.expression, &mut agg_counter);
+                        if !extracted.is_empty() {
+                            has_aggregation = true;
+                        }
+                        rewritten_items.push((i.expression.clone(), rewritten, alias));
+                        aggregates.extend(extracted);
+                    }
+
+                    // `rewritten_items` is consumed below, so keep the
+                    // `(written expression, projected alias)` pairs the sort
+                    // resolution needs.
+                    let rewritten_aliases: Vec<(Expression, String)> = if has_aggregation {
+                        rewritten_items
+                            .iter()
+                            .map(|(original, _, alias)| (original.clone(), alias.clone()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Where the `ORDER BY` goes depends on whether this RETURN
+                    // aggregates, so `has_aggregation` is decided first, above.
+                    //
+                    // **Not aggregating: below the projection.** `WITH p,
+                    // count(q) AS rng RETURN p ORDER BY rng` sorts on a column
+                    // the RETURN does not carry. Sorting above the projection
+                    // leaves the key unbound, the sort silently becomes a
+                    // no-op, and the rows come back in whatever order the
+                    // barrier produced -- which is hash order, so the answer
+                    // differs between processes. CH-DETERM caught exactly this
+                    // scenario after the pipeline landed.
+                    //
+                    // **Aggregating: above it.** This arm sorted below
+                    // unconditionally, with `SortPosition::BeforeProjection`,
+                    // which substitutes an alias for the expression it names.
+                    // So `RETURN a, count(*) AS c ORDER BY c DESC` sorted on
+                    // `count(*)`, evaluated by the scalar expression evaluator
+                    // beneath the `Aggregate` that implements `count`, and the
+                    // query died with `Unknown function: count` (#1810). That is
+                    // the literal text of #304's Q19 and of "top N by count"
+                    // generally. The by-kind shape has always sorted an
+                    // aggregating RETURN above the projection with
+                    // `SortPosition::AfterProjection`; this is the same choice,
+                    // in the shape that was missed.
+                    if let (Some(order_by), false) = (&query.order_by, has_aggregation) {
                         let order_keys: Vec<(Expression, String)> = rc
                             .items
                             .iter()
@@ -7642,34 +7771,6 @@ impl QueryPlanner {
                         order_by_applied = true;
                     }
 
-                    // An aggregate in RETURN needs an Aggregate below the
-                    // projection. Without this the pipeline projected
-                    // `count(*)` as an ordinary expression, it reached the
-                    // scalar evaluator, and the query died with "Unknown
-                    // function: count" — for every shape that opens with WITH,
-                    // which is what routes a query here in the first place.
-                    //
-                    // The `Clause::With` arm of this same function already did
-                    // this; only RETURN was missed, so the two clauses in one
-                    // pipeline disagreed about what an aggregate is.
-                    let mut agg_counter = 0usize;
-                    let mut aggregates: Vec<AggregateFunction> = Vec::new();
-                    let mut group_by: Vec<(Expression, String)> = Vec::new();
-                    let mut post_projections: Vec<(Expression, String)> = Vec::new();
-                    let mut has_aggregation = false;
-                    let mut rewritten_items: Vec<(Expression, Expression, String)> = Vec::new();
-
-                    for (idx, i) in rc.items.iter().enumerate() {
-                        let alias = i.column_name(idx);
-                        let (rewritten, extracted) =
-                            extract_nested_aggregates(&i.expression, &mut agg_counter);
-                        if !extracted.is_empty() {
-                            has_aggregation = true;
-                        }
-                        rewritten_items.push((i.expression.clone(), rewritten, alias));
-                        aggregates.extend(extracted);
-                    }
-
                     let projections: Vec<(Expression, String)> = if has_aggregation {
                         for (original, rewritten, alias) in &rewritten_items {
                             // An item with no aggregate inside it is a grouping
@@ -7700,7 +7801,32 @@ impl QueryPlanner {
                     if rc.distinct {
                         operator = Box::new(DistinctOperator::new(operator));
                     }
+                
+                    // The aggregating half of the choice above: sort the
+                    // projected rows, where the aggregate's alias is bound and
+                    // `count` has already been computed. After `DISTINCT`,
+                    // because `ORDER BY` orders the result.
+                    if let (Some(order_by), true) = (&query.order_by, has_aggregation) {
+                        let order_keys: Vec<(Expression, String)> = rewritten_aliases;
+                        let sort_items: Vec<(Expression, bool)> = order_by
+                            .items
+                            .iter()
+                            .map(|i| {
+                                (
+                                    resolve_sort_key(
+                                        &i.expression,
+                                        &order_keys,
+                                        SortPosition::AfterProjection,
+                                    ),
+                                    i.ascending,
+                                )
+                            })
+                            .collect();
+                        operator = Box::new(SortOperator::new(operator, sort_items));
+                        order_by_applied = true;
+                    }
                 }
+
                 // Not yet threaded through the pipeline. Refusing is the point:
                 // planning these as though the clause order were different is
                 // how a parse error becomes a wrong answer.

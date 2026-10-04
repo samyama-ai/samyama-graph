@@ -11565,6 +11565,15 @@ pub struct AdjacencyCountAggregateOperator {
     catalog_rows: Option<std::vec::IntoIter<(NodeId, i64)>>,
     /// Whether the catalog check has already run for this execution.
     catalog_checked: bool,
+    /// Bounded selection inside the operator: `(k, descending)`.
+    ///
+    /// Set by the planner when the query is `ORDER BY <this count> [ASC|DESC]
+    /// LIMIT k`, in which case it removes the `Sort` and this operator emits
+    /// the k surviving rows directly. Only those k become `Record`s; the rest
+    /// of the groups are 24 bytes on a heap and never a row (#304).
+    top_k: Option<(usize, bool)>,
+    /// The k survivors as `(node, count)`, best first. Built on the first pull.
+    top_k_rows: Option<std::vec::IntoIter<(NodeId, i64)>>,
     /// `grouped_var` and `count_alias` as `Arc<str>`, interned once.
     ///
     /// `Record::bind` takes `impl Into<Arc<str>>`, and a `String` converts by
@@ -11585,6 +11594,82 @@ struct GroupedRow {
     /// expressions like `g` (the variable itself) still bind to a real
     /// NodeRef. All nodes in the group share the same `prop_values`.
     sample_node: NodeId,
+}
+
+/// A k-element bounded selection over `(node, count)` pairs.
+///
+/// The heap's top is the *worst* survivor, so one comparison per candidate
+/// decides whether it can enter. Keyed on `(count, arrival index)`, ordered so
+/// that "greater" means "worse":
+///
+/// * `DESC` wants the largest counts, so a smaller count is worse — hence
+///   `Reverse(count)` — and on a tie a later arrival is worse.
+/// * `ASC` wants the smallest counts, so a larger count is worse, and on a tie
+///   a later arrival is worse again.
+///
+/// **Ties.** `SortOperator::trim_to` states the rule this replaces: "Cypher does
+/// not define a tie-break for `ORDER BY … LIMIT`, so any k of a tied set is a
+/// valid answer, but two runs may therefore disagree about *which*". It uses
+/// `select_nth_unstable_by`, so on `main` the tied survivor is unspecified. The
+/// arrival tie-break here is narrower than that, not different from it: for a
+/// given arrival order it returns exactly the rows a *stable* sort followed by
+/// `LIMIT k` would, which is one of the answers the old path was already free to
+/// give. The arrival order itself is a hash map's iteration order, so which tied
+/// group survives is still not a promise either way — what is determined, and
+/// what the tests assert on, is the multiset of counts.
+enum TopKHeap {
+    Desc(std::collections::BinaryHeap<((std::cmp::Reverse<i64>, u64), NodeId)>),
+    Asc(std::collections::BinaryHeap<((i64, u64), NodeId)>),
+}
+
+impl TopKHeap {
+    fn new(descending: bool) -> Self {
+        if descending {
+            TopKHeap::Desc(std::collections::BinaryHeap::new())
+        } else {
+            TopKHeap::Asc(std::collections::BinaryHeap::new())
+        }
+    }
+
+    /// Offer one group. Enters only if the heap is short of `k` or this
+    /// candidate beats the worst survivor.
+    fn offer(&mut self, k: usize, seq: u64, node: NodeId, count: i64) {
+        macro_rules! offer_into {
+            ($heap:expr, $key:expr) => {{
+                let item = ($key, node);
+                if $heap.len() < k {
+                    $heap.push(item);
+                } else if let Some(worst) = $heap.peek() {
+                    if item.0 < worst.0 {
+                        $heap.pop();
+                        $heap.push(item);
+                    }
+                }
+            }};
+        }
+        match self {
+            TopKHeap::Desc(h) => offer_into!(h, (std::cmp::Reverse(count), seq)),
+            TopKHeap::Asc(h) => offer_into!(h, (count, seq)),
+        }
+    }
+
+    /// The survivors, best first — the order the removed `Sort` would have
+    /// produced. `into_sorted_vec` ascends by the key, and the key orders worst
+    /// as greatest, so ascending *is* best first.
+    fn into_sorted(self) -> Vec<(NodeId, i64)> {
+        match self {
+            TopKHeap::Desc(h) => h
+                .into_sorted_vec()
+                .into_iter()
+                .map(|((std::cmp::Reverse(count), _), node)| (node, count))
+                .collect(),
+            TopKHeap::Asc(h) => h
+                .into_sorted_vec()
+                .into_iter()
+                .map(|((count, _), node)| (node, count))
+                .collect(),
+        }
+    }
 }
 
 impl AdjacencyCountAggregateOperator {
@@ -11611,6 +11696,8 @@ impl AdjacencyCountAggregateOperator {
             catalog_degrees: false,
             catalog_rows: None,
             catalog_checked: false,
+            top_k: None,
+            top_k_rows: None,
             grouped_key: grouped_var_key,
             count_key: count_alias_key,
         }
@@ -11651,6 +11738,82 @@ impl AdjacencyCountAggregateOperator {
     pub fn with_count_distinct(mut self, distinct: bool) -> Self {
         self.count_distinct = distinct;
         self
+    }
+
+    /// Select the k rows that survive `ORDER BY <this count> … LIMIT k` here,
+    /// instead of emitting every group and sorting above.
+    ///
+    /// `descending` is `true` for `DESC`. The planner removes the `Sort` when it
+    /// sets this, so the operator's output order is the answer's order.
+    ///
+    /// Why this exists: #1809 measured the Q19 shape at 2M groups as 2.1 s, and
+    /// the same query with the `ORDER BY` removed at 10.5 ms. The row source was
+    /// 10 ms of it. The other 2.09 s was one `Record` per group, built because a
+    /// `Sort` has to see every group to know which ten are the top ten. A bound
+    /// pushed into the sort (also #1809) recovered 16% and could not recover
+    /// more: a bounded sort still *receives* every row. A bound pushed into the
+    /// aggregate receives `(node, count)` pairs instead.
+    pub fn with_top_k(mut self, k: usize, descending: bool) -> Self {
+        self.top_k = Some((k, descending));
+        self
+    }
+
+    /// Fill `top_k_rows` with at most `k` `(node, count)` pairs, best first.
+    ///
+    /// Exact, not approximate: every group is still counted, and the heap holds
+    /// the best k seen so far. What is skipped is building a `Record` for a
+    /// group that cannot survive.
+    fn build_top_k(&mut self, store: &GraphStore, k: usize, descending: bool) -> ExecutionResult<()> {
+        let mut heap = TopKHeap::new(descending);
+        let mut seq = 0u64;
+        if !self.group_by_props.is_empty() || self.count_distinct {
+            // The group key has to be known for every group before any count
+            // is: two articles sharing a `title` are one group, and only their
+            // properties say so. So the property read cannot be deferred to the
+            // survivors in this shape -- it is the grouping. What the bound
+            // removes here is the `Record` per group and the `Sort` above it,
+            // not the read.
+            if self.grouped_iter.is_none() {
+                self.build_grouped_iter(store)?;
+            }
+            for row in self.grouped_iter.take().expect("built just above") {
+                heap.offer(k, seq, row.sample_node, row.count);
+                seq += 1;
+            }
+        } else if let Some(pairs) = self.catalog_degree_pairs(store) {
+            // The cheap source: one summed degree per node, already in the
+            // catalog. No scan, no adjacency walk, no row.
+            for (node, count) in pairs {
+                heap.offer(k, seq, node, count);
+                seq += 1;
+            }
+        } else {
+            // The catalog declined -- a stub load, a multi-label edge, a stale
+            // degree map. The walk gives the same counts and the bound is exact
+            // over those too, so this is not a decline for top-k; it is a
+            // decline for the *source*, which is #1806's question and not this
+            // one.
+            loop {
+                let input_record = match self.input.next(store)? {
+                    Some(r) => r,
+                    None => break,
+                };
+                let node_id = match input_record.get(&self.grouped_var) {
+                    Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => *id,
+                    _ => continue,
+                };
+                let count = self.degree_filtered(store, node_id) as i64;
+                if count == 0 {
+                    // A required MATCH yields no row for a node the pattern
+                    // does not match (#601).
+                    continue;
+                }
+                heap.offer(k, seq, node_id, count);
+                seq += 1;
+            }
+        }
+        self.top_k_rows = Some(heap.into_sorted().into_iter());
+        Ok(())
     }
 
     fn build_grouped_iter(&mut self, store: &GraphStore) -> ExecutionResult<()> {
@@ -11971,6 +12134,27 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
     }
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        // Bounded selection: the planner removed the `Sort`, so the k rows this
+        // emits are the answer, in order. Only these k become `Record`s.
+        if let Some((k, descending)) = self.top_k {
+            if self.top_k_rows.is_none() {
+                self.build_top_k(store, k, descending)?;
+            }
+            let next = self
+                .top_k_rows
+                .as_mut()
+                .expect("built just above")
+                .next();
+            let grouped_key = std::sync::Arc::clone(&self.grouped_key);
+            let count_key = std::sync::Arc::clone(&self.count_key);
+            return Ok(next.map(|(node_id, count)| {
+                let mut out = Record::new();
+                out.bind(grouped_key, Value::NodeRef(node_id));
+                out.bind(count_key, Value::Property(PropertyValue::Integer(count)));
+                out
+            }));
+        }
+
         // Grouped path: accumulate per-(prop_values) counts on first call,
         // then emit one record per group. Correctness-preserving fast path
         // for `RETURN n.prop, count(...)` patterns where multiple nodes may
@@ -12056,6 +12240,7 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
         self.grouped_iter = None;
         self.catalog_rows = None;
         self.catalog_checked = false;
+        self.top_k_rows = None;
     }
 
     fn describe(&self) -> OperatorDescription {
@@ -12073,16 +12258,26 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
         } else {
             " source=adjacency"
         };
+        // Whether the bound is in the operator is the difference between a
+        // `Record` per group and a `Record` per surviving row, so EXPLAIN says
+        // so -- and says nothing when it is not, which is what the decline
+        // tests assert on.
+        let topk = match self.top_k {
+            Some((k, true)) => format!(" topk={k} desc"),
+            Some((k, false)) => format!(" topk={k} asc"),
+            None => String::new(),
+        };
         OperatorDescription {
             name: "AdjacencyCountAggregate".to_string(),
             details: format!(
-                "({}){}[:{}]{} count AS {}{}",
+                "({}){}[:{}]{} count AS {}{}{}",
                 self.grouped_var,
                 dir,
                 self.edge_type.as_str(),
                 dir,
                 self.count_alias,
-                source
+                source,
+                topk
             ),
             children: vec![self.input.describe()],
         }
