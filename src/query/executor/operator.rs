@@ -11565,6 +11565,13 @@ pub struct AdjacencyCountAggregateOperator {
     catalog_rows: Option<std::vec::IntoIter<(NodeId, i64)>>,
     /// Whether the catalog check has already run for this execution.
     catalog_checked: bool,
+    /// `grouped_var` and `count_alias` as `Arc<str>`, interned once.
+    ///
+    /// `Record::bind` takes `impl Into<Arc<str>>`, and a `String` converts by
+    /// allocating and copying. Binding the two names from `String` per row cost
+    /// two allocations per output row.
+    grouped_key: std::sync::Arc<str>,
+    count_key: std::sync::Arc<str>,
 }
 
 /// One pre-aggregated row for the in-operator group-by mode.
@@ -11588,6 +11595,8 @@ impl AdjacencyCountAggregateOperator {
         edge_type: EdgeType,
         direction: Direction,
     ) -> Self {
+        let grouped_var_key: std::sync::Arc<str> = grouped_var.as_str().into();
+        let count_alias_key: std::sync::Arc<str> = count_alias.as_str().into();
         Self {
             input,
             grouped_var,
@@ -11602,6 +11611,8 @@ impl AdjacencyCountAggregateOperator {
             catalog_degrees: false,
             catalog_rows: None,
             catalog_checked: false,
+            grouped_key: grouped_var_key,
+            count_key: count_alias_key,
         }
     }
 
@@ -11836,18 +11847,38 @@ impl AdjacencyCountAggregateOperator {
             store
                 .catalog()
                 .degree_maps_for(&self.edge_type, source_label, target_label, side);
-        let mut acc: rustc_hash::FxHashMap<NodeId, i64> = rustc_hash::FxHashMap::default();
-        for degrees in maps {
-            for (node, degree) in degrees {
-                if *degree > 0 {
-                    *acc.entry(*node).or_insert(0) += *degree as i64;
-                }
-            }
-        }
         // A node of degree zero is absent from the maps, which is what a
         // required MATCH wants: it produces no row for a node the pattern does
         // not match (#601).
-        Some(acc.into_iter().collect())
+        match maps.as_slice() {
+            // No triple matches: the pattern matches nothing. Distinct from
+            // declining, which returns `None` and runs the walk.
+            [] => Some(Vec::new()),
+            // One triple is the ordinary case -- one label on each endpoint and
+            // one edge type -- and its map is already the answer, keyed by node
+            // with the degree summed. Copied out rather than re-accumulated:
+            // building a second hash map of every node measured 650 ms against
+            // 430 ms for the adjacency walk it was supposed to beat, at 500k
+            // articles. Rehashing every node is not cheaper than visiting every
+            // edge.
+            [only] => Some(only.iter().map(|(n, d)| (*n, *d as i64)).collect()),
+            // Several triples can only happen when a label is left off one
+            // endpoint and the other side carries more than one label across
+            // the graph. A node can then appear in more than one map, so the
+            // sum has to be accumulated.
+            several => {
+                let mut acc: rustc_hash::FxHashMap<NodeId, i64> =
+                    rustc_hash::FxHashMap::default();
+                for degrees in several {
+                    for (node, degree) in *degrees {
+                        if *degree > 0 {
+                            *acc.entry(*node).or_insert(0) += *degree as i64;
+                        }
+                    }
+                }
+                Some(acc.into_iter().collect())
+            }
+        }
     }
 
     /// Run the catalog check once, caching its answer for this execution.
@@ -11958,9 +11989,12 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
             // values for `group_by_props`, so any group member is correct.
             let _ = row.prop_values;
             let mut out = Record::new();
-            out.bind(self.grouped_var.clone(), Value::NodeRef(row.sample_node));
             out.bind(
-                self.count_alias.clone(),
+                std::sync::Arc::clone(&self.grouped_key),
+                Value::NodeRef(row.sample_node),
+            );
+            out.bind(
+                std::sync::Arc::clone(&self.count_key),
                 Value::Property(PropertyValue::Integer(row.count)),
             );
             return Ok(Some(out));
@@ -11974,13 +12008,12 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
                 .as_mut()
                 .expect("checked just above")
                 .next();
+            let grouped_key = std::sync::Arc::clone(&self.grouped_key);
+            let count_key = std::sync::Arc::clone(&self.count_key);
             return Ok(next.map(|(node_id, count)| {
                 let mut out = Record::new();
-                out.bind(self.grouped_var.clone(), Value::NodeRef(node_id));
-                out.bind(
-                    self.count_alias.clone(),
-                    Value::Property(PropertyValue::Integer(count)),
-                );
+                out.bind(std::sync::Arc::clone(&grouped_key), Value::NodeRef(node_id));
+                out.bind(count_key, Value::Property(PropertyValue::Integer(count)));
                 out
             }));
         }
@@ -12010,7 +12043,7 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
 
             let mut out = input_record;
             out.bind(
-                self.count_alias.clone(),
+                std::sync::Arc::clone(&self.count_key),
                 Value::Property(PropertyValue::Integer(count as i64)),
             );
             return Ok(Some(out));

@@ -70,6 +70,26 @@ fn calls_per_row(store: &GraphStore, cypher: &str) -> f64 {
 
 const MATCH: &str = "MATCH (h:Hub)-[:KNOWS]->(p:P)";
 
+/// The same rows, matched undirected, for the aggregate arms.
+///
+/// A difference only measures a per-column cost while both arms run the same
+/// plan. A *single* `count()` over a single directed segment is the ADR-017
+/// adjacency-count shape, and since #304 `count(*)` reaches it too — so the
+/// one-column arm was rewritten to `AdjacencyCountAggregate`, which never
+/// builds the generic aggregate's records, while the three-column arm was not.
+/// It read 3.05 calls/row against 6.11 and the test reported 1.53 per extra
+/// column, which was the plan difference.
+///
+/// `adjacency_agg_detector::detect` declines `--`, so both arms take the
+/// generic `Aggregate` and the interval is a column cost again. `h` has only
+/// outgoing `:KNOWS`, so the undirected pattern matches the same 2,000 pairs.
+///
+/// Widening the interval instead (two columns against four) does not work:
+/// `Record`'s bindings `Vec` grows between three and four, and `origin/main`
+/// reads 1.01 calls per extra column across that step and 0.01 across the
+/// one-to-three one. The step is not what this test is about.
+const AGG_MATCH: &str = "MATCH (h:Hub)-[:KNOWS]-(p:P)";
+
 #[test]
 fn an_output_column_name_costs_no_allocation_per_row() {
     let store = build();
@@ -82,10 +102,10 @@ fn an_output_column_name_costs_no_allocation_per_row() {
     // Aggregation with one group per row (`p.i` is unique), so a per-group cost
     // is a per-row cost. One aggregate column, then three; the projection that
     // follows the aggregate rebinds them all, so this covers both operators.
-    let agg_one = calls_per_row(&store, &format!("{MATCH} RETURN p.i AS g, count(*) AS n"));
+    let agg_one = calls_per_row(&store, &format!("{AGG_MATCH} RETURN p.i AS g, count(*) AS n"));
     let agg_three = calls_per_row(
         &store,
-        &format!("{MATCH} RETURN p.i AS g, count(*) AS n, count(*) AS m, count(*) AS o"),
+        &format!("{AGG_MATCH} RETURN p.i AS g, count(*) AS n, count(*) AS m, count(*) AS o"),
     );
     let per_aggregate = (agg_three - agg_one) / 2.0;
 

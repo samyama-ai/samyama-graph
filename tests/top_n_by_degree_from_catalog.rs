@@ -604,6 +604,93 @@ fn a_deleted_edge_declines_the_catalog_until_the_rebuild() {
     );
 }
 
+// ------------------------------------------------------ the bounded sort
+
+#[test]
+fn the_limit_reaches_the_sort_in_the_specialised_plan() {
+    // `SortOperator` has discarded rows past the limit as they arrive since
+    // #518, but `try_push_limit` is called at one planner site and the three
+    // specialised aggregate plans built their own Sort/Skip/Limit tail without
+    // it. At 2M groups that sort was 99.6% of the query. The answer must not
+    // change -- `LIMIT n` above a sort already makes row n+1 unobservable.
+    let store = citations();
+    let unbounded = titled(
+        &store,
+        "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c ORDER BY c DESC",
+    );
+    assert_eq!(
+        unbounded,
+        vec![("A0".to_string(), 3), ("A1".to_string(), 1)]
+    );
+    // Taking the top one gives the first row of the full ordering.
+    let top1 = titled(
+        &store,
+        "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c ORDER BY c DESC LIMIT 1",
+    );
+    assert_eq!(top1, vec![("A0".to_string(), 3)]);
+    // And SKIP is counted into the bound, or the skipped rows would be the
+    // ones that were kept.
+    let second = titled(
+        &store,
+        "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c \
+         ORDER BY c DESC SKIP 1 LIMIT 1",
+    );
+    assert_eq!(second, vec![("A1".to_string(), 1)]);
+    // Ascending, to catch a bound applied to the wrong end.
+    let lowest = titled(
+        &store,
+        "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c ORDER BY c ASC LIMIT 1",
+    );
+    assert_eq!(lowest, vec![("A1".to_string(), 1)]);
+}
+
+#[test]
+fn the_bound_does_not_cut_the_count_itself() {
+    // The hint stops at the sort. If it reached the aggregate, a `LIMIT 1`
+    // would stop counting after one edge and the count would be 1 rather than
+    // 3 -- the fast-wrong-answer version of this optimisation.
+    let store = citations();
+    assert_eq!(
+        titled(
+            &store,
+            "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c \
+             ORDER BY c DESC LIMIT 1"
+        ),
+        vec![("A0".to_string(), 3)]
+    );
+    // No ORDER BY: nothing consumes the hint, and the counts are still whole.
+    let query = parse_query(
+        "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c LIMIT 5",
+    )
+    .unwrap();
+    let batch = QueryExecutor::new(&store).execute(&query).unwrap();
+    let mut counts: Vec<i64> = batch
+        .records
+        .iter()
+        .map(|r| match r.get("c") {
+            Some(Value::Property(PropertyValue::Integer(n))) => *n,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    counts.sort();
+    assert_eq!(counts, vec![1, 3]);
+}
+
+#[test]
+fn the_with_bound_plan_takes_the_limit_too() {
+    // Phase 3a's shape (`MATCH ... WITH g LIMIT n MATCH (g)-[:T]->(x) RETURN
+    // g.prop, count(x) ORDER BY ...`) has the same hand-built tail, so it had
+    // the same gap. The pre-WITH LIMIT and the post-RETURN LIMIT are different
+    // bounds and must not be confused.
+    let store = citations();
+    let rows = titled(
+        &store,
+        "MATCH (a:Article) WITH a LIMIT 10 \
+         MATCH (a)<-[:CITES]-(b) RETURN a.title AS t, count(b) AS c ORDER BY c DESC LIMIT 1",
+    );
+    assert_eq!(rows, vec![("A0".to_string(), 3)]);
+}
+
 // ------------------------------------------------------------- the two shapes
 
 #[test]
