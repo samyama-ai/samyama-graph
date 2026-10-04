@@ -6,6 +6,11 @@
 //! work showed they are not equally well served. Adding an index is only half
 //! a fix; the plan has to change. A query getting faster is also what a warm
 //! cache looks like, so this reads the plan first.
+
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor};
 use samyama::query::parser::parse_query;

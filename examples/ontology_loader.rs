@@ -30,6 +30,10 @@
 //! licence and are gated behind `--i-have-a-licence <source>`, which does nothing but make
 //! the acknowledgement explicit and audit-visible.
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 

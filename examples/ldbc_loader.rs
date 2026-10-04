@@ -12,6 +12,10 @@
 //!   cargo run --release --example ldbc_loader -- --data-dir /path/to/ldbc-sf1/social_network-sf1-CsvBasic-LongDateFormatter
 //!   cargo run --release --example ldbc_loader -- --query   # drop into query loop after loading
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;

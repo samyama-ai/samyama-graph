@@ -14,6 +14,10 @@
 //!   cargo run --release --example football_loader -- --data-dir data/football
 //!   cargo run --release --example football_loader -- --data-dir data/football --snapshot football.sgsnap
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;

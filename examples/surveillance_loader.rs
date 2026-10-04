@@ -7,6 +7,10 @@
 //!   cargo run --release --example surveillance_loader -- --data-dir data/surveillance
 //!   cargo run --release --example surveillance_loader -- --data-dir data/surveillance --snapshot surveillance.sgsnap
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;

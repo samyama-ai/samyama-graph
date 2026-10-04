@@ -11,6 +11,10 @@
 //!   cargo run --release --example aact_biomarker_extractor -- \
 //!     --eligibilities data/aact/eligibilities.txt --snapshot biomarkers.sgsnap
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::path::PathBuf;
 use std::time::Instant;
 

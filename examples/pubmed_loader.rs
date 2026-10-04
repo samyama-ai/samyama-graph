@@ -7,6 +7,10 @@
 //!   cargo run --release --example pubmed_loader -- --data-dir data/pubmed-parsed
 //!   cargo run --release --example pubmed_loader -- --data-dir data/pubmed-parsed --snapshot pubmed.sgsnap
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;

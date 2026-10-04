@@ -11,6 +11,10 @@
 //! 5. NSGA-II maintenance scheduling optimization
 //! 6. NLQ integration (ClaudeCode)
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama_sdk::{
     EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
     PropertyValue, PageRankConfig, DistanceMetric,

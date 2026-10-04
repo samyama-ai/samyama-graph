@@ -12,7 +12,7 @@
 #[path = "../benches/ldbc_bi_common/mod.rs"]
 mod ldbc_bi_common;
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Counting allocator.
@@ -28,19 +28,22 @@ static BYTES: AtomicU64 = AtomicU64::new(0);
 
 struct Counting;
 
+// Counts through the allocator that ships, not through `System` (ADR-038,
+// #1818). Counting through `System` made this example's own timings glibc
+// timings, which is how #750 came to read 69% of IS3 as allocator cost.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
         BYTES.fetch_add(l.size() as u64, Ordering::Relaxed);
-        System.alloc(l)
+        unsafe { samyama::allocator::SHIPPED.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        System.dealloc(p, l)
+        unsafe { samyama::allocator::SHIPPED.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
         BYTES.fetch_add(n as u64, Ordering::Relaxed);
-        System.realloc(p, l, n)
+        unsafe { samyama::allocator::SHIPPED.realloc(p, l, n) }
     }
 }
 

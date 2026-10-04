@@ -26,6 +26,10 @@
 //!
 //!   cargo run --release --example bi17_intersect -- --data-dir <sf1-dir>
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "../benches/ldbc_bi_common/mod.rs"]
 mod ldbc_bi_common;
 

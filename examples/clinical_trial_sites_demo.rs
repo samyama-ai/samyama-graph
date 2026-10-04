@@ -20,6 +20,10 @@
 //!       [--snapshot PATH] [--candidates 50] [--k 5] [--seeds 3] \
 //!       [--diversity-weight 5.0]
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use ndarray::Array1;
 use samyama::graph::{GraphStore, PropertyValue};
 use samyama::query::QueryEngine;

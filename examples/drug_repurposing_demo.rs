@@ -17,6 +17,10 @@
 //!
 //! Default snapshot: ../druginteractions-kg/data/druginteractions.sgsnap
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use ndarray::Array1;
 use samyama::graph::GraphStore;
 use samyama::optimization::CypherProblem;

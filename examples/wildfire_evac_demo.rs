@@ -25,6 +25,10 @@
 //!       [--osm PATH] [--n-centroids 5] [--n-exits 5] [--seeds 3] \
 //!       [--congestion-weight 0.001] [--balance-penalty 10000.0] [--disrupt-frac 0.3]
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use ndarray::Array1;
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::QueryEngine;

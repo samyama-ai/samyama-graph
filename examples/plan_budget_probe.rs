@@ -9,6 +9,10 @@
 //! The blowup query is deliberately small. A probe that actually explodes
 //! memory to prove memory can explode is a probe that gets run once.
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::QueryEngine;
 

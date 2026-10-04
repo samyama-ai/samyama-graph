@@ -9,6 +9,10 @@
 //! path (graph access, parameter substitution, scalar return, memoization)
 //! and has a known minimum at the OLS solution.
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use ndarray::Array1;
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::optimization::CypherProblem;

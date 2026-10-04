@@ -22,6 +22,10 @@
 //! The graph directory is read only. It is produced by a different repo's ETL
 //! and this makes no claim to own it.
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;

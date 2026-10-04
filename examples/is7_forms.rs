@@ -15,6 +15,10 @@
 //!
 //!   cargo run --release --example is7_forms -- --data-dir <sf1> --post-id <id>
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 #[path = "../benches/ldbc_common/mod.rs"]
 mod ldbc_common;
 

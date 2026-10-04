@@ -17,6 +17,10 @@
 //! [[Use-Case 1 — Clinical-Trial Site Selection]]
 //! [[SGE + Optimization — Phase 2 Results]]
 
+// Measure what ships: the server's allocator, not the system default (ADR-038).
+#[global_allocator]
+static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
+
 use samyama_sdk::{
     Array1, MultiObjectiveProblem, NSGA2Solver, RemoteClient, SamyamaClient, SolverConfig,
 };
