@@ -1520,7 +1520,7 @@ impl QueryPlanner {
             // correct for the query. The specialized plan short-circuits the
             // Expand→Aggregate path that causes MB049/MB054 to time out.
             if let Some(pat) = super::adjacency_agg_detector::detect(query, store) {
-                return self.plan_adjacency_count_aggregate(query, pat);
+                return self.plan_adjacency_count_aggregate(query, pat, store);
             }
             // ADR-017 Phase 3a: the WITH-bound variant handles MB053 and EX49,
             // where an explicit pre-WITH LIMIT caps the work per group but the
@@ -5662,6 +5662,7 @@ impl QueryPlanner {
         &self,
         query: &Query,
         pat: super::adjacency_agg_detector::AdjacencyAggPattern,
+        store: &GraphStore,
     ) -> ExecutionResult<ExecutionPlan> {
         use super::operator::{
             AdjacencyCountAggregateOperator, LimitOperator, NodeScanOperator, ProjectOperator,
@@ -5676,7 +5677,7 @@ impl QueryPlanner {
         // Scan + optional WHERE filter on grouped side + count.
         let scan: OperatorBox = Box::new(NodeScanOperator::new(
             pat.grouped_var.clone(),
-            vec![pat.grouped_label.clone()],
+            pat.grouped_label.clone().into_iter().collect(),
         ));
         let scan: OperatorBox = if let Some(pred) = &pat.prefilter {
             use super::operator::FilterOperator;
@@ -5718,6 +5719,29 @@ impl QueryPlanner {
         }
         if pat.count_distinct {
             adj_op = adj_op.with_count_distinct(true);
+        }
+        // The catalog holds the summed degree per node per triple, so the scan
+        // and the per-node adjacency walk both go away and the plan stops
+        // being O(nodes + edges) (#304). Three things have to be true, and the
+        // first two are the shape:
+        //
+        // * **no WHERE** — the maps hold node ids and degrees, not properties,
+        //   so a predicate that selects which nodes count cannot be pushed
+        //   into them, and applying it afterwards would have already summed the
+        //   wrong nodes;
+        // * **not `count(DISTINCT …)`** — a degree counts edges, and two
+        //   parallel edges to the same neighbour are one distinct neighbour;
+        // * **the degrees are exact for this edge type** — the stub-load,
+        //   multi-label and stale-label hazards, asked as one question.
+        //
+        // The operator asks the third again on its first pull, so a plan that
+        // outlives the mutation that invalidated it falls back rather than
+        // answering short.
+        if pat.prefilter.is_none()
+            && !pat.count_distinct
+            && store.catalog_degrees_are_exact_for(&pat.edge_type)
+        {
+            adj_op = adj_op.with_catalog_degrees(pat.grouped_label.clone());
         }
         let mut operator: OperatorBox = Box::new(adj_op);
 
@@ -5793,6 +5817,42 @@ impl QueryPlanner {
             operator = Box::new(LimitOperator::new(operator, limit));
         }
 
+        // The bounded sort the generic path has had since #518 never reached
+        // this plan. `try_push_limit` is called at exactly one planner site
+        // (the `plan_inner` tail), and the specialised aggregate plans build
+        // their own Sort/Skip/Limit tail without it. `LimitOperator` forwards
+        // the hint and `SortOperator` consumes it, discarding rows as they
+        // arrive instead of sorting every group and then throwing almost all of
+        // them away.
+        //
+        // Measured on the #304 Q19 shape at 2M articles / 40.6M edges, grouped
+        // on the node so no property read is in the way: 2.50 s with the bound
+        // unpushed, 2.10 s with it -- 16%. The ~5% the #304 comment measured
+        // was at 32k groups, so the number does grow with the group count, but
+        // 16% is what this is worth and not more.
+        //
+        // What it does *not* buy is the asymptotics. The same query with the
+        // `ORDER BY` removed entirely answers in 10.5 ms, because the `Limit`
+        // then stops pulling after ten rows. The bound cannot do that: the sort
+        // has to see every group to know which ten are the top ten, so one
+        // `Record` per group is still built and projected, and that -- not the
+        // comparison sort -- is the 2.1 s that remains. Removing it needs a
+        // top-K aggregate that never materialises a row per group, which is a
+        // different change.
+        //
+        // No new tie semantics: `LIMIT n` above a sort makes rows past the n-th
+        // unobservable whether or not they were sorted, which is #518's
+        // argument. With no `ORDER BY` there is no `Sort` to take the hint, and
+        // the aggregate below does not implement `try_push_limit`, so nothing
+        // stops counting early.
+        if let Some(limit) = query.limit {
+            let push_n = match query.skip {
+                Some(skip) => skip.saturating_add(limit),
+                None => limit,
+            };
+            operator.try_push_limit(push_n);
+        }
+
         Ok(ExecutionPlan {
             root: operator,
             output_columns,
@@ -5827,7 +5887,7 @@ impl QueryPlanner {
         // equivalent of PR #192's streaming idea, applied to the scan itself.
         let mut scan = NodeScanOperator::new(
             pat.core.grouped_var.clone(),
-            vec![pat.core.grouped_label.clone()],
+            pat.core.grouped_label.clone().into_iter().collect(),
         );
         // Only push early_limit down when there's no pre-filter — otherwise
         // we'd stop at the wrong rows. With a filter, we apply LIMIT after.
@@ -5955,6 +6015,42 @@ impl QueryPlanner {
             operator = Box::new(LimitOperator::new(operator, limit));
         }
 
+        // The bounded sort the generic path has had since #518 never reached
+        // this plan. `try_push_limit` is called at exactly one planner site
+        // (the `plan_inner` tail), and the specialised aggregate plans build
+        // their own Sort/Skip/Limit tail without it. `LimitOperator` forwards
+        // the hint and `SortOperator` consumes it, discarding rows as they
+        // arrive instead of sorting every group and then throwing almost all of
+        // them away.
+        //
+        // Measured on the #304 Q19 shape at 2M articles / 40.6M edges, grouped
+        // on the node so no property read is in the way: 2.50 s with the bound
+        // unpushed, 2.10 s with it -- 16%. The ~5% the #304 comment measured
+        // was at 32k groups, so the number does grow with the group count, but
+        // 16% is what this is worth and not more.
+        //
+        // What it does *not* buy is the asymptotics. The same query with the
+        // `ORDER BY` removed entirely answers in 10.5 ms, because the `Limit`
+        // then stops pulling after ten rows. The bound cannot do that: the sort
+        // has to see every group to know which ten are the top ten, so one
+        // `Record` per group is still built and projected, and that -- not the
+        // comparison sort -- is the 2.1 s that remains. Removing it needs a
+        // top-K aggregate that never materialises a row per group, which is a
+        // different change.
+        //
+        // No new tie semantics: `LIMIT n` above a sort makes rows past the n-th
+        // unobservable whether or not they were sorted, which is #518's
+        // argument. With no `ORDER BY` there is no `Sort` to take the hint, and
+        // the aggregate below does not implement `try_push_limit`, so nothing
+        // stops counting early.
+        if let Some(limit) = query.limit {
+            let push_n = match query.skip {
+                Some(skip) => skip.saturating_add(limit),
+                None => limit,
+            };
+            operator.try_push_limit(push_n);
+        }
+
         Ok(ExecutionPlan {
             root: operator,
             output_columns,
@@ -5983,7 +6079,7 @@ impl QueryPlanner {
 
         let scan: OperatorBox = Box::new(NodeScanOperator::new(
             pat.core.grouped_var.clone(),
-            vec![pat.core.grouped_label.clone()],
+            pat.core.grouped_label.clone().into_iter().collect(),
         ));
         let scan: OperatorBox = if let Some(pred) = &pat.core.prefilter {
             Box::new(FilterOperator::new(scan, pred.clone()))
@@ -6095,6 +6191,42 @@ impl QueryPlanner {
         }
         if let Some(limit) = query.limit {
             operator = Box::new(LimitOperator::new(operator, limit));
+        }
+
+        // The bounded sort the generic path has had since #518 never reached
+        // this plan. `try_push_limit` is called at exactly one planner site
+        // (the `plan_inner` tail), and the specialised aggregate plans build
+        // their own Sort/Skip/Limit tail without it. `LimitOperator` forwards
+        // the hint and `SortOperator` consumes it, discarding rows as they
+        // arrive instead of sorting every group and then throwing almost all of
+        // them away.
+        //
+        // Measured on the #304 Q19 shape at 2M articles / 40.6M edges, grouped
+        // on the node so no property read is in the way: 2.50 s with the bound
+        // unpushed, 2.10 s with it -- 16%. The ~5% the #304 comment measured
+        // was at 32k groups, so the number does grow with the group count, but
+        // 16% is what this is worth and not more.
+        //
+        // What it does *not* buy is the asymptotics. The same query with the
+        // `ORDER BY` removed entirely answers in 10.5 ms, because the `Limit`
+        // then stops pulling after ten rows. The bound cannot do that: the sort
+        // has to see every group to know which ten are the top ten, so one
+        // `Record` per group is still built and projected, and that -- not the
+        // comparison sort -- is the 2.1 s that remains. Removing it needs a
+        // top-K aggregate that never materialises a row per group, which is a
+        // different change.
+        //
+        // No new tie semantics: `LIMIT n` above a sort makes rows past the n-th
+        // unobservable whether or not they were sorted, which is #518's
+        // argument. With no `ORDER BY` there is no `Sort` to take the hint, and
+        // the aggregate below does not implement `try_push_limit`, so nothing
+        // stops counting early.
+        if let Some(limit) = query.limit {
+            let push_n = match query.skip {
+                Some(skip) => skip.saturating_add(limit),
+                None => limit,
+            };
+            operator.try_push_limit(push_n);
         }
 
         Ok(ExecutionPlan {

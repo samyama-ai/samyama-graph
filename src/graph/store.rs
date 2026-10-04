@@ -2440,7 +2440,6 @@ NodeDeleted { .. } => {
             }
             self.catalog.on_label_removed(label);
         }
-
         let event = crate::graph::event::IndexEvent::NodeDeleted {
             tenant_id: tenant_id.to_string(),
             id,
@@ -2485,6 +2484,15 @@ NodeDeleted { .. } => {
         incoming_edges.extend(
             std::mem::take(&mut self.incoming[idx]).into_iter().map(|(_, eid)| eid)
         );
+
+        // The node's labels came off above, before its edges come off here, so
+        // the `on_edge_deleted` calls below see a node with no labels and
+        // cannot find the triples their degrees were filed under. Said once,
+        // here, rather than on every node deletion: a node with no edges leaves
+        // no degree behind to go stale (#304).
+        if !outgoing_edges.is_empty() || !incoming_edges.is_empty() {
+            self.catalog.note_degrees_may_be_stale();
+        }
 
         for edge_id in outgoing_edges.iter().chain(incoming_edges.iter()) {
             let _ = self.delete_edge(*edge_id);
@@ -2553,6 +2561,13 @@ NodeDeleted { .. } => {
 
         // The planner's count for the label goes down with it (#1605).
         self.catalog.on_label_removed(label);
+        // A degree was filed under the label this node had when its edges were
+        // created. Taking the label away does not move the degree, so the maps
+        // now answer for a triple the node is no longer in (#304). Only when
+        // there is a degree to misfile.
+        if self.has_any_incident_edge(node_id) {
+            self.catalog.note_degrees_may_be_stale();
+        }
 
         // `label_index` changes here, so the derived bitsets are stale (#730).
         self.invalidate_label_bits();
@@ -2688,6 +2703,14 @@ NodeDeleted { .. } => {
         // the label too high (#1605).
         if !had {
             self.catalog.on_label_added(&label);
+            // The node's existing edges stay filed under its old labels, so a
+            // query on the new one would read a degree of zero from the maps
+            // while the adjacency has the edges. A node with no edges yet --
+            // which is what a loader that labels before connecting produces --
+            // has nothing filed, so the maps stay usable (#304).
+            if self.has_any_incident_edge(node_id) {
+                self.catalog.note_degrees_may_be_stale();
+            }
         }
 
         let event = crate::graph::event::IndexEvent::LabelAdded {
@@ -2760,6 +2783,13 @@ NodeDeleted { .. } => {
             self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
         }
         self.edge_endpoints[idx] = (source, target);
+
+        // The catalog is skipped here along with the type index, so its degree
+        // maps are short by this edge. `edges_counted` against `edge_count()`
+        // already notices that, but say it outright: a reader that trusted the
+        // maps on a stub-loaded graph would answer "no rows" for a node that
+        // has plenty (#304). `finish_bulk_load` -> `rebuild_catalog` repairs it.
+        self.catalog.note_degrees_may_be_stale();
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
@@ -4743,6 +4773,41 @@ NodeDeleted { .. } => {
     /// Get the triple-level statistics catalog (for graph-native query planning)
     pub fn catalog(&self) -> &GraphCatalog {
         &self.catalog
+    }
+
+    /// Whether the catalog's per-node degree maps can be read as the answer to
+    /// a degree question for `edge_type`, rather than only as an estimate.
+    ///
+    /// Pairs the catalog's own bookkeeping with this store's edge count, so the
+    /// two cannot be read from different states. See
+    /// [`GraphCatalog::degrees_are_exact_for`]; `false` means walk the
+    /// adjacency.
+    pub fn catalog_degrees_are_exact_for(&self, edge_type: &EdgeType) -> bool {
+        self.catalog.degrees_are_exact_for(self.edge_count(), edge_type)
+    }
+
+    /// Whether this node has any incident edge, in either tier and either
+    /// direction.
+    ///
+    /// Allocation-free -- the frozen tiers hand out slices -- because it gates
+    /// the label-mutation hooks that mark the catalog's degree maps stale. A
+    /// node with no edges has no filed degree to go stale, and marking anyway
+    /// would turn off the #304 shortcut for an ordinary load that labels its
+    /// nodes before connecting them.
+    fn has_any_incident_edge(&self, id: NodeId) -> bool {
+        let idx = id.as_u64() as usize;
+        self.outgoing.get(idx).is_some_and(|v| !v.is_empty())
+            || self.incoming.get(idx).is_some_and(|v| !v.is_empty())
+            || self
+                .frozen_outgoing
+                .segments
+                .iter()
+                .any(|seg| !seg.neighbors(idx).is_empty())
+            || self
+                .frozen_incoming
+                .segments
+                .iter()
+                .any(|seg| !seg.neighbors(idx).is_empty())
     }
 
     /// Get node count for a specific label (fast, O(1))

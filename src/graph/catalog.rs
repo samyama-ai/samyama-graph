@@ -9,6 +9,15 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use super::types::{Label, EdgeType, NodeId};
 
+/// Which endpoint of a triple a degree is counted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DegreeSide {
+    /// Out-degree: the node is the edge's source.
+    Source,
+    /// In-degree: the node is the edge's target.
+    Target,
+}
+
 /// A triple pattern representing a (source_label, edge_type, target_label) combination
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriplePattern {
@@ -121,6 +130,27 @@ pub struct GraphCatalog {
     target_degrees: HashMap<TriplePattern, HashMap<NodeId, usize>>,
     /// Monotonically increasing version for cache invalidation
     pub generation: u64,
+    /// Edges this catalog has been told about, one per `on_edge_created`.
+    ///
+    /// Compared against the store's own edge count to notice the edges it was
+    /// *not* told about: `create_edge_stub` skips `on_edge_created` entirely,
+    /// so a bulk-loaded graph has degree maps that are short rather than
+    /// merely stale. See [`Self::degrees_are_exact_for`].
+    edges_counted: usize,
+    /// Edge types for which at least one edge was filed under a number of
+    /// triples other than exactly one.
+    ///
+    /// The degree maps are keyed by `(source label, type, target label)`, so an
+    /// edge between two single-label nodes is filed once and a node's degree is
+    /// the sum over the matching triples. An edge whose endpoints carry two
+    /// labels each is filed four times and would be counted four times; an
+    /// edge between unlabelled nodes is filed nowhere and would be counted
+    /// never. Either way the sum is not the degree, so the type is listed here
+    /// and the shortcut declines it.
+    non_unit_label_types: std::collections::HashSet<EdgeType>,
+    /// Set by anything that can leave a filed degree under the wrong key, and
+    /// cleared only by a full recompute. See [`Self::note_degrees_may_be_stale`].
+    degrees_stale: bool,
 }
 
 impl GraphCatalog {
@@ -132,6 +162,10 @@ impl GraphCatalog {
             source_degrees: HashMap::new(),
             target_degrees: HashMap::new(),
             generation: 0,
+            edges_counted: 0,
+            non_unit_label_types: std::collections::HashSet::new(),
+            // An empty catalog describes an empty graph exactly.
+            degrees_stale: false,
         }
     }
 
@@ -172,8 +206,13 @@ impl GraphCatalog {
         // clone is a pointer copy and costs nothing.
         T: IntoIterator<Item = &'a Label> + Clone,
     {
+        // How many triples this one edge was filed under. Exactly one is the
+        // only case in which summing a node's per-triple degrees gives its
+        // degree, so anything else disqualifies the type (#304).
+        let mut filings = 0usize;
         for src_label in src_labels {
             for tgt_label in tgt_labels.clone() {
+                filings += 1;
                 // Probe by reference; build the owned key only to insert one.
                 let parts = (src_label, edge_type, tgt_label);
                 let key: &dyn TripleKey = &parts;
@@ -242,7 +281,84 @@ impl GraphCatalog {
                 }
             }
         }
+        self.edges_counted += 1;
+        if filings != 1 {
+            self.non_unit_label_types.insert(edge_type.clone());
+        }
         self.generation += 1;
+    }
+
+    /// Mark the degree maps unfit to be read as answers.
+    ///
+    /// Called for the changes that can leave a degree filed under a key that no
+    /// longer describes the edge: a label added to or removed from a node that
+    /// already has edges, a node deleted (which removes its labels *before* its
+    /// edges, so `on_edge_deleted` sees labels that are already gone), and the
+    /// stub edge path, which does not reach this catalog at all.
+    ///
+    /// Sticky. `GraphStore::rebuild_catalog` builds a fresh catalog and is the
+    /// only repair, which is what `finish_bulk_load` calls.
+    pub fn note_degrees_may_be_stale(&mut self) {
+        self.degrees_stale = true;
+    }
+
+    /// Whether the per-node degree maps for `edge_type` can be read as the
+    /// answer to a degree question rather than as an estimate.
+    ///
+    /// `total_edges` is the store's own edge count, which the caller already
+    /// holds; passing it keeps this a pure function of the catalog and avoids
+    /// reading the two from different states.
+    ///
+    /// Three ways the maps can be wrong, and a read has to rule out all three:
+    ///
+    /// * **short** — `create_edge_stub` never calls `on_edge_created`, so a
+    ///   mid-bulk-load catalog is missing whole edges. `edges_counted` against
+    ///   the store's count catches it, the same question PR #1806 asks of
+    ///   `edge_type_counts`.
+    /// * **mis-keyed by label** — an edge filed under two triples or none,
+    ///   recorded per type in `non_unit_label_types`.
+    /// * **stale** — a label or a deletion moved a node after its degrees were
+    ///   filed; see [`Self::note_degrees_may_be_stale`].
+    ///
+    /// A `false` means "walk the adjacency", which is slower and right. A fast
+    /// wrong answer is worse than a slow one.
+    pub fn degrees_are_exact_for(&self, total_edges: usize, edge_type: &EdgeType) -> bool {
+        !self.degrees_stale
+            && self.edges_counted == total_edges
+            && !self.non_unit_label_types.contains(edge_type)
+    }
+
+    /// The degree maps that answer one pattern, as read-only borrows.
+    ///
+    /// `side` picks out-degree (`Source`) or in-degree (`Target`); `source_label`
+    /// and `target_label` are the pattern's endpoint labels, `None` meaning
+    /// unconstrained. The returned maps are exactly the triples the pattern can
+    /// match, so a caller sums a node's entry across them and applies no
+    /// further filter.
+    ///
+    /// `pub(crate)`: the maps themselves stay private — this is the narrowest
+    /// accessor an operator in this crate can use, and the neighbouring
+    /// `all_triple_stats` hands out a whole map by comparison. Only meaningful
+    /// when [`Self::degrees_are_exact_for`] says yes for `edge_type`.
+    pub(crate) fn degree_maps_for(
+        &self,
+        edge_type: &EdgeType,
+        source_label: Option<&Label>,
+        target_label: Option<&Label>,
+        side: DegreeSide,
+    ) -> Vec<&HashMap<NodeId, usize>> {
+        let maps = match side {
+            DegreeSide::Source => &self.source_degrees,
+            DegreeSide::Target => &self.target_degrees,
+        };
+        maps.iter()
+            .filter(|(pattern, _)| {
+                pattern.edge_type.as_str() == edge_type.as_str()
+                    && source_label.is_none_or(|l| pattern.source_label.as_str() == l.as_str())
+                    && target_label.is_none_or(|l| pattern.target_label.as_str() == l.as_str())
+            })
+            .map(|(_, degrees)| degrees)
+            .collect()
     }
 
     /// Notify the catalog that an edge was deleted
@@ -254,6 +370,14 @@ impl GraphCatalog {
         target_id: NodeId,
         tgt_labels: &[Label],
     ) {
+        self.edges_counted = self.edges_counted.saturating_sub(1);
+        // The labels passed here are the endpoints' labels *now*, and
+        // `delete_node` strips a node's labels before deleting its edges — so
+        // the decrement below can miss the triple the increment used, leaving a
+        // degree that no longer has an edge behind it. Rather than reason about
+        // every order a deletion can arrive in, a deletion ends the exactness
+        // claim until a rebuild.
+        self.degrees_stale = true;
         for src_label in src_labels {
             for tgt_label in tgt_labels {
                 let pattern = TriplePattern::new(src_label.clone(), edge_type.clone(), tgt_label.clone());
@@ -458,6 +582,7 @@ impl GraphCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::slice::from_ref;
 
     // ---- TDD: Tests written first, then implementation verified ----
 
@@ -954,5 +1079,111 @@ mod tests {
             .unwrap();
         assert_eq!(stats.count, 1, "the count is decremented regardless");
         assert_eq!(stats.distinct_sources, 1);
+    }
+
+    // ---------------------------------------------------------------- #304
+
+    /// The exactness guard, asked of the catalog alone.
+    ///
+    /// Three separate ways the degree maps can be unfit, and each has to say
+    /// no on its own: a short count, a mis-keyed edge, a later mutation.
+    #[test]
+    fn degrees_are_exact_only_when_every_edge_is_filed_once() {
+        let a = Label::new("A");
+        let b = Label::new("B");
+        let t = EdgeType::new("T");
+        let n = |i: u64| NodeId::new(i);
+
+        let mut c = GraphCatalog::new();
+        // Vacuously exact: no edges, no graph.
+        assert!(c.degrees_are_exact_for(0, &t));
+        // And not exact against a store that has an edge the catalog never saw
+        // -- the `create_edge_stub` case.
+        assert!(!c.degrees_are_exact_for(1, &t));
+
+        c.on_edge_created(n(1), from_ref(&a), &t, n(2), from_ref(&b));
+        assert!(c.degrees_are_exact_for(1, &t));
+
+        // A two-label endpoint files the edge twice, so a per-node sum over
+        // the matching triples would double it.
+        let mut two = GraphCatalog::new();
+        two.on_edge_created(n(1), from_ref(&a), &t, n(2), &[a.clone(), b.clone()]);
+        assert!(!two.degrees_are_exact_for(1, &t));
+        // Only that type is disqualified.
+        assert!(two.degrees_are_exact_for(1, &EdgeType::new("U")));
+
+        // An unlabelled endpoint files it nowhere.
+        let mut none = GraphCatalog::new();
+        none.on_edge_created(n(1), &[] as &[Label], &t, n(2), from_ref(&b));
+        assert!(!none.degrees_are_exact_for(1, &t));
+
+        // A deletion ends the claim until a rebuild, and so does a label
+        // change on a connected node.
+        let mut deleted = c.clone();
+        deleted.on_edge_deleted(n(1), from_ref(&a), &t, n(2), from_ref(&b));
+        assert!(!deleted.degrees_are_exact_for(0, &t));
+        let mut churned = c.clone();
+        churned.note_degrees_may_be_stale();
+        assert!(!churned.degrees_are_exact_for(1, &t));
+    }
+
+    /// The accessor hands back exactly the triples a pattern can match, so a
+    /// caller sums and applies no further filter.
+    #[test]
+    fn degree_maps_are_selected_by_the_patterns_labels() {
+        let article = Label::new("Article");
+        let blog = Label::new("Blog");
+        let cites = EdgeType::new("CITES");
+        let n = |i: u64| NodeId::new(i);
+
+        let mut c = GraphCatalog::new();
+        // Two articles and a blog all cite node 1.
+        c.on_edge_created(n(2), from_ref(&article), &cites, n(1), from_ref(&article));
+        c.on_edge_created(n(3), from_ref(&article), &cites, n(1), from_ref(&article));
+        c.on_edge_created(n(4), from_ref(&blog), &cites, n(1), from_ref(&article));
+
+        let sum = |maps: Vec<&HashMap<NodeId, usize>>, node: NodeId| -> usize {
+            maps.iter().filter_map(|m| m.get(&node)).sum()
+        };
+
+        // In-degree of node 1, far end unconstrained.
+        assert_eq!(
+            sum(
+                c.degree_maps_for(&cites, None, Some(&article), DegreeSide::Target),
+                n(1)
+            ),
+            3
+        );
+        // Far end an :Article only.
+        assert_eq!(
+            sum(
+                c.degree_maps_for(&cites, Some(&article), Some(&article), DegreeSide::Target),
+                n(1)
+            ),
+            2
+        );
+        // A label nothing carries selects no triple at all, not every triple.
+        assert!(c
+            .degree_maps_for(&cites, Some(&Label::new("Nope")), None, DegreeSide::Target)
+            .is_empty());
+        // Out-degree is the other map, and node 1 has none.
+        assert_eq!(
+            sum(
+                c.degree_maps_for(&cites, Some(&article), None, DegreeSide::Source),
+                n(1)
+            ),
+            0
+        );
+        assert_eq!(
+            sum(
+                c.degree_maps_for(&cites, Some(&article), None, DegreeSide::Source),
+                n(2)
+            ),
+            1
+        );
+        // Another edge type shares no triple with this one.
+        assert!(c
+            .degree_maps_for(&EdgeType::new("QUOTES"), None, None, DegreeSide::Target)
+            .is_empty());
     }
 }

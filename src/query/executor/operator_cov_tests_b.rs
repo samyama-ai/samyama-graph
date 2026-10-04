@@ -6342,7 +6342,13 @@ fn adjacency_count_operator_paths() {
     };
     let mut out = make(Direction::Outgoing);
     assert_eq!(out.children_mut().len(), 1);
-    assert_eq!(out.describe().details, "(n)->[:E]-> count AS c");
+    // The row source is in the description since #304: an O(nodes) read of
+    // the catalog's degree maps and an O(nodes + edges) adjacency walk are
+    // different plans and EXPLAIN says which one ran.
+    assert_eq!(
+        out.describe().details,
+        "(n)->[:E]-> count AS c source=adjacency"
+    );
     assert_eq!(counts(&mut out, &store), vec![1, 1, 2]);
     out.reset();
     assert_eq!(counts(&mut out, &store), vec![1, 1, 2]);
@@ -6364,12 +6370,18 @@ fn adjacency_count_operator_paths() {
     // DISTINCT neighbours.
     let mut distinct = make(Direction::Both).with_count_distinct(true);
     assert_eq!(counts(&mut distinct, &store), vec![1, 2, 2, 3]);
+    // Both of these read `[0, 1, 1, 2]` until #304: `build_grouped_iter_distinct`
+    // emitted a group whose neighbour set was empty, so a node the pattern
+    // matches zero times came back with a count of 0 — the #601 defect, which
+    // the summing path has filtered since then and this one never did. The
+    // non-distinct runs above give `[1, 1, 2]` on this same fixture, which is
+    // the disagreement that gives it away.
     let mut distinct_out = make(Direction::Outgoing)
         .with_count_distinct(true)
         .with_group_by_props(vec!["x".into()]);
-    assert_eq!(counts(&mut distinct_out, &store), vec![0, 1, 1, 2]);
+    assert_eq!(counts(&mut distinct_out, &store), vec![1, 1, 2]);
     let mut distinct_in = make(Direction::Incoming).with_count_distinct(true);
-    assert_eq!(counts(&mut distinct_in, &store), vec![0, 1, 1, 2]);
+    assert_eq!(counts(&mut distinct_in, &store), vec![1, 1, 2]);
     // The write path drains its input first.
     let mut w = make(Direction::Outgoing);
     assert_eq!(drain_mut(&mut w, &mut store).len(), 3);
