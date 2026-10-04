@@ -55,12 +55,29 @@ fn imported_store() -> GraphStore {
     store
 }
 
-fn plan_for(store: &GraphStore, query: &str) -> String {
+fn plan_for_unchecked(store: &GraphStore, query: &str) -> String {
     let engine = QueryEngine::new();
     let batch = engine
         .execute(&format!("EXPLAIN {query}"), store)
         .expect("explain");
     format!("{:?}", batch.records[0].get("plan")).replace("\\n", "\n")
+}
+
+/// [`plan_for_unchecked`], refusing a plan tree that stops early.
+///
+/// `PhysicalOperator::describe` has a default printing `Unknown` with no
+/// children, so an operator that does not implement it truncates the tree —
+/// and an assertion that the plan does *not* contain something is then
+/// satisfied by the missing half, whatever the planner did (#1826). Checked
+/// here, where the text is read, so the hole fails loudly rather than passing.
+fn plan_for(store: &GraphStore, query: &str) -> String {
+    let text = plan_for_unchecked(store, query);
+    assert!(
+        samyama::query::executor::undescribed_plan_lines(&text).is_empty(),
+        "the plan tree stops at an operator with no describe, so what is below \
+         it cannot be asserted about (#1826):\n{text}"
+    );
+    text
 }
 
 #[test]
