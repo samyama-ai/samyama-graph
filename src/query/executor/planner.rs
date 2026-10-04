@@ -1931,6 +1931,40 @@ impl QueryPlanner {
         let mut optional_join_predicates: Vec<Option<Expression>> =
             vec![None; pre_with_clauses.len()];
 
+        // A cross-pattern equality plus a constant pins both patterns (#1813).
+        // `d1.mondo_id = d2.mondo_id AND d1.mondo_id = 'MONDO:0007254'` says
+        // `d2.mondo_id` is that value too, and only a property-against-literal
+        // conjunct can reach an index. Writing the implied one down turns the
+        // second clause's `:Disease` scan into a point lookup, which is what
+        // keeps the cartesian product below the row budget.
+        //
+        // The derived conjuncts go through the classification below unchanged,
+        // so each lands in the MATCH clause whose variables it names, exactly
+        // as if it had been written. `owners` gets a `None` for each: a derived
+        // conjunct was not written after an OPTIONAL MATCH, because one that
+        // was is not used as a source in the first place.
+        let (mut pre_where_preds, mut owners) = (pre_where_preds, owners);
+        {
+            let usable: Vec<bool> = owners.iter().map(|o| o.is_none()).collect();
+            // Variables a *non-optional* clause introduces are the only ones a
+            // mandatory filter may name. A late-bound variable (a leading
+            // UNWIND's, a CALL YIELD's) is not bound during match planning at
+            // all, so a conjunct naming one cannot be placed here.
+            let mandatory: HashSet<String> = pre_with_clauses
+                .iter()
+                .zip(&pre_match_var_sets)
+                .filter(|(mc, _)| !mc.optional)
+                .flat_map(|(_, vars)| vars.iter().cloned())
+                .collect();
+            let derived = propagated_equality_constants(&pre_where_preds, &usable, &|v| {
+                mandatory.contains(v) && !late_bound_pre.contains(v)
+            });
+            for d in derived {
+                pre_where_preds.push(d);
+                owners.push(None);
+            }
+        }
+
         for (k, pred) in pre_where_preds.into_iter().enumerate() {
             let mut pred_vars = HashSet::new();
             Self::collect_expression_variables(&pred, &mut pred_vars);
@@ -2485,6 +2519,31 @@ impl QueryPlanner {
             // dropping the conjunct lost it: the OPTIONAL MATCH answered every
             // `(i, a)` pair (#1229).
             let late_bound = Self::late_bound_variables(query);
+
+            // The same constant propagation as before the WITH (#1813), in the
+            // copy that would otherwise not have it -- the repeated failure
+            // mode this planner's two decompositions have.
+            let where_preds = {
+                let mut where_preds = where_preds;
+                let mut source_optional_left = query.optional_where.clone();
+                let usable: Vec<bool> = where_preds
+                    .iter()
+                    .map(|p| {
+                        Self::optional_owner(&mut source_optional_left, p, stage_matches).is_none()
+                    })
+                    .collect();
+                let mandatory: HashSet<String> = stage_matches
+                    .iter()
+                    .zip(&match_var_sets)
+                    .filter(|(mc, _)| !mc.optional)
+                    .flat_map(|(_, vars)| vars.iter().cloned())
+                    .collect();
+                let derived = propagated_equality_constants(&where_preds, &usable, &|v| {
+                    mandatory.contains(v) && !(late_bound.contains(v) && !known_vars.contains(v))
+                });
+                where_preds.extend(derived);
+                where_preds
+            };
 
             let mut stage_optional_where_left = query.optional_where.clone();
             for pred in where_preds {
@@ -7229,6 +7288,179 @@ fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
         }
         _ => vec![expr.clone()],
     }
+}
+
+/// Whether two expressions are the same equality, either way round.
+fn same_equality(a: &Expression, b: &Expression) -> bool {
+    match (a, b) {
+        (
+            Expression::Binary { left: al, op: BinaryOp::Eq, right: ar },
+            Expression::Binary { left: bl, op: BinaryOp::Eq, right: br },
+        ) => (al == bl && ar == br) || (al == br && ar == bl),
+        _ => false,
+    }
+}
+
+/// `b.k = <literal>`, derived from `a.k = b.k AND a.k = <literal>` (#1813).
+///
+/// Two MATCH clauses sharing no variable plan as a `CartesianProduct` with the
+/// `WHERE` above it, because the join key is variable identity and an equality
+/// between a property of one pattern and a property of the other shares no
+/// variable. OM08 --
+///
+/// ```text
+/// MATCH (v:Variant)-[:ASSOCIATED_WITH_DISEASE]->(d1:Disease)
+/// MATCH (t:Target)-[:ASSOCIATED_WITH_DISEASE]->(d2:Disease)
+/// WHERE d1.mondo_id = d2.mondo_id AND d1.mondo_id = 'MONDO:0007254'
+/// ```
+///
+/// -- was refused after 13.8 s at 1.44B edges, the cartesian product having
+/// crossed the 50M per-operator row budget. But the two conjuncts together pin
+/// **both** sides to one value: equality is transitive, so `d2.mondo_id` is
+/// `'MONDO:0007254'` too. `find_index_predicate` only ever matches a property
+/// against a *literal*, so the clause that is merely equal to another pattern's
+/// property can never use an index, however selective the value is. Writing
+/// the implied conjunct down gives it one.
+///
+/// This **adds** conjuncts and removes none. Every original predicate is still
+/// applied where it was, so a derived predicate cannot change an answer unless
+/// `=` is not transitive — it can only let a clause be anchored earlier.
+///
+/// `usable_source[i]` says conjunct `i` is a fact about the row rather than an
+/// `OPTIONAL MATCH`'s join condition, which asserts nothing about the rows that
+/// fail it. `emit_for_variable` says a mandatory filter on that variable is
+/// legal: a variable only an `OPTIONAL MATCH` introduces must not acquire one,
+/// because the derived predicate would be applied above the outer join and
+/// delete exactly the null-filled row the clause exists to produce.
+///
+/// Declined, each with a test in `tests/cross_pattern_equality_constant.rs`:
+/// an equality under `OR` or `NOT` (never a top-level conjunct, so never
+/// reached), a comparison that is not `=`, an operand that is not a bare
+/// property or a literal, and a class pinned to two different literals — a
+/// contradiction whose original conjuncts already answer nothing, and choosing
+/// which of the two to propagate would mean choosing which to believe.
+fn propagated_equality_constants(
+    conjuncts: &[Expression],
+    usable_source: &[bool],
+    emit_for_variable: &dyn Fn(&str) -> bool,
+) -> Vec<Expression> {
+    fn as_term(e: &Expression) -> Option<(String, String)> {
+        match e {
+            Expression::Property { variable, property } => {
+                Some((variable.clone(), property.clone()))
+            }
+            _ => None,
+        }
+    }
+    fn as_literal(e: &Expression) -> Option<&PropertyValue> {
+        match e {
+            Expression::Literal(v) => Some(v),
+            _ => None,
+        }
+    }
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            let p = parent[x];
+            parent[x] = parent[p];
+            x = p;
+        }
+        x
+    }
+
+    /// The operands of a usable top-level `=`. An equality under `OR` or `NOT`
+    /// is not a top-level conjunct, so it never arrives here.
+    fn operands<'e>(
+        i: usize,
+        c: &'e Expression,
+        usable_source: &[bool],
+    ) -> Option<(&'e Expression, &'e Expression)> {
+        match c {
+            Expression::Binary { left, op: BinaryOp::Eq, right }
+                if usable_source.get(i).copied().unwrap_or(false) =>
+            {
+                Some((left.as_ref(), right.as_ref()))
+            }
+            _ => None,
+        }
+    }
+
+    // Intern the property terms first, so the union-find has a fixed universe.
+    let mut terms: Vec<(String, String)> = Vec::new();
+    for (i, c) in conjuncts.iter().enumerate() {
+        if let Some((l, r)) = operands(i, c, usable_source) {
+            for side in [l, r] {
+                if let Some(t) = as_term(side) {
+                    if !terms.contains(&t) {
+                        terms.push(t);
+                    }
+                }
+            }
+        }
+    }
+    if terms.len() < 2 {
+        return Vec::new();
+    }
+    let mut parent: Vec<usize> = (0..terms.len()).collect();
+    let index_of = |t: &(String, String)| terms.iter().position(|u| u == t).expect("interned above");
+
+    // An equality between two property terms links them; one against a literal
+    // pins the term's class.
+    let mut pinned: Vec<(usize, PropertyValue)> = Vec::new();
+    for (i, c) in conjuncts.iter().enumerate() {
+        let Some((l, r)) = operands(i, c, usable_source) else { continue };
+        match (as_term(l), as_term(r)) {
+            (Some(a), Some(b)) => {
+                let (ra, rb) = (index_of(&a), index_of(&b));
+                let (ra, rb) = (find(&mut parent, ra), find(&mut parent, rb));
+                parent[ra] = rb;
+            }
+            (Some(a), None) => {
+                if let Some(v) = as_literal(r) {
+                    pinned.push((index_of(&a), v.clone()));
+                }
+            }
+            (None, Some(b)) => {
+                if let Some(v) = as_literal(l) {
+                    pinned.push((index_of(&b), v.clone()));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    // One class, one constant. `None` = unpinned, `Some(None)` = two different
+    // constants, which is declined.
+    let mut class_literal: Vec<Option<Option<PropertyValue>>> = vec![None; terms.len()];
+    for (t, v) in &pinned {
+        let r = find(&mut parent, *t);
+        match &class_literal[r] {
+            None => class_literal[r] = Some(Some(v.clone())),
+            Some(Some(existing)) if existing == v => {}
+            _ => class_literal[r] = Some(None),
+        }
+    }
+
+    let mut out: Vec<Expression> = Vec::new();
+    for ti in 0..terms.len() {
+        let r = find(&mut parent, ti);
+        let Some(Some(v)) = class_literal[r].clone() else { continue };
+        let (variable, property) = terms[ti].clone();
+        if !emit_for_variable(&variable) {
+            continue;
+        }
+        let derived = Expression::Binary {
+            left: Box::new(Expression::Property { variable, property }),
+            op: BinaryOp::Eq,
+            right: Box::new(Expression::Literal(v)),
+        };
+        if conjuncts.iter().any(|c| same_equality(c, &derived))
+            || out.iter().any(|c| same_equality(c, &derived))
+        {
+            continue;
+        }
+        out.push(derived);
+    }
+    out
 }
 
 impl QueryPlanner {
