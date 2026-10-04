@@ -138,6 +138,7 @@ anything; a number from a loaded machine is not a measurement.
 | `ldbc_http_serve` | Serves an LDBC SNB extract over the HTTP API so Samyama is measured across the same wire as the engines it is compared with (PERF-04), not in-process. | `--data-dir <ldbc extract>`. |
 | `mesh_scale_bench` | Hierarchical roll-up over the real MeSH tree with a literature-shaped fact table — does the hierarchy index still pay on a real ontology at real volume? | Built-in / MeSH tree data. |
 | `query_probe` | Times arbitrary Cypher against an LDBC extract, one line per query; each `--q "<label>=<cypher>"` is a separate variant. The general form of `is7_probe` and `ic11_probe`. | `--data-dir <ldbc extract>`. |
+| `sort_cost_decompose` | Splits what an `ORDER BY` costs per row into extracting the key, comparing keys and moving records, at three row counts and three key shapes, and prints the engine's own whole-query number beside the replica (#1819). | `--data-dir <ldbc extract>`. |
 | `unified_benchmark` | 200+ queries over up to 9 KGs loaded into one graph, each by whichever of snapshot import or direct Rust loader is fastest for it. | Snapshots and data dirs for the 9 KGs; `--queries`. |
 
 ## Performance investigations

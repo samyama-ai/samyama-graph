@@ -12644,6 +12644,12 @@ thread_local! {
     /// Key comparisons made by `SortOperator`, for tests that pin how much of
     /// its input a bounded or early-stopping sort actually orders.
     static SORT_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// Rows ordered by `int_order`'s typed integer path, or 0 when it declined
+    /// the key. A test that pins the typed path's *answer* passes whether or
+    /// not that path ran, so this is how a test says which one it measured
+    /// (#1819).
+    static SORT_TYPED_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub struct SortOperator {
@@ -12740,8 +12746,28 @@ impl SortOperator {
 
     /// Two key parts, in Cypher's order: `cypher_order_value` on values, and on
     /// a borrowed string the order its owned form would have.
+    ///
+    /// Two integers are compared here rather than through
+    /// `cypher_order_value`, which for that pair is seven steps to reach
+    /// `i64::cmp`: `cypher_order_rank` on each side, then
+    /// `property::cypher_order`, whose own `rank` runs on each side, then
+    /// `PropertyValue::cmp`, whose `rank` runs on each side again, then
+    /// `a.cmp(b)`. Six rank computations, all of which answer "both are
+    /// numbers", for a comparison that is one instruction. Measured on vm-1,
+    /// SF1, release, mimalloc: a generic integer comparison costs 9.3-10.1 ns
+    /// where a borrowed-string one costs 5.2-6.6, and removing the ranks takes
+    /// `ORDER BY f.id` from 67.9 to 28.6 ns/row over 142 rows and 103.2 to
+    /// 42.6 over 920 (#1819).
+    ///
+    /// The arm is the same answer by construction, not by test: both ranks are
+    /// 7, `cypher_order`'s both 4, `PropertyValue::cmp`'s both 1, and the arm
+    /// it reaches is `(Integer(a), Integer(b)) => a.cmp(b)`.
     fn cmp_part(x: &KeyPart<'_>, y: &KeyPart<'_>) -> std::cmp::Ordering {
         match (x, y) {
+            (
+                KeyPart::Value(Value::Property(PropertyValue::Integer(a))),
+                KeyPart::Value(Value::Property(PropertyValue::Integer(b))),
+            ) => a.cmp(b),
             (KeyPart::Value(a), KeyPart::Value(b)) => crate::query::executor::record::cypher_order_value(a, b),
             (KeyPart::Str(a), KeyPart::Str(b)) => a.cmp(b),
             (KeyPart::Str(a), KeyPart::Value(b)) => Self::cmp_str_value(a, b),
@@ -12810,6 +12836,105 @@ impl SortOperator {
         }
         keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items));
         keyed.truncate(k);
+    }
+
+    /// The row order for a key whose every part, in every row, is a non-null
+    /// integer -- or `None`, meaning the generic comparator must do it.
+    ///
+    /// Why a second path at all. The unbounded sort already sorts 4-byte row
+    /// indices rather than records (#750), but it compares them *through*
+    /// `keys`, a vector of 120-byte `SortKey`s, at two random offsets per
+    /// comparison. For an integer key the whole key is 8 bytes of that 120,
+    /// and a sort does n*log2(n) of those comparisons: 1,010 over 142 rows,
+    /// 9,406 over 920. Copying the integers into a 24-byte `([i64; 2], u32)`
+    /// element sorts the keys *and* the permutation in one compact array, so a
+    /// comparison reads one cache line instead of chasing two.
+    ///
+    /// Measured on vm-1, SF1, release, mimalloc, `ORDER BY f.id` over LDBC
+    /// KNOWS neighbourhoods, median of 301 trials (#1819):
+    ///
+    /// | rows | extract + generic sort | extract + typed sort |
+    /// |---:|---:|---:|
+    /// | 142 | 89.3 ns/row | 22.0 ns/row |
+    /// | 920 | 124.1 ns/row | 27.5 ns/row |
+    ///
+    /// Why it is the same order, not a nearly-equal one. `cmp_keys` walks the
+    /// key parts in order, compares each with `cmp_part`, reverses a
+    /// descending one, and `execute_all` breaks a full tie with the row index
+    /// ascending whatever the direction. For two integers `cmp_part` *is*
+    /// `i64::cmp`, which is what the comparator here applies, part by part, in
+    /// the same order, with the same reversal and the same index tie-break. A
+    /// key that is anything else -- a float (numbers compare across the two,
+    /// so `999999 > 6.9`), a string, a boolean, a temporal, null, an absent
+    /// property, or more parts than the directions describe -- returns `None`
+    /// rather than guessing, which is why a *mixed* integer and float key does
+    /// not take this path.
+    ///
+    /// `head` carries `execute_all`'s partial order: the `head` smallest rows
+    /// fully ordered, the rest left in input order for `sort_tail`.
+    fn int_order(
+        keys: &[SortKey<'_>],
+        items: &[(Expression, bool)],
+        head: Option<usize>,
+    ) -> Option<Vec<u32>> {
+        // Two parts is what `SortKey::Inline` holds and nearly every
+        // `ORDER BY` written; a third is rare enough that the generic path can
+        // have it rather than this one carry a heap key.
+        let n = items.len();
+        if n == 0 || n > 2 {
+            return None;
+        }
+        // A permutation is indexed by `u32`, as the generic path's is.
+        if keys.len() > u32::MAX as usize {
+            return None;
+        }
+        let mut pairs: Vec<([i64; 2], u32)> = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            let parts = key.as_slice();
+            if parts.len() != n {
+                return None;
+            }
+            let mut packed = [0i64; 2];
+            for (j, part) in parts.iter().enumerate() {
+                match part {
+                    KeyPart::Value(Value::Property(PropertyValue::Integer(v))) => packed[j] = *v,
+                    _ => return None,
+                }
+            }
+            pairs.push((packed, i as u32));
+        }
+
+        let cmp = |a: &([i64; 2], u32), b: &([i64; 2], u32)| {
+            // Counted on this path too. `SORT_COMPARISONS` is how
+            // `distinct_limit_orders_only_the_head_of_the_sort` pins that a
+            // soft hint orders O(n) rather than n*log2(n); leaving the typed
+            // path out would have made that test read zero and pass for the
+            // wrong reason.
+            #[cfg(test)]
+            SORT_COMPARISONS.with(|c| c.set(c.get() + 1));
+            for (j, (_, ascending)) in items.iter().enumerate() {
+                let ord = a.0[j].cmp(&b.0[j]);
+                if ord != std::cmp::Ordering::Equal {
+                    return if *ascending { ord } else { ord.reverse() };
+                }
+            }
+            // The index tie-break is ascending whatever the key directions
+            // are, exactly as `execute_all`'s `.then(a.cmp(b))` is.
+            a.1.cmp(&b.1)
+        };
+        match head {
+            Some(h) => {
+                pairs.select_nth_unstable_by(h - 1, cmp);
+                pairs[..h].sort_unstable_by(cmp);
+                // The tail goes back to input order, which is what the generic
+                // path's `order[h..].sort_unstable()` leaves it in.
+                pairs[h..].sort_unstable_by_key(|p| p.1);
+            }
+            None => pairs.sort_unstable_by(cmp),
+        }
+        #[cfg(test)]
+        SORT_TYPED_ROWS.with(|c| c.set(c.get() + pairs.len() as u64));
+        Some(pairs.into_iter().map(|(_, i)| i).collect())
     }
 
     fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
@@ -13084,11 +13209,6 @@ impl SortOperator {
                 }
             }
             let sort_items = &self.sort_items;
-            let cmp = |a: &u32, b: &u32| {
-                Self::cmp_keys(keys[*a as usize].as_slice(), keys[*b as usize].as_slice(), sort_items)
-                    .then(a.cmp(b))
-            };
-            let mut order: Vec<u32> = (0..keys.len() as u32).collect();
             // With an early-stopping consumer above -- `DISTINCT ... ORDER BY ...
             // LIMIT k`, whose limit cannot pass the Distinct (#522) -- order only
             // a head: the `head` smallest rows, in exactly the (key, index) order
@@ -13098,14 +13218,32 @@ impl SortOperator {
             let head = self
                 .soft_hint
                 .map(|k| k.saturating_mul(4).max(1024))
-                .filter(|&h| h < order.len());
-            if let Some(h) = head {
-                order.select_nth_unstable_by(h - 1, cmp);
-                order[..h].sort_unstable_by(cmp);
-                order[h..].sort_unstable();
-            } else {
-                order.sort_unstable_by(cmp);
-            }
+                .filter(|&h| h < keys.len());
+            // An all-integer key orders as `i64`s in a compact vector, which is
+            // the same order by construction and a fifth of the cost; anything
+            // else falls through to the generic comparator below.
+            let order = match Self::int_order(&keys, sort_items, head) {
+                Some(order) => order,
+                None => {
+                    let cmp = |a: &u32, b: &u32| {
+                        Self::cmp_keys(
+                            keys[*a as usize].as_slice(),
+                            keys[*b as usize].as_slice(),
+                            sort_items,
+                        )
+                        .then(a.cmp(b))
+                    };
+                    let mut order: Vec<u32> = (0..keys.len() as u32).collect();
+                    if let Some(h) = head {
+                        order.select_nth_unstable_by(h - 1, cmp);
+                        order[..h].sort_unstable_by(cmp);
+                        order[h..].sort_unstable();
+                    } else {
+                        order.sort_unstable_by(cmp);
+                    }
+                    order
+                }
+            };
             self.records = order.iter().map(|&i| std::mem::take(&mut rows[i as usize])).collect();
             self.sorted_upto = head.unwrap_or(self.records.len());
             self.executed = true;
@@ -22681,6 +22819,109 @@ mod tests {
         let mut all = drain_x(&mut DistinctOperator::new(Box::new(sort)), &GraphStore::new());
         all.truncate(k);
         all
+    }
+
+    /// A `Sort` over integers, and nothing above it.
+    fn int_sort(values: &[i64], ascending: bool) -> SortOperator {
+        SortOperator::new(
+            Box::new(MaterializedOperator::new(x_rows(values))),
+            vec![(Expression::Variable("x".to_string()), ascending)],
+        )
+    }
+
+    #[test]
+    fn an_all_integer_key_is_ordered_by_the_typed_path() {
+        // The falsifier for every other test of the integer order: they assert
+        // the answer, which is the same on both paths, so none of them would
+        // notice if `int_order` declined every key and the generic comparator
+        // did all the work.
+        let values: Vec<i64> = vec![5, -3, i64::MAX, 0, i64::MIN, 7, -3];
+        SORT_TYPED_ROWS.with(|c| c.set(0));
+        let got = drain_x(&mut int_sort(&values, true), &GraphStore::new());
+        assert_eq!(
+            SORT_TYPED_ROWS.with(|c| c.get()),
+            values.len() as u64,
+            "an all-integer key must be ordered by the typed path"
+        );
+        let mut expected = values.clone();
+        expected.sort_unstable();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn a_key_that_is_not_an_integer_everywhere_keeps_the_generic_path() {
+        // One float among the integers, and the whole key must fall back:
+        // numbers compare across the two, so 999999 > 6.9, which a typed i64
+        // vector cannot express.
+        let rows: Vec<Record> = [
+            PropertyValue::Integer(999_999),
+            PropertyValue::Float(6.9),
+            PropertyValue::Integer(7),
+            PropertyValue::Null,
+        ]
+        .into_iter()
+        .map(|v| {
+            let mut r = Record::new();
+            r.bind("x".to_string(), Value::Property(v));
+            r
+        })
+        .collect();
+        let mut sort = SortOperator::new(
+            Box::new(MaterializedOperator::new(rows)),
+            vec![(Expression::Variable("x".to_string()), true)],
+        );
+        SORT_TYPED_ROWS.with(|c| c.set(0));
+        SORT_COMPARISONS.with(|c| c.set(0));
+        let store = GraphStore::new();
+        let mut got = Vec::new();
+        while let Some(r) = sort.next(&store).unwrap() {
+            got.push(format!("{:?}", r.get("x").unwrap()));
+        }
+        assert_eq!(
+            SORT_TYPED_ROWS.with(|c| c.get()),
+            0,
+            "a mixed numeric key must not take the typed path"
+        );
+        assert!(
+            SORT_COMPARISONS.with(|c| c.get()) > 0,
+            "the generic comparator must have run"
+        );
+        assert_eq!(
+            got,
+            vec![
+                "Property(Float(6.9))".to_string(),
+                "Property(Integer(7))".to_string(),
+                "Property(Integer(999999))".to_string(),
+                "Property(Null)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_typed_integer_order_matches_a_plain_i64_sort_on_random_inputs() {
+        let mut seed: u64 = 0xc0ffee;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as i64 - (1 << 30)
+        };
+        for n in [0usize, 1, 2, 3, 17, 1_000, 5_000] {
+            let values: Vec<i64> = (0..n).map(|_| next() % 97).collect();
+            for ascending in [true, false] {
+                SORT_TYPED_ROWS.with(|c| c.set(0));
+                let got = drain_x(&mut int_sort(&values, ascending), &GraphStore::new());
+                let mut expected = values.clone();
+                expected.sort_unstable();
+                if !ascending {
+                    expected.reverse();
+                }
+                assert_eq!(got, expected, "n = {n}, ascending = {ascending}");
+                assert_eq!(
+                    SORT_TYPED_ROWS.with(|c| c.get()),
+                    n as u64,
+                    "n = {n}: every row should have gone through the typed path"
+                );
+            }
+        }
     }
 
     #[test]
