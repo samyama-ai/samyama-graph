@@ -237,7 +237,7 @@ fn the_neighbours_label_still_restricts_the_count() {
     // (#601). The catalog is keyed by the triple, so the far label selects
     // which triples are summed rather than filtering afterwards.
     let mut store = GraphStore::new();
-    let mut mk = |store: &mut GraphStore, label: &str, name: &str| {
+    let mk = |store: &mut GraphStore, label: &str, name: &str| {
         let id = store.create_node(label);
         let _ = store.set_node_property(
             "default",
@@ -276,7 +276,7 @@ fn nodes_sharing_a_title_are_one_group() {
     // title are one row whose count is the sum -- the catalog gives per-node
     // degrees, so the operator still has to merge them.
     let mut store = GraphStore::new();
-    let mut mk = |store: &mut GraphStore, name: &str| {
+    let mk = |store: &mut GraphStore, name: &str| {
         let id = store.create_node("Article");
         let _ = store.set_node_property(
             "default",
@@ -306,7 +306,7 @@ fn count_distinct_declines_the_catalog_and_still_dedupes() {
     // Two parallel CITES edges between the same pair: the degree is 2, the
     // number of distinct citing articles is 1.
     let mut store = GraphStore::new();
-    let mut mk = |store: &mut GraphStore, name: &str| {
+    let mk = |store: &mut GraphStore, name: &str| {
         let id = store.create_node("Article");
         let _ = store.set_node_property(
             "default",

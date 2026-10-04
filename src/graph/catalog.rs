@@ -582,6 +582,7 @@ impl GraphCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::slice::from_ref;
 
     // ---- TDD: Tests written first, then implementation verified ----
 
@@ -1100,26 +1101,26 @@ mod tests {
         // -- the `create_edge_stub` case.
         assert!(!c.degrees_are_exact_for(1, &t));
 
-        c.on_edge_created(n(1), &[a.clone()], &t, n(2), &[b.clone()]);
+        c.on_edge_created(n(1), from_ref(&a), &t, n(2), from_ref(&b));
         assert!(c.degrees_are_exact_for(1, &t));
 
         // A two-label endpoint files the edge twice, so a per-node sum over
         // the matching triples would double it.
         let mut two = GraphCatalog::new();
-        two.on_edge_created(n(1), &[a.clone()], &t, n(2), &[a.clone(), b.clone()]);
+        two.on_edge_created(n(1), from_ref(&a), &t, n(2), &[a.clone(), b.clone()]);
         assert!(!two.degrees_are_exact_for(1, &t));
         // Only that type is disqualified.
         assert!(two.degrees_are_exact_for(1, &EdgeType::new("U")));
 
         // An unlabelled endpoint files it nowhere.
         let mut none = GraphCatalog::new();
-        none.on_edge_created(n(1), &[] as &[Label], &t, n(2), &[b.clone()]);
+        none.on_edge_created(n(1), &[] as &[Label], &t, n(2), from_ref(&b));
         assert!(!none.degrees_are_exact_for(1, &t));
 
         // A deletion ends the claim until a rebuild, and so does a label
         // change on a connected node.
         let mut deleted = c.clone();
-        deleted.on_edge_deleted(n(1), &[a.clone()], &t, n(2), &[b.clone()]);
+        deleted.on_edge_deleted(n(1), from_ref(&a), &t, n(2), from_ref(&b));
         assert!(!deleted.degrees_are_exact_for(0, &t));
         let mut churned = c.clone();
         churned.note_degrees_may_be_stale();
@@ -1137,9 +1138,9 @@ mod tests {
 
         let mut c = GraphCatalog::new();
         // Two articles and a blog all cite node 1.
-        c.on_edge_created(n(2), &[article.clone()], &cites, n(1), &[article.clone()]);
-        c.on_edge_created(n(3), &[article.clone()], &cites, n(1), &[article.clone()]);
-        c.on_edge_created(n(4), &[blog.clone()], &cites, n(1), &[article.clone()]);
+        c.on_edge_created(n(2), from_ref(&article), &cites, n(1), from_ref(&article));
+        c.on_edge_created(n(3), from_ref(&article), &cites, n(1), from_ref(&article));
+        c.on_edge_created(n(4), from_ref(&blog), &cites, n(1), from_ref(&article));
 
         let sum = |maps: Vec<&HashMap<NodeId, usize>>, node: NodeId| -> usize {
             maps.iter().filter_map(|m| m.get(&node)).sum()

@@ -11702,7 +11702,8 @@ impl AdjacencyCountAggregateOperator {
                 accumulate(node_id, degree, &self.group_by_props);
             }
         }
-        drop(accumulate);
+        // `accumulate` borrows `groups` mutably; the borrow ends at its last
+        // use above, so nothing has to be dropped before reading `groups`.
 
         let rows: Vec<GroupedRow> = groups
             .into_iter()
