@@ -49,13 +49,30 @@ fn names(store: &GraphStore, cypher: &str) -> Vec<String> {
     out
 }
 
-fn plan_of(store: &GraphStore, cypher: &str) -> String {
+fn plan_of_unchecked(store: &GraphStore, cypher: &str) -> String {
     let q = parse_query(&format!("EXPLAIN {cypher}")).expect("query should parse");
     let batch = QueryExecutor::new(store).execute(&q).expect("EXPLAIN should run");
     match batch.records[0].get("plan") {
         Some(Value::Property(PropertyValue::String(t))) => t.clone(),
         other => panic!("expected a plan, got {other:?}"),
     }
+}
+
+/// [`plan_of_unchecked`], refusing a plan tree that stops early.
+///
+/// `PhysicalOperator::describe` has a default printing `Unknown` with no
+/// children, so an operator that does not implement it truncates the tree —
+/// and an assertion that the plan does *not* contain something is then
+/// satisfied by the missing half, whatever the planner did (#1826). Checked
+/// here, where the text is read, so the hole fails loudly rather than passing.
+fn plan_of(store: &GraphStore, cypher: &str) -> String {
+    let text = plan_of_unchecked(store, cypher);
+    assert!(
+        samyama::query::executor::undescribed_plan_lines(&text).is_empty(),
+        "the plan tree stops at an operator with no describe, so what is below \
+         it cannot be asserted about (#1826):\n{text}"
+    );
+    text
 }
 
 /// The IC6 shape in miniature.

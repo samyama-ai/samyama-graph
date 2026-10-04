@@ -309,7 +309,7 @@ fn indexed_store() -> GraphStore {
     store
 }
 
-fn plan_of(query: &str, store: &GraphStore) -> String {
+fn plan_of_unchecked(query: &str, store: &GraphStore) -> String {
     let parsed = samyama::query::parse_query(query).expect("parse");
     let planner = samyama::query::executor::planner::QueryPlanner::new();
     planner
@@ -318,4 +318,21 @@ fn plan_of(query: &str, store: &GraphStore) -> String {
         .root
         .describe()
         .format(0)
+}
+
+/// [`plan_of_unchecked`], refusing a plan tree that stops early.
+///
+/// `PhysicalOperator::describe` has a default printing `Unknown` with no
+/// children, so an operator that does not implement it truncates the tree —
+/// and an assertion that the plan does *not* contain something is then
+/// satisfied by the missing half, whatever the planner did (#1826). Checked
+/// here, where the text is read, so the hole fails loudly rather than passing.
+fn plan_of(query: &str, store: &GraphStore) -> String {
+    let text = plan_of_unchecked(query, store);
+    assert!(
+        samyama::query::executor::undescribed_plan_lines(&text).is_empty(),
+        "the plan tree stops at an operator with no describe, so what is below \
+         it cannot be asserted about (#1826):\n{text}"
+    );
+    text
 }
