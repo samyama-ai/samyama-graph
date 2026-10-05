@@ -124,7 +124,12 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           python -m pip install dist/*.whl pytest
-          python -m pytest tests/ -v
+          # `hostperf` cases assert a timing relationship that needs a host able
+          # to run two CPU-bound queries at once. They say nothing about the
+          # wheel, and one failing leg here withholds *every* artifact
+          # (`publish` needs the whole matrix) -- which is how v1.10.0 published
+          # nothing. The nightly sweep runs them on ubuntu instead.
+          python -m pytest tests/ -v -m "not hostperf"
 
       - uses: actions/upload-artifact@v4
         with:

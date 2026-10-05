@@ -103,6 +103,16 @@ def test_the_event_loop_keeps_running_during_a_query():
     asyncio.run(case())
 
 
+# The guarantee this restates -- the extension releases the GIL -- is asserted
+# host-independently by the case above, which compares a running loop's tick rate
+# against a blocked one's. This case compares wall-clock times instead, so it is a
+# speed test of the host, exactly what that one's threshold was chosen to avoid.
+# On GitHub's macos-15-intel runner it reads 12.06s against 5.36s while the loop
+# case passes, so the engine is releasing the GIL and the runner simply cannot
+# overlap two CPU-bound queries. Deselected in the wheel smoke test for that
+# reason (`-m "not hostperf"` in publish-pypi.yml); still run by the nightly
+# sweep on ubuntu, where the timing means something.
+@pytest.mark.hostperf
 def test_two_queries_overlap():
     async def case():
         # The consequence of the above, stated as the thing a user notices: two
