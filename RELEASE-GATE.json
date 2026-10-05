@@ -6,9 +6,9 @@
   ],
   "envelope_status": "fail",
   "envelope_verdict": "fail",
-  "measured_at": "2026-09-29T06:01:36Z",
-  "run_id": "2026-09-29T06:01:36Z-3a70d91",
-  "host": "vultr-voc-m-16c-128gb",
-  "engine_commit": "3a70d91",
+  "measured_at": "2026-10-04T22:07:15Z",
+  "run_id": "2026-10-04T22:07:15Z-685dd9d",
+  "host": "aws-r6a.4xlarge-spot",
+  "engine_commit": "685dd9d",
   "note": "Compares against a stored baseline on the same host; refuses to compare across hosts."
 }
