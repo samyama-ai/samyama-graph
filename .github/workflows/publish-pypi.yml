@@ -65,8 +65,12 @@ jobs:
             runner: macos-15-intel
             target: x86_64
             manylinux: "off"
+          # macos-14 retires 2026-11-02, and GitHub fails jobs asking for it
+          # during announced brownouts before then -- the first was 2026-10-05
+          # 14:00 UTC. A brownout here withholds every wheel, because `publish`
+          # needs the whole matrix. macos-15 is the arm64 successor label.
           - platform: macos-aarch64
-            runner: macos-14
+            runner: macos-15
             target: aarch64
             manylinux: "off"
           - platform: windows-x64
