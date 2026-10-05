@@ -82,6 +82,40 @@ fn clean_str(s: &str) -> String {
     s.replace('"', "").replace('\n', " ").replace('\r', "")
 }
 
+/// Split one CSV line into fields, honouring RFC 4180 double-quoted fields.
+///
+/// A naive `split(',')` shifts every field right of a quoted value that
+/// contains a comma. WHO SPAR capacity C1 is named
+/// `"C1 - Policy, legal and normative instruments"`, the only capacity name
+/// with a comma in it, so a naive split moved `year` into `score` and the
+/// capacity-name tail into `year` for exactly those rows (#1609).
+pub fn split_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes => {
+                // A doubled quote inside a quoted field is a literal quote.
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    cur.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            }
+            '"' => in_quotes = true,
+            ',' if !in_quotes => {
+                fields.push(std::mem::take(&mut cur));
+            }
+            _ => cur.push(c),
+        }
+    }
+    fields.push(cur);
+    fields
+}
+
 fn parse_csv_records(path: &Path) -> Result<Vec<CsvRecord>, Error> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -90,17 +124,20 @@ fn parse_csv_records(path: &Path) -> Result<Vec<CsvRecord>, Error> {
         Some(Ok(l)) => l,
         _ => return Ok(vec![]),
     };
-    let headers: Vec<&str> = header_line.split(',').collect();
+    let headers = split_csv_line(&header_line);
     let mut records = Vec::new();
     for line in lines {
         let line = line?;
-        let fields: Vec<&str> = line.split(',').collect();
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields = split_csv_line(&line);
         if fields.len() < headers.len() {
             continue;
         }
         let mut map = HashMap::new();
         for (i, h) in headers.iter().enumerate() {
-            map.insert(h.to_string(), fields[i].to_string());
+            map.insert(h.trim().to_string(), fields[i].trim().to_string());
         }
         let cc = map.get("country_code").cloned().unwrap_or_default();
         if !cc.is_empty() {
@@ -140,10 +177,17 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &Path) -> Result<LoadResul
             if let Some(n) = graph.get_node_mut(id) {
                 n.set_property("iso_code", PropertyValue::String(c.iso_code.clone()));
                 n.set_property("name", PropertyValue::String(clean_str(&c.name)));
-                if !c.who_region.is_empty() {
+                // WHO SPAR's upstream country list (GHO DIMENSION/COUNTRY) carries
+                // neither WHO region nor income level: `countries.json` has 233
+                // entries and 0 non-empty values for both fields. Writing them
+                // anyway produces a column that is present on every node and
+                // empty on every node, which is worse than an absent one --
+                // `exists(c.who_region)` returns true and grouping by region
+                // yields one empty bucket (#1815). Only write what is there.
+                if !c.who_region.trim().is_empty() {
                     n.set_property("who_region", PropertyValue::String(c.who_region.clone()));
                 }
-                if !c.income_level.is_empty() {
+                if !c.income_level.trim().is_empty() {
                     n.set_property(
                         "income_level",
                         PropertyValue::String(c.income_level.clone()),
@@ -177,7 +221,14 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &Path) -> Result<LoadResul
                 .unwrap_or("");
             let year = rec.fields.get("year").map(|s| s.as_str()).unwrap_or("");
             let score = rec.fields.get("score").and_then(|s| s.parse::<f64>().ok());
-            if cap_code.is_empty() || year.is_empty() {
+            // An assessment with no parsable year is not an assessment: the year
+            // is part of its identity (`ER-<country>-<capacity>-<year>`). Drop the
+            // row rather than mint a node whose id holds unparsed text (#1609).
+            let year: i64 = match year.parse::<i64>() {
+                Ok(y) => y,
+                Err(_) => continue,
+            };
+            if cap_code.is_empty() {
                 continue;
             }
 
@@ -187,9 +238,8 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &Path) -> Result<LoadResul
                 n.set_property("id", PropertyValue::String(nid));
                 n.set_property("capacity_code", PropertyValue::String(cap_code.to_string()));
                 n.set_property("capacity_name", PropertyValue::String(clean_str(cap_name)));
-                if let Ok(y) = year.parse::<i64>() {
-                    n.set_property("year", PropertyValue::Integer(y));
-                }
+                n.set_property("year", PropertyValue::Integer(year));
+                // Absent is honest; a year sitting in the score column is not.
                 if let Some(s) = score {
                     n.set_property("score", PropertyValue::Integer(s as i64));
                 }

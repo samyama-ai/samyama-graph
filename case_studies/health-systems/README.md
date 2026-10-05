@@ -18,7 +18,7 @@ RECORD=1 ./run.sh                                  # also regenerate demo.gif
 
 | Node label | Count | Key properties |
 |------------|-------|----------------|
-| EmergencyResponse | 8,430 | indicator_name, score, year |
+| EmergencyResponse | 8,430 | capacity_code, capacity_name, country_code, score, year |
 | Country | 233 | iso_code, name |
 
 **Relationships:** `CAPACITY_FOR` (8,430) — each preparedness assessment links a
