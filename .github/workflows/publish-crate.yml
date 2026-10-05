@@ -35,6 +35,10 @@ on:
         description: "Package and validate every crate, upload nothing"
         type: boolean
         default: true
+      ref:
+        description: "Tag to build (empty: the ref this runs on). Lets a fixed workflow build a release whose own workflow cannot."
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -70,8 +74,17 @@ jobs:
       contents: read
 
     steps:
+      # `inputs.ref` builds a tag other than the one this run sits on. A
+      # dispatch takes its WORKFLOW FILE from the ref it runs on, so a release
+      # whose tag predates a fix to this file cannot publish itself: running on
+      # the tag re-runs the broken file, and running on main is refused below
+      # as a branch. v1.11.0 was exactly that -- it failed twice on disk, the
+      # fix landed on main in #1845, and the tag could not reach it. Same input
+      # and same reason as publish-pypi.yml and publish-docker.yml (#1524).
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -112,6 +125,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          INPUT_REF: ${{ inputs.ref }}
         run: |
           set -euo pipefail
 
@@ -151,6 +165,15 @@ jobs:
           # must come from a tag, so a dispatch from a branch can only dry-run.
           if [ "$EVENT" = "release" ]; then
             TAG=$RELEASE_TAG
+          elif [ -n "$INPUT_REF" ]; then
+            # Checked out above, so this is the source being published. It must
+            # still be a v* tag -- naming a branch here would upload whatever
+            # that branch holds, which is the thing the branch rule prevents.
+            case "$INPUT_REF" in
+              v*) TAG=$INPUT_REF ;;
+              *)  echo "::error::ref '$INPUT_REF' is not a v* tag; a real publish must name one"
+                  exit 1 ;;
+            esac
           elif [ "$REF_TYPE" = "tag" ]; then
             TAG=$REF_NAME
           elif [ "$DRY_RUN" = "true" ]; then
