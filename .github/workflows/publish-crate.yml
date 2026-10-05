@@ -79,6 +79,20 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
+      # The engine crate links 412 test binaries, and this job builds them and
+      # then packages six crates on the same disk. The hosted image ships
+      # several GB of toolchains this job never uses; reclaiming them is what
+      # buys the headroom. v1.11.0 ran out of disk here twice -- see the note
+      # on "Test every crate" -- so this is not precautionary.
+      - name: Reclaim disk the hosted image spends on toolchains we do not use
+        run: |
+          set -euo pipefail
+          df -h /home/runner | tail -1 | sed 's/^/before: /'
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/local/lib/node_modules "$AGENT_TOOLSDIRECTORY" || true
+          df -h /home/runner | tail -1 | sed 's/^/after:  /'
+
       # The engine now ships from here, and building it needs libclang
       # (zstd-sys). Same list as ci.yml's test job.
       - name: Install system dependencies
@@ -157,14 +171,36 @@ jobs:
       # anything ships. This runs before authentication so the engine's suite
       # does not spend the 30-minute crates.io token, and in dry-run mode too,
       # so a validate-only dispatch still catches a real test failure.
+      #
+      # `debug = 0` is load-bearing, not a tweak. The engine crate has 412
+      # `tests/*.rs` files and cargo links each as its own binary; with full
+      # debuginfo they do not fit the runner's disk. v1.11.0 failed here twice:
+      # attempt 1 as `collect2: ld terminated with signal 7 [Bus error]` and
+      # attempt 2, saying it plainly, as `rustc-LLVM ERROR: IO failure on
+      # output stream: No space left on device`. Nothing was published either
+      # time -- the step runs before authentication, which is why a disk
+      # failure cost a retry rather than a half-published release.
+      #
+      # Dropping debuginfo shrinks those 412 binaries by roughly an order of
+      # magnitude and changes nothing about which tests run or what they
+      # assert. A panic still names the test; only the backtrace loses line
+      # numbers, and a failure here is reproduced locally anyway.
       - name: Test every crate
         shell: bash
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           set -euo pipefail
+          df -h /home/runner | tail -1 | sed 's/^/disk before: /'
           for crate in $CRATES; do
             echo "::group::test $crate"
             cargo test -p "$crate"
             echo "::endgroup::"
+            # Reporting it per crate turns "it ran out of disk" into "it ran
+            # out of disk at crate N", which is what the first two attempts
+            # could not say.
+            df -h /home/runner | tail -1 | sed "s|^|disk after $crate: |"
           done
 
       # Packages all six in one invocation and builds each .crate from its
