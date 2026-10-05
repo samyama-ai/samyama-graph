@@ -25,6 +25,15 @@ dependencies = [
 [project.scripts]
 samyama-mcp-serve = "samyama_mcp.cli:main"
 
+[tool.pytest.ini_options]
+# Registered so the marker does not warn. `hostperf` means "asserts a timing
+# relationship that only holds on a host able to run two CPU-bound queries at
+# once" -- correctness is asserted elsewhere, so it is deselected where the host
+# is not known to qualify.
+markers = [
+    "hostperf: depends on the host's real parallelism, not on engine behaviour",
+]
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
 python-packages = ["samyama_mcp", "samyama_aio", "samyama_nb", "samyama-stubs"]
