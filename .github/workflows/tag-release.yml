@@ -108,11 +108,36 @@ jobs:
           git tag "v$VERSION"
           git push origin "v$VERSION"
 
-          # --generate-notes builds the changelog from merged PRs since the
-          # previous release tag — no separate changelog process to maintain.
+          # Two sources, deliberately. --generate-notes lists every merged PR
+          # since the previous tag, which is the attribution and the complete
+          # record. docs/release-notes/<version>.md is the part a reader needs
+          # FIRST: what changes behaviour, what is now refused, which answers
+          # move. v1.11.0 shipped with only the generated list, so the curated
+          # notes -- written, reviewed and merged for that release -- were
+          # invisible on the Release page.
+          #
+          # tests/docs_index_lists_every_document.rs already requires the file
+          # to exist for the current version, so this cannot silently fall back
+          # to the generated list alone.
           gh release create "v$VERSION" \
             --title "Samyama Graph v$VERSION" \
             --generate-notes
+
+          NOTES="docs/release-notes/$VERSION.md"
+          if [ -f "$NOTES" ]; then
+            gh release view "v$VERSION" --json body -q .body > /tmp/generated.md
+            {
+              # Drop the file's own H1: the Release already carries the title.
+              tail -n +2 "$NOTES"
+              printf '\n---\n\n'
+              cat /tmp/generated.md
+            } > /tmp/body.md
+            gh release edit "v$VERSION" --notes-file /tmp/body.md
+            echo "Release body: curated notes + generated changelog"
+          else
+            echo "::error::$NOTES is missing; the Release carries only the generated changelog"
+            exit 1
+          fi
 
       # An SBOM of the tagged source, attached to the release and signed. REL-14 and
       # TRUST-08 ask for three controls — SBOM, signed artifacts, cargo-deny clean in
