@@ -3074,6 +3074,14 @@ pub async fn restore_snapshot_handler(
                 "status": "ok",
                 "nodes_imported": stats.node_count,
                 "nodes_merged": stats.merged_count,
+                // The shape of those merges, not just the count (#1808). A caller
+                // reading only `nodes_merged` cannot tell duplicate pairs from a
+                // collapse, and the larger number reads as the better result.
+                "merge_groups": stats.merge_groups,
+                "largest_merge_group": stats.largest_merge_group,
+                "merges_by_key": stats.merges_by_key.iter()
+                    .map(|(k, n)| json!({"key": k, "merged": n}))
+                    .collect::<Vec<_>>(),
                 "edges_imported": stats.edge_count,
                 "labels": stats.labels,
                 "edge_types": stats.edge_types,
