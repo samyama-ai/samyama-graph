@@ -764,6 +764,10 @@ fn import_tenant_inner(
     let mut imported_node_count: u64 = 0;
     let mut imported_edge_count: u64 = 0;
     let mut merged_node_count: u64 = 0;
+    // Which key did the merging, and how many records landed on each target
+    // (#1808). A bare count cannot distinguish duplicate pairs from a collapse.
+    let mut merges_by_key: HashMap<String, u64> = HashMap::new();
+    let mut merge_group_sizes: HashMap<NodeId, u64> = HashMap::new();
     let mut imported_labels: HashSet<String> = HashSet::new();
     let mut imported_edge_types: HashSet<String> = HashSet::new();
     let mut hierarchy_decls: Vec<SnapshotHierarchyIndex> = Vec::new();
@@ -847,6 +851,10 @@ fn import_tenant_inner(
                 }
             }
             let mut existing_id: Option<NodeId> = None;
+            // The key that matched, not the first key given: the loop breaks on
+            // the first value *found*, so an identifier listed first does not
+            // shield a free-text key listed after it (#1808).
+            let mut matched_key: Option<&str> = None;
             'dedup: for &key in dedup_keys.iter() {
                 if let Some(json_val) = snap_node.props.get(key) {
                     let val_str = match json_val {
@@ -858,6 +866,7 @@ fn import_tenant_inner(
                         let lookup = (label.clone(), key.to_string(), val_str.clone());
                         if let Some(&eid) = dedup_index.get(&lookup) {
                             existing_id = Some(eid);
+                            matched_key = Some(key);
                             break 'dedup;
                         }
                     }
@@ -868,6 +877,10 @@ fn import_tenant_inner(
                 // Reuse existing node — remap the ID AND merge properties
                 id_remap.insert(snap_node.id, eid);
                 merged_node_count += 1;
+                if let Some(key) = matched_key {
+                    *merges_by_key.entry(key.to_string()).or_insert(0) += 1;
+                }
+                *merge_group_sizes.entry(eid).or_insert(0) += 1;
                 // The merge below may add dedup-key values to `eid`. If `eid` also
                 // carries a label not indexed yet, a later on-the-spot index of that label
                 // must see it as it was before this import, not with those additions.
@@ -1130,8 +1143,53 @@ fn import_tenant_inner(
         store.finish_bulk_load();
     }
 
+    // Derived merge shape, and the bound that would have caught #1808.
+    let merge_groups = merge_group_sizes.len() as u64;
+    // Group size counts the node that first claimed the value, so a duplicate
+    // pair is 2.
+    let largest_merge_group = merge_group_sizes.values().copied().max().map_or(0, |m| m + 1);
+    let mut merges_by_key_sorted: Vec<(String, u64)> = merges_by_key.into_iter().collect();
+    merges_by_key_sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
     if merged_node_count > 0 {
-        eprintln!("[dedup] Merged {} duplicate nodes (reused existing)", merged_node_count);
+        // Not "duplicate nodes": that is the claim under test. A merge means two
+        // records shared a dedup value, which is only the same thing when the key
+        // is an entity identifier.
+        let incoming = imported_node_count + merged_node_count;
+        let lost_pct = if incoming > 0 {
+            (merged_node_count as f64 / incoming as f64) * 100.0
+        } else {
+            0.0
+        };
+        let by_key = merges_by_key_sorted
+            .iter()
+            .map(|(k, n)| format!("{k}={n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!(
+            "[dedup] merged {merged_node_count} of {incoming} incoming nodes ({lost_pct:.1}%)              into {merge_groups} group(s); largest group {largest_merge_group}; by key: {by_key}"
+        );
+        // A source losing most of its nodes to a merge is far more likely to be a
+        // bad key than a well-deduplicated corpus. Passing `symbol` alongside 13
+        // identifier keys took UniProt from 618,093 proteins to 143,003 and
+        // reported it as a bigger success than the identifier-only run (#1808).
+        // Warn rather than refuse: an import is not the place to overrule a
+        // caller, and some corpora legitimately overlap heavily.
+        const SUSPECT_MERGE_FRACTION: f64 = 20.0;
+        if lost_pct > SUSPECT_MERGE_FRACTION {
+            let worst = merges_by_key_sorted
+                .first()
+                .map(|(k, n)| format!("'{k}' ({n} merges)"))
+                .unwrap_or_else(|| "unknown".to_string());
+            eprintln!(
+                "[dedup] WARNING: {lost_pct:.1}% of this source merged away, above the                  {SUSPECT_MERGE_FRACTION:.0}% a well-identified corpus would show. Most merges                  came from {worst}. If that key is not an entity identifier -- a gene symbol, a                  display name -- it is collapsing distinct entities, and a larger merge count is                  the symptom, not the result. Re-run with identifier keys only to compare."
+            );
+        }
+        if largest_merge_group > 2 {
+            eprintln!(
+                "[dedup] note: largest group collapsed {largest_merge_group} records into one                  node. An entity identifier normally merges pairs; a group this size means one                  value is shared by {largest_merge_group} records."
+            );
+        }
     }
 
     let mut labels: Vec<String> = imported_labels.into_iter().collect();
@@ -1226,6 +1284,9 @@ fn import_tenant_inner(
         node_count: imported_node_count,
         edge_count: imported_edge_count,
         merged_count: merged_node_count,
+        merge_groups,
+        largest_merge_group,
+        merges_by_key: merges_by_key_sorted,
         labels,
         edge_types,
         hierarchy_count,

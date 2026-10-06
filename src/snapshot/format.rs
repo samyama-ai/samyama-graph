@@ -202,6 +202,26 @@ pub struct ImportStats {
     pub node_count: u64,
     pub edge_count: u64,
     pub merged_count: u64,
+    /// How many distinct nodes absorbed at least one dedup merge (#1808).
+    ///
+    /// `merged_count` alone cannot tell a good key from a bad one: 300 merges
+    /// may be 300 duplicate pairs or 300 records collapsed onto one node. A
+    /// `--dedup-keys` list containing `symbol` reported 531,984 merges and read
+    /// as a better run than the 104,080 of identifier-only keys, while
+    /// destroying 77% of UniProt. The group count is what separates them.
+    pub merge_groups: u64,
+    /// Records collapsed into one node in the largest group, counting the node
+    /// that first claimed the value. 2 is a duplicate pair; a large value is the
+    /// signature of a key that is not an entity identifier.
+    pub largest_merge_group: u64,
+    /// Merges attributed to the dedup key that matched, highest first (#1808).
+    ///
+    /// The matching key is the first in `dedup_keys` whose value is *found*, not
+    /// the first given, so an identifier listed ahead of a free-text key does not
+    /// shield it: orthologues differ in accession, so the accession never matches
+    /// and the lookup falls through to `symbol`. This names the key that actually
+    /// did the merging.
+    pub merges_by_key: Vec<(String, u64)>,
     pub labels: Vec<String>,
     pub edge_types: Vec<String>,
     /// Hierarchy indexes rebuilt from declarations in the snapshot.

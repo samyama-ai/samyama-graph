@@ -155,3 +155,108 @@ fn the_merge_count_reads_the_same_for_a_correct_merge_and_a_destructive_one() {
     assert_eq!(good.node_count(), 1);
     assert_eq!(bad.node_count(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// The fix: the statistics now carry the shape of the merge, so a caller that
+// reads them can tell a duplicate pair from a collapse. #1808 fixes 2 and 3.
+// ---------------------------------------------------------------------------
+
+/// A correct merge and a destructive one now differ in the statistics, even
+/// though `merged_count` is still 2 for both.
+#[test]
+fn the_merge_shape_separates_a_correct_merge_from_a_collapse() {
+    let duplicates = &[("P38398", "BRCA1"), ("P38398", "BRCA1"), ("P38398", "BRCA1")];
+    let mut good = GraphStore::new();
+    let good_stats =
+        import_tenant_with_dedup(&mut good, &proteins(duplicates)[..], &["accession"]).expect("import");
+
+    let mut bad = GraphStore::new();
+    let bad_stats =
+        import_tenant_with_dedup(&mut bad, &proteins(ORTHOLOGUES)[..], &["symbol"]).expect("import");
+
+    // Still indistinguishable on the old statistic.
+    assert_eq!(good_stats.merged_count, bad_stats.merged_count);
+
+    // Both collapse three records into one group, so group COUNT alone does not
+    // separate them either -- the size does, together with which key merged.
+    assert_eq!(good_stats.largest_merge_group, 3);
+    assert_eq!(bad_stats.largest_merge_group, 3);
+
+    // What does separate them: the key that did the merging is named.
+    assert_eq!(good_stats.merges_by_key, vec![("accession".to_string(), 2)]);
+    assert_eq!(bad_stats.merges_by_key, vec![("symbol".to_string(), 2)]);
+}
+
+/// The key named is the one that MATCHED, not the first one listed -- the
+/// attribution #1808 needs to point at `symbol` when identifiers came first.
+#[test]
+fn the_attributed_key_is_the_one_that_matched_not_the_first_listed() {
+    let mut store = GraphStore::new();
+    let stats = import_tenant_with_dedup(
+        &mut store,
+        &proteins(ORTHOLOGUES)[..],
+        &["accession", "symbol"],
+    )
+    .expect("import");
+
+    assert_eq!(
+        stats.merges_by_key,
+        vec![("symbol".to_string(), 2)],
+        "accession was listed first but never matched; symbol did the merging"
+    );
+    assert!(
+        !stats.merges_by_key.iter().any(|(k, _)| k == "accession"),
+        "a key that matched nothing must not be credited with merges"
+    );
+}
+
+/// Group counting distinguishes many pairs from one large collapse, which is the
+/// case `merged_count` cannot express at all.
+#[test]
+fn many_pairs_and_one_large_group_report_different_shapes() {
+    // Three separate entities, each duplicated once: three groups of two.
+    let pairs = &[
+        ("P00001", "AAA"), ("P00001", "AAA"),
+        ("P00002", "BBB"), ("P00002", "BBB"),
+        ("P00003", "CCC"), ("P00003", "CCC"),
+    ];
+    let mut many = GraphStore::new();
+    let many_stats =
+        import_tenant_with_dedup(&mut many, &proteins(pairs)[..], &["accession"]).expect("import");
+
+    // Six records, one shared symbol: one group of six.
+    let one_group = &[
+        ("P00001", "SHARED"), ("P00002", "SHARED"), ("P00003", "SHARED"),
+        ("P00004", "SHARED"), ("P00005", "SHARED"), ("P00006", "SHARED"),
+    ];
+    let mut collapsed = GraphStore::new();
+    let collapsed_stats =
+        import_tenant_with_dedup(&mut collapsed, &proteins(one_group)[..], &["symbol"]).expect("import");
+
+    // Identical merge counts, opposite shapes.
+    assert_eq!(many_stats.merged_count, 3);
+    assert_eq!(collapsed_stats.merged_count, 5);
+
+    assert_eq!(many_stats.merge_groups, 3, "three duplicate pairs");
+    assert_eq!(many_stats.largest_merge_group, 2, "a pair is the largest group");
+
+    assert_eq!(collapsed_stats.merge_groups, 1, "one value swallowed everything");
+    assert_eq!(collapsed_stats.largest_merge_group, 6, "six records into one node");
+
+    assert_eq!(many.node_count(), 3, "three entities survive");
+    assert_eq!(collapsed.node_count(), 1, "five entities destroyed");
+}
+
+/// An import that merges nothing reports a zeroed shape rather than a stale or
+/// absent one.
+#[test]
+fn an_import_that_merges_nothing_reports_an_empty_shape() {
+    let mut store = GraphStore::new();
+    let stats = import_tenant_with_dedup(&mut store, &proteins(ORTHOLOGUES)[..], &["accession"])
+        .expect("import");
+
+    assert_eq!(stats.merged_count, 0);
+    assert_eq!(stats.merge_groups, 0);
+    assert_eq!(stats.largest_merge_group, 0, "no groups, so no largest");
+    assert!(stats.merges_by_key.is_empty(), "no key merged anything");
+}
