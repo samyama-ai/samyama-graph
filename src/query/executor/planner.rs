@@ -3944,6 +3944,15 @@ impl QueryPlanner {
             if b.start.variable.as_ref() != Some(shared) || !covered(&b.start, end_node(a)) {
                 return None;
             }
+            // `(p)-[r]->(q), (q)-[r]->(s)` names one relationship twice, which
+            // means the same relationship; as two hops of one path it would
+            // mean two distinct ones (#684), so it stays two paths.
+            let names = |p: &PathPattern| {
+                p.segments.iter().filter_map(|s| s.edge.variable.clone()).collect::<HashSet<_>>()
+            };
+            if !names(a).is_disjoint(&names(b)) {
+                return None;
+            }
             let mut out = a.clone();
             out.segments.extend(b.segments.iter().cloned());
             Some(out)
