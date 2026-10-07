@@ -34,11 +34,90 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  # Does this change touch anything the suites below actually measure?
+  #
+  # 40% of recent PRs (12 of the last 30: 7 docs-only, 5 workflow-only) changed
+  # no Rust at all and still ran the full nine-check, two-architecture matrix.
+  #
+  # The filter is a JOB CONDITION, deliberately, not `paths:` on the trigger.
+  # `test (ubuntu-latest)`, `test (ubuntu-24.04-arm)` and
+  # `supply-chain (cargo-deny)` are required status checks: a job that GitHub
+  # SKIPS satisfies the requirement, while a workflow that `paths:` filters out
+  # never reports at all and leaves the check pending, so the PR can never
+  # merge. Same intent as conformance.yml's `paths:`, which is safe there only
+  # because none of its checks are required.
+  #
+  # The list below is an ALLOWLIST of paths that cannot affect a build, and
+  # anything unrecognised runs the full suite. Erring towards running is the
+  # whole point: a missed filter wastes ten minutes, a wrong one ships a
+  # regression.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether the code suites need to run
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Anything that is not a PR -- a push to main, a re-run, a dispatch --
+          # runs everything. main's history is what releases are cut from.
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "event $EVENT: running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "${BASE:-}" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "::warning::base commit unavailable; running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          echo "changed files:"; printf '  %s\n' $CHANGED
+
+          # Paths that cannot change what any suite below measures.
+          SKIPPABLE='(^docs/|\.md$|^LICENSE|^\.gitignore$|^\.github/ISSUE_TEMPLATE/)'
+
+          CODE=false
+          for f in $CHANGED; do
+            if printf '%s' "$f" | grep -qE "$SKIPPABLE"; then
+              continue
+            fi
+            # A workflow other than this one cannot affect these suites. This one
+            # can, so editing it runs everything.
+            if printf '%s' "$f" | grep -qE '^\.github/workflows/' \
+               && [ "$f" != ".github/workflows/ci.yml" ]; then
+              continue
+            fi
+            echo "requires the full suite: $f"
+            CODE=true
+            break
+          done
+
+          if [ "$CODE" = "false" ]; then
+            echo "no code paths touched; the suites below will be skipped"
+          fi
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+
   supply-chain:
     # REL-14 / TRUST-08 (#1042). Known advisories, licences outside the allow
     # list, and crates from unknown sources fail the build. Exceptions live in
     # deny.toml, each with the reason it cannot be fixed yet.
     name: supply-chain (cargo-deny)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -68,6 +147,8 @@ jobs:
 
   test:
     name: test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     # A warm run takes about 40 minutes on ARM; a cold-cache one (a new stable
     # toolchain, an evicted cache) needs about 50. At 45 a cold ARM run was
@@ -352,6 +433,8 @@ jobs:
     # request deadlines and retry, which is precisely the behaviour that is
     # invisible until a server goes quiet in production (#1326).
     name: typescript-sdk (transport and connection management)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -379,6 +462,8 @@ jobs:
     # The MCP tools are generated from a discovered schema, so a defect here is
     # a wrong tool handed to a model rather than a test failure anyone notices.
     name: python-sdk (MCP tools and schema discovery)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -438,7 +523,8 @@ jobs:
   # differ between two exports of one graph.
   snapshot-portability:
     name: snapshot written on ${{ matrix.writer }}
-    needs: test
+    needs: [changes, test]
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -470,7 +556,8 @@ jobs:
 
   snapshot-portability-read:
     name: read on ${{ matrix.reader }}
-    needs: snapshot-portability
+    needs: [changes, snapshot-portability]
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 30
     strategy:
       fail-fast: false
