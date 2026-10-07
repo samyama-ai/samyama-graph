@@ -221,6 +221,14 @@ fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
 ///     with itself.
 ///   - **A list or map holding either**, at any depth, because `cypher_equals`
 ///     propagates the unknown outward and returns `None`.
+///
+/// Not yet invoked outside its own tests: the operator that will hash on it and
+/// the planner rule that will choose it are the rest of #1822. It lands first,
+/// and alone, because the key is the part that can be wrong without anything
+/// failing — a join that buckets `5` apart from `5.0` returns fewer rows and
+/// no error — so it is worth reviewing on its own, against the equality it has
+/// to mirror, before an operator is built on top of it.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum JoinKey {
     /// Every number that is exactly an integer, whichever variant carried it,
@@ -244,6 +252,7 @@ pub(crate) enum JoinKey {
 }
 
 /// The join key for one value, or `None` if it can never pair.
+#[allow(dead_code)]
 pub(crate) fn join_key_of(v: &PropertyValue) -> Option<JoinKey> {
     use PropertyValue::*;
     match v {
