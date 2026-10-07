@@ -130,15 +130,27 @@ fn main() {
     let per_article: usize =
         arg(&args, "--per-article").and_then(|v| v.parse().ok()).unwrap_or(5);
     let reps: usize = arg(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(3);
+    // Nodes of an unrelated label with no edges, standing in for the other
+    // KGs of a federation. The Q16 residual on #1812 was a cost per node in
+    // the *store*, not per node or edge the query reads, so it only shows
+    // with these present.
+    let filler: usize = arg(&args, "--filler").and_then(|v| v.parse().ok()).unwrap_or(0);
 
     let t = Instant::now();
-    let store = build(articles, terms, per_article);
+    let mut store = build(articles, terms, per_article);
+    for _ in 0..filler {
+        store.create_node("Filler");
+    }
     println!(
         "built {} nodes / {} edges in {:.1} s",
         store.node_count(),
         store.edge_count(),
         t.elapsed().as_secs_f64()
     );
+
+    let t = Instant::now();
+    let edges = store.edge_count();
+    println!("edge_count() = {edges} in {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
 
     let shapes: &[(&str, &str)] = &[
         (

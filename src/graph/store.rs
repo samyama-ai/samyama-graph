@@ -965,6 +965,16 @@ pub struct GraphStore {
     /// Incoming edges write buffer: new edges from CREATE go here (mutable, Vec-of-Vec)
     incoming: Vec<Vec<(NodeId, EdgeId)>>,
 
+    /// Number of entries across `outgoing`, kept in step with it.
+    ///
+    /// `edge_count` used to sum the lengths of `outgoing`, which has a slot per
+    /// node id in the store whether or not the node has an edge in the buffer.
+    /// That made a count of edges cost a pass over every node: 46 ms at 33M
+    /// nodes, and the planner and `AdjacencyCountAggregate` each ask once per
+    /// query to decide whether the catalog's degrees are exact -- so the
+    /// shortcut that reads 3,000 degrees paid for 66M slots first (#1812).
+    buffer_edge_count: usize,
+
     /// Frozen outgoing adjacency (CSR): bulk-loaded data, immutable, compact
     frozen_outgoing: FrozenAdjacencyStore,
 
@@ -1190,6 +1200,7 @@ impl GraphStore {
             edge_history: HashMap::new(),
             outgoing: Vec::with_capacity(1024),
             incoming: Vec::with_capacity(1024),
+            buffer_edge_count: 0,
             frozen_outgoing: FrozenAdjacencyStore::new(),
             frozen_incoming: FrozenAdjacencyStore::new(),
             current_version: 1,
@@ -2495,9 +2506,9 @@ NodeDeleted { .. } => {
         // Remove all connected edges — collect from both frozen tier and write buffer
         let mut outgoing_edges: Vec<EdgeId> = self.frozen_outgoing.neighbors_collected(idx)
             .iter().map(|&(_, eid)| eid).collect();
-        outgoing_edges.extend(
-            std::mem::take(&mut self.outgoing[idx]).into_iter().map(|(_, eid)| eid)
-        );
+        let buffered_out = std::mem::take(&mut self.outgoing[idx]);
+        self.buffer_edge_count -= buffered_out.len();
+        outgoing_edges.extend(buffered_out.into_iter().map(|(_, eid)| eid));
         let mut incoming_edges: Vec<EdgeId> = self.frozen_incoming.neighbors_collected(idx)
             .iter().map(|&(_, eid)| eid).collect();
         incoming_edges.extend(
@@ -2788,6 +2799,7 @@ NodeDeleted { .. } => {
         // Unsorted append — O(1) per edge. Sorted at compact_adjacency().
         // Saves ~50% of edge phase time vs sorted insert (no binary search + shift).
         self.outgoing[source.as_u64() as usize].push((target, edge_id));
+        self.buffer_edge_count += 1;
         self.incoming[target.as_u64() as usize].push((source, edge_id));
 
         // Compact edge type: 2 bytes per edge (DS-07c)
@@ -2855,6 +2867,7 @@ NodeDeleted { .. } => {
                 .unwrap_or_else(|p| p);
             out_list.insert(pos, (target, edge_id));
         }
+        self.buffer_edge_count += 1;
         {
             let in_list = &mut self.incoming[target.as_u64() as usize];
             let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)
@@ -2961,6 +2974,7 @@ NodeDeleted { .. } => {
                 .unwrap_or_else(|p| p);
             out_list.insert(pos, (target, edge_id));
         }
+        self.buffer_edge_count += 1;
         {
             let in_list = &mut self.incoming[target.as_u64() as usize];
             let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)
@@ -3300,7 +3314,9 @@ NodeDeleted { .. } => {
 
         // Remove from adjacency lists
         if let Some(adj) = self.outgoing.get_mut(edge.source.as_u64() as usize) {
+            let before = adj.len();
             adj.retain(|&(_, eid)| eid != id);
+            self.buffer_edge_count -= before - adj.len();
         }
         if let Some(adj) = self.incoming.get_mut(edge.target.as_u64() as usize) {
             adj.retain(|&(_, eid)| eid != id);
@@ -4366,8 +4382,18 @@ NodeDeleted { .. } => {
     /// exactly those entries.
     pub fn edge_count(&self) -> usize {
         let frozen = self.frozen_outgoing.edge_count() - self.frozen_dead_edges;
-        let buffer: usize = self.outgoing.iter().map(|v| v.len()).sum();
-        frozen + buffer
+        // The sum this replaced, kept as the check on the counter: every unit
+        // test that counts edges also proves the two agree. `cfg(test)` rather
+        // than `debug_assertions`, because CI runs the integration tests in a
+        // debug build and the pass over every node is the cost being pinned
+        // there (`tests/adjacency_count_semantics.rs`).
+        #[cfg(test)]
+        assert_eq!(
+            self.buffer_edge_count,
+            self.outgoing.iter().map(|v| v.len()).sum::<usize>(),
+            "buffer_edge_count drifted from the outgoing write buffer"
+        );
+        frozen + self.buffer_edge_count
     }
 
     /// Snapshot of the two-tier adjacency store: how many edges live in the
@@ -4375,7 +4401,7 @@ NodeDeleted { .. } => {
     /// of the bytes saved by packing edges into CSR rather than Vec-of-Vec.
     pub fn adjacency_stats(&self) -> AdjacencyStats {
         let frozen_edges = self.frozen_outgoing.edge_count();
-        let buffer_edges: usize = self.outgoing.iter().map(|v| v.len()).sum();
+        let buffer_edges = self.buffer_edge_count;
         let frozen_segments = self.frozen_outgoing.segments.len();
 
         // Vec-of-Vec pays ~24 bytes of Vec header per non-empty source node plus
@@ -5246,7 +5272,7 @@ NodeDeleted { .. } => {
     /// this (e.g. after a batch of writes). `threshold == 0` always compacts
     /// when there's anything to compact.
     pub fn compact_adjacency_if_needed(&mut self, threshold: usize) -> bool {
-        let buffer_edges: usize = self.outgoing.iter().map(|v| v.len()).sum();
+        let buffer_edges = self.buffer_edge_count;
         if buffer_edges == 0 || buffer_edges < threshold {
             return false;
         }
@@ -5342,6 +5368,7 @@ NodeDeleted { .. } => {
             v.clear();
             v.shrink_to_fit();
         }
+        self.buffer_edge_count = 0;
         for v in &mut self.incoming {
             v.clear();
             v.shrink_to_fit();
@@ -5435,6 +5462,7 @@ NodeDeleted { .. } => {
             for v in &mut self.outgoing { v.clear(); v.shrink_to_fit(); }
             for v in &mut self.incoming { v.clear(); v.shrink_to_fit(); }
         }
+        self.buffer_edge_count = 0;
 
         let frozen_edge_count = self.frozen_outgoing.edge_count();
         eprintln!(
@@ -6082,6 +6110,7 @@ NodeDeleted { .. } => {
         self.session_txn = None;
         self.outgoing.clear();
         self.incoming.clear();
+        self.buffer_edge_count = 0;
         self.frozen_outgoing.clear();
         self.frozen_incoming.clear();
         self.free_node_ids.clear();
@@ -6840,6 +6869,7 @@ NodeDeleted { .. } => {
                 .unwrap_or_else(|p| p);
             out_list.insert(pos, (target, edge_id));
         }
+        self.buffer_edge_count += 1;
         {
             let in_list = &mut self.incoming[target.as_u64() as usize];
             let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)

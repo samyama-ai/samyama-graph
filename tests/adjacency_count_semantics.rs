@@ -297,3 +297,79 @@ fn the_neighbour_label_probe_is_not_a_hash_per_edge() {
          15.7x, so 7x separates them in either profile (#1812)"
     );
 }
+
+/// Reading degrees from the catalog does not cost a pass over the store (#1812).
+///
+/// The catalog path exists to answer this shape from one degree per grouped
+/// node. Before it reads them it asks whether the degrees are exact, which
+/// compares the catalog's edge count with the store's — and `edge_count` summed
+/// the write buffer's per-node lists, one slot per node id in the store. The
+/// planner asks once and the operator asks again, so a query that reads a few
+/// thousand degrees first walked every node twice. On the 328M-node federation
+/// that was the whole 1.36 s of Q16, a query 1.7.0 answered in 0.83 s; with 33M
+/// nodes it made the catalog path (95 ms) slower than the adjacency walk it
+/// replaces (22 ms).
+///
+/// Pinned as a **ratio measured in this process**: the same query over the same
+/// hubs and edges, before and after nodes of an unrelated label are added. The
+/// query reads none of them, so the ratio is what the store's size costs it.
+#[test]
+fn the_catalog_path_does_not_pay_for_nodes_it_never_reads() {
+    use std::time::Instant;
+
+    let mut store = GraphStore::new();
+    let mut leaves = Vec::new();
+    for _ in 0..200 {
+        leaves.push(store.create_node("Leaf"));
+    }
+    for h in 0..50 {
+        let hub = store.create_node("Hub");
+        let _ = store.set_node_property(
+            "default",
+            hub,
+            "name".to_string(),
+            PropertyValue::String(format!("H{h}")),
+        );
+        for leaf in leaves.iter().take(100 + h) {
+            store.create_edge(hub, *leaf, "E").unwrap();
+        }
+    }
+
+    let cypher = "MATCH (h:Hub)-[:E]->(l:Leaf) \
+                  RETURN h.name AS g, count(l) AS c ORDER BY c DESC LIMIT 10";
+    let best = |store: &GraphStore| {
+        let query = parse_query(cypher).unwrap();
+        let mut best = f64::MAX;
+        for _ in 0..25 {
+            let t = Instant::now();
+            let batch = QueryExecutor::new(store).execute(&query).unwrap();
+            assert_eq!(batch.records.len(), 10);
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        best
+    };
+
+    assert!(plan(&store, cypher).contains("source=catalog"), "{}", plan(&store, cypher));
+    let answer = rows(&store, cypher);
+    let small = best(&store);
+
+    // Edge-less nodes of another label: the other KGs of a federation, as far
+    // as this query is concerned.
+    for _ in 0..1_000_000 {
+        store.create_node("Filler");
+    }
+
+    // Still the catalog, still the same ten rows: a ratio over two plans or
+    // two answers would be measuring something else.
+    assert!(plan(&store, cypher).contains("source=catalog"), "{}", plan(&store, cypher));
+    assert_eq!(rows(&store, cypher), answer);
+    let large = best(&store);
+
+    let ratio = large / small;
+    eprintln!("catalog path: {small:.6}s at 250 nodes, {large:.6}s at 1,000,250, {ratio:.2}x");
+    assert!(
+        ratio < 5.0,
+        "the catalog path got {ratio:.2}x slower when 1,000,000 nodes it never \
+         reads were added ({small:.6}s to {large:.6}s) (#1812)"
+    );
+}
