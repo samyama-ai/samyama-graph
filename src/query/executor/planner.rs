@@ -3796,11 +3796,187 @@ impl QueryPlanner {
     /// Plan one MATCH clause, keeping its relationships distinct across its
     /// comma-separated patterns (#1233): see `isolate_relationships`.
     fn dispatch_plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
+        let unrolled = Self::unroll_fixed_length_closes(match_clause);
+        let match_clause = unrolled.as_ref().unwrap_or(match_clause);
+        let stitched = Self::stitch_paths(match_clause);
+        let match_clause = stitched.as_ref().unwrap_or(match_clause);
         if let Some((clause, distinct)) = Self::isolate_relationships(match_clause, where_clause) {
             let plan = self.dispatch_plan_match_inner(&clause, where_clause, store)?;
             return Ok(Box::new(FilterOperator::new(plan, distinct)));
         }
         self.dispatch_plan_match_inner(match_clause, where_clause, store)
+    }
+
+    /// `(a)-[:R*3]->(a)` is `(a)-[:R]->()-[:R]->()-[:R]->(a)` (#1614).
+    ///
+    /// A fixed-length relationship pattern is a trail of exactly that many
+    /// hops -- the same relation the single hops describe, with the same
+    /// relationship isomorphism along it. Written as hops, a loop back to its
+    /// own start is a cycle the path builder can see and close with the fused
+    /// join; as one variable-length segment it is a BFS that ends on a bound
+    /// node and tests each path it finds.
+    ///
+    /// Only where it matters and only where it is the same question: the
+    /// segment lands on a variable that occurs elsewhere in the path, names no
+    /// relationship variable (`[r:R*3]` binds `r` to a list, which three hops
+    /// cannot), and the path carries no written restrictor or selector. The
+    /// hop count is capped so an absurd exact length does not build an absurd
+    /// plan. Inline relationship properties apply to every hop, as they did to
+    /// the segment.
+    fn unroll_fixed_length_closes(match_clause: &MatchClause) -> Option<MatchClause> {
+        const MAX_HOPS: usize = 8;
+        let occurs_elsewhere = |path: &PathPattern, seg_idx: usize, var: &str| {
+            (path.start.variable.as_deref() == Some(var))
+                || path.segments.iter().enumerate().any(|(i, s)| i != seg_idx && s.node.variable.as_deref() == Some(var))
+        };
+        let unrollable = |path: &PathPattern, seg_idx: usize, seg: &PathSegment| -> Option<usize> {
+            if !matches!(path.path_type, PathType::Normal) || path.restrictor_explicit || !matches!(path.selector, PathSelector::All) {
+                return None;
+            }
+            let len = seg.edge.length.as_ref()?;
+            let k = len.min?;
+            if len.max != Some(k) || k == 0 || k > MAX_HOPS || seg.edge.variable.is_some() {
+                return None;
+            }
+            let var = seg.node.variable.as_deref()?;
+            occurs_elsewhere(path, seg_idx, var).then_some(k)
+        };
+        let any = match_clause.pattern.paths.iter().any(|p| {
+            p.segments.iter().enumerate().any(|(i, s)| unrollable(p, i, s).is_some())
+        });
+        if !any {
+            return None;
+        }
+        let mut clause = match_clause.clone();
+        for path in &mut clause.pattern.paths {
+            let original = path.clone();
+            let mut segments = Vec::with_capacity(original.segments.len());
+            for (i, seg) in original.segments.iter().enumerate() {
+                match unrollable(&original, i, seg) {
+                    Some(k) => {
+                        let mut hop = seg.edge.clone();
+                        hop.length = None;
+                        for _ in 1..k {
+                            segments.push(PathSegment {
+                                edge: hop.clone(),
+                                node: NodePattern { variable: None, labels: Vec::new(), properties: None, property_exprs: None },
+                            });
+                        }
+                        segments.push(PathSegment { edge: hop, node: seg.node.clone() });
+                    }
+                    None => segments.push(seg.clone()),
+                }
+            }
+            path.segments = segments;
+        }
+        Some(clause)
+    }
+
+    /// Comma-separated patterns that meet end to end are one path (#1614).
+    ///
+    /// `MATCH (a)-[:R]->(b), (b)-[:R]->(c), (c)-[:R]->(a)` and
+    /// `MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a)` ask the same question: the
+    /// segments are the same, and relationship isomorphism holds across a
+    /// clause whichever way it is punctuated. Planned apart they were joined by
+    /// hash, and the cycle they describe was never visible to the path builder
+    /// -- so the fused close it picks for the second phrasing was never offered
+    /// to the first. Joined here, before any path is planned, both get it.
+    ///
+    /// Two paths are joined where the end of one is the start of the other, in
+    /// either orientation; a path read backwards is the same relation with its
+    /// directions flipped. The node pattern at the join is kept from the path
+    /// that is read first, so the one dropped may carry nothing the kept one
+    /// does not: `propagate_shared_variable_labels` has usually copied the
+    /// kept one's labels onto it by now. Only plain paths take part -- no path variable, no
+    /// shortestPath, no written restrictor or selector, no variable-length
+    /// segment -- because each of those binds something to the path as
+    /// written, and a stitched path is not the path that was written.
+    ///
+    /// `None` when nothing joins, so the common case clones nothing.
+    fn stitch_paths(match_clause: &MatchClause) -> Option<MatchClause> {
+        let paths = &match_clause.pattern.paths;
+        if paths.len() < 2 {
+            return None;
+        }
+        fn plain(p: &PathPattern) -> bool {
+            p.path_variable.is_none()
+                && matches!(p.path_type, PathType::Normal)
+                && !p.restrictor_explicit
+                && matches!(p.selector, PathSelector::All)
+                && !p.segments.is_empty()
+                && p.segments.iter().all(|s| s.edge.length.is_none())
+        }
+        /// `dropped` constrains nothing that `kept` does not already.
+        fn covered(dropped: &NodePattern, kept: &NodePattern) -> bool {
+            dropped.labels.iter().all(|l| kept.labels.contains(l))
+                && dropped.properties.iter().flat_map(|p| p.iter()).all(|(k, v)| {
+                    kept.properties.as_ref().is_some_and(|d| d.get(k) == Some(v))
+                })
+                && dropped.property_exprs.as_ref().is_none_or(|p| p.is_empty())
+        }
+        fn end_node(p: &PathPattern) -> &NodePattern {
+            p.segments.last().map(|s| &s.node).unwrap_or(&p.start)
+        }
+        /// The same path read from its end: directions flipped, nodes shifted
+        /// one segment along.
+        fn reversed(p: &PathPattern) -> PathPattern {
+            let mut out = p.clone();
+            out.start = end_node(p).clone();
+            out.segments = (0..p.segments.len())
+                .rev()
+                .map(|k| {
+                    let mut edge = p.segments[k].edge.clone();
+                    edge.direction = match edge.direction {
+                        Direction::Outgoing => Direction::Incoming,
+                        Direction::Incoming => Direction::Outgoing,
+                        Direction::Both => Direction::Both,
+                    };
+                    let node = if k == 0 { p.start.clone() } else { p.segments[k - 1].node.clone() };
+                    PathSegment { edge, node }
+                })
+                .collect();
+            out
+        }
+        /// `a` then `b`, where `a` ends on the variable `b` starts on and `b`'s
+        /// start pattern constrains nothing `a`'s end does not.
+        fn join(a: &PathPattern, b: &PathPattern) -> Option<PathPattern> {
+            let shared = end_node(a).variable.as_ref()?;
+            if b.start.variable.as_ref() != Some(shared) || !covered(&b.start, end_node(a)) {
+                return None;
+            }
+            let mut out = a.clone();
+            out.segments.extend(b.segments.iter().cloned());
+            Some(out)
+        }
+
+        let mut paths = paths.clone();
+        let mut changed = false;
+        'again: loop {
+            for i in 0..paths.len() {
+                for j in 0..paths.len() {
+                    if i == j || !plain(&paths[i]) || !plain(&paths[j]) {
+                        continue;
+                    }
+                    let merged = join(&paths[i], &paths[j])
+                        .or_else(|| join(&paths[i], &reversed(&paths[j])))
+                        .or_else(|| join(&reversed(&paths[j]), &paths[i]));
+                    if let Some(merged) = merged {
+                        let (lo, hi) = (i.min(j), i.max(j));
+                        paths.remove(hi);
+                        paths[lo] = merged;
+                        changed = true;
+                        continue 'again;
+                    }
+                }
+            }
+            break;
+        }
+        if !changed {
+            return None;
+        }
+        let mut clause = match_clause.clone();
+        clause.pattern.paths = paths;
+        Some(clause)
     }
 
     /// Relationship isomorphism between the comma-separated patterns of one
@@ -4310,8 +4486,30 @@ impl QueryPlanner {
                 // earlier clause — the rule is per-clause.
                 let track_edges = path.segments.len() > 1;
                 let mut first_expand = true;
+                // A closing segment the previous expand has already bound as a
+                // fused cyclic close (#1614). What is left of it is its
+                // bookkeeping: the relationship variable it names, a filter on
+                // that relationship's inline properties, and the walk
+                // continuing from the node it closed onto.
+                let mut fused_close: Option<FusedCloseSegment> = None;
                 for (seg_idx, segment) in path.segments.iter().enumerate() {
                     let target_var = path_nodes[seg_idx + 1].var.clone();
+
+                    if let Some(close) = fused_close.take() {
+                        if let Some(predicate) = close.edge_predicate {
+                            path_operator = Box::new(FilterOperator::new(path_operator, predicate));
+                        }
+                        if let Some(ev) = &segment.edge.variable {
+                            bound.insert(ev.clone());
+                        }
+                        path_operator = Self::apply_ready_predicates(
+                            path_operator,
+                            &mut deferred_predicates,
+                            &bound,
+                        );
+                        current_var = target_var;
+                        continue;
+                    }
 
                     // An inline relationship property constraint has to be
                     // applied; it used to be dropped, so
@@ -4526,6 +4724,28 @@ impl QueryPlanner {
                                     next_target.clone(),
                                     next.edge.direction.clone(),
                                 );
+                            }
+                            // The fused form of the same close (#1614): this
+                            // expand binds the closing relationship too, so
+                            // the closing segment needs no expand into a
+                            // synthetic name and no equality filter. The
+                            // candidate set is the intersection of the two
+                            // adjacency lists, and every element of it is a
+                            // match -- the worst-case-optimal join for a
+                            // cycle, which PERF-07 asks the planner to pick
+                            // by itself.
+                            if let Some((close_edge_var, predicate)) = self.fused_close_for(
+                                segment, next, seg_idx + 1, next_target, &target_var, &current_var, &bound,
+                                &path_nodes, seg_idx + 2,
+                            ) {
+                                if expand.closes_onto().is_none() {
+                                    expand = expand.with_co_neighbour(
+                                        next_target.clone(),
+                                        next.edge.direction.clone(),
+                                    );
+                                }
+                                expand = expand.with_fused_close(close_edge_var);
+                                fused_close = Some(FusedCloseSegment { edge_predicate: predicate });
                             }
                         }
                     }
@@ -4877,6 +5097,73 @@ impl QueryPlanner {
     /// later filter would have removed. `OPTIONAL MATCH` is not affected --
     /// this runs inside a single path of a single MATCH, and the outer join is
     /// built above it.
+    /// Whether the segment after `segment` (in walk order) closes the pattern
+    /// back onto a variable already bound, in a form the expand binding
+    /// `segment`'s target can take on as a fused cyclic close (#1614).
+    ///
+    /// `next_target` is the node the closing segment lands on, `close_dir` the
+    /// direction the close runs in *walk* order (target -> next_target): as
+    /// written when walking forward, reversed when walking back from an
+    /// anchor. Returns the closing relationship's variable and the filter on
+    /// its inline properties, which the caller applies once the fused expand
+    /// has bound it.
+    ///
+    /// Equal type lists, empty included: an untyped close walks the candidate's
+    /// adjacency instead of the type index, which is what the expand it
+    /// replaces did. The fused operator does not re-check the closing node's
+    /// labels or properties, so it may carry only what every other occurrence
+    /// of the variable in the path carries -- whichever of those bound it has
+    /// checked them. `propagate_shared_variable_labels` copies a variable's
+    /// labels onto its bare occurrences, which is how `(a:P)-->(b)-->(a)`
+    /// arrives here. Not onto the source: every candidate neighbours it by
+    /// construction, and a second edge back to it is what the closing hop
+    /// still has to find.
+    #[allow(clippy::too_many_arguments)]
+    fn fused_close_for(
+        &self,
+        segment: &PathSegment,
+        next: &PathSegment,
+        next_seg_idx: usize,
+        next_target: &str,
+        target_var: &str,
+        current_var: &str,
+        bound: &HashSet<String>,
+        nodes: &[PathNodeRef],
+        closing_node_idx: usize,
+    ) -> Option<(Option<String>, Option<Expression>)> {
+        let closes_onto_bound =
+            bound.contains(next_target) && next_target != target_var && next_target != current_var;
+        let types_equal = next.edge.types.len() == segment.edge.types.len()
+            && next
+                .edge
+                .types
+                .iter()
+                .zip(segment.edge.types.iter())
+                .all(|(a, b)| a.as_str() == b.as_str());
+        let others = || {
+            nodes.iter().enumerate().filter(|(i, n)| *i != closing_node_idx && n.var == next_target).map(|(_, n)| n)
+        };
+        let checked_elsewhere = others().count() > 0
+            && next.node.labels.iter().all(|l| others().all(|n| n.labels.contains(l)))
+            && next.node.properties.iter().flat_map(|p| p.iter()).all(|(k, v)| {
+                others().all(|n| n.properties.as_ref().is_some_and(|d| d.get(k) == Some(v)))
+            });
+        if !(closes_onto_bound
+            && types_equal
+            && next.edge.length.is_none()
+            && segment.edge.length.is_none()
+            && checked_elsewhere)
+        {
+            return None;
+        }
+        let close_filter = self.edge_property_filter(&next.edge, next_seg_idx);
+        let close_edge_var = match &close_filter {
+            Some((var, _)) => Some(var.clone()),
+            None => next.edge.variable.clone(),
+        };
+        Some((close_edge_var, close_filter.map(|(_, p)| p)))
+    }
+
     fn apply_ready_predicates(
         operator: OperatorBox,
         deferred: &mut Vec<Expression>,
@@ -5002,9 +5289,24 @@ impl QueryPlanner {
         // the anchor is now the traversal source, so an originally-outgoing edge from
         // the earlier node must be read as incoming from the anchor's perspective.
         let mut current_var = anchor_var.clone();
+        // A closing segment already bound by a fused cyclic close (#1614); see
+        // the main path builder. Both walks here can meet one.
+        let mut fused_close: Option<FusedCloseSegment> = None;
         for seg_idx in (0..anchor_idx).rev() {
             let segment = &path.segments[seg_idx];
             let target = &nodes[seg_idx];
+            if let Some(close) = fused_close.take() {
+                if let Some(predicate) = close.edge_predicate {
+                    path_operator = Box::new(FilterOperator::new(path_operator, predicate));
+                }
+                if let Some(ev) = &segment.edge.variable {
+                    bound.insert(ev.clone());
+                }
+                path_operator =
+                    Self::apply_ready_predicates(path_operator, &mut deferred_predicates, &bound);
+                current_var = target.var.clone();
+                continue;
+            }
             // Same rule as the main path builder: an inline relationship
             // property constraint is applied rather than dropped (#649). Which
             // of these builders runs depends on where the cheapest anchor is,
@@ -5131,6 +5433,26 @@ impl QueryPlanner {
                     expand = expand.with_edge_isolation(first_expand);
                     first_expand = false;
                 }
+                // Walking back, the next segment is the one written before
+                // this, and its close runs against its written direction.
+                if !self_ref && seg_idx > 0 {
+                    let next = &path.segments[seg_idx - 1];
+                    let next_target = &nodes[seg_idx - 1].var;
+                    if let Some((close_edge_var, predicate)) = self.fused_close_for(
+                        segment, next, seg_idx - 1, next_target, &target.var, &current_var, &bound,
+                        nodes, seg_idx - 1,
+                    ) {
+                        let close_dir = match next.edge.direction {
+                            Direction::Outgoing => Direction::Incoming,
+                            Direction::Incoming => Direction::Outgoing,
+                            Direction::Both => Direction::Both,
+                        };
+                        expand = expand
+                            .with_co_neighbour(next_target.clone(), close_dir)
+                            .with_fused_close(close_edge_var);
+                        fused_close = Some(FusedCloseSegment { edge_predicate: predicate });
+                    }
+                }
                 let expanded: OperatorBox = if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone()))
                 } else {
@@ -5175,9 +5497,22 @@ impl QueryPlanner {
 
         // Walk forward toward later-written nodes using the written edge direction.
         let mut current_var = anchor_var;
+        let mut fused_close: Option<FusedCloseSegment> = None;
         for seg_idx in anchor_idx..path.segments.len() {
             let segment = &path.segments[seg_idx];
             let target = &nodes[seg_idx + 1];
+            if let Some(close) = fused_close.take() {
+                if let Some(predicate) = close.edge_predicate {
+                    path_operator = Box::new(FilterOperator::new(path_operator, predicate));
+                }
+                if let Some(ev) = &segment.edge.variable {
+                    bound.insert(ev.clone());
+                }
+                path_operator =
+                    Self::apply_ready_predicates(path_operator, &mut deferred_predicates, &bound);
+                current_var = target.var.clone();
+                continue;
+            }
             // Same rule as the main path builder: an inline relationship
             // property constraint is applied rather than dropped (#649). Which
             // of these builders runs depends on where the cheapest anchor is,
@@ -5271,6 +5606,20 @@ impl QueryPlanner {
                 if track_edges {
                     expand = expand.with_edge_isolation(first_expand);
                     first_expand = false;
+                }
+                if !self_ref {
+                    if let Some(next) = path.segments.get(seg_idx + 1) {
+                        let next_target = &nodes[seg_idx + 2].var;
+                        if let Some((close_edge_var, predicate)) = self.fused_close_for(
+                            segment, next, seg_idx + 1, next_target, &target.var, &current_var, &bound,
+                            nodes, seg_idx + 2,
+                        ) {
+                            expand = expand
+                                .with_co_neighbour(next_target.clone(), next.edge.direction.clone())
+                                .with_fused_close(close_edge_var);
+                            fused_close = Some(FusedCloseSegment { edge_predicate: predicate });
+                        }
+                    }
                 }
                 let expanded: OperatorBox = if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone()))
@@ -6735,6 +7084,12 @@ fn propagate_shared_variable_labels(clauses: &[MatchClause]) -> Vec<MatchClause>
 /// (anonymous nodes get an auto-generated `_anon_N` name). Used by anchor
 /// selection to consider indexing/scanning any node in the pattern, not just
 /// the first one written.
+/// What remains of a closing segment after a fused cyclic close bound it
+/// (#1614): a filter on the closing relationship's inline properties, if any.
+struct FusedCloseSegment {
+    edge_predicate: Option<Expression>,
+}
+
 struct PathNodeRef {
     var: String,
     labels: Vec<Label>,

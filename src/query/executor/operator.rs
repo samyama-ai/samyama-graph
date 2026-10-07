@@ -7956,6 +7956,30 @@ pub struct ExpandOperator {
     /// outgoing middle hop and needs `a`'s incoming list; reading `direction`
     /// would search the wrong one (#1090).
     co_neighbour_dir: Direction,
+    /// Bind the closing hop here too, so the pattern's cycle is one operator.
+    ///
+    /// With `co_neighbour_var` alone the walk keeps the candidates that close
+    /// and the planner still emits an `Expand` into a synthetic `__self` name
+    /// plus a `Filter` proving it equal -- a row per surviving candidate that
+    /// exists only to be checked. This is the fused form #1082 left open:
+    /// the candidate is the intersection of the source's list and the closing
+    /// node's list, and every element of it is a match, so the closing edge
+    /// is bound on the row the walk emits and nothing is built to be
+    /// discarded. One row per closing edge, because parallel edges are
+    /// separate matches, and none for an edge the clause already walked.
+    ///
+    /// `EXPLAIN` then prints the operator as the join it is rather than as the
+    /// expand it started from (#1614).
+    fused_close: Option<FusedClose>,
+    /// The closing edge of each entry of `current_edges`, when fused.
+    current_close_edges: Vec<crate::graph::EdgeId>,
+}
+
+/// The closing hop a fused expand binds. See `ExpandOperator::fused_close`.
+#[derive(Debug, Clone)]
+pub struct FusedClose {
+    /// The closing segment's relationship variable, if the pattern names it.
+    pub edge_var: Option<Arc<str>>,
 }
 
 impl ExpandOperator {
@@ -7986,6 +8010,8 @@ impl ExpandOperator {
             starts_clause: false,
             co_neighbour_var: None,
             co_neighbour_dir: Direction::Both,
+            fused_close: None,
+            current_close_edges: Vec::new(),
             target_bound_var: None,
             direction,
             current_record: None,
@@ -8037,6 +8063,20 @@ impl ExpandOperator {
     pub fn with_co_neighbour(mut self, var: String, closing: Direction) -> Self {
         self.co_neighbour_var = Some(var.into());
         self.co_neighbour_dir = closing;
+        self
+    }
+
+    /// The variable a cyclic close prunes against, if `with_co_neighbour` set one.
+    pub fn closes_onto(&self) -> Option<&str> {
+        self.co_neighbour_var.as_deref()
+    }
+
+    /// Bind the closing hop onto `co_neighbour_var` on the rows this expand
+    /// emits, instead of leaving it to a following expand and filter. Requires
+    /// `with_co_neighbour` to have named the closing variable and direction.
+    pub fn with_fused_close(mut self, edge_var: Option<String>) -> Self {
+        debug_assert!(self.co_neighbour_var.is_some(), "a fused close needs a closing variable");
+        self.fused_close = Some(FusedClose { edge_var: edge_var.map(Into::into) });
         self
     }
 
@@ -8125,6 +8165,7 @@ impl ExpandOperator {
         edge_id: crate::graph::EdgeId,
         src: NodeId,
         tgt: NodeId,
+        close: Option<crate::graph::EdgeId>,
         store: &GraphStore,
     ) -> Record {
         // Room for the target, and for the edge and path variables when the
@@ -8132,7 +8173,8 @@ impl ExpandOperator {
         // that was cloned at exact capacity (#562).
         let extra = 1
             + self.edge_var.is_some() as usize
-            + self.path_variable.is_some() as usize;
+            + self.path_variable.is_some() as usize
+            + self.fused_close.as_ref().is_some_and(|f| f.edge_var.is_some()) as usize;
         let mut new_record = base.clone_with_capacity(extra);
 
         let target_id = match self.direction {
@@ -8175,6 +8217,31 @@ impl ExpandOperator {
             new_record.mark_edge_used(edge_id);
         }
 
+        // The closing hop, bound on the same row: its relationship variable,
+        // the path it extends, and the edge it takes from the clause.
+        if let (Some(fused), Some(close_id)) = (&self.fused_close, close) {
+            let (close_src, close_tgt) = store
+                .get_edge_endpoints(close_id)
+                .unwrap_or((target_id, target_id));
+            if let Some(edge_var) = &fused.edge_var {
+                let edge_type = store
+                    .get_edge_type(close_id)
+                    .unwrap_or_else(|| EdgeType::new(""));
+                new_record.bind(
+                    edge_var.clone(),
+                    Value::EdgeRef(close_id, close_src, close_tgt, edge_type),
+                );
+            }
+            if let Some(ref path_var) = self.path_variable {
+                let far = if close_src == target_id { close_tgt } else { close_src };
+                let extended = extend_path(new_record.get(path_var), target_id, far, close_id);
+                new_record.bind(path_var.clone(), extended);
+            }
+            if self.track_edges {
+                new_record.mark_edge_used(close_id);
+            }
+        }
+
         new_record
     }
 
@@ -8214,6 +8281,8 @@ impl ExpandOperator {
         // a buffer that is the same shape every time (#564).
         let mut collected = std::mem::take(&mut self.current_edges);
         collected.clear();
+        let mut closes = std::mem::take(&mut self.current_close_edges);
+        closes.clear();
         let type_filter = self.type_ids.as_deref();
 
         // Target-label sets, resolved once per source record rather than per
@@ -8478,6 +8547,73 @@ impl ExpandOperator {
         // `None` when there is no close to test, which is every non-cyclic
         // expand and any walk the type index declined.
         let mut co = (!co_lists.is_empty()).then(|| CoCursor::new(&co_lists));
+        // The closing edges between a candidate and the closing node, for a
+        // fused close. From the closing node's sorted lists when the type index
+        // is up -- the run for the candidate is two binary searches, and the
+        // candidate has already been proved to be in it -- and from the
+        // candidate's own adjacency otherwise, which is what the closing expand
+        // this replaces walked.
+        //
+        // Not the edge this expand is taking, and not one the clause already
+        // walked (#684): the closing hop is a segment of the pattern like any
+        // other and relationship isomorphism applies to it. A self-loop on the
+        // closing node sits in both of its lists and is taken once (#640).
+        let fused = self.fused_close.is_some();
+        let close_dir = self.co_neighbour_dir.clone();
+        // The index answers the close only when it holds the half the close
+        // reads. `usable` above judged the walk's halves, not these (#1090).
+        let close_via_index = typed.as_ref().is_some_and(|(out, inc)| {
+            (matches!(close_dir, Direction::Incoming) || out.is_some())
+                && (matches!(close_dir, Direction::Outgoing) || inc.is_some())
+        });
+        let closing_edges = |target: NodeId, eid: crate::graph::EdgeId, out: &mut Vec<crate::graph::EdgeId>| {
+            out.clear();
+            let Some(c) = co_node else { return };
+            if close_via_index {
+                for list in &co_lists {
+                    for &(_, e2) in pinned_run(list, target) {
+                        if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
+                            out.push(e2);
+                        }
+                    }
+                }
+            } else {
+                let mut keep = |e2: crate::graph::EdgeId| {
+                    if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
+                        out.push(e2);
+                    }
+                };
+                if !matches!(close_dir, Direction::Incoming) {
+                    store.for_each_outgoing_neighbor(target, type_filter, |t, e2| {
+                        if t == c {
+                            keep(e2);
+                        }
+                    });
+                }
+                if !matches!(close_dir, Direction::Outgoing) {
+                    store.for_each_incoming_neighbor(target, type_filter, |s, e2| {
+                        if s == c {
+                            keep(e2);
+                        }
+                    });
+                }
+            }
+        };
+        let mut close_buf: Vec<crate::graph::EdgeId> = Vec::new();
+        // Emit one entry per closing edge when fused, else the entry itself.
+        macro_rules! emit {
+            ($eid:expr, $src:expr, $tgt:expr, $cand:expr) => {
+                if fused {
+                    closing_edges($cand, $eid, &mut close_buf);
+                    for &e2 in &close_buf {
+                        collected.push(($eid, $src, $tgt));
+                        closes.push(e2);
+                    }
+                } else {
+                    collected.push(($eid, $src, $tgt));
+                }
+            };
+        }
         // A pinned far end turns the walk into a lookup: the sorted list is cut
         // to that target's run before it is read, so a closing hop costs two
         // binary searches instead of the node's degree.
@@ -8503,13 +8639,13 @@ impl ExpandOperator {
                 if typed.is_some() {
                     for &(target, eid) in walk_list!(out_of(&typed, node_id)) {
                         if closes!(target) && keeps(target, eid) {
-                            collected.push((eid, node_id, target));
+                            emit!(eid, node_id, target, target);
                         }
                     }
                 } else {
                     store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
                         if keeps(target, eid) {
-                            collected.push((eid, node_id, target));
+                            emit!(eid, node_id, target, target);
                         }
                     });
                 }
@@ -8518,13 +8654,13 @@ impl ExpandOperator {
                 if typed.is_some() {
                     for &(source, eid) in walk_list!(in_of(&typed, node_id)) {
                         if closes!(source) && keeps(source, eid) {
-                            collected.push((eid, source, node_id));
+                            emit!(eid, source, node_id, source);
                         }
                     }
                 } else {
                     store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
                         if keeps(source, eid) {
-                            collected.push((eid, source, node_id));
+                            emit!(eid, source, node_id, source);
                         }
                     });
                 }
@@ -8532,7 +8668,7 @@ impl ExpandOperator {
             Direction::Both if typed.is_some() => {
                 for &(target, eid) in walk_list!(out_of(&typed, node_id)) {
                     if closes!(target) && keeps(target, eid) {
-                        collected.push((eid, node_id, target));
+                        emit!(eid, node_id, target, target);
                     }
                 }
                 // A second sorted list, so the cursors start over.
@@ -8547,14 +8683,14 @@ impl ExpandOperator {
                         continue;
                     }
                     if closes!(source) && keeps(source, eid) {
-                        collected.push((eid, source, node_id));
+                        emit!(eid, source, node_id, source);
                     }
                 }
             }
             Direction::Both => {
                 store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
                     if keeps(target, eid) {
-                        collected.push((eid, node_id, target));
+                        emit!(eid, node_id, target, target);
                     }
                 });
                 store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
@@ -8567,7 +8703,7 @@ impl ExpandOperator {
                         return;
                     }
                     if keeps(source, eid) {
-                        collected.push((eid, source, node_id));
+                        emit!(eid, source, node_id, source);
                     }
                 });
             }
@@ -8579,6 +8715,7 @@ impl ExpandOperator {
         // `store.get_node(node_id)` per edge purely to recover a value it
         // already had (#592).
         self.current_edges = collected;
+        self.current_close_edges = closes;
 
         self.edge_index = 0;
         Ok(())
@@ -8641,12 +8778,13 @@ impl PhysicalOperator for ExpandOperator {
             // If we have edges from current record, return them
             if self.edge_index < self.current_edges.len() {
                 let (edge_id, src, tgt) = self.current_edges[self.edge_index];
+                let close = self.current_close_edges.get(self.edge_index).copied();
                 self.edge_index += 1;
 
                 // `&Record` out of `self`, and `expanded_record` also borrows
                 // `self` -- both immutable, so no clone of the source row.
                 let base = self.current_record.as_ref().unwrap();
-                let new_record = self.expanded_record(base, edge_id, src, tgt, store);
+                let new_record = self.expanded_record(base, edge_id, src, tgt, close, store);
 
                 self.emitted_for_current = true;
                 return Ok(Some(new_record));
@@ -8679,13 +8817,14 @@ impl PhysicalOperator for ExpandOperator {
 
                 for i in 0..take {
                     let (edge_id, src, tgt) = self.current_edges[self.edge_index + i];
+                    let close = self.current_close_edges.get(self.edge_index + i).copied();
                     // Same one implementation the row-at-a-time path uses. The
                     // isomorphism bookkeeping and the path-variable handling
                     // used to be written out again here, and the comments said
                     // why that was dangerous rather than removing the danger.
                     let base = self.current_record.as_ref().unwrap();
                     expanded_records.push(
-                        self.expanded_record(base, edge_id, src, tgt, store));
+                        self.expanded_record(base, edge_id, src, tgt, close, store));
                 }
                 self.edge_index += take;
                 self.emitted_for_current = true;
@@ -8724,6 +8863,7 @@ impl PhysicalOperator for ExpandOperator {
         self.input.reset();
         self.current_record = None;
         self.current_edges.clear();
+        self.current_close_edges.clear();
         self.edge_index = 0;
         // Without this, a re-run would think the first source record had
         // already emitted and would swallow its null row (#726).
@@ -8736,6 +8876,36 @@ impl PhysicalOperator for ExpandOperator {
             Direction::Incoming => format!("({})<-[:{}]-({})", self.source_var, if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") }, self.target_var),
             Direction::Both => format!("({})--[:{}]--({})", self.source_var, if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") }, self.target_var),
         };
+        if let (Some(fused), Some(close_var)) = (&self.fused_close, &self.co_neighbour_var) {
+            // Two sorted adjacency lists walked with forward-only cursors is
+            // the two-way case of a leapfrog trie join: the name says what the
+            // operator computes, the details say over which lists.
+            let types = if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") };
+            let own = match self.direction {
+                Direction::Outgoing => format!("N_out({})", self.source_var),
+                Direction::Incoming => format!("N_in({})", self.source_var),
+                Direction::Both => format!("N_both({})", self.source_var),
+            };
+            // The close runs target -> close_var, so an outgoing close is a
+            // membership of close_var's *incoming* list.
+            let close = match self.co_neighbour_dir {
+                Direction::Outgoing => format!("N_in({close_var})"),
+                Direction::Incoming => format!("N_out({close_var})"),
+                Direction::Both => format!("N_both({close_var})"),
+            };
+            let edges = match (&self.edge_var, &fused.edge_var) {
+                (None, None) => String::new(),
+                (a, b) => format!(
+                    " binds {}",
+                    [a, b].iter().filter_map(|v| v.as_ref().map(|v| v.to_string())).collect::<Vec<_>>().join(", ")
+                ),
+            };
+            return OperatorDescription {
+                name: "TrieJoin".to_string(),
+                details: format!("{} ∈ {own}[:{types}] ∩ {close}[:{types}]{edges}", self.target_var),
+                children: vec![self.input.describe()],
+            };
+        }
         OperatorDescription {
             name: "Expand".to_string(),
             details: dir_str,
