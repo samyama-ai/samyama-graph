@@ -225,8 +225,10 @@ Good first contributions, roughly easiest to hardest:
 3. **Cypher functions** — the supported function list is in
    [`CLAUDE.md`](CLAUDE.md); standard OpenCypher has more that could be added
    (parser + executor + tests).
-4. **Open issues / roadmap items** — see [`ROADMAP.md`](ROADMAP.md) and known
-   gaps noted in `docs/CYPHER_COMPATIBILITY.md`.
+4. **Open issues** — see the
+   [issue tracker](https://github.com/samyama-ai/samyama-graph/issues), where
+   each issue is a concrete unit of work, and known gaps noted in
+   `docs/CYPHER_COMPATIBILITY.md`.
 
 ## Project Layout
 
