@@ -25,7 +25,7 @@ use std::path::Path;
 
 use samyama_sdk::{GraphStore, PropertyValue};
 
-#[path = "../examples/health_systems_common/mod.rs"]
+#[path = "../examples/common/health_systems_common.rs"]
 mod health_systems_common;
 
 #[path = "../examples/common/value_distribution.rs"]

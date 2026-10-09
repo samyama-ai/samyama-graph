@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/surveillance_common.rs"]
 mod surveillance_common;
 use surveillance_common::{format_duration, format_num};
 

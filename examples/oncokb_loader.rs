@@ -32,6 +32,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, Label, NodeId, PropertyValue, SamyamaClient};
 
+#[path = "common/oncokb_common.rs"]
 mod oncokb_common;
 use oncokb_common::{load_actionable_variants_json, load_curated_genes_json};
 

@@ -30,8 +30,9 @@ Purposes below are taken from each file's own header comment.
 | [Maintainer tools](#maintainer-tools) | 3 | No - internal |
 | [Hardware client sketch](#hardware-client-sketch) | 1 | No - internal |
 
-Helper code shared between programs lives in the 17 `*_common/` directories and in
-`examples/common/`; they hold no runnable program.
+Helper code shared between programs lives in `examples/common/`, which holds no
+runnable program. A dataset's loader and its benchmarks share `common/<dataset>_common.rs`,
+included with `#[path = "common/<dataset>_common.rs"] mod <dataset>_common;`.
 
 
 ## Demos on built-in data

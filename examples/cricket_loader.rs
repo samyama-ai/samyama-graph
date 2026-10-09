@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/cricket_common.rs"]
 mod cricket_common;
 use cricket_common::{format_duration, format_num};
 

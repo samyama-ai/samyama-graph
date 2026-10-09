@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/aact_biomarker_common.rs"]
 mod aact_biomarker_common;
 use aact_biomarker_common::{
     build_gene_set_and_index, build_trial_index, load_eligibilities,

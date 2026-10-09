@@ -114,9 +114,13 @@ fn classify(rows: usize, oracle: Option<&Oracle>) -> (&'static str, bool) {
     }
 }
 
+#[path = "common/druginteractions_common.rs"]
 mod druginteractions_common;
+#[path = "common/health_determinants_common.rs"]
 mod health_determinants_common;
+#[path = "common/health_systems_common.rs"]
 mod health_systems_common;
+#[path = "common/surveillance_common.rs"]
 mod surveillance_common;
 
 type Error = Box<dyn std::error::Error>;

@@ -17,13 +17,17 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+/// The OpenAPI document, relative to the repository root. It is both a shipped
+/// surface and the source of the documented paths compared below.
+const OPENAPI: &str = "openapi/openapi.yaml";
+
 /// The shipped surfaces. Their absence is a packaging failure, not a drift.
 const SURFACES: &[(&str, &str)] = &[
     ("rust_sdk", "crates/samyama-sdk/src/lib.rs"),
     ("python_sdk", "sdk/python/pyproject.toml"),
     ("typescript_sdk", "sdk/typescript/package.json"),
     ("cli", "cli/Cargo.toml"),
-    ("openapi", "api/openapi.yaml"),
+    ("openapi", OPENAPI),
 ];
 
 /// Collapse path parameters so the two spellings compare equal.
@@ -151,7 +155,7 @@ fn main() {
         }
     }
 
-    let openapi = repo.join("api/openapi.yaml");
+    let openapi = repo.join(OPENAPI);
     let documented: BTreeSet<String> = std::fs::read_to_string(&openapi)
         .map(|t| documented_paths(&t))
         .unwrap_or_default();

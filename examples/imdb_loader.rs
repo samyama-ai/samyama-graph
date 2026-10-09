@@ -30,6 +30,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/imdb_common.rs"]
 mod imdb_common;
 use imdb_common::{format_duration, format_num};
 

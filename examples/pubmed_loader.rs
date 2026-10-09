@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/pubmed_common.rs"]
 mod pubmed_common;
 use pubmed_common::{format_duration, format_num};
 

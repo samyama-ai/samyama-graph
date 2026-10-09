@@ -23,6 +23,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/civic_common.rs"]
 mod civic_common;
 use civic_common::{
     build_clinvar_index, build_gene_symbol_index, format_duration, format_num,

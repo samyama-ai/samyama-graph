@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/aact_common.rs"]
 mod aact_common;
 use aact_common::{format_duration, format_num};
 

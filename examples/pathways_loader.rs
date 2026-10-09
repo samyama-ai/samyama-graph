@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/pathways_common.rs"]
 mod pathways_common;
 use pathways_common::{format_duration, format_num};
 

@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/druginteractions_common.rs"]
 mod druginteractions_common;
 use druginteractions_common::{format_duration, format_num};
 

@@ -96,6 +96,9 @@ fn yaml_version_values(text: &str) -> Vec<String> {
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The OpenAPI document, relative to the repository root.
+const OPENAPI: &str = "openapi/openapi.yaml";
+
 /// The `[package] version` of a Cargo manifest — not a dependency's version.
 fn cargo_package_version(rel: &str) -> Option<String> {
     let text = read(rel);
@@ -217,13 +220,13 @@ fn the_typescript_package_and_its_lockfile_agree_with_the_version_of_record() {
 fn the_openapi_document_advertises_the_version_of_record() {
     // Including the examples: an example is what a reader copies, and a
     // status example claiming 0.7.0 is a published claim about the server.
-    let text = read("api/openapi.yaml");
+    let text = read(OPENAPI);
     let values = yaml_version_values(&text);
-    assert!(!values.is_empty(), "no version fields found in api/openapi.yaml — the scan is vacuous");
+    assert!(!values.is_empty(), "no version fields found in {OPENAPI} — the scan is vacuous");
     let stale: Vec<String> = values.into_iter().filter(|v| v != VERSION).collect();
     assert!(
         stale.is_empty(),
-        "api/openapi.yaml mentions {stale:?}; the version of record is {VERSION}. \
+        "{OPENAPI} mentions {stale:?}; the version of record is {VERSION}. \
          Examples count — they are what a reader copies."
     );
 }
@@ -285,7 +288,7 @@ fn the_release_checklist_locations_all_exist() {
         "sdk/python/pyproject.toml",
         "sdk/typescript/package.json",
         "sdk/typescript/package-lock.json",
-        "api/openapi.yaml",
+        OPENAPI,
         "src/lib.rs",
         "CLAUDE.md",
         "README.md",
