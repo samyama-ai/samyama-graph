@@ -197,7 +197,14 @@ impl VectorIndexManager {
         }
     }
 
-    /// Search an index
+    /// Search an index.
+    ///
+    /// No index is an error, not an empty answer. It used to return `[]`, so a
+    /// vector search over an index that was never created, or that did not
+    /// come back after a restart, read exactly like "nothing is similar" --
+    /// the one failure in the index contract that nothing could see (#1660).
+    /// The full-text procedure already says `no full-text index named ...`;
+    /// this is the same rule for vectors.
     pub fn search(
         &self,
         label: &str,
@@ -205,11 +212,29 @@ impl VectorIndexManager {
         query: &[f32],
         k: usize,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
-        if let Some(index_lock) = self.get_index(label, property_key) {
-            let index = index_lock.read().unwrap();
-            return index.search(query, k);
-        }
-        Ok(Vec::new())
+        let index_lock = self.get_index(label, property_key).ok_or_else(|| self.missing(label, property_key))?;
+        let index = index_lock.read().unwrap();
+        index.search(query, k)
+    }
+
+    /// The error a search over an index that does not exist raises. Names the
+    /// indexes that do, so a typo in the label or property is visible.
+    fn missing(&self, label: &str, property_key: &str) -> VectorError {
+        let known: Vec<String> = self
+            .indices
+            .read()
+            .unwrap()
+            .keys()
+            .map(|k| format!(":{}({})", k.label, k.property_key))
+            .collect();
+        VectorError::IndexError(format!(
+            "no vector index on :{label}({property_key}). {}",
+            if known.is_empty() {
+                format!("None exists; CREATE VECTOR INDEX <name> FOR (n:{label}) ON (n.{property_key}) creates one.")
+            } else {
+                format!("Known vector indexes: {}", known.join(", "))
+            }
+        ))
     }
 
     /// Every index as a persistable declaration (#1477).
@@ -302,9 +327,8 @@ impl VectorIndexManager {
         k: usize,
         keep: impl Fn(NodeId) -> bool,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
-        let Some(index_lock) = self.get_index(label, property_key) else {
-            return Ok(Vec::new());
-        };
+        // No index is an error, as in [`Self::search`] (#1660).
+        let index_lock = self.get_index(label, property_key).ok_or_else(|| self.missing(label, property_key))?;
         let index = index_lock.read().unwrap();
         widen(index.len(), k, |fetch| index.search(query, fetch), &keep)
     }
@@ -533,14 +557,21 @@ mod tests {
     }
 
     #[test]
-    fn adding_to_a_missing_index_stores_nothing_and_searching_it_finds_nothing() {
+    fn adding_to_or_searching_a_missing_index_is_an_error() {
         let mgr = VectorIndexManager::new();
         assert!(matches!(
             mgr.add_vector("Nope", "v", NodeId::new(1), &vec![1.0, 0.0]),
             Err(VectorError::IndexError(_))
         ));
         assert!(mgr.list_indices().is_empty());
-        assert!(mgr.search("Nope", "v", &[1.0, 0.0], 3).unwrap().is_empty());
+        // Searching it is an error too, naming the index (#1660).
+        let err = mgr.search("Nope", "v", &[1.0, 0.0], 3).unwrap_err().to_string();
+        assert!(err.contains("no vector index on :Nope(v)"), "{err}");
+        assert!(err.contains("CREATE VECTOR INDEX"), "{err}");
+        // With one index present, the error says which exist.
+        mgr.create_index("Doc", "v", 2, DistanceMetric::Cosine).unwrap();
+        let err = mgr.search("Nope", "v", &[1.0, 0.0], 3).unwrap_err().to_string();
+        assert!(err.contains(":Doc(v)"), "{err}");
     }
 
     #[test]

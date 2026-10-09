@@ -326,12 +326,11 @@ async fn vector_dimension_mismatches_are_vector_errors() {
         .await
         .unwrap_err();
     assert!(matches!(err, SamyamaError::VectorError(_)), "{err:?}");
-    // A search on an index that does not exist finds nothing.
-    assert!(c
-        .vector_search("Nope", "emb", &[1.0], 3)
-        .await
-        .unwrap()
-        .is_empty());
+    // A search on an index that does not exist is an error too, naming the
+    // index rather than answering `[]` as if nothing were similar (#1660).
+    let err = c.vector_search("Nope", "emb", &[1.0], 3).await.unwrap_err();
+    assert!(matches!(err, SamyamaError::VectorError(_)), "{err:?}");
+    assert!(err.to_string().contains("no vector index on :Nope(emb)"), "{err}");
 }
 
 #[tokio::test]
