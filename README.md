@@ -11,9 +11,6 @@
     <a href="https://graph.samyama.cloud/book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
     <a href="https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d"><img src="https://img.shields.io/badge/community-WhatsApp-25D366?logo=whatsapp&logoColor=white" alt="WhatsApp Community"></a>
   </p>
-  <p align="center">
-    💬 <strong><a href="https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d">Join the Samyama OSS community on WhatsApp</a></strong> — questions, help, and updates.
-  </p>
 </p>
 
 ---
@@ -24,88 +21,42 @@ Samyama Graph is a Rust-native graph-vector database that lets developers store,
 
 It brings together graph traversal, OpenCypher-style querying, vector search, graph algorithms, and Redis-compatible access, making it useful for GraphRAG, knowledge graphs, AI agent memory, and large-scale relationship analytics.
 
-### Quickstart
+## Quickstart
 
-#### Option 1 — Run with Docker Compose
+### Option 1 — Docker
 
-**Step 1 — Prerequisites**
+Pulling the image needs no registry account: it is public on GitHub Container
+Registry. `latest` is the newest release; pin a version such as `:1.11.0` for a
+reproducible setup.
 
-- ✅ Docker Desktop installed and running — [Watch setup video →](https://samyama.dev/videos)
-- ✅ No account or credentials needed — the image is public on GitHub Container Registry (`latest` is the newest release; pin a version such as `:1.11.0` for a reproducible setup)
-
-**Step 2 — Pull the Docker image**
-
-```bash
-docker pull ghcr.io/samyama-ai/samyama-graph:latest
-```
-
-**Step 3 — Docker Compose setup**
-
-Create a clean folder, then create `docker-compose.yml` inside it.
-
-Linux & Mac:
-
-```bash
-mkdir -p samyama-graph
-cd samyama-graph
-touch docker-compose.yml
-```
-
-Windows (PowerShell):
-
-```powershell
-mkdir C:\samyama-graph
-cd C:\samyama-graph
-notepad docker-compose.yml
-```
-
-> ℹ️ Replace `<your-openai-api-key>` with your actual key. Generate one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+**Step 1 — Write `docker-compose.yml`** in an empty folder:
 
 ```yaml
-version: "3.9"
 services:
   samyama-graph:
     image: ghcr.io/samyama-ai/samyama-graph:latest
     container_name: samyama-graph
     restart: unless-stopped
     ports:
-      - "6379:6379"
-      - "8080:8080"
+      - "6379:6379"   # RESP (Redis protocol)
+      - "8080:8080"   # HTTP API
     environment:
-      EMBED_ENABLED: "true"
-      EMBED_PROVIDER: openai
-      EMBED_MODEL: text-embedding-3-small
-      EMBED_API_KEY: <your-openai-api-key>
-      EMBED_DIMENSION: 1024
+      # Lets the hosted visualizer (Step 4) call this server from your browser.
+      SAMYAMA_CORS_ORIGINS: https://graph.samyama.cloud
     volumes:
       - samyama-data:/app/samyama_data
-    networks:
-      - samyama-network
-networks:
-  samyama-network:
-    driver: bridge
 volumes:
   samyama-data:
 ```
 
-**Step 4 — Start the server**
+**Step 2 — Start it**
 
 ```bash
 docker compose up -d
+docker logs -f samyama-graph     # Ctrl-C to stop following the log
 ```
 
-Server will be available at http://localhost:8080
-
-**Step 5 — Verify it's running**
-
-```bash
-docker ps
-docker logs -f samyama-graph
-```
-
-You should see `samyama-graph` with status `Up`.
-
-**Step 6 — Run your first query**
+**Step 3 — Run your first query**
 
 ```bash
 curl -X POST http://localhost:8080/api/query \
@@ -117,15 +68,8 @@ curl -X POST http://localhost:8080/api/query \
 {"columns":["a.name","b.name"],"edges":[],"nodes":[],"records":[["Alice","Bob"]]}
 ```
 
-Then read it back:
-
-```bash
-curl -X POST http://localhost:8080/api/query \
-  -H 'content-type: application/json' \
-  -d '{"query":"MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name","graph":"default"}'
-```
-
-**Parameters.** A runtime value goes in `params`, not in the query text:
+Runtime values go in `params`, never in the query text — they are bound, so a
+value is never re-read as Cypher:
 
 ```bash
 curl -X POST http://localhost:8080/api/query \
@@ -133,140 +77,35 @@ curl -X POST http://localhost:8080/api/query \
   -d '{"query":"MATCH (p:Person) WHERE p.name = $name RETURN p.name","params":{"name":"Alice"}}'
 ```
 
-The values are bound, so a value is never re-read as Cypher — `{"name": "' OR
-1=1 --"}` matches a person with that name and nothing else. JSON integers,
-floats, booleans, strings, `null`, lists and nested objects all map through; a
-number too large for an `i64` is refused rather than silently converted. A key
-the query never mentions is refused too, because ignoring it would drop a typo
-in silence. The same values go over RESP as trailing pairs:
-`GRAPH.QUERY default "MATCH (p:Person) WHERE p.name = $name RETURN p.name" name Alice`.
+**Step 4 — Explore it visually (optional).** Open the hosted visualizer at
+<https://graph.samyama.cloud/>. The engine itself needs no account, but the
+visualizer asks you to sign up or sign in. Then click **Home**, enter
+`http://localhost:8080` and click **Connect**. Without the `SAMYAMA_CORS_ORIGINS`
+line from Step 1 the browser refuses the call — deliberately, because
+`/api/query` runs arbitrary Cypher including `DELETE`
+([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)).
 
-**Step 7 — Samyama Visualizer**
-
-Visualize your imported graph data using the Samyama cloud visualizer at https://graph.samyama.cloud/
-
-The visualizer is a page on the public web calling a server on your machine, so
-the server has to name it. Start Samyama with the origin allowed:
+**Step 5 — Stop or reset**
 
 ```bash
-samyama --cors-origin https://graph.samyama.cloud
+docker compose down        # stop
+docker compose down -v     # stop and delete all graph data in the volume
 ```
 
-or `SAMYAMA_CORS_ORIGINS=https://graph.samyama.cloud`. Without it the browser
-refuses the call. **This is deliberate** — `/api/query` runs arbitrary Cypher
-including `DELETE`, so until v1.9 any web page you happened to visit could
-drive it ([#1328](https://github.com/samyama-ai/samyama-graph/issues/1328)).
-The server also listens on loopback unless `--host` says otherwise.
+The server needs no credential by default. To require a bearer token, serve
+TLS, or enable auto-embedding, see [docs/DATA-HANDLING.md](docs/DATA-HANDLING.md).
+To load a real dataset, pick one from the [case studies](#case-studies--prove-it-yourself).
 
-To require a credential as well:
+### Option 2 — Build from source
 
-```bash
-samyama auth-token ops >> credentials     # prints the token once; store the line
-samyama --auth-file credentials --host 0.0.0.0
-```
-
-Every request then needs `Authorization: Bearer <token>`, on every route.
-Without `--auth-file` the API reads no credential, which is the default and
-what every release before this one did. A token is all-or-nothing: there are no
-users, roles or per-graph grants yet.
-
-To serve TLS as well:
-
-```bash
-samyama --tls-cert fullchain.pem --tls-key key.pem --auth-file credentials --host 0.0.0.0
-```
-
-Both are required together — one without the other stops the server rather
-than quietly serving cleartext — and there is no self-signed fallback. Plain
-HTTP remains the default.
-
-1. Open https://graph.samyama.cloud/ in your browser.
-2. Sign up for a new account, or sign in if you already have one.
-3. From the left sidebar, click **Home**.
-4. In the connection field, enter your local graph server URL: `http://localhost:8080`.
-5. Click **Connect** — the status will change to **Connected**.
-
-<details>
-<summary><strong>Step 8 — Optional: Load sample dataset</strong> <sub>Optional</sub></summary>
-
-**8a — Download snapshot**
-
-| Dataset | Description | File |
-|---------|-------------|------|
-| DBMS Research | Database management systems research knowledge graph | [`dbms-research.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v7/dbms-research.sgsnap) |
-
-Tip: Save the file in the same folder as `docker-compose.yml` to avoid path errors.
-- Windows: `C:\samyama-graph\dbms-research.sgsnap`
-- Linux / Mac: `./samyama-graph/dbms-research.sgsnap`
-
-**8b — Create tenant**
-
-Linux & Mac:
-
-```bash
-curl -X POST http://localhost:8080/api/tenants \
-  -H "Content-Type: application/json" \
-  -d '{"id": "dbms-research", "name": "dbms-research"}'
-```
-
-Windows (PowerShell):
-
-```powershell
-curl.exe -X POST http://localhost:8080/api/tenants `
-  -H "Content-Type: application/json" `
-  -d '{"id": "dbms-research", "name": "dbms-research"}'
-```
-
-**8c — Import snapshot**
-
-Linux & Mac:
-
-```bash
-curl -X POST http://localhost:8080/api/snapshot/import \
-  -F "file=@./samyama-graph/dbms-research.sgsnap" \
-  -F "tenant_id=dbms-research"
-```
-
-Windows (PowerShell):
-
-```powershell
-curl.exe -X POST http://localhost:8080/api/snapshot/import `
-  -F "file=@C:\samyama-graph\dbms-research.sgsnap" `
-  -F "tenant_id=dbms-research"
-```
-
-Note: On Windows always use `curl.exe` — PowerShell's `curl` alias does not support `-F`.
-
-</details>
-
-**Step 8 — Stop / reset**
-
-Stop the server:
-
-```bash
-docker compose down
-```
-
-Reset all data (⚠️ deletes volume):
-
-```bash
-docker compose down -v
-```
-
-⚠️ This deletes all graph data stored in the Docker volume.
-
-#### Option 2 — Build from source
-
-**System packages.** `zstd-sys` generates its bindings with `bindgen`, which needs libclang.
-Without it the build fails part-way through with a misleading `'stddef.h' file not found`.
+`zstd-sys` generates its bindings with `bindgen`, which needs libclang; without it
+the build fails part-way with a misleading `'stddef.h' file not found`.
 
 ```bash
 # Debian / Ubuntu
 sudo apt-get install -y build-essential cmake pkg-config libssl-dev clang libclang-dev
-
 # Fedora / RHEL
 sudo dnf install -y gcc gcc-c++ cmake pkgconf-pkg-config openssl-devel clang clang-devel
-
 # macOS — the Xcode Command Line Tools already provide clang
 xcode-select --install
 ```
@@ -274,38 +113,36 @@ xcode-select --install
 Then, with a stable Rust toolchain from [rustup](https://rustup.rs/):
 
 ```bash
-# Build from source
 git clone https://github.com/samyama-ai/samyama-graph && cd samyama-graph
 cargo build --release
 ./target/release/samyama    # RESP on :6379, HTTP on :8080
-```
 
-```bash
 # Connect with any Redis client
 redis-cli -p 6379
 GRAPH.QUERY mydb "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})"
 GRAPH.QUERY mydb "MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name"
 ```
 
+## Clients
+
+| Language | Install | Connect |
+|----------|---------|---------|
+| Python | `pip install samyama` | `SamyamaClient.connect("http://localhost:8080")`, or `SamyamaClient.embedded()` to run the engine in-process |
+| TypeScript | `npm install samyama-sdk` | `SamyamaClient.connectHttp("http://localhost:8080")` (ESM, Node 18+) |
+| Rust | `samyama-sdk = { git = "https://github.com/samyama-ai/samyama-graph", tag = "v1.11.0" }` — not on crates.io yet | `RemoteClient` over HTTP, or `EmbeddedClient::new()` in-process |
+
+Any Redis client also works over RESP on port 6379. Details:
+[Python](sdk/python/README.md) · [TypeScript](sdk/typescript/README.md) · [Rust](crates/samyama-sdk/README.md).
+
 ## What can you build with Samyama Graph?
-
-Samyama Graph is useful when your application needs both connected-data reasoning and semantic retrieval.
-
-You can use it to build:
 
 - **GraphRAG systems** that combine vector search with graph traversal
 - **Knowledge graph applications** for enterprise, research, healthcare, and operations data
 - **AI agent memory** where entities, tools, actions, and context are stored as a graph
 - **Biomedical and clinical graphs** across papers, trials, pathways, drugs, and conditions
-- **Fraud and investigation graphs** for relationship discovery and pattern analysis
-- **Infrastructure and dependency graphs** for impact analysis and root-cause exploration
-- **Large-scale graph analytics** using built-in graph algorithms
+- **Fraud, investigation, infrastructure and dependency graphs** for pattern and impact analysis
 
----
-
-We loaded the entire PubMed corpus — every article published since 1966 — plus ClinicalTrials.gov, Reactome pathways, and DrugBank into **one graph**. Then we asked:
-
-> *"What drugs are most tested in cancer clinical trials?"*
+We loaded the entire PubMed corpus plus ClinicalTrials.gov, Reactome pathways, and DrugBank into **one graph**, then asked *"What drugs are most tested in cancer clinical trials?"*
 
 ```cypher
 MATCH (m:MeSHTerm)<-[:ANNOTATED_WITH]-(a:Article)
@@ -327,18 +164,10 @@ ORDER BY trials DESC LIMIT 5
 
 That is query `XK02` in
 [`verified-results.csv`](https://graph.samyama.cloud/book/data/benchmark/verified-results.csv):
-10,250.2 ms, 10 rows, first row `Placebo, 521`, measured 2026-04-02 on one
-r6a.8xlarge and not re-measured since. The CSV records only the first row of
-each result; rows 2–5 above are from the query listing on the benchmark page,
-not from the CSV. The 5.2 s this line used to quote came from an earlier run
-that day and is not what the CSV records
-([#1503](https://github.com/samyama-ai/samyama-graph/issues/1503)).
+10,250.2 ms, measured 2026-04-02 on one r6a.8xlarge and not re-measured since.
+Provenance of each row is in [docs/BENCHMARKS.md](docs/BENCHMARKS.md#biomedical-scale-and-cross-kg-queries).
 
 [See all 100 benchmark queries →](https://graph.samyama.cloud/book/biomedical_benchmark.html)
-
-> ⭐ **Find this useful?** A GitHub star helps more developers discover Samyama Graph.
-
----
 
 ## Demo
 
@@ -346,76 +175,47 @@ that day and is not what the CSV records
 
 [![Samyama Graph Simulation](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/simulation-preview.gif)](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v2/samyama-cricket-demo.mp4)
 
-*Click for full demo (1:56)*
-
-### Infrastructure failure-propagation
-
-One query family — reachability, criticality, N-1 contingency — runs identically across infrastructure domains. Both demos use real **CC BY 4.0** data.
-
-**Power Grid** — IEEE 14-bus system (pglib-opf): degree centrality → connectivity → N-1 line contingency.
-
-![Power grid failure-propagation demo](docs/demos/powergrid.gif)
-
-**Telecom** — GÉANT 2012 pan-European backbone (Internet Topology Zoo): 40 PoPs across 37 countries; N-1 link contingency exposes 8 single points of failure.
-
-![Telecom failure-propagation demo](docs/demos/telecom.gif)
-
----
+*Click for the full demo (1:56).*
 
 ## Case Studies — prove it yourself
 
-[`case_studies/`](case_studies) lets anyone who clones this repo download a real
-public knowledge graph, import it, run showcase Cypher (and vector search), and
-render the session as a narrated GIF — **one command, no database to install**.
-Every showcase query is gated to return real rows before any GIF is recorded
-(see the [Definition of Done](case_studies/DEFINITION_OF_DONE.md)).
+[`case_studies/`](case_studies) downloads a real public knowledge graph, imports
+it, runs showcase Cypher, and renders the session as a narrated GIF — one
+command. Every showcase query is gated to return real rows
+([Definition of Done](case_studies/DEFINITION_OF_DONE.md)).
 
 ```bash
 cargo build --release && pip install rich requests
 cd case_studies/cricket && ./run.sh          # fetch snapshot → import → validate → demo
-RECORD=1 ./run.sh                            # also (re)generate demo.gif
 ```
 
-Each snapshot is small enough to run on a laptop; every query returns real rows.
-GIFs can't pause in a browser, so each domain also ships its `demo.cast` — replay
-it pausably (`space`) with `asciinema play case_studies/<domain>/demo.cast`.
+| Domain | Scale (nodes / edges) | Highlight |
+|--------|-------|-----------|
+| [cricket](case_studies/cricket) | 37K / 1.4M | dismissal-rivalry networks, venues, awards |
+| [drug-interactions](case_studies/drug-interactions) | 245K / 388K | polypharmacy shared-target risk, CYP hubs |
+| [pathways](case_studies/pathways) | 119K / 835K | protein hubs (TP53), pathway crosstalk |
+| [dbms-research](case_studies/dbms-research) | 19K · 2 HNSW | **vector search** — semantic "nearest topics" |
+| [imdb-movies](case_studies/imdb-movies) | 1.94M / 2.63M | top-rated films, director–actor pairs, genre trends |
 
-| Domain | Scale | Highlight | Snapshot | Demo |
-|--------|-------|-----------|----------|------|
-| [cricket](case_studies/cricket) | 37K / 1.4M | dismissal-rivalry networks, venues, awards | [`cricket.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v1/cricket.sgsnap) | [gif](case_studies/cricket/demo.gif) |
-| [drug-interactions](case_studies/drug-interactions) | 245K / 388K | polypharmacy shared-target risk, CYP hubs | [`druginteractions.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v5/druginteractions.sgsnap) | [gif](case_studies/drug-interactions/demo.gif) |
-| [surveillance](case_studies/surveillance) | 217K / 241K | WHO disease burden + immunization gaps | [`surveillance.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v4/surveillance.sgsnap) | [gif](case_studies/surveillance/demo.gif) |
-| [health-determinants](case_studies/health-determinants) | 240K / 240K | air, water, poverty — the upstream "why" | [`health-determinants.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v6/health-determinants.sgsnap) | [gif](case_studies/health-determinants/demo.gif) |
-| [health-systems](case_studies/health-systems) | 8.7K / 8.4K | WHO emergency-preparedness (SPAR) scores | [`health-systems.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v6/health-systems.sgsnap) | [gif](case_studies/health-systems/demo.gif) |
-| [pathways](case_studies/pathways) | 119K / 835K | protein hubs (TP53), pathway crosstalk | [`pathways.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v3/pathways.sgsnap) | [gif](case_studies/pathways/demo.gif) |
-| [dbms-research](case_studies/dbms-research) | 19K · 2 HNSW | **vector search** — semantic "nearest topics" | [`dbms-research.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v7/dbms-research.sgsnap) | [gif](case_studies/dbms-research/demo.gif) |
-| [imdb-movies](case_studies/imdb-movies) | 1.94M / 2.63M | top-rated films, director–actor power pairs, genre trends, decade arcs | [`imdb.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v8/imdb.sgsnap) | [gif](case_studies/imdb-movies/demo.gif) |
-| [football](case_studies/football) | 16K / 12K | top scorers, winning nations, busiest stadiums, multi-tournament veterans | [`football.sgsnap`](https://github.com/samyama-ai/samyama-graph/releases/download/kg-snapshots-v8/football.sgsnap) | [gif](case_studies/football/demo.gif) |
-
-*surveillance + health-determinants + health-systems federate by `Country.iso_code`
-into a public-health trifecta.* [Browse the catalogue →](case_studies)
-
----
+Plus surveillance, health-determinants, health-systems and football — [browse the catalogue →](case_studies)
 
 ## Why Samyama Graph?
 
-**If your data has relationships, you need a graph database.** If your graph database can't handle a billion edges on a single machine, you need Samyama.
-
 | What | How |
 |------|-----|
-| **74M nodes, 1B edges** | Loaded PubMed + ClinicalTrials.gov + Reactome + DrugBank on one r6a.8xlarge; that run cost about $2.50 at the spot price of the day, which is a fact about one run and not a price list |
-| **96 of 100 queries return real data** | Point lookups, multi-hop traversals, cross-KG aggregations, measured 2026-04-02 on one r6a.8xlarge and not re-measured since — no harness suite runs this benchmark, so nothing here would notice it going stale — [all 100 queries and their timings](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
-| **Four algorithms scale with cores** | PageRank, LCC, CDLP and triangle counting are Rayon-parallel, as are scan, filter and compaction. Measured at 16 cores: 3 of 7 frontier algorithms reach ≥0.6 efficiency, and `wcc`, `betweenness` and `closeness` are sequential at 0.06 — one thread on sixteen (`CH-ALGO-PARALLEL`, ALGO-09) |
+| **74M nodes, 1B edges** | PubMed + ClinicalTrials.gov + Reactome + DrugBank on one r6a.8xlarge |
+| **96 of 100 queries return real data** | Point lookups, multi-hop traversals and cross-KG aggregations, measured 2026-04-02 on one r6a.8xlarge and not re-measured since — [all 100 queries](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
+| **Four algorithms scale with cores** | PageRank, LCC, CDLP and triangle counting are Rayon-parallel; WCC, betweenness and closeness run on one thread (`CH-ALGO-PARALLEL`, ALGO-09) |
 | **LDBC suites run in-tree** | SNB Interactive 21/21 and SNB BI 20/20 at SF1, no timeouts; Graphalytics 12/12 against the LDBC reference answers |
 | **200 resident bytes per edge** | Measured on LDBC SNB SF10 (176M edges) by `CH-MEM-01`, against a 256 B/edge target |
-| **Transactions with a published isolation table** | `BEGIN` / `COMMIT` / `ROLLBACK` over RESP and HTTP; every anomaly mapped to the test that pins it in [`docs/ACID_GUARANTEES.md`](docs/ACID_GUARANTEES.md) |
+| **Transactions with a published isolation table** | `BEGIN` / `COMMIT` / `ROLLBACK` over RESP and HTTP — [`docs/ACID_GUARANTEES.md`](docs/ACID_GUARANTEES.md) |
 | **Every headline number re-measured on a schedule** | A conformance harness publishes `SCORECARD.json`, and a regression gate blocks the release tag on a stale or red verdict |
-
----
 
 ## The 30-Second Tour
 
-**Cypher queries** — MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions. **99.9% of the openCypher TCK's evaluated scenarios pass** (3,845 of 3,847, at 98.7% coverage of the 3,897-scenario corpus, measured 2026-09-15), and **neither of the two remaining failures is a wrong answer** — both raise; on the same corpus and comparator Neo4j 5 scores 79.5%. That is conformance only — not performance or scale — and the competitor figure is a fixed baseline from one run. See [`docs/CYPHER_COMPATIBILITY.md`](docs/CYPHER_COMPATIBILITY.md) for a per-feature matrix verified by an executable probe, and [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the full accounting.
+**Cypher** — MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions.
+99.9% of the openCypher TCK's evaluated scenarios pass (3,845 of 3,847, at 98.7%
+coverage of the corpus, measured 2026-09-15) — see [`docs/CYPHER_COMPATIBILITY.md`](docs/CYPHER_COMPATIBILITY.md).
 
 ```cypher
 MATCH p = shortestPath((a:Person)-[:KNOWS*1..3]->(b:Person))
@@ -423,342 +223,104 @@ WHERE a.name = 'Alice'
 RETURN b.name, length(p)
 ```
 
-**Graph algorithms** — PageRank, WCC, SCC, BFS, Dijkstra, LCC, CDLP, Triangle Count. All rayon-parallelized.
+**Graph algorithms** — PageRank, WCC, SCC, BFS, Dijkstra, LCC, CDLP, triangle count.
 
 ```cypher
 CALL pagerank('social') YIELD nodeId, score
 RETURN nodeId, score ORDER BY score DESC LIMIT 10
 ```
 
-**Vector search** — HNSW indexing for semantic search and Graph RAG.
+**Vector search** — HNSW indexing for semantic search and GraphRAG; `quantization: 'fp16'` halves the index's memory.
 
 ```cypher
 CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding) OPTIONS {dimensions: 384, similarity: 'cosine'}
-
--- Half the memory, at 16-bit precision. The index holds f16 in the HNSW graph
--- and in the copy kept for persistence, so the saving is real rather than a
--- claim about one of the two. What it costs in recall is a property of your
--- corpus: measured on random vectors at 64 and 384 dimensions it was
--- indistinguishable from f32, and `tests/vector_quantization.rs` is the
--- instrument to measure your own.
-CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding)
-  OPTIONS {dimensions: 384, similarity: 'cosine', quantization: 'fp16'}
-
 CALL vector.search('Paper', 'embedding', [0.1, 0.2, 0.3], 10) YIELD node, score
 ```
 
-**Natural language** — Ask questions in English. The LLM translates to Cypher.
+**Natural language** — ask in English; an LLM translates to Cypher.
 
 ```
 NLQ "Who are Alice's friends of friends that work at Google?"
-→ MATCH (a:Person {name:'Alice'})-[:KNOWS]->()-[:KNOWS]->(fof)-[:WORKS_AT]->(c:Company {name:'Google'}) RETURN fof.name
 ```
 
-**AI agents** — Auto-generated MCP servers from your graph schema.
+**AI agents** — MCP servers generated from your graph schema: `pip install samyama[mcp]`, then `samyama-mcp-serve --demo cricket`.
 
-```bash
-pip install samyama[mcp]
-samyama-mcp-serve --demo cricket    # Instant AI agent tools for any graph
-```
-
-**Out to pandas** — Any read query as Arrow or Parquet, straight into a
-dataframe, with no intermediate file.
-
-```bash
-curl -X POST http://localhost:8080/api/query/export \
-  -H 'content-type: application/json' \
-  -d '{"query":"MATCH (d:Doc) RETURN d.id, d.title, d.embedding","format":"parquet"}' \
-  -o result.parquet
-```
-
-```python
-import pandas as pd
-pd.read_parquet("result.parquet")
-```
-
-`"format":"arrow"` streams the Arrow IPC format instead. Column types come from
-the values in the result — integers stay `Int64`, a vector arrives as
-`List<Float64>` — and temporal values leave as ISO-8601 text, because Arrow
-carries one time zone per column while Cypher carries one per value.
-
----
+**Out to pandas** — any read query as Arrow or Parquet via `POST /api/query/export` ([docs/BI-CONNECTIVITY.md](docs/BI-CONNECTIVITY.md)).
 
 ## Benchmarks
 
-**Run them:** `cargo bench --bench <name>` ([`benches/`](benches)). The vector,
-optimization, and micro/MVCC suites are self-contained; LDBC needs a data download.
+Run them with `cargo bench --bench <name>` ([`benches/`](benches)); the vector,
+optimization and micro/MVCC suites are self-contained, LDBC needs a data download.
+Full results, provenance and caveats: **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**.
 
-| Benchmark | Command | Measures | Data |
-|-----------|---------|----------|------|
-| Vector (HNSW) | `cargo bench --bench vector_benchmark` | build time, recall@k, search QPS (64–768 dim) | self-contained |
-| Rao family | `cargo bench --bench rao_family_benchmark` | Jaya/Rao/BMR/NSGA-II on ZDT/DTLZ | self-contained |
-| Graph optimization | `cargo bench --bench graph_optimization_benchmark` | 10+ metaheuristic solvers on allocation | self-contained |
-| Graphalytics | `cargo bench --bench graphalytics_benchmark` | BFS, PageRank, WCC, CDLP, LCC, SSSP | synthetic / LDBC |
-| Micro | `cargo bench --bench graph_benchmarks` | insertion, label scan, k-hop, filter, aggregate | self-contained |
-| MVCC & arena | `cargo bench --bench mvcc_benchmark` | 1M-node alloc, version access, time-travel | self-contained |
-| Late materialization | `cargo bench --bench late_materialization_bench` | raw vs lazy traversal vs Cypher | self-contained |
-| LDBC SNB Interactive | `cargo bench --bench ldbc_benchmark` | 21 IS/IC queries + 8 updates | needs SF1 download |
-| LDBC SNB BI | `cargo bench --bench ldbc_bi_benchmark` | 20 analytical (BI-1…20) | needs SF1 download |
-| LDBC FinBench | `cargo bench --bench finbench_benchmark` | 40+ CR/SR/RW/W on financial networks | synthetic / download |
-| Hierarchy (OEH) | `cargo bench --bench hierarchy_benchmark` | build, order test, roll-up vs subtree size | self-contained |
-| **HIER corpus** | `cargo run --release --example hier_benchmark` | 112 hierarchy-heavy queries, index on vs off | self-contained |
+| Benchmark | Result |
+|-----------|--------|
+| LDBC SNB Interactive (SF1) | 21/21 complete, 21/21 return rows (`CH-BENCH-LDBC`, 2026-08-28) |
+| LDBC SNB BI (SF1) | 20/20 complete, 0 timeouts (`CH-BENCH-LDBC`) |
+| LDBC Graphalytics | 12/12 agree with the LDBC reference (`CH-BENCH-GALX`) |
+| Cross-KG biomedical | see the table below |
 
-**HIER** ([`benchmarks/hier/`](benchmarks/hier)) is a category for subsumption and
-hierarchical roll-up over time, geography and ontology — the workload the LDBC and FinBench
-suites do not contain. Every query is checked against an unindexed run of the same
-question, so a speedup is only reported alongside an identical answer. Latest: **108/108
-agree** — `benchmarks/hier/results/PROVENANCE.json`, engine commit `30d0731` with
-uncommitted changes (`"dirty": true`) on vm-1, committed 2026-09-21, and not a
-measurement any harness suite publishes; 4 further corpus queries are specified but uncontrolled and are
-not in that denominator. Roll-up is flat at 15–20 ns from a 1-node subtree to a
-137,257-node one. Against Neo4j on an identical graph it is
-**94× faster across the 58 queries expressible on both**, with no class losing — though without the index Samyama is 1.6× *slower* than Neo4j, so the
-index is the differentiator rather than the engine. That 94× is the ratio of the two
-*medians* over the 58 queries, which is not an average speedup and should not be read as
-one; the geometric mean of the per-query ratios is 88×. Both are recomputed from the
-committed per-query timings by `CH-BENCH-HIER`, measured 2026-08-14 on a host that no
-longer exists.
+These run in-tree; LDBC certification is a formal third-party process we have not been through.
 
-**The 58 queries behind that figure are the classes the index wins.** 94× and
-88× are computed over the queries *expressible on both engines* — H1, H2, H3,
-H5 and H10. The three classes where our index-written form is a net cost are
-not expressible on Neo4j and so are absent by construction: H7 lowest common
-ancestor, H4 cross-hierarchy conjunction, H6 anti-subsumption. That is what
-"expressible on both" means, and a reader is entitled to know which classes the
-comparison could not include.
-
-**The local corpus answers two different questions and the column headings did
-not say so.** Of its 112 queries, 27 run the *same query text* twice with the
-index toggled; the other 85 carry a separate hand-written `baseline` query.
-Split:
-
-| Comparison | n | Total time |
-|---|---:|---:|
-| **same text, index on vs off** — what the index does | 27 | **35.3× faster** |
-| index-written query vs a hand-written alternative | 81 | 0.43× |
-
-Only the first row is a statement about the index, and there it is a large win
-(2 of the 27 are slower). The second is a statement about how the two queries
-were written — and on H7 the index-written form calls `hierarchy_lca(a, b)`
-inside a `WHERE` evaluated once per `:Term`, while the hand-written arm is a
-single path join. H6's alternative is `NOT (d.code STARTS WITH "T")`, a
-string-prefix test that works only because this synthetic corpus encodes
-ancestry in the code and would not exist on a real ontology.
-
-Both figures are measured by `CH-BENCH-HIER` every run, as
-`index_on_same_query_total_time` and `index_written_vs_hand_written_total_time`.
-
-One more caveat on the 94× itself: it predates
-[#1343](https://github.com/samyama-ai/samyama-graph/issues/1343), which found
-the index answering a roll-up with a subsumption result — set-shaped where the
-pattern is defined over paths — and narrowed where the rewrite applies. A
-speedup measured before a correctness fix in the same code path is partly a
-speedup over the wrong answer. Re-measuring needs both engines on one host.
-
-### Scale: 74M Nodes, 1 Billion Edges
-
-| KG | Source | Nodes | Edges |
-|----|--------|-------|-------|
-| PubMed/MEDLINE | NLM | 66.2M | 1.04B |
-| Clinical Trials | ClinicalTrials.gov | 7.8M | 27M |
-| Pathways | Reactome | 119K | 835K |
-| Drug Interactions | DrugBank + ChEMBL + SIDER | 245K | 388K |
-
-Loaded in 31 minutes from snapshots. **96 of 100 queries return real data** across all
-four KGs, measured 2026-04-02 on one r6a.8xlarge and not re-measured since.
-[Full results →](https://graph.samyama.cloud/book/biomedical_benchmark.html)
-
-### Cross-KG Query Highlights
-
-Times and first rows are the `time_ms` and `sample_result` columns of
-[`verified-results.csv`](https://graph.samyama.cloud/book/data/benchmark/verified-results.csv)
-(2026-04-02, one r6a.8xlarge). The CSV keeps only the first row of each result,
-so that is all this table quotes.
+**HIER** ([`benchmarks/hier/`](benchmarks/hier)) covers subsumption and hierarchical roll-up, which LDBC and FinBench do not. Latest: **108/108 agree** — `benchmarks/hier/results/PROVENANCE.json`, engine commit `30d0731` with uncommitted changes (`"dirty": true`), committed 2026-09-21; 4 further corpus queries are specified but uncontrolled and are not in that denominator.
 
 | ID | Query | Time | First row (CSV) |
 |----|-------|------|-----------------|
 | XK02 | Cancer → Trial interventions | 10.3s | Placebo (521 trials) |
-| XK03 | Diabetes → Trial interventions | 2.7s | Placebo (324 trials) |
-| XK06 | Metformin → Trial adverse events | 2.1s | Headache (215 trials) |
 | XK07 | Cancer trial sites by country | 4.2s | United States (4,062) |
 | XK08 | NCI-funded → Trial interventions | 20.5s | Placebo (933) |
-| XK05 | Aspirin articles → Trials | 1.5s | NCT04908982 "Aspirin and congenital malformations." |
 
-### LDBC suites
+*Cross-KG times from `verified-results.csv`, 2026-04-02, one r6a.8xlarge.*
 
-Run in-tree by the conformance harness, not audited by anyone: **LDBC
-certification is a formal third-party process and we have not been through
-it.** Every row below is a measurement from `samyama-graph-competitor-benchmarks`
-on 2026-08-28, and the suite that produced it is named so the number can be
-re-derived or refuted.
+## Examples and loaders
 
-| Benchmark | Result | Dataset | Suite |
-|-----------|--------|---------|-------|
-| SNB Interactive | **21/21 complete, 21/21 return rows** | SF1: 3.18M nodes, 17.26M edges | `CH-BENCH-LDBC` |
-| SNB BI | **20/20 complete, 0 timeouts** | SF1 | `CH-BENCH-LDBC` |
-| Graphalytics | **12/12 agree with the LDBC reference** | XS reference graphs | `CH-BENCH-GALX` |
-| FinBench | **21 read queries run, 21 return rows** | synthetic, ~7.7K nodes / 42.2K edges | `CH-BENCH-FIN` |
+[`examples/`](examples) holds 124 programs, among them 19 domain demos and 15 data
+loaders — banking fraud, clinical trials, supply chain, manufacturing, SOC,
+LDBC, FinBench, cricket, IMDB and more. Run them all with
+`./scripts/run_all_examples.sh --batch`, or one with `cargo run --example banking_demo`.
+**Guide:** [`examples/README.md`](examples/README.md).
 
-One of those is not clean, and saying so is the point of publishing them:
-three FinBench queries are pinned to ids the generated data does not
-guarantee, so they answer nothing while reporting `OK`
-([#918](https://github.com/samyama-ai/samyama-graph/issues/918)).
+## Related repositories
 
-### Concurrent performance
-
-**Not published, because it is not measured.** The numbers that stood here were
-added in April 2026 with no benchmark, log, host or date behind them, and no
-benchmark in this repository produces them
-([#919](https://github.com/samyama-ai/samyama-graph/issues/919)). An unfounded
-number is worse than an absent one: it invites a reader to plan around it.
-
-`CH-PERF-CONC` (PERF-17 — 64 concurrent clients, p99 ≤ 3× single-client p50) is
-the suite that will answer this, and the figure returns here when it does.
-
----
-
-## Examples
-
-**Run them all in one command:** `./scripts/run_all_examples.sh --batch` builds
-every example, starts a server, and runs each in turn with a pass/fail summary
-(the orchestrator for the `examples/` directory).
-
-### Domain Knowledge Graphs
-
-| Domain | Command | What it shows |
-|--------|---------|---------------|
-| Banking & Fraud | `cargo run --example banking_demo` | Fraud patterns, money laundering, OFAC, NLQ |
-| Clinical Trials | `cargo run --example clinical_trials_demo` | Patient-trial matching, drug interactions, vector search |
-| Supply Chain | `cargo run --example supply_chain_demo` | Disruption analysis, port optimization (Jaya) |
-| Manufacturing | `cargo run --example smart_manufacturing_demo` | Digital twin, failure cascades, scheduling |
-| Social Network | `cargo run --example social_network_demo` | Influence, communities, recommendations |
-| Enterprise SOC | `cargo run --example enterprise_soc_demo` | MITRE ATT&CK, attack paths, threat intel |
-| Knowledge Graph | `cargo run --example knowledge_graph_demo` | Enterprise RAG + semantic search |
-| Agentic (GAK) | `cargo run --example agentic_enrichment_demo` | Generation-augmented enrichment (needs `claude` CLI) |
-| Raft Cluster | `cargo run --example cluster_demo` | Cluster configuration and membership API. Writes apply to the local node only; there is no replication or quorum ([ACID_GUARANTEES §2](docs/ACID_GUARANTEES.md)) |
-
-*19 demo examples + 15 data loaders in [`examples/`](examples); optimization/use-case
-demos: `grid_dispatch_demo`, `amr_stewardship_demo`, `healthcare_allocation_demo`,
-`wildfire_evac_demo`, `pca_demo`, `sdk_demo`, …*
-
-**Guide to all 122 programs:** [`examples/README.md`](examples/README.md) — demos, loaders, tools, and which ones are internal probes.
-
-### Data Loaders
-
-| Dataset | Command | Scale |
-|---------|---------|-------|
-| LDBC SNB SF1 | `cargo run --example ldbc_loader` | 3.2M nodes, 17.3M edges |
-| Clinical Trials | `cargo run --release --example aact_loader` | 7.8M nodes, 27M edges |
-| Drug Interactions | `cargo run --release --example druginteractions_loader` | 245K nodes, 388K edges |
-| Cricket | `cargo run --release --example cricket_loader` | 36K nodes, 1.4M edges |
-| FinBench | `cargo run --example finbench_loader` | 7.7K nodes, 42K edges |
-| IMDB Movies | `cargo run --release --example imdb_loader -- --data-dir <path>` | 1.94M nodes, 2.63M edges |
-| Football | `cargo run --release --example football_loader -- --data-dir <path>` | 16K nodes, 12K edges |
-
-### Related Repositories
-
-samyama-graph is the engine. Per-domain KGs and companion projects live separately and can be loaded into it:
-
-- **KGs:** [pubmed-kg](https://github.com/samyama-ai/pubmed-kg) (66M / 1B), [clinicaltrials-kg](https://git.samyama.ai/Samyama.ai/clinicaltrials-kg) (7.8M / 27M), [druginteractions-kg](https://git.samyama.ai/Samyama.ai/druginteractions-kg) (245K / 388K), [pathways-kg](https://git.samyama.ai/Samyama.ai/pathways-kg) (119K / 835K), [cricket-kg](https://git.samyama.ai/Samyama.ai/cricket-kg) (36K / 1.4M), [imdb-kg](https://github.com/samyama-ai/imdb-kg) (1.94M / 2.63M), [football-kg](https://github.com/samyama-ai/football-kg) (16K / 12K), [assetops-kg](https://git.samyama.ai/Samyama.ai/assetops-kg) (13K / 13K), [powergrid-kg](https://git.samyama.ai/Samyama.ai/powergrid-kg) (pglib-opf — infrastructure), [telecom-kg](https://git.samyama.ai/Samyama.ai/telecom-kg) (Internet Topology Zoo — infrastructure)
+- **KGs:** [pubmed-kg](https://github.com/samyama-ai/pubmed-kg), [clinicaltrials-kg](https://github.com/samyama-ai/clinicaltrials-kg), [druginteractions-kg](https://github.com/samyama-ai/druginteractions-kg), [pathways-kg](https://github.com/samyama-ai/pathways-kg), [cricket-kg](https://github.com/samyama-ai/cricket-kg), [imdb-kg](https://github.com/samyama-ai/imdb-kg), [football-kg](https://github.com/samyama-ai/football-kg), [assetops-kg](https://github.com/samyama-ai/assetops-kg)
 - **Benchmarks:** [biomedqa](https://github.com/samyama-ai/biomedqa) — 40-question pharmacology benchmark across three KGs
-- **Companions:** [graphrag-rs](https://github.com/samyama-ai/graphrag-rs) — doc-to-KG + MCP server; [optimization_algorithms](https://github.com/samyama-ai/optimization_algorithms) — PyPI `rao-algorithms` package (PyO3 bindings over `crates/samyama-optimization/`)
-
----
-
-## Architecture
-
-```
-samyama/
-├── src/
-│   ├── graph/          Property graph model (Node, Edge, GraphStore, CSR adjacency)
-│   ├── query/          OpenCypher engine
-│   │   ├── cypher.pest     PEG grammar
-│   │   ├── executor/       Volcano iterator + WCO LeapFrog TrieJoin
-│   │   └── planner.rs      Cost-based graph-native query planner
-│   ├── protocol/       RESP3 server (Redis-compatible, Tokio async)
-│   ├── http/           HTTP/REST API and Web UI
-│   ├── persistence/    RocksDB + WAL + multi-tenancy
-│   ├── index/          Property, unique, composite, full-text, hierarchy (OEH) indexes
-│   ├── vector/         HNSW vector index
-│   ├── snapshot/       Portable .sgsnap v2 (CSR + ColumnStore)
-│   ├── raft/           Cluster config and membership; writes apply locally, no consensus yet
-│   ├── sharding/       Tenant-level sharding (router, proxy)
-│   ├── rdf/            RDF triple/quad store and mapping
-│   ├── sparql/         SPARQL 1.1 parser, algebra, optimizer, executor
-│   ├── algo/           Adapter to the samyama-graph-algorithms crate
-│   ├── optimization/   Graph-grounded problems for the samyama-optimization crate
-│   ├── nlq/            Natural language → Cypher (OpenAI, Gemini, Ollama, Claude)
-│   ├── agent/          Agentic enrichment (tool-using agents that write to the graph)
-│   ├── embed/          Auto-embed pipelines for RAG
-│   ├── export/         Arrow / Parquet / CSV / GraphML result export
-│   ├── migrate/        Importers for other engines' exports (Neo4j APOC JSON)
-│   └── *.rs            allocator, auth, compat, pii, provenance, schema_doc, lib, main
-├── crates/             samyama-graph-algorithms, samyama-optimization, samyama-gpu, samyama-sdk
-├── sdk/                Python and TypeScript client SDKs
-├── cli/                `samyama-cli` command-line client
-├── openapi/            OpenAPI 3 specification
-├── benches/            Criterion + LDBC / FinBench / Graphalytics harnesses
-├── benchmarks/         Benchmark inputs and corpora
-├── case_studies/       End-to-end domain datasets with loaders and queries
-├── examples/           Runnable demos and data loaders
-├── tests/              Integration tests
-├── scripts/            CI gates, coverage, release checks, dataset downloads
-├── ops/                Grafana dashboards
-└── docs/               Architecture docs, ADRs, compatibility notes
-```
-
-**Companion crates:**
-- [samyama-graph-algorithms](crates/samyama-graph-algorithms/) — PageRank, BFS, Dijkstra, WCC, SCC, LCC, CDLP, Triangle Count (all rayon-parallelized)
-- [samyama-optimization](crates/samyama-optimization/) — 15+ metaheuristic solvers (Jaya, Rao, GWO, NSGA-II, TLBO)
-- [samyama-sdk](crates/samyama-sdk/) — Rust SDK with embedded and remote clients
-
----
+- **Companions:** [graphrag-rs](https://github.com/samyama-ai/graphrag-rs) — doc-to-KG + MCP server; [optimization_algorithms](https://github.com/samyama-ai/optimization_algorithms) — PyPI `rao-algorithms`
 
 ## Documentation
 
 | Resource | Link |
 |----------|------|
 | **The Book** | [graph.samyama.cloud/book](https://graph.samyama.cloud/book/) |
-| Biomedical Benchmark | [**96 of 100 queries return real data**, measured 2026-04-02](https://graph.samyama.cloud/book/biomedical_benchmark.html) |
-| Cypher Compatibility | [docs/CYPHER_COMPATIBILITY.md](docs/CYPHER_COMPATIBILITY.md) |
-| LDBC Results | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
-| Algorithm Conventions | [docs/ALGORITHM-CONVENTIONS.md](docs/ALGORITHM-CONVENTIONS.md) — directedness, weights, self-loops, disconnected components, tie-breaking and normalisation, per algorithm |
-| Failure Modes | [docs/FAILURE-MODES.md](docs/FAILURE-MODES.md) — what happens when something goes wrong, each row naming the test that observed it |
-| Data Handling | [docs/DATA-HANDLING.md](docs/DATA-HANDLING.md) — there is no telemetry; the three features that can send data to a third party, what each sends, and how to switch them off |
-| Migrating from Neo4j | [docs/MIGRATING-FROM-NEO4J.md](docs/MIGRATING-FROM-NEO4J.md) — point `compatibility_report` at your queries, then what each refusal means |
-| Leaving Samyama | [docs/LEAVING-SAMYAMA.md](docs/LEAVING-SAMYAMA.md) — every export route and what it costs |
-| Grafana dashboard | [ops/grafana/](ops/grafana/) — query latency percentiles, band occupancy and the slow-query counter, over metrics the engine actually exports |
-| Architecture Decisions | [docs/ADR/](docs/ADR/) |
-| API Spec | [openapi/openapi.yaml](openapi/openapi.yaml) |
-| Troubleshooting & Support | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
-
----
+| All documentation | [docs/README.md](docs/README.md) |
+| Cypher compatibility | [docs/CYPHER_COMPATIBILITY.md](docs/CYPHER_COMPATIBILITY.md) |
+| Benchmarks | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
+| Security, auth, TLS and data handling | [docs/DATA-HANDLING.md](docs/DATA-HANDLING.md) |
+| Migrating from Neo4j | [docs/MIGRATING-FROM-NEO4J.md](docs/MIGRATING-FROM-NEO4J.md) |
+| Failure modes | [docs/FAILURE-MODES.md](docs/FAILURE-MODES.md) |
+| Project layout | [CONTRIBUTING.md](CONTRIBUTING.md#project-layout) |
+| API spec | [openapi/openapi.yaml](openapi/openapi.yaml) |
+| Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 
 ## Enterprise Edition
 
-Everything above is open source (Apache 2.0). [Samyama Enterprise](https://samyama.dev) adds:
+Everything in this repository is open source (Apache 2.0), including GPU
+acceleration (wgpu, plus CUDA — build with `--features gpu` or `--features cuda`),
+Prometheus metrics at `/metrics` with a [Grafana dashboard](ops/grafana/), and a
+request audit log (`--audit-log`). [Samyama Enterprise](https://samyama.dev) adds:
 
-- GPU acceleration (wgpu + CUDA)
 - OpenTelemetry OTLP metrics
-- Prometheus + Grafana monitoring
 - Backup & disaster recovery
-- ADMIN commands + audit trail
+- ADMIN commands
 - Ed25519 signed license tokens
 
 [Contact us →](https://samyama.dev/contact)
 
----
-
 ## Contributing
 
 Contributions are welcome — bug reports, docs, tests, and code. See
-**[CONTRIBUTING.md](CONTRIBUTING.md)** for development setup, build/test commands,
-and the pull request workflow. Good first areas are listed there.
-
-- 🐛 Found a bug or have an idea? [Open an issue](https://github.com/samyama-ai/samyama-graph/issues/new/choose).
-- 💬 Questions or general discussion? [Join the community chat](https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d).
-
----
+**[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, build/test commands and the
+pull request workflow. Found a bug? [Open an issue](https://github.com/samyama-ai/samyama-graph/issues/new/choose).
+Questions? [Join the community chat](https://chat.whatsapp.com/Jjjkb3uWRDi1YMdfffaD9d).
 
 ## License
 
