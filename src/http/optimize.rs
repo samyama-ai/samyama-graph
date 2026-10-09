@@ -366,8 +366,28 @@ struct CancelHandle {
 #[derive(Debug, Clone)]
 enum SseEvent {
     Iteration { iter: usize, best_fitness: f64, pareto_front: Option<Vec<Vec<f64>>> },
-    Done { final_fitness: f64, iterations: usize, final_pareto: Option<Vec<Vec<f64>>>, seed: Option<u64> },
+    Done {
+        final_fitness: f64,
+        iterations: usize,
+        final_pareto: Option<Vec<Vec<f64>>>,
+        seed: Option<u64>,
+        /// Wall-clock time of the solve itself, in milliseconds: from the moment
+        /// the solver starts to the moment it returns. Queueing before the
+        /// blocking task runs and streaming the iteration events afterwards are
+        /// not part of it. Fractional, because a small solve finishes in well
+        /// under a millisecond and rounding it to 0 would read as "not measured"
+        /// (#1798, where the field was the constant 0).
+        total_time_ms: f64,
+    },
     Error { message: String },
+}
+
+/// Milliseconds in a second, for reporting a `Duration` in milliseconds.
+const MILLIS_PER_SEC: f64 = 1_000.0;
+
+/// A duration in milliseconds, keeping the sub-millisecond part.
+fn as_millis_f64(elapsed: std::time::Duration) -> f64 {
+    elapsed.as_secs_f64() * MILLIS_PER_SEC
 }
 
 pub fn router() -> Router<Arc<OptimizeState>> {
@@ -499,12 +519,18 @@ async fn start_solve(
     let _ = cancel_rx; // silence warning; we don't use the oneshot receiver
 
     tokio::task::spawn(async move {
+        // The clock starts inside the blocking task, so time spent waiting for
+        // a blocking thread is not billed to the solver.
         let compute = tokio::task::spawn_blocking(move || {
-            run_solver(&algo.id, algo.multi_objective, &bench.id, bench.num_objectives, dim, cfg, seed)
+            let started = std::time::Instant::now();
+            let outcome =
+                run_solver(&algo.id, algo.multi_objective, &bench.id, bench.num_objectives, dim, cfg, seed);
+            (outcome, started.elapsed())
         });
 
         match compute.await {
-            Ok(Ok(SolverOutcome { history, final_fitness, final_pareto })) => {
+            Ok((Ok(SolverOutcome { history, final_fitness, final_pareto }), elapsed)) => {
+                let total_time_ms = as_millis_f64(elapsed);
                 let iterations = history.len();
                 let last_iter = iterations.saturating_sub(1);
                 for (iter, best) in history.iter().enumerate() {
@@ -525,10 +551,10 @@ async fn start_solve(
                     }
                 }
                 let _ = event_tx
-                    .send(SseEvent::Done { final_fitness, iterations, final_pareto, seed })
+                    .send(SseEvent::Done { final_fitness, iterations, final_pareto, seed, total_time_ms })
                     .await;
             }
-            Ok(Err(e)) => {
+            Ok((Err(e), _)) => {
                 let _ = event_tx.send(SseEvent::Error { message: e }).await;
             }
             Err(e) => {
@@ -704,12 +730,12 @@ async fn stream_solve(
                     "pareto_front": pareto_front,
                 }))
                 .unwrap(),
-            SseEvent::Done { final_fitness, iterations, final_pareto, seed } => Event::default()
+            SseEvent::Done { final_fitness, iterations, final_pareto, seed, total_time_ms } => Event::default()
                 .event("done")
                 .json_data(serde_json::json!({
                     "final_fitness": final_fitness,
                     "iterations": iterations,
-                    "total_time_ms": 0,
+                    "total_time_ms": total_time_ms,
                     "final_pareto": final_pareto,
                     // Echo the seed that produced this result: a published number
                     // should carry what is needed to re-derive it (#1478).
