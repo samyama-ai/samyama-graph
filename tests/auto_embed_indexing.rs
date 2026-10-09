@@ -81,11 +81,13 @@ async fn auto_embed_indexes_under_the_target_property() {
         "the generated embedding should be findable in the index that was created for it"
     );
 
-    // and it must not have gone into an index keyed by the source text property
-    let source_hits = vector_index
+    // and no index keyed by the source text property was created for it: a
+    // search there is an error naming the missing index, not an empty answer
+    // (#1660).
+    let err = vector_index
         .search("Person", "headline", &vec![0.1f32; MOCK_DIM], 5)
-        .expect("search");
-    assert!(source_hits.is_empty(), "nothing should be indexed under the source property");
+        .expect_err("no index should exist under the source property");
+    assert!(err.to_string().contains("no vector index on :Person(headline)"), "{err}");
 }
 
 #[tokio::test]
