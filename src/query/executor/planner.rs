@@ -2060,8 +2060,10 @@ impl QueryPlanner {
                     match_clause,
                     per_match_where[match_idx].as_ref(),
                     &pre_match_var_sets[match_idx],
+                    &known_vars,
                     upstream,
                     &mut anon_counter,
+                    store,
                 )?;
                 operator = Some(current_op);
                 known_vars.extend(new_vars);
@@ -2659,8 +2661,10 @@ impl QueryPlanner {
                         match_clause,
                         per_match_where[match_idx].as_ref(),
                         &match_var_sets[match_idx],
+                        &known_vars,
                         upstream,
                         &mut anon_counter,
+                        store,
                     )?;
                     operator = Some(current_op);
                     known_vars.extend(new_vars);
@@ -4532,18 +4536,14 @@ impl QueryPlanner {
                     // A selective equality on the far side of the expansion —
                     // LDBC IC11's `org.name = "..."` — applied during the walk
                     // rather than to the rows it produces (#656).
-                    let pushed = Self::target_equality_props(&deferred_predicates, &target_var);
-                    if !pushed.is_empty() {
-                        // Resolved to ids where possible: the property check
-                        // costs a node fetch per candidate edge and this costs
-                        // a hash lookup (#665).
-                        if let Some(ids) =
-                            self.resolve_target_ids(&segment.node.labels, &pushed, store)
-                        {
-                            expand = expand.with_target_ids(ids);
-                        }
-                        expand = expand.with_target_props(pushed);
-                    }
+                    expand = self.push_hop_target_props(
+                        expand,
+                        &target_var,
+                        &segment.node.labels,
+                        segment.node.properties.as_ref(),
+                        &deferred_predicates,
+                        store,
+                    );
                     // `c.id > b.id` with `b` already bound: the same idea
                     // against a value that changes per row (#1069). Not for a
                     // self-reference, whose target is the synthetic name.
@@ -4687,6 +4687,47 @@ impl QueryPlanner {
     /// rather than a dropped row. Every other pushdown in this file that
     /// removed its filter had to be reasoned about for null and type
     /// coercion; this one does not.
+    /// The single-hop form of [`Self::push_varlen_target_props`]: equalities
+    /// the target must satisfy, from the WHERE (#656) **and from the node
+    /// pattern itself**, applied during the walk.
+    ///
+    /// `(p2)-[:HAS_TAG]->(t2:Tag {name: "Afghanistan"})` carried its property
+    /// as a filter over the expand's rows, so the walk visited every tag of
+    /// every post and built a row for each, to keep one in sixteen thousand.
+    /// The WHERE spelling of the same constraint had been pushed into the walk
+    /// since #656 and the var-length spelling since #1063; this one was the
+    /// gap, and on LDBC BI-9 it was the whole query (#1613). Resolved to an id
+    /// set where an index answers, so a candidate is rejected by a hash
+    /// lookup rather than a node fetch (#665). Additive: the filter above
+    /// stays, so a pushdown that is too narrow costs work, never rows.
+    #[allow(clippy::too_many_arguments)]
+    fn push_hop_target_props(
+        &self,
+        mut expand: ExpandOperator,
+        target_var: &str,
+        labels: &[Label],
+        properties: Option<&HashMap<String, PropertyValue>>,
+        deferred: &[Expression],
+        store: &GraphStore,
+    ) -> ExpandOperator {
+        let mut pushed = Self::target_equality_props(deferred, target_var);
+        if let Some(props) = properties {
+            // Deterministic: `HashMap` iteration order is not, and the
+            // resolved set depends on which property is consulted first.
+            let mut inline: Vec<(String, PropertyValue)> =
+                props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            inline.sort_by(|a, b| a.0.cmp(&b.0));
+            pushed.extend(inline);
+        }
+        if pushed.is_empty() {
+            return expand;
+        }
+        if let Some(ids) = self.resolve_target_ids(labels, &pushed, store) {
+            expand = expand.with_target_ids(ids);
+        }
+        expand.with_target_props(pushed)
+    }
+
     fn push_varlen_target_props(
         &self,
         expand: VarLengthExpandOperator,
@@ -5131,6 +5172,19 @@ impl QueryPlanner {
                     expand = expand.with_edge_isolation(first_expand);
                     first_expand = false;
                 }
+                // A selective equality on the far side of the expansion,
+                // applied during the walk (#656, #1613). Not for a
+                // self-reference, whose target is the synthetic name.
+                if !self_ref {
+                    expand = self.push_hop_target_props(
+                        expand,
+                        &target.var,
+                        &target.labels,
+                        target.properties.as_ref(),
+                        &deferred_predicates,
+                        store,
+                    );
+                }
                 let expanded: OperatorBox = if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone()))
                 } else {
@@ -5271,6 +5325,19 @@ impl QueryPlanner {
                 if track_edges {
                     expand = expand.with_edge_isolation(first_expand);
                     first_expand = false;
+                }
+                // A selective equality on the far side of the expansion,
+                // applied during the walk (#656, #1613). Not for a
+                // self-reference, whose target is the synthetic name.
+                if !self_ref {
+                    expand = self.push_hop_target_props(
+                        expand,
+                        &target.var,
+                        &target.labels,
+                        target.properties.as_ref(),
+                        &deferred_predicates,
+                        store,
+                    );
                 }
                 let expanded: OperatorBox = if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone()))
@@ -6735,6 +6802,27 @@ fn propagate_shared_variable_labels(clauses: &[MatchClause]) -> Vec<MatchClause>
 /// (anonymous nodes get an auto-generated `_anon_N` name). Used by anchor
 /// selection to consider indexing/scanning any node in the pattern, not just
 /// the first one written.
+/// The same path read from its end: directions flipped, nodes shifted one
+/// segment along. The pairs it matches are the ones the written path matches.
+fn reversed_path(p: &PathPattern) -> PathPattern {
+    let mut out = p.clone();
+    out.start = p.segments.last().map(|s| s.node.clone()).unwrap_or_else(|| p.start.clone());
+    out.segments = (0..p.segments.len())
+        .rev()
+        .map(|k| {
+            let mut edge = p.segments[k].edge.clone();
+            edge.direction = match edge.direction {
+                Direction::Outgoing => Direction::Incoming,
+                Direction::Incoming => Direction::Outgoing,
+                Direction::Both => Direction::Both,
+            };
+            let node = if k == 0 { p.start.clone() } else { p.segments[k - 1].node.clone() };
+            PathSegment { edge, node }
+        })
+        .collect();
+    out
+}
+
 struct PathNodeRef {
     var: String,
     labels: Vec<Label>,
@@ -8722,6 +8810,7 @@ impl QueryPlanner {
         predicates: Vec<Expression>,
         upstream: OperatorBox,
         anon_counter: &mut usize,
+        store: &GraphStore,
     ) -> ExecutionResult<(OperatorBox, HashSet<String>)> {
         let mut path_operator = upstream;
         let mut current_var = start_var.to_string();
@@ -8776,6 +8865,18 @@ impl QueryPlanner {
                 if !compared.is_empty() {
                     expand = expand.with_target_comparisons(compared);
                 }
+                // And the equality pushdown (#656), which this builder never
+                // had: BI-9's second clause is planned here, and its
+                // `(t2:Tag {name: "Afghanistan"})` was a filter over every
+                // tag of every post in the forum (#1613).
+                expand = self.push_hop_target_props(
+                    expand,
+                    &target_var,
+                    &segment.node.labels,
+                    segment.node.properties.as_ref(),
+                    &deferred_predicates,
+                    store,
+                );
             }
 
             path_operator = if !segment.node.labels.is_empty() {
@@ -8847,8 +8948,10 @@ impl QueryPlanner {
         match_clause: &MatchClause,
         where_clause: Option<&WhereClause>,
         clause_vars: &HashSet<String>,
+        known_vars: &HashSet<String>,
         upstream: OperatorBox,
         anon_counter: &mut usize,
+        store: &GraphStore,
     ) -> ExecutionResult<(OperatorBox, HashSet<String>)> {
         let preds = where_clause
             .map(|wc| flatten_and_predicates(&wc.predicate))
@@ -8862,6 +8965,20 @@ impl QueryPlanner {
         let mut new_vars = HashSet::new();
 
         for path in &match_clause.pattern.paths {
+            // A path written towards the bound variable is walked from it:
+            // `MATCH (liker:Person)-[:LIKES]->(p)` with `p` bound is
+            // `(p)<-[:LIKES]-(liker)`, the same relation read the other way.
+            // Planned as written it scanned every `:Person` and hash-joined
+            // back to the few posts already in hand -- BI-6 and BI-8 at SF10
+            // (#1613). `can_pushdown_match` admits exactly these.
+            let reversed;
+            let path = match &path.start.variable {
+                Some(v) if known_vars.contains(v) => path,
+                _ => {
+                    reversed = reversed_path(path);
+                    &reversed
+                }
+            };
             let start_var = path
                 .start
                 .variable
@@ -8896,6 +9013,7 @@ impl QueryPlanner {
                 path_preds,
                 current_op,
                 anon_counter,
+                store,
             )?;
             current_op = expanded_op;
             new_vars.extend(path_vars);
@@ -9248,13 +9366,34 @@ impl QueryPlanner {
         }
 
         for path in &match_clause.pattern.paths {
-            // Must have a start variable that's bound
-            let start_var = match &path.start.variable {
-                Some(v) => v,
-                None => return false,
-            };
-            if !known_vars.contains(start_var) {
-                return false;
+            // Must have a start variable that's bound -- or, failing that, an
+            // end variable that is, with every single-hop segment and no path
+            // variable, so the path can be walked from its end instead
+            // (#1613; `plan_pushed_down_match` does the reversal).
+            let start_bound = path.start.variable.as_ref().is_some_and(|v| known_vars.contains(v));
+            if !start_bound {
+                let end_bound = path
+                    .segments
+                    .last()
+                    .and_then(|s| s.node.variable.as_ref())
+                    .is_some_and(|v| known_vars.contains(v));
+                let plain = path.path_variable.is_none()
+                    && matches!(path.path_type, PathType::Normal)
+                    && path.segments.iter().all(|s| s.edge.length.is_none());
+                if !(end_bound && plain) {
+                    return false;
+                }
+                // The other endpoint and everything between must be new, by
+                // the same argument as below.
+                let interior_bound = path.start.variable.as_ref().is_some_and(|v| known_vars.contains(v))
+                    || path.segments[..path.segments.len() - 1]
+                        .iter()
+                        .any(|s| s.node.variable.as_ref().is_some_and(|v| known_vars.contains(v)))
+                    || path.segments.iter().any(|s| s.edge.variable.as_ref().is_some_and(|v| known_vars.contains(v)));
+                if interior_bound {
+                    return false;
+                }
+                continue;
             }
             // ...and nothing *after* the start may be bound already. The
             // pushdown chains expands, which bind their target; a target that
