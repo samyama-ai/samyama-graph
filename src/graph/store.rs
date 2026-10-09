@@ -8245,9 +8245,10 @@ mod tests {
     #[test]
     fn test_vector_search_nonexistent_index() {
         let store = GraphStore::new();
-        // Search on a non-existent index should return empty results
-        let results = store.vector_search("NoLabel", "noprop", &[1.0, 2.0], 5).unwrap();
-        assert!(results.is_empty());
+        // A search over an index that does not exist is an error that names
+        // it, not an empty answer that looks like "nothing matched" (#1660).
+        let err = store.vector_search("NoLabel", "noprop", &[1.0, 2.0], 5).unwrap_err();
+        assert!(err.to_string().contains("no vector index on :NoLabel(noprop)"), "{err}");
     }
 
     #[test]
