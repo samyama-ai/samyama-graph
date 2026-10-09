@@ -18,6 +18,7 @@
 //!   cargo bench --bench ldbc_bi_benchmark
 //!   cargo bench --bench ldbc_bi_benchmark -- --runs 5
 //!   cargo bench --bench ldbc_bi_benchmark -- --query BI-1
+//!   cargo bench --bench ldbc_bi_benchmark -- --explain --query BI-9   # plans only, no run
 //!   cargo bench --bench ldbc_bi_benchmark -- --data-dir /path/to/data
 
 use std::path::PathBuf;
@@ -575,6 +576,10 @@ async fn main() -> Result<(), Error> {
         5
     };
 
+    // `--explain` prints the plan without running the query, the same flag
+    // `ldbc_benchmark` has: a query that times out cannot be PROFILEd, and
+    // the plan is what a 351x gap is read from first (#1613).
+    let explain_mode = args.iter().any(|a| a == "--explain");
     let filter_query: Option<String> = if let Some(pos) = args.iter().position(|a| a == "--query") {
         Some(
             args.get(pos + 1)
@@ -662,6 +667,28 @@ async fn main() -> Result<(), Error> {
     let bench_start = Instant::now();
 
     for query in &queries {
+        if explain_mode {
+            println!("\n================ {} — {} ================", query.id, query.name);
+            println!("{}", query.cypher);
+            println!();
+            match client.query("default", &format!("EXPLAIN {}", query.cypher)).await {
+                Ok(batch) => {
+                    for record in &batch.records {
+                        for cell in record {
+                            match cell.as_str() {
+                                Some(text) => println!("{}", text),
+                                None => println!("{}", cell),
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("ERROR: {}", e);
+                    errors += 1;
+                }
+            }
+            continue;
+        }
         eprint!("  Running {}...\r", query.id);
 
         let result = run_benchmark(&client, query, runs).await;
