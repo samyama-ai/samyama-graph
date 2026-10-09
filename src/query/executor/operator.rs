@@ -202,6 +202,210 @@ fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
     }
 }
 
+/// A hash-join key that pairs exactly when `cypher_equals` answers `Some(true)`.
+///
+/// A join keyed on a value cannot reuse `PropertyValue`'s `Hash`, and the gap is
+/// not cosmetic. `Hash` tags `Integer` 1 and `Float` 2 and hashes the float's
+/// bits, while `cypher_equals` answers `1 = 1.0` with `Some(true)` (#860). Put
+/// those two together in a hash join and the pair the `WHERE` would keep lands
+/// in two buckets and is silently lost -- a wrong answer that looks like an
+/// honest "no match" (#1822).
+///
+/// `None` means "this value can never pair", which covers every case where
+/// `cypher_equals` declines to answer `Some(true)`:
+///
+///   - **Null.** `null = null` is null, not true. A row keyed on a missing
+///     property must not pair with another missing one. The variable-identity
+///     join never meets this, because a bound variable is never null.
+///   - **NaN.** `Float(NaN) == Float(NaN)` is false, so a NaN cannot pair even
+///     with itself.
+///   - **A list or map holding either**, at any depth, because `cypher_equals`
+///     propagates the unknown outward and returns `None`.
+///
+/// Not yet invoked outside its own tests: the operator that will hash on it and
+/// the planner rule that will choose it are the rest of #1822. It lands first,
+/// and alone, because the key is the part that can be wrong without anything
+/// failing — a join that buckets `5` apart from `5.0` returns fewer rows and
+/// no error — so it is worth reviewing on its own, against the equality it has
+/// to mirror, before an operator is built on top of it.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum JoinKey {
+    /// Every number that is exactly an integer, whichever variant carried it,
+    /// so `5` and `5.0` share a bucket. Compared as `i64` rather than through
+    /// `as f64` for the same reason `cypher_equals` does: above 2^53 the float
+    /// conversion loses bits.
+    Int(i64),
+    /// A float with a fractional part, or one outside `i64`'s range. Keyed on
+    /// its bits, which is sound here because any float that *could* equal an
+    /// integer took the `Int` arm above.
+    Float(u64),
+    Str(String),
+    Bool(bool),
+    List(Vec<JoinKey>),
+    /// Keys sorted, so two maps written in different orders agree.
+    Map(Vec<(String, JoinKey)>),
+    /// Everything `cypher_equals` settles with the derived `PartialEq`: dates,
+    /// times, vectors. Rendered rather than held, so one representation is one
+    /// key without this enum having to mirror every variant.
+    Opaque(String),
+}
+
+/// The join key for one value, or `None` if it can never pair.
+#[allow(dead_code)]
+pub(crate) fn join_key_of(v: &PropertyValue) -> Option<JoinKey> {
+    use PropertyValue::*;
+    match v {
+        Null => None,
+        Integer(i) => Some(JoinKey::Int(*i)),
+        Float(f) => {
+            if f.is_nan() {
+                // Cannot equal itself, so it cannot pair.
+                None
+            } else if f.is_finite()
+                && f.fract() == 0.0
+                && *f >= i64::MIN as f64
+                && *f <= i64::MAX as f64
+            {
+                // The exact arm `cypher_equals` uses for Integer/Float.
+                Some(JoinKey::Int(*f as i64))
+            } else {
+                Some(JoinKey::Float(f.to_bits()))
+            }
+        }
+        String(s) => Some(JoinKey::Str(s.clone())),
+        Boolean(b) => Some(JoinKey::Bool(*b)),
+        Array(items) => {
+            // A null anywhere inside makes the whole comparison unknown.
+            let parts: Option<Vec<JoinKey>> = items.iter().map(join_key_of).collect();
+            parts.map(JoinKey::List)
+        }
+        Map(entries) => {
+            let mut parts: Vec<(std::string::String, JoinKey)> = Vec::with_capacity(entries.len());
+            for (k, val) in entries {
+                parts.push((k.clone(), join_key_of(val)?));
+            }
+            parts.sort_by(|a, b| a.0.cmp(&b.0));
+            Some(JoinKey::Map(parts))
+        }
+        other => Some(JoinKey::Opaque(format!("{other:?}"))),
+    }
+}
+
+#[cfg(test)]
+mod join_key_tests {
+    use super::{cypher_equals, join_key_of};
+    use crate::graph::PropertyValue as P;
+
+    /// Values chosen to reach every arm of `cypher_equals`, including the ones
+    /// that make it answer something other than `Some(true)`.
+    fn matrix() -> Vec<P> {
+        vec![
+            P::Null,
+            P::Integer(0),
+            P::Integer(5),
+            P::Integer(-5),
+            P::Integer(i64::MAX),
+            P::Float(5.0),
+            P::Float(-5.0),
+            P::Float(5.5),
+            P::Float(0.0),
+            P::Float(f64::NAN),
+            P::Float(f64::INFINITY),
+            // Beyond 2^53, where `as f64` would lose bits and an integer
+            // comparison must not.
+            P::Float(9007199254740993.0),
+            P::Integer(9007199254740993),
+            P::String("5".into()),
+            P::String("".into()),
+            P::Boolean(true),
+            P::Boolean(false),
+            P::Array(vec![P::Integer(1), P::Integer(2)]),
+            P::Array(vec![P::Integer(1), P::Float(2.0)]),
+            P::Array(vec![P::Integer(1)]),
+            P::Array(vec![P::Integer(1), P::Null]),
+        ]
+    }
+
+    /// The whole contract, over every ordered pair: two values share a join key
+    /// **iff** `cypher_equals` says they are equal.
+    ///
+    /// This is the test that matters. The hazard #1822 names is a hash join
+    /// bucketing `5` and `5.0` apart and losing a pair the filter keeps, and
+    /// the only way to be sure the key does not do that is to check it against
+    /// the engine's own equality over values that reach every arm.
+    #[test]
+    fn two_values_share_a_key_exactly_when_cypher_equals_them() {
+        let vals = matrix();
+        for a in &vals {
+            for b in &vals {
+                let equal = cypher_equals(a, b) == Some(true);
+                let ka = join_key_of(a);
+                let kb = join_key_of(b);
+                let same_key = match (&ka, &kb) {
+                    (Some(x), Some(y)) => x == y,
+                    // No key on either side means no pair, which is the only
+                    // correct outcome when `=` is not `Some(true)`.
+                    _ => false,
+                };
+                assert_eq!(
+                    same_key, equal,
+                    "key agreement broke for {a:?} vs {b:?}: \
+                     cypher_equals={:?} keys={ka:?} / {kb:?}",
+                    cypher_equals(a, b)
+                );
+            }
+        }
+    }
+
+    /// The specific pair the issue names, called out so a failure says which
+    /// bug came back.
+    #[test]
+    fn an_integer_and_an_integral_float_share_one_key() {
+        assert_eq!(join_key_of(&P::Integer(5)), join_key_of(&P::Float(5.0)));
+        assert_ne!(join_key_of(&P::Integer(5)), join_key_of(&P::Float(5.5)));
+    }
+
+    /// Nothing that `cypher_equals` leaves unknown may carry a key, because a
+    /// key is a licence to pair.
+    #[test]
+    fn nothing_unknown_carries_a_key() {
+        assert_eq!(join_key_of(&P::Null), None, "null must not pair with null");
+        assert_eq!(join_key_of(&P::Float(f64::NAN)), None, "NaN cannot equal itself");
+        assert_eq!(
+            join_key_of(&P::Array(vec![P::Integer(1), P::Null])),
+            None,
+            "a null inside a list makes the comparison unknown"
+        );
+        let mut m = std::collections::HashMap::new();
+        m.insert("k".to_string(), P::Null);
+        assert_eq!(join_key_of(&P::Map(m)), None, "a null inside a map likewise");
+    }
+
+    /// Two maps written in different orders are one key.
+    #[test]
+    fn map_key_order_does_not_change_the_key() {
+        let mut a = std::collections::HashMap::new();
+        a.insert("x".to_string(), P::Integer(1));
+        a.insert("y".to_string(), P::Integer(2));
+        let mut b = std::collections::HashMap::new();
+        b.insert("y".to_string(), P::Integer(2));
+        b.insert("x".to_string(), P::Integer(1));
+        assert_eq!(join_key_of(&P::Map(a)), join_key_of(&P::Map(b)));
+    }
+
+    /// Above 2^53 an `as f64` round trip loses bits, so the integer arm must do
+    /// the comparison -- the same reason `cypher_equals` does it that way.
+    #[test]
+    fn large_integers_keep_their_precision() {
+        let i = P::Integer(9007199254740993);
+        let f = P::Float(9007199254740993.0);
+        // Whatever cypher_equals answers here, the keys must agree with it.
+        let equal = cypher_equals(&i, &f) == Some(true);
+        assert_eq!(join_key_of(&i) == join_key_of(&f), equal);
+    }
+}
+
 /// The instant "now" means for the duration of one statement.
 ///
 /// Cypher fixes the clock **once per query**, not once per call. Without that,
