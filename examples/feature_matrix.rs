@@ -76,7 +76,7 @@ fn capabilities() -> Vec<Capability> {
             title: "Cypher — read-only query",
             note: "",
             http: Cell {
-                evidence: Evidence { file: "api/openapi.yaml", needle: "Supports both read (MATCH) and write (CREATE, SET, DELETE, MERGE) queries." },
+                evidence: Evidence { file: "openapi/openapi.yaml", needle: "Supports both read (MATCH) and write (CREATE, SET, DELETE, MERGE) queries." },
                 if_present: "Yes — `POST /api/query`", if_absent: "No",
             },
             resp: Cell {
@@ -110,7 +110,7 @@ fn capabilities() -> Vec<Capability> {
                    `sdk/python/samyama_mcp/README.md` (\"Security — read-only by \
                    construction\"), not an oversight.",
             http: Cell {
-                evidence: Evidence { file: "api/openapi.yaml", needle: "Supports both read (MATCH) and write (CREATE, SET, DELETE, MERGE) queries." },
+                evidence: Evidence { file: "openapi/openapi.yaml", needle: "Supports both read (MATCH) and write (CREATE, SET, DELETE, MERGE) queries." },
                 if_present: "Yes — `POST /api/query`", if_absent: "No",
             },
             resp: Cell {
@@ -143,7 +143,7 @@ fn capabilities() -> Vec<Capability> {
                    the only way to hold a transaction open across statements today is raw \
                    HTTP against `/api/tx/*`.",
             http: Cell {
-                evidence: Evidence { file: "api/openapi.yaml", needle: "/api/tx/begin:" },
+                evidence: Evidence { file: "openapi/openapi.yaml", needle: "/api/tx/begin:" },
                 if_present: "Yes — `/api/tx/begin`, `/api/tx/{id}/commit`, `/api/tx/{id}/rollback`",
                 if_absent: "No",
             },
@@ -183,7 +183,7 @@ fn capabilities() -> Vec<Capability> {
                    `hasattr(self.client, \"page_rank\")`, i.e. only when it wraps an \
                    embedded Python client.",
             http: Cell {
-                evidence: Evidence { file: "api/openapi.yaml", needle: "/api/algorithms/pagerank" },
+                evidence: Evidence { file: "openapi/openapi.yaml", needle: "/api/algorithms/pagerank" },
                 if_present: "Yes", if_absent: "No endpoint",
             },
             resp: Cell {
@@ -222,7 +222,7 @@ fn capabilities() -> Vec<Capability> {
                    `VectorToolGenerator` mirrors that by checking `hasattr(self.client, \
                    \"vector_search\")` before registering `find_similar_*` tools.",
             http: Cell {
-                evidence: Evidence { file: "api/openapi.yaml", needle: "/api/vector-search:" },
+                evidence: Evidence { file: "openapi/openapi.yaml", needle: "/api/vector-search:" },
                 if_present: "Yes — `/api/vector-search`, `/api/vector/indexes`", if_absent: "No",
             },
             resp: Cell {
@@ -253,7 +253,7 @@ fn capabilities() -> Vec<Capability> {
             title: "Portable snapshot export / import (.sgsnap)",
             note: "",
             http: Cell {
-                evidence: Evidence { file: "api/openapi.yaml", needle: "/api/snapshot/export:" },
+                evidence: Evidence { file: "openapi/openapi.yaml", needle: "/api/snapshot/export:" },
                 if_present: "Yes — `/api/snapshot/export`, `/api/snapshot/import`", if_absent: "No",
             },
             resp: Cell {
@@ -285,7 +285,7 @@ fn capabilities() -> Vec<Capability> {
             note: "The TypeScript SDK covers two of the three formats the HTTP API serves; \
                    there is no evidence of a `importParquet` method.",
             http: Cell {
-                evidence: Evidence { file: "api/openapi.yaml", needle: "/api/import/parquet:" },
+                evidence: Evidence { file: "openapi/openapi.yaml", needle: "/api/import/parquet:" },
                 if_present: "Yes — `/api/import/csv`, `/api/import/json`, `/api/import/parquet`",
                 if_absent: "No",
             },
@@ -319,7 +319,7 @@ fn capabilities() -> Vec<Capability> {
                    edge/algorithm/vector-index so the agent calls those directly. Whether \
                    that substitutes for NLQ is exactly AI-03's open question, not this one's.",
             http: Cell {
-                evidence: Evidence { file: "api/openapi.yaml", needle: "/api/nlq:" },
+                evidence: Evidence { file: "openapi/openapi.yaml", needle: "/api/nlq:" },
                 if_present: "Yes — `/api/nlq`", if_absent: "No",
             },
             resp: Cell {
@@ -353,7 +353,7 @@ fn capabilities() -> Vec<Capability> {
                    call every other Cypher statement uses. That is a real capability, just not \
                    a discoverable one from a method list or an IDE's autocomplete.",
             http: Cell {
-                evidence: Evidence { file: "api/openapi.yaml", needle: "/api/schema:" },
+                evidence: Evidence { file: "openapi/openapi.yaml", needle: "/api/schema:" },
                 if_present: "Yes — `/api/schema`", if_absent: "No",
             },
             resp: Cell {
@@ -385,7 +385,7 @@ fn capabilities() -> Vec<Capability> {
                    graphs exist is an operator action taken before the server starts, not \
                    something the agent it serves does.",
             http: Cell {
-                evidence: Evidence { file: "api/openapi.yaml", needle: "/api/tenants:" },
+                evidence: Evidence { file: "openapi/openapi.yaml", needle: "/api/tenants:" },
                 if_present: "Yes — `/api/tenants`, `/api/tenants/{id}`", if_absent: "No",
             },
             resp: Cell {

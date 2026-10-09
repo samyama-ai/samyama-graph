@@ -696,7 +696,7 @@ samyama/
 ├── crates/             samyama-graph-algorithms, samyama-optimization, samyama-gpu, samyama-sdk
 ├── sdk/                Python and TypeScript client SDKs
 ├── cli/                `samyama-cli` command-line client
-├── api/                OpenAPI 3 specification
+├── openapi/            OpenAPI 3 specification
 ├── benches/            Criterion + LDBC / FinBench / Graphalytics harnesses
 ├── benchmarks/         Benchmark inputs and corpora
 ├── case_studies/       End-to-end domain datasets with loaders and queries
@@ -729,7 +729,7 @@ samyama/
 | Leaving Samyama | [docs/LEAVING-SAMYAMA.md](docs/LEAVING-SAMYAMA.md) — every export route and what it costs |
 | Grafana dashboard | [ops/grafana/](ops/grafana/) — query latency percentiles, band occupancy and the slow-query counter, over metrics the engine actually exports |
 | Architecture Decisions | [docs/ADR/](docs/ADR/) |
-| API Spec | [api/openapi.yaml](api/openapi.yaml) |
+| API Spec | [openapi/openapi.yaml](openapi/openapi.yaml) |
 | Troubleshooting & Support | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 
 ---

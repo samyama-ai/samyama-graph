@@ -262,7 +262,6 @@ src/                  # The server engine — the `samyama` library crate and it
 ├── lib.rs            # Library crate root — re-exports the modules above
 └── main.rs           # Server binary entry point
 
-api/               # OpenAPI 3 specification for the HTTP/REST surface (openapi.yaml)
 benches/           # Criterion microbenchmarks and LDBC / FinBench / Graphalytics harnesses
 benchmarks/        # Benchmark inputs and corpora (LDBC parameter files, Neo4j idiom and APOC export
                    #   fixtures, hierarchy corpus generator) — data, not code; the harnesses are in benches/
@@ -275,6 +274,7 @@ crates/            # Workspace member crates (the algorithm and optimization cod
 └── samyama-sdk/               # Rust client SDK — embedded and remote modes
 docs/              # Architecture docs, ADRs, compatibility notes
 examples/          # Runnable demos and data loaders
+openapi/           # OpenAPI 3 specification for the HTTP/REST surface (openapi.yaml)
 ops/               # Operational assets (Grafana dashboard JSON)
 scripts/           # CI gates, coverage, release checks, dataset downloads
 sdk/               # Python and TypeScript client SDKs (outside the cargo workspace)

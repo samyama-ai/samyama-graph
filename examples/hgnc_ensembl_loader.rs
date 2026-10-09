@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, NodeId, PropertyValue, Label};
 
+#[path = "common/hgnc_ensembl_common.rs"]
 mod hgnc_ensembl_common;
 use hgnc_ensembl_common::{format_duration, format_num, load_ensembl_gff3, load_hgnc_tsv};
 

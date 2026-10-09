@@ -254,7 +254,7 @@ graph LR
 }
 ```
 
-**OpenAPI spec:** `api/openapi.yaml`
+**OpenAPI spec:** `openapi/openapi.yaml`
 
 ---
 
@@ -337,5 +337,5 @@ pub trait SamyamaClient {
 | **RESP Server** | `src/protocol/server.rs` | TCP listener + connection handler |
 | | `src/protocol/command.rs` | `GRAPH.QUERY` etc. |
 | | `src/protocol/resp.rs` | RESP3 encoding/decoding |
-| **Specs** | `api/openapi.yaml` | HTTP API specification (OpenAPI 3.0) |
+| **Specs** | `openapi/openapi.yaml` | HTTP API specification (OpenAPI 3.0) |
 | **Server** | `src/main.rs` | Server startup (RESP + HTTP) |

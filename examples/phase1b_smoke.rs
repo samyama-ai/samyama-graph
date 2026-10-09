@@ -31,8 +31,11 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, NodeId, PropertyValue, SamyamaClient};
 
+#[path = "common/hgnc_ensembl_common.rs"]
 mod hgnc_ensembl_common;
+#[path = "common/civic_common.rs"]
 mod civic_common;
+#[path = "common/aact_biomarker_common.rs"]
 mod aact_biomarker_common;
 
 type Error = Box<dyn std::error::Error>;

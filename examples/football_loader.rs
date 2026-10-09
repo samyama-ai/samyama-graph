@@ -24,6 +24,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/football_common.rs"]
 mod football_common;
 use football_common::{format_duration, format_num};
 

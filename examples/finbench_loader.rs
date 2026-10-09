@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/finbench_common.rs"]
 mod finbench_common;
 use finbench_common::{format_duration, format_num, GeneratorConfig};
 

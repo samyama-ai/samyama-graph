@@ -25,6 +25,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/ldbc_common.rs"]
 mod ldbc_common;
 use ldbc_common::{format_duration, format_num};
 

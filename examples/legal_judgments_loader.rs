@@ -27,6 +27,7 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
+#[path = "common/legal_judgments_common.rs"]
 mod legal_judgments_common;
 use legal_judgments_common::{format_duration, format_num, REQUIRED_FILES};
 

@@ -73,7 +73,7 @@ jobs:
         run: npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
 
       # The manifests are not the only places the version is published, and
-      # tests/version_consistency.rs guards the rest: api/openapi.yaml (the
+      # tests/version_consistency.rs guards the rest: openapi/openapi.yaml (the
       # document *and* its examples, since an example is what a reader copies),
       # and the prose in src/lib.rs and CLAUDE.md that names a version. v1.8.0
       # was prepared without these and the release PR would have gone red on
@@ -88,11 +88,16 @@ jobs:
           PREV=$(git show HEAD:Cargo.toml 2>/dev/null | grep -m1 '^version = ' | cut -d'"' -f2 || true)
           [ -n "$PREV" ] || PREV=$(git show origin/main:Cargo.toml | grep -m1 '^version = ' | cut -d'"' -f2)
           echo "bumping prose and openapi from $PREV to $V"
-          for f in api/openapi.yaml src/lib.rs CLAUDE.md README.md; do
-            [ -f "$f" ] && sed -i "s/${PREV//./\.}/$V/g" "$f"
+          # One list for the bump and the check below, so they cannot drift.
+          FILES=(openapi/openapi.yaml src/lib.rs CLAUDE.md README.md)
+          for f in "${FILES[@]}"; do
+            # A missing file is an error, not a skip: after a move, skipping it
+            # would leave its version unbumped and still print "ok" below.
+            [ -f "$f" ] || { echo "::error::version location $f does not exist"; exit 1; }
+            sed -i "s/${PREV//./\.}/$V/g" "$f"
           done
           # Verify rather than assume: a sed that matched nothing is silent.
-          if grep -rn "$PREV" api/openapi.yaml src/lib.rs CLAUDE.md README.md 2>/dev/null; then
+          if grep -n "$PREV" "${FILES[@]}"; then
             echo "::error::a version location still names $PREV after the bump"
             exit 1
           fi
