@@ -11,7 +11,7 @@
   "dialect": null,
   "engine_version": "samyama v1.10.0",
   "recorded": "2026-10-03",
-  "suite_commit": "7e53c37744c966b6db385cb3bdfce9cf9c0b4491",
+  "suite_commit": "c153d1d6f6636777b9c5f9d13d2f95329860c734",
   "verdicts": {
     "direction-any": "CONFORMS",
     "direction-left": "CONFORMS",
