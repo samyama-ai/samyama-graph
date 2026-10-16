@@ -6,5 +6,6 @@ fenced block with no blank line between them, which `doc_check` splits on.
 
 ```cypher
 CREATE VECTOR INDEX probe_idx FOR (p:Paper) ON (p.embedding) OPTIONS {dimensions: 384, similarity: 'cosine'}
+
 CALL vector.search('Paper', 'embedding', [0.1, 0.2, 0.3], 10) YIELD node, score
 ```
