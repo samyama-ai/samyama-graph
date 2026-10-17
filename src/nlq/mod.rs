@@ -194,6 +194,71 @@ pub fn config_from(get: impl Fn(&str) -> Option<String>) -> Result<NLQConfig, St
     })
 }
 
+/// The NLQ configuration for `graph`: the tenant's own saved [`NLQConfig`] when
+/// it has one, the process environment otherwise.
+///
+/// A tenant's config was write-only until #438 — `update_nlq_config` stored it
+/// and `PATCH /api/tenants/:id` round-tripped it, but every request built its
+/// config from the environment, so setting a tenant's provider changed nothing.
+/// Both `POST /api/nlq` and `GRAPH.NLQ` now read it through here.
+pub fn config_for_tenant(
+    tenants: &crate::persistence::tenant::TenantManager,
+    graph: &str,
+) -> Result<NLQConfig, String> {
+    let saved = tenants.get_tenant(graph).ok().and_then(|t| t.nlq_config);
+    config_for(saved, |var| std::env::var(var).ok())
+}
+
+/// As [`config_for_tenant`], with the tenant's saved config and the variable
+/// reader passed in so tests do not touch the process environment.
+///
+/// Three cases, and the middle one is a deliberate refusal rather than a
+/// fallback: a tenant whose NLQ is switched off must not be served from the
+/// environment, or disabling it for one tenant would silently do nothing.
+///
+///   * no saved config  -> the environment, exactly as before
+///   * `enabled: false` -> refused, naming the tenant setting
+///   * `enabled: true`  -> the saved config, with the API key still read from
+///     the environment unless the tenant carries one
+///
+/// The key is resolved the same way `config_from` resolves it, and for the same
+/// reason it is preferred from the environment: a key written into the tenant
+/// registry is a key that `GET /api/tenants` can hand back.
+pub fn config_for(
+    saved: Option<NLQConfig>,
+    get: impl Fn(&str) -> Option<String>,
+) -> Result<NLQConfig, String> {
+    let Some(mut saved) = saved else {
+        return config_from(get);
+    };
+    if !saved.enabled {
+        return Err(concat!(
+            "NLQ is disabled for this graph (its tenant has `nlq_config.enabled: false`). ",
+            "Enable it with PATCH /api/tenants/:id, or remove the tenant's nlq_config to ",
+            "fall back to the NLQ_* environment variables.",
+        )
+        .to_string());
+    }
+    client::check_implemented(&saved.provider).map_err(|e| e.to_string())?;
+    saved.api_key = match api_key_var(&saved.provider) {
+        None => None,
+        Some(var) => {
+            let from_tenant = saved.api_key.take().filter(|k| !k.trim().is_empty());
+            let from_env = get(var).filter(|k| !k.trim().is_empty());
+            match from_tenant.or(from_env) {
+                Some(key) => Some(key),
+                None => {
+                    return Err(format!(
+                        "This graph's tenant asks for {:?}, which needs an API key. \
+                         The tenant carries none, and {var} is not set.",
+                        saved.provider
+                    ))
+                }
+            }
+        }
+    };
+    Ok(saved)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +273,139 @@ mod tests {
             api_base_url: None,
             system_prompt: None,
         }).unwrap()
+    }
+
+
+    // --- config_for: the tenant's saved NLQConfig, else the environment (#438) ---
+    //
+    // The bug these cover: `update_nlq_config` persisted a tenant's provider and
+    // every request path then built its config from the environment, so the saved
+    // one was write-only. A test that only checked the setter round-trips through
+    // storage passed throughout.
+
+    fn saved(provider: LLMProvider, api_key: Option<&str>) -> NLQConfig {
+        NLQConfig {
+            enabled: true,
+            provider,
+            model: "tenant-model".to_string(),
+            api_key: api_key.map(str::to_string),
+            api_base_url: Some("https://tenant.example".to_string()),
+            system_prompt: Some("tenant prompt".to_string()),
+        }
+    }
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn config_for_without_a_saved_config_reads_the_environment() {
+        let got = config_for(None, |v| match v {
+            "NLQ_PROVIDER" => Some("ollama".to_string()),
+            "NLQ_MODEL" => Some("llama3".to_string()),
+            _ => None,
+        })
+        .expect("ollama needs no key");
+        assert_eq!(got.provider, LLMProvider::Ollama);
+        assert_eq!(got.model, "llama3");
+    }
+
+    #[test]
+    fn config_for_prefers_the_tenants_saved_config_over_the_environment() {
+        // The environment names a different provider and model. If the saved
+        // config were ignored -- the #438 defect -- these would come back as
+        // ollama/llama3.
+        let got = config_for(Some(saved(LLMProvider::Mock, None)), |v| match v {
+            "NLQ_PROVIDER" => Some("ollama".to_string()),
+            "NLQ_MODEL" => Some("llama3".to_string()),
+            _ => None,
+        })
+        .expect("mock needs no key");
+        assert_eq!(got.provider, LLMProvider::Mock);
+        assert_eq!(got.model, "tenant-model");
+        assert_eq!(got.api_base_url.as_deref(), Some("https://tenant.example"));
+        assert_eq!(got.system_prompt.as_deref(), Some("tenant prompt"));
+    }
+
+    #[test]
+    fn config_for_refuses_a_tenant_whose_nlq_is_disabled() {
+        // Not a fallback: if a disabled tenant were served from the environment,
+        // turning NLQ off for one tenant would silently do nothing.
+        let mut off = saved(LLMProvider::Mock, None);
+        off.enabled = false;
+        let err = config_for(Some(off), |v| match v {
+            "NLQ_PROVIDER" => Some("ollama".to_string()),
+            _ => None,
+        })
+        .expect_err("a disabled tenant must be refused, not served from the environment");
+        assert!(
+            err.contains("disabled") && err.contains("nlq_config.enabled"),
+            "the error should name the setting that turned it off, got: {err}"
+        );
+    }
+
+    #[test]
+    fn config_for_takes_the_api_key_from_the_environment_when_the_tenant_carries_none() {
+        // Deliberate: a key written into the tenant registry is a key that
+        // `GET /api/tenants` can hand back.
+        let got = config_for(Some(saved(LLMProvider::OpenAI, None)), |v| match v {
+            "OPENAI_API_KEY" => Some("sk-from-env".to_string()),
+            _ => None,
+        })
+        .expect("the key is in the environment");
+        assert_eq!(got.api_key.as_deref(), Some("sk-from-env"));
+        assert_eq!(got.provider, LLMProvider::OpenAI);
+    }
+
+    #[test]
+    fn config_for_prefers_a_key_the_tenant_carries() {
+        let got = config_for(Some(saved(LLMProvider::OpenAI, Some("sk-from-tenant"))), |v| {
+            match v {
+                "OPENAI_API_KEY" => Some("sk-from-env".to_string()),
+                _ => None,
+            }
+        })
+        .expect("the tenant carries a key");
+        assert_eq!(got.api_key.as_deref(), Some("sk-from-tenant"));
+    }
+
+    #[test]
+    fn config_for_ignores_a_blank_key_and_falls_back_to_the_environment() {
+        let got = config_for(Some(saved(LLMProvider::OpenAI, Some("   "))), |v| match v {
+            "OPENAI_API_KEY" => Some("sk-from-env".to_string()),
+            _ => None,
+        })
+        .expect("a blank tenant key is not a key");
+        assert_eq!(got.api_key.as_deref(), Some("sk-from-env"));
+    }
+
+    #[test]
+    fn config_for_names_the_missing_variable_when_no_key_is_available() {
+        let err = config_for(Some(saved(LLMProvider::OpenAI, None)), no_env)
+            .expect_err("openai needs a key");
+        assert!(
+            err.contains("OPENAI_API_KEY"),
+            "the error should name the variable to set, got: {err}"
+        );
+    }
+
+    #[test]
+    fn config_for_refuses_a_saved_provider_that_is_not_implemented() {
+        // A tenant row can hold Anthropic or AzureOpenAI -- the enum has them --
+        // and the request path must refuse it rather than build a client for it.
+        let err = config_for(Some(saved(LLMProvider::Anthropic, Some("k"))), no_env)
+            .expect_err("anthropic is not implemented");
+        assert!(
+            err.contains("not implemented"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn config_for_does_not_need_a_key_for_a_keyless_provider() {
+        let got = config_for(Some(saved(LLMProvider::Ollama, None)), no_env)
+            .expect("ollama reads no key variable");
+        assert!(got.api_key.is_none());
     }
 
     // --- is_safe_query tests (via pipeline) ---
@@ -246,6 +444,49 @@ mod tests {
     /// are not exotic: they are the ordinary way to write a destructive
     /// statement in Cypher, and the NLQ pipeline runs whatever the model
     /// returns once this says yes.
+
+    /// Every write form the parser classifies, asserted through the gate rather
+    /// than through `is_write` directly — #438 asks for a negative test per write
+    /// keyword, and `test_unsafe_write_queries` covers six of them.
+    ///
+    /// The ones here are the forms a keyword blacklist would miss: a write buried
+    /// in a FOREACH, the CREATE-side DDL (only DROP INDEX was covered), and a
+    /// CALL to a procedure that writes a property.
+    ///
+    /// A write in a UNION branch is deliberately absent: the grammar refuses
+    /// every spelling of it (`... UNION MATCH (m) SET m.v = 1 RETURN m` does not
+    /// parse), so `is_write`'s `union_queries` arm is unreachable through
+    /// `parse_query` and such text fails the gate as unparseable instead --
+    /// which `text_that_does_not_parse_is_not_safe` already covers.
+    #[test]
+    fn the_gate_refuses_every_write_form_the_parser_knows() {
+        let pipeline = make_pipeline();
+        for q in [
+            // FOREACH -- the write is inside the loop body, not the outer clause.
+            "MATCH (n) FOREACH (x IN [1,2] | SET n.v = x)",
+            "MATCH (n) FOREACH (x IN [1] | CREATE (:Tag {v: x}))",
+            // DETACH DELETE, which the covered DELETE case does not spell.
+            "MATCH (n) DETACH DELETE n",
+            // Schema changes mutate the store. Only DROP INDEX was asserted.
+            "CREATE INDEX ON :Person(name)",
+            "CREATE CONSTRAINT ON (p:Person) ASSERT p.email IS UNIQUE",
+            // A procedure that writes an embedding as a node property (#1468).
+            "CALL algo.fastRP({embeddingDimension: 4})",
+            "CALL algo.node2vec({embeddingDimension: 4})",
+        ] {
+            // A parse failure also fails the gate, which would make this test
+            // pass for the wrong reason -- so require that the engine parses it.
+            assert!(
+                crate::query::parse_query(q).is_ok(),
+                "this test proves nothing if the query does not parse: {q:?}"
+            );
+            assert!(
+                !pipeline.is_safe_query(q),
+                "the read-only gate accepted a write: {q:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_write_that_begins_with_match_is_not_safe() {
         let pipeline = make_pipeline();
@@ -605,3 +846,5 @@ mod tests {
         }
     }
 }
+
+

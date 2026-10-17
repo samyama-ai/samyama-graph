@@ -3244,6 +3244,9 @@ pub async fn verify_handler(
 #[derive(Deserialize)]
 pub struct NlqRequest {
     pub question: String,
+    /// Tenant/graph whose `nlq_config` to use. Defaults to "default".
+    #[serde(default = "default_graph")]
+    pub graph: String,
 }
 
 /// POST /api/nlq -- translate a natural-language question into read-only Cypher using the
@@ -3261,10 +3264,18 @@ pub async fn nlq_handler(
 ) -> impl IntoResponse {
     use crate::nlq::NLQPipeline;
 
+    // The tenant's own `nlq_config` first, the environment when it has none
+    // (#438). Before this, a tenant's saved provider was never read by any
+    // request path, so setting it changed nothing.
+    //
     // Refused, not defaulted. `NLQ_PROVIDER=claudecode` was not on the old list
     // and fell through to OpenAI, so an operator asking for the local CLI sent
     // the question and the schema summary to a third party instead.
-    let config = match crate::nlq::config_from_env() {
+    let resolved = match state.tenant_manager.as_ref() {
+        Some(tm) => crate::nlq::config_for_tenant(tm, &payload.graph),
+        None => crate::nlq::config_from_env(),
+    };
+    let config = match resolved {
         Ok(c) => c,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();

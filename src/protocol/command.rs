@@ -423,7 +423,8 @@ impl CommandHandler {
     /// Format: GRAPH.NLQ graph_name "Who does Alice know?"
     ///
     /// The RESP counterpart of `POST /api/nlq`, with the same configuration
-    /// (`crate::nlq::config_from_env`) and the same refusal of any generated
+    /// (the graph's tenant `nlq_config`, else `crate::nlq::config_from_env`)
+    /// and the same refusal of any generated
     /// query that writes. Like the HTTP route it does not run the query; the
     /// caller passes the reply to GRAPH.RO_QUERY.
     async fn handle_graph_nlq(
@@ -461,8 +462,14 @@ impl CommandHandler {
                 return RespValue::Error(format!("ERR {e}"));
             }
         }
-        self.translate_nlq(&question, store, crate::nlq::config_from_env())
-            .await
+        // The tenant's own `nlq_config` first, the environment when it has none
+        // (#438), matching `POST /api/nlq`.
+        self.translate_nlq(
+            &question,
+            store,
+            crate::nlq::config_for_tenant(&self.tenant_manager, &graph_name),
+        )
+        .await
     }
 
     /// The translation half of GRAPH.NLQ, with the configuration passed in so
