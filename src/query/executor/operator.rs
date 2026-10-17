@@ -3086,10 +3086,6 @@ fn as_point(v: &Value, who: &str) -> ExecutionResult<Point> {
     Ok(Point { x, y, geographic })
 }
 
-/// Mean earth radius, metres. The value WGS-84 uses for a spherical
-/// approximation.
-const EARTH_RADIUS_M: f64 = 6_371_008.8;
-
 /// Distance between two points.
 ///
 /// Haversine on a sphere for geographic points, in **metres**; Euclidean for
@@ -3109,12 +3105,10 @@ fn point_distance(a: &Point, b: &Point) -> ExecutionResult<f64> {
     if !a.geographic {
         return Ok(((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt());
     }
-    let (lat1, lat2) = (a.y.to_radians(), b.y.to_radians());
-    let dlat = (b.y - a.y).to_radians();
-    let dlon = (b.x - a.x).to_radians();
-    let h = (dlat / 2.0).sin().powi(2)
-        + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    Ok(2.0 * EARTH_RADIUS_M * h.sqrt().asin())
+    // The mean earth radius WGS-84 uses for a spherical approximation, and
+    // the same function the point index sizes its boxes with (#1618), so an
+    // indexed distance bound and this one cannot disagree.
+    Ok(crate::index::point::haversine_m((a.x, a.y), (b.x, b.y)))
 }
 
 /// The fewest arguments each function can be called with.
@@ -15766,6 +15760,13 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .map(|(name, label, property)| {
                         (label, property, format!("FULLTEXT[{name}]"))
                     }),
+            );
+            rows.extend(
+                store
+                    .point_index
+                    .listing()
+                    .into_iter()
+                    .map(|(name, label, property)| (label, property, format!("POINT[{name}]"))),
             );
             // Both registries are hash maps, so the listing order is otherwise
             // arbitrary and differs run to run.

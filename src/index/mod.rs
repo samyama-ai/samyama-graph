@@ -9,6 +9,7 @@ pub mod property_index;
 pub mod sketch;
 pub mod manager;
 pub mod fulltext;
+pub mod point;
 pub mod hierarchy;
 pub mod catalog;
 

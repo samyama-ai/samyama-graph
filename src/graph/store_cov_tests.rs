@@ -1540,6 +1540,7 @@ fn index_catalog_lists_every_kind_in_a_stable_order() {
             IndexDefinition::UniqueConstraint { .. } => 1,
             IndexDefinition::FullText { .. } => 2,
             IndexDefinition::Vector { .. } => 3,
+            IndexDefinition::Point { .. } => 4,
         })
         .collect();
     let mut sorted = kinds.clone();

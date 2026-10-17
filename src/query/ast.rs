@@ -115,6 +115,8 @@ pub struct Query {
     pub create_vector_index_clause: Option<CreateVectorIndexClause>,
     pub create_fulltext_index_clause: Option<CreateFullTextIndexClause>,
     pub drop_fulltext_index_clause: Option<DropFullTextIndexClause>,
+    /// `CREATE POINT INDEX` / `DROP POINT INDEX` (#1618).
+    pub point_index_ddl: Option<PointIndexDdl>,
     /// CREATE INDEX clause (optional)
     pub create_index_clause: Option<CreateIndexClause>,
     /// DROP INDEX clause (optional)
@@ -234,6 +236,13 @@ pub struct CreateFullTextIndexClause {
     /// One or more properties. Neo4j's `ON EACH [n.a, n.b]` indexes several,
     /// and the single-property form is the same thing with one entry.
     pub property_keys: Vec<String>,
+}
+
+/// `CREATE POINT INDEX` / `DROP POINT INDEX` (#1618).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PointIndexDdl {
+    Create { name: String, label: Label, property: String },
+    Drop { name: String },
 }
 
 /// DROP FULLTEXT INDEX clause
@@ -1255,6 +1264,7 @@ impl Query {
             || self.create_vector_index_clause.is_some()
             || self.create_fulltext_index_clause.is_some()
             || self.drop_fulltext_index_clause.is_some()
+            || self.point_index_ddl.is_some()
             || self.create_constraint_clause.is_some()
             || self.create_hierarchy_index_clause.is_some()
             || self.drop_hierarchy_index.is_some()
@@ -1326,6 +1336,7 @@ impl Query {
             create_vector_index_clause: None,
             create_fulltext_index_clause: None,
             drop_fulltext_index_clause: None,
+            point_index_ddl: None,
             create_index_clause: None,
             drop_index_clause: None,
             create_constraint_clause: None,

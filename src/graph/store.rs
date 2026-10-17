@@ -1087,6 +1087,9 @@ pub struct GraphStore {
     /// interior mutability the vector index needs for concurrent search has no
     /// counterpart here.
     pub fulltext: crate::index::fulltext::FullTextIndexes,
+    /// R-tree point indexes (NDS-04, #1618), maintained on the same paths as
+    /// the full-text indexes.
+    pub point_index: crate::index::point::PointIndexes,
 
     /// Property indices manager
     pub property_index: Arc<IndexManager>,
@@ -1224,6 +1227,7 @@ impl GraphStore {
             bulk_load_finishes: 0,
             vector_index: Arc::new(VectorIndexManager::new()),
             fulltext: Default::default(),
+            point_index: Default::default(),
             property_index: Arc::new(IndexManager::new()),
             index_catalog_dirty: std::sync::atomic::AtomicBool::new(false),
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
@@ -1445,8 +1449,8 @@ impl GraphStore {
     /// Resident bytes of every index the store holds, one row each, largest
     /// first (COST-06, NDS-14).
     ///
-    /// All four kinds: property indexes and unique constraints, full-text,
-    /// vector (with its HNSW graph) and hierarchy. The property kinds alone
+    /// All five kinds: property indexes and unique constraints, full-text,
+    /// vector (with its HNSW graph), hierarchy and point. The property kinds alone
     /// were reported before, so an index overhead figure left out the two
     /// structures most likely to be the largest.
     pub fn index_memory(&self) -> Vec<crate::index::IndexMemory> {
@@ -1461,6 +1465,16 @@ impl GraphStore {
             name: Some(h.name),
             bytes: h.bytes,
         }));
+        out.extend(self.point_index.index_memory().into_iter().map(
+            |(name, label, property, bytes, entries)| crate::index::IndexMemory {
+                kind: "point",
+                entries,
+                label,
+                property,
+                name: Some(name),
+                bytes,
+            },
+        ));
         out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.label.cmp(&b.label)));
         out
     }
@@ -1982,6 +1996,13 @@ NodeDeleted { .. } => {
         //
         // A property-less node indexes nothing, so the local call is skipped
         // rather than allocating to feed a loop that iterates zero times (#491).
+        if !self.point_index.is_empty() {
+            for (key, value) in &indexed_properties {
+                for label in &labels {
+                    self.point_index.on_property_set(label.as_str(), key, node_id, Some(value));
+                }
+            }
+        }
         // Full-text, which neither branch below reaches: it is fed on the
         // property-set path only, so a node created with its properties
         // through this call was never findable by a full-text search on a
@@ -2498,6 +2519,7 @@ NodeDeleted { .. } => {
         // through `on_property_removed` per label, because by the time a
         // reader asks, the labels are what is being torn down.
         self.fulltext.on_node_deleted(id);
+        self.point_index.on_node_removed(None, id);
 
         // `label_index` changes here, so the derived bitsets are stale (#730).
         self.invalidate_label_bits();
@@ -2603,6 +2625,9 @@ NodeDeleted { .. } => {
             let at = self.current_version;
             self.push_node_undo(node_id, NodeUndo::Label { at, label: label.clone(), had: true });
         }
+        if had && !self.point_index.is_empty() {
+            self.point_index.on_node_removed(Some(label.as_str()), node_id);
+        }
         let current_version = self.current_version;
 
         let node = self
@@ -2689,6 +2714,11 @@ NodeDeleted { .. } => {
         } else {
             self.node_properties_full(node_id)
         };
+        if !self.point_index.is_empty() {
+            for (k, v) in &properties {
+                self.point_index.on_property_set(label.as_str(), k, node_id, Some(v));
+            }
+        }
         let constrained: Vec<(&String, &PropertyValue)> =
             if self.property_index.has_any_unique_constraints() {
                 properties
@@ -3868,6 +3898,13 @@ NodeDeleted { .. } => {
                         node_id,
                         NodeUndo::Property { at, key: key.to_string(), old: Some(old) },
                     );
+                }
+            }
+        }
+        if !self.point_index.is_empty() {
+            if let Some(node) = self.get_node(node_id) {
+                for label in &node.labels {
+                    self.point_index.on_property_set(label.as_str(), key, node_id, None);
                 }
             }
         }
@@ -6229,6 +6266,13 @@ NodeDeleted { .. } => {
         for label in labels {
             self.property_index.index_insert(label, key, new_value.clone(), id);
         }
+        // Point indexes on the same choke point (#1618): a value that is not
+        // a point removes the node from the index.
+        if !self.point_index.is_empty() {
+            for label in labels {
+                self.point_index.on_property_set(label.as_str(), key, id, Some(new_value));
+            }
+        }
         // Full-text maintenance on the same choke point as the property
         // index. A full-text index maintained from the callers of
         // this function instead would go stale at whichever caller was
@@ -6311,6 +6355,9 @@ NodeDeleted { .. } => {
             |(name, label, property)| IndexDefinition::FullText { name, label, property },
         ));
         definitions.extend(self.vector_index.definitions());
+        definitions.extend(self.point_index.listing().into_iter().map(
+            |(name, label, property)| IndexDefinition::Point { name, label, property },
+        ));
         // Sorted so two runs of the same DDL produce byte-identical records and
         // a diff of the catalog is a diff of the indexes, not of hash order.
         definitions.sort_by_key(|d| match d {
@@ -6329,6 +6376,9 @@ NodeDeleted { .. } => {
                 property.clone(),
                 name.clone().unwrap_or_default(),
             ),
+            IndexDefinition::Point { name, label, property } => {
+                (4u8, label.clone(), property.clone(), name.clone())
+            }
         });
         IndexCatalog { definitions }
     }
@@ -6530,6 +6580,10 @@ NodeDeleted { .. } => {
                     self.create_fulltext_index(name, label, property);
                     report.fulltext += 1;
                 }
+                IndexDefinition::Point { name, label, property } => {
+                    self.create_point_index(name, label, property);
+                    report.point += 1;
+                }
                 IndexDefinition::Vector {
                     name,
                     label,
@@ -6602,6 +6656,29 @@ NodeDeleted { .. } => {
             })
             .collect();
         self.fulltext.rebuild(name, docs)
+    }
+
+    /// `CREATE POINT INDEX` — declare the R-tree and fill it from the nodes
+    /// already present (#1618). Returns the points indexed.
+    pub fn create_point_index(&mut self, name: &str, label: &str, property: &str) -> usize {
+        self.bump_epoch();
+        self.mark_index_catalog_changed();
+        self.point_index.create(name, label, property);
+        let points: Vec<(NodeId, PropertyValue)> = self
+            .node_ids_by_label(&Label::new(label), None)
+            .into_iter()
+            .filter_map(|id| self.node_properties_merged(id).get(property).cloned().map(|v| (id, v)))
+            .collect();
+        self.point_index.rebuild(name, points)
+    }
+
+    pub fn drop_point_index(&mut self, name: &str) -> bool {
+        self.bump_epoch();
+        let dropped = self.point_index.drop_index(name);
+        if dropped {
+            self.mark_index_catalog_changed();
+        }
+        dropped
     }
 
     pub fn drop_fulltext_index(&mut self, name: &str) -> bool {

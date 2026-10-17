@@ -17,7 +17,7 @@ pub struct PropertyIndexKey {
 /// What one index costs.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IndexMemory {
-    /// `index`, `unique_constraint`, `fulltext`, `vector` or `hierarchy`.
+    /// `index`, `unique_constraint`, `fulltext`, `vector`, `hierarchy` or `point`.
     pub kind: &'static str,
     /// The name the DDL gave the index, for the kinds that carry one.
     #[serde(skip_serializing_if = "Option::is_none")]

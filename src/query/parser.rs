@@ -720,14 +720,35 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                 parse_create_index_statement(inner, query)?;
             }
             Rule::create_point_index_stmt => {
-                return Err(ParseError::SemanticError(
-                    "CREATE POINT INDEX is not supported yet: a point index is a spatial \
-                     structure (an R-tree) that answers point.withinBBox and nearest-neighbour \
-                     queries, and it does not exist in this engine yet -- samyama-graph#1618. \
-                     Spatial predicates run as a scan until then; CREATE INDEX on a scalar \
-                     property (for example a geohash) is the available alternative."
-                        .to_string(),
-                ));
+                // An unnamed index is named from what it covers, as the
+                // full-text kinds are (#1668), so DROP POINT INDEX can name it.
+                let mut name = None;
+                let mut label = None;
+                let mut property = None;
+                for part in inner.into_inner() {
+                    match part.as_rule() {
+                        Rule::index_name => name = Some(part.as_str().to_string()),
+                        Rule::label => label = Some(Label::new(unescape_name(part.as_str()))),
+                        Rule::property_key => property = Some(unescape_name(part.as_str())),
+                        _ => {}
+                    }
+                }
+                let (Some(label), Some(property)) = (label, property) else {
+                    return Err(ParseError::SemanticError(
+                        "CREATE POINT INDEX needs a label and a property: \
+                         CREATE POINT INDEX [name] FOR (n:Label) ON (n.property)".to_string(),
+                    ));
+                };
+                let name = name.unwrap_or_else(|| format!("point_{}_{}", label.as_str(), property));
+                query.point_index_ddl = Some(PointIndexDdl::Create { name, label, property });
+            }
+            Rule::drop_point_index_stmt => {
+                let name = inner
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::index_name)
+                    .map(|p| p.as_str().to_string())
+                    .ok_or_else(|| ParseError::SemanticError("DROP POINT INDEX needs a name".to_string()))?;
+                query.point_index_ddl = Some(PointIndexDdl::Drop { name });
             }
             Rule::call_stmt => {
                 parse_call_statement(inner, query)?;

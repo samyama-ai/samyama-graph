@@ -52,6 +52,9 @@ pub enum IndexDefinition {
         metric: crate::vector::DistanceMetric,
         quantization: crate::vector::index::Quantization,
     },
+    /// `CREATE POINT INDEX name FOR (n:Label) ON (n.property)` (#1618). Last,
+    /// so a catalog written before it still decodes.
+    Point { name: String, label: String, property: String },
 }
 
 /// Every index declaration a tenant has, as one record.
@@ -86,6 +89,7 @@ pub struct RestoredIndexes {
     pub unique: usize,
     pub fulltext: usize,
     pub vector: usize,
+    pub point: usize,
     /// Definitions that could not be rebuilt — a vector index whose registry
     /// refused the declaration, for instance. Counted so a partial restore is
     /// visible instead of being read as a smaller catalog.
@@ -94,7 +98,7 @@ pub struct RestoredIndexes {
 
 impl RestoredIndexes {
     pub fn total(&self) -> usize {
-        self.property + self.unique + self.fulltext + self.vector
+        self.property + self.unique + self.fulltext + self.vector + self.point
     }
 }
 
@@ -122,6 +126,7 @@ mod tests {
             unique: 2,
             fulltext: 3,
             vector: 4,
+            point: 0,
             failed: 5,
         };
         assert_eq!(r.total(), 10);

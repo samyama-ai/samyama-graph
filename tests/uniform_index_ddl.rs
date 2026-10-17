@@ -5,8 +5,7 @@
 //! the plain index did not accept Neo4j 5's `FOR (n:L) ON (n.p)`. Each kind now
 //! takes both, with an optional name. An unnamed full-text or text index is
 //! named from what it covers, because `db.index.fulltext.queryNodes` addresses
-//! it by name. `CREATE POINT INDEX` parses and is refused with the reason: the
-//! R-tree it asks for is #1618.
+//! it by name. `CREATE POINT INDEX` builds the R-tree (#1618).
 
 use samyama::graph::{GraphStore, Label, PropertyValue};
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
@@ -95,11 +94,15 @@ fn a_named_range_index_is_used_by_the_planner() {
 }
 
 #[test]
-fn a_point_index_is_refused_with_the_reason() {
-    for q in ["CREATE POINT INDEX ON :N(loc)", "CREATE POINT INDEX pl FOR (n:N) ON (n.loc)"] {
+fn a_point_index_takes_both_spellings_too() {
+    // Refused with a pointer to #1618 until the R-tree existed; it does now.
+    for (q, expect) in [
+        ("CREATE POINT INDEX ON :N(loc)", "N|loc|POINT[point_N_loc]"),
+        ("CREATE POINT INDEX pl FOR (n:N) ON (n.loc)", "N|loc|POINT[pl]"),
+    ] {
         let mut s = store();
-        let err = run(&mut s, q).expect_err(q);
-        assert!(err.contains("#1618") && err.contains("R-tree"), "{q}: {err}");
-        assert!(show(&s).is_empty(), "{q} created something: {:?}", show(&s));
+        run(&mut s, q).unwrap_or_else(|e| panic!("{q}: {e}"));
+        let rows = show(&s);
+        assert!(rows.iter().any(|r| r == expect), "{q}: SHOW INDEXES {rows:?}, wanted {expect}");
     }
 }
