@@ -5,8 +5,17 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 
 // Query structure
-query = { SOI ~ explain_clause? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
+query = { SOI ~ cypher_options? ~ explain_clause? ~ cypher_options? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
 explain_clause = { ^"PROFILE" | ^"EXPLAIN" }
+// `CYPHER planner=cost plan=2 MATCH …` (LANG-06, #1616): options that choose
+// the planner and force one of its candidate plans, before or after EXPLAIN.
+// Keys and values are checked when the query is lowered, so an option this
+// engine lacks is named in the error rather than reported as a parse failure.
+cypher_options = { cypher_kw ~ cypher_option+ }
+cypher_kw = @{ ^"CYPHER" ~ !(ASCII_ALPHANUMERIC | "_") }
+cypher_option = { cypher_option_key ~ "=" ~ cypher_option_value }
+cypher_option_key = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+cypher_option_value = @{ (ASCII_ALPHANUMERIC | "_" | "-" | ".")+ }
 union_clause = { ^"UNION" ~ ^"ALL"? }
 statement = { analyze_stmt | show_hierarchy_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_point_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | load_parquet_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
 
@@ -22,7 +31,7 @@ statement = { analyze_stmt | show_hierarchy_indexes_stmt | show_indexes_stmt | s
 // when that fails. Every query the established rules accept keeps taking them
 // and keeps producing the by-kind AST the planner has always used; only the
 // ones they reject reach here, and those get `Query::clauses` instead.
-pipeline_query = { SOI ~ explain_clause? ~ pipeline_stmt ~ ";"? ~ EOI }
+pipeline_query = { SOI ~ cypher_options? ~ explain_clause? ~ cypher_options? ~ pipeline_stmt ~ ";"? ~ EOI }
 pipeline_stmt = { pipeline_clause+ ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 pipeline_clause = _{
     optional_match_clause | match_clause | where_clause | unwind_clause | load_csv_clause | load_parquet_clause |

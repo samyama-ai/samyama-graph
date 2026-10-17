@@ -79,6 +79,9 @@ pub struct PlanDiagnostics {
     pub candidates_evaluated: usize,
     pub chosen_plan_cost: f64,
     pub candidate_costs: Vec<(String, f64)>,
+    /// The candidate that runs, counting from 0: the cheapest unless
+    /// `CYPHER plan=N` forced another (#1616).
+    pub chosen: usize,
 }
 
 thread_local! {
@@ -834,6 +837,18 @@ pub struct QueryPlanner {
     /// (#1675). Set per `plan` call, like `trail_enumeration`, because the scan
     /// choices sit in builders that never see the `Query`.
     hints: std::sync::Mutex<(Vec<PlanHint>, HashSet<String>)>,
+    /// The query's `CYPHER planner=… plan=N` options (#1616), set per `plan`
+    /// call for the same reason as `hints`.
+    forcing: std::sync::Mutex<Forcing>,
+}
+
+/// `CYPHER` options in force for the query being planned (#1616).
+#[derive(Debug, Default)]
+struct Forcing {
+    /// `Some` when the query named a planner; otherwise the config decides.
+    graph_native: Option<bool>,
+    /// The candidate each MATCH runs, counting from 1.
+    plan: Option<usize>,
 }
 
 /// Project a `RETURN` list, building an aggregation when any item aggregates.
@@ -892,6 +907,7 @@ impl QueryPlanner {
             config: PlannerConfig::default(),
             trail_enumeration: std::sync::atomic::AtomicBool::new(false),
             hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
+            forcing: std::sync::Mutex::new(Forcing::default()),
         }
     }
 
@@ -902,6 +918,7 @@ impl QueryPlanner {
             config,
             trail_enumeration: std::sync::atomic::AtomicBool::new(false),
             hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
+            forcing: std::sync::Mutex::new(Forcing::default()),
         }
     }
 
@@ -1255,6 +1272,25 @@ impl QueryPlanner {
     }
 
     pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+        use crate::query::ast::PlannerChoice;
+        // Diagnostics are left for EXPLAIN to take; a query that ran without
+        // EXPLAIN would otherwise leave its candidates for the next one to print.
+        PLAN_DIAGNOSTICS.with(|d| d.borrow_mut().take());
+        let options = &query.plan_options;
+        *self.forcing.lock().unwrap() = Forcing {
+            graph_native: match options.planner {
+                Some(PlannerChoice::Cost) => Some(true),
+                Some(PlannerChoice::Legacy) => Some(false),
+                None => options.plan.map(|_| true),
+            },
+            plan: options.plan,
+        };
+        let plan = self.plan_with_hints(query, store);
+        *self.forcing.lock().unwrap() = Forcing::default();
+        plan
+    }
+
+    fn plan_with_hints(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
         if query.hints.is_empty() {
             self.hints.lock().unwrap().0.clear();
             return self.plan_unhinted(query, store);
@@ -4277,8 +4313,29 @@ impl QueryPlanner {
     }
 
     fn dispatch_plan_match_inner(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
-        if self.config.graph_native {
-            match self.plan_match_native(match_clause, where_clause, store) {
+        let (graph_native, forced) = {
+            let f = self.forcing.lock().unwrap();
+            (f.graph_native.unwrap_or(self.config.graph_native), f.plan)
+        };
+        if let Some(n) = forced {
+            // A pattern the enumerator cannot plan has the one plan the
+            // default planner gives it, so `plan=1` is that plan and any
+            // other number does not exist. Refused rather than run as plan 1:
+            // a harness comparing "plan 2" with plan 1 would be comparing a
+            // plan with itself and could never fail.
+            if let Some(why) = Self::not_enumerable(match_clause) {
+                if n == 1 {
+                    return self.plan_match(match_clause, where_clause, store);
+                }
+                return Err(ExecutionError::PlanningError(format!(
+                    "cannot honour CYPHER plan={n}: this MATCH has one plan, because the \
+                     cost-based enumerator does not plan {why}"
+                )));
+            }
+            return self.plan_match_native(match_clause, where_clause, store, n - 1);
+        }
+        if graph_native {
+            match self.plan_match_native(match_clause, where_clause, store, 0) {
                 Ok(plan) => Ok(plan),
                 Err(_) => {
                     // Fallback to legacy planner for patterns the graph-native
@@ -4291,26 +4348,160 @@ impl QueryPlanner {
         }
     }
 
-    /// Graph-native planner (ADR-015): enumerate candidate plans, choose cheapest
-    fn plan_match_native(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
+    /// Why the cost-based enumerator cannot plan this MATCH exactly, or `None`
+    /// when it can (#1616).
+    ///
+    /// Its pattern graph keeps nodes, single-type relationships in a stated
+    /// direction and literal inline properties. Anything else it would drop
+    /// rather than plan -- a length bound, a path variable, `shortestPath` --
+    /// and a plan that drops part of the pattern answers a different query.
+    /// Such a MATCH goes to the default planner, as `SAMYAMA_GRAPH_NATIVE` has
+    /// always done on an error; checking up front makes that fallback cover
+    /// the shapes that used to be planned wrongly instead of refused.
+    fn not_enumerable(match_clause: &MatchClause) -> Option<&'static str> {
+        use crate::query::ast::{Direction, PathRestrictor, PathSelector, PathType};
+        if match_clause.pattern.paths.is_empty() {
+            return Some("an empty pattern");
+        }
+        for path in &match_clause.pattern.paths {
+            if path.path_variable.is_some() {
+                return Some("a named path");
+            }
+            if path.path_type != PathType::Normal || path.selector != PathSelector::All {
+                return Some("a shortest-path or selector pattern");
+            }
+            if path.restrictor != PathRestrictor::Trail {
+                return Some("a path restrictor other than TRAIL");
+            }
+            let nodes = std::iter::once(&path.start).chain(path.segments.iter().map(|s| &s.node));
+            for node in nodes {
+                if node.property_exprs.as_ref().is_some_and(|m| !m.is_empty()) {
+                    return Some("an inline property that is not a literal");
+                }
+            }
+            for seg in &path.segments {
+                let e = &seg.edge;
+                if e.length.is_some() {
+                    return Some("a variable-length relationship");
+                }
+                if e.direction == Direction::Both {
+                    return Some("an undirected relationship");
+                }
+                if e.types.len() > 1 {
+                    return Some("a relationship with more than one type");
+                }
+                if e.properties.as_ref().is_some_and(|m| !m.is_empty())
+                    || e.property_exprs.as_ref().is_some_and(|m| !m.is_empty())
+                {
+                    return Some("a relationship with inline properties");
+                }
+            }
+        }
+        None
+    }
+
+    /// The clause the enumerator plans, and the predicates its pattern graph
+    /// does not carry by itself (#1616):
+    ///
+    /// - every anonymous node and relationship named, since the pattern
+    ///   graph keys on names and dropped the unnamed ones;
+    /// - every label of every occurrence of a node, since a scan reads only
+    ///   the first label and an expand reads none;
+    /// - every literal inline property of every occurrence, since the
+    ///   pattern graph keeps only the first occurrence's;
+    /// - that two relationships which could be the same one are not, since
+    ///   nothing else in an enumerated plan keeps a pattern from walking one
+    ///   relationship twice.
+    fn prepare_for_enumeration(match_clause: &MatchClause) -> (MatchClause, Vec<Expression>) {
+        let mut clause = match_clause.clone();
+        let mut extra = Vec::new();
+        let mut minted = 0usize;
+        let mut mint = |prefix: &str| {
+            minted += 1;
+            format!("__{prefix}_{}", minted - 1)
+        };
+        let mut rels: Vec<(String, Vec<EdgeType>)> = Vec::new();
+        for path in clause.pattern.paths.iter_mut() {
+            let nodes = std::iter::once(&mut path.start).chain(path.segments.iter_mut().map(|s| &mut s.node));
+            for node in nodes {
+                let var = node.variable.get_or_insert_with(|| mint("enum_node")).clone();
+                if !node.labels.is_empty() {
+                    extra.push(Expression::Function {
+                        name: "hasLabels".to_string(),
+                        args: vec![
+                            Expression::Variable(var.clone()),
+                            Expression::Literal(PropertyValue::Array(
+                                node.labels.iter().map(|l| PropertyValue::String(l.as_str().to_string())).collect(),
+                            )),
+                        ],
+                        distinct: false,
+                    });
+                }
+                for (k, v) in node.properties.iter().flatten() {
+                    extra.push(Expression::Binary {
+                        left: Box::new(Expression::Property { variable: var.clone(), property: k.clone() }),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expression::Literal(v.clone())),
+                    });
+                }
+            }
+            for seg in path.segments.iter_mut() {
+                let var = seg.edge.variable.get_or_insert_with(|| mint("enum_rel")).clone();
+                rels.push((var, seg.edge.types.clone()));
+            }
+        }
+        let may_share = |a: &[EdgeType], b: &[EdgeType]| a.is_empty() || b.is_empty() || a.iter().any(|t| b.contains(t));
+        for i in 0..rels.len() {
+            for j in i + 1..rels.len() {
+                if rels[i].0 != rels[j].0 && may_share(&rels[i].1, &rels[j].1) {
+                    extra.push(Expression::Binary {
+                        left: Box::new(Expression::Variable(rels[i].0.clone())),
+                        op: BinaryOp::Ne,
+                        right: Box::new(Expression::Variable(rels[j].0.clone())),
+                    });
+                }
+            }
+        }
+        (clause, extra)
+    }
+
+    /// Graph-native planner (ADR-015): enumerate candidate plans and run the
+    /// `pick`-th cheapest, counting from 0 -- the cheapest unless `CYPHER
+    /// plan=N` forced another (#1616).
+    fn plan_match_native(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore, pick: usize) -> ExecutionResult<OperatorBox> {
         use super::logical_plan::PatternGraph;
         use super::plan_enumerator::{enumerate_plans, EnumerationConfig};
         use super::physical_planner::logical_to_physical;
 
-        let pattern = &match_clause.pattern;
-        if pattern.paths.is_empty() {
-            return Err(ExecutionError::PlanningError("Match pattern has no paths".to_string()));
+        if let Some(why) = Self::not_enumerable(match_clause) {
+            return Err(ExecutionError::PlanningError(format!("the cost-based enumerator does not plan {why}")));
         }
+        let (clause, extra) = Self::prepare_for_enumeration(match_clause);
+        let predicate = where_clause
+            .map(|w| w.predicate.clone())
+            .into_iter()
+            .chain(extra)
+            .reduce(|a, b| Expression::Binary { left: Box::new(a), op: BinaryOp::And, right: Box::new(b) });
+        let where_clause = predicate.map(|predicate| WhereClause { predicate });
 
-        let pg = PatternGraph::from_match_clause(match_clause);
+        let pg = PatternGraph::from_match_clause(&clause);
         let catalog = store.catalog();
         let config = EnumerationConfig {
             max_candidate_plans: self.config.max_candidate_plans,
         };
 
-        let candidates = enumerate_plans(&pg, where_clause, catalog, &store.property_index, &config);
+        let candidates = enumerate_plans(&pg, where_clause.as_ref(), catalog, &store.property_index, &config);
         if candidates.is_empty() {
             return Err(ExecutionError::PlanningError("No valid plans enumerated".to_string()));
+        }
+        if pick >= candidates.len() {
+            return Err(ExecutionError::PlanningError(format!(
+                "cannot honour CYPHER plan={}: this MATCH has {} candidate plan{}; EXPLAIN \
+                 under CYPHER planner=cost lists them",
+                pick + 1,
+                candidates.len(),
+                if candidates.len() == 1 { "" } else { "s" }
+            )));
         }
 
         // Collect candidate diagnostics before consuming
@@ -4319,18 +4510,18 @@ impl QueryPlanner {
             let desc = plan.display_plan(0);
             (desc, *cost)
         }).collect();
-        let best_cost = candidates[0].1;
+        let chosen_cost = candidates[pick].1;
 
-        // Pick the cheapest plan (first one — already sorted)
-        let (best_plan, _) = candidates.into_iter().next().unwrap();
-        let physical = logical_to_physical(&best_plan);
+        let (chosen_plan, _) = candidates.into_iter().nth(pick).expect("pick is in range");
+        let physical = logical_to_physical(&chosen_plan);
 
         // Store diagnostics in thread-local for EXPLAIN to pick up
         PLAN_DIAGNOSTICS.with(|diag| {
             *diag.borrow_mut() = Some(PlanDiagnostics {
                 candidates_evaluated: num_candidates,
-                chosen_plan_cost: best_cost,
+                chosen_plan_cost: chosen_cost,
                 candidate_costs: candidate_summaries,
+                chosen: pick,
             });
         });
 
@@ -10837,6 +11028,7 @@ mod tests {
             profile: false,
             analyze: false,
             hints: Vec::new(),
+            plan_options: Default::default(),
             params: std::collections::HashMap::new(),
             foreach_clause: None,
             unwind_clause: None,

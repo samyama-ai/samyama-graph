@@ -136,6 +136,8 @@ pub struct Query {
     /// Planner hints from every MATCH in the query (#1675). Keyed by variable,
     /// which names one node across the whole query.
     pub hints: Vec<PlanHint>,
+    /// `CYPHER planner=… plan=N` options before the query (LANG-06, #1616).
+    pub plan_options: PlanOptions,
     /// SHOW CONSTRAINTS flag
     pub show_constraints: bool,
     /// PROFILE flag
@@ -336,6 +338,35 @@ pub enum PlanHint {
     /// `USING JOIN ON n` -- accepted; this planner joins comma-separated
     /// patterns on their shared variables already, so it is checked and kept.
     Join { variables: Vec<String> },
+}
+
+/// Options written as `CYPHER key=value …` before a query (LANG-06, #1616):
+/// which planner plans it, and which of its candidate plans runs.
+///
+/// Like the `USING` hints, these are mandatory. An option this engine does
+/// not have, or a plan number a pattern does not have, is an error: a plan
+/// forced in name and not in fact is the one thing plan-equivalence testing
+/// cannot survive, because the comparison would pass by comparing a plan
+/// with itself.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlanOptions {
+    /// `planner=cost` plans every MATCH with the cost-based enumerator
+    /// (ADR-015), `planner=legacy` with the default planner. `None` keeps
+    /// the server's setting.
+    pub planner: Option<PlannerChoice>,
+    /// `plan=N`: run the N-th cheapest candidate the enumerator produces for
+    /// each MATCH, counting from 1 -- the numbers EXPLAIN prints beside
+    /// `Alternative plans`. Implies `planner=cost`.
+    pub plan: Option<usize>,
+}
+
+/// The planners a query can name with `CYPHER planner=…`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannerChoice {
+    /// The cost-based enumerator (`planner=cost`).
+    Cost,
+    /// The default planner (`planner=legacy`).
+    Legacy,
 }
 
 /// MATCH clause: `MATCH (n:Person)-[:KNOWS]->(m)`
@@ -1336,6 +1367,7 @@ impl Query {
             show_indexes: false,
             analyze: false,
             hints: Vec::new(),
+            plan_options: PlanOptions::default(),
             show_constraints: false,
             profile: false,
             params: HashMap::new(),

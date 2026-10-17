@@ -134,6 +134,33 @@ The problem: P1 (cost-based join ordering with multiple join strategies) is solv
 - Plan cache key changes to include catalog generation (invalidate on schema change)
 - JoinOperator remains for truly disjoint patterns — it is not eliminated, just used less
 
+## Forcing a plan (2026-10-17, #1616)
+
+`CYPHER` options before a query (or after `EXPLAIN`) choose the planner and the
+plan, per query rather than per server:
+
+| Option | Effect |
+|---|---|
+| `planner=cost` | Every MATCH the enumerator can plan is planned by it, as `SAMYAMA_GRAPH_NATIVE=true` does for the whole server |
+| `planner=legacy` | The default planner, whatever the server's setting |
+| `plan=N` | Each MATCH runs its N-th cheapest candidate, numbered as EXPLAIN numbers `Alternative plans`; implies `planner=cost` |
+| `runtime=volcano` | The one runtime there is; any other runtime is an error |
+
+Options are mandatory, like the `USING` hints: an unknown option, a plan number a
+MATCH does not have, or `plan=2` on a MATCH the enumerator cannot plan is an
+error that says why, never a silent fallback. This is what plan-equivalence
+testing (LANG-06) needs: `tests/plan_equivalence.rs` runs a corpus under every
+plan it has and compares each answer with the default planner's.
+
+Forcing plans exposed shapes the enumerator's pattern graph dropped, not
+planned: labels on a node reached by an expand, anonymous nodes, inline
+properties on a later occurrence of a node, and relationship uniqueness. Those
+are now carried as predicates. Variable-length and undirected relationships,
+relationships with more than one type or with inline properties, named paths,
+`shortestPath` and selectors are refused up front, and such a MATCH goes to the
+default planner, including under `SAMYAMA_GRAPH_NATIVE=true`, where they used
+to be planned wrongly rather than refused.
+
 ## Alternatives Considered
 
 ### Alternative 1: Relational-Style DP Join Enumeration
