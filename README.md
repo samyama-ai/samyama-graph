@@ -235,7 +235,7 @@ RETURN nodeId, score ORDER BY score DESC LIMIT 10
 ```cypher
 CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding) OPTIONS {dimensions: 384, similarity: 'cosine'}
 
-CALL vector.search('Paper', 'embedding', [0.1, 0.2, 0.3], 10) YIELD node, score
+CALL db.index.vector.queryNodes('Paper', 'embedding', [0.1, 0.2, 0.3], 10) YIELD node, score
 ```
 
 **Natural language** — ask in English; an LLM translates to Cypher.
@@ -298,6 +298,7 @@ FinBench, cricket, IMDB and more. Run the curated demos with
 | Benchmarks | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
 | Security, auth, TLS and data handling | [docs/DATA-HANDLING.md](docs/DATA-HANDLING.md) |
 | Migrating from Neo4j | [docs/MIGRATING-FROM-NEO4J.md](docs/MIGRATING-FROM-NEO4J.md) |
+| Migrating from FalkorDB or RedisGraph | [docs/MIGRATING-FROM-FALKORDB.md](docs/MIGRATING-FROM-FALKORDB.md) |
 | Failure modes | [docs/FAILURE-MODES.md](docs/FAILURE-MODES.md) |
 | Project layout | [CONTRIBUTING.md](CONTRIBUTING.md#project-layout) |
 | API spec | [openapi/openapi.yaml](openapi/openapi.yaml) |

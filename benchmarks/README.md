@@ -20,6 +20,8 @@ What is here:
   `examples/hier_benchmark.rs`; see `hier/README.md`.
 - `compat/neo4j-idioms.cypher` — Neo4j Cypher idioms, read by
   `tests/compatibility_corpus.rs`.
+- `compat/falkordb-idioms.cypher` — FalkorDB/RedisGraph Cypher idioms, each run on
+  FalkorDB before it was added, read by `tests/falkordb_compatibility_corpus.rs`.
 - `migrate/` — Neo4j APOC export fixtures (full and partial), read by
   `tests/neo4j_import.rs`.
 - `ldbc-sf1-params.*.json` — LDBC SNB SF1 substitution parameters for

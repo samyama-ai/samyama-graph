@@ -31,6 +31,7 @@ eight of eighteen documents (#1450).
 - **[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)** — what to do when something does not work.
 - **[GLOSSARY.md](./GLOSSARY.md)** — domain and engine terms (MVCC, HNSW, NLQ, MCP, GAK).
 - **[MIGRATING-FROM-NEO4J.md](./MIGRATING-FROM-NEO4J.md)** — bringing queries and data across, and the compatibility report that tells you what will run.
+- **[MIGRATING-FROM-FALKORDB.md](./MIGRATING-FROM-FALKORDB.md)** — FalkorDB and RedisGraph: the RESP differences (graph key, parameters, reply shape, `--compact`), the Cypher to rewrite, and how to move the data.
 - **[LEAVING-SAMYAMA.md](./LEAVING-SAMYAMA.md)** — getting your data out. Documented on purpose: an exit you cannot find is not an exit.
 
 ### The query language
