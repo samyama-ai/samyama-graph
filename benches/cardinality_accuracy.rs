@@ -195,6 +195,73 @@ fn main() {
         ));
     }
 
+    // ── Range predicates (#478): the fixed third against the histogram ──
+    println!();
+    println!("Range predicates — {n} nodes, `p op x` over every threshold that keeps >= 0.5% of rows");
+    /// A distribution: the value of the `i`-th node.
+    type Distribution = Box<dyn Fn(usize) -> i64>;
+    let range_cases: Vec<(&str, &str, Distribution)> = vec![
+        ("uniform", "0..1000, every value equally often", Box::new(|i| ((i * 7919) % 1000) as i64)),
+        ("geometric", "half 0, a quarter 1, an eighth 2, ...", Box::new(move |i| ((n as f64 / (i + 1) as f64).log2().floor()) as i64)),
+        ("zipf-like", "value ~ 1000/(rank+1): a long tail of 1000 values", Box::new(|i| (1000.0 / ((i % 2000) as f64 + 1.0)).floor() as i64)),
+    ];
+    for (name, description, value) in &range_cases {
+        let mut store = GraphStore::new();
+        let mut values = Vec::with_capacity(n);
+        for i in 0..n {
+            let id = store.create_node("R");
+            let v = value(i);
+            values.push(v);
+            let _ = store.set_node_property("default", id, "x".to_string(), PropertyValue::Integer(v));
+        }
+        values.sort_unstable();
+        let stats = store.statistics();
+        let label = Label::new("R");
+        let (lo, hi) = (values[0], values[n - 1]);
+        let step = ((hi - lo) / 40).max(1);
+        let (mut fixed, mut hist) = (Vec::new(), Vec::new());
+        let mut x = lo;
+        while x <= hi {
+            for op in [samyama::query::ast::BinaryOp::Lt, samyama::query::ast::BinaryOp::Le, samyama::query::ast::BinaryOp::Gt, samyama::query::ast::BinaryOp::Ge] {
+                use samyama::query::ast::BinaryOp;
+                let actual = values
+                    .iter()
+                    .filter(|v| match op { BinaryOp::Lt => **v < x, BinaryOp::Le => **v <= x, BinaryOp::Gt => **v > x, _ => **v >= x })
+                    .count() as f64;
+                if actual < n as f64 * 0.005 {
+                    continue;
+                }
+                fixed.push(n as f64 / 3.0 / actual);
+                let sel = stats
+                    .estimate_comparison_selectivity(&label, "x", &op, &PropertyValue::Integer(x))
+                    .unwrap_or(1.0 / 3.0);
+                hist.push(sel * n as f64 / actual);
+            }
+            x += step;
+        }
+        let score = |rs: &[f64]| -> (usize, f64) {
+            let w = rs.iter().filter(|r| **r >= 0.5 && **r <= 2.0).count();
+            let worst = rs.iter().fold(1.0f64, |a, b| a.max(if *b >= 1.0 { *b } else { 1.0 / b }));
+            (w, worst)
+        };
+        let ((fw, fworst), (hw, hworst)) = (score(&fixed), score(&hist));
+        println!("  {name} — {description}");
+        println!(
+            "    fixed 1/3   within 2x: {fw}/{} ({:.0}%)   worst: {fworst:.1}x",
+            fixed.len(),
+            100.0 * fw as f64 / fixed.len() as f64
+        );
+        println!(
+            "    histogram   within 2x: {hw}/{} ({:.0}%)   worst: {hworst:.1}x",
+            hist.len(),
+            100.0 * hw as f64 / hist.len() as f64
+        );
+        json_cases.push(format!(
+            "{{\"case\": \"range-{name}\", \"predicates\": {}, \"within_2x_fixed\": {fw}, \"worst_error_fixed\": {fworst:.2}, \"within_2x_histogram\": {hw}, \"worst_error_histogram\": {hworst:.2}}}",
+            hist.len()
+        ));
+    }
+
     println!();
     println!("{}", "=".repeat(84));
     println!("The estimate is identical for every value of a property, because");
@@ -224,7 +291,7 @@ fn main() {
   ]}},
   \"status\": \"measured\",
   \"artifacts\": [\"benches/cardinality_accuracy.rs\"],
-  \"caveat\": \"Single-property equality only. Does not measure join or multi-hop estimates.\"
+  \"caveat\": \"Single-property equality and range predicates only. Does not measure join or multi-hop estimates.\"
 }}
 ",
             env!("CARGO_PKG_VERSION"),

@@ -7672,7 +7672,10 @@ fn anchor_cardinality(
                 let selectivity = if matches!(op, BinaryOp::Eq) {
                     stats.estimate_equality_selectivity_for_value(&label, &property, &val)
                 } else {
-                    0.3
+                    // From the histogram (#478): a range on a skewed property
+                    // keeps anywhere from nothing to everything, and the fixed
+                    // 0.3 costed both alike.
+                    stats.estimate_comparison_selectivity(&label, &property, &op, &val).unwrap_or(0.3)
                 };
                 (base * selectivity).max(1.0)
             }

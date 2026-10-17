@@ -260,12 +260,166 @@ pub struct PropertyStats {
     /// Empty when a property was never sampled, which is why the value-aware
     /// estimator falls back rather than assuming absence means rarity.
     pub most_common: Vec<(PropertyValue, f64)>,
+    /// Equi-depth histogram of the sampled values, for range predicates
+    /// (#478). `None` when the values are not all of one orderable kind.
+    pub histogram: Option<Histogram>,
 }
 
 /// How many values to retain per (label, property). Small on purpose: the
 /// point is to capture the head of a skewed distribution, and the tail is what
 /// histograms are for.
 pub const MAX_MCV: usize = 16;
+
+/// Buckets per equi-depth histogram (#478).
+pub const HISTOGRAM_BUCKETS: usize = 64;
+
+/// A string bound is kept to this many characters. Bounds are only compared,
+/// and a long text property would otherwise hold 65 copies of its longest
+/// values in the statistics.
+const HISTOGRAM_TEXT_BOUND: usize = 64;
+
+/// The axis a numeric histogram's values sit on. Cypher compares an integer
+/// with a float but not a date with a number, so each temporal kind is its own
+/// axis and a literal on another axis gets no estimate from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistogramAxis {
+    /// `Integer` and `Float`.
+    Number,
+    /// An instant: `ZonedDateTime`, and the legacy millisecond `DateTime`,
+    /// which reads as a UTC `ZonedDateTime`. In seconds.
+    Instant,
+    /// `LocalDateTime`, in wall-clock seconds.
+    LocalDateTime,
+    /// `Date`, in days.
+    Date,
+    /// `LocalTime`, in nanoseconds of the day.
+    LocalTime,
+}
+
+impl HistogramAxis {
+    /// `value` as a position on its axis, or `None` for a value no numeric
+    /// histogram orders.
+    pub fn of(value: &PropertyValue) -> Option<(HistogramAxis, f64)> {
+        match value {
+            PropertyValue::Integer(i) => Some((HistogramAxis::Number, *i as f64)),
+            PropertyValue::Float(f) if !f.is_nan() => Some((HistogramAxis::Number, *f)),
+            PropertyValue::DateTime(ms) => Some((HistogramAxis::Instant, *ms as f64 / 1000.0)),
+            PropertyValue::ZonedDateTime { secs, nanos, .. } => {
+                Some((HistogramAxis::Instant, *secs as f64 + *nanos as f64 / 1e9))
+            }
+            PropertyValue::LocalDateTime { secs, nanos } => {
+                Some((HistogramAxis::LocalDateTime, *secs as f64 + *nanos as f64 / 1e9))
+            }
+            PropertyValue::Date(d) => Some((HistogramAxis::Date, *d as f64)),
+            PropertyValue::LocalTime(n) => Some((HistogramAxis::LocalTime, *n as f64)),
+            _ => None,
+        }
+    }
+}
+
+/// How `a` orders against `b` on a histogram's axes: numbers with numbers,
+/// each temporal kind with itself, text with text. `None` across kinds, where
+/// Cypher's comparison is null.
+fn histogram_order(a: &PropertyValue, b: &PropertyValue) -> Option<std::cmp::Ordering> {
+    match (a, b) {
+        (PropertyValue::String(x), PropertyValue::String(y)) => Some(x.cmp(y)),
+        _ => {
+            let ((ax, x), (bx, y)) = (HistogramAxis::of(a)?, HistogramAxis::of(b)?);
+            if ax != bx {
+                return None;
+            }
+            x.partial_cmp(&y)
+        }
+    }
+}
+
+/// An equi-depth histogram over the sampled non-null values of a property
+/// (#478): `bounds[0]` is the least value, `bounds[k]` the greatest, and each
+/// of the `k` buckets between two bounds holds about `1/k` of the values.
+///
+/// It answers what the 1/3 guess for every range predicate could not: on a
+/// skewed property `x < 10` may keep almost nothing or almost everything. The
+/// mass *at* a value comes from the most-common-value list, which is what the
+/// histogram cannot see -- a value repeated across many buckets is a run of
+/// equal bounds, and the estimate of `<` and `<=` must differ by exactly it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Histogram {
+    Numeric { axis: HistogramAxis, bounds: Vec<f64> },
+    Text { bounds: Vec<String> },
+}
+
+impl Histogram {
+    /// Build from sampled values, or `None` unless at least two are of one
+    /// orderable kind and no value is of another.
+    pub fn build(values: &[PropertyValue]) -> Option<Histogram> {
+        if values.len() < 2 {
+            return None;
+        }
+        if let PropertyValue::String(_) = &values[0] {
+            let mut texts: Vec<&str> = Vec::with_capacity(values.len());
+            for v in values {
+                let PropertyValue::String(t) = v else { return None };
+                texts.push(t);
+            }
+            texts.sort_unstable();
+            let bounds = Self::quantiles(&texts)
+                .into_iter()
+                .map(|t| t.chars().take(HISTOGRAM_TEXT_BOUND).collect())
+                .collect();
+            return Some(Histogram::Text { bounds });
+        }
+        let (axis, _) = HistogramAxis::of(&values[0])?;
+        let mut keys: Vec<f64> = Vec::with_capacity(values.len());
+        for v in values {
+            match HistogramAxis::of(v) {
+                Some((a, k)) if a == axis => keys.push(k),
+                _ => return None,
+            }
+        }
+        keys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        Some(Histogram::Numeric { axis, bounds: Self::quantiles(&keys) })
+    }
+
+    /// `HISTOGRAM_BUCKETS + 1` quantiles of a sorted slice, or one per value
+    /// when there are fewer.
+    fn quantiles<T: Clone>(sorted: &[T]) -> Vec<T> {
+        let n = sorted.len();
+        let k = HISTOGRAM_BUCKETS.min(n - 1);
+        (0..=k).map(|j| sorted[j * (n - 1) / k].clone()).collect()
+    }
+
+    /// The fraction of values strictly below `x`, or `None` when `x` is not
+    /// on this histogram's axis -- a comparison Cypher answers with null.
+    pub fn fraction_below(&self, x: &PropertyValue) -> Option<f64> {
+        fn cdf<T: PartialOrd>(bounds: &[T], x: &T, within: impl Fn(&T, &T) -> f64) -> f64 {
+            let k = bounds.len() - 1;
+            // The first bound at or above x: the buckets before it are below.
+            let j = bounds.partition_point(|b| b < x);
+            if j == 0 {
+                return 0.0;
+            }
+            if j > k {
+                return 1.0;
+            }
+            ((j - 1) as f64 + within(&bounds[j - 1], &bounds[j])) / k as f64
+        }
+        match (self, x) {
+            (Histogram::Text { bounds }, PropertyValue::String(t)) => {
+                let t: String = t.chars().take(HISTOGRAM_TEXT_BOUND).collect();
+                // No arithmetic between strings: half a bucket.
+                Some(cdf(bounds, &t, |_, _| 0.5))
+            }
+            (Histogram::Numeric { axis, bounds }, _) => {
+                let (a, v) = HistogramAxis::of(x)?;
+                if a != *axis {
+                    return None;
+                }
+                Some(cdf(bounds, &v, |lo, hi| if hi > lo { ((v - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 1.0 }))
+            }
+            _ => None,
+        }
+    }
+}
 
 impl GraphStatistics {
     /// Estimate the number of rows from a label scan
@@ -353,6 +507,87 @@ impl GraphStatistics {
             return ps.selectivity.min(remaining_mass.max(f64::EPSILON));
         }
         remaining_mass / remaining_distinct as f64
+    }
+
+    /// Estimate the selectivity of a range on `property` -- the fraction of
+    /// `label`'s nodes with `lower <(=) value <(=) upper`, either end open --
+    /// from the property's histogram (#478). Each bound is `(value,
+    /// inclusive)`.
+    ///
+    /// `None` when there is no histogram, or a bound is not on its axis; the
+    /// caller keeps its fixed guess, which is what it used for every range
+    /// before. The mass at a bound is the equality estimate, so `<` and `<=`
+    /// differ by the value's own frequency -- on a skewed property, the
+    /// difference between none of the rows and half of them.
+    pub fn estimate_range_selectivity(
+        &self,
+        label: &Label,
+        property: &str,
+        lower: Option<(&PropertyValue, bool)>,
+        upper: Option<(&PropertyValue, bool)>,
+    ) -> Option<f64> {
+        let ps = self.property_stats.get(&(label.clone(), property.to_string()))?;
+        let non_null = (1.0 - ps.null_fraction).clamp(0.0, 1.0);
+        // Every distinct value the sample saw is in the most-common list: the
+        // range is the sum of the ones it admits, exactly. A histogram's
+        // buckets are 1/64 of the values wide, which cannot resolve a tail of
+        // a few values holding 1% each -- the low-cardinality skewed property
+        // this is most often asked of.
+        if !ps.most_common.is_empty() && ps.most_common.len() >= ps.distinct_count {
+            let mut kept = 0.0;
+            for (v, freq) in &ps.most_common {
+                let admits = |bound: Option<(&PropertyValue, bool)>, below: bool| -> Option<bool> {
+                    let Some((b, inclusive)) = bound else { return Some(true) };
+                    let ord = histogram_order(v, b)?;
+                    Some(match (below, ord) {
+                        (_, std::cmp::Ordering::Equal) => inclusive,
+                        (true, o) => o == std::cmp::Ordering::Less,
+                        (false, o) => o == std::cmp::Ordering::Greater,
+                    })
+                };
+                if admits(upper, true)? && admits(lower, false)? {
+                    kept += freq;
+                }
+            }
+            return Some(kept.clamp(0.0, 1.0) * non_null);
+        }
+        let h = ps.histogram.as_ref()?;
+        // The fraction of non-null values below (or at, when inclusive) `v`.
+        let at_or_below = |v: &PropertyValue, inclusive: bool| -> Option<f64> {
+            let below = h.fraction_below(v)?;
+            let at = if inclusive { self.estimate_equality_selectivity_for_value(label, property, v) } else { 0.0 };
+            Some((below + at).clamp(0.0, 1.0))
+        };
+        let hi = match upper {
+            Some((v, inclusive)) => at_or_below(v, inclusive)?,
+            None => 1.0,
+        };
+        // Below the lower bound is what the range excludes: everything under
+        // it, and the bound itself when it is exclusive.
+        let lo = match lower {
+            Some((v, inclusive)) => at_or_below(v, !inclusive)?,
+            None => 0.0,
+        };
+        Some((hi - lo).max(0.0) * non_null)
+    }
+
+    /// [`Self::estimate_range_selectivity`] for one comparison, `property op
+    /// value`. `None` for an operator that is not a range.
+    pub fn estimate_comparison_selectivity(
+        &self,
+        label: &Label,
+        property: &str,
+        op: &crate::query::ast::BinaryOp,
+        value: &PropertyValue,
+    ) -> Option<f64> {
+        use crate::query::ast::BinaryOp;
+        match op {
+            BinaryOp::Lt => self.estimate_range_selectivity(label, property, None, Some((value, false))),
+            BinaryOp::Le => self.estimate_range_selectivity(label, property, None, Some((value, true))),
+            BinaryOp::Gt => self.estimate_range_selectivity(label, property, Some((value, false)), None),
+            BinaryOp::Ge => self.estimate_range_selectivity(label, property, Some((value, true)), None),
+            _ => None,
+        }
     }
 
     /// Format statistics as human-readable text
@@ -5067,6 +5302,11 @@ NodeDeleted { .. } => {
             // holding every distinct value seen.
             let mut property_values: HashMap<String, HashMap<u64, (PropertyValue, usize)>> =
                 HashMap::new();
+            // The sampled values a histogram can order (#478). Others -- maps,
+            // lists, vectors -- are not kept, so an embedding property costs
+            // nothing here.
+            let mut property_samples: HashMap<String, Vec<PropertyValue>> = HashMap::new();
+            let mut unorderable: HashSet<String> = HashSet::new();
 
             for (i, &node_id) in node_ids.iter().enumerate() {
                 if i >= sample_size { break; }
@@ -5088,6 +5328,12 @@ NodeDeleted { .. } => {
                             hasher.finish()
                         };
                         property_distinct.entry(key.clone()).or_default().insert(hash);
+
+                        if matches!(val, PropertyValue::String(_)) || HistogramAxis::of(val).is_some() {
+                            property_samples.entry(key.clone()).or_default().push(val.clone());
+                        } else if !matches!(val, PropertyValue::Null) {
+                            unorderable.insert(key.clone());
+                        }
 
                         let counts = property_values.entry(key.clone()).or_default();
                         // Bound the working set: once enough distinct values
@@ -5121,11 +5367,18 @@ NodeDeleted { .. } => {
                     }
                 }
 
+                let histogram = if unorderable.contains(prop) {
+                    None
+                } else {
+                    property_samples.get(prop).and_then(|v| Histogram::build(v))
+                };
+
                 property_stats.insert((label.clone(), prop.clone()), PropertyStats {
                     null_fraction: 1.0 - (*count as f64 / sample_size as f64),
                     distinct_count: distinct,
                     selectivity,
                     most_common,
+                    histogram,
                 });
             }
         }

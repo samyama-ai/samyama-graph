@@ -14144,13 +14144,30 @@ impl IndexScanOperator {
 
 impl PhysicalOperator for IndexScanOperator {
     fn estimate_rows(&self, store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
+        let stats = store.statistics();
         let selectivity = match self.op {
-            BinaryOp::Eq => store.statistics().estimate_equality_selectivity_for_value(
+            BinaryOp::Eq => stats.estimate_equality_selectivity_for_value(
                 &self.label,
                 &self.property,
                 &self.value,
             ),
-            _ => RANGE_SELECTIVITY,
+            // From the property's histogram, both ends when the scan has two
+            // (#478); the fixed third only when there is none.
+            _ => {
+                let own = (&self.value, matches!(self.op, BinaryOp::Le | BinaryOp::Ge));
+                let other = self.other_end.as_ref().map(|e| match e {
+                    OtherEnd::AtMost(v) | OtherEnd::AtLeast(v) => (v, true),
+                });
+                let (lower, upper) = match (&self.op, &self.other_end) {
+                    (BinaryOp::Gt | BinaryOp::Ge, Some(OtherEnd::AtMost(_))) => (Some(own), other),
+                    (BinaryOp::Lt | BinaryOp::Le, Some(OtherEnd::AtLeast(_))) => (other, Some(own)),
+                    (BinaryOp::Gt | BinaryOp::Ge, _) => (Some(own), None),
+                    _ => (None, Some(own)),
+                };
+                stats
+                    .estimate_range_selectivity(&self.label, &self.property, lower, upper)
+                    .unwrap_or(RANGE_SELECTIVITY)
+            }
         };
         Some(store.label_node_count(&self.label) as f64 * selectivity)
     }

@@ -2105,6 +2105,7 @@ fn selectivity_without_most_common_values_is_the_uniform_estimate() {
             distinct_count: 4,
             selectivity: 0.25,
             most_common: vec![],
+            histogram: None,
         },
     );
     let stats = GraphStatistics {
