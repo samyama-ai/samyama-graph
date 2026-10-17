@@ -1,4 +1,4 @@
-//! Executes one representative query per row of `docs/CYPHER_COMPATIBILITY.md`
+//! Executes one representative query per row of `docs/CYPHER-COMPATIBILITY.md`
 //! and reports what the engine actually does, so the matrix is measured rather
 //! than remembered (#437).
 //!
@@ -245,7 +245,7 @@ fn main() {
     ]
   }},
   \"status\": \"{status}\",
-  \"artifacts\": [\"docs/CYPHER_COMPATIBILITY.md\", \"examples/cypher_matrix_probe.rs\"],
+  \"artifacts\": [\"docs/CYPHER-COMPATIBILITY.md\", \"examples/cypher_matrix_probe.rs\"],
   \"caveat\": \"A supported probe means the query executed. It does not certify semantics; correctness lives in the test suites.\"
 }}
 ",

@@ -13,5 +13,5 @@ pub mod hierarchy;
 pub mod catalog;
 
 pub use property_index::PropertyIndex;
-pub use manager::{IndexManager, PropertyIndexKey};
+pub use manager::{IndexManager, IndexMemory, PropertyIndexKey};
 pub use catalog::{IndexCatalog, IndexDefinition, RestoredIndexes};

@@ -1,6 +1,6 @@
 //! Point it at your queries; it says which ones this engine accepts (INT-11).
 //!
-//! `docs/CYPHER_COMPATIBILITY.md` answers "which features exist". That is a
+//! `docs/CYPHER-COMPATIBILITY.md` answers "which features exist". That is a
 //! different question from "will my queries run", and it is the wrong one for
 //! somebody deciding whether to migrate: a matrix of 78 supported features
 //! tells you nothing about the twelve queries in your application that use the

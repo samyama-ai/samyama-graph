@@ -26,7 +26,7 @@
 //! Both are written *after* the in-memory mutation, from the statement's write
 //! log ([`PersistenceManager::apply_mutations`]): this is write-behind, not
 //! write-ahead, and a crash between the mutation and that call loses the write
-//! (`docs/ACID_GUARANTEES.md` §1).
+//! (`docs/ACID-GUARANTEES.md` §1).
 //!
 //! ## RocksDB
 //!
@@ -50,6 +50,7 @@
 //! used to say the WAL was written first and replayed on start-up; neither has
 //! been true (#1592).
 
+pub mod format;
 pub mod health;
 pub mod storage;
 pub mod tenant;
@@ -87,6 +88,11 @@ impl PersistenceManager {
     pub fn new(base_path: impl AsRef<Path>) -> Result<Self, PersistenceError> {
         let base_path = base_path.as_ref().to_path_buf();
 
+        // Which format wrote this directory, asked before anything is created
+        // or opened: a directory this engine refuses is left as it was found
+        // (#1657).
+        let found = format::check(&base_path)?;
+
         // Create subdirectories
         let storage_path = base_path.join("data");
         let wal_path = base_path.join("wal");
@@ -109,6 +115,10 @@ impl PersistenceManager {
         // Initialize tenant manager
         let tenants = TenantManager::new();
         info!("Tenant manager initialized");
+
+        // Stamped only now, once both stores opened: a directory is marked as
+        // this engine's format only when this engine could actually read it.
+        format::stamp(&base_path, found)?;
 
         Ok(Self {
             base_path,
@@ -468,6 +478,26 @@ impl PersistenceManager {
     /// and replay are unchanged; only the mutex is taken once rather than per
     /// row. Usage is collected in `usage` and applied once by the caller,
     /// unless `per_row` asks for the old behaviour of applying it row by row.
+    ///
+    /// The storage writes are **staged** and committed `ROWS_PER_COMMIT` at a
+    /// time, as one RocksDB write each (#1666). They were one `put_cf` per row,
+    /// and each of those is its own RocksDB log record and `write(2)` -- with
+    /// `SAMYAMA_FSYNC=1`, its own fsync. Profiled under CH-PERF-WRITE's
+    /// 1,000-node batches, persistence was 75% of a write request and the
+    /// per-row `write(2)` alone 34%. A row's WAL record still precedes its
+    /// storage write: the WAL append is immediate, the storage write lands at
+    /// the next commit.
+    ///
+    /// A row that fails part-way still leaves every row before it on disk, as
+    /// before: what was staged is committed before the error is returned.
+    ///
+    /// **The WAL is synced once per commit, not once per row.** Each row's
+    /// record is appended without the durability barrier, and `Wal::sync` runs
+    /// before every storage commit -- so a chunk's records are on disk before
+    /// its rows are, and all of them before the statement is acknowledged. With
+    /// `SAMYAMA_FSYNC=1` a 1,000-row statement was 1,000 fsyncs and ran at 50
+    /// rows a second; it is now one (#1666). A sync that fails commits nothing:
+    /// storage never gets ahead of a log that did not reach the disk.
     #[allow(clippy::too_many_arguments)]
     fn write_batch(
         &self,
@@ -480,8 +510,50 @@ impl PersistenceManager {
         usage: &mut UsageDelta,
     ) -> Result<usize, PersistenceError> {
         let mut wal = wal::lock(&self.wal);
+        let mut rows = storage::RowBatch::default();
+        let result =
+            self.stage_rows(tenant, store, order, last, exists, per_row, usage, &mut wal, &mut rows);
+        // Committed whether or not a row failed: the rows staged before the
+        // failure are the ones the old per-row writes had already put on disk.
+        // Their records first.
+        let committed = self.commit_logged(&mut wal, &mut rows);
+        let written = result?;
+        committed?;
+        Ok(written)
+    }
+
+    /// Sync the WAL, then commit the staged rows: the order a crash must see.
+    fn commit_logged(&self, wal: &mut Wal, rows: &mut storage::RowBatch) -> Result<(), PersistenceError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        wal.sync()?;
+        self.storage.commit_rows(rows)?;
+        Ok(())
+    }
+
+    /// Rows a statement's storage writes are committed in. Bounds the memory a
+    /// large statement holds staged; a 1,000-row batch is one commit.
+    const ROWS_PER_COMMIT: usize = 10_000;
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_rows(
+        &self,
+        tenant: &str,
+        store: &GraphStore,
+        order: &[(bool, u64)],
+        last: &std::collections::HashMap<(bool, u64), bool>,
+        exists: &std::collections::HashMap<(bool, u64), bool>,
+        per_row: bool,
+        usage: &mut UsageDelta,
+        wal: &mut Wal,
+        rows: &mut storage::RowBatch,
+    ) -> Result<usize, PersistenceError> {
         let mut written = 0usize;
         for &key in order {
+            if rows.len() >= Self::ROWS_PER_COMMIT {
+                self.commit_logged(wal, rows)?;
+            }
             let (is_edge, id) = key;
             let deleted = last[&key];
             let existed = exists[&key];
@@ -503,13 +575,13 @@ impl PersistenceManager {
                             self.tenants.check_quota(tenant, "nodes")?;
                         }
                         let properties = bincode::serialize(&node.properties)?;
-                        wal.append(WalEntry::CreateNode {
+                        wal.append_unsynced(WalEntry::CreateNode {
                             tenant: tenant.to_string(),
                             node_id: id,
                             labels: node.labels.iter().map(|l| l.as_str().to_string()).collect(),
                             properties,
                         })?;
-                        self.storage.put_node(tenant, node)?;
+                        self.storage.stage_put_node(rows, tenant, node)?;
                         if !existed {
                             usage.nodes.step(1);
                         }
@@ -518,11 +590,11 @@ impl PersistenceManager {
                 }
                 (false, true) => {
                     if existed {
-                        wal.append(WalEntry::DeleteNode {
+                        wal.append_unsynced(WalEntry::DeleteNode {
                             tenant: tenant.to_string(),
                             node_id: id,
                         })?;
-                        self.storage.delete_node(tenant, id)?;
+                        self.storage.stage_delete_node(rows, tenant, id)?;
                         usage.nodes.step(-1);
                         written += 1;
                     }
@@ -533,7 +605,7 @@ impl PersistenceManager {
                             self.tenants.check_quota(tenant, "edges")?;
                         }
                         let properties = bincode::serialize(&edge.properties)?;
-                        wal.append(WalEntry::CreateEdge {
+                        wal.append_unsynced(WalEntry::CreateEdge {
                             tenant: tenant.to_string(),
                             edge_id: id,
                             source: edge.source.as_u64(),
@@ -541,7 +613,7 @@ impl PersistenceManager {
                             edge_type: edge.edge_type.as_str().to_string(),
                             properties,
                         })?;
-                        self.storage.put_edge(tenant, &edge)?;
+                        self.storage.stage_put_edge(rows, tenant, &edge)?;
                         if !existed {
                             usage.edges.step(1);
                         }
@@ -550,11 +622,11 @@ impl PersistenceManager {
                 }
                 (true, true) => {
                     if existed {
-                        wal.append(WalEntry::DeleteEdge {
+                        wal.append_unsynced(WalEntry::DeleteEdge {
                             tenant: tenant.to_string(),
                             edge_id: id,
                         })?;
-                        self.storage.delete_edge(tenant, id)?;
+                        self.storage.stage_delete_edge(rows, tenant, id)?;
                         usage.edges.step(-1);
                         written += 1;
                     }
@@ -829,6 +901,9 @@ pub enum PersistenceError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("{0}")]
+    Format(#[from] format::FormatError),
 }
 
 pub type PersistenceResult<T> = Result<T, PersistenceError>;

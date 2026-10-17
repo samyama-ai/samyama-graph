@@ -920,15 +920,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_label_with_no_index_searches_to_nothing() {
+    async fn a_label_with_no_index_is_a_400_naming_the_index() {
+        // Not an empty `results`: an index that does not exist used to answer
+        // exactly like one in which nothing is similar (#1660).
         let (status, body) = post_json(
             test_app(test_state()),
             "/api/vector-search",
             json!({ "query_vector": [0.1, 0.2], "label": "Nothing", "property_key": "vec" }),
         )
         .await;
-        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
-        assert_eq!(body["results"], json!([]));
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.to_string().contains("no vector index on :Nothing(vec)"), "{body}");
     }
 
     #[tokio::test]

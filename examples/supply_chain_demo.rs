@@ -24,6 +24,7 @@ use samyama_sdk::{
     AgentConfig, LLMProvider, NLQConfig,
     DistanceMetric, PageRankConfig,
     JayaSolver, SolverConfig, Problem, Array1,
+    GraphStore, NodeId,
 };
 use std::collections::HashMap;
 use std::time::Instant;
@@ -60,6 +61,86 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (na.sqrt() * nb.sqrt())
+}
+
+/// A string property of a node, or `""` when it is missing or not a string.
+///
+/// Reads through `GraphStore::node_property`, which sees both the node's inline
+/// map and the columnar store. `Node::get_property` sees only the inline map, and
+/// `create_node_with_properties` leaves that map empty, so reading a Supplier's
+/// name that way returned blank (#1313).
+fn node_string(store: &GraphStore, id: NodeId, key: &str) -> String {
+    store
+        .node_property(id, key)
+        .and_then(|v| v.as_string().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
+/// Two PageRank scores closer than this are treated as the same score.
+const PAGERANK_TIE_EPSILON: f64 = 1e-9;
+
+/// Whether every score is the same, so sorting by score orders nothing.
+fn scores_all_tied(scores: &[f64]) -> bool {
+    scores
+        .windows(2)
+        .all(|w| (w[0] - w[1]).abs() < PAGERANK_TIE_EPSILON)
+}
+
+/// A total allocation within this many containers of the target counts as
+/// complete. The penalty and the success message below share it, so the demo
+/// cannot report "all rerouted" for an allocation its own penalty rejected.
+const REROUTE_TOLERANCE_CONTAINERS: f64 = 0.5;
+/// Penalty weight on the squared shortfall, in $ per container².
+const REROUTE_PENALTY_PER_CONTAINER_SQ: f64 = 500.0;
+
+/// Scenario F: spread `target_containers` over three alternative ports at
+/// minimum cost. Each port costs `base_costs[i] * x + congestion_factors[i] * x²`
+/// for `x` containers and holds at most `port_capacities[i]`; a total that misses
+/// the target is penalised on the squared shortfall.
+struct RerouteProblem {
+    target_containers: f64,
+    base_costs: [f64; 3],
+    congestion_factors: [f64; 3],
+    port_capacities: [f64; 3],
+}
+
+impl RerouteProblem {
+    /// Whether `total` containers meets the target, by the same tolerance the
+    /// penalty uses.
+    fn is_fully_allocated(&self, total: f64) -> bool {
+        (self.target_containers - total).abs() <= REROUTE_TOLERANCE_CONTAINERS
+    }
+}
+
+impl Problem for RerouteProblem {
+    fn dim(&self) -> usize {
+        3
+    }
+
+    fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
+        let lower = Array1::from_elem(3, 0.0);
+        let upper = Array1::from_vec(self.port_capacities.to_vec());
+        (lower, upper)
+    }
+
+    fn objective(&self, x: &Array1<f64>) -> f64 {
+        let mut cost = 0.0;
+        for i in 0..3 {
+            // Linear cost + quadratic congestion
+            cost += self.base_costs[i] * x[i] + self.congestion_factors[i] * x[i] * x[i];
+        }
+        cost
+    }
+
+    fn penalty(&self, x: &Array1<f64>) -> f64 {
+        let total: f64 = x.iter().sum();
+        let deficit = (self.target_containers - total).abs();
+        if deficit > REROUTE_TOLERANCE_CONTAINERS {
+            deficit * deficit * REROUTE_PENALTY_PER_CONTAINER_SQ
+        } else {
+            0.0
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -859,11 +940,8 @@ async fn main() {
             let edges = store.get_outgoing_edges(port_ids[pi]);
             let connections: Vec<String> = edges.iter()
                 .filter(|e| e.edge_type.as_str() == "ROUTES_THROUGH")
-                .filter_map(|e| {
-                    store.get_node(e.target)
-                        .and_then(|n| n.get_property("name"))
-                        .and_then(|v| v.as_string().map(|s| s.to_string()))
-                })
+                .map(|e| node_string(&store, e.target, "name"))
+                .filter(|name| !name.is_empty())
                 .collect();
             println!("    {} -> {} connected ports: {}",
                 ports[pi].name, connections.len(),
@@ -992,6 +1070,14 @@ async fn main() {
             rank + 1, name_disp, country, score);
     }
     println!("  +------+------------------------+--------------+----------+");
+    // Suppliers only have outgoing edges (SUPPLIES, MANUFACTURES, BASED_AT), so
+    // PageRank gives every one of them the same base score and the order above is
+    // just insertion order. Say so instead of presenting it as a ranking.
+    let supplier_scores: Vec<f64> = supplier_ranks.iter().map(|r| r.2).collect();
+    if scores_all_tied(&supplier_scores) {
+        println!("  Note: every supplier scores the same -- suppliers have no incoming edges,");
+        println!("  so PageRank cannot separate them and the order above is not a ranking.");
+    }
     println!();
 
     // WCC analysis
@@ -1014,7 +1100,7 @@ async fn main() {
         hamburg_shipments.iter().map(|(_, s)| s.containers).sum::<i64>());
     println!("  across 3 alternative European ports, minimizing total cost.");
     println!();
-    println!("  Cost model: base_rate * distance_factor + congestion_penalty");
+    println!("  Cost model: base_cost * containers + congestion_factor * containers^2");
     println!("  Ports: Rotterdam (idx 0), Antwerp (idx 1), Felixstowe (idx 2)");
     println!();
 
@@ -1026,41 +1112,6 @@ async fn main() {
     // Rotterdam: medium base, medium congestion (largest port)
     // Antwerp: slightly higher base, lower congestion
     // Felixstowe: higher base (smaller port), lowest congestion
-    struct RerouteProblem {
-        target_containers: f64,
-        base_costs: [f64; 3],
-        congestion_factors: [f64; 3],
-        port_capacities: [f64; 3],
-    }
-
-    impl Problem for RerouteProblem {
-        fn dim(&self) -> usize { 3 }
-
-        fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
-            let lower = Array1::from_elem(3, 0.0);
-            let upper = Array1::from_vec(self.port_capacities.to_vec());
-            (lower, upper)
-        }
-
-        fn objective(&self, x: &Array1<f64>) -> f64 {
-            let mut cost = 0.0;
-            for i in 0..3 {
-                // Linear cost + quadratic congestion
-                cost += self.base_costs[i] * x[i] + self.congestion_factors[i] * x[i] * x[i];
-            }
-            cost
-        }
-
-        fn penalty(&self, x: &Array1<f64>) -> f64 {
-            let total: f64 = x.iter().sum();
-            let deficit = (self.target_containers - total).abs();
-            if deficit > 0.5 {
-                deficit * deficit * 500.0
-            } else {
-                0.0
-            }
-        }
-    }
 
     let reroute_problem = RerouteProblem {
         target_containers: total_hamburg_containers,
@@ -1081,8 +1132,14 @@ async fn main() {
     let allocated: Vec<f64> = (0..3).map(|i| opt_result.best_variables[i]).collect();
     let total_allocated: f64 = allocated.iter().sum();
 
+    // `best_fitness` is objective + penalty. Report the cost of the allocation
+    // itself, so the TOTAL row equals the sum of the rows above it, and show the
+    // penalty separately when the capacity constraint could not be met.
+    let routing_cost = reroute_problem.objective(&opt_result.best_variables);
+    let shortfall_penalty = reroute_problem.penalty(&opt_result.best_variables);
+
     println!("  Optimization completed in {:.2?}", opt_time);
-    println!("  Minimized total cost: ${:.2}", opt_result.best_fitness);
+    println!("  Minimized routing cost: ${:.2}", routing_cost);
     println!();
     println!("  +--------------------+-------------+-------------+");
     println!("  | Port               | Containers  | Cost $      |");
@@ -1095,15 +1152,18 @@ async fn main() {
     }
     println!("  +--------------------+-------------+-------------+");
     println!("  | TOTAL              | {:>11.0} | {:>11.2} |",
-        total_allocated, opt_result.best_fitness);
+        total_allocated, routing_cost);
     println!("  +--------------------+-------------+-------------+");
     println!();
 
-    if (total_allocated - total_hamburg_containers).abs() < 2.0 {
+    let total_capacity: f64 = reroute_problem.port_capacities.iter().sum();
+    if reroute_problem.is_fully_allocated(total_allocated) {
         println!("  All {} containers successfully rerouted.", total_hamburg_containers as i64);
     } else {
-        println!("  Note: Allocation ({:.0}) vs target ({:.0}) -- constraint tolerance.",
-            total_allocated, total_hamburg_containers);
+        println!("  Shortfall: {:.0} of {:.0} containers placed; the alternative ports hold {:.0}.",
+            total_allocated, total_hamburg_containers, total_capacity);
+        println!("  Unplaced containers carry a ${:.2} penalty in the solver's fitness.",
+            shortfall_penalty);
     }
     println!();
 
@@ -1132,26 +1192,25 @@ async fn main() {
 
         let results = client.vector_search("Supplier", "capabilities_vec", &query_vec, 6).await.unwrap();
 
-        println!("  Top alternative suppliers by capability similarity:");
+        // The index returns cosine *distance* (1 - similarity): lower is closer.
+        println!("  Top alternative suppliers by capability similarity (cosine distance, lower = closer):");
         println!("  +------+------------------------+--------------+----------+");
-        println!("  | Rank | Supplier               | Country      | Score    |");
+        println!("  | Rank | Supplier               | Country      | Distance |");
         println!("  +------+------------------------+--------------+----------+");
         let mut rank = 0;
         {
             let store = client.store_read().await;
             for (nid, score) in &results {
-                if let Some(node) = store.get_node(*nid) {
-                    let name = node.get_property("name")
-                        .and_then(|v| v.as_string().map(|s| s.to_string()))
-                        .unwrap_or_default();
+                // Through `node_string`, not `Node::get_property`: the inline
+                // read returned blank names, so the self-skip below never fired.
+                if store.get_node(*nid).is_some() {
+                    let name = node_string(&store, *nid, "name");
                     // Skip the disrupted supplier itself
                     if name == *disrupted_name {
                         continue;
                     }
                     rank += 1;
-                    let country = node.get_property("country")
-                        .and_then(|v| v.as_string().map(|s| s.to_string()))
-                        .unwrap_or_default();
+                    let country = node_string(&store, *nid, "country");
                     let name_disp = if name.len() > 22 {
                         format!("{}...", &name[..19])
                     } else {
@@ -1195,7 +1254,8 @@ async fn main() {
     println!("└──────────────────────────────────────────────────────────────┘");
     println!();
 
-    if is_claude_available() {
+    let claude_available = is_claude_available();
+    if claude_available {
         println!("  [ok] Claude Code CLI detected — running NLQ queries");
         println!();
 
@@ -1209,9 +1269,9 @@ async fn main() {
         };
 
         let schema_summary = "Node labels: Port, Supplier, Product, ShippingLine, Shipment\n\
-                              Edge types: SHIPS_FROM, SHIPS_TO, SUPPLIES, CONTAINS (Shipment->Product), CARRIES (ShippingLine->Shipment), ROUTES_THROUGH, BASED_AT\n\
-                              Relationship paths: (Supplier)-[:SUPPLIES]->(Product), (Supplier)-[:BASED_AT]->(Port), (Shipment)-[:SHIPS_FROM]->(Port), (Shipment)-[:SHIPS_TO]->(Port), (Shipment)-[:CONTAINS]->(Product), (ShippingLine)-[:CARRIES]->(Shipment)\n\
-                              Properties: Port(name, country, region['East Asia'/'Europe'/'North America'/'Southeast Asia'/'South Asia'/'Middle East'/'South America'], capacity_teu), \
+                              Edge types: SHIPS_FROM, SHIPS_TO, SHIPS_VIA, SUPPLIES, MANUFACTURES, CONTAINS (Shipment->Product), CARRIES (ShippingLine->Shipment), ROUTES_THROUGH, BASED_AT\n\
+                              Relationship paths: (Supplier)-[:SUPPLIES]->(Product), (Supplier)-[:MANUFACTURES]->(Product), (Supplier)-[:BASED_AT]->(Port), (Shipment)-[:SHIPS_FROM]->(Port), (Shipment)-[:SHIPS_TO]->(Port), (Shipment)-[:SHIPS_VIA]->(Port), (Shipment)-[:CONTAINS]->(Product), (ShippingLine)-[:CARRIES]->(Shipment)\n\
+                              Properties: Port(name, country, region['East Asia'/'Europe'/'North America'/'Southeast Asia'/'South Asia'/'Middle East'/'South America'], capacity_teu_k, status), \
                               Supplier(name, country[e.g. 'India', 'Germany', 'USA', 'China', 'Japan', 'Switzerland'], capabilities, annual_revenue_m, gmp_certified), \
                               Product(name, category['Diabetes'/'Cardiovascular'/'Oncology'/'Immunology'/'Antibiotic'/'Antiviral'/'GI'/'Pain'/'Neurology'/'Psychiatry'/'Respiratory'], product_type['small molecule'/'biologic'], unit_value, cold_chain), \
                               Shipment(shipment_id, status['In Transit'/'Loading'], value_usd, containers), \
@@ -1331,9 +1391,106 @@ async fn main() {
     println!("    [E] PageRank criticality ({} nodes analyzed)", view.node_count);
     println!("    [F] Jaya optimization ({:.0} containers across 3 ports)", total_hamburg_containers);
     println!("    [G] Vector search for alternative suppliers (64-dim embeddings)");
-    println!("    [H] NLQ supply chain intelligence via ClaudeCode pipeline");
-    println!("    [I] Agentic enrichment for supplier knowledge generation");
+    // H and I need the Claude Code CLI; say so rather than claim a step that was skipped.
+    if claude_available {
+        println!("    [H] NLQ supply chain intelligence via ClaudeCode pipeline");
+        println!("    [I] Agentic enrichment for supplier knowledge generation");
+    } else {
+        println!("    [H] NLQ and [I] agentic enrichment skipped (Claude Code CLI not found)");
+    }
     println!();
     println!("  Samyama Graph Database -- Global Pharmaceutical Supply Chain");
     println!("================================================================");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reroute(target: f64) -> RerouteProblem {
+        RerouteProblem {
+            target_containers: target,
+            base_costs: [45.0, 52.0, 65.0],
+            congestion_factors: [0.15, 0.10, 0.05],
+            port_capacities: [80.0, 60.0, 40.0],
+        }
+    }
+
+    #[test]
+    fn reroute_objective_is_linear_plus_quadratic_congestion_per_port() {
+        let p = reroute(180.0);
+        let x = Array1::from_vec(vec![80.0, 60.0, 40.0]);
+        // 45*80 + 0.15*80² = 4560; 52*60 + 0.10*60² = 3480; 65*40 + 0.05*40² = 2680.
+        assert_eq!(p.objective(&x), 4560.0 + 3480.0 + 2680.0);
+    }
+
+    #[test]
+    fn reroute_penalty_is_zero_within_tolerance() {
+        let p = reroute(180.0);
+        let x = Array1::from_vec(vec![80.0, 60.0, 40.0 - REROUTE_TOLERANCE_CONTAINERS]);
+        assert_eq!(p.penalty(&x), 0.0);
+        assert!(p.is_fully_allocated(x.sum()));
+    }
+
+    #[test]
+    fn reroute_shortfall_is_penalised_and_not_reported_as_complete() {
+        // The demo's own data: 181 containers, 180 slots of capacity.
+        let p = reroute(181.0);
+        let full = Array1::from_vec(p.port_capacities.to_vec());
+        assert_eq!(p.penalty(&full), REROUTE_PENALTY_PER_CONTAINER_SQ);
+        assert!(
+            !p.is_fully_allocated(full.sum()),
+            "a one-container shortfall was reported as fully rerouted"
+        );
+    }
+
+    #[test]
+    fn reroute_bounds_are_zero_to_each_port_capacity() {
+        let p = reroute(181.0);
+        let (lo, hi) = p.bounds();
+        assert_eq!(lo.to_vec(), vec![0.0; 3]);
+        assert_eq!(hi.to_vec(), p.port_capacities.to_vec());
+    }
+
+    #[test]
+    fn node_string_reads_properties_held_only_in_the_columnar_store() {
+        let mut store = GraphStore::new();
+        let mut props = PropertyMap::new();
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String("Aurobindo Pharma".to_string()),
+        );
+        let id = store.create_node_with_properties("default", vec![Label::new("Supplier")], props);
+
+        // The inline read is what returned blank names in Scenario G.
+        assert!(store.get_node(id).unwrap().get_property("name").is_none());
+        assert_eq!(node_string(&store, id, "name"), "Aurobindo Pharma");
+    }
+
+    #[test]
+    fn node_string_is_empty_for_a_missing_or_non_string_property() {
+        let mut store = GraphStore::new();
+        let mut props = PropertyMap::new();
+        props.insert("annual_revenue_m".to_string(), PropertyValue::Integer(7));
+        let id = store.create_node_with_properties("default", vec![Label::new("Supplier")], props);
+
+        assert_eq!(node_string(&store, id, "name"), "");
+        assert_eq!(node_string(&store, id, "annual_revenue_m"), "");
+    }
+
+    #[test]
+    fn scores_all_tied_detects_equal_and_distinct_scores() {
+        assert!(scores_all_tied(&[0.001586, 0.001586, 0.001586]));
+        assert!(!scores_all_tied(&[0.070089, 0.062648]));
+        assert!(scores_all_tied(&[0.5]));
+        assert!(scores_all_tied(&[]));
+    }
+
+    #[test]
+    fn mock_embedding_is_deterministic_and_has_the_requested_dimension() {
+        let a = mock_embedding("cardiac API", 64);
+        assert_eq!(a.len(), 64);
+        assert_eq!(a, mock_embedding("cardiac API", 64));
+        assert!((cosine_similarity(&a, &a) - 1.0).abs() < 1e-5);
+    }
 }

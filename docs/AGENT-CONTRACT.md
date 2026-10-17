@@ -7,6 +7,14 @@ MCP) can rely on when it talks to Samyama through the **MCP server**
 (`sdk/python/samyama_mcp/`). It covers, per AI-16: **tool schemas**, **error
 format**, **pagination**, **result envelopes**, and **idempotency**.
 
+| AI-16 clause | Section |
+|---|---|
+| `tool_schemas` | [1. Tool schemas](#1-tool-schemas) |
+| `error_format` | [2. Error format](#2-error-format) |
+| `pagination` | [3. Pagination](#3-pagination) |
+| `result_envelopes` | [4. Result envelopes](#4-result-envelopes) |
+| `idempotency` | [5. Idempotency](#5-idempotency) |
+
 It is written from the code as it stands, not from intent. Where the code
 does not guarantee something, this document says so instead of promising it
 — see [What is not guaranteed](#what-is-not-guaranteed) at the end. A

@@ -43,7 +43,7 @@ a declared index, a registered procedure — may not be one for you.
 | Cause | What to do |
 |---|---|
 | `Unknown procedure: apoc.*` | There is no APOC namespace. Most `apoc.text.*` and `apoc.coll.*` calls have a plain Cypher equivalent; `apoc.periodic.iterate` has no equivalent and the loop moves to your application. |
-| `Unknown function` | Check `docs/CYPHER_COMPATIBILITY.md` for the supported list. A function that is genuinely missing is worth an issue — a named one gets prioritised over a count. |
+| `Unknown function` | Check `docs/CYPHER-COMPATIBILITY.md` for the supported list. A function that is genuinely missing is worth an issue — a named one gets prioritised over a count. |
 | `Parse error: expected …` | A construct the grammar does not take yet. The `expected` list says what it wanted at that point, which usually identifies the construct. |
 | `is not yet supported in this clause position` | Clause **order**. Cypher allows almost any order and this engine's grammar enumerates the ones it knows; rewriting the clauses usually gets you through. |
 | `Unknown procedure: db.*` | Some of Neo4j's `db.*` introspection exists and some does not. `CALL db.labels()` works; check the matrix for the rest. |
@@ -91,7 +91,7 @@ Two other routes:
   client's behalf is an SSRF primitive — so stage the file locally.
 - **Parquet.** `LOAD PARQUET FROM 'file:///…' AS row` binds each record as a
   map of column to value, behind the same `--import-dir` gate. Not a Neo4j
-  clause; see `docs/CYPHER_COMPATIBILITY.md` for the types it reads.
+  clause; see `docs/CYPHER-COMPATIBILITY.md` for the types it reads.
 
 ## 4. What you should know before you commit
 

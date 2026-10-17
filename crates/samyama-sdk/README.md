@@ -110,7 +110,7 @@ an error if two nodes hold the key.
 
 ## More
 
-- [`docs/SDK_API_CLI_ARCHITECTURE.md`](../../docs/SDK_API_CLI_ARCHITECTURE.md)
+- [`docs/SDK-API-CLI-ARCHITECTURE.md`](../../docs/SDK-API-CLI-ARCHITECTURE.md)
   — how the SDKs, the HTTP API and the CLI fit together.
 - [`sdk/README.md`](../../sdk/README.md) — the Python and TypeScript SDKs.
 

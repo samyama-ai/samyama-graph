@@ -1,36 +1,67 @@
-# Samyama Scripts
+# Repository scripts
 
-Utility scripts for verification, data downloads, and testing.
+This directory holds the checks used by CI and release workflows, local
+verification tools, and dataset helpers. The automated scripts are called from
+`.github/workflows/ci.yml`, `.github/workflows/nightly.yml`, and
+`.github/workflows/tag-release.yml`.
 
-## Verification
+## Automated checks
 
-### `verify-sweep.sh`
+| Script | What it checks | Typical invocation |
+|---|---|---|
+| `api_stability.py` | Replays the recorded HTTP request/response contract and fails if it changes. CI runs `--check`; changing the contract requires an intentional re-record. | `python3 scripts/api_stability.py --check` |
+| `check_dockerfile_rust_pin.py` | Checks that the Rust version pinned by the Dockerfile satisfies the resolved dependencies. | `python3 scripts/check_dockerfile_rust_pin.py` |
+| `check_lint_ratchet.sh` | Prevents the Clippy warning count from exceeding its configured ceiling. | `scripts/check_lint_ratchet.sh 796` |
+| `check_thread_determinism.sh` | Compares openCypher TCK results across thread counts. CI supplies the TCK feature directory. | `scripts/check_thread_determinism.sh /path/to/tck/features` |
+| `test_check_release_gate.py` | Tests the release-gate validator. | `python3 scripts/test_check_release_gate.py` |
+| `check_release_gate.py` | Blocks a release tag when its CH-REGRESS verdict is missing, stale, red, or does not cover the commit being tagged. | `python3 scripts/check_release_gate.py RELEASE-GATE.json --commit SHA` |
+| `verify-sweep.sh` | Runs tests, examples, benchmarks, and case studies, recording a result for each. The nightly workflow runs it. | `scripts/verify-sweep.sh --only tests` |
 
-Runs the full sweep — **tests, examples, benches, case studies** — and writes a
-one-line-per-item summary of each, so two runs can be diffed directly.
+The full sweep accepts `--provision`, `--out DIR`, `--jobs N`, and repeatable
+`--only` stages (`tests`, `examples`, `benches`, `casestudies`). See
+`scripts/verify-sweep.sh --help` for the current options. It treats an example
+that reports missing input and an unpublished case-study snapshot as skips;
+panics and failed checks remain failures.
+
+The API corpus lives at
+[`tests/fixtures/api_corpus/corpus.json`](../tests/fixtures/api_corpus/corpus.json).
+To update it, use `--record --i-am-changing-the-contract` and include the
+contract change in the commit message.
+
+## Local verification
+
+### `coverage.sh`
+
+Runs workspace tests under `cargo-llvm-cov` (excluding `samyama-python`) and
+writes reports under `coverage/`. If `cargo-llvm-cov` is missing, the script
+installs it; it also requests the `llvm-tools-preview` Rust component.
 
 ```sh
-scripts/verify-sweep.sh                 # against this checkout
-scripts/verify-sweep.sh --provision     # also install toolchain + system deps
-scripts/verify-sweep.sh --out DIR       # where results and logs go
-scripts/verify-sweep.sh --jobs 4        # cargo -j (default: nproc-2)
+scripts/coverage.sh              # HTML report; opens it on macOS
+scripts/coverage.sh --summary    # terminal summary
+scripts/coverage.sh --json       # coverage/coverage.json
+scripts/coverage.sh --lcov       # coverage/lcov.info
 ```
 
-This catches the classes a plain `cargo test` does not: an example that panics
-instead of saying what data it needs, a bench that reports success while
-measuring nothing, a case study whose snapshot URL was never filled in.
+### Other local tools
 
-It distinguishes **breakage from absence**, and the exit code follows that
-distinction — an example exiting non-zero because it needs a dataset
-(`NEEDS-INPUT`) and a case study whose snapshot is unpublished (`SKIP`) are not
-failures. A panic, a failed bench, or a failed test is.
+| Script | What it does | Typical invocation |
+|---|---|---|
+| `regression-test.sh` | Runs the broader regression sequence: tests, feature checks, example and benchmark builds, GPU smoke runs where available, Clippy, and formatting. `--quick` skips the longer stages. | `scripts/regression-test.sh --quick` |
+| `crash_consistency.py` | Force-kills the server during writes, restarts it, and reports whether acknowledged data survived consistently. This is a process-level probe, not an in-process unit test. | `python3 scripts/crash_consistency.py --cycles 50 --json out.json` |
+| `run_all_examples.sh` | Starts a local server and runs the example demos interactively or with `--batch`; `--port N` changes the server port. It clears its named demo data directories between examples. | `scripts/run_all_examples.sh --batch` |
 
-Resumable: each stage drops a marker, so a run interrupted partway resumes
-where it stopped. On a cloud host, launch it under `setsid nohup` so a dropped
-SSH connection does not take the run with it.
+## Dataset helpers
 
+| Script | Data |
+|---|---|
+| `download_ldbc_snb.sh` | Downloads and extracts LDBC SNB Interactive SF1 data used by the loader and SNB benchmarks. |
+| `download_finbench.sh` | Generates the synthetic LDBC FinBench files through the FinBench loader. |
+| `download_graphalytics.sh` | Downloads LDBC Graphalytics datasets; defaults to XS, with `--size S` or `--size all` for larger datasets. The S-size archives require `zstd`. |
 
 ## Requirements
 
-The Python scripts here use only the standard library, so there is nothing to
-install beyond Python 3.
+The shell scripts require Bash. Python tools use the Python 3 standard library;
+checks that build or run Samyama need the repository's Rust toolchain. Dataset
+helpers need network access; the Graphalytics S-size download also needs
+`zstd`. Coverage installs `cargo-llvm-cov` if needed.

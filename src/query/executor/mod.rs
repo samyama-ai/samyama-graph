@@ -517,7 +517,7 @@ impl<'a> QueryExecutor<'a> {
         }
 
         // Plan the query
-        let plan = self.planner.plan(query, self.store)?;
+        let mut plan = self.planner.plan(query, self.store)?;
         // TRUST-06: the hash of the plan that runs, taken before it is
         // consumed. Re-planning later could describe a different plan: the
         // planner reads statistics that move with the data.
@@ -525,7 +525,7 @@ impl<'a> QueryExecutor<'a> {
 
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain {
-            let mut batch = Self::explain_plan_with_stats(&plan, Some(self.store), self.row_budget);
+            let mut batch = Self::explain_plan_with_stats(&mut plan, Some(self.store), self.row_budget);
             batch.plan_hash = plan_hash;
             return whole(batch, sink);
         }
@@ -599,15 +599,21 @@ impl<'a> QueryExecutor<'a> {
 
     /// Generate EXPLAIN output from an execution plan, optionally with graph statistics
     fn explain_plan_with_stats(
-        plan: &ExecutionPlan,
+        plan: &mut ExecutionPlan,
         store: Option<&GraphStore>,
         row_budget: u64,
     ) -> RecordBatch {
         use crate::graph::PropertyValue;
         use crate::query::executor::planner::PLAN_DIAGNOSTICS;
 
-        let description = plan.root.describe();
-        let mut plan_text = description.format(0);
+        // Each operator with the planner's numbers beside it (NDS-12, #1670):
+        // the rows it is expected to produce and a cost -- the rows produced
+        // by it and everything under it, the work the plan is chosen to
+        // minimise. Without them EXPLAIN said what was chosen and not why.
+        let mut plan_text = match store {
+            Some(store) => format_with_estimates(&mut plan.root, store),
+            None => plan.root.describe().format(0),
+        };
 
         // Append planner diagnostics (candidate plans) if available
         let diagnostics = PLAN_DIAGNOSTICS.with(|diag: &std::cell::RefCell<Option<planner::PlanDiagnostics>>| diag.borrow_mut().take());
@@ -821,7 +827,7 @@ impl<'a> MutQueryExecutor<'a> {
         }
 
         // Plan the query (need immutable borrow temporarily)
-        let plan = {
+        let mut plan = {
             let store_ref: &GraphStore = self.store;
             self.planner.plan(query, store_ref)?
         };
@@ -831,7 +837,7 @@ impl<'a> MutQueryExecutor<'a> {
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain {
             let store_ref: &GraphStore = self.store;
-            let mut batch = QueryExecutor::explain_plan_with_stats(&plan, Some(store_ref), self.row_budget);
+            let mut batch = QueryExecutor::explain_plan_with_stats(&mut plan, Some(store_ref), self.row_budget);
             batch.plan_hash = plan_hash;
             return Ok(batch);
         }
@@ -1266,6 +1272,75 @@ fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<St
         }
     }
     Ok(())
+}
+
+
+/// A plan node with the estimate the operator gives for it.
+struct EstimatedNode {
+    name: String,
+    details: String,
+    rows: Option<f64>,
+    cost: Option<f64>,
+    children: Vec<EstimatedNode>,
+}
+
+/// Walk the operator tree as PROFILE does, bottom-up, asking each operator for
+/// its row estimate given its children's (#1624), and summing a cost as the
+/// rows produced by the operator and everything under it.
+///
+/// An operator whose `children_mut` does not match the children `describe`
+/// reports is printed from `describe` with no numbers below it, rather than
+/// with numbers attached to the wrong lines.
+fn estimate_node(op: &mut OperatorBox, store: &GraphStore) -> EstimatedNode {
+    let description = op.describe();
+    let mut children: Vec<EstimatedNode> = op
+        .children_mut()
+        .into_iter()
+        .map(|child| estimate_node(child, store))
+        .collect();
+    if children.len() != description.children.len() {
+        fn plain(d: &operator::OperatorDescription) -> EstimatedNode {
+            EstimatedNode {
+                name: d.name.clone(),
+                details: d.details.clone(),
+                rows: None,
+                cost: None,
+                children: d.children.iter().map(plain).collect(),
+            }
+        }
+        children = description.children.iter().map(plain).collect();
+    }
+    let child_rows: Vec<Option<f64>> = children.iter().map(|c| c.rows).collect();
+    let rows = op.estimate_rows(store, &child_rows);
+    let cost = rows.and_then(|r| {
+        children.iter().try_fold(r, |acc, c| c.cost.map(|cc| acc + cc))
+    });
+    EstimatedNode { name: description.name, details: description.details, rows, cost, children }
+}
+
+fn format_estimated(node: &EstimatedNode, indent: usize, out: &mut String) {
+    let prefix = if indent == 0 { String::new() } else { format!("{}+- ", "   ".repeat(indent - 1)) };
+    out.push_str(&prefix);
+    out.push_str(&node.name);
+    if !node.details.is_empty() {
+        out.push_str(&format!(" ({})", node.details));
+    }
+    match (node.rows, node.cost) {
+        (Some(r), Some(c)) => out.push_str(&format!(" [estimated rows={} cost={}]", r.round(), c.round())),
+        (Some(r), None) => out.push_str(&format!(" [estimated rows={}]", r.round())),
+        _ => out.push_str(" [estimated rows=?]"),
+    }
+    out.push('\n');
+    for c in &node.children {
+        format_estimated(c, indent + 1, out);
+    }
+}
+
+/// The plan text EXPLAIN prints, each operator carrying its estimate.
+fn format_with_estimates(root: &mut OperatorBox, store: &GraphStore) -> String {
+    let mut out = String::new();
+    format_estimated(&estimate_node(root, store), 0, &mut out);
+    out
 }
 
 #[cfg(test)]

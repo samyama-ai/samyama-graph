@@ -4476,8 +4476,10 @@ fn vector_search_operator_ranks_by_similarity() {
         "n".into(),
         None,
     );
-    // No index for the label: nothing to rank.
-    assert!(missing.next(&store).unwrap().is_none());
+    // No index for the label: an error that names it, not an empty answer
+    // that reads like "nothing is similar" (#1660).
+    let err = missing.next(&store).unwrap_err().to_string();
+    assert!(err.contains("no vector index on :Nope(emb)"), "{err}");
 }
 
 // ---------------------------------------------------------------------------

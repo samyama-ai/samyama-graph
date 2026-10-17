@@ -134,6 +134,29 @@ impl FullTextIndex {
         self.lengths.len()
     }
 
+    /// Resident bytes held by this index, and the postings it holds (NDS-14).
+    ///
+    /// The term dictionary, every posting list with its positions, and the
+    /// per-document lengths BM25 normalises by. Estimated from the structures
+    /// walked, like `PropertyIndex::heap_bytes`: `BTreeMap` node overhead and
+    /// hash-map load factor are not visible from here, so it is a floor.
+    pub fn heap_bytes(&self) -> (usize, usize) {
+        use std::mem::size_of;
+        let mut bytes = 0usize;
+        let mut postings = 0usize;
+        for (term, docs) in &self.terms {
+            bytes += size_of::<String>() + term.capacity() + size_of::<HashMap<u64, Posting>>();
+            // A hash map holds `capacity` slots of key and value, plus a control byte each.
+            bytes += docs.capacity() * (size_of::<u64>() + size_of::<Posting>() + 1);
+            for p in docs.values() {
+                bytes += p.positions.capacity() * size_of::<u32>();
+            }
+            postings += docs.len();
+        }
+        bytes += self.lengths.capacity() * (size_of::<u64>() + size_of::<usize>() + 1);
+        (bytes, postings)
+    }
+
     pub fn distinct_terms(&self) -> usize {
         self.terms.len()
     }
@@ -415,6 +438,25 @@ impl FullTextIndexes {
 
     pub fn is_empty(&self) -> bool {
         self.by_name.read().unwrap().is_empty()
+    }
+
+    /// Per-index memory, one row per full-text index (NDS-14). `label` and
+    /// `property` are what the index covers; the name is in `name`.
+    pub fn index_memory(&self) -> Vec<crate::index::IndexMemory> {
+        let g = self.by_name.read().unwrap();
+        g.iter()
+            .map(|(name, i)| {
+                let (bytes, entries) = i.heap_bytes();
+                crate::index::IndexMemory {
+                    kind: "fulltext",
+                    name: Some(name.clone()),
+                    label: i.label.clone(),
+                    property: i.property.clone(),
+                    bytes,
+                    entries,
+                }
+            })
+            .collect()
     }
 
     /// The (label, property) an index covers, or `None` if there is no such

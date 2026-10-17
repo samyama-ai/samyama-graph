@@ -24,6 +24,26 @@ on:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
+  # DO NOT make any check in this file a required status check while this
+  # `paths:` filter is here (#1854 item 3; #1860 for what it costs).
+  #
+  # A workflow that `paths:` filters out does not report its checks as skipped
+  # -- it does not report them at all. A required context that never reports
+  # leaves every pull request missing these paths pending forever, unmergeable,
+  # with no visible cause. This is safe today only because nothing here is
+  # required.
+  #
+  # Converting to a job condition, the shape `ci.yml` uses, is NOT sufficient on
+  # its own. #1860 was a docs-only pull request under exactly that shape and was
+  # MERGEABLE yet permanently BLOCKED: when an `if:` skips a MATRIX job, GitHub
+  # never expands the matrix, so the check reports under its literal name
+  # (`test (${{ matrix.os }})`) and the required `test (ubuntu-latest)` never
+  # appears. A skipped job with a FIXED name does satisfy its requirement --
+  # `supply-chain (cargo-deny)` reports, skipped, under exactly the required
+  # name.
+  #
+  # So if this ever has to gate merges, route it through `ci.yml`'s single
+  # fixed-name aggregator (`ci-ok`, #1863) instead of requiring it directly.
   pull_request:
     paths:
       - "case_studies/*/questions.json"

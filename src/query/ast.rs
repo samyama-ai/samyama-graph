@@ -133,6 +133,9 @@ pub struct Query {
     pub show_indexes: bool,
     /// ANALYZE flag -- recompute the planner's statistics (LANG-13).
     pub analyze: bool,
+    /// Planner hints from every MATCH in the query (#1675). Keyed by variable,
+    /// which names one node across the whole query.
+    pub hints: Vec<PlanHint>,
     /// SHOW CONSTRAINTS flag
     pub show_constraints: bool,
     /// PROFILE flag
@@ -317,6 +320,22 @@ pub struct YieldItem {
     pub name: String,
     /// Alias (optional)
     pub alias: Option<String>,
+}
+
+/// A planner hint written after a MATCH pattern (LANG-13, #1675).
+///
+/// Mandatory, as in Neo4j: a hint the planner cannot honour is an error, not a
+/// suggestion it may drop. A hint that is silently ignored is indistinguishable
+/// from one that worked, which is exactly the property a hint exists to give.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanHint {
+    /// `USING INDEX n:Label(prop)` -- start from `n`, through that index.
+    Index { variable: String, label: Label, properties: Vec<String> },
+    /// `USING SCAN n:Label` -- start from `n`, by a label scan, using no index.
+    Scan { variable: String, label: Label },
+    /// `USING JOIN ON n` -- accepted; this planner joins comma-separated
+    /// patterns on their shared variables already, so it is checked and kept.
+    Join { variables: Vec<String> },
 }
 
 /// MATCH clause: `MATCH (n:Person)-[:KNOWS]->(m)`
@@ -1316,6 +1335,7 @@ impl Query {
             show_hierarchy_indexes: false,
             show_indexes: false,
             analyze: false,
+            hints: Vec::new(),
             show_constraints: false,
             profile: false,
             params: HashMap::new(),

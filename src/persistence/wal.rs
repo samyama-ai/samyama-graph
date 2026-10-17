@@ -77,6 +77,9 @@ thread_local! {
     /// [`Wal::append`], for tests that pin how often a batch takes the lock (#1109).
     pub(crate) static WAL_LOCKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     pub(crate) static WAL_APPENDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Durability barriers asked for through [`Wal::sync`], whether or not
+    /// sync mode made them reach the disk (#1666).
+    pub(crate) static WAL_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Take the WAL mutex. One place to acquire it, so a test can count how often
@@ -281,7 +284,7 @@ impl Wal {
     /// `SAMYAMA_FSYNC=1` turns it on. **Off by default**, which is what the
     /// engine has always done, and the default is the honest one to keep: this
     /// is a change of what users can choose, not a change of what they get
-    /// without asking. `docs/ACID_GUARANTEES.md` §4 states both costs.
+    /// without asking. `docs/ACID-GUARANTEES.md` §4 states both costs.
     ///
     /// Read once, at construction. A durability level that could change under
     /// a running process would make "was this write durable?" unanswerable for
@@ -317,8 +320,24 @@ impl Wal {
         self.sequence
     }
 
-    /// Append an entry to the WAL
+    /// Append an entry to the WAL, durably when sync mode is on.
+    ///
+    /// [`Self::append_unsynced`] followed by [`Self::sync`]: with
+    /// `SAMYAMA_FSYNC=1` the entry is on the platter when this returns.
     pub fn append(&mut self, entry: WalEntry) -> WalResult<u64> {
+        let sequence = self.append_unsynced(entry)?;
+        self.sync()?;
+        Ok(sequence)
+    }
+
+    /// Append an entry **without** the durability barrier.
+    ///
+    /// For a caller writing many entries for one acknowledgement: it appends
+    /// each, then calls [`Self::sync`] once before acknowledging -- one fsync
+    /// for the batch rather than one per entry (#1666). The caller owns the
+    /// promise: nothing appended this way may be acknowledged before `sync`
+    /// has returned.
+    pub fn append_unsynced(&mut self, entry: WalEntry) -> WalResult<u64> {
         #[cfg(test)]
         WAL_APPENDS.with(|c| c.set(c.get() + 1));
         // Increment sequence
@@ -346,23 +365,32 @@ impl Wal {
             file.write_all(&(data.len() as u32 | FORMAT_FLAG).to_le_bytes())?;
             // Write data
             file.write_all(&data)?;
+        }
 
-            // Sync if asked. `flush()` alone moves bytes out of the `BufWriter`
-            // into the OS page cache and is **not** a durability barrier — a
-            // host crash or power loss still loses them. `sync_data()` is the
-            // barrier, and it is what "durable" has to mean for a write that
-            // has been acknowledged (#1309).
-            //
-            // `sync_data` rather than `sync_all`: the file's length and
-            // contents are what a replay needs, and skipping the metadata
-            // flush is the cheaper of the two barriers.
-            if self.sync_mode {
+        Ok(sequence)
+    }
+
+    /// Make every entry appended so far durable, when sync mode is on; a
+    /// no-op otherwise, as the per-append barrier always was.
+    ///
+    /// `flush()` alone moves bytes out of the `BufWriter` into the OS page
+    /// cache and is **not** a durability barrier — a host crash or power loss
+    /// still loses them. `sync_data()` is the barrier, and it is what "durable"
+    /// has to mean for a write that has been acknowledged (#1309).
+    ///
+    /// `sync_data` rather than `sync_all`: the file's length and contents are
+    /// what a replay needs, and skipping the metadata flush is the cheaper of
+    /// the two barriers.
+    pub fn sync(&mut self) -> WalResult<()> {
+        #[cfg(test)]
+        WAL_SYNCS.with(|c| c.set(c.get() + 1));
+        if self.sync_mode {
+            if let Some(ref mut file) = self.current_file {
                 file.flush()?;
                 file.get_ref().sync_data()?;
             }
         }
-
-        Ok(sequence)
+        Ok(())
     }
 
     /// Force flush the WAL

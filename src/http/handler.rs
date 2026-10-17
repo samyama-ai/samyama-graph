@@ -1101,7 +1101,7 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
     let store_guard = state.store.read().await;
     let r = store_guard.memory_report();
     let stats = state.engine.cache_stats();
-    let indexes = store_guard.property_index.index_memory();
+    let indexes = store_guard.index_memory();
 
     let mut out = String::new();
     let mut gauge = |name: &str, help: &str, value: String| {
@@ -1126,7 +1126,7 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
     );
     gauge(
         "samyama_index_memory_bytes",
-        "Resident bytes held by property indexes and unique constraints.",
+        "Resident bytes held by every index: property, unique constraint, full-text, vector (including its HNSW graph) and hierarchy.",
         indexes.iter().map(|i| i.bytes).sum::<usize>().to_string(),
     );
     gauge(
@@ -1151,10 +1151,11 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
     out.push_str("# TYPE samyama_index_bytes gauge\n");
     for i in &indexes {
         out.push_str(&format!(
-            "samyama_index_bytes{{label=\"{}\",property=\"{}\",kind=\"{}\"}} {}\n",
+            "samyama_index_bytes{{label=\"{}\",property=\"{}\",kind=\"{}\",name=\"{}\"}} {}\n",
             i.label.replace('"', ""),
             i.property.replace('"', ""),
             i.kind,
+            i.name.as_deref().unwrap_or("").replace('"', ""),
             i.bytes
         ));
     }
@@ -1191,7 +1192,7 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
 pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
     let r = store_guard.memory_report();
-    let indexes = store_guard.property_index.index_memory();
+    let indexes = store_guard.index_memory();
     let index_bytes: usize = indexes.iter().map(|i| i.bytes).sum();
     let nodes = store_guard.node_count();
     let edges = store_guard.edge_count();

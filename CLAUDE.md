@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Samyama is a high-performance distributed graph database written in Rust with Redis protocol (RESP) compatibility, multi-tenancy, vector search, NLQ, and graph algorithms. Currently at Phase 4 (High Availability Foundation), version v1.11.0.
+Samyama is a high-performance graph database written in Rust with Redis protocol (RESP) compatibility, multi-tenancy, vector search, NLQ, and graph algorithms. Raft configuration and state-machine scaffolding exist, but writes currently apply only on the local node; replication and quorum are not implemented. Version v1.11.0.
 
 Cypher conformance is **measured, not estimated**: 97.3% of the openCypher TCK's evaluated scenarios pass (3,659 of 3,762, 96.5% coverage, 2026-08-26). The `~90% OpenCypher support` this line used to claim was a self-assessment withdrawn in `#437` as unmeasured; the measured figure has now passed it, which settles nothing, because only one of the two can be reproduced. Quote the pass rate **with** its coverage: a high rate over a small evaluated set is how this measurement is usually inflated, and that is exactly what the earlier 87.1% turned out to be.
 
@@ -15,7 +15,7 @@ Cypher conformance is **measured, not estimated**: 97.3% of the openCypher TCK's
 cargo build                    # Debug build
 cargo build --release          # Release build (optimized)
 
-# Run tests (1814 unit tests)
+# Run workspace unit and integration tests
 cargo test                     # All tests
 cargo test graph::node         # Specific module tests
 cargo test -- --nocapture      # Tests with output
@@ -45,7 +45,7 @@ cargo run --example social_network_demo       # Social network analysis
 cargo run --example knowledge_graph_demo      # Enterprise knowledge graph
 cargo run --example enterprise_soc_demo       # Security operations center
 cargo run --example agentic_enrichment_demo   # GAK (Generation-Augmented Knowledge; needs `claude` CLI)
-cargo run --example cluster_demo              # Raft clustering
+cargo run --example cluster_demo              # Raft cluster configuration demo
 cargo run --example ldbc_loader               # Load LDBC SNB SF1 dataset
 cargo run --example finbench_loader           # Load/generate FinBench dataset
 cargo run --release --example cricket_loader  # Load 21K Cricsheet matches
@@ -100,7 +100,7 @@ src/
 │   ├── wal.rs       # Write-Ahead Log
 │   └── tenant.rs    # Multi-tenancy & resource quotas
 │
-├── raft/            # High Availability
+├── raft/            # Raft configuration and state-machine scaffolding
 │   ├── node.rs      # RaftNode using openraft
 │   ├── state_machine.rs  # GraphStateMachine
 │   ├── cluster.rs   # ClusterConfig, ClusterManager
@@ -150,7 +150,7 @@ samyama-gpu, samyama-sdk), `sdk/` (Python, TypeScript), `cli/`, `openapi/`,
 
 4. **Multi-Tenancy**: RocksDB column families with tenant-prefixed keys, per-tenant quotas.
 
-5. **Raft Consensus**: Uses `openraft` crate with custom `GraphStateMachine`.
+5. **Raft scaffolding**: The repository has `openraft` types and a custom `GraphStateMachine`; there is no protocol write path, replication, or quorum yet.
 
 6. **Cross-Type Coercion**: Integer/Float promotion, String/Boolean coercion, Null propagation (three-valued logic).
 
@@ -231,8 +231,8 @@ running 329x too slow (#584).
 Benchmarks are the opposite — always `--release`, on a quiet host, with the
 calibration line compared before the timings (#529).
 
-- **1814 unit tests** across all modules (87.8% coverage)
-- **10 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
-- **Integration tests**: Python scripts in `tests/integration/`
-- **8 domain-specific example demos** with NLQ integration
-- **4 data loaders** (LDBC SNB, FinBench, Cricket, AACT) in `examples/`
+- **Unit and integration tests** across the workspace; `scripts/coverage.sh` measures coverage for the current checkout.
+- **31 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
+- **Integration tests**: Rust suites in `tests/` and Python scripts in `tests/integration/`
+- **20 demos on built-in data** in `examples/`
+- **17 dataset loaders and post-processing passes** in `examples/`

@@ -53,7 +53,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 BINARY = REPO / "target" / "release" / "samyama"
-CORPUS = REPO / "tests" / "api_corpus" / "corpus.json"
+CORPUS = REPO / "tests" / "fixtures" / "api_corpus" / "corpus.json"
 
 #: Statements that build the graph every request is answered against. Fixed
 #: order, so ids and counts are reproducible.

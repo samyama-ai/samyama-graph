@@ -103,7 +103,11 @@ fn parallel_relationships() {
 
 /// The unordered-pairs idiom needs no check: `t1.name < t2.name` already
 /// fails when the two relationships are one (#1233; BI-2's shape). Without
-/// such a WHERE the check stays.
+/// such a WHERE the rule still has to be enforced -- since #1614 by planning
+/// the two patterns as one path, `(t2)<-[:K]-(p)-[:K]->(t1)`, whose expands
+/// carry the relationships walked (#684), rather than by a `__iso_rel` filter
+/// over a join. Either way, no join is left for a relationship to slip
+/// through.
 #[test]
 fn a_where_that_keeps_the_endpoints_apart_needs_no_check() {
     let s = graph();
@@ -118,7 +122,12 @@ fn a_where_that_keeps_the_endpoints_apart_needs_no_check() {
     assert!(!plan(pairs).contains("__iso_rel"), "{}", plan(pairs));
     check(pairs, &[]);
     let any = "MATCH (p)-[:K]->(t1), (p)-[:K]->(t2) RETURN t1.n, t2.n";
-    assert!(plan(any).contains("__iso_rel"), "{}", plan(any));
+    let p = plan(any);
+    assert!(
+        p.contains("__iso_rel") || !(p.contains("HashJoin") || p.contains("CartesianProduct")),
+        "two patterns joined with nothing keeping their relationships apart:\n{p}"
+    );
+    check(any, &[]);
 }
 
 /// Controls, right before and after: separate clauses may reuse a relationship,

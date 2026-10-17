@@ -95,6 +95,66 @@ pub fn export_tenant(
 ///
 /// Lower is faster and larger. Use 1 when the snapshot is a local capture whose size does
 /// not matter; the default trades almost no size for most of the speed.
+/// Records serialized per batch by `write_in_parallel`: enough to keep every
+/// core busy, few enough that a batch of serialized lines stays a few MB.
+const EXPORT_BATCH_RECORDS: usize = 32 * 1024;
+
+/// Serialize `items` on every core and write the lines to `out` in order.
+///
+/// Export spent most of its time single-threaded on work that does not need
+/// ordering: building each record's property map and turning it into JSON --
+/// per-record allocation and `serde_json`, measured at 3-4 µs a record (#314).
+/// Batches of records are serialized in parallel, each into its own buffer,
+/// and the buffers are written in batch order on this thread while the next
+/// batch is being serialized, so compression -- which must stay one stream,
+/// because a multi-member gzip would be read as truncated by every
+/// `GzDecoder` already deployed -- overlaps the serialization of what comes
+/// after. The file is byte-for-byte what the sequential loop wrote: same
+/// lines, same order, one gzip member.
+fn write_in_parallel<T: Sync, W: Write>(
+    out: &mut W,
+    items: &[T],
+    serialize: impl Fn(&T, &mut Vec<u8>) -> serde_json::Result<()> + Sync,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rayon::prelude::*;
+    let serialize_batch = |batch: &[T]| -> serde_json::Result<Vec<u8>> {
+        // Sub-chunks so each core writes one buffer, then concatenate in order.
+        let parts: Vec<Vec<u8>> = batch
+            .par_chunks(512)
+            .map(|chunk| {
+                let mut buf = Vec::with_capacity(chunk.len() * 128);
+                for item in chunk {
+                    serialize(item, &mut buf)?;
+                }
+                Ok(buf)
+            })
+            .collect::<serde_json::Result<_>>()?;
+        Ok(parts.concat())
+    };
+    let mut batches = items.chunks(EXPORT_BATCH_RECORDS);
+    let Some(first) = batches.next() else { return Ok(()) };
+    let mut ready = serialize_batch(first)?;
+    for batch in batches {
+        // Serialize the next batch on the pool while this thread compresses
+        // the one already serialized. A scoped thread rather than
+        // `rayon::join`, because the writer need not be `Send` and only the
+        // serializing side has to move.
+        let (written, next) = std::thread::scope(|scope| {
+            let next = scope.spawn(|| serialize_batch(batch));
+            let written = out.write_all(&ready);
+            (written, next.join())
+        });
+        written?;
+        ready = next.map_err(|_| "a serializing thread panicked")??;
+    }
+    out.write_all(&ready)?;
+    Ok(())
+}
+
+/// Bytes buffered in front of the export's gzip encoder; see the comment where
+/// it is used (#314).
+const EXPORT_BUFFER_BYTES: usize = 1 << 20;
+
 pub fn export_tenant_with_compression(
     store: &GraphStore,
     writer: impl Write,
@@ -159,8 +219,19 @@ pub fn export_tenant_with_compression(
 
     let dropped = losses(total_edge_count);
 
-    // Create gzip encoder
-    let mut gz = GzEncoder::new(writer, Compression::new(compression_level.min(9)));
+    // Create gzip encoder, behind a buffer.
+    //
+    // Every record is two `write_all` calls -- the line, then the newline --
+    // and flate2's writer zero-fills its whole output buffer on each call,
+    // however few bytes it is handed. At ~100 bytes a record that was most of
+    // the export: on 300K nodes / 2.4M edges, uncompressed, 13.6 s of which a
+    // third was `bzero` under `GzEncoder::write_all` (#314). One buffered write
+    // per megabyte does the same compression and none of the zeroing. The
+    // bytes reaching the encoder are identical, so the file is too.
+    let mut gz = std::io::BufWriter::with_capacity(
+        EXPORT_BUFFER_BYTES,
+        GzEncoder::new(writer, Compression::new(compression_level.min(9))),
+    );
 
     // Write header (v2)
     let header = SnapshotHeader {
@@ -213,8 +284,9 @@ pub fn export_tenant_with_compression(
         gz.write_all(b"\n")?;
     }
 
-    // Write nodes (with ColumnStore properties merged)
-    for node in &nodes {
+    // Nodes, then full edges, then adjacency-only edges, each serialized in
+    // parallel batches and written in order (#314). See `write_in_parallel`.
+    write_in_parallel(&mut gz, &nodes, |node, out| {
         let mut props = HashMap::new();
 
         // 1. Node HashMap properties (from full create_node)
@@ -241,13 +313,13 @@ pub fn export_tenant_with_compression(
             created_at: node.created_at,
             updated_at: node.updated_at,
         };
-        let node_json = serde_json::to_string(&snap_node)?;
-        gz.write_all(node_json.as_bytes())?;
-        gz.write_all(b"\n")?;
-    }
+        serde_json::to_writer(&mut *out, &snap_node)?;
+        out.push(b'\n');
+        Ok(())
+    })?;
 
     // Write full edges (from Edge arena — have properties)
-    for edge in &full_edges {
+    write_in_parallel(&mut gz, &full_edges, |edge, out| {
         let mut props = HashMap::new();
         for (key, value) in &edge.properties {
             props.insert(key.clone(), property_to_json(value));
@@ -261,23 +333,24 @@ pub fn export_tenant_with_compression(
             edge_type: edge.edge_type.as_str().to_string(),
             props,
         };
-        let edge_json = serde_json::to_string(&snap_edge)?;
-        gz.write_all(edge_json.as_bytes())?;
-        gz.write_all(b"\n")?;
-    }
+        serde_json::to_writer(&mut *out, &snap_edge)?;
+        out.push(b'\n');
+        Ok(())
+    })?;
 
     // Write stub edges (from adjacency lists — no properties, just topology + type)
-    for node in &nodes {
+    write_in_parallel(&mut gz, &nodes, |node, out| {
         let src_id = node.id.as_u64();
         let idx = src_id as usize;
-
-        // Frozen outgoing
-        let frozen = store.frozen_outgoing_neighbors(idx);
-        for &(tgt_nid, eid) in &frozen {
-            if full_edge_ids.contains(eid.as_u64()) { continue; }
+        let one = |tgt_nid: NodeId, eid: crate::graph::EdgeId, out: &mut Vec<u8>| -> serde_json::Result<()> {
+            if full_edge_ids.contains(eid.as_u64()) {
+                return Ok(());
+            }
             // Same rule as the count above: no type means deleted. Writing it
             // with `edge_type: ""` brought it back on import, live (#1096).
-            let Some(et) = store.get_edge_type(eid).map(|e| e.as_str().to_string()) else { continue };
+            let Some(et) = store.get_edge_type(eid).map(|e| e.as_str().to_string()) else {
+                return Ok(());
+            };
             let snap_edge = SnapshotEdge {
                 t: "e".to_string(),
                 id: eid.as_u64(),
@@ -286,33 +359,21 @@ pub fn export_tenant_with_compression(
                 edge_type: et,
                 props: HashMap::new(),
             };
-            let edge_json = serde_json::to_string(&snap_edge)?;
-            gz.write_all(edge_json.as_bytes())?;
-            gz.write_all(b"\n")?;
+            serde_json::to_writer(&mut *out, &snap_edge)?;
+            out.push(b'\n');
+            Ok(())
+        };
+        // Frozen outgoing, then the write buffer.
+        for &(tgt_nid, eid) in &store.frozen_outgoing_neighbors(idx) {
+            one(tgt_nid, eid, out)?;
         }
-
-        // Write buffer outgoing
-        let buf = store.get_outgoing_neighbor_slice(node.id);
-        for &(tgt_nid, eid) in buf {
-            if full_edge_ids.contains(eid.as_u64()) { continue; }
-            // Same rule as the count above: no type means deleted. Writing it
-            // with `edge_type: ""` brought it back on import, live (#1096).
-            let Some(et) = store.get_edge_type(eid).map(|e| e.as_str().to_string()) else { continue };
-            let snap_edge = SnapshotEdge {
-                t: "e".to_string(),
-                id: eid.as_u64(),
-                src: src_id,
-                tgt: tgt_nid.as_u64(),
-                edge_type: et,
-                props: HashMap::new(),
-            };
-            let edge_json = serde_json::to_string(&snap_edge)?;
-            gz.write_all(edge_json.as_bytes())?;
-            gz.write_all(b"\n")?;
+        for &(tgt_nid, eid) in store.get_outgoing_neighbor_slice(node.id) {
+            one(tgt_nid, eid, out)?;
         }
-    }
+        Ok(())
+    })?;
 
-    let finished = gz.finish()?;
+    let finished = gz.into_inner().map_err(|e| e.into_error())?.finish()?;
     let _ = finished;
 
     Ok(ExportStats {

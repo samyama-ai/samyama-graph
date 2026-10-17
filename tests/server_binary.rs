@@ -1059,18 +1059,33 @@ fn a_refusal_with_persistence_open_exits_with_its_status() {
 }
 
 #[test]
-fn an_unusable_data_path_runs_without_persistence() {
+fn an_unusable_data_path_is_refused_unless_ephemeral_is_explicit() {
     let cwd = tempfile::tempdir().unwrap();
-    // A file where the directory should be.
-    std::fs::write(cwd.path().join("taken"), "").unwrap();
+    // A file where the directory should be; refusing must leave it untouched.
+    let taken = cwd.path().join("taken");
+    std::fs::write(&taken, "keep me").unwrap();
     run_in(
         cwd.path(),
         &["--data-path", "taken/db", "--max-nodes", "?"],
         &[],
         None,
     )
-    .assert_code(2)
-    .err_has("Failed to initialize persistence");
+    .assert_code(3)
+    .err_has("Refusing to start: cannot open the data directory")
+    .err_has("has not served any request and has not changed the directory")
+    .err_has("--ephemeral");
+    assert_eq!(std::fs::read_to_string(&taken).unwrap(), "keep me");
+
+    // Explicit ephemeral mode bypasses the unusable path and reaches the later
+    // quota validation, which refuses the deliberately invalid max-nodes value.
+    run_in(
+        cwd.path(),
+        &["--ephemeral", "--data-path", "taken/db", "--max-nodes", "?"],
+        &[],
+        None,
+    )
+    .assert_code(2);
+    assert_eq!(std::fs::read_to_string(&taken).unwrap(), "keep me");
 }
 
 // ───────────────────────────────────────────────────────────── the serving path
@@ -1444,4 +1459,191 @@ fn every_acknowledged_write_survives_a_sigkill_mid_write() {
     let mut unique = survived.clone();
     unique.dedup();
     assert_eq!(unique.len(), survived.len(), "a node recovered twice");
+}
+
+/// REL-04: recovery after `SIGKILL` at many points is always a prefix of the
+/// commit log, and REL-03: what it costs -- writes lost, time to serve (#481).
+///
+/// The single-kill test above checks one kill point. This one kills the same
+/// data directory repeatedly, each time at a different number of acknowledged
+/// writes and a different sub-millisecond offset, so the signal lands in
+/// different places in the write path, and checks after every restart that:
+///
+/// - **RPO = 0** for acknowledged writes: every acknowledged statement is there.
+/// - **Prefix**: the statements present are exactly `1..=k` for some `k` -- no
+///   hole, so nothing later survived an earlier statement that did not.
+/// - **Atomicity**: each statement writes two nodes and the edge between them;
+///   recovery holds all three or none of them, never a node without its pair.
+/// - **Nothing invented**: no statement beyond the last one issued.
+///
+/// The writer continues from the recovered `k`, so each round starts on the
+/// store the last crash left behind -- recovery of a recovered store is what a
+/// second crash exercises.
+///
+/// RTO is reported, not asserted: it is the time from spawning the server to
+/// its first answer, and a wall-clock bound would encode the speed of the
+/// host and the debug build (CLAUDE.md). `SAMYAMA_CRASH_KILLS` raises the kill
+/// count; REL-04 asks for 1,000, which belongs in a nightly job, not in every
+/// pull request's debug run.
+#[cfg(unix)]
+#[test]
+fn repeated_sigkills_always_recover_a_prefix_of_the_acknowledged_writes() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Arc;
+
+    let kills: usize = std::env::var("SAMYAMA_CRASH_KILLS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path();
+    let port = free_port();
+
+    // xorshift: the kill points vary, and a failure names the seed.
+    let seed: u64 = std::env::var("SAMYAMA_CRASH_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0x5eed_1481);
+    let mut state = seed;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    let mut recovered: i64 = 0; // highest statement present after the last restart
+    let mut rto = Vec::new();
+    // Every statement whose SET was acknowledged, across rounds. Not "every
+    // multiple of three up to the last acknowledged statement": a statement
+    // in flight at a kill can survive without its SET ever being sent.
+    let acked_sets = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::<i64>::new()));
+    for round in 0..kills {
+        let spawned = Instant::now();
+        let mut server = spawn_server(data, port);
+        let mut conn = wait_until_serving(&mut server, port, data);
+        rto.push(spawned.elapsed());
+
+        // Acknowledged statements this round, and the last one issued.
+        let acked = Arc::new(AtomicI64::new(recovered));
+        let issued = Arc::new(AtomicI64::new(recovered));
+        let start_at = recovered + 1;
+        let writer = {
+            let (acked, issued, sets) = (acked.clone(), issued.clone(), acked_sets.clone());
+            std::thread::spawn(move || -> String {
+                for seq in start_at.. {
+                    issued.store(seq, Ordering::SeqCst);
+                    // One statement, three writes: atomic or not at all.
+                    let q = format!(
+                        "CREATE (:Head {{seq: {seq}}})-[:NEXT {{seq: {seq}}}]->(:Tail {{seq: {seq}}})"
+                    );
+                    match conn.query(&q) {
+                        Ok(Reply::Array(_)) => {}
+                        Ok(other) => return format!("statement {seq} was refused: {other:?}"),
+                        Err(_) => return String::new(),
+                    }
+                    if seq % 3 == 0 {
+                        let q = format!("MATCH (h:Head {{seq: {seq}}}) SET h.v = {seq}");
+                        match conn.query(&q) {
+                            Ok(Reply::Array(_)) => {
+                                sets.lock().unwrap().insert(seq);
+                            }
+                            Ok(other) => return format!("SET {seq} was refused: {other:?}"),
+                            Err(_) => return String::new(),
+                        }
+                    }
+                    acked.store(seq, Ordering::SeqCst);
+                }
+                unreachable!()
+            })
+        };
+
+        // A different point each round: 10..90 acknowledged statements, then
+        // up to 2 ms more, so the signal is not always between statements.
+        let target = recovered + 10 + (next() % 80) as i64;
+        let start = Instant::now();
+        while acked.load(Ordering::SeqCst) < target {
+            if writer.is_finished() || start.elapsed() > DEADLINE {
+                let _ = server.kill();
+                let _ = server.wait();
+                panic!(
+                    "round {round} (seed {seed}): the writer stopped at {}: {:?}\n{}",
+                    acked.load(Ordering::SeqCst),
+                    writer.join(),
+                    server_output(data)
+                );
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        std::thread::sleep(Duration::from_micros(next() % 2_000));
+        server.kill().unwrap();
+        let status = server.wait().unwrap();
+        let refusal = writer.join().unwrap();
+        assert!(refusal.is_empty(), "round {round}: {refusal}\n{}", server_output(data));
+        assert_eq!(status.signal(), Some(9), "round {round}: not killed: {status}");
+        let acked = acked.load(Ordering::SeqCst);
+        let issued = issued.load(Ordering::SeqCst);
+
+        // Read back what recovery holds.
+        let mut server = spawn_server(data, port);
+        let mut conn = wait_until_serving(&mut server, port, data);
+        let ints = |reply: std::io::Result<Reply>| -> Vec<Vec<Option<i64>>> {
+            let Ok(Reply::Array(rows)) = reply else {
+                panic!("round {round}: no answer: {reply:?}\n{}", server_output(data))
+            };
+            rows.iter()
+                .skip(1)
+                .map(|r| match r {
+                    Reply::Array(cells) => cells
+                        .iter()
+                        .map(|c| match c {
+                            Reply::Int(i) => Some(*i),
+                            _ => None,
+                        })
+                        .collect(),
+                    other => panic!("row {other:?}"),
+                })
+                .collect()
+        };
+        let heads = ints(conn.query(
+            "MATCH (h:Head) OPTIONAL MATCH (h)-[e:NEXT]->(t:Tail) \
+             RETURN h.seq AS seq, e.seq AS e, t.seq AS t, h.v AS v ORDER BY seq",
+        ));
+        let tails = ints(conn.query("MATCH (t:Tail) RETURN count(t) AS n"));
+        let _ = server.kill();
+        let _ = server.wait();
+
+        let seqs: Vec<i64> = heads.iter().map(|r| r[0].expect("seq")).collect();
+        let k = seqs.last().copied().unwrap_or(0);
+        let ctx = format!("round {round} (seed {seed}): acked {acked}, issued {issued}, recovered 1..={k}");
+        // RPO = 0 for what was acknowledged.
+        assert!(k >= acked, "{ctx}: acknowledged statements lost");
+        // Nothing beyond the one in flight.
+        assert!(k <= issued, "{ctx}: a statement that was never issued");
+        // A prefix: exactly 1..=k, each once.
+        assert_eq!(seqs, (1..=k).collect::<Vec<_>>(), "{ctx}: not a prefix");
+        // Atomic: every head with its edge and tail, and no stray tail.
+        let sets = acked_sets.lock().unwrap().clone();
+        for r in &heads {
+            assert_eq!((r[1], r[2]), (r[0], r[0]), "{ctx}: a statement half-recovered: {r:?}");
+            let seq = r[0].unwrap();
+            if sets.contains(&seq) {
+                assert_eq!(r[3], Some(seq), "{ctx}: acknowledged SET on {seq} lost");
+            }
+        }
+        assert_eq!(tails[0][0], Some(k), "{ctx}: tail count differs from head count");
+
+        println!("{ctx}");
+        recovered = k;
+    }
+
+    let mut sorted = rto.clone();
+    sorted.sort();
+    println!(
+        "RTO over {} restarts (spawn to first answer, this host and build): median {:?}, max {:?}",
+        sorted.len(),
+        sorted[sorted.len() / 2],
+        sorted[sorted.len() - 1]
+    );
 }

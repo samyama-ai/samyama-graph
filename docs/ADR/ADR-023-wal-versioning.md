@@ -65,7 +65,7 @@ The decision is now:
 - Making the logical WAL the recovery source instead would need replay from the
   last checkpoint before serving, and a write path that appends and syncs it
   *before* the in-memory mutation; today both logs are written after it
-  (`docs/ACID_GUARANTEES.md` §1). That is not planned.
+  (`docs/ACID-GUARANTEES.md` §1). That is not planned.
 
 The alternative this ADR rejected -- "rely solely on RocksDB's" -- is in effect
 what has shipped. Its stated drawback, that replay would have to re-derive graph

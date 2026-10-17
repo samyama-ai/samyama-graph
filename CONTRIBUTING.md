@@ -228,7 +228,7 @@ Good first contributions, roughly easiest to hardest:
 4. **Open issues** — see the
    [issue tracker](https://github.com/samyama-ai/samyama-graph/issues), where
    each issue is a concrete unit of work, and known gaps noted in
-   `docs/CYPHER_COMPATIBILITY.md`.
+   `docs/CYPHER-COMPATIBILITY.md`.
 
 ## Project Layout
 

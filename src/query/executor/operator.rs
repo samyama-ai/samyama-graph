@@ -202,6 +202,210 @@ fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
     }
 }
 
+/// A hash-join key that pairs exactly when `cypher_equals` answers `Some(true)`.
+///
+/// A join keyed on a value cannot reuse `PropertyValue`'s `Hash`, and the gap is
+/// not cosmetic. `Hash` tags `Integer` 1 and `Float` 2 and hashes the float's
+/// bits, while `cypher_equals` answers `1 = 1.0` with `Some(true)` (#860). Put
+/// those two together in a hash join and the pair the `WHERE` would keep lands
+/// in two buckets and is silently lost -- a wrong answer that looks like an
+/// honest "no match" (#1822).
+///
+/// `None` means "this value can never pair", which covers every case where
+/// `cypher_equals` declines to answer `Some(true)`:
+///
+///   - **Null.** `null = null` is null, not true. A row keyed on a missing
+///     property must not pair with another missing one. The variable-identity
+///     join never meets this, because a bound variable is never null.
+///   - **NaN.** `Float(NaN) == Float(NaN)` is false, so a NaN cannot pair even
+///     with itself.
+///   - **A list or map holding either**, at any depth, because `cypher_equals`
+///     propagates the unknown outward and returns `None`.
+///
+/// Not yet invoked outside its own tests: the operator that will hash on it and
+/// the planner rule that will choose it are the rest of #1822. It lands first,
+/// and alone, because the key is the part that can be wrong without anything
+/// failing — a join that buckets `5` apart from `5.0` returns fewer rows and
+/// no error — so it is worth reviewing on its own, against the equality it has
+/// to mirror, before an operator is built on top of it.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum JoinKey {
+    /// Every number that is exactly an integer, whichever variant carried it,
+    /// so `5` and `5.0` share a bucket. Compared as `i64` rather than through
+    /// `as f64` for the same reason `cypher_equals` does: above 2^53 the float
+    /// conversion loses bits.
+    Int(i64),
+    /// A float with a fractional part, or one outside `i64`'s range. Keyed on
+    /// its bits, which is sound here because any float that *could* equal an
+    /// integer took the `Int` arm above.
+    Float(u64),
+    Str(String),
+    Bool(bool),
+    List(Vec<JoinKey>),
+    /// Keys sorted, so two maps written in different orders agree.
+    Map(Vec<(String, JoinKey)>),
+    /// Everything `cypher_equals` settles with the derived `PartialEq`: dates,
+    /// times, vectors. Rendered rather than held, so one representation is one
+    /// key without this enum having to mirror every variant.
+    Opaque(String),
+}
+
+/// The join key for one value, or `None` if it can never pair.
+#[allow(dead_code)]
+pub(crate) fn join_key_of(v: &PropertyValue) -> Option<JoinKey> {
+    use PropertyValue::*;
+    match v {
+        Null => None,
+        Integer(i) => Some(JoinKey::Int(*i)),
+        Float(f) => {
+            if f.is_nan() {
+                // Cannot equal itself, so it cannot pair.
+                None
+            } else if f.is_finite()
+                && f.fract() == 0.0
+                && *f >= i64::MIN as f64
+                && *f <= i64::MAX as f64
+            {
+                // The exact arm `cypher_equals` uses for Integer/Float.
+                Some(JoinKey::Int(*f as i64))
+            } else {
+                Some(JoinKey::Float(f.to_bits()))
+            }
+        }
+        String(s) => Some(JoinKey::Str(s.clone())),
+        Boolean(b) => Some(JoinKey::Bool(*b)),
+        Array(items) => {
+            // A null anywhere inside makes the whole comparison unknown.
+            let parts: Option<Vec<JoinKey>> = items.iter().map(join_key_of).collect();
+            parts.map(JoinKey::List)
+        }
+        Map(entries) => {
+            let mut parts: Vec<(std::string::String, JoinKey)> = Vec::with_capacity(entries.len());
+            for (k, val) in entries {
+                parts.push((k.clone(), join_key_of(val)?));
+            }
+            parts.sort_by(|a, b| a.0.cmp(&b.0));
+            Some(JoinKey::Map(parts))
+        }
+        other => Some(JoinKey::Opaque(format!("{other:?}"))),
+    }
+}
+
+#[cfg(test)]
+mod join_key_tests {
+    use super::{cypher_equals, join_key_of};
+    use crate::graph::PropertyValue as P;
+
+    /// Values chosen to reach every arm of `cypher_equals`, including the ones
+    /// that make it answer something other than `Some(true)`.
+    fn matrix() -> Vec<P> {
+        vec![
+            P::Null,
+            P::Integer(0),
+            P::Integer(5),
+            P::Integer(-5),
+            P::Integer(i64::MAX),
+            P::Float(5.0),
+            P::Float(-5.0),
+            P::Float(5.5),
+            P::Float(0.0),
+            P::Float(f64::NAN),
+            P::Float(f64::INFINITY),
+            // Beyond 2^53, where `as f64` would lose bits and an integer
+            // comparison must not.
+            P::Float(9007199254740993.0),
+            P::Integer(9007199254740993),
+            P::String("5".into()),
+            P::String("".into()),
+            P::Boolean(true),
+            P::Boolean(false),
+            P::Array(vec![P::Integer(1), P::Integer(2)]),
+            P::Array(vec![P::Integer(1), P::Float(2.0)]),
+            P::Array(vec![P::Integer(1)]),
+            P::Array(vec![P::Integer(1), P::Null]),
+        ]
+    }
+
+    /// The whole contract, over every ordered pair: two values share a join key
+    /// **iff** `cypher_equals` says they are equal.
+    ///
+    /// This is the test that matters. The hazard #1822 names is a hash join
+    /// bucketing `5` and `5.0` apart and losing a pair the filter keeps, and
+    /// the only way to be sure the key does not do that is to check it against
+    /// the engine's own equality over values that reach every arm.
+    #[test]
+    fn two_values_share_a_key_exactly_when_cypher_equals_them() {
+        let vals = matrix();
+        for a in &vals {
+            for b in &vals {
+                let equal = cypher_equals(a, b) == Some(true);
+                let ka = join_key_of(a);
+                let kb = join_key_of(b);
+                let same_key = match (&ka, &kb) {
+                    (Some(x), Some(y)) => x == y,
+                    // No key on either side means no pair, which is the only
+                    // correct outcome when `=` is not `Some(true)`.
+                    _ => false,
+                };
+                assert_eq!(
+                    same_key, equal,
+                    "key agreement broke for {a:?} vs {b:?}: \
+                     cypher_equals={:?} keys={ka:?} / {kb:?}",
+                    cypher_equals(a, b)
+                );
+            }
+        }
+    }
+
+    /// The specific pair the issue names, called out so a failure says which
+    /// bug came back.
+    #[test]
+    fn an_integer_and_an_integral_float_share_one_key() {
+        assert_eq!(join_key_of(&P::Integer(5)), join_key_of(&P::Float(5.0)));
+        assert_ne!(join_key_of(&P::Integer(5)), join_key_of(&P::Float(5.5)));
+    }
+
+    /// Nothing that `cypher_equals` leaves unknown may carry a key, because a
+    /// key is a licence to pair.
+    #[test]
+    fn nothing_unknown_carries_a_key() {
+        assert_eq!(join_key_of(&P::Null), None, "null must not pair with null");
+        assert_eq!(join_key_of(&P::Float(f64::NAN)), None, "NaN cannot equal itself");
+        assert_eq!(
+            join_key_of(&P::Array(vec![P::Integer(1), P::Null])),
+            None,
+            "a null inside a list makes the comparison unknown"
+        );
+        let mut m = std::collections::HashMap::new();
+        m.insert("k".to_string(), P::Null);
+        assert_eq!(join_key_of(&P::Map(m)), None, "a null inside a map likewise");
+    }
+
+    /// Two maps written in different orders are one key.
+    #[test]
+    fn map_key_order_does_not_change_the_key() {
+        let mut a = std::collections::HashMap::new();
+        a.insert("x".to_string(), P::Integer(1));
+        a.insert("y".to_string(), P::Integer(2));
+        let mut b = std::collections::HashMap::new();
+        b.insert("y".to_string(), P::Integer(2));
+        b.insert("x".to_string(), P::Integer(1));
+        assert_eq!(join_key_of(&P::Map(a)), join_key_of(&P::Map(b)));
+    }
+
+    /// Above 2^53 an `as f64` round trip loses bits, so the integer arm must do
+    /// the comparison -- the same reason `cypher_equals` does it that way.
+    #[test]
+    fn large_integers_keep_their_precision() {
+        let i = P::Integer(9007199254740993);
+        let f = P::Float(9007199254740993.0);
+        // Whatever cypher_equals answers here, the keys must agree with it.
+        let equal = cypher_equals(&i, &f) == Some(true);
+        assert_eq!(join_key_of(&i) == join_key_of(&f), equal);
+    }
+}
+
 /// The instant "now" means for the duration of one statement.
 ///
 /// Cypher fixes the clock **once per query**, not once per call. Without that,
@@ -7956,6 +8160,30 @@ pub struct ExpandOperator {
     /// outgoing middle hop and needs `a`'s incoming list; reading `direction`
     /// would search the wrong one (#1090).
     co_neighbour_dir: Direction,
+    /// Bind the closing hop here too, so the pattern's cycle is one operator.
+    ///
+    /// With `co_neighbour_var` alone the walk keeps the candidates that close
+    /// and the planner still emits an `Expand` into a synthetic `__self` name
+    /// plus a `Filter` proving it equal -- a row per surviving candidate that
+    /// exists only to be checked. This is the fused form #1082 left open:
+    /// the candidate is the intersection of the source's list and the closing
+    /// node's list, and every element of it is a match, so the closing edge
+    /// is bound on the row the walk emits and nothing is built to be
+    /// discarded. One row per closing edge, because parallel edges are
+    /// separate matches, and none for an edge the clause already walked.
+    ///
+    /// `EXPLAIN` then prints the operator as the join it is rather than as the
+    /// expand it started from (#1614).
+    fused_close: Option<FusedClose>,
+    /// The closing edge of each entry of `current_edges`, when fused.
+    current_close_edges: Vec<crate::graph::EdgeId>,
+}
+
+/// The closing hop a fused expand binds. See `ExpandOperator::fused_close`.
+#[derive(Debug, Clone)]
+pub struct FusedClose {
+    /// The closing segment's relationship variable, if the pattern names it.
+    pub edge_var: Option<Arc<str>>,
 }
 
 impl ExpandOperator {
@@ -7986,6 +8214,8 @@ impl ExpandOperator {
             starts_clause: false,
             co_neighbour_var: None,
             co_neighbour_dir: Direction::Both,
+            fused_close: None,
+            current_close_edges: Vec::new(),
             target_bound_var: None,
             direction,
             current_record: None,
@@ -8037,6 +8267,20 @@ impl ExpandOperator {
     pub fn with_co_neighbour(mut self, var: String, closing: Direction) -> Self {
         self.co_neighbour_var = Some(var.into());
         self.co_neighbour_dir = closing;
+        self
+    }
+
+    /// The variable a cyclic close prunes against, if `with_co_neighbour` set one.
+    pub fn closes_onto(&self) -> Option<&str> {
+        self.co_neighbour_var.as_deref()
+    }
+
+    /// Bind the closing hop onto `co_neighbour_var` on the rows this expand
+    /// emits, instead of leaving it to a following expand and filter. Requires
+    /// `with_co_neighbour` to have named the closing variable and direction.
+    pub fn with_fused_close(mut self, edge_var: Option<String>) -> Self {
+        debug_assert!(self.co_neighbour_var.is_some(), "a fused close needs a closing variable");
+        self.fused_close = Some(FusedClose { edge_var: edge_var.map(Into::into) });
         self
     }
 
@@ -8125,6 +8369,7 @@ impl ExpandOperator {
         edge_id: crate::graph::EdgeId,
         src: NodeId,
         tgt: NodeId,
+        close: Option<crate::graph::EdgeId>,
         store: &GraphStore,
     ) -> Record {
         // Room for the target, and for the edge and path variables when the
@@ -8132,7 +8377,8 @@ impl ExpandOperator {
         // that was cloned at exact capacity (#562).
         let extra = 1
             + self.edge_var.is_some() as usize
-            + self.path_variable.is_some() as usize;
+            + self.path_variable.is_some() as usize
+            + self.fused_close.as_ref().is_some_and(|f| f.edge_var.is_some()) as usize;
         let mut new_record = base.clone_with_capacity(extra);
 
         let target_id = match self.direction {
@@ -8175,6 +8421,31 @@ impl ExpandOperator {
             new_record.mark_edge_used(edge_id);
         }
 
+        // The closing hop, bound on the same row: its relationship variable,
+        // the path it extends, and the edge it takes from the clause.
+        if let (Some(fused), Some(close_id)) = (&self.fused_close, close) {
+            let (close_src, close_tgt) = store
+                .get_edge_endpoints(close_id)
+                .unwrap_or((target_id, target_id));
+            if let Some(edge_var) = &fused.edge_var {
+                let edge_type = store
+                    .get_edge_type(close_id)
+                    .unwrap_or_else(|| EdgeType::new(""));
+                new_record.bind(
+                    edge_var.clone(),
+                    Value::EdgeRef(close_id, close_src, close_tgt, edge_type),
+                );
+            }
+            if let Some(ref path_var) = self.path_variable {
+                let far = if close_src == target_id { close_tgt } else { close_src };
+                let extended = extend_path(new_record.get(path_var), target_id, far, close_id);
+                new_record.bind(path_var.clone(), extended);
+            }
+            if self.track_edges {
+                new_record.mark_edge_used(close_id);
+            }
+        }
+
         new_record
     }
 
@@ -8214,6 +8485,8 @@ impl ExpandOperator {
         // a buffer that is the same shape every time (#564).
         let mut collected = std::mem::take(&mut self.current_edges);
         collected.clear();
+        let mut closes = std::mem::take(&mut self.current_close_edges);
+        closes.clear();
         let type_filter = self.type_ids.as_deref();
 
         // Target-label sets, resolved once per source record rather than per
@@ -8478,6 +8751,73 @@ impl ExpandOperator {
         // `None` when there is no close to test, which is every non-cyclic
         // expand and any walk the type index declined.
         let mut co = (!co_lists.is_empty()).then(|| CoCursor::new(&co_lists));
+        // The closing edges between a candidate and the closing node, for a
+        // fused close. From the closing node's sorted lists when the type index
+        // is up -- the run for the candidate is two binary searches, and the
+        // candidate has already been proved to be in it -- and from the
+        // candidate's own adjacency otherwise, which is what the closing expand
+        // this replaces walked.
+        //
+        // Not the edge this expand is taking, and not one the clause already
+        // walked (#684): the closing hop is a segment of the pattern like any
+        // other and relationship isomorphism applies to it. A self-loop on the
+        // closing node sits in both of its lists and is taken once (#640).
+        let fused = self.fused_close.is_some();
+        let close_dir = self.co_neighbour_dir.clone();
+        // The index answers the close only when it holds the half the close
+        // reads. `usable` above judged the walk's halves, not these (#1090).
+        let close_via_index = typed.as_ref().is_some_and(|(out, inc)| {
+            (matches!(close_dir, Direction::Incoming) || out.is_some())
+                && (matches!(close_dir, Direction::Outgoing) || inc.is_some())
+        });
+        let closing_edges = |target: NodeId, eid: crate::graph::EdgeId, out: &mut Vec<crate::graph::EdgeId>| {
+            out.clear();
+            let Some(c) = co_node else { return };
+            if close_via_index {
+                for list in &co_lists {
+                    for &(_, e2) in pinned_run(list, target) {
+                        if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
+                            out.push(e2);
+                        }
+                    }
+                }
+            } else {
+                let mut keep = |e2: crate::graph::EdgeId| {
+                    if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
+                        out.push(e2);
+                    }
+                };
+                if !matches!(close_dir, Direction::Incoming) {
+                    store.for_each_outgoing_neighbor(target, type_filter, |t, e2| {
+                        if t == c {
+                            keep(e2);
+                        }
+                    });
+                }
+                if !matches!(close_dir, Direction::Outgoing) {
+                    store.for_each_incoming_neighbor(target, type_filter, |s, e2| {
+                        if s == c {
+                            keep(e2);
+                        }
+                    });
+                }
+            }
+        };
+        let mut close_buf: Vec<crate::graph::EdgeId> = Vec::new();
+        // Emit one entry per closing edge when fused, else the entry itself.
+        macro_rules! emit {
+            ($eid:expr, $src:expr, $tgt:expr, $cand:expr) => {
+                if fused {
+                    closing_edges($cand, $eid, &mut close_buf);
+                    for &e2 in &close_buf {
+                        collected.push(($eid, $src, $tgt));
+                        closes.push(e2);
+                    }
+                } else {
+                    collected.push(($eid, $src, $tgt));
+                }
+            };
+        }
         // A pinned far end turns the walk into a lookup: the sorted list is cut
         // to that target's run before it is read, so a closing hop costs two
         // binary searches instead of the node's degree.
@@ -8503,13 +8843,13 @@ impl ExpandOperator {
                 if typed.is_some() {
                     for &(target, eid) in walk_list!(out_of(&typed, node_id)) {
                         if closes!(target) && keeps(target, eid) {
-                            collected.push((eid, node_id, target));
+                            emit!(eid, node_id, target, target);
                         }
                     }
                 } else {
                     store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
                         if keeps(target, eid) {
-                            collected.push((eid, node_id, target));
+                            emit!(eid, node_id, target, target);
                         }
                     });
                 }
@@ -8518,13 +8858,13 @@ impl ExpandOperator {
                 if typed.is_some() {
                     for &(source, eid) in walk_list!(in_of(&typed, node_id)) {
                         if closes!(source) && keeps(source, eid) {
-                            collected.push((eid, source, node_id));
+                            emit!(eid, source, node_id, source);
                         }
                     }
                 } else {
                     store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
                         if keeps(source, eid) {
-                            collected.push((eid, source, node_id));
+                            emit!(eid, source, node_id, source);
                         }
                     });
                 }
@@ -8532,7 +8872,7 @@ impl ExpandOperator {
             Direction::Both if typed.is_some() => {
                 for &(target, eid) in walk_list!(out_of(&typed, node_id)) {
                     if closes!(target) && keeps(target, eid) {
-                        collected.push((eid, node_id, target));
+                        emit!(eid, node_id, target, target);
                     }
                 }
                 // A second sorted list, so the cursors start over.
@@ -8547,14 +8887,14 @@ impl ExpandOperator {
                         continue;
                     }
                     if closes!(source) && keeps(source, eid) {
-                        collected.push((eid, source, node_id));
+                        emit!(eid, source, node_id, source);
                     }
                 }
             }
             Direction::Both => {
                 store.for_each_outgoing_neighbor(node_id, type_filter, |target, eid| {
                     if keeps(target, eid) {
-                        collected.push((eid, node_id, target));
+                        emit!(eid, node_id, target, target);
                     }
                 });
                 store.for_each_incoming_neighbor(node_id, type_filter, |source, eid| {
@@ -8567,7 +8907,7 @@ impl ExpandOperator {
                         return;
                     }
                     if keeps(source, eid) {
-                        collected.push((eid, source, node_id));
+                        emit!(eid, source, node_id, source);
                     }
                 });
             }
@@ -8579,6 +8919,7 @@ impl ExpandOperator {
         // `store.get_node(node_id)` per edge purely to recover a value it
         // already had (#592).
         self.current_edges = collected;
+        self.current_close_edges = closes;
 
         self.edge_index = 0;
         Ok(())
@@ -8641,12 +8982,13 @@ impl PhysicalOperator for ExpandOperator {
             // If we have edges from current record, return them
             if self.edge_index < self.current_edges.len() {
                 let (edge_id, src, tgt) = self.current_edges[self.edge_index];
+                let close = self.current_close_edges.get(self.edge_index).copied();
                 self.edge_index += 1;
 
                 // `&Record` out of `self`, and `expanded_record` also borrows
                 // `self` -- both immutable, so no clone of the source row.
                 let base = self.current_record.as_ref().unwrap();
-                let new_record = self.expanded_record(base, edge_id, src, tgt, store);
+                let new_record = self.expanded_record(base, edge_id, src, tgt, close, store);
 
                 self.emitted_for_current = true;
                 return Ok(Some(new_record));
@@ -8679,13 +9021,14 @@ impl PhysicalOperator for ExpandOperator {
 
                 for i in 0..take {
                     let (edge_id, src, tgt) = self.current_edges[self.edge_index + i];
+                    let close = self.current_close_edges.get(self.edge_index + i).copied();
                     // Same one implementation the row-at-a-time path uses. The
                     // isomorphism bookkeeping and the path-variable handling
                     // used to be written out again here, and the comments said
                     // why that was dangerous rather than removing the danger.
                     let base = self.current_record.as_ref().unwrap();
                     expanded_records.push(
-                        self.expanded_record(base, edge_id, src, tgt, store));
+                        self.expanded_record(base, edge_id, src, tgt, close, store));
                 }
                 self.edge_index += take;
                 self.emitted_for_current = true;
@@ -8724,6 +9067,7 @@ impl PhysicalOperator for ExpandOperator {
         self.input.reset();
         self.current_record = None;
         self.current_edges.clear();
+        self.current_close_edges.clear();
         self.edge_index = 0;
         // Without this, a re-run would think the first source record had
         // already emitted and would swallow its null row (#726).
@@ -8736,6 +9080,36 @@ impl PhysicalOperator for ExpandOperator {
             Direction::Incoming => format!("({})<-[:{}]-({})", self.source_var, if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") }, self.target_var),
             Direction::Both => format!("({})--[:{}]--({})", self.source_var, if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") }, self.target_var),
         };
+        if let (Some(fused), Some(close_var)) = (&self.fused_close, &self.co_neighbour_var) {
+            // Two sorted adjacency lists walked with forward-only cursors is
+            // the two-way case of a leapfrog trie join: the name says what the
+            // operator computes, the details say over which lists.
+            let types = if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") };
+            let own = match self.direction {
+                Direction::Outgoing => format!("N_out({})", self.source_var),
+                Direction::Incoming => format!("N_in({})", self.source_var),
+                Direction::Both => format!("N_both({})", self.source_var),
+            };
+            // The close runs target -> close_var, so an outgoing close is a
+            // membership of close_var's *incoming* list.
+            let close = match self.co_neighbour_dir {
+                Direction::Outgoing => format!("N_in({close_var})"),
+                Direction::Incoming => format!("N_out({close_var})"),
+                Direction::Both => format!("N_both({close_var})"),
+            };
+            let edges = match (&self.edge_var, &fused.edge_var) {
+                (None, None) => String::new(),
+                (a, b) => format!(
+                    " binds {}",
+                    [a, b].iter().filter_map(|v| v.as_ref().map(|v| v.to_string())).collect::<Vec<_>>().join(", ")
+                ),
+            };
+            return OperatorDescription {
+                name: "TrieJoin".to_string(),
+                details: format!("{} ∈ {own}[:{types}] ∩ {close}[:{types}]{edges}", self.target_var),
+                children: vec![self.input.describe()],
+            };
+        }
         OperatorDescription {
             name: "Expand".to_string(),
             details: dir_str,
@@ -13624,9 +13998,72 @@ pub struct IndexScanOperator {
     /// dropping a filter the scan has not fully answered turns a cost into a
     /// wrong answer.
     satisfied: Option<Expression>,
+    /// The other end of a range, from a second conjunct on the same property
+    /// (#1482): `p.id > $k AND p.id < $k + 50` read only the `>` from the
+    /// index, so every node above `$k` -- half the label on average -- came
+    /// out of the scan for a filter to discard all but fifty. On CH-PERF-CONC
+    /// that one query was 68 ms of CPU, a quarter of the mix, and the whole
+    /// of the read-throughput ceiling.
+    ///
+    /// **Inclusive and loose at the bound, on purpose.** The conjunct it came
+    /// from keeps its filter, so this may only drop rows that filter would
+    /// drop; it never decides one. The planner widens a numeric bound across
+    /// the `Integer`/`Float` tie (see `PropertyValue::cmp`), so `p.id <= 150`
+    /// keeps `150.0`.
+    other_end: Option<OtherEnd>,
+    /// Read the scan's own range bound inclusively and across the numeric
+    /// tie, as `other_end` already is. Only for a caller that keeps the range
+    /// predicate as a filter, which the legacy planner does: a range scan
+    /// answers no predicate there (`filter_predicate` is `None`).
+    ///
+    /// Without it `p.id >= 100.0` missed `Integer(100)` and `p.id <= 150`
+    /// missed `Float(150.0)`: `PropertyValue::cmp` orders `Integer(n)` just
+    /// below `Float(n)`, and an exact bound on one variant cuts the other off.
+    loose: bool,
+}
+
+/// The value at the low end of `v`'s numeric tie (`Integer(n)` for `n` or
+/// `n.0`), or at the high end (`Float(n.0)`), so an inclusive bound keeps both
+/// spellings of the same number. `None` for an integer an `f64` cannot hold
+/// exactly, where the caller keeps its exact bound.
+pub(crate) fn numeric_tie_end(v: &PropertyValue, high: bool) -> Option<PropertyValue> {
+    const EXACT: i64 = 1 << 53;
+    Some(match (v, high) {
+        (PropertyValue::Float(x), _) if x.is_nan() => return None,
+        (PropertyValue::Integer(n), true) if n.abs() < EXACT => PropertyValue::Float(*n as f64),
+        (PropertyValue::Integer(_), true) => return None,
+        (PropertyValue::Float(x), false) if x.fract() == 0.0 && x.abs() < EXACT as f64 => {
+            PropertyValue::Integer(*x as i64)
+        }
+        (other, _) => other.clone(),
+    })
+}
+
+/// The second, opposite bound of a range index scan. See
+/// `IndexScanOperator::other_end`.
+#[derive(Debug, Clone)]
+pub enum OtherEnd {
+    /// Keep keys at or below this one.
+    AtMost(PropertyValue),
+    /// Keep keys at or above this one.
+    AtLeast(PropertyValue),
 }
 
 impl IndexScanOperator {
+    /// Bound the scan's other end too. Meaningful only for a range scan whose
+    /// own op points the other way: an `AtMost` on a `>`/`>=` scan, an
+    /// `AtLeast` on a `<`/`<=` one. Ignored otherwise.
+    pub fn with_other_end(mut self, end: OtherEnd) -> Self {
+        self.other_end = Some(end);
+        self
+    }
+
+    /// See `loose`. The caller promises the range predicate stays a filter.
+    pub fn with_loose_bounds(mut self) -> Self {
+        self.loose = true;
+        self
+    }
+
     pub fn new(variable: String, label: Label, property: String, op: BinaryOp, value: PropertyValue) -> Self {
         // Built to match what the parser produces for `var.prop = literal`, so
         // the planner's structural comparison against the WHERE conjunct finds
@@ -13649,6 +14086,8 @@ impl IndexScanOperator {
             node_ids: Vec::new(),
             current: 0,
             satisfied,
+            other_end: None,
+            loose: false,
         }
     }
 
@@ -13658,31 +14097,47 @@ impl IndexScanOperator {
         }
 
         if let Some(index_lock) = store.property_index.get_index(&self.label, &self.property) {
+            use std::ops::Bound::{Excluded, Included, Unbounded};
             let index = index_lock.read().unwrap();
-            self.node_ids = match self.op {
-                BinaryOp::Eq => index.get(&self.value),
-                BinaryOp::Gt => {
-                    use std::ops::Bound::Excluded;
-                    use std::ops::Bound::Unbounded;
-                    index.range((Excluded(self.value.clone()), Unbounded))
-                },
-                BinaryOp::Ge => {
-                    use std::ops::Bound::Included;
-                    use std::ops::Bound::Unbounded;
-                    index.range((Included(self.value.clone()), Unbounded))
-                },
-                BinaryOp::Lt => {
-                    use std::ops::Bound::Excluded;
-                    use std::ops::Bound::Unbounded;
-                    index.range((Unbounded, Excluded(self.value.clone())))
-                },
-                BinaryOp::Le => {
-                    use std::ops::Bound::Included;
-                    use std::ops::Bound::Unbounded;
-                    index.range((Unbounded, Included(self.value.clone())))
-                },
-                _ => Vec::new(),
+            let v = self.value.clone();
+            // The scan's own bound -- exact, or inclusive across the numeric
+            // tie when the filter above decides -- and the other end when a
+            // second conjunct supplied one.
+            let own_low = |exact: std::ops::Bound<PropertyValue>| match self.loose {
+                true => numeric_tie_end(&self.value, false).map_or(exact, Included),
+                false => exact,
             };
+            let own_high = |exact: std::ops::Bound<PropertyValue>| match self.loose {
+                true => numeric_tie_end(&self.value, true).map_or(exact, Included),
+                false => exact,
+            };
+            let (lower, upper) = match (&self.op, &self.other_end) {
+                (BinaryOp::Eq, _) => {
+                    self.node_ids = index.get(&self.value);
+                    return;
+                }
+                (BinaryOp::Gt, Some(OtherEnd::AtMost(hi))) => (own_low(Excluded(v)), Included(hi.clone())),
+                (BinaryOp::Gt, _) => (own_low(Excluded(v)), Unbounded),
+                (BinaryOp::Ge, Some(OtherEnd::AtMost(hi))) => (own_low(Included(v)), Included(hi.clone())),
+                (BinaryOp::Ge, _) => (own_low(Included(v)), Unbounded),
+                (BinaryOp::Lt, Some(OtherEnd::AtLeast(lo))) => (Included(lo.clone()), own_high(Excluded(v))),
+                (BinaryOp::Lt, _) => (Unbounded, own_high(Excluded(v))),
+                (BinaryOp::Le, Some(OtherEnd::AtLeast(lo))) => (Included(lo.clone()), own_high(Included(v))),
+                (BinaryOp::Le, _) => (Unbounded, own_high(Included(v))),
+                _ => {
+                    self.node_ids = Vec::new();
+                    return;
+                }
+            };
+            // `BTreeMap::range` panics on a start past its end, which is what
+            // `p.id > 100 AND p.id < 50` asks for. That range is empty.
+            let inverted = match (&lower, &upper) {
+                (Included(a) | Excluded(a), Included(b) | Excluded(b)) => {
+                    a > b || (a == b && !(matches!(lower, Included(_)) && matches!(upper, Included(_))))
+                }
+                _ => false,
+            };
+            self.node_ids = if inverted { Vec::new() } else { index.range((lower, upper)) };
         }
     }
 }
@@ -13758,9 +14213,18 @@ impl PhysicalOperator for IndexScanOperator {
             BinaryOp::Eq => "=", BinaryOp::Gt => ">", BinaryOp::Ge => ">=",
             BinaryOp::Lt => "<", BinaryOp::Le => "<=", _ => "?",
         };
+        let other_end = match &self.other_end {
+            Some(OtherEnd::AtMost(hi)) if matches!(self.op, BinaryOp::Gt | BinaryOp::Ge) => {
+                format!(", <= {:?}", hi)
+            }
+            Some(OtherEnd::AtLeast(lo)) if matches!(self.op, BinaryOp::Lt | BinaryOp::Le) => {
+                format!(", >= {:?}", lo)
+            }
+            _ => String::new(),
+        };
         OperatorDescription {
             name: "IndexScan".to_string(),
-            details: format!("var={}, {}.{} {} {:?}", self.variable, self.label, self.property, op_str, self.value),
+            details: format!("var={}, {}.{} {} {:?}{other_end}", self.variable, self.label, self.property, op_str, self.value),
             children: Vec::new(),
         }
     }

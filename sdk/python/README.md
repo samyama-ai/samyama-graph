@@ -98,7 +98,7 @@ asyncio.run(main())
 
 ## More
 
-- [`docs/SDK_API_CLI_ARCHITECTURE.md`](https://github.com/samyama-ai/samyama-graph/blob/main/docs/SDK_API_CLI_ARCHITECTURE.md)
+- [`docs/SDK-API-CLI-ARCHITECTURE.md`](https://github.com/samyama-ai/samyama-graph/blob/main/docs/SDK-API-CLI-ARCHITECTURE.md)
   — how the SDKs, the HTTP API and the CLI fit together.
 - [`sdk/README.md`](https://github.com/samyama-ai/samyama-graph/blob/main/sdk/README.md)
   — the other two SDKs (TypeScript, Rust).

@@ -1463,7 +1463,7 @@
       "plan_hash": "<hex>",
       "records": [
         [
-          "Project (p)\n+- NodeScan (var=p, labels=[\"Person\"])\n\n--- Row budget ---\nper-operator row budget: 50000000 rows; an operator producing more is refused with Samyama.ClientError.Statement.RowBudgetExceeded\n\n--- Statistics ---\nGraph Statistics:\n  Total nodes: 6\n  Total edges: 4\n  Avg out-degree: 0.67\n  Labels:\n    :Person = 4 nodes\n    :Company = 2 nodes\n    :Employee = 1 nodes\n  Edge types:\n    :KNOWS = 2 edges\n    :WORKS_AT = 2 edges\n"
+          "Project (p) [estimated rows=4 cost=8]\n+- NodeScan (var=p, labels=[\"Person\"]) [estimated rows=4 cost=4]\n\n--- Row budget ---\nper-operator row budget: 50000000 rows; an operator producing more is refused with Samyama.ClientError.Statement.RowBudgetExceeded\n\n--- Statistics ---\nGraph Statistics:\n  Total nodes: 6\n  Total edges: 4\n  Avg out-degree: 0.67\n  Labels:\n    :Person = 4 nodes\n    :Company = 2 nodes\n    :Employee = 1 nodes\n  Edge types:\n    :KNOWS = 2 edges\n    :WORKS_AT = 2 edges\n"
         ]
       ],
       "snapshot_version": 11
@@ -4309,7 +4309,7 @@
       "plan_hash": "<hex>",
       "records": [
         [
-          "Project (a, b)\n+- Expand ((a)-[:KNOWS]->(b))\n   +- NodeScan (var=a, labels=[\"Person\"])\n\n--- Row budget ---\nper-operator row budget: 50000000 rows; an operator producing more is refused with Samyama.ClientError.Statement.RowBudgetExceeded\n\n--- Statistics ---\nGraph Statistics:\n  Total nodes: 8\n  Total edges: 4\n  Avg out-degree: 0.50\n  Labels:\n    :Person = 4 nodes\n    :Company = 2 nodes\n    :Employee = 1 nodes\n    :Merged = 1 nodes\n    :Merged2 = 1 nodes\n    :Temp = 0 nodes\n    :Temp2 = 0 nodes\n  Edge types:\n    :KNOWS = 2 edges\n    :WORKS_AT = 2 edges\n    :TMP = 0 edges\n"
+          "Project (a, b) [estimated rows=1 cost=5]\n+- Expand ((a)-[:KNOWS]->(b)) [estimated rows=1 cost=5]\n   +- NodeScan (var=a, labels=[\"Person\"]) [estimated rows=4 cost=4]\n\n--- Row budget ---\nper-operator row budget: 50000000 rows; an operator producing more is refused with Samyama.ClientError.Statement.RowBudgetExceeded\n\n--- Statistics ---\nGraph Statistics:\n  Total nodes: 8\n  Total edges: 4\n  Avg out-degree: 0.50\n  Labels:\n    :Person = 4 nodes\n    :Company = 2 nodes\n    :Employee = 1 nodes\n    :Merged = 1 nodes\n    :Merged2 = 1 nodes\n    :Temp = 0 nodes\n    :Temp2 = 0 nodes\n  Edge types:\n    :KNOWS = 2 edges\n    :WORKS_AT = 2 edges\n    :TMP = 0 edges\n"
         ]
       ],
       "snapshot_version": 28

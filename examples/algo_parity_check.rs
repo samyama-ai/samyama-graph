@@ -9,7 +9,7 @@
 //!     That is this, it needs nothing but the engine, and it runs on every
 //!     commit.
 //!
-//! `tests/algo-parity-reference.json` carries the date it was taken and
+//! `tests/fixtures/algo-parity-reference.json` carries the date it was taken and
 //! the NetworkX version, so a reader can see how old the agreement is. It is
 //! re-recorded deliberately, by `harness/algo-parity/record_reference.py`
 //! after a parity run — never silently.
@@ -121,7 +121,7 @@ fn view_single(nodes: usize, edges: &[(usize, usize, f64)]) -> GraphView {
 
 fn main() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/algo-parity-reference.json");
+        .join("tests/fixtures/algo-parity-reference.json");
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => {

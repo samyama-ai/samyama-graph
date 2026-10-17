@@ -9,11 +9,11 @@ external knowledge-graph repositories invoke them by name, so they do not get re
 **Start here** if you are new: the demos on built-in data. They need nothing but a
 checkout.
 
-**Most of this directory is internal.** Of the 122 programs, 57 are performance
+**Most of this directory is internal.** Of the 127 programs, 60 are performance
 investigations, conformance checks or maintainer tools — written to answer one question
 about the engine, usually once, often to kill a hypothesis. They print verdicts and
 timings, not results you can use. Those sections say *Internal* in their opening line;
-you are not expected to run them. The 8 benchmark runners are runnable but need a quiet
+you are not expected to run them. The 10 benchmark runners are runnable but need a quiet
 host and an external corpus to mean anything.
 
 Purposes below are taken from each file's own header comment.
@@ -24,8 +24,8 @@ Purposes below are taken from each file's own header comment.
 | [UC1-UC5 optimization use cases](#uc1-uc5-optimization-use-cases) | 9 | Yes |
 | [Dataset loaders and post-processing passes](#dataset-loaders-and-post-processing-passes) | 17 | Yes |
 | [Import, export and user-facing tools](#import-export-and-user-facing-tools) | 10 | Yes |
-| [Benchmark runners](#benchmark-runners) | 8 | No - internal |
-| [Performance investigations](#performance-investigations) | 22 | No - internal |
+| [Benchmark runners](#benchmark-runners) | 10 | No - internal |
+| [Performance investigations](#performance-investigations) | 25 | No - internal |
 | [Conformance and correctness checks](#conformance-and-correctness-checks) | 32 | No - internal |
 | [Maintainer tools](#maintainer-tools) | 3 | No - internal |
 | [Hardware client sketch](#hardware-client-sketch) | 1 | No - internal |
@@ -139,6 +139,7 @@ anything; a number from a loaded machine is not a measurement.
 | `ldbc_http_serve` | Serves an LDBC SNB extract over the HTTP API so Samyama is measured across the same wire as the engines it is compared with (PERF-04), not in-process. | `--data-dir <ldbc extract>`. |
 | `mesh_scale_bench` | Hierarchical roll-up over the real MeSH tree with a literature-shaped fact table — does the hierarchy index still pay on a real ontology at real volume? | Built-in / MeSH tree data. |
 | `query_probe` | Times arbitrary Cypher against an LDBC extract, one line per query; each `--q "<label>=<cypher>"` is a separate variant. The general form of `is7_probe` and `ic11_probe`. | `--data-dir <ldbc extract>`. |
+| `read_concurrency` | HTTP read throughput at different client counts, using indexed lookups, one- and two-hop reads, and a range aggregation; reports client CPU time to expose client-side limits (#1482). | A running HTTP server; `--load` builds a 200,000-node chain, then use `--clients 1,16,64 --seconds 10`. |
 | `sort_cost_decompose` | Splits what an `ORDER BY` costs per row into extracting the key, comparing keys and moving records, at three row counts and three key shapes, and prints the engine's own whole-query number beside the replica (#1819). | `--data-dir <ldbc extract>`. |
 | `unified_benchmark` | 200+ queries over up to 9 KGs loaded into one graph, each by whichever of snapshot import or direct Rust loader is fastest for it. | Snapshots and data dirs for the 9 KGs; `--queries`. |
 
@@ -166,11 +167,14 @@ extract via `--data-dir`.
 | `ic1_distinct_multiplicity` | `RETURN DISTINCT` decides whether a var-length segment enumerates paths — re-measures the 505,660-row claim in #1054. | Built-in. |
 | `ic1_index_regression` | Did indexing `Person.firstName` make IC1 slower? CH-REGRESS read 1.2x in the same window the index landed. | Built-in. |
 | `ic1_inline_vs_where` | Does an inline property on the far side of a var-length pattern drop rows? Asks the inline form, the WHERE form and bare reachability. | Built-in. |
+| `import_tax_probe` | Separates the phases of bulk-import completion to identify whether cost follows nodes, edges or segments; `sequence` compares eager and deferred imports with matching graph counts (#1807). | Built-in; optional node, edge and import counts. |
 | `is7_forms` | IS7 as we run it (`EXISTS`) against the form the competitors are given (`OPTIONAL MATCH` + `IS NOT NULL`) (#725). | `--data-dir` (LDBC extract). |
 | `is7_probe` | Where LDBC IS7's time goes — ~93% profiles into `Project`, so: the subquery, the property reads, or the plan feeding both (#618). | `--data-dir` (LDBC extract). |
 | `ldbc_name_index_probe` | Do the LDBC `name`/`firstName` anchors lower to an IndexScan? Inline properties and deferred `WHERE` predicates are two different planner paths. | Built-in / LDBC extract. |
 | `result_path_probe` | What the client path costs on top of the executor, per returned row — `client.query_readonly` and `QueryExecutor::execute` disagree by 3.3x on IS3 (#718). | `--data-dir` (LDBC extract). |
 | `shortestpath_plan_probe` | Which operators `shortestPath` between two indexed anchors actually plans — bidirectional BFS did not move CR-3 at all, so the BFS was not the cost. | Built-in. |
+| `top_k_degree_scaling` | Measures degree-aggregate TopN cost against group count, comparing limited and full sorts, declined ordering, and property group keys (#304). | Built-in citation graph; optional article and degree counts. |
+| `topn_property_group_regression` | Reproduces endpoint-property aggregation and TopN shapes on a synthetic PubMed-like graph, reporting plans and third-run timings for comparisons between engine versions (#1812). | Built-in; `--articles`, `--terms`, `--per-article`. |
 | `varlen_emit_cost` | How much of a var-length expansion is walking and how much is emitting — measured by pointing the pattern at a label nothing carries. | Built-in. |
 
 ## Conformance and correctness checks
@@ -189,7 +193,7 @@ not need them.
 | `algo_parity_export` | ALGO-02 — runs every shipped algorithm on reference graphs and emits the graphs *and* the answers as JSON, so both sides of a NetworkX comparison ran on the same edge list. | Built-in. |
 | `api_contract` | API-01 — the OpenAPI document and the HTTP server describe the same API, as a per-commit gate. #613 found one phantom and five undocumented endpoints by hand, once. | Built-in; `--json`. |
 | `api_surface_probe` | TRUST-06, API-07 — what the shipped HTTP surface actually returns, driven through `HttpServer::router()` because a grep cannot see a field added by a layer or a serde flatten. | Built-in. |
-| `cypher_matrix_probe` | Executes one representative query per row of `docs/CYPHER_COMPATIBILITY.md`, so the matrix is measured rather than remembered (#437). Establishes support, not correctness. | Built-in; `--json`. |
+| `cypher_matrix_probe` | Executes one representative query per row of `docs/CYPHER-COMPATIBILITY.md`, so the matrix is measured rather than remembered (#437). Establishes support, not correctness. | Built-in; `--json`. |
 | `cypher_probe` | Sweep 1 — standard Cypher scalar expressions with hand-computed answers, hunting constructs that parse, run and return the wrong thing without erroring (#571, #572). | Built-in. |
 | `cypher_probe2` | Sweep 2 — mutations, path functions, temporal and aggregate edge cases. Found three silent wrong answers. | Built-in. |
 | `cypher_probe3` | Sweep 3 — MERGE, FOREACH, UNION, OPTIONAL MATCH, CALL and subqueries: the clause-level surface. | Built-in. |
@@ -242,7 +246,7 @@ definition could be established, that is said plainly rather than guessed at.
 | **Paper 8** | A numbered research paper, external to this repository. Seven of its problems have a program here: 1 drug repurposing, 2 trial site selection, 3 supply chain, 4 healthcare allocation, 5 grid dispatch, 6 AMR stewardship, 7 wildfire evacuation. | **No.** The nearest gloss is `src/optimization/mod.rs:9` — "the primitive Paper 8 builds the 7 real-world problems on top of" — and `crates/samyama-optimization/src/benchmarks/mod.rs:3` — "Built for Paper 8 (graph-grounded optimization)". No list of papers exists here; `docs/README.md` points papers at `samyama-cloud/book/src/`. |
 | **Paper 5 B3** | Benchmark "B3" from another numbered paper; `b3_runner.rs` is its Samyama-side runner. | **No.** What B3 measures is stated nowhere in this repository. `B3` also appears unexplained in `crates/samyama-gpu/PORT-STATUS.md:39`, `src/query/executor/planner.rs:5803` and `src/query/executor/operator.rs:10580`, alongside `CT##` query ids that are likewise undefined. |
 | **SGE** | Used in the UC1–UC5 headers for the graph engine the optimizer's fitness function queries ("queries SGE for current beds"). | **No.** The acronym is never expanded anywhere in the repository, including `docs/GLOSSARY.md`. Context reads as the Samyama graph engine, but that is inference, not a definition found here. |
-| **Requirement IDs** — `ALGO-01`, `ALGO-04`, `ALGO-09`, `ALGO-15`, `API-01`, `API-02`, `API-03`, `API-07`, `API-15`, `AI-05`, `DX-04`, `EVAL-10`, `HW-07`, `INT-02`, `INT-04`…`INT-11`, `KG-11`, `LANG-01`, `LANG-09`…`LANG-16`, `ML-09`, `NDS-03`…`NDS-15`, `OPT-01`, `OPT-02`, `OPT-08`, `OPT-12`, `OPT-13`, `PERF-04`, `PERF-05`, `PERF-19`, `REL-03`, `REL-06`, `TRUST-03`, `TRUST-06` | Identifiers from a product requirements specification, each with a baseline and an "H1" target. Headers cite it as "spec 01", "spec 06", "the spec's H1 gate". | **No.** There is no requirements table, no `docs/specs/`, no `docs/MANDATE.md` and no `SCORECARD.json` in this repository. The one pointer to the real location is `docs/CYPHER_COMPATIBILITY.md:66`, which links `samyama-cloud/docs/product/spec/18-conformance-harness.md` — so "spec 06" means file `06-*.md` of that numbered series in the private `samyama-cloud` repository. `docs/ADR/ADR-037-bolt-protocol-feasibility.md:59` similarly attributes `API-08` to `12-clients-apis-sdks-crates.md`. A few IDs carry a one-clause gloss at a use site (`README.md:602` for PERF-17, `docs/ADR/ADR-038-memory-allocator.md:95` for PERF-10), but there is no canonical table anywhere here. |
+| **Requirement IDs** — `ALGO-01`, `ALGO-04`, `ALGO-09`, `ALGO-15`, `API-01`, `API-02`, `API-03`, `API-07`, `API-15`, `AI-05`, `DX-04`, `EVAL-10`, `HW-07`, `INT-02`, `INT-04`…`INT-11`, `KG-11`, `LANG-01`, `LANG-09`…`LANG-16`, `ML-09`, `NDS-03`…`NDS-15`, `OPT-01`, `OPT-02`, `OPT-08`, `OPT-12`, `OPT-13`, `PERF-04`, `PERF-05`, `PERF-19`, `REL-03`, `REL-06`, `TRUST-03`, `TRUST-06` | Identifiers from a product requirements specification, each with a baseline and an "H1" target. Headers cite it as "spec 01", "spec 06", "the spec's H1 gate". | **No.** There is no requirements table, no `docs/specs/`, no `docs/MANDATE.md` and no `SCORECARD.json` in this repository. The one pointer to the real location is `docs/CYPHER-COMPATIBILITY.md:66`, which links `samyama-cloud/docs/product/spec/18-conformance-harness.md` — so "spec 06" means file `06-*.md` of that numbered series in the private `samyama-cloud` repository. `docs/ADR/ADR-037-bolt-protocol-feasibility.md:59` similarly attributes `API-08` to `12-clients-apis-sdks-crates.md`. A few IDs carry a one-clause gloss at a use site (`README.md:602` for PERF-17, `docs/ADR/ADR-038-memory-allocator.md:95` for PERF-10), but there is no canonical table anywhere here. |
 | **Check IDs** — `CH-TCK`, `CH-IMPORT`, `CH-DOC-EXEC`, `CH-ERR`, `CH-NDS-*`, `CH-OPT-BENCH`, `CH-REGRESS` | Named conformance suites that measure the requirements above. Several programs here *are* the adapter for one. | **No.** Defined with the spec, in `samyama-cloud`. |
 | **The scorecard** | The single file recording where the product stands against all 254 requirements. | **Not here.** `docs/BENCHMARKS.md:49-54` says `SCORECARD.json` "lives with the cross-engine results", i.e. in the benchmarks repository. |
 | **LDBC**, **SNB**, **IC1**…**IC14**, **IS1**…**IS7** | Linked Data Benchmark Council Social Network Benchmark, interactive read workload. `SF1` / `SF10` are scale factors. | **Yes.** `docs/BENCHMARKS.md:355` expands it and links ldbcouncil.org; per-query names are tabulated at `docs/BENCHMARKS.md:402-420` (e.g. "IS7 — Replies to Post", "IC1 — Transitive Friends by Name"). Not in `docs/GLOSSARY.md`. |

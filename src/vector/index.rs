@@ -332,6 +332,53 @@ impl VectorIndex {
         2 * self.len() * self.dimensions * self.quantization.bytes_per_value()
     }
 
+    /// Bytes held by the HNSW navigable graph: each point's per-layer
+    /// neighbour lists, the shared pointers in them, and the point records
+    /// themselves (NDS-14).
+    ///
+    /// This is what `vector_bytes` left out, and at the default `M = 16` it is
+    /// the larger share for small dimensions: a point on layer 0 alone holds up
+    /// to 32 links of 40 bytes each, against 4 bytes a dimension. Counted from
+    /// the lists the graph actually holds rather than from `M`, because the
+    /// layer distribution and pruning make the real count a fraction of the
+    /// bound. A floor, like the other estimates: allocator slack is not visible.
+    pub fn graph_bytes(&self) -> usize {
+        fn walk<T: Clone + Send + Sync>(indexation: &PointIndexation<'_, T>) -> usize {
+            use std::mem::size_of;
+            // Per link: the `Arc<PointWithOrder>` in the list (one pointer), and
+            // the `PointWithOrder` it points to (an `Arc<Point>`, an f32
+            // distance) behind an Arc header of two counters.
+            const LINK: usize = size_of::<usize>() + 2 * size_of::<usize>() + size_of::<usize>() + size_of::<f32>() + 4;
+            let mut bytes = 0usize;
+            for point in indexation {
+                // The point record behind its Arc, and its neighbour table's
+                // Arc + lock + outer Vec.
+                bytes += 2 * size_of::<usize>() + size_of::<Point<'_, T>>();
+                bytes += 2 * size_of::<usize>() + size_of::<usize>() + size_of::<Vec<Vec<usize>>>();
+                for layer in point.get_neighborhood_id() {
+                    bytes += size_of::<Vec<usize>>() + layer.len() * LINK;
+                }
+            }
+            bytes
+        }
+        match &self.backend {
+            Backend::F32(h) => walk(h.get_point_indexation()),
+            Backend::F16(h) => walk(h.get_point_indexation()),
+        }
+    }
+
+    /// Everything this index holds resident: both vector copies, the HNSW
+    /// graph, and the exact-match table (#1498). What `SHOW INDEXES`, the
+    /// memory endpoint and the metrics report for a vector index.
+    pub fn resident_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let exact: usize = self.exact.capacity() * (size_of::<u64>() + size_of::<Vec<usize>>() + 1)
+            + self.exact.values().map(|v| v.capacity() * size_of::<usize>()).sum::<usize>();
+        let records = self.stored_f32.capacity() * size_of::<StoredVector>()
+            + self.stored_f16.capacity() * size_of::<(u64, Vec<f16>)>();
+        self.vector_bytes() + self.graph_bytes() + exact + records
+    }
+
     /// Add a vector to the index
     pub fn add(&mut self, node_id: NodeId, vector: &Vec<f32>) -> VectorResult<()> {
         if vector.len() != self.dimensions {

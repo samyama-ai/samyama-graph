@@ -59,8 +59,13 @@ const PROBES: &[(&str, &str, &str, usize)] = &[
 
     // LANG-13 — ANALYZE and query hints.
     ("LANG-13", "ANALYZE to refresh statistics", "ANALYZE", 0),
-    ("LANG-13", "USING INDEX hint", "MATCH (n:N) USING INDEX n:N(x) RETURN n", 0),
-    ("LANG-13", "USING SCAN hint", "MATCH (n:N) USING SCAN n:N RETURN n", 0),
+    // Creates the index and gives it a predicate, as the DROP probe below
+    // sets up its own precondition: a hint is mandatory, so `USING INDEX`
+    // with no such index or nothing for it to answer is refused -- in Neo4j
+    // and here (#1675) -- and a probe without them measured its own setup.
+    ("LANG-13", "USING INDEX hint",
+     "CREATE INDEX ON :N(x); MATCH (n:N) USING INDEX n:N(x) WHERE n.x = 1 RETURN n", 1),
+    ("LANG-13", "USING SCAN hint", "MATCH (n:N) USING SCAN n:N RETURN n", 1),
 
     // LANG-16 — temporal semantics: types, arithmetic, comparison, indexing.
     ("LANG-16", "date literal", "RETURN date(\"2024-01-01\") AS d", 0),

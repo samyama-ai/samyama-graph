@@ -17,8 +17,11 @@ pub struct PropertyIndexKey {
 /// What one index costs.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IndexMemory {
-    /// `index` or `unique_constraint`.
+    /// `index`, `unique_constraint`, `fulltext`, `vector` or `hierarchy`.
     pub kind: &'static str,
+    /// The name the DDL gave the index, for the kinds that carry one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub label: String,
     pub property: String,
     /// Resident bytes, estimated from the structures walked. A floor: the
@@ -126,6 +129,7 @@ impl IndexManager {
                 let (bytes, entries) = idx.read().unwrap().heap_bytes();
                 out.push(IndexMemory {
                     kind,
+                    name: None,
                     label: key.label.as_str().to_string(),
                     property: key.property.clone(),
                     bytes,

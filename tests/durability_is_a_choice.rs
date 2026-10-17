@@ -7,7 +7,7 @@
 //! not a durability barrier. RocksDB was opened with no `WriteOptions`, so its
 //! writes were unsynced too.
 //!
-//! `docs/ACID_GUARANTEES.md` had to say so, and did. What it could not offer
+//! `docs/ACID-GUARANTEES.md` had to say so, and did. What it could not offer
 //! was a way to choose otherwise.
 //!
 //! # The default does not move

@@ -8,7 +8,7 @@ COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 query = { SOI ~ explain_clause? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
 explain_clause = { ^"PROFILE" | ^"EXPLAIN" }
 union_clause = { ^"UNION" ~ ^"ALL"? }
-statement = { analyze_stmt | show_hierarchy_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | load_parquet_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
+statement = { analyze_stmt | show_hierarchy_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_point_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | load_parquet_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
 
 // A query as what Cypher actually is: an ordered sequence of clauses.
 //
@@ -47,7 +47,17 @@ index_name = @{ !((^"FOR" | ^"ON") ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA
 create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ index_name? ~ (vector_index_for | vector_index_on) ~ options? }
 vector_index_for = _{ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" }
 vector_index_on = _{ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ")" }
-create_index_stmt = { ^"CREATE" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")" }
+// Every index kind takes both spellings (NDS-11, #1668): the `ON :L(p)` form
+// this grammar started with, and Neo4j 5's `FOR (n:L) ON (n.p)`, each with an
+// optional name. `RANGE` is Neo4j's name for the plain B-tree kind.
+create_index_stmt = { ^"CREATE" ~ (^"RANGE" | ^"BTREE")? ~ ^"INDEX" ~ index_name? ~ (index_for_props | index_on_props) }
+index_on_props = _{ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")" }
+index_for_props = _{ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ("," ~ variable ~ "." ~ property_key)* ~ ")" }
+// `CREATE POINT INDEX` parses so it can be refused with a reason: the spatial
+// structure it asks for is an R-tree that does not exist yet (#1618), and
+// building a B-tree under that name would answer `within` and k-NN by a scan
+// while `SHOW INDEXES` claimed otherwise.
+create_point_index_stmt = { ^"CREATE" ~ ^"POINT" ~ ^"INDEX" ~ index_name? ~ (vector_index_for | vector_index_on) ~ options? }
 
 // CREATE HIERARCHY INDEX (ADR-035, OEH)
 //   CREATE HIERARCHY INDEX atc ON ()-[:IS_A]->() MEASURE d.units AGGREGATE sum, max
@@ -68,7 +78,12 @@ drop_index_stmt = { ^"DROP" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_ke
 // CREATE FULLTEXT INDEX (NDS-06). Neo4j's form is `FOR (n:L) ON EACH [n.a, n.b]`;
 // the single-property `ON (n.a)` spelling is accepted too, because that is what
 // every other index DDL here looks like and the difference carries no meaning.
-create_fulltext_index_stmt = { ^"CREATE" ~ ^"FULLTEXT" ~ ^"INDEX" ~ index_name ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ (fulltext_each | fulltext_one) }
+// `TEXT` is the same structure: Neo4j's text index answers CONTAINS / STARTS
+// WITH over a string property, which the term dictionary here serves. The name
+// is optional in both spellings; an unnamed index is named `<kind>_<label>_<property>`
+// so `db.index.fulltext.queryNodes` can still address it (#1668).
+create_fulltext_index_stmt = { ^"CREATE" ~ fulltext_kind ~ ^"INDEX" ~ index_name? ~ ((^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ (fulltext_each | fulltext_one)) | (^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")")) }
+fulltext_kind = { ^"FULLTEXT" | ^"TEXT" }
 fulltext_each = _{ ^"EACH" ~ "[" ~ variable ~ "." ~ property_key ~ ("," ~ variable ~ "." ~ property_key)* ~ "]" }
 fulltext_one = _{ "(" ~ variable ~ "." ~ property_key ~ ")" }
 drop_fulltext_index_stmt = { ^"DROP" ~ ^"FULLTEXT" ~ ^"INDEX" ~ index_name }
@@ -156,8 +171,14 @@ unwind_stmt = { unwind_clause+ ~ ((optional_match_clause | match_clause)+ ~ wher
 load_csv_stmt = { load_csv_clause ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 // A statement that begins with LOAD PARQUET. Same tail as `load_csv_stmt`.
 load_parquet_stmt = { load_parquet_clause ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
-match_clause = { ^"MATCH" ~ pattern }
-optional_match_clause = { ^"OPTIONAL" ~ ^"MATCH" ~ pattern }
+match_clause = { ^"MATCH" ~ pattern ~ using_hint* }
+optional_match_clause = { ^"OPTIONAL" ~ ^"MATCH" ~ pattern ~ using_hint* }
+// Planner hints (LANG-13, #1675), Neo4j's spelling, after the pattern and
+// before its WHERE: `MATCH (n:N) USING INDEX n:N(x) WHERE n.x = 1`.
+using_hint = { ^"USING" ~ (using_index_hint | using_scan_hint | using_join_hint) }
+using_index_hint = { ^"INDEX" ~ ^"SEEK"? ~ variable ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")" }
+using_scan_hint = { ^"SCAN" ~ variable ~ ":" ~ label }
+using_join_hint = { ^"JOIN" ~ ^"ON" ~ variable ~ ("," ~ variable)* }
 where_clause = { ^"WHERE" ~ expression }
 with_clause = { ^"WITH" ~ distinct? ~ return_items ~ order_by_clause? ~ skip_clause? ~ limit_clause? ~ where_clause? }
 create_clause = { ^"CREATE" ~ pattern }

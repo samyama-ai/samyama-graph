@@ -263,3 +263,34 @@ fn the_arity_error_describes_both_forms() {
     assert!(err.contains("label") && err.contains("indexName"),
             "a caller who gets this wrong should be told both spellings: {err}");
 }
+
+/// A search over an index that does not exist is an error, not an empty answer
+/// (#1660). It used to return `[]`, so an index that was never created, or did
+/// not come back after a restart, read as "nothing is similar" -- the one
+/// failure in the index contract nothing could see. Full-text has said `no
+/// full-text index named ...` all along; this is the same rule for vectors.
+#[test]
+fn a_search_over_a_missing_index_is_an_error_that_names_it() {
+    let mut store = GraphStore::new();
+    store.create_vector_index("Person", "embedding", 3, DistanceMetric::Cosine).unwrap();
+    let engine = QueryEngine::new();
+    let err = engine
+        .execute(
+            "CALL db.index.vector.queryNodes('Person', 'nope', [1.0, 0.0, 0.0], 1) YIELD node RETURN node",
+            &store,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no vector index on :Person(nope)"), "{err}");
+    assert!(err.contains(":Person(embedding)"), "the indexes that do exist are named: {err}");
+
+    let none = GraphStore::new();
+    let err = engine
+        .execute(
+            "CALL db.index.vector.queryNodes('P', 'emb', [0.0, 0.0, 1.0], 1) YIELD node RETURN node.id",
+            &none,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("CREATE VECTOR INDEX"), "{err}");
+}

@@ -499,6 +499,117 @@ built-in anchors — happened in the round before, and those harder parameters a
 still in force.
 
 
+## Detail moved from the README
+
+The README carries a short summary of each result. The accounting below stood
+there in full until #1836 shortened it, and is kept here word for word.
+
+### HIER: which queries the Neo4j comparison covers
+
+**The 58 queries behind that figure are the classes the index wins.** 94× and
+88× are computed over the queries *expressible on both engines* — H1, H2, H3,
+H5 and H10. The three classes where our index-written form is a net cost are
+not expressible on Neo4j and so are absent by construction: H7 lowest common
+ancestor, H4 cross-hierarchy conjunction, H6 anti-subsumption. That is what
+"expressible on both" means, and a reader is entitled to know which classes the
+comparison could not include.
+
+That 94× is the ratio of the two *medians* over the 58 queries, which is not an
+average speedup and should not be read as one; the geometric mean of the
+per-query ratios is 88×. Both are recomputed from the committed per-query
+timings by `CH-BENCH-HIER`, measured 2026-08-14 on a host that no longer exists.
+
+**The local corpus answers two different questions and the column headings did
+not say so.** Of its 112 queries, 27 run the *same query text* twice with the
+index toggled; the other 85 carry a separate hand-written `baseline` query.
+Split:
+
+| Comparison | n | Total time |
+|---|---:|---:|
+| **same text, index on vs off** — what the index does | 27 | **35.3× faster** |
+| index-written query vs a hand-written alternative | 81 | 0.43× |
+
+Only the first row is a statement about the index, and there it is a large win
+(2 of the 27 are slower). The second is a statement about how the two queries
+were written — and on H7 the index-written form calls `hierarchy_lca(a, b)`
+inside a `WHERE` evaluated once per `:Term`, while the hand-written arm is a
+single path join. H6's alternative is `NOT (d.code STARTS WITH "T")`, a
+string-prefix test that works only because this synthetic corpus encodes
+ancestry in the code and would not exist on a real ontology.
+
+Both figures are measured by `CH-BENCH-HIER` every run, as
+`index_on_same_query_total_time` and `index_written_vs_hand_written_total_time`.
+
+One more caveat on the 94× itself: it predates
+[#1343](https://github.com/samyama-ai/samyama-graph/issues/1343), which found
+the index answering a roll-up with a subsumption result — set-shaped where the
+pattern is defined over paths — and narrowed where the rewrite applies. A
+speedup measured before a correctness fix in the same code path is partly a
+speedup over the wrong answer. Re-measuring needs both engines on one host.
+
+### Biomedical scale and cross-KG queries
+
+| KG | Source | Nodes | Edges |
+|----|--------|-------|-------|
+| PubMed/MEDLINE | NLM | 66.2M | 1.04B |
+| Clinical Trials | ClinicalTrials.gov | 7.8M | 27M |
+| Pathways | Reactome | 119K | 835K |
+| Drug Interactions | DrugBank + ChEMBL + SIDER | 245K | 388K |
+
+Loaded in 31 minutes from snapshots, measured 2026-04-02 on one r6a.8xlarge and
+not re-measured since. No harness suite runs this benchmark, so nothing would
+notice it going stale.
+
+Times and first rows below are the `time_ms` and `sample_result` columns of
+[`verified-results.csv`](https://graph.samyama.cloud/book/data/benchmark/verified-results.csv)
+(2026-04-02, one r6a.8xlarge). The CSV keeps only the first row of each result,
+so that is all this table quotes.
+
+| ID | Query | Time | First row (CSV) |
+|----|-------|------|-----------------|
+| XK02 | Cancer → Trial interventions | 10.3s | Placebo (521 trials) |
+| XK03 | Diabetes → Trial interventions | 2.7s | Placebo (324 trials) |
+| XK06 | Metformin → Trial adverse events | 2.1s | Headache (215 trials) |
+| XK07 | Cancer trial sites by country | 4.2s | United States (4,062) |
+| XK08 | NCI-funded → Trial interventions | 20.5s | Placebo (933) |
+| XK05 | Aspirin articles → Trials | 1.5s | NCT04908982 "Aspirin and congenital malformations." |
+
+The README's PubMed example lists rows 2–5 of XK02's answer; those come from the
+query listing on the benchmark page, not from the CSV. The 5.2 s the README once
+quoted came from an earlier run that day and is not what the CSV records
+([#1503](https://github.com/samyama-ai/samyama-graph/issues/1503)).
+
+### LDBC suites, as run by the conformance harness
+
+Run in-tree by the conformance harness, not audited by anyone: **LDBC
+certification is a formal third-party process and we have not been through
+it.** Every row below is a measurement from `samyama-graph-competitor-benchmarks`
+on 2026-08-28, and the suite that produced it is named so the number can be
+re-derived or refuted.
+
+| Benchmark | Result | Dataset | Suite |
+|-----------|--------|---------|-------|
+| SNB Interactive | **21/21 complete, 21/21 return rows** | SF1: 3.18M nodes, 17.26M edges | `CH-BENCH-LDBC` |
+| SNB BI | **20/20 complete, 0 timeouts** | SF1 | `CH-BENCH-LDBC` |
+| Graphalytics | **12/12 agree with the LDBC reference** | XS reference graphs | `CH-BENCH-GALX` |
+| FinBench | **21 read queries run, 21 return rows** | synthetic, ~7.7K nodes / 42.2K edges | `CH-BENCH-FIN` |
+
+One of those is not clean, and saying so is the point of publishing them:
+three FinBench queries are pinned to ids the generated data does not
+guarantee, so they answer nothing while reporting `OK`
+([#918](https://github.com/samyama-ai/samyama-graph/issues/918)).
+
+### Concurrent performance
+
+**Not published, because it is not measured.** The numbers that once stood in
+the README were added in April 2026 with no benchmark, log, host or date behind
+them, and no benchmark in this repository produces them
+([#919](https://github.com/samyama-ai/samyama-graph/issues/919)). An unfounded
+number is worse than an absent one: it invites a reader to plan around it.
+
+`CH-PERF-CONC` (PERF-17 — 64 concurrent clients, p99 ≤ 3× single-client p50) is
+the suite that will answer this, and the figure returns when it does.
+
 ## Notes
 
 - **Samyama is extremely fast on point and short reads** — IS1/IS4/IS5 are sub-0.1 ms at both scales (in-process index-free adjacency).

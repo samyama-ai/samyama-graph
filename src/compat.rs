@@ -1,6 +1,6 @@
 //! Which of a corpus of queries this engine accepts, and why not (INT-11).
 //!
-//! `docs/CYPHER_COMPATIBILITY.md` answers "which features exist". A user
+//! `docs/CYPHER-COMPATIBILITY.md` answers "which features exist". A user
 //! deciding whether to migrate is asking something else: will *my* queries
 //! run. A matrix of 78 supported features says nothing about the twelve
 //! queries in their application that use the two that are missing.

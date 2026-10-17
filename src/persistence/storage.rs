@@ -35,7 +35,7 @@
 //! shared pointers in C++.
 
 use crate::graph::{Edge, EdgeId, Node, NodeId, PropertyMap};
-use rocksdb::{ColumnFamilyDescriptor, Options, WriteOptions, DB};
+use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, WriteOptions, DB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -93,6 +93,26 @@ thread_local! {
     pub(crate) static ROW_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// Row writes staged for one RocksDB write. See
+/// [`PersistentStorage::commit_rows`].
+#[derive(Default)]
+pub struct RowBatch {
+    inner: WriteBatch,
+    rows: usize,
+}
+
+impl RowBatch {
+    /// Rows staged since the last commit.
+    pub fn len(&self) -> usize {
+        self.rows
+    }
+
+    /// Whether nothing is staged.
+    pub fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+}
+
 /// RocksDB-based persistent storage
 pub struct PersistentStorage {
     /// RocksDB instance
@@ -104,7 +124,7 @@ pub struct PersistentStorage {
     ///
     /// RocksDB was opened with no `WriteOptions` at all, so every write used
     /// the default — unsynced. With the WAL also unsynced that made the whole
-    /// write path unsynced, which is what `docs/ACID_GUARANTEES.md` §4 had to
+    /// write path unsynced, which is what `docs/ACID-GUARANTEES.md` §4 had to
     /// say and what #1309 is about. `SAMYAMA_FSYNC=1` turns both on together;
     /// turning on one and not the other would be a durability level nobody
     /// asked for.
@@ -199,7 +219,19 @@ impl PersistentStorage {
     pub fn put_node(&self, tenant: &str, node: &Node) -> StorageResult<()> {
         let cf = self.db.cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
+        let (key, value) = Self::encode_node(tenant, node)?;
 
+        // Write to RocksDB
+        self.db.put_cf_opt(&cf, key, value, &self.write_opts)?;
+
+        debug!("Stored node {} for tenant {}", node.id, tenant);
+
+        Ok(())
+    }
+
+    /// A node's key and stored bytes. One encoding for the single-row write and
+    /// the batched one, so a row reads back the same whichever wrote it.
+    fn encode_node(tenant: &str, node: &Node) -> StorageResult<(Vec<u8>, Vec<u8>)> {
         // Serialize properties
         let properties = bincode::serialize(&node.properties)?;
 
@@ -216,14 +248,7 @@ impl PersistentStorage {
         let value = bincode::serialize(&stored)?;
 
         // Create key with tenant prefix
-        let key = Self::node_key(tenant, node.id.as_u64());
-
-        // Write to RocksDB
-        self.db.put_cf_opt(&cf, key, value, &self.write_opts)?;
-
-        debug!("Stored node {} for tenant {}", node.id, tenant);
-
-        Ok(())
+        Ok((Self::node_key(tenant, node.id.as_u64()), value))
     }
 
     /// Get a node
@@ -293,7 +318,18 @@ impl PersistentStorage {
     pub fn put_edge(&self, tenant: &str, edge: &Edge) -> StorageResult<()> {
         let cf = self.db.cf_handle("edges")
             .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
+        let (key, value) = Self::encode_edge(tenant, edge)?;
 
+        // Write to RocksDB
+        self.db.put_cf_opt(&cf, key, value, &self.write_opts)?;
+
+        debug!("Stored edge {} for tenant {}", edge.id, tenant);
+
+        Ok(())
+    }
+
+    /// An edge's key and stored bytes; see `encode_node`.
+    fn encode_edge(tenant: &str, edge: &Edge) -> StorageResult<(Vec<u8>, Vec<u8>)> {
         // Serialize properties
         let properties = bincode::serialize(&edge.properties)?;
 
@@ -311,14 +347,7 @@ impl PersistentStorage {
         let value = bincode::serialize(&stored)?;
 
         // Create key with tenant prefix
-        let key = Self::edge_key(tenant, edge.id.as_u64());
-
-        // Write to RocksDB
-        self.db.put_cf_opt(&cf, key, value, &self.write_opts)?;
-
-        debug!("Stored edge {} for tenant {}", edge.id, tenant);
-
-        Ok(())
+        Ok((Self::edge_key(tenant, edge.id.as_u64()), value))
     }
 
     /// Get an edge
@@ -374,6 +403,59 @@ impl PersistentStorage {
 
         debug!("Deleted edge {} for tenant {}", edge_id, tenant);
 
+        Ok(())
+    }
+
+    /// Stage a node write into `batch`; nothing reaches the database until
+    /// [`Self::commit_rows`]. Same key and bytes as [`Self::put_node`].
+    pub fn stage_put_node(&self, batch: &mut RowBatch, tenant: &str, node: &Node) -> StorageResult<()> {
+        let cf = self.db.cf_handle("nodes")
+            .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
+        let (key, value) = Self::encode_node(tenant, node)?;
+        batch.inner.put_cf(&cf, key, value);
+        batch.rows += 1;
+        Ok(())
+    }
+
+    /// Stage an edge write; see [`Self::stage_put_node`].
+    pub fn stage_put_edge(&self, batch: &mut RowBatch, tenant: &str, edge: &Edge) -> StorageResult<()> {
+        let cf = self.db.cf_handle("edges")
+            .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
+        let (key, value) = Self::encode_edge(tenant, edge)?;
+        batch.inner.put_cf(&cf, key, value);
+        batch.rows += 1;
+        Ok(())
+    }
+
+    /// Stage a node delete; see [`Self::stage_put_node`].
+    pub fn stage_delete_node(&self, batch: &mut RowBatch, tenant: &str, node_id: u64) -> StorageResult<()> {
+        let cf = self.db.cf_handle("nodes")
+            .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
+        batch.inner.delete_cf(&cf, Self::node_key(tenant, node_id));
+        batch.rows += 1;
+        Ok(())
+    }
+
+    /// Stage an edge delete; see [`Self::stage_put_node`].
+    pub fn stage_delete_edge(&self, batch: &mut RowBatch, tenant: &str, edge_id: u64) -> StorageResult<()> {
+        let cf = self.db.cf_handle("edges")
+            .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
+        batch.inner.delete_cf(&cf, Self::edge_key(tenant, edge_id));
+        batch.rows += 1;
+        Ok(())
+    }
+
+    /// Write every staged row in one RocksDB write: one log record, one
+    /// `write(2)`, and with `SAMYAMA_FSYNC=1` one fsync, instead of one of each
+    /// per row (#1666). Atomic: all of the batch's rows land or none do. The
+    /// batch is empty afterwards and can be staged into again.
+    pub fn commit_rows(&self, batch: &mut RowBatch) -> StorageResult<()> {
+        if batch.rows == 0 {
+            return Ok(());
+        }
+        let staged = std::mem::take(&mut batch.inner);
+        batch.rows = 0;
+        self.db.write_opt(staged, &self.write_opts)?;
         Ok(())
     }
 

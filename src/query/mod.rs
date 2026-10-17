@@ -82,7 +82,7 @@ pub mod span;
 pub mod metrics;
 
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use lru::LruCache;
 
@@ -157,7 +157,14 @@ impl CacheStats {
 /// query strings and evicts least-recently-used entries when full.
 pub struct QueryEngine {
     /// Parsed AST cache: normalized query string -> Query AST
-    ast_cache: Mutex<LruCache<String, Query>>,
+    ///
+    /// `Arc` so a hit hands out a pointer, not a copy. It held `Query` and
+    /// cloned the whole AST under the lock, so every request -- twice, once to
+    /// classify the statement and once to run it -- held this one mutex for
+    /// a deep copy. At 64 clients that was most of what the server did: the
+    /// threads sat in `__psynch_mutexwait` here while only 6 of 16 cores did
+    /// work, and the tail latency was the queue (#1672).
+    ast_cache: Mutex<LruCache<String, Arc<Query>>>,
     /// Lock-free hit/miss counters
     stats: CacheStats,
     /// Per-query timeout in seconds (0 = no timeout)
@@ -355,17 +362,19 @@ impl QueryEngine {
         self.ast_cache.lock().unwrap().len()
     }
 
-    /// Parse with caching — normalizes whitespace for cache hits
-    fn cached_parse(&self, query_str: &str) -> Result<Query, Box<dyn std::error::Error>> {
+    /// Parse with caching — normalizes whitespace for cache hits.
+    ///
+    /// Returns the shared AST. The lock is held for the lookup and the LRU
+    /// promotion only; a caller that needs to change the query copies it
+    /// after the lock is gone (#1672).
+    fn cached_parse(&self, query_str: &str) -> Result<Arc<Query>, Box<dyn std::error::Error>> {
         let normalized = query_str.split_whitespace().collect::<Vec<_>>().join(" ");
 
         // Check cache (LruCache::get promotes to most-recently-used)
-        {
-            let mut cache = self.ast_cache.lock().unwrap();
-            if let Some(cached) = cache.get(&normalized) {
-                self.stats.record_hit();
-                return Ok(cached.clone());
-            }
+        let hit = self.ast_cache.lock().unwrap().get(&normalized).cloned();
+        if let Some(cached) = hit {
+            self.stats.record_hit();
+            return Ok(cached);
         }
 
         self.stats.record_miss();
@@ -376,11 +385,8 @@ impl QueryEngine {
         // so half the errors a user sees never reach the executor and a hook
         // on execution alone missed exactly those. `pest`'s own grammar errors
         // already carry a caret and are left alone.
-        let query = parse_query(query_str).map_err(|e| with_span(Box::new(e), query_str))?;
-        {
-            let mut cache = self.ast_cache.lock().unwrap();
-            cache.put(normalized, query.clone());
-        }
+        let query = Arc::new(parse_query(query_str).map_err(|e| with_span(Box::new(e), query_str))?);
+        self.ast_cache.lock().unwrap().put(normalized, Arc::clone(&query));
         Ok(query)
     }
 
@@ -479,15 +485,21 @@ impl QueryEngine {
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         let mut query = self.cached_parse(query_str)?;
-        crate::query::dialect::apply(&mut query, dialect).map_err(|e| {
-            with_span(
-                Box::new(crate::query::ParseError::Coded {
-                    code: e.code(),
-                    message: e.to_string(),
-                }),
-                query_str,
-            )
-        })?;
+        // Only a non-Cypher dialect rewrites the AST, so only that pays for a
+        // private copy; the shared one is never modified.
+        if dialect != crate::query::ast::Dialect::Cypher {
+            let mut own = (*query).clone();
+            crate::query::dialect::apply(&mut own, dialect).map_err(|e| {
+                with_span(
+                    Box::new(crate::query::ParseError::Coded {
+                        code: e.code(),
+                        message: e.to_string(),
+                    }),
+                    query_str,
+                )
+            })?;
+            query = Arc::new(own);
+        }
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(

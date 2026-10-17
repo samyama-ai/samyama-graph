@@ -19,7 +19,7 @@ Run any row for yourself:
 cargo test <test name>
 ```
 
-Read this next to [`ACID_GUARANTEES.md`](ACID_GUARANTEES.md), which says what is
+Read this next to [`ACID-GUARANTEES.md`](ACID-GUARANTEES.md), which says what is
 guaranteed; this page says what is observed when the guarantee is tested. In
 particular: **nothing on the write path is fsynced by default** (§4 there, #1309);
 `SAMYAMA_FSYNC=1` turns the barrier on for both the WAL and RocksDB. So on a

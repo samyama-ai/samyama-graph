@@ -196,6 +196,8 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                                             pattern: parse_pattern(p)?,
                                             optional,
                                         }));
+                                    } else if p.as_rule() == Rule::using_hint {
+                                        query.hints.push(parse_using_hint(p)?);
                                     }
                                 }
                             }
@@ -662,24 +664,30 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                 parse_create_vector_index_statement(inner, query)?;
             }
             Rule::create_fulltext_index_stmt => {
-                // `index_name` is required here, unlike the vector form: the
-                // procedure addresses a full-text index *by name*, so an
-                // unnamed one could be created and never queried.
+                // The procedure addresses a full-text index *by name*, so an
+                // unnamed one gets a name derived from what it covers rather
+                // than none -- `CREATE TEXT INDEX ON :N(x)` is `text_N_x` (#1668).
                 let mut name = None;
+                let mut kind = "fulltext";
                 let mut label = None;
                 let mut keys: Vec<String> = Vec::new();
                 for part in inner.into_inner() {
                     match part.as_rule() {
                         Rule::index_name => name = Some(part.as_str().to_string()),
+                        Rule::fulltext_kind => {
+                            if part.as_str().eq_ignore_ascii_case("text") {
+                                kind = "text";
+                            }
+                        }
                         Rule::label => label = Some(Label::new(unescape_name(part.as_str()))),
                         Rule::property_key => keys.push(unescape_name(part.as_str())),
                         _ => {}
                     }
                 }
-                let (Some(index_name), Some(label)) = (name, label) else {
+                let Some(label) = label else {
                     return Err(ParseError::SemanticError(
-                        "CREATE FULLTEXT INDEX needs a name and a label: \
-                         CREATE FULLTEXT INDEX <name> FOR (n:Label) ON (n.property)".to_string(),
+                        "CREATE FULLTEXT INDEX needs a label: \
+                         CREATE FULLTEXT INDEX [name] FOR (n:Label) ON (n.property)".to_string(),
                     ));
                 };
                 if keys.is_empty() {
@@ -687,6 +695,9 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                         "CREATE FULLTEXT INDEX names no property".to_string(),
                     ));
                 }
+                let index_name = name.unwrap_or_else(|| {
+                    format!("{kind}_{}_{}", label.as_str(), keys.join("_"))
+                });
                 query.create_fulltext_index_clause = Some(CreateFullTextIndexClause {
                     index_name,
                     label,
@@ -707,6 +718,16 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             }
             Rule::create_index_stmt => {
                 parse_create_index_statement(inner, query)?;
+            }
+            Rule::create_point_index_stmt => {
+                return Err(ParseError::SemanticError(
+                    "CREATE POINT INDEX is not supported yet: a point index is a spatial \
+                     structure (an R-tree) that answers point.withinBBox and nearest-neighbour \
+                     queries, and it does not exist in this engine yet -- samyama-graph#1618. \
+                     Spatial predicates run as a scan until then; CREATE INDEX on a scalar \
+                     property (for example a geohash) is the available alternative."
+                        .to_string(),
+                ));
             }
             Rule::call_stmt => {
                 parse_call_statement(inner, query)?;
@@ -785,6 +806,39 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
         }
     }
     Ok(())
+}
+
+/// `USING INDEX n:L(p)`, `USING SCAN n:L` or `USING JOIN ON n, m` (#1675).
+fn parse_using_hint(pair: pest::iterators::Pair<Rule>) -> ParseResult<PlanHint> {
+    let hint = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| ParseError::SemanticError("empty USING hint".to_string()))?;
+    let rule = hint.as_rule();
+    let mut variables = Vec::new();
+    let mut label = None;
+    let mut properties = Vec::new();
+    for part in hint.into_inner() {
+        match part.as_rule() {
+            Rule::variable => variables.push(unescape_name(part.as_str())),
+            Rule::label => label = Some(Label::new(unescape_name(part.as_str()))),
+            Rule::property_key => properties.push(unescape_name(part.as_str())),
+            _ => {}
+        }
+    }
+    let one = |vs: &mut Vec<String>| vs.drain(..).next().unwrap_or_default();
+    Ok(match rule {
+        Rule::using_index_hint => PlanHint::Index {
+            variable: one(&mut variables),
+            label: label.ok_or_else(|| ParseError::SemanticError("USING INDEX needs a label".into()))?,
+            properties,
+        },
+        Rule::using_scan_hint => PlanHint::Scan {
+            variable: one(&mut variables),
+            label: label.ok_or_else(|| ParseError::SemanticError("USING SCAN needs a label".into()))?,
+        },
+        _ => PlanHint::Join { variables },
+    })
 }
 
 fn parse_create_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
@@ -1275,6 +1329,8 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                             pattern: parse_pattern(mc_inner)?,
                             optional: false,
                         });
+                    } else if mc_inner.as_rule() == Rule::using_hint {
+                        query.hints.push(parse_using_hint(mc_inner)?);
                     }
                 }
             }
@@ -1285,6 +1341,8 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                             pattern: parse_pattern(mc_inner)?,
                             optional: true,
                         });
+                    } else if mc_inner.as_rule() == Rule::using_hint {
+                        query.hints.push(parse_using_hint(mc_inner)?);
                     }
                 }
                 after_optional = query.match_clauses.last().map(|m| m.pattern.clone());

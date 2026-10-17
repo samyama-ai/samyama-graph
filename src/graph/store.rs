@@ -1442,6 +1442,29 @@ impl GraphStore {
     /// Heap only. The `Arc`-held index managers report their own sizes if they can;
     /// what is not attributed here is named in `unattributed_note` rather than
     /// silently folded into another line.
+    /// Resident bytes of every index the store holds, one row each, largest
+    /// first (COST-06, NDS-14).
+    ///
+    /// All four kinds: property indexes and unique constraints, full-text,
+    /// vector (with its HNSW graph) and hierarchy. The property kinds alone
+    /// were reported before, so an index overhead figure left out the two
+    /// structures most likely to be the largest.
+    pub fn index_memory(&self) -> Vec<crate::index::IndexMemory> {
+        let mut out = self.property_index.index_memory();
+        out.extend(self.fulltext.index_memory());
+        out.extend(self.vector_index.index_memory());
+        out.extend(self.hierarchy_index.list().into_iter().map(|h| crate::index::IndexMemory {
+            kind: "hierarchy",
+            entries: h.nodes,
+            label: String::new(),
+            property: h.edge_types.join("|"),
+            name: Some(h.name),
+            bytes: h.bytes,
+        }));
+        out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.label.cmp(&b.label)));
+        out
+    }
+
     pub fn memory_report(&self) -> MemoryReport {
         let node_versions: usize = self
             .nodes
@@ -1959,6 +1982,20 @@ NodeDeleted { .. } => {
         //
         // A property-less node indexes nothing, so the local call is skipped
         // rather than allocating to feed a loop that iterates zero times (#491).
+        // Full-text, which neither branch below reaches: it is fed on the
+        // property-set path only, so a node created with its properties
+        // through this call was never findable by a full-text search on a
+        // store that already had the index. Found while counting the index's
+        // bytes (#1673), where 500 such documents indexed as zero.
+        if !self.fulltext.is_empty() {
+            for (key, value) in &indexed_properties {
+                if let PropertyValue::String(text) = value {
+                    for label in &labels {
+                        self.fulltext.on_property_set(label.as_str(), key, node_id, text);
+                    }
+                }
+            }
+        }
         if !indexed_properties.is_empty() {
             if self.index_sender.is_some() {
                 for (key, value) in &indexed_properties {
@@ -8245,9 +8282,10 @@ mod tests {
     #[test]
     fn test_vector_search_nonexistent_index() {
         let store = GraphStore::new();
-        // Search on a non-existent index should return empty results
-        let results = store.vector_search("NoLabel", "noprop", &[1.0, 2.0], 5).unwrap();
-        assert!(results.is_empty());
+        // A search over an index that does not exist is an error that names
+        // it, not an empty answer that looks like "nothing matched" (#1660).
+        let err = store.vector_search("NoLabel", "noprop", &[1.0, 2.0], 5).unwrap_err();
+        assert!(err.to_string().contains("no vector index on :NoLabel(noprop)"), "{err}");
     }
 
     #[test]

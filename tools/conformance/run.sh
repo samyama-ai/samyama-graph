@@ -7,6 +7,18 @@
 # construction.
 set -euo pipefail
 
+# Python buffers stdout when it is not a terminal, and in CI every one of these
+# steps is piped. That is why a cancelled run's log simply stopped after the
+# "unavailable" lines with no indication of where the job was stuck: the output
+# existed, it was sitting in a buffer that the kill discarded.
+#
+# 61 runs were cancelled at the 45-minute limit before anyone could say which
+# case consumed the budget (#1858), and this is half the reason. Unbuffering
+# costs nothing here -- the suite's output is a few hundred lines -- and it is
+# what makes the other half, the per-case progress marks in the suite, visible
+# at all.
+export PYTHONUNBUFFERED=1
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SUITE_REPO="${SUITE_REPO:-https://github.com/samyama-ai/gpml-conformance.git}"
 SUITE_COMMIT="${SUITE_COMMIT:-$(python3 -c "import json;print(json.load(open('$ROOT/tools/conformance/baseline.json'))['suite_commit'])")}"

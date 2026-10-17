@@ -252,6 +252,10 @@ test = true
 name = "ic11_probe"
 test = true
 
+[[example]]
+name = "supply_chain_demo"
+test = true
+
 [[bench]]
 name = "aggregate_throughput"
 harness = false

@@ -59,7 +59,7 @@
 //! (`execute_cached`, #1153), which returns the rows and never reaches the
 //! planner at all: 14.8x on that same selective read.
 
-use crate::query::executor::operator::{CreateFullTextIndexOperator, DropFullTextIndexOperator, FullTextSearchOperator, TargetComparison};
+use crate::query::executor::operator::{numeric_tie_end, CreateFullTextIndexOperator, DropFullTextIndexOperator, FullTextSearchOperator, OtherEnd, TargetComparison};
 use crate::graph::GraphStore;
 use crate::graph::{Label, PropertyValue};  // Added for CREATE support
 use crate::query::ast::*;
@@ -830,6 +830,10 @@ pub struct QueryPlanner {
     /// them would touch far more code than the decision is worth; an atomic
     /// keeps `&self` and stays `Sync` (#710).
     trail_enumeration: std::sync::atomic::AtomicBool,
+    /// The query's `USING` hints and which of them a scan choice has honoured
+    /// (#1675). Set per `plan` call, like `trail_enumeration`, because the scan
+    /// choices sit in builders that never see the `Query`.
+    hints: std::sync::Mutex<(Vec<PlanHint>, HashSet<String>)>,
 }
 
 /// Project a `RETURN` list, building an aggregation when any item aggregates.
@@ -887,6 +891,7 @@ impl QueryPlanner {
             _optimize: true,
             config: PlannerConfig::default(),
             trail_enumeration: std::sync::atomic::AtomicBool::new(false),
+            hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
         }
     }
 
@@ -896,6 +901,7 @@ impl QueryPlanner {
             _optimize: true,
             config,
             trail_enumeration: std::sync::atomic::AtomicBool::new(false),
+            hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
         }
     }
 
@@ -1249,6 +1255,158 @@ impl QueryPlanner {
     }
 
     pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+        if query.hints.is_empty() {
+            self.hints.lock().unwrap().0.clear();
+            return self.plan_unhinted(query, store);
+        }
+        self.check_hints(query, store)?;
+        *self.hints.lock().unwrap() = (query.hints.clone(), HashSet::new());
+        let plan = self.plan_unhinted(query, store);
+        let (hints, honoured) = std::mem::take(&mut *self.hints.lock().unwrap());
+        let plan = plan?;
+        // Mandatory: a hint no scan choice took is an error, as in Neo4j. A
+        // hint quietly dropped reads exactly like one that worked.
+        for h in &hints {
+            if let PlanHint::Index { variable, .. } | PlanHint::Scan { variable, .. } = h {
+                if !honoured.contains(variable) {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "cannot honour the planner hint on `{variable}`: it is not the start \
+                         of a pattern this planner chooses a scan for (it may be bound by an \
+                         earlier clause, or sit inside a shortestPath)"
+                    )));
+                }
+            }
+        }
+        Ok(plan)
+    }
+
+    /// The hints are well-formed against this query and store: each names a
+    /// variable some MATCH binds with that label, and an INDEX hint names an
+    /// index that exists. Checked before planning so the error names the hint.
+    fn check_hints(&self, query: &Query, store: &GraphStore) -> ExecutionResult<()> {
+        let mut bound: HashMap<String, Vec<Label>> = HashMap::new();
+        let clauses = query.match_clauses.iter().chain(query.clauses.iter().filter_map(|c| match c {
+            crate::query::ast::Clause::Match(m) => Some(m),
+            _ => None,
+        }));
+        for mc in clauses {
+            for path in &mc.pattern.paths {
+                let nodes = std::iter::once(&path.start).chain(path.segments.iter().map(|s| &s.node));
+                for n in nodes {
+                    if let Some(v) = &n.variable {
+                        bound.entry(v.clone()).or_default().extend(n.labels.iter().cloned());
+                    }
+                }
+            }
+        }
+        for h in &query.hints {
+            let (vars, label): (Vec<&String>, Option<&Label>) = match h {
+                PlanHint::Index { variable, label, .. } | PlanHint::Scan { variable, label } => {
+                    (vec![variable], Some(label))
+                }
+                PlanHint::Join { variables } => (variables.iter().collect(), None),
+            };
+            for v in vars {
+                let Some(labels) = bound.get(v) else {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "the planner hint names `{v}`, which no MATCH pattern binds"
+                    )));
+                };
+                if let Some(l) = label {
+                    if !labels.contains(l) {
+                        return Err(ExecutionError::PlanningError(format!(
+                            "the planner hint names `{v}:{}`, but the pattern does not give `{v}` that label",
+                            l.as_str()
+                        )));
+                    }
+                }
+            }
+            if let PlanHint::Index { label, properties, .. } = h {
+                for p in properties {
+                    if !store.property_index.has_index(label, p) {
+                        return Err(ExecutionError::PlanningError(format!(
+                            "USING INDEX names :{}({p}), and there is no such index. \
+                             CREATE INDEX ON :{}({p}) creates it.",
+                            label.as_str(),
+                            label.as_str()
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The hinted position in a path to start from, if a hint names one of its
+    /// nodes. `None` leaves the cost-based choice alone.
+    fn hinted_anchor(&self, nodes: &[PathNodeRef], anchor_eligible: bool) -> ExecutionResult<Option<usize>> {
+        let g = self.hints.lock().unwrap();
+        for h in &g.0 {
+            if let PlanHint::Index { variable, .. } | PlanHint::Scan { variable, .. } = h {
+                if let Some(i) = nodes.iter().position(|n| &n.var == variable) {
+                    if i > 0 && !anchor_eligible {
+                        return Err(ExecutionError::PlanningError(format!(
+                            "cannot start from `{variable}` as the hint asks: a named path or \
+                             shortestPath is walked from its first node"
+                        )));
+                    }
+                    return Ok(Some(i));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The scan a hint fixes for `var`, or `None` when no hint names it.
+    ///
+    /// `USING SCAN` is a label scan, bypassing `id()` and every index.
+    /// `USING INDEX` is an index scan over the hinted property, taken from a
+    /// predicate the index can answer; with none, the hint cannot be honoured
+    /// and that is an error. The predicate stays in the filter above, so the
+    /// forced scan can only narrow, never change, the answer.
+    fn hinted_scan(
+        &self,
+        var: &str,
+        labels: &[Label],
+        preds: &[Expression],
+        store: &GraphStore,
+    ) -> ExecutionResult<Option<OperatorBox>> {
+        let mut g = self.hints.lock().unwrap();
+        let hint = g.0.iter().find(|h| matches!(h,
+            PlanHint::Index { variable, .. } | PlanHint::Scan { variable, .. } if variable == var)).cloned();
+        let op: OperatorBox = match hint {
+            None => return Ok(None),
+            Some(PlanHint::Scan { label, .. }) => {
+                let mut ls = labels.to_vec();
+                if !ls.contains(&label) {
+                    ls.push(label);
+                }
+                Box::new(NodeScanOperator::new(var.to_string(), ls))
+            }
+            Some(PlanHint::Index { label, properties, .. }) => {
+                let found = preds.iter().find_map(|p| {
+                    let (_, l, prop, op, val) =
+                        find_index_predicate(var, std::slice::from_ref(&label), std::slice::from_ref(p), store)?;
+                    properties.contains(&prop).then_some((l, prop, op, val))
+                });
+                let Some((l, prop, op, val)) = found else {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "USING INDEX {var}:{}({}) needs a predicate on {var}.{} the index can \
+                         answer -- an equality or a range in WHERE or in the pattern",
+                        label.as_str(),
+                        properties.join(", "),
+                        properties.first().map(String::as_str).unwrap_or("?"),
+                    )));
+                };
+                Box::new(IndexScanOperator::new(var.to_string(), l, prop, op, val))
+            }
+            Some(PlanHint::Join { .. }) => return Ok(None),
+        };
+        g.1.insert(var.to_string());
+        Ok(Some(op))
+    }
+
+    fn plan_unhinted(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
         // Decide once, here, whether a var-length walk must enumerate trails.
         // See `multiplicity_is_observable`: the BFS answers `b, c` where
         // openCypher answers `b, b, c, c`, and enumerating is only affordable
@@ -2060,8 +2218,10 @@ impl QueryPlanner {
                     match_clause,
                     per_match_where[match_idx].as_ref(),
                     &pre_match_var_sets[match_idx],
+                    &known_vars,
                     upstream,
                     &mut anon_counter,
+                    store,
                 )?;
                 operator = Some(current_op);
                 known_vars.extend(new_vars);
@@ -2659,8 +2819,10 @@ impl QueryPlanner {
                         match_clause,
                         per_match_where[match_idx].as_ref(),
                         &match_var_sets[match_idx],
+                        &known_vars,
                         upstream,
                         &mut anon_counter,
+                        store,
                     )?;
                     operator = Some(current_op);
                     known_vars.extend(new_vars);
@@ -3796,11 +3958,176 @@ impl QueryPlanner {
     /// Plan one MATCH clause, keeping its relationships distinct across its
     /// comma-separated patterns (#1233): see `isolate_relationships`.
     fn dispatch_plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
+        let unrolled = Self::unroll_fixed_length_closes(match_clause);
+        let match_clause = unrolled.as_ref().unwrap_or(match_clause);
+        let stitched = Self::stitch_paths(match_clause);
+        let match_clause = stitched.as_ref().unwrap_or(match_clause);
         if let Some((clause, distinct)) = Self::isolate_relationships(match_clause, where_clause) {
             let plan = self.dispatch_plan_match_inner(&clause, where_clause, store)?;
             return Ok(Box::new(FilterOperator::new(plan, distinct)));
         }
         self.dispatch_plan_match_inner(match_clause, where_clause, store)
+    }
+
+    /// `(a)-[:R*3]->(a)` is `(a)-[:R]->()-[:R]->()-[:R]->(a)` (#1614).
+    ///
+    /// A fixed-length relationship pattern is a trail of exactly that many
+    /// hops -- the same relation the single hops describe, with the same
+    /// relationship isomorphism along it. Written as hops, a loop back to its
+    /// own start is a cycle the path builder can see and close with the fused
+    /// join; as one variable-length segment it is a BFS that ends on a bound
+    /// node and tests each path it finds.
+    ///
+    /// Only where it matters and only where it is the same question: the
+    /// segment lands on a variable that occurs elsewhere in the path, names no
+    /// relationship variable (`[r:R*3]` binds `r` to a list, which three hops
+    /// cannot), and the path carries no written restrictor or selector. The
+    /// hop count is capped so an absurd exact length does not build an absurd
+    /// plan. Inline relationship properties apply to every hop, as they did to
+    /// the segment.
+    fn unroll_fixed_length_closes(match_clause: &MatchClause) -> Option<MatchClause> {
+        const MAX_HOPS: usize = 8;
+        let occurs_elsewhere = |path: &PathPattern, seg_idx: usize, var: &str| {
+            (path.start.variable.as_deref() == Some(var))
+                || path.segments.iter().enumerate().any(|(i, s)| i != seg_idx && s.node.variable.as_deref() == Some(var))
+        };
+        let unrollable = |path: &PathPattern, seg_idx: usize, seg: &PathSegment| -> Option<usize> {
+            if !matches!(path.path_type, PathType::Normal) || path.restrictor_explicit || !matches!(path.selector, PathSelector::All) {
+                return None;
+            }
+            let len = seg.edge.length.as_ref()?;
+            let k = len.min?;
+            if len.max != Some(k) || k == 0 || k > MAX_HOPS || seg.edge.variable.is_some() {
+                return None;
+            }
+            let var = seg.node.variable.as_deref()?;
+            occurs_elsewhere(path, seg_idx, var).then_some(k)
+        };
+        let any = match_clause.pattern.paths.iter().any(|p| {
+            p.segments.iter().enumerate().any(|(i, s)| unrollable(p, i, s).is_some())
+        });
+        if !any {
+            return None;
+        }
+        let mut clause = match_clause.clone();
+        for path in &mut clause.pattern.paths {
+            let original = path.clone();
+            let mut segments = Vec::with_capacity(original.segments.len());
+            for (i, seg) in original.segments.iter().enumerate() {
+                match unrollable(&original, i, seg) {
+                    Some(k) => {
+                        let mut hop = seg.edge.clone();
+                        hop.length = None;
+                        for _ in 1..k {
+                            segments.push(PathSegment {
+                                edge: hop.clone(),
+                                node: NodePattern { variable: None, labels: Vec::new(), properties: None, property_exprs: None },
+                            });
+                        }
+                        segments.push(PathSegment { edge: hop, node: seg.node.clone() });
+                    }
+                    None => segments.push(seg.clone()),
+                }
+            }
+            path.segments = segments;
+        }
+        Some(clause)
+    }
+
+    /// Comma-separated patterns that meet end to end are one path (#1614).
+    ///
+    /// `MATCH (a)-[:R]->(b), (b)-[:R]->(c), (c)-[:R]->(a)` and
+    /// `MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a)` ask the same question: the
+    /// segments are the same, and relationship isomorphism holds across a
+    /// clause whichever way it is punctuated. Planned apart they were joined by
+    /// hash, and the cycle they describe was never visible to the path builder
+    /// -- so the fused close it picks for the second phrasing was never offered
+    /// to the first. Joined here, before any path is planned, both get it.
+    ///
+    /// Two paths are joined where the end of one is the start of the other, in
+    /// either orientation; a path read backwards is the same relation with its
+    /// directions flipped. The node pattern at the join is kept from the path
+    /// that is read first, so the one dropped may carry nothing the kept one
+    /// does not: `propagate_shared_variable_labels` has usually copied the
+    /// kept one's labels onto it by now. Only plain paths take part -- no path variable, no
+    /// shortestPath, no written restrictor or selector, no variable-length
+    /// segment -- because each of those binds something to the path as
+    /// written, and a stitched path is not the path that was written.
+    ///
+    /// `None` when nothing joins, so the common case clones nothing.
+    fn stitch_paths(match_clause: &MatchClause) -> Option<MatchClause> {
+        let paths = &match_clause.pattern.paths;
+        if paths.len() < 2 {
+            return None;
+        }
+        fn plain(p: &PathPattern) -> bool {
+            p.path_variable.is_none()
+                && matches!(p.path_type, PathType::Normal)
+                && !p.restrictor_explicit
+                && matches!(p.selector, PathSelector::All)
+                && !p.segments.is_empty()
+                && p.segments.iter().all(|s| s.edge.length.is_none())
+        }
+        /// `dropped` constrains nothing that `kept` does not already.
+        fn covered(dropped: &NodePattern, kept: &NodePattern) -> bool {
+            dropped.labels.iter().all(|l| kept.labels.contains(l))
+                && dropped.properties.iter().flat_map(|p| p.iter()).all(|(k, v)| {
+                    kept.properties.as_ref().is_some_and(|d| d.get(k) == Some(v))
+                })
+                && dropped.property_exprs.as_ref().is_none_or(|p| p.is_empty())
+        }
+        fn end_node(p: &PathPattern) -> &NodePattern {
+            p.segments.last().map(|s| &s.node).unwrap_or(&p.start)
+        }
+        /// `a` then `b`, where `a` ends on the variable `b` starts on and `b`'s
+        /// start pattern constrains nothing `a`'s end does not.
+        fn join(a: &PathPattern, b: &PathPattern) -> Option<PathPattern> {
+            let shared = end_node(a).variable.as_ref()?;
+            if b.start.variable.as_ref() != Some(shared) || !covered(&b.start, end_node(a)) {
+                return None;
+            }
+            // `(p)-[r]->(q), (q)-[r]->(s)` names one relationship twice, which
+            // means the same relationship; as two hops of one path it would
+            // mean two distinct ones (#684), so it stays two paths.
+            let names = |p: &PathPattern| {
+                p.segments.iter().filter_map(|s| s.edge.variable.clone()).collect::<HashSet<_>>()
+            };
+            if !names(a).is_disjoint(&names(b)) {
+                return None;
+            }
+            let mut out = a.clone();
+            out.segments.extend(b.segments.iter().cloned());
+            Some(out)
+        }
+
+        let mut paths = paths.clone();
+        let mut changed = false;
+        'again: loop {
+            for i in 0..paths.len() {
+                for j in 0..paths.len() {
+                    if i == j || !plain(&paths[i]) || !plain(&paths[j]) {
+                        continue;
+                    }
+                    let merged = join(&paths[i], &paths[j])
+                        .or_else(|| join(&paths[i], &reversed_path(&paths[j])))
+                        .or_else(|| join(&reversed_path(&paths[j]), &paths[i]));
+                    if let Some(merged) = merged {
+                        let (lo, hi) = (i.min(j), i.max(j));
+                        paths.remove(hi);
+                        paths[lo] = merged;
+                        changed = true;
+                        continue 'again;
+                    }
+                }
+            }
+            break;
+        }
+        if !changed {
+            return None;
+        }
+        let mut clause = match_clause.clone();
+        clause.pattern.paths = paths;
+        Some(clause)
     }
 
     /// Relationship isomorphism between the comma-separated patterns of one
@@ -4111,15 +4438,18 @@ impl QueryPlanner {
             // reverses those segments, so the restriction is no longer needed.
             let anchor_eligible = path.path_variable.is_none()
                 && !matches!(path.path_type, PathType::Shortest | PathType::AllShortest);
-            let anchor_idx = if anchor_eligible {
-                choose_anchor_index(path, &path_nodes, &per_path_preds[path_idx], store)
-            } else {
-                0
+            let anchor_idx = match self.hinted_anchor(&path_nodes, anchor_eligible)? {
+                // A `USING` hint names where to start (#1675).
+                Some(i) => i,
+                None if anchor_eligible => {
+                    choose_anchor_index(path, &path_nodes, &per_path_preds[path_idx], store)
+                }
+                None => 0,
             };
 
             let (mut path_operator, deferred_predicates): (OperatorBox, Vec<Expression>) =
                 if anchor_eligible && anchor_idx > 0 {
-                    self.build_path_from_anchor(path, &path_nodes, anchor_idx, &per_path_preds[path_idx], store)
+                    self.build_path_from_anchor(path, &path_nodes, anchor_idx, &per_path_preds[path_idx], store)?
                 } else {
             // Merge inline start node properties into predicates for index selection.
             // Without this, {prop: val} in MATCH patterns falls back to NodeScan + Filter
@@ -4140,7 +4470,10 @@ impl QueryPlanner {
             // Optimization: Check for index usage (using this path's assigned predicates).
             // Recognizes both `n.prop OP literal` and `literal OP n.prop` operand orders.
             let mut remaining_predicates: Vec<Expression> = per_path_preds[path_idx].clone();
-            let mut path_operator: OperatorBox = if let Some((idx, ids)) =
+            let hinted = self.hinted_scan(&start_var, &path.start.labels, &remaining_predicates, store)?;
+            let mut path_operator: OperatorBox = if let Some(op) = hinted {
+                op
+            } else if let Some((idx, ids)) =
                 find_id_predicate(&start_var, &remaining_predicates)
             {
                 // `id()` before any index: it is unique by construction, so
@@ -4159,8 +4492,18 @@ impl QueryPlanner {
             } else if let Some((idx, label, property, op, val)) =
                 find_index_predicate(&start_var, &path.start.labels, &remaining_predicates, store)
             {
+                // Before the remove, so the index it skips is still the scan's.
+                let other_end =
+                    range_other_end(&start_var, &property, &op, &val, &remaining_predicates, idx);
                 remaining_predicates.remove(idx);
-                Box::new(IndexScanOperator::new(start_var.clone(), label, property, op, val))
+                // The range conjunct stays in the WHERE filter (a range scan
+                // answers none), so the scan's bounds may be loose.
+                let scan = IndexScanOperator::new(start_var.clone(), label, property, op, val)
+                    .with_loose_bounds();
+                Box::new(match other_end {
+                    Some(end) => scan.with_other_end(end),
+                    None => scan,
+                })
             } else {
                 Box::new(NodeScanOperator::new(
                     start_var.clone(),
@@ -4310,8 +4653,30 @@ impl QueryPlanner {
                 // earlier clause — the rule is per-clause.
                 let track_edges = path.segments.len() > 1;
                 let mut first_expand = true;
+                // A closing segment the previous expand has already bound as a
+                // fused cyclic close (#1614). What is left of it is its
+                // bookkeeping: the relationship variable it names, a filter on
+                // that relationship's inline properties, and the walk
+                // continuing from the node it closed onto.
+                let mut fused_close: Option<FusedCloseSegment> = None;
                 for (seg_idx, segment) in path.segments.iter().enumerate() {
                     let target_var = path_nodes[seg_idx + 1].var.clone();
+
+                    if let Some(close) = fused_close.take() {
+                        if let Some(predicate) = close.edge_predicate {
+                            path_operator = Box::new(FilterOperator::new(path_operator, predicate));
+                        }
+                        if let Some(ev) = &segment.edge.variable {
+                            bound.insert(ev.clone());
+                        }
+                        path_operator = Self::apply_ready_predicates(
+                            path_operator,
+                            &mut deferred_predicates,
+                            &bound,
+                        );
+                        current_var = target_var;
+                        continue;
+                    }
 
                     // An inline relationship property constraint has to be
                     // applied; it used to be dropped, so
@@ -4527,23 +4892,41 @@ impl QueryPlanner {
                                     next.edge.direction.clone(),
                                 );
                             }
+                            // The fused form of the same close (#1614): this
+                            // expand binds the closing relationship too, so
+                            // the closing segment needs no expand into a
+                            // synthetic name and no equality filter. The
+                            // candidate set is the intersection of the two
+                            // adjacency lists, and every element of it is a
+                            // match -- the worst-case-optimal join for a
+                            // cycle, which PERF-07 asks the planner to pick
+                            // by itself.
+                            if let Some((close_edge_var, predicate)) = self.fused_close_for(
+                                segment, next, seg_idx + 1, next_target, &target_var, &current_var, &bound,
+                                &path_nodes, seg_idx + 2,
+                            ) {
+                                if expand.closes_onto().is_none() {
+                                    expand = expand.with_co_neighbour(
+                                        next_target.clone(),
+                                        next.edge.direction.clone(),
+                                    );
+                                }
+                                expand = expand.with_fused_close(close_edge_var);
+                                fused_close = Some(FusedCloseSegment { edge_predicate: predicate });
+                            }
                         }
                     }
                     // A selective equality on the far side of the expansion —
                     // LDBC IC11's `org.name = "..."` — applied during the walk
                     // rather than to the rows it produces (#656).
-                    let pushed = Self::target_equality_props(&deferred_predicates, &target_var);
-                    if !pushed.is_empty() {
-                        // Resolved to ids where possible: the property check
-                        // costs a node fetch per candidate edge and this costs
-                        // a hash lookup (#665).
-                        if let Some(ids) =
-                            self.resolve_target_ids(&segment.node.labels, &pushed, store)
-                        {
-                            expand = expand.with_target_ids(ids);
-                        }
-                        expand = expand.with_target_props(pushed);
-                    }
+                    expand = self.push_hop_target_props(
+                        expand,
+                        &target_var,
+                        &segment.node.labels,
+                        segment.node.properties.as_ref(),
+                        &deferred_predicates,
+                        store,
+                    );
                     // `c.id > b.id` with `b` already bound: the same idea
                     // against a value that changes per row (#1069). Not for a
                     // self-reference, whose target is the synthetic name.
@@ -4687,6 +5070,47 @@ impl QueryPlanner {
     /// rather than a dropped row. Every other pushdown in this file that
     /// removed its filter had to be reasoned about for null and type
     /// coercion; this one does not.
+    /// The single-hop form of [`Self::push_varlen_target_props`]: equalities
+    /// the target must satisfy, from the WHERE (#656) **and from the node
+    /// pattern itself**, applied during the walk.
+    ///
+    /// `(p2)-[:HAS_TAG]->(t2:Tag {name: "Afghanistan"})` carried its property
+    /// as a filter over the expand's rows, so the walk visited every tag of
+    /// every post and built a row for each, to keep one in sixteen thousand.
+    /// The WHERE spelling of the same constraint had been pushed into the walk
+    /// since #656 and the var-length spelling since #1063; this one was the
+    /// gap, and on LDBC BI-9 it was the whole query (#1613). Resolved to an id
+    /// set where an index answers, so a candidate is rejected by a hash
+    /// lookup rather than a node fetch (#665). Additive: the filter above
+    /// stays, so a pushdown that is too narrow costs work, never rows.
+    #[allow(clippy::too_many_arguments)]
+    fn push_hop_target_props(
+        &self,
+        mut expand: ExpandOperator,
+        target_var: &str,
+        labels: &[Label],
+        properties: Option<&HashMap<String, PropertyValue>>,
+        deferred: &[Expression],
+        store: &GraphStore,
+    ) -> ExpandOperator {
+        let mut pushed = Self::target_equality_props(deferred, target_var);
+        if let Some(props) = properties {
+            // Deterministic: `HashMap` iteration order is not, and the
+            // resolved set depends on which property is consulted first.
+            let mut inline: Vec<(String, PropertyValue)> =
+                props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            inline.sort_by(|a, b| a.0.cmp(&b.0));
+            pushed.extend(inline);
+        }
+        if pushed.is_empty() {
+            return expand;
+        }
+        if let Some(ids) = self.resolve_target_ids(labels, &pushed, store) {
+            expand = expand.with_target_ids(ids);
+        }
+        expand.with_target_props(pushed)
+    }
+
     fn push_varlen_target_props(
         &self,
         expand: VarLengthExpandOperator,
@@ -4877,6 +5301,73 @@ impl QueryPlanner {
     /// later filter would have removed. `OPTIONAL MATCH` is not affected --
     /// this runs inside a single path of a single MATCH, and the outer join is
     /// built above it.
+    /// Whether the segment after `segment` (in walk order) closes the pattern
+    /// back onto a variable already bound, in a form the expand binding
+    /// `segment`'s target can take on as a fused cyclic close (#1614).
+    ///
+    /// `next_target` is the node the closing segment lands on, `close_dir` the
+    /// direction the close runs in *walk* order (target -> next_target): as
+    /// written when walking forward, reversed when walking back from an
+    /// anchor. Returns the closing relationship's variable and the filter on
+    /// its inline properties, which the caller applies once the fused expand
+    /// has bound it.
+    ///
+    /// Equal type lists, empty included: an untyped close walks the candidate's
+    /// adjacency instead of the type index, which is what the expand it
+    /// replaces did. The fused operator does not re-check the closing node's
+    /// labels or properties, so it may carry only what every other occurrence
+    /// of the variable in the path carries -- whichever of those bound it has
+    /// checked them. `propagate_shared_variable_labels` copies a variable's
+    /// labels onto its bare occurrences, which is how `(a:P)-->(b)-->(a)`
+    /// arrives here. Not onto the source: every candidate neighbours it by
+    /// construction, and a second edge back to it is what the closing hop
+    /// still has to find.
+    #[allow(clippy::too_many_arguments)]
+    fn fused_close_for(
+        &self,
+        segment: &PathSegment,
+        next: &PathSegment,
+        next_seg_idx: usize,
+        next_target: &str,
+        target_var: &str,
+        current_var: &str,
+        bound: &HashSet<String>,
+        nodes: &[PathNodeRef],
+        closing_node_idx: usize,
+    ) -> Option<(Option<String>, Option<Expression>)> {
+        let closes_onto_bound =
+            bound.contains(next_target) && next_target != target_var && next_target != current_var;
+        let types_equal = next.edge.types.len() == segment.edge.types.len()
+            && next
+                .edge
+                .types
+                .iter()
+                .zip(segment.edge.types.iter())
+                .all(|(a, b)| a.as_str() == b.as_str());
+        let others = || {
+            nodes.iter().enumerate().filter(|(i, n)| *i != closing_node_idx && n.var == next_target).map(|(_, n)| n)
+        };
+        let checked_elsewhere = others().count() > 0
+            && next.node.labels.iter().all(|l| others().all(|n| n.labels.contains(l)))
+            && next.node.properties.iter().flat_map(|p| p.iter()).all(|(k, v)| {
+                others().all(|n| n.properties.as_ref().is_some_and(|d| d.get(k) == Some(v)))
+            });
+        if !(closes_onto_bound
+            && types_equal
+            && next.edge.length.is_none()
+            && segment.edge.length.is_none()
+            && checked_elsewhere)
+        {
+            return None;
+        }
+        let close_filter = self.edge_property_filter(&next.edge, next_seg_idx);
+        let close_edge_var = match &close_filter {
+            Some((var, _)) => Some(var.clone()),
+            None => next.edge.variable.clone(),
+        };
+        Some((close_edge_var, close_filter.map(|(_, p)| p)))
+    }
+
     fn apply_ready_predicates(
         operator: OperatorBox,
         deferred: &mut Vec<Expression>,
@@ -4923,7 +5414,7 @@ impl QueryPlanner {
         anchor_idx: usize,
         path_preds: &[Expression],
         store: &GraphStore,
-    ) -> (OperatorBox, Vec<Expression>) {
+    ) -> ExecutionResult<(OperatorBox, Vec<Expression>)> {
         let anchor = &nodes[anchor_idx];
         let anchor_var = anchor.var.clone();
 
@@ -4967,7 +5458,10 @@ impl QueryPlanner {
 
         // `id()` first: it is unique by construction, so it beats any index
         // and needs no statistics to know that (#538).
-        let mut path_operator: OperatorBox = if let Some((idx, ids)) =
+        let hinted = self.hinted_scan(&anchor_var, &anchor.labels, &candidates, store)?;
+        let mut path_operator: OperatorBox = if let Some(op) = hinted {
+            op
+        } else if let Some((idx, ids)) =
             find_id_predicate(&anchor_var, &candidates)
         {
             candidates.remove(idx);
@@ -4978,8 +5472,14 @@ impl QueryPlanner {
         } else if let Some((idx, label, property, op, val)) =
             find_index_predicate(&anchor_var, &anchor.labels, &candidates, store)
         {
+            let other_end = range_other_end(&anchor_var, &property, &op, &val, &candidates, idx);
             candidates.remove(idx);
-            Box::new(IndexScanOperator::new(anchor_var.clone(), label, property, op, val))
+            let scan = IndexScanOperator::new(anchor_var.clone(), label, property, op, val)
+                .with_loose_bounds();
+            Box::new(match other_end {
+                Some(end) => scan.with_other_end(end),
+                None => scan,
+            })
         } else {
             Box::new(NodeScanOperator::new(anchor_var.clone(), anchor.labels.clone()))
         };
@@ -5002,9 +5502,24 @@ impl QueryPlanner {
         // the anchor is now the traversal source, so an originally-outgoing edge from
         // the earlier node must be read as incoming from the anchor's perspective.
         let mut current_var = anchor_var.clone();
+        // A closing segment already bound by a fused cyclic close (#1614); see
+        // the main path builder. Both walks here can meet one.
+        let mut fused_close: Option<FusedCloseSegment> = None;
         for seg_idx in (0..anchor_idx).rev() {
             let segment = &path.segments[seg_idx];
             let target = &nodes[seg_idx];
+            if let Some(close) = fused_close.take() {
+                if let Some(predicate) = close.edge_predicate {
+                    path_operator = Box::new(FilterOperator::new(path_operator, predicate));
+                }
+                if let Some(ev) = &segment.edge.variable {
+                    bound.insert(ev.clone());
+                }
+                path_operator =
+                    Self::apply_ready_predicates(path_operator, &mut deferred_predicates, &bound);
+                current_var = target.var.clone();
+                continue;
+            }
             // Same rule as the main path builder: an inline relationship
             // property constraint is applied rather than dropped (#649). Which
             // of these builders runs depends on where the cheapest anchor is,
@@ -5131,6 +5646,39 @@ impl QueryPlanner {
                     expand = expand.with_edge_isolation(first_expand);
                     first_expand = false;
                 }
+                // Walking back, the next segment is the one written before
+                // this, and its close runs against its written direction.
+                if !self_ref && seg_idx > 0 {
+                    let next = &path.segments[seg_idx - 1];
+                    let next_target = &nodes[seg_idx - 1].var;
+                    if let Some((close_edge_var, predicate)) = self.fused_close_for(
+                        segment, next, seg_idx - 1, next_target, &target.var, &current_var, &bound,
+                        nodes, seg_idx - 1,
+                    ) {
+                        let close_dir = match next.edge.direction {
+                            Direction::Outgoing => Direction::Incoming,
+                            Direction::Incoming => Direction::Outgoing,
+                            Direction::Both => Direction::Both,
+                        };
+                        expand = expand
+                            .with_co_neighbour(next_target.clone(), close_dir)
+                            .with_fused_close(close_edge_var);
+                        fused_close = Some(FusedCloseSegment { edge_predicate: predicate });
+                    }
+                }
+                // A selective equality on the far side of the expansion,
+                // applied during the walk (#656, #1613). Not for a
+                // self-reference, whose target is the synthetic name.
+                if !self_ref {
+                    expand = self.push_hop_target_props(
+                        expand,
+                        &target.var,
+                        &target.labels,
+                        target.properties.as_ref(),
+                        &deferred_predicates,
+                        store,
+                    );
+                }
                 let expanded: OperatorBox = if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone()))
                 } else {
@@ -5175,9 +5723,22 @@ impl QueryPlanner {
 
         // Walk forward toward later-written nodes using the written edge direction.
         let mut current_var = anchor_var;
+        let mut fused_close: Option<FusedCloseSegment> = None;
         for seg_idx in anchor_idx..path.segments.len() {
             let segment = &path.segments[seg_idx];
             let target = &nodes[seg_idx + 1];
+            if let Some(close) = fused_close.take() {
+                if let Some(predicate) = close.edge_predicate {
+                    path_operator = Box::new(FilterOperator::new(path_operator, predicate));
+                }
+                if let Some(ev) = &segment.edge.variable {
+                    bound.insert(ev.clone());
+                }
+                path_operator =
+                    Self::apply_ready_predicates(path_operator, &mut deferred_predicates, &bound);
+                current_var = target.var.clone();
+                continue;
+            }
             // Same rule as the main path builder: an inline relationship
             // property constraint is applied rather than dropped (#649). Which
             // of these builders runs depends on where the cheapest anchor is,
@@ -5272,6 +5833,33 @@ impl QueryPlanner {
                     expand = expand.with_edge_isolation(first_expand);
                     first_expand = false;
                 }
+                if !self_ref {
+                    if let Some(next) = path.segments.get(seg_idx + 1) {
+                        let next_target = &nodes[seg_idx + 2].var;
+                        if let Some((close_edge_var, predicate)) = self.fused_close_for(
+                            segment, next, seg_idx + 1, next_target, &target.var, &current_var, &bound,
+                            nodes, seg_idx + 2,
+                        ) {
+                            expand = expand
+                                .with_co_neighbour(next_target.clone(), next.edge.direction.clone())
+                                .with_fused_close(close_edge_var);
+                            fused_close = Some(FusedCloseSegment { edge_predicate: predicate });
+                        }
+                    }
+                }
+                // A selective equality on the far side of the expansion,
+                // applied during the walk (#656, #1613). Not for a
+                // self-reference, whose target is the synthetic name.
+                if !self_ref {
+                    expand = self.push_hop_target_props(
+                        expand,
+                        &target.var,
+                        &target.labels,
+                        target.properties.as_ref(),
+                        &deferred_predicates,
+                        store,
+                    );
+                }
                 let expanded: OperatorBox = if !target.labels.is_empty() {
                     Box::new(expand.with_target_labels(target.labels.clone()))
                 } else {
@@ -5314,7 +5902,7 @@ impl QueryPlanner {
             current_var = target.var.clone();
         }
 
-        (path_operator, deferred_predicates)
+        Ok((path_operator, deferred_predicates))
     }
 
     /// Build a filter expression from node properties.
@@ -6731,6 +7319,33 @@ fn propagate_shared_variable_labels(clauses: &[MatchClause]) -> Vec<MatchClause>
     result
 }
 
+/// What remains of a closing segment after a fused cyclic close bound it
+/// (#1614): a filter on the closing relationship's inline properties, if any.
+struct FusedCloseSegment {
+    edge_predicate: Option<Expression>,
+}
+
+/// The same path read from its end: directions flipped, nodes shifted one
+/// segment along. The pairs it matches are the ones the written path matches.
+fn reversed_path(p: &PathPattern) -> PathPattern {
+    let mut out = p.clone();
+    out.start = p.segments.last().map(|s| s.node.clone()).unwrap_or_else(|| p.start.clone());
+    out.segments = (0..p.segments.len())
+        .rev()
+        .map(|k| {
+            let mut edge = p.segments[k].edge.clone();
+            edge.direction = match edge.direction {
+                Direction::Outgoing => Direction::Incoming,
+                Direction::Incoming => Direction::Outgoing,
+                Direction::Both => Direction::Both,
+            };
+            let node = if k == 0 { p.start.clone() } else { p.segments[k - 1].node.clone() };
+            PathSegment { edge, node }
+        })
+        .collect();
+    out
+}
+
 /// A single node within a path pattern, resolved to a concrete variable name
 /// (anonymous nodes get an auto-generated `_anon_N` name). Used by anchor
 /// selection to consider indexing/scanning any node in the pattern, not just
@@ -6743,6 +7358,114 @@ struct PathNodeRef {
 
 /// Flip a comparison operator to normalize a reversed-operand predicate.
 /// E.g. `5 < n.age` is equivalent to `n.age > 5`, so `Lt` flips to `Gt`.
+/// A literal, or `+`, `-`, `*` over literals, folded to its value (#1482).
+///
+/// Parameters arrive as literals, so `p.id < $k + 50` reaches the planner as
+/// `Integer(k) + Integer(50)`: a constant the index could use, written as an
+/// expression it could not. Only integer and float arithmetic, with integer
+/// overflow declining rather than wrapping; anything else is `None` and the
+/// predicate stays what it was.
+fn fold_constant(expr: &Expression) -> Option<PropertyValue> {
+    match expr {
+        Expression::Literal(v) => Some(v.clone()),
+        Expression::Binary { left, op, right }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
+        {
+            let (l, r) = (fold_constant(left)?, fold_constant(right)?);
+            use PropertyValue::{Float, Integer};
+            Some(match (l, r) {
+                (Integer(a), Integer(b)) => Integer(match op {
+                    BinaryOp::Add => a.checked_add(b)?,
+                    BinaryOp::Sub => a.checked_sub(b)?,
+                    _ => a.checked_mul(b)?,
+                }),
+                (a, b) => {
+                    let f = |v: PropertyValue| match v {
+                        Integer(i) => Some(i as f64),
+                        Float(x) => Some(x),
+                        _ => None,
+                    };
+                    let (a, b) = (f(a)?, f(b)?);
+                    Float(match op {
+                        BinaryOp::Add => a + b,
+                        BinaryOp::Sub => a - b,
+                        _ => a * b,
+                    })
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The opposite end of a range index scan on `var.property`, from another
+/// conjunct in `preds` (#1482). `scan_op` is the scan's own, already-normalised
+/// op; `skip` is the conjunct it came from.
+///
+/// The returned bound is **inclusive and widened across the numeric tie**,
+/// because the conjunct keeps its filter and the bound may only drop rows that
+/// filter drops. `PropertyValue::cmp` orders `Integer(n)` just below
+/// `Float(n as f64)`, so an upper bound of `150` is taken as `150.0` (the
+/// larger of the pair) and a lower bound of `100.0` as `100`. Declines a value
+/// in a different type bucket from the scan's own -- the B-tree orders buckets,
+/// not values, across them -- and an integer too large for an `f64` to hold
+/// exactly.
+fn range_other_end(
+    var: &str,
+    property: &str,
+    scan_op: &BinaryOp,
+    scan_value: &PropertyValue,
+    preds: &[Expression],
+    skip: usize,
+) -> Option<OtherEnd> {
+    use PropertyValue::{Float, Integer};
+    let numeric = |v: &PropertyValue| matches!(v, Integer(_) | Float(_));
+    let same_bucket = |v: &PropertyValue| {
+        (numeric(v) && numeric(scan_value))
+            || std::mem::discriminant(v) == std::mem::discriminant(scan_value)
+    };
+    let want_upper = matches!(scan_op, BinaryOp::Gt | BinaryOp::Ge);
+    let want_lower = matches!(scan_op, BinaryOp::Lt | BinaryOp::Le);
+    if !(want_upper || want_lower) {
+        return None;
+    }
+    for (i, pred) in preds.iter().enumerate() {
+        if i == skip {
+            continue;
+        }
+        let Expression::Binary { left, op, right } = pred else { continue };
+        let (op, value) = match (left.as_ref(), right.as_ref()) {
+            (Expression::Property { variable, property: p }, other)
+                if variable == var && p == property =>
+            {
+                (op.clone(), fold_constant(other))
+            }
+            (other, Expression::Property { variable, property: p })
+                if variable == var && p == property =>
+            {
+                (flip_comparison_op(op), fold_constant(other))
+            }
+            _ => continue,
+        };
+        let Some(value) = value else { continue };
+        if !same_bucket(&value) {
+            continue;
+        }
+        match op {
+            BinaryOp::Lt | BinaryOp::Le if want_upper => {
+                let Some(hi) = numeric_tie_end(&value, true) else { continue };
+                return Some(OtherEnd::AtMost(hi));
+            }
+            BinaryOp::Gt | BinaryOp::Ge if want_lower => {
+                let Some(lo) = numeric_tie_end(&value, false) else { continue };
+                return Some(OtherEnd::AtLeast(lo));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn flip_comparison_op(op: &BinaryOp) -> BinaryOp {
     match op {
         BinaryOp::Lt => BinaryOp::Gt,
@@ -8722,6 +9445,7 @@ impl QueryPlanner {
         predicates: Vec<Expression>,
         upstream: OperatorBox,
         anon_counter: &mut usize,
+        store: &GraphStore,
     ) -> ExecutionResult<(OperatorBox, HashSet<String>)> {
         let mut path_operator = upstream;
         let mut current_var = start_var.to_string();
@@ -8776,6 +9500,18 @@ impl QueryPlanner {
                 if !compared.is_empty() {
                     expand = expand.with_target_comparisons(compared);
                 }
+                // And the equality pushdown (#656), which this builder never
+                // had: BI-9's second clause is planned here, and its
+                // `(t2:Tag {name: "Afghanistan"})` was a filter over every
+                // tag of every post in the forum (#1613).
+                expand = self.push_hop_target_props(
+                    expand,
+                    &target_var,
+                    &segment.node.labels,
+                    segment.node.properties.as_ref(),
+                    &deferred_predicates,
+                    store,
+                );
             }
 
             path_operator = if !segment.node.labels.is_empty() {
@@ -8847,8 +9583,10 @@ impl QueryPlanner {
         match_clause: &MatchClause,
         where_clause: Option<&WhereClause>,
         clause_vars: &HashSet<String>,
+        known_vars: &HashSet<String>,
         upstream: OperatorBox,
         anon_counter: &mut usize,
+        store: &GraphStore,
     ) -> ExecutionResult<(OperatorBox, HashSet<String>)> {
         let preds = where_clause
             .map(|wc| flatten_and_predicates(&wc.predicate))
@@ -8862,6 +9600,20 @@ impl QueryPlanner {
         let mut new_vars = HashSet::new();
 
         for path in &match_clause.pattern.paths {
+            // A path written towards the bound variable is walked from it:
+            // `MATCH (liker:Person)-[:LIKES]->(p)` with `p` bound is
+            // `(p)<-[:LIKES]-(liker)`, the same relation read the other way.
+            // Planned as written it scanned every `:Person` and hash-joined
+            // back to the few posts already in hand -- BI-6 and BI-8 at SF10
+            // (#1613). `can_pushdown_match` admits exactly these.
+            let reversed;
+            let path = match &path.start.variable {
+                Some(v) if known_vars.contains(v) => path,
+                _ => {
+                    reversed = reversed_path(path);
+                    &reversed
+                }
+            };
             let start_var = path
                 .start
                 .variable
@@ -8896,6 +9648,7 @@ impl QueryPlanner {
                 path_preds,
                 current_op,
                 anon_counter,
+                store,
             )?;
             current_op = expanded_op;
             new_vars.extend(path_vars);
@@ -9248,13 +10001,34 @@ impl QueryPlanner {
         }
 
         for path in &match_clause.pattern.paths {
-            // Must have a start variable that's bound
-            let start_var = match &path.start.variable {
-                Some(v) => v,
-                None => return false,
-            };
-            if !known_vars.contains(start_var) {
-                return false;
+            // Must have a start variable that's bound -- or, failing that, an
+            // end variable that is, with every single-hop segment and no path
+            // variable, so the path can be walked from its end instead
+            // (#1613; `plan_pushed_down_match` does the reversal).
+            let start_bound = path.start.variable.as_ref().is_some_and(|v| known_vars.contains(v));
+            if !start_bound {
+                let end_bound = path
+                    .segments
+                    .last()
+                    .and_then(|s| s.node.variable.as_ref())
+                    .is_some_and(|v| known_vars.contains(v));
+                let plain = path.path_variable.is_none()
+                    && matches!(path.path_type, PathType::Normal)
+                    && path.segments.iter().all(|s| s.edge.length.is_none());
+                if !(end_bound && plain) {
+                    return false;
+                }
+                // The other endpoint and everything between must be new, by
+                // the same argument as below.
+                let interior_bound = path.start.variable.as_ref().is_some_and(|v| known_vars.contains(v))
+                    || path.segments[..path.segments.len() - 1]
+                        .iter()
+                        .any(|s| s.node.variable.as_ref().is_some_and(|v| known_vars.contains(v)))
+                    || path.segments.iter().any(|s| s.edge.variable.as_ref().is_some_and(|v| known_vars.contains(v)));
+                if interior_bound {
+                    return false;
+                }
+                continue;
             }
             // ...and nothing *after* the start may be bound already. The
             // pushdown chains expands, which bind their target; a target that
@@ -10062,6 +10836,7 @@ mod tests {
             show_constraints: false,
             profile: false,
             analyze: false,
+            hints: Vec::new(),
             params: std::collections::HashMap::new(),
             foreach_clause: None,
             unwind_clause: None,

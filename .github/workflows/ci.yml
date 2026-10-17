@@ -39,13 +39,24 @@ jobs:
   # 40% of recent PRs (12 of the last 30: 7 docs-only, 5 workflow-only) changed
   # no Rust at all and still ran the full nine-check, two-architecture matrix.
   #
-  # The filter is a JOB CONDITION, deliberately, not `paths:` on the trigger.
-  # `test (ubuntu-latest)`, `test (ubuntu-24.04-arm)` and
-  # `supply-chain (cargo-deny)` are required status checks: a job that GitHub
-  # SKIPS satisfies the requirement, while a workflow that `paths:` filters out
-  # never reports at all and leaves the check pending, so the PR can never
-  # merge. Same intent as conformance.yml's `paths:`, which is safe there only
-  # because none of its checks are required.
+  # The filter is a JOB CONDITION, deliberately, not `paths:` on the trigger. A
+  # workflow that `paths:` filters out does not report its checks as skipped --
+  # it does not report them at all -- so a required context there can never be
+  # satisfied and the pull request can never merge. That is why the conformance
+  # job moved into this file rather than keeping its own `paths:`-filtered
+  # workflow (#1865).
+  #
+  # A job condition is necessary and was NOT sufficient on its own, which this
+  # comment used to get wrong. It claimed a job GitHub skips satisfies its
+  # requirement. That holds for a job with a FIXED name -- `supply-chain
+  # (cargo-deny)` reported, skipped, under exactly its required name -- and
+  # fails for a MATRIX job, because an `if:`-skipped matrix is never expanded
+  # and reports as `test (${{ matrix.os }})`, so the required
+  # `test (ubuntu-latest)` never appeared at all. #1860 was MERGEABLE and
+  # permanently BLOCKED for five days on precisely that.
+  #
+  # The single required context is now `ci-ok`, which has a fixed name and
+  # `if: always()`, so it reports on every run whatever these jobs did.
   #
   # The list below is an ALLOWLIST of paths that cannot affect a build, and
   # anything unrecognised runs the full suite. Erring towards running is the
@@ -56,6 +67,20 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      # A separate question from `code`. A storage-layer change runs the test
+      # matrix and cannot move a path-pattern verdict; a change under
+      # `tools/conformance/` cannot affect the test matrix. Asking one question
+      # for both would run an eleven-minute suite on every Rust edit, or skip it
+      # on the ones that can actually move it.
+      conformance: ${{ steps.filter.outputs.conformance }}
+      # A third question, and the one #1860 proved was missing. `*.md` is on the
+      # SKIPPABLE allowlist below, and CH-DOC-EXEC exists to parse the Cypher in
+      # `*.md` -- so the one gate a documentation change can break was the one
+      # gate a documentation change skipped. #1860 shortened the README, skipped
+      # the whole matrix, merged green, and broke `test` on every open PR on both
+      # architectures. `ci-ok` passed and was right to: skipped is success by
+      # design. The filter was what was wrong (#1854).
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,12 +100,16 @@ jobs:
           if [ "$EVENT" != "pull_request" ]; then
             echo "event $EVENT: running the full suite"
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "conformance=true" >> "$GITHUB_OUTPUT"
+            echo "docs=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           if [ -z "${BASE:-}" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
             echo "::warning::base commit unavailable; running the full suite"
             echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "conformance=true" >> "$GITHUB_OUTPUT"
+            echo "docs=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -110,6 +139,82 @@ jobs:
             echo "no code paths touched; the suites below will be skipped"
           fi
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
+
+          # What the conformance suite measures. This replaces the workflow-level
+          # `paths:` filter that `conformance.yml` carried, and that is the point
+          # of folding it in: a `paths:`-filtered workflow does not report its
+          # checks as skipped, it does not report them at all, so a required
+          # context there can never be satisfied (#1854 item 3, #1860). As a job
+          # condition the check always reports, and `ci-ok` can gate it the day
+          # anyone decides it should.
+          CONFORMANCE_PATHS='(^src/query/|^src/http/|^tools/conformance/|^\.github/workflows/ci\.yml$)'
+
+          CONFORMANCE=false
+          for f in $CHANGED; do
+            if printf '%s' "$f" | grep -qE "$CONFORMANCE_PATHS"; then
+              echo "requires the conformance suite: $f"
+              CONFORMANCE=true
+              break
+            fi
+          done
+          if [ "$CONFORMANCE" = "false" ]; then
+            echo "no path-pattern surface touched; the conformance suite will be skipped"
+          fi
+          echo "conformance=$CONFORMANCE" >> "$GITHUB_OUTPUT"
+
+          # Markdown, which CH-DOC-EXEC parses. Deliberately overlapping with
+          # SKIPPABLE rather than carved out of it: a docs-only PR should still
+          # skip the two-architecture matrix -- that part of #1851 was right --
+          # it just must not skip the gate that reads documentation. So `docs`
+          # answers "run CH-DOC-EXEC", not "run everything".
+          DOCS_PATHS='\.md$'
+
+          DOCS=false
+          for f in $CHANGED; do
+            if printf '%s' "$f" | grep -qE "$DOCS_PATHS"; then
+              echo "requires the documentation gate: $f"
+              DOCS=true
+              break
+            fi
+          done
+          if [ "$DOCS" = "false" ]; then
+            echo "no markdown touched; the documentation gate will be skipped"
+          fi
+          echo "docs=$DOCS" >> "$GITHUB_OUTPUT"
+
+  docs-gate:
+    # CH-DOC-EXEC for a PR that changes documentation and no code (#1854).
+    #
+    # The same gate runs as a step inside `test`, which is where it belongs when
+    # there is code to test. This job is only for the case `test` does not run at
+    # all, so the condition excludes `code == 'true'` rather than duplicating a
+    # release build on every PR.
+    #
+    # One architecture, because `doc_check` only calls `parse_query` -- no store,
+    # no execution, nothing that differs on ARM.
+    name: docs-gate (CH-DOC-EXEC)
+    needs: changes
+    if: needs.changes.outputs.docs == 'true' && needs.changes.outputs.code != 'true'
+    runs-on: ubuntu-latest
+    # A warm `ci-test` cache makes this a link step. A cold one is a full release
+    # build, hence the headroom.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake pkg-config libssl-dev clang libclang-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The same key the `test` job uses, so this restores that cache
+          # instead of building the workspace from scratch.
+          shared-key: ci-test
+      - name: CH-DOC-EXEC -- the Cypher in our documentation parses
+        # Byte-identical to the step inside `test`, so the two cannot drift into
+        # disagreeing about what the gate is.
+        run: cargo run --release --example doc_check
 
   supply-chain:
     # REL-14 / TRUST-08 (#1042). Known advisories, licences outside the allow
@@ -426,87 +531,168 @@ jobs:
           echo
           echo "all gates ran and passed"
 
-  typescript-sdk:
-    # 22 tests, none of which ran on a pull request until now. `sdk/typescript`
-    # is not a cargo crate, so `cargo test --workspace` cannot reach it and the
-    # only workflows mentioning it publish on a tag. Six of the tests are about
-    # request deadlines and retry, which is precisely the behaviour that is
-    # invisible until a server goes quiet in production (#1326).
-    name: typescript-sdk (transport and connection management)
+      # The release binary the conformance job needs, so it does not spend ten
+      # minutes building the same thing. `conformance.yml` used to run its own
+      # `cargo build --release --bin samyama`, averaging 10m 49s over 61 runs,
+      # and a separate workflow cannot reuse this job's output -- which is the
+      # reason that job is now in this file rather than its own (#1865).
+      #
+      # `if: always()` and `continue-on-error`, because the build happens inside
+      # the CH-API-STABILITY gate step above, which is itself
+      # `continue-on-error`: a failure there before the build leaves no binary.
+      # `if-no-files-found: warn` for the same reason. The conformance job treats
+      # a missing artifact as "build it yourself", which is exactly what it did
+      # before, so the degraded path is the old behaviour rather than a new one.
+      - name: Keep the release binary for the conformance job
+        if: always() && matrix.os == 'ubuntu-latest'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: samyama-release
+          path: target/release/samyama
+          retention-days: 1
+          if-no-files-found: warn
+
+  # One job for both SDKs.
+  #
+  # These were two check runs for two directories that share a trigger, a runner
+  # image and a purpose, and between them they were the whole of the pull-request
+  # lane's non-cargo testing. Collapsing them removes a check run and a runner VM;
+  # it costs about twenty seconds of wall clock, because the TypeScript half takes
+  # that long and now runs before the Python half instead of beside it.
+  #
+  # Every step is `continue-on-error` with a final gate, which is not decoration.
+  # Two jobs fail independently; six sequential steps do not. #1134 is what that
+  # costs here: the CH gates were sequential steps in one job, a failure at step N
+  # skipped N+1 onwards, and nothing in the log distinguished "passed" from "never
+  # ran" -- CH-API was red for a day and took four gates with it. Merging two jobs
+  # into one job's steps reintroduces exactly that, so it is answered the same way
+  # the GATES step above answers it. `skipped` is a failure here too: a check that
+  # did not run has not passed.
+  #
+  # The two halves are independent -- different language, different directory, no
+  # shared artefact -- so neither failing is a reason to stop asking the other.
+  sdks:
+    name: sdks (typescript transport, python MCP tools)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Each half had 10. Sequential now, so the sum plus room for a cold cargo
+    # cache on the `cargo check`.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+
+      # ---- TypeScript: 22 tests, none of which ran on a pull request before
+      # #1326. `sdk/typescript` is not a cargo crate, so `cargo test --workspace`
+      # cannot reach it, and the only workflows that mentioned it publish on a
+      # tag. Six of the tests are about request deadlines and retry, which is
+      # precisely the behaviour that stays invisible until a server goes quiet in
+      # production.
       - uses: actions/setup-node@v4
+        continue-on-error: true
         with:
           node-version: "20"
-      - name: Install
+      - name: typescript -- install
+        id: ts_install
+        continue-on-error: true
         working-directory: sdk/typescript
         run: npm ci || npm install
-      - name: Typecheck
+      - name: typescript -- typecheck
+        id: ts_typecheck
+        continue-on-error: true
         working-directory: sdk/typescript
         run: npx tsc --noEmit -p tsconfig.json
-      - name: Tests
+      - name: typescript -- tests
+        id: ts_tests
+        continue-on-error: true
         working-directory: sdk/typescript
         run: npm run build && npm test
 
-  python-sdk:
-    # `sdk/python` holds 95 tests and until now no workflow ran them on a pull
-    # request: `cargo test --workspace` cannot reach the directory because the
-    # crate is `exclude`d from the workspace, and the only files that mentioned
-    # `sdk/python` were the four publish workflows, which run on a tag. The
-    # tests were therefore green in whatever state they were last run by hand.
-    #
-    # The MCP tools are generated from a discovered schema, so a defect here is
-    # a wrong tool handed to a model rather than a test failure anyone notices.
-    name: python-sdk (MCP tools and schema discovery)
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
+      # ---- Python: `sdk/python` holds 95 tests and until #1326 no workflow ran
+      # them on a pull request. The crate is `exclude`d from the workspace, so
+      # `cargo test --workspace` cannot reach the directory and the tests below
+      # are pure-Python; the only files that mentioned `sdk/python` were the four
+      # publish workflows, which run on a tag. The tests were therefore green in
+      # whatever state someone last ran them by hand.
+      #
+      # The MCP tools are generated from a discovered schema, so a defect here is
+      # a wrong tool handed to a model rather than a test failure anyone notices.
       - uses: actions/setup-python@v5
+        continue-on-error: true
         with:
           python-version: "3.12"
-      # Compile the binding. `sdk/python` is `exclude`d from the workspace, so
-      # `cargo check --workspace` cannot reach it, and the tests below are
-      # pure-Python. Nothing on a pull request built this crate, and nothing in
-      # the nightly did either -- the first thing to compile it was the publish
-      # workflow, on the tag.
-      #
-      # v1.9.0 is what that cost: #1333 changed the SDK's `dijkstra` to return
-      # `Result<Option<PathResult>, NegativeWeight>`, every workspace caller was
-      # updated, and this one was not. All five wheels failed on the same two
-      # E0308s and PyPI got nothing, while crates.io and npm published fine.
-      #
-      # `cargo check`, not a maturin build: it catches a signature drift like
-      # that one in a couple of minutes and needs no Python toolchain, which is
-      # what kept the full build out of the pull-request lane.
       - uses: dtolnay/rust-toolchain@stable
+        continue-on-error: true
       - uses: Swatinem/rust-cache@v2
-      - name: Compile the extension crate
+        continue-on-error: true
+
+      # `cargo check`, not a maturin build. v1.9.0 is what skipping this cost:
+      # #1333 changed the SDK's `dijkstra` to return `Result<Option<PathResult>,
+      # NegativeWeight>`, every workspace caller was updated and this one was not,
+      # because `cargo check --workspace` cannot reach an excluded crate. All five
+      # wheels failed on the same two E0308s and PyPI got nothing, while crates.io
+      # and npm published fine. A check catches that drift in a couple of minutes
+      # and needs no Python toolchain, which is what kept the full build out of
+      # the pull-request lane.
+      - name: python -- compile the extension crate
+        id: py_compile
+        continue-on-error: true
         working-directory: sdk/python
         run: cargo check --all-targets
-
-      - name: Install test dependencies
+      - name: python -- install test dependencies
+        id: py_deps
+        continue-on-error: true
         run: pip install pytest fastmcp
-      - name: Tests
+      - name: python -- tests
+        id: py_tests
+        continue-on-error: true
         working-directory: sdk/python
         # The suites that need the compiled extension (`test_embedded.py`,
-        # `test_vector.py`) are not selected: building it needs maturin and a
-        # full release compile, which belongs in the nightly sweep rather than
-        # on every pull request. Naming the files that do run keeps that
-        # deliberate -- a bare `pytest tests/` would collect them and fail on
-        # the import, and the usual repair is to make the failure disappear.
+        # `test_vector.py`) are not selected: building it needs maturin and a full
+        # release compile, which belongs in the nightly sweep rather than on every
+        # pull request. Naming the files that do run keeps that deliberate -- a
+        # bare `pytest tests/` would collect them and fail on the import, and the
+        # usual repair is to make the failure disappear.
         run: |
           PYTHONPATH=. python -m pytest -q \
             tests/test_mcp_schema.py \
             tests/test_mcp_generators.py \
             tests/test_mcp_escape.py \
             tests/test_mcp_server.py
+
+      - name: SDKS -- every step above ran, and every one of them passed
+        # The only step that fails this job. See the comment on the job.
+        if: always()
+        env:
+          TS_INSTALL_OUTCOME: ${{ steps.ts_install.outcome }}
+          TS_TYPECHECK_OUTCOME: ${{ steps.ts_typecheck.outcome }}
+          TS_TESTS_OUTCOME: ${{ steps.ts_tests.outcome }}
+          PY_COMPILE_OUTCOME: ${{ steps.py_compile.outcome }}
+          PY_DEPS_OUTCOME: ${{ steps.py_deps.outcome }}
+          PY_TESTS_OUTCOME: ${{ steps.py_tests.outcome }}
+        run: |
+          failed=""
+          check() {
+            eval "outcome=\$$(echo "$1" | tr '[:lower:]' '[:upper:]')_OUTCOME"
+            case "$outcome" in
+              success) printf '  PASS  %s\n' "$2" ;;
+              *)       printf '  FAIL  %s (%s)\n' "$2" "$outcome"; failed="$failed $2" ;;
+            esac
+          }
+          check ts_install "typescript install"
+          check ts_typecheck "typescript typecheck"
+          check ts_tests "typescript tests"
+          check py_compile "python extension compiles"
+          check py_deps "python test dependencies"
+          check py_tests "python MCP tests"
+          if [ -n "$failed" ]; then
+            echo
+            echo "failed:$failed"
+            exit 1
+          fi
+          echo
+          echo "both SDKs ran and passed"
 
   # HW-07 and KG-11 ask that a `.sgsnap` written on one tier loads on another
   # with the same results. Nothing had ever checked it, because checking it
@@ -582,3 +768,184 @@ jobs:
           set -euo pipefail
           cargo run --release --example snapshot_portability -- \
             --verify snap.sgsnap --against wrote.json
+
+  # What this job asserts, and what it does not.
+  #
+  # It asserts that this checkout still computes what the committed baseline says
+  # it computes for the ISO/IEC 39075 path patterns -- every construct, in both
+  # directions. A cell that gets worse is a semantics regression. A cell that gets
+  # better also fails, because a baseline that no longer describes the engine
+  # cannot catch the next regression: the stale line hides it.
+  #
+  # It does not assert conformance. Ten cells in the baseline are DIVERGES today,
+  # and they are the open dialect questions in #1646, not regressions. Turning
+  # them green is work; keeping them from moving silently is this job.
+  #
+  # #1140 was found by an external suite rather than by our tests, and #1142
+  # existed to fix that and was closed without anything in the repository running
+  # the suite. This is that, actually wired up.
+  #
+  # It lived in `conformance.yml` until #1865. Folding it here does two things a
+  # separate workflow could not:
+  #
+  #   It takes the release binary from `test` instead of building its own. Two
+  #   workflows cannot share an artifact -- a workflow cannot `needs:` a job in
+  #   another one -- and that duplicate build averaged 10m 49s over 61 runs.
+  #
+  #   It replaces a workflow-level `paths:` filter with a job condition. A
+  #   `paths:`-filtered workflow does not report its checks as skipped; it does
+  #   not report them at all, so a required context there could never be
+  #   satisfied. That trap is #1860, and the old file carried a comment warning
+  #   not to require it. Now the check always reports, and `ci-ok` can gate it
+  #   whenever anyone decides it should -- which is a policy decision, not this
+  #   change, so `ci-ok` does NOT list it in `needs` yet. See
+  #   tests/ci_gate_enumeration.rs, where that exemption has to be stated
+  #   explicitly rather than simply omitted.
+  gpml:
+    name: GPML path-pattern conformance
+    needs: [changes, test]
+    if: needs.changes.outputs.conformance == 'true'
+    runs-on: ubuntu-latest
+    # Was 45 while a dead Grafeo adapter burned 60s per case on 84 cases (#1858).
+    # With that fixed the whole of run.sh is about a minute, and the build is the
+    # only slow part -- and it is now usually downloaded rather than built.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `git describe` below needs the tags, and needs enough history to reach
+          # them. checkout fetches neither by default: `fetch-tags` is false, and a
+          # depth-1 clone cannot walk back to a tag that is not on HEAD.
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Which build this run is measuring.
+      #
+      # The suite defaults this to a hardcoded `v1.10.0`
+      # (`SamyamaAdapter(build=os.environ.get("SAMYAMA_BUILD", "v1.10.0"))`), so
+      # until #1866 every run labelled its measurement with a release it was not
+      # measuring. `SamyamaAdapter._version` treats the label as authoritative and
+      # the engine's own `engine_version` as the cross-check, printing a
+      # disagreement rather than swallowing it -- a mechanism that fires on every
+      # run is a warning nobody reads.
+      #
+      # The nearest TAG is the right source and the two obvious alternatives are
+      # both wrong. `--always` yields `v1.11.0-25-gc24f8ad` after the tag, and the
+      # comparison is a string compare, so it would never match. Cargo.toml's
+      # version makes the cross-check vacuous: the binary reports
+      # `env!("CARGO_PKG_VERSION")`, so both sides would come from one file and
+      # agree by construction.
+      - name: Which build is being measured
+        run: |
+          set -euo pipefail
+          label=$(git describe --tags --abbrev=0 2>/dev/null || echo unspecified)
+          echo "SAMYAMA_BUILD=$label" >> "$GITHUB_ENV"
+          echo "build label for this run: $label"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+
+      # The binary `test` already built. `continue-on-error` because a missing
+      # artifact is not a failure here: `run.sh` builds the engine itself when
+      # `$SAMYAMA_BIN` is absent, which is what this job did on every run before
+      # #1865. The fallback is the old behaviour, not a new one.
+      - name: Take the release binary from the test job
+        id: fetch_binary
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: samyama-release
+          path: target/release
+
+      - name: Use it if it arrived, otherwise say so
+        run: |
+          set -euo pipefail
+          if [ -f target/release/samyama ]; then
+            # run.sh tests `[ ! -x "$SAMYAMA_BIN" ]`, and an artifact download
+            # does not preserve the executable bit. Without this the binary is
+            # present, not executable, and the suite silently rebuilds it.
+            chmod +x target/release/samyama
+            # Do NOT run the binary to identify it. `samyama` dispatches a fixed
+            # list of subcommands (main.rs) and anything else -- `--version`
+            # included -- falls through to start_server(), which never returns.
+            # A command substitution around it hangs until the job timeout.
+            echo "using the binary built by the test job: $(ls -l target/release/samyama | awk '{print $1, $5}') bytes"
+          else
+            echo "::notice::no release artifact; run.sh will build the engine itself"
+          fi
+
+      - name: Run the suite against the baseline
+        # Keep the suite checkout out of the Rust target cache.
+        env:
+          WORK: ${{ runner.temp }}/gpml-conformance
+        run: ./tools/conformance/run.sh
+
+      - name: Keep the map, whatever the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-map
+          path: |
+            ${{ runner.temp }}/gpml-conformance/suite/results/map.json
+            ${{ runner.temp }}/gpml-conformance/suite/results/summary.json
+          if-no-files-found: warn
+
+  # The one check branch protection should require.
+  #
+  # `test` and the two snapshot jobs take their check names from a matrix. When an
+  # `if:` skips a matrix job, GitHub never expands the matrix, so the check is
+  # reported under the LITERAL name -- `test (${{ matrix.os }})` -- and the names
+  # protection requires, `test (ubuntu-latest)` and `test (ubuntu-24.04-arm)`, are
+  # never reported at all. A required context that never reports leaves the pull
+  # request permanently BLOCKED.
+  #
+  # That is #1860: a docs-only change, MERGEABLE, every suite correctly skipped,
+  # and unmergeable. The comment on `changes` above says a job GitHub skips
+  # satisfies its requirement, and for a job with a fixed name it is right --
+  # `supply-chain (cargo-deny)` does report, skipped, under exactly the required
+  # name. It is wrong only for a matrix job, which is the case nobody could have
+  # tested: no docs-only pull request was opened between that filter landing in
+  # #1851 and #1860.
+  #
+  # This job has a fixed name and `if: always()`, so it reports on every run
+  # whatever the suites did. `skipped` counts as success -- a change that touches
+  # no code is supposed to skip them. `failure` and `cancelled` do not.
+  #
+  # tests/ci_gate_enumeration.rs asserts that every other job in this file is
+  # listed in `needs` below, because a suite added without being added here would
+  # stop gating silently: the aggregator would go green without ever waiting for
+  # it.
+  ci-ok:
+    name: ci-ok
+    # always() is load-bearing. Without it a failed dependency SKIPS this job, and
+    # a skipped check with a fixed name counts as satisfied -- which would turn the
+    # gate off in precisely the case it exists for.
+    if: always()
+    needs:
+      - changes
+      - supply-chain
+      - test
+      - docs-gate
+      - sdks
+      - snapshot-portability
+      - snapshot-portability-read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every suite either succeeded or was skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$RESULTS"
+          bad=$(printf '%s' "$RESULTS" | jq -r '
+            to_entries
+            | map(select(.value.result != "success" and .value.result != "skipped")
+                  | .key)
+            | join(" ")')
+          if [ -n "$bad" ]; then
+            echo "::error::did not succeed: $bad"
+            exit 1
+          fi
+          echo "all suites accounted for"

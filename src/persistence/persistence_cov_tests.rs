@@ -607,3 +607,74 @@ fn a_usage_run_applied_once_matches_applying_each_step() {
         }
     }
 }
+
+/// A statement's storage writes are committed in chunks, and every chunk
+/// lands (#1666).
+///
+/// `write_batch` stages rows and commits them `ROWS_PER_COMMIT` at a time
+/// instead of one RocksDB write per row. A statement larger than one chunk
+/// crosses at least two mid-loop commits and a final one; every row, edges
+/// included, must be on disk afterwards, and a later statement that deletes
+/// some of them must take them off it.
+#[test]
+fn a_statement_larger_than_one_commit_lands_whole() {
+    let (_dir, m) = manager();
+    m.tenants()
+        .update_quotas("default", ResourceQuotas::unlimited())
+        .unwrap();
+    let rows = PersistenceManager::ROWS_PER_COMMIT * 2 + 7;
+
+    let mut store = GraphStore::new();
+    store.enable_write_log();
+    let nodes: Vec<NodeId> = (0..rows).map(|_| store.create_node("P")).collect();
+    let edge = store.create_edge(nodes[0], nodes[rows - 1], "R").unwrap();
+    let log = store.take_write_log();
+    assert_eq!(m.apply_mutations("default", &store, &log).unwrap(), rows + 1);
+
+    let (on_disk, edges) = m.recover("default").unwrap();
+    assert_eq!(on_disk.len(), rows, "every staged node was committed");
+    assert_eq!(edges.len(), 1);
+    assert!(m.storage().get_edge("default", edge.as_u64()).unwrap().is_some());
+
+    // Deletes are staged and committed the same way.
+    for &n in &nodes[..3] {
+        store.delete_node("default", n).unwrap();
+    }
+    let log = store.take_write_log();
+    m.apply_mutations("default", &store, &log).unwrap();
+    for &n in &nodes[..3] {
+        assert!(m.storage().get_node("default", n.as_u64()).unwrap().is_none());
+    }
+    assert!(m.storage().get_node("default", nodes[3].as_u64()).unwrap().is_some());
+}
+
+/// With the WAL in sync mode, a statement costs one durability barrier per
+/// commit, not one per row (#1666).
+///
+/// Each row's record was appended with its own `sync_data`, so a 1,000-row
+/// statement under `SAMYAMA_FSYNC=1` was 1,000 fsyncs -- 50 rows a second on
+/// the host that measured it. The records are still one per row; the barrier
+/// is once per commit, before the rows it covers are committed, and every row
+/// is on disk when the statement returns.
+#[test]
+fn a_synced_statement_pays_one_wal_barrier_per_commit() {
+    const N: usize = 1_000;
+    let (_dir, m) = manager();
+    m.set_wal_sync_for_test(true);
+
+    let mut store = GraphStore::new();
+    store.enable_write_log();
+    let nodes: Vec<NodeId> = (0..N).map(|_| store.create_node("P")).collect();
+    let log = store.take_write_log();
+
+    let syncs_before = wal::WAL_SYNCS.with(|c| c.get());
+    let (result, ops) = apply_counted(&m, "default", &store, &log);
+    let syncs = wal::WAL_SYNCS.with(|c| c.get()) - syncs_before;
+
+    assert_eq!(result.unwrap(), N);
+    assert_eq!(ops.wal_appends, N as u64, "still one WAL record per row");
+    assert_eq!(syncs, 1, "one barrier for a statement that fits in one commit");
+    for n in [nodes[0], nodes[N / 2], nodes[N - 1]] {
+        assert!(m.storage().get_node("default", n.as_u64()).unwrap().is_some());
+    }
+}

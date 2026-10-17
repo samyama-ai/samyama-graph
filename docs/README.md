@@ -1,6 +1,6 @@
 # Samyama Graph — Documentation Index
 
-**Last updated:** 2026-09-25 · **Engine version:** see [Releases](https://github.com/samyama-ai/samyama-graph/releases) — documents below state the version they were verified against
+**Last updated:** 2026-10-14 · **Engine version:** see [Releases](https://github.com/samyama-ai/samyama-graph/releases) — documents below state the version they were verified against
 
 ## Primary sources
 
@@ -35,14 +35,15 @@ eight of eighteen documents (#1450).
 
 ### The query language
 
-- **[CYPHER_COMPATIBILITY.md](./CYPHER_COMPATIBILITY.md)** — OpenCypher coverage against the TCK, with the pass rate quoted beside its coverage.
+- **[CYPHER-COMPATIBILITY.md](./CYPHER-COMPATIBILITY.md)** — OpenCypher coverage against the TCK, with the pass rate quoted beside its coverage.
 - **[FULL-TEXT-SEARCH.md](./FULL-TEXT-SEARCH.md)** — the full-text index and how it is queried.
+- **[INDEX-CONTRACT.md](./INDEX-CONTRACT.md)** — the six clauses every index structure implements (build, maintain under MVCC, cost, plan, persist, snapshot), and how to add one.
 - **[GDS-COMPATIBILITY.md](./GDS-COMPATIBILITY.md)** — which `gds.*` names resolve here, and which deliberately do not.
 - **[ALGORITHM-CONVENTIONS.md](./ALGORITHM-CONVENTIONS.md)** — directedness, weights, self-loops, disconnected components, tie-breaking.
 
 ### Guarantees and behaviour under stress
 
-- **[ACID_GUARANTEES.md](./ACID_GUARANTEES.md)** — the transaction model: MVCC, the logical WAL, what durability `SAMYAMA_FSYNC` does and does not buy, and why there is no Raft replication to rely on.
+- **[ACID-GUARANTEES.md](./ACID-GUARANTEES.md)** — the transaction model: MVCC, the logical WAL, what durability `SAMYAMA_FSYNC` does and does not buy, and why there is no Raft replication to rely on.
 - **[FAILURE-MODES.md](./FAILURE-MODES.md)** — how the engine behaves when things go wrong.
 - **[BI-CONNECTIVITY.md](./BI-CONNECTIVITY.md)** — connecting BI tools.
 
@@ -54,17 +55,16 @@ eight of eighteen documents (#1450).
 
 ### Interfaces and operations
 
-- **[SDK_API_CLI_ARCHITECTURE.md](./SDK_API_CLI_ARCHITECTURE.md)** — how the Python / TypeScript SDKs, the CLI, and the HTTP / RESP surfaces connect.
+- **[SDK-API-CLI-ARCHITECTURE.md](./SDK-API-CLI-ARCHITECTURE.md)** — how the Python / TypeScript SDKs, the CLI, and the HTTP / RESP surfaces connect.
 - **[AGENT-CONTRACT.md](./AGENT-CONTRACT.md)** — the versioned MCP tool contract: schemas, error format, pagination, result envelopes, idempotency.
 - **[API-PARITY.md](./API-PARITY.md)** — generated capability-by-surface matrix (HTTP, RESP, Rust / Python / TypeScript SDKs, MCP); regenerate with `cargo run --release --example feature_matrix`.
 - **[CONSTRAINED-CLIENTS.md](./CONSTRAINED-CLIENTS.md)** — writing to an Edge node from an ESP32 or Arduino-class device over RESP, and why that surface has no authentication.
 - **[BENCHMARKS.md](./BENCHMARKS.md)** — LDBC SNB Interactive results (SF1 and SF10).
-- **[SUPPLY_CHAIN_GUARDIAN_DEMO.md](./SUPPLY_CHAIN_GUARDIAN_DEMO.md)** — an end-to-end demo combining ingestion, federation, NLQ and optimization.
+- **[SUPPLY-CHAIN-GUARDIAN-DEMO.md](./SUPPLY-CHAIN-GUARDIAN-DEMO.md)** — walkthrough of `supply_chain_demo`: disruption analysis, PageRank, Jaya rerouting and vector search on built-in data, and which of its results are artefacts of that data.
 
 ### Sub-directories
 
 - **[ADR/](./ADR/)** — Architecture Decision Records. A record of why a decision was made *when it was made*; they are not refreshed, and old ones are not stale.
-- **[optimization/](./optimization/)** — optimization case study (see also `crates/samyama-optimization/` and ADR-026).
 - **[release-notes/](./release-notes/)** — per-release notes, current back to [1.7.0](./release-notes/1.7.0.md). Earlier tags (1.0.x, 1.1.0, 1.7.1) have none and are not back-filled.
 - **[demos/](./demos/)** — recordings used by the top-level README.
 
@@ -79,3 +79,9 @@ The following documents were retired in 2026-05-19 because their content is now 
 | `TECHNOLOGY_COMPARISONS.md` | Engineering Compendium *alternatives we considered* sections per topic |
 
 The retirements were content-redundancy cleanups, not architectural changes — see git history for the prior versions.
+
+Retired 2026-10-14 because it no longer described anything in the repository (#1839):
+
+| Retired | Where to look now |
+|---|---|
+| `optimization/CASE_STUDY_HEALTHCARE.md` | It documented `examples/healthcare_demo.rs`, a Jaya hospital-staffing example that was replaced on 2026-02-06 and deleted on 2026-02-07. For the solvers, see [`crates/samyama-optimization/README.md`](../crates/samyama-optimization/README.md) and [ADR-026](./ADR/ADR-026-rao-optimization-crate.md); for a healthcare allocation problem that runs today, `healthcare_allocation_demo` in [`examples/README.md`](../examples/README.md). |
