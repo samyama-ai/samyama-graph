@@ -36,4 +36,4 @@ markers = [
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-python-packages = ["samyama_mcp", "samyama_aio", "samyama_nb", "samyama-stubs"]
+python-packages = ["samyama_mcp", "samyama_aio", "samyama_nb", "samyama_arrow", "samyama-stubs"]

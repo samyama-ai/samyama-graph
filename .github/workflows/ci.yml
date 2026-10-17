@@ -643,7 +643,11 @@ jobs:
       - name: python -- install test dependencies
         id: py_deps
         continue-on-error: true
-        run: pip install pytest fastmcp
+        # pyarrow and pandas are not SDK dependencies -- `samyama_arrow` imports
+        # each inside the function that needs it -- but without them installed
+        # here the Arrow helper's suite `importorskip`s itself and reports as
+        # passed while asserting nothing (#1097).
+        run: pip install pytest fastmcp pyarrow pandas
       - name: python -- tests
         id: py_tests
         continue-on-error: true
@@ -659,7 +663,8 @@ jobs:
             tests/test_mcp_schema.py \
             tests/test_mcp_generators.py \
             tests/test_mcp_escape.py \
-            tests/test_mcp_server.py
+            tests/test_mcp_server.py \
+            tests/test_arrow_helper.py
 
       - name: SDKS -- every step above ran, and every one of them passed
         # The only step that fails this job. See the comment on the job.
