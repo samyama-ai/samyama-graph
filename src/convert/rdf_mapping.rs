@@ -595,6 +595,11 @@ pub struct RdfMapReport {
     /// (#1954 review).
     #[serde(default)]
     pub merge_statements_reassigned: usize,
+    /// Merge links whose target was itself merged (a chain a -> b -> c);
+    /// written back, each alias points at the end of the chain (#1954
+    /// review).
+    #[serde(default)]
+    pub merge_chains_flattened: usize,
     /// Literals of a narrower numeric datatype (`xsd:int`, `xsd:long`,
     /// `xsd:float`, ...) stored as Integer or Float, which write back as
     /// `xsd:integer` or `xsd:double` (#1912).
@@ -763,6 +768,13 @@ impl RdfMapReport {
                 .to_string(),
         );
         push(
+            "rdf_merge_chains_flattened",
+            self.merge_chains_flattened as u64,
+            "Merge links that formed a chain; written back, every alias links straight to \
+             the end of the chain."
+                .to_string(),
+        );
+        push(
             "rdf_merge_statements_reassigned",
             self.merge_statements_reassigned as u64,
             "Statements about a merged subject now belong to the node it merged into; \
@@ -908,6 +920,7 @@ impl<'a> Applier<'a> {
         self.report.triples_read = self.triples.len();
 
         // Merges first: every later step talks about canonical IRIs.
+        let mut merge_links: Vec<String> = Vec::new();
         if let Some(rule) = &m.merge {
             for t in &self.triples {
                 if t.predicate.as_named_node().as_str() != rule.predicate {
@@ -921,11 +934,20 @@ impl<'a> Applier<'a> {
                     MergeInto::Object => (s.as_str(), o.as_str()),
                     MergeInto::Subject => (o.as_str(), s.as_str()),
                 };
+                merge_links.push(into.to_string());
                 let (from, into) = (self.canonical(from), self.canonical(into));
                 if from != into {
                     self.merged_into.insert(from, into);
                 }
             }
+            // A link whose target was itself merged into something else is a
+            // chain (a -> b -> c); written back, every alias points straight
+            // at the end of it (a -> c, b -> c), so the link changes (#1954
+            // review).
+            self.report.merge_chains_flattened = merge_links
+                .iter()
+                .filter(|into| self.merged_into.contains_key(into.as_str()))
+                .count();
         }
 
         // Which predicates and classes are used how, so names are chosen once
@@ -1294,7 +1316,8 @@ impl<'a> Applier<'a> {
     /// such a triple is dropped and reported. A key another predicate already
     /// fills is used, and counted, since it writes back as that predicate.
     fn record_key(&mut self, key: &str, predicate: &str) -> bool {
-        if key == IRI_PROPERTY {
+        // `@type` is the inlined class entry's key, never a predicate's.
+        if key == IRI_PROPERTY || key == INLINE_CLASS_KEY {
             self.report.drop_predicate(predicate);
             return false;
         }
@@ -2014,7 +2037,7 @@ impl Writer<'_> {
                 let mut keys: Vec<&String> = map.keys().collect();
                 keys.sort();
                 for k in keys {
-                    if k == "type" {
+                    if k == INLINE_CLASS_KEY {
                         for inner in elements(&map[k]) {
                             if let PropertyValue::String(class) = inner {
                                 self.add(s.clone(), RDF_TYPE, RdfObject::NamedNode(named(class)?))?;

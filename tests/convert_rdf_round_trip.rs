@@ -640,3 +640,34 @@ fn the_identity_key_cannot_be_overwritten() {
         .collect();
     assert_eq!(iris, vec!["http://example.org/a".to_string()]);
 }
+
+/// An inlined blank node's class and a predicate named `type` round-trip
+/// side by side: the class under `@type`, the predicate as itself (#1954
+/// review).
+#[test]
+fn an_inlined_class_and_a_predicate_named_type_round_trip_together() {
+    let (input, output, losses) = round_trip_under(
+        "blank_nodes: inline",
+        "ex:a ex:part [ a ex:Box ; ex:type \"text\" ] .",
+    );
+    assert!(losses.is_empty(), "{losses:?}");
+    assert_eq!(output, input);
+}
+
+/// A merge chain is flattened, and says so (#1954 review).
+#[test]
+fn a_flattened_merge_chain_is_reported() {
+    let yaml = "prefixes: { ex: \"http://example.org/\" }\n\
+                merge: { predicate: \"ex:preferred\", into: object, aliases_property: aliases }";
+    let losses = read_losses(yaml, "ex:a ex:preferred ex:b . ex:b ex:preferred ex:c .");
+    assert!(
+        losses.contains(&"rdf_merge_chains_flattened".to_string()),
+        "{losses:?}"
+    );
+    // Two aliases of one node directly is not a chain.
+    let losses = read_losses(yaml, "ex:a ex:preferred ex:c . ex:b ex:preferred ex:c .");
+    assert!(
+        !losses.contains(&"rdf_merge_chains_flattened".to_string()),
+        "{losses:?}"
+    );
+}
