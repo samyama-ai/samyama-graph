@@ -123,13 +123,48 @@ impl Format {
     }
 
     /// Whether this crate can read the format into a graph today.
+    ///
+    /// JSON-LD is not among them: the engine's JSON-LD parser is a stub that
+    /// errors, so reading it would only ever fail (#1912).
     pub fn can_read(&self) -> bool {
-        matches!(self, Format::Sgsnap)
+        matches!(
+            self,
+            Format::Sgsnap | Format::Turtle | Format::NTriples | Format::RdfXml
+        )
     }
 
     /// Whether this crate can write a graph out in the format today.
     pub fn can_write(&self) -> bool {
-        matches!(self, Format::Sgsnap)
+        matches!(
+            self,
+            Format::Sgsnap | Format::Turtle | Format::NTriples | Format::RdfXml | Format::JsonLd
+        )
+    }
+
+    /// The engine's RDF format for an RDF member of this enum.
+    fn rdf(&self) -> Option<crate::rdf::RdfFormat> {
+        use crate::rdf::RdfFormat;
+        Some(match self {
+            Format::Turtle => RdfFormat::Turtle,
+            Format::NTriples => RdfFormat::NTriples,
+            Format::RdfXml => RdfFormat::RdfXml,
+            Format::JsonLd => RdfFormat::JsonLd,
+            _ => return None,
+        })
+    }
+
+    /// The name a snapshot header's `sources[].format` records.
+    fn source_name(&self) -> &'static str {
+        match self {
+            Format::Sgsnap => "sgsnap",
+            Format::Turtle => "turtle",
+            Format::NTriples => "n-triples",
+            Format::RdfXml => "rdf-xml",
+            Format::JsonLd => "json-ld",
+            Format::Neo4jJson => "neo4j-json",
+            Format::GraphMl => "graphml",
+            Format::Csv => "csv",
+        }
     }
 }
 
@@ -171,6 +206,9 @@ pub struct Options {
     pub on_missing_endpoint: EndpointPolicy,
     /// Treat anything a step reports dropping as an error.
     pub require_lossless: bool,
+    /// How RDF input becomes a graph (#1910). `None` reads it under the
+    /// `generic` preset.
+    pub mapping: Option<rdf_mapping::Mapping>,
 }
 
 /// What one read or write did, in the format's own terms.
@@ -183,6 +221,18 @@ pub enum FormatReport {
     SgsnapRead(ImportStats),
     /// A `.sgsnap` write: the engine's export report, its loss report included.
     SgsnapWrite(ExportStats),
+    /// An RDF read under a mapping (#1912).
+    RdfRead {
+        report: rdf_mapping::RdfMapReport,
+        dropped: Vec<Dropped>,
+    },
+    /// A graph written back as RDF (#1912).
+    RdfWrite {
+        report: rdf_mapping::RdfWriteReport,
+        dropped: Vec<Dropped>,
+        nodes: u64,
+        edges: u64,
+    },
 }
 
 impl FormatReport {
@@ -191,6 +241,9 @@ impl FormatReport {
         match self {
             FormatReport::SgsnapRead(_) => &[],
             FormatReport::SgsnapWrite(stats) => &stats.dropped,
+            FormatReport::RdfRead { dropped, .. } | FormatReport::RdfWrite { dropped, .. } => {
+                dropped
+            }
         }
     }
 
@@ -199,6 +252,8 @@ impl FormatReport {
         match self {
             FormatReport::SgsnapRead(s) => s.node_count,
             FormatReport::SgsnapWrite(s) => s.node_count,
+            FormatReport::RdfRead { report, .. } => report.nodes_created as u64,
+            FormatReport::RdfWrite { nodes, .. } => *nodes,
         }
     }
 
@@ -207,6 +262,8 @@ impl FormatReport {
         match self {
             FormatReport::SgsnapRead(s) => s.edge_count,
             FormatReport::SgsnapWrite(s) => s.edge_count,
+            FormatReport::RdfRead { report, .. } => report.edges_created as u64,
+            FormatReport::RdfWrite { edges, .. } => *edges,
         }
     }
 }
@@ -303,14 +360,124 @@ pub fn read(
     store: &mut GraphStore,
     opts: &Options,
 ) -> Result<FormatReport, ConvertError> {
+    read_named(format, input, "-", store, opts)
+}
+
+/// [`read`], naming the input for the snapshot header's `sources[].file`:
+/// an RDF read records where the graph came from -- the file, its SHA-256,
+/// the converter and the mapping with the names it applied -- so writing it
+/// back as RDF can undo the mapping (#1911, #1912). `name` is a bare file
+/// name, not a path.
+pub fn read_named(
+    format: Format,
+    mut input: impl BufRead,
+    name: &str,
+    store: &mut GraphStore,
+    opts: &Options,
+) -> Result<FormatReport, ConvertError> {
     let report = match format {
         Format::Sgsnap => {
             FormatReport::SgsnapRead(crate::snapshot::import_tenant(store, input).map_err(engine)?)
+        }
+        f @ (Format::Turtle | Format::NTriples | Format::RdfXml) => {
+            // Both stores are held at once: the parsed triples, then the graph
+            // made from them. Streaming is a later change if a vocabulary
+            // proves too large for that (#1912).
+            let mut bytes = Vec::new();
+            input
+                .read_to_end(&mut bytes)
+                .map_err(|e| ConvertError::Engine(format!("could not read the input: {e}")))?;
+            let text = String::from_utf8(bytes)
+                .map_err(|_| ConvertError::Engine("RDF input is not UTF-8".to_string()))?;
+            let rdf_format = f.rdf().ok_or(ConvertError::CannotRead(f))?;
+            let triples = crate::rdf::RdfParser::parse(&text, rdf_format).map_err(message)?;
+            let mut rdf = crate::rdf::RdfStore::new();
+            for t in triples {
+                // A triple stated twice is one triple; RDF is a set.
+                let _ = rdf.insert(t);
+            }
+            let mapping = match &opts.mapping {
+                Some(m) => m.clone(),
+                None => rdf_mapping::Mapping::preset("generic").map_err(message)?,
+            };
+            let report = mapping.apply(&rdf, store).map_err(message)?;
+            store.add_snapshot_sources([crate::snapshot::format::SnapshotSource {
+                format: f.source_name().to_string(),
+                file: name.to_string(),
+                sha256: sha256_hex(text.as_bytes()),
+                converter: format!("samyama-convert {}", env!("CARGO_PKG_VERSION")),
+                mapping: Some(mapping.recorded(&report.names)),
+            }]);
+            let dropped = report.dropped();
+            FormatReport::RdfRead { report, dropped }
         }
         other => return Err(ConvertError::CannotRead(other)),
     };
     check_lossless(&report, opts)?;
     Ok(report)
+}
+
+/// An error that is reported by its message alone.
+fn message(e: impl fmt::Display) -> ConvertError {
+    ConvertError::Engine(e.to_string())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The mapping a graph was read from RDF under, and the names it applied:
+/// the last source in its header that recorded one. A graph that never was
+/// RDF gets the `samyama` preset, which is Samyama's own RDF form.
+fn recorded_mapping(
+    store: &GraphStore,
+) -> Result<(rdf_mapping::Mapping, rdf_mapping::AppliedNames), ConvertError> {
+    let recorded = store
+        .snapshot_sources()
+        .iter()
+        .rev()
+        .find_map(|s| s.mapping.as_ref().and_then(rdf_mapping::Mapping::from_recorded));
+    match recorded {
+        Some(pair) => Ok(pair),
+        None => Ok((
+            rdf_mapping::Mapping::preset("samyama").map_err(message)?,
+            rdf_mapping::AppliedNames::default(),
+        )),
+    }
+}
+
+/// The graph as RDF text in `format`, and what writing it lost. Turtle gets
+/// the mapping's prefixes as `@prefix` lines.
+fn rdf_text(store: &GraphStore, format: Format) -> Result<(String, FormatReport), ConvertError> {
+    let rdf_format = format.rdf().ok_or(ConvertError::CannotWrite(format))?;
+    let (mapping, names) = recorded_mapping(store)?;
+    let (triples, report) = mapping.write_rdf(&names, store).map_err(message)?;
+    let body = crate::rdf::RdfSerializer::serialize(&triples, rdf_format).map_err(message)?;
+    let text = if format == Format::Turtle {
+        let mut head: String = mapping
+            .prefixes
+            .iter()
+            .map(|(p, ns)| format!("@prefix {p}: <{ns}> .\n"))
+            .collect();
+        head.push('\n');
+        head + &body
+    } else {
+        body
+    };
+    let dropped = report.dropped();
+    Ok((
+        text,
+        FormatReport::RdfWrite {
+            report,
+            dropped,
+            nodes: store.all_nodes().len() as u64,
+            edges: store.all_edges().len() as u64,
+        },
+    ))
 }
 
 /// Write `store` to `out` in `format`.
@@ -323,9 +490,19 @@ pub fn write(
     out: impl Write,
     opts: &Options,
 ) -> Result<FormatReport, ConvertError> {
+    let mut out = out;
     let report = match format {
         Format::Sgsnap => {
             FormatReport::SgsnapWrite(crate::snapshot::export_tenant(store, out).map_err(engine)?)
+        }
+        f @ (Format::Turtle | Format::NTriples | Format::RdfXml | Format::JsonLd) => {
+            let (text, report) = rdf_text(store, f)?;
+            // Checked before anything is written: the text is all in memory.
+            check_lossless(&report, opts)?;
+            out.write_all(text.as_bytes())
+                .and_then(|_| out.flush())
+                .map_err(|e| ConvertError::Engine(format!("could not write {f}: {e}")))?;
+            report
         }
         other => return Err(ConvertError::CannotWrite(other)),
     };
@@ -355,10 +532,48 @@ pub fn write_path(
                 .map_err(engine)?;
             FormatReport::SgsnapWrite(stats)
         }
+        f @ (Format::Turtle | Format::NTriples | Format::RdfXml | Format::JsonLd) => {
+            let (text, report) = rdf_text(store, f)?;
+            // Refused before the file is touched, so a lossy write leaves an
+            // existing output as it was.
+            check_lossless(&report, opts)?;
+            write_text_atomically(path, &text)?;
+            report
+        }
         other => return Err(ConvertError::CannotWrite(other)),
     };
     check_lossless(&report, opts)?;
     Ok(report)
+}
+
+/// Write `text` to `path` through a new, uniquely named file beside it,
+/// synced and then renamed over `path`, so the file appears whole or not at
+/// all and nothing already there is truncated.
+fn write_text_atomically(path: &Path, text: &str) -> Result<(), ConvertError> {
+    let io = |p: &Path, source: std::io::Error| ConvertError::Io {
+        path: p.into(),
+        source,
+    };
+    let parent = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut staging = tempfile::Builder::new()
+        .prefix(&format!(".{name}."))
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .map_err(|e| io(parent, e))?;
+    staging
+        .write_all(text.as_bytes())
+        .and_then(|_| staging.as_file().sync_all())
+        .map_err(|e| io(staging.path(), e))?;
+    staging.persist(path).map_err(|e| io(path, e.error))?;
+    Ok(())
 }
 
 /// Convert the file at `input` to the file at `output`, each in the format its
@@ -385,9 +600,14 @@ pub fn convert(input: &Path, output: &Path, opts: &Options) -> Result<ConvertRep
         source,
     })?;
     let mut store = GraphStore::new();
-    let read_report = read(
+    let name = input
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let read_report = read_named(
         input_format,
         std::io::BufReader::new(file),
+        &name,
         &mut store,
         opts,
     )?;
@@ -468,8 +688,9 @@ mod tests {
     #[test]
     fn an_unsupported_format_is_refused_by_name_not_read_approximately() {
         let mut store = GraphStore::new();
+        // JSON-LD: the engine's parser is a stub, so it is refused by name.
         let err = read(
-            Format::Turtle,
+            Format::JsonLd,
             std::io::Cursor::new(b""),
             &mut store,
             &Options::default(),
@@ -477,10 +698,10 @@ mod tests {
         .unwrap_err();
         let msg = err.to_string();
         assert!(
-            matches!(err, ConvertError::CannotRead(Format::Turtle)),
+            matches!(err, ConvertError::CannotRead(Format::JsonLd)),
             "{msg}"
         );
-        assert!(msg.contains("Turtle") && msg.contains(".sgsnap"), "{msg}");
+        assert!(msg.contains("JSON-LD") && msg.contains(".sgsnap"), "{msg}");
         let err = write(Format::GraphMl, &store, Vec::new(), &Options::default()).unwrap_err();
         assert!(
             matches!(err, ConvertError::CannotWrite(Format::GraphMl)),
