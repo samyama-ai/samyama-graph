@@ -1,0 +1,9 @@
+# The defaults every mapping starts from (#1910). Nothing is dropped except
+# what the report lists.
+base: "https://samyama.ai/rdf/"
+label_style: local          # local | prefixed | iri
+key_style: local            # local | prefixed | iri
+multi_valued: list          # list | first | error
+languages: { prefer: en, others: suffix }   # others: suffix | map | drop
+typed_literals: true
+blank_nodes: node           # node | inline | drop
