@@ -13196,8 +13196,8 @@ thread_local! {
     /// its input a bounded or early-stopping sort actually orders.
     static SORT_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 
-    /// Rows ordered by `int_order`'s typed integer path, or 0 when it declined
-    /// the key. A test that pins the typed path's *answer* passes whether or
+    /// Rows ordered by a typed path -- `int_order` or `str_order` -- or 0 when
+    /// both declined the key. A test that pins the typed path's *answer* passes whether or
     /// not that path ran, so this is how a test says which one it measured
     /// (#1819).
     static SORT_TYPED_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -13479,6 +13479,84 @@ impl SortOperator {
                 pairs[..h].sort_unstable_by(cmp);
                 // The tail goes back to input order, which is what the generic
                 // path's `order[h..].sort_unstable()` leaves it in.
+                pairs[h..].sort_unstable_by_key(|p| p.1);
+            }
+            None => pairs.sort_unstable_by(cmp),
+        }
+        #[cfg(test)]
+        SORT_TYPED_ROWS.with(|c| c.set(c.get() + pairs.len() as u64));
+        Some(pairs.into_iter().map(|(_, i)| i).collect())
+    }
+
+    /// The row order for a key whose every part, in every row, is a non-null
+    /// string -- or `None`, meaning the generic comparator must do it.
+    ///
+    /// The string counterpart of [`int_order`](Self::int_order), for the
+    /// `ORDER BY friend.firstName, friend.lastName` that LDBC IS3 actually
+    /// runs; #1819's integer path left it untouched. The generic path compares
+    /// two row indices *through* `keys` at two random offsets per comparison;
+    /// copying the two `&str`s into a 40-byte `([&str; 2], u32)` sorts keys and
+    /// permutation together. Estimated in #1819 at 69.6 -> 43 ns/row on the
+    /// extract + sort term, against 4.5x for the integer key.
+    ///
+    /// A string is taken from either form a key holds it in: `KeyPart::Str`,
+    /// borrowed from its column, or an owned `PropertyValue::String` -- a
+    /// value held only in row storage, which `read_str` does not borrow --
+    /// borrowed here from `keys`, which outlives the sort. So a row whose
+    /// string lives in the row store does not send the whole key back to the
+    /// generic path.
+    ///
+    /// Why it is the same order. For two strings `cmp_part` is `str::cmp`
+    /// whichever forms they are in: `Str`/`Str` compares them directly,
+    /// `Str`/`Value` goes through `cmp_str_value`, whose ranks are equal and
+    /// which then compares as strings, and `Value`/`Value` reaches
+    /// `PropertyValue`'s string arm, which is `str::cmp`. The comparator here
+    /// applies `str::cmp` part by part with the same reversal and the same
+    /// ascending index tie-break as `execute_all`. Anything else in any row --
+    /// null, an absent property, a number, a list, a third part -- returns
+    /// `None`.
+    fn str_order<'k>(
+        keys: &'k [SortKey<'_>],
+        items: &[(Expression, bool)],
+        head: Option<usize>,
+    ) -> Option<Vec<u32>> {
+        let n = items.len();
+        if n == 0 || n > 2 || keys.len() > u32::MAX as usize {
+            return None;
+        }
+        let mut pairs: Vec<([&'k str; 2], u32)> = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            let parts = key.as_slice();
+            if parts.len() != n {
+                return None;
+            }
+            let mut packed: [&'k str; 2] = [""; 2];
+            for (j, part) in parts.iter().enumerate() {
+                packed[j] = match part {
+                    KeyPart::Str(s) => s,
+                    KeyPart::Value(Value::Property(PropertyValue::String(s))) => s.as_str(),
+                    _ => return None,
+                };
+            }
+            pairs.push((packed, i as u32));
+        }
+
+        let cmp = |a: &([&str; 2], u32), b: &([&str; 2], u32)| {
+            // Counted for the reason `int_order` gives.
+            #[cfg(test)]
+            SORT_COMPARISONS.with(|c| c.set(c.get() + 1));
+            for (j, (_, ascending)) in items.iter().enumerate() {
+                let ord = a.0[j].cmp(b.0[j]);
+                if ord != std::cmp::Ordering::Equal {
+                    return if *ascending { ord } else { ord.reverse() };
+                }
+            }
+            a.1.cmp(&b.1)
+        };
+        match head {
+            Some(h) => {
+                pairs.select_nth_unstable_by(h - 1, cmp);
+                pairs[..h].sort_unstable_by(cmp);
                 pairs[h..].sort_unstable_by_key(|p| p.1);
             }
             None => pairs.sort_unstable_by(cmp),
@@ -13770,10 +13848,13 @@ impl SortOperator {
                 .soft_hint
                 .map(|k| k.saturating_mul(4).max(1024))
                 .filter(|&h| h < keys.len());
-            // An all-integer key orders as `i64`s in a compact vector, which is
-            // the same order by construction and a fifth of the cost; anything
-            // else falls through to the generic comparator below.
-            let order = match Self::int_order(&keys, sort_items, head) {
+            // An all-integer key orders as `i64`s in a compact vector, and an
+            // all-string key as `&str`s, which is the same order by
+            // construction at a fraction of the cost; anything else falls
+            // through to the generic comparator below.
+            let typed = Self::int_order(&keys, sort_items, head)
+                .or_else(|| Self::str_order(&keys, sort_items, head));
+            let order = match typed {
                 Some(order) => order,
                 None => {
                     let cmp = |a: &u32, b: &u32| {
@@ -24195,6 +24276,126 @@ mod tests {
                     expected.reverse();
                 }
                 assert_eq!(got, expected, "n = {n}, ascending = {ascending}");
+                assert_eq!(
+                    SORT_TYPED_ROWS.with(|c| c.get()),
+                    n as u64,
+                    "n = {n}: every row should have gone through the typed path"
+                );
+            }
+        }
+    }
+
+    /// Rows binding `x` and `y` to strings, or null where `None`.
+    fn xy_rows(pairs: &[(Option<&str>, &str)]) -> Vec<Record> {
+        pairs
+            .iter()
+            .map(|(x, y)| {
+                let mut r = Record::new();
+                let xv = match x {
+                    Some(s) => PropertyValue::String(s.to_string()),
+                    None => PropertyValue::Null,
+                };
+                r.bind("x".to_string(), Value::Property(xv));
+                r.bind("y".to_string(), Value::Property(PropertyValue::String(y.to_string())));
+                r
+            })
+            .collect()
+    }
+
+    fn drain_xy(op: &mut dyn PhysicalOperator, store: &GraphStore) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        while let Some(r) = op.next(store).unwrap() {
+            let get = |k: &str| match r.get(k) {
+                Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                Some(Value::Property(PropertyValue::Null)) => "<null>".to_string(),
+                other => panic!("unexpected {k}: {other:?}"),
+            };
+            out.push((get("x"), get("y")));
+        }
+        out
+    }
+
+    fn xy_sort(rows: Vec<Record>, x_asc: bool, y_asc: bool) -> SortOperator {
+        SortOperator::new(
+            Box::new(MaterializedOperator::new(rows)),
+            vec![
+                (Expression::Variable("x".to_string()), x_asc),
+                (Expression::Variable("y".to_string()), y_asc),
+            ],
+        )
+    }
+
+    #[test]
+    fn an_all_string_key_is_ordered_by_the_typed_path() {
+        // The falsifier for the string order's other tests, as
+        // `an_all_integer_key_is_ordered_by_the_typed_path` is for integers.
+        // The strings here are owned values, the row-storage form that
+        // `read_str` does not borrow, so this also pins that such a row keeps
+        // the typed path.
+        let input = [
+            (Some("Smith"), "Ann"),
+            (Some("Ali"), "Zed"),
+            (Some("Smith"), "Al"),
+            (Some(""), "x"),
+            (Some("Ali"), "Bo"),
+        ];
+        SORT_TYPED_ROWS.with(|c| c.set(0));
+        let got = drain_xy(&mut xy_sort(xy_rows(&input), true, true), &GraphStore::new());
+        assert_eq!(
+            SORT_TYPED_ROWS.with(|c| c.get()),
+            input.len() as u64,
+            "an all-string key must be ordered by the typed path"
+        );
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(
+            got,
+            vec![s("", "x"), s("Ali", "Bo"), s("Ali", "Zed"), s("Smith", "Al"), s("Smith", "Ann")]
+        );
+    }
+
+    #[test]
+    fn a_string_key_with_a_null_keeps_the_generic_path() {
+        let input = [(Some("b"), "1"), (None, "2"), (Some("a"), "3")];
+        SORT_TYPED_ROWS.with(|c| c.set(0));
+        SORT_COMPARISONS.with(|c| c.set(0));
+        let got = drain_xy(&mut xy_sort(xy_rows(&input), true, true), &GraphStore::new());
+        assert_eq!(SORT_TYPED_ROWS.with(|c| c.get()), 0, "a null must send the key to the generic path");
+        assert!(SORT_COMPARISONS.with(|c| c.get()) > 0);
+        // Null sorts last ascending, as openCypher orders it.
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(got, vec![s("a", "3"), s("b", "1"), s("<null>", "2")]);
+    }
+
+    #[test]
+    fn the_typed_string_order_matches_a_plain_str_sort_on_random_inputs() {
+        let mut seed: u64 = 0x5eed;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize
+        };
+        // Few distinct values, so ties on the first part are common and the
+        // second part and the index tie-break both do work. Includes the empty
+        // string, a prefix of another, and a multi-byte character.
+        let words = ["", "a", "ab", "b", "B", "\u{e9}", "zz"];
+        for n in [0usize, 1, 2, 17, 1_000, 3_000] {
+            let input: Vec<(Option<&str>, &str)> = (0..n)
+                .map(|_| (Some(words[next() % words.len()]), words[next() % words.len()]))
+                .collect();
+            for (x_asc, y_asc) in [(true, true), (true, false), (false, true), (false, false)] {
+                SORT_TYPED_ROWS.with(|c| c.set(0));
+                let got = drain_xy(&mut xy_sort(xy_rows(&input), x_asc, y_asc), &GraphStore::new());
+                let mut expected: Vec<(usize, (String, String))> = input
+                    .iter()
+                    .map(|(x, y)| (x.unwrap().to_string(), y.to_string()))
+                    .enumerate()
+                    .collect();
+                expected.sort_by(|(ia, a), (ib, b)| {
+                    let ox = if x_asc { a.0.cmp(&b.0) } else { b.0.cmp(&a.0) };
+                    let oy = if y_asc { a.1.cmp(&b.1) } else { b.1.cmp(&a.1) };
+                    ox.then(oy).then(ia.cmp(ib))
+                });
+                let expected: Vec<(String, String)> = expected.into_iter().map(|(_, p)| p).collect();
+                assert_eq!(got, expected, "n = {n}, directions = ({x_asc}, {y_asc})");
                 assert_eq!(
                     SORT_TYPED_ROWS.with(|c| c.get()),
                     n as u64,
