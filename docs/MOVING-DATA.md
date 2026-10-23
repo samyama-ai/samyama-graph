@@ -116,6 +116,7 @@ you will meet most:
 | Neo4j → | `null_properties`, `unknown_record_types`, `unparseable_lines` | A JSON null (Neo4j cannot store one), a record type not read, a line that is not JSON. |
 | RDF → | `rdf_predicates_dropped` | Triples the mapping drops (`drop:`), or whose object it cannot use. The predicates are named. |
 | RDF → | `rdf_languages_dropped`, `rdf_decimals_as_float`, `rdf_literals_as_string`, `rdf_datatypes_normalized` | Language, number and datatype detail that does not survive as typed graph values. |
+| RDF → | `rdf_edge_predicates_ambiguous`, `rdf_term_kinds_mixed`, `rdf_blank_nodes_shared`, `rdf_blank_node_cycles` | What the graph holds but cannot write back as the same RDF: one relationship type from several predicates, a key holding both IRIs and text, a blank node inlined under several parents or inside itself. |
 | → GraphML | `attributes_widened_to_string`, `values_written_as_json`, `temporal_values_written_as_text`, `labels_containing_a_space` | GraphML declares one type per attribute and has no list, map or temporal type. |
 | → CSV | `columns_widened_to_string`, `labels_containing_a_semicolon`, `properties_with_a_colon_omitted` | The same for `neo4j-admin`'s header, plus what its header syntax cannot name. |
 | → RDF | `rdf_edge_properties_not_written`, `rdf_values_as_json` | Relationship properties have no RDF form under a mapping, and values with no XSD type are written as Samyama JSON literals. |
@@ -147,12 +148,16 @@ prefixes: { cso: "http://cso.kmi.open.ac.uk/schema/cso#" }
 labels: { "cso:Topic": Concept }
 edges:
   "cso:superTopicOf": { type: BROADER, reverse: true }
-merge: { predicate: "cso:preferentialEquivalent", into: object, aliases_property: altLabel }
+merge: { predicate: "cso:preferentialEquivalent", into: object, aliases_property: aliases }
 languages: { prefer: en, others: suffix }   # others: suffix | map | drop
 multi_valued: list                          # list | first | error
 blank_nodes: node                           # node | inline | drop
 drop: [ "skos:inScheme" ]
 ```
+
+`aliases_property` must name a key no predicate fills: a node with both
+merged aliases and its own values for that key is refused rather than one
+silently replacing the other.
 
 `src/convert/presets/` holds the presets, and
 `src/convert/presets/examples/cso.yaml` maps the Computer Science Ontology.
