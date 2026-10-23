@@ -1,8 +1,9 @@
 # The Computer Science Ontology (CSO 3.5) as a concept tree: Topic subjects,
 # `superTopicOf` read as BROADER the other way round, and each
 # `preferentialEquivalent` cluster merged into its preferred topic with the
-# others kept as aliases. The same mapping samyama-ontologies'
-# `scripts/vocab_to_graph.py` does by hand.
+# others kept as aliases, in `aliases`: a key no CSO predicate maps to, since
+# the mapping refuses an aliases key that a predicate also fills. The same
+# mapping samyama-ontologies' `scripts/vocab_to_graph.py` does by hand.
 preset: generic
 prefixes:
   cso: "http://cso.kmi.open.ac.uk/schema/cso#"
@@ -13,5 +14,5 @@ edges:
 merge:
   predicate: "cso:preferentialEquivalent"
   into: object
-  aliases_property: altLabel
+  aliases_property: aliases
 languages: { prefer: en, others: suffix }

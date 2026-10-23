@@ -282,6 +282,11 @@ pub enum MappingFileError {
     SamyamaOverrides(String),
     #[error("{subject} has more than one {key:?} and `multi_valued: error` was set")]
     MultiValued { subject: String, key: String },
+    #[error(
+        "{subject} has merged aliases and its own {property:?} values; `aliases_property` must \
+         name a key no predicate maps to"
+    )]
+    AliasesConflict { subject: String, property: String },
     #[error("could not read the mapping file {path}: {source}")]
     Io {
         path: std::path::PathBuf,
@@ -530,6 +535,10 @@ pub struct RdfMapReport {
     pub extra_values_dropped: usize,
     /// Edges that a merge made identical to one already there.
     pub duplicate_edges_collapsed: usize,
+    /// Blank nodes reached again inside their own inlined map -- a cycle --
+    /// written as null there (`blank_nodes: inline`).
+    #[serde(default)]
+    pub blank_node_cycles: usize,
 }
 
 impl RdfMapReport {
@@ -592,6 +601,13 @@ impl RdfMapReport {
             "rdf_duplicate_edges_collapsed",
             self.duplicate_edges_collapsed as u64,
             "Edges a merge made identical to another were stored once.".to_string(),
+        );
+        push(
+            "rdf_blank_node_cycles",
+            self.blank_node_cycles as u64,
+            "Blank nodes that refer back to themselves cannot be inlined as a map; the \
+             repeat is written as null."
+                .to_string(),
         );
         out
     }
@@ -829,8 +845,11 @@ impl<'a> Applier<'a> {
             self.report.nodes_created += 1;
         }
 
-        // Aliases of merged nodes.
-        if let Some(rule) = &m.merge {
+        // Aliases of merged nodes. Written after the properties, and refused if
+        // a predicate also maps to the same key, rather than one silently
+        // replacing the other (review on #1952).
+        let mut alias_lists: BTreeMap<NodeId, Vec<String>> = BTreeMap::new();
+        if m.merge.is_some() {
             let mut aliases: BTreeMap<String, Vec<String>> = BTreeMap::new();
             let merged: Vec<String> = self.merged_into.keys().cloned().collect();
             for from in merged {
@@ -842,20 +861,14 @@ impl<'a> Applier<'a> {
                 };
                 list.sort();
                 self.report.aliases_merged += list.len();
-                let values = list.into_iter().map(PropertyValue::String).collect();
-                set_node(
-                    graph,
-                    id,
-                    &rule.aliases_property,
-                    PropertyValue::Array(values),
-                )?;
+                alias_lists.insert(id, list);
             }
         }
 
         // Labels, properties and edges.
         let mut values: Vec<((NodeId, String), Vec<PropertyValue>)> = Vec::new();
         let mut value_index: HashMap<(NodeId, String), usize> = HashMap::new();
-        let mut lang_maps: BTreeMap<(NodeId, String), HashMap<String, PropertyValue>> =
+        let mut lang_maps: BTreeMap<(NodeId, String), BTreeMap<String, Vec<PropertyValue>>> =
             BTreeMap::new();
         let mut edges_seen: BTreeSet<(NodeId, NodeId, String)> = BTreeSet::new();
         let mut labelled: BTreeSet<NodeId> = BTreeSet::new();
@@ -922,10 +935,12 @@ impl<'a> Applier<'a> {
                     let key = self.key_for(p);
                     match lit.language() {
                         Some(lang) if m.other_languages == OtherLanguages::Map => {
-                            lang_maps.entry((node, key)).or_default().insert(
-                                lang.to_string(),
-                                PropertyValue::String(lit.value().into()),
-                            );
+                            lang_maps
+                                .entry((node, key))
+                                .or_default()
+                                .entry(lang.to_string())
+                                .or_default()
+                                .push(string(lit));
                         }
                         Some(lang) if !lang.eq_ignore_ascii_case(&m.prefer_language) => {
                             match m.other_languages {
@@ -959,8 +974,8 @@ impl<'a> Applier<'a> {
                     }
                     _ => {
                         let key = self.key_for(p);
-                        let mut seen = BTreeSet::new();
-                        let v = self.inline(b.as_str(), &blank_triples, &mut seen);
+                        let mut stack = BTreeSet::new();
+                        let v = self.inline(b.as_str(), &blank_triples, &mut stack)?;
                         self.report.blank_nodes_inlined += 1;
                         push_value(&mut values, &mut value_index, node, key, v);
                     }
@@ -968,33 +983,47 @@ impl<'a> Applier<'a> {
             }
         }
 
-        // Multi-valued properties, then language maps.
-        for ((node, key), mut vs) in values {
-            let value = if vs.len() == 1 {
-                vs.pop().unwrap_or(PropertyValue::Null)
-            } else {
-                match m.multi_valued {
-                    MultiValued::List => PropertyValue::Array(vs),
-                    MultiValued::First => {
-                        self.report.extra_values_dropped += vs.len() - 1;
-                        vs.swap_remove(0)
-                    }
-                    MultiValued::Error => {
-                        let subject = graph
-                            .node_properties_merged(node)
-                            .get(IRI_PROPERTY)
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
-                        return Err(MappingFileError::MultiValued { subject, key });
-                    }
+        // Multi-valued properties, then language maps. A key that is a language
+        // map on a node keeps that node's untagged values inside the map, under
+        // `@none` (as JSON-LD names them), instead of the map replacing them;
+        // every language's values go through the same multi-value rule
+        // (review on #1952).
+        for ((node, key), vs) in values {
+            if let Some(map) = lang_maps.get_mut(&(node, key.clone())) {
+                map.entry("@none".to_string()).or_default().extend(vs);
+                continue;
+            }
+            if let Some(rule) = m.merge.as_ref().filter(|r| r.aliases_property == key) {
+                if alias_lists.contains_key(&node) {
+                    return Err(MappingFileError::AliasesConflict {
+                        subject: subject_of(graph, node),
+                        property: rule.aliases_property.clone(),
+                    });
                 }
-            };
+            }
+            let value = self.collapse(vs, || subject_of(graph, node), &key)?;
             set_node(graph, node, &key, value)?;
             self.report.properties_set += 1;
         }
-        for ((node, key), map) in lang_maps {
+        for ((node, key), langs) in lang_maps {
+            let mut map = HashMap::new();
+            for (lang, vs) in langs {
+                let v = self.collapse(vs, || subject_of(graph, node), &format!("{key}@{lang}"))?;
+                map.insert(lang, v);
+            }
             set_node(graph, node, &key, PropertyValue::Map(map))?;
             self.report.properties_set += 1;
+        }
+        if let Some(rule) = &m.merge {
+            for (node, list) in alias_lists {
+                let values = list.into_iter().map(PropertyValue::String).collect();
+                set_node(
+                    graph,
+                    node,
+                    &rule.aliases_property,
+                    PropertyValue::Array(values),
+                )?;
+            }
         }
 
         // A node with no `rdf:type` still needs a label to be found by, as the
@@ -1056,45 +1085,130 @@ impl<'a> Applier<'a> {
         Ok(())
     }
 
-    /// A blank node's triples as a map, nested blank nodes as nested maps.
+    /// One key's values under `multi_valued`: one value as itself, several as
+    /// a list, the first, or an error naming the subject.
+    fn collapse(
+        &mut self,
+        mut vs: Vec<PropertyValue>,
+        subject: impl FnOnce() -> String,
+        key: &str,
+    ) -> Result<PropertyValue, MappingFileError> {
+        if vs.len() == 1 {
+            return Ok(vs.pop().unwrap_or(PropertyValue::Null));
+        }
+        match self.m.multi_valued {
+            MultiValued::List => Ok(PropertyValue::Array(vs)),
+            MultiValued::First => {
+                self.report.extra_values_dropped += vs.len() - 1;
+                Ok(vs.swap_remove(0))
+            }
+            MultiValued::Error => Err(MappingFileError::MultiValued {
+                subject: subject(),
+                key: key.to_string(),
+            }),
+        }
+    }
+
+    /// A blank node's triples as a map, nested blank nodes as nested maps,
+    /// under the same rules as a node's own triples: `drop`, language tags
+    /// and `multi_valued` (review on #1952).
+    ///
+    /// `stack` holds the blank nodes on the current path only, so a blank node
+    /// two parents share is inlined under each of them; one that refers back
+    /// to itself is a cycle, written as null there and counted.
     fn inline(
         &mut self,
         blank: &str,
         triples: &HashMap<String, Vec<&Triple>>,
-        seen: &mut BTreeSet<String>,
-    ) -> PropertyValue {
-        if !seen.insert(blank.to_string()) {
-            // A cycle of blank nodes: the repeat is the same node again.
-            return PropertyValue::Null;
+        stack: &mut BTreeSet<String>,
+    ) -> Result<PropertyValue, MappingFileError> {
+        if !stack.insert(blank.to_string()) {
+            self.report.blank_node_cycles += 1;
+            return Ok(PropertyValue::Null);
         }
-        let mut entries: HashMap<String, Vec<PropertyValue>> = HashMap::new();
+        let m = self.m;
+        let mut entries: Vec<(String, Vec<PropertyValue>)> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        let mut langs: BTreeMap<String, BTreeMap<String, Vec<PropertyValue>>> = BTreeMap::new();
+        let mut push = |entries: &mut Vec<(String, Vec<PropertyValue>)>, key: String, v| match index
+            .get(&key)
+        {
+            Some(&i) => entries[i].1.push(v),
+            None => {
+                index.insert(key.clone(), entries.len());
+                entries.push((key, vec![v]));
+            }
+        };
         for t in triples.get(blank).into_iter().flatten() {
             let p = t.predicate.as_named_node().as_str();
+            if m.drop.contains(p) {
+                self.report.drop_predicate(p);
+                continue;
+            }
+            if m.merge.as_ref().is_some_and(|r| r.predicate == p) {
+                continue;
+            }
             let key = if p == RDF_TYPE {
                 "type".to_string()
             } else {
                 self.key_for(p)
             };
-            let v = match &t.object {
-                RdfObject::Literal(lit) => self.literal_value(lit),
-                RdfObject::NamedNode(n) => PropertyValue::String(n.as_str().to_string()),
-                RdfObject::BlankNode(b) => self.inline(b.as_str(), triples, seen),
-            };
-            entries.entry(key).or_default().push(v);
+            match &t.object {
+                RdfObject::Literal(lit) => match lit.language() {
+                    Some(lang) if m.other_languages == OtherLanguages::Map => {
+                        langs
+                            .entry(key)
+                            .or_default()
+                            .entry(lang.to_string())
+                            .or_default()
+                            .push(string(lit));
+                    }
+                    Some(lang) if !lang.eq_ignore_ascii_case(&m.prefer_language) => {
+                        match m.other_languages {
+                            OtherLanguages::Suffix => {
+                                self.report.languages_suffixed += 1;
+                                push(&mut entries, format!("{key}@{lang}"), string(lit));
+                            }
+                            _ => self.report.languages_dropped += 1,
+                        }
+                    }
+                    _ => {
+                        let v = self.literal_value(lit);
+                        push(&mut entries, key, v);
+                    }
+                },
+                RdfObject::NamedNode(n) => push(
+                    &mut entries,
+                    key,
+                    PropertyValue::String(n.as_str().to_string()),
+                ),
+                RdfObject::BlankNode(b) => {
+                    let v = self.inline(b.as_str(), triples, stack)?;
+                    push(&mut entries, key, v);
+                }
+            }
         }
-        PropertyValue::Map(
-            entries
-                .into_iter()
-                .map(|(k, mut vs)| {
-                    let v = if vs.len() == 1 {
-                        vs.pop().unwrap_or(PropertyValue::Null)
-                    } else {
-                        PropertyValue::Array(vs)
-                    };
-                    (k, v)
-                })
-                .collect(),
-        )
+        stack.remove(blank);
+
+        let subject = || format!("blank node _:{blank}");
+        let mut map = HashMap::new();
+        for (key, vs) in entries {
+            if let Some(l) = langs.get_mut(&key) {
+                l.entry("@none".to_string()).or_default().extend(vs);
+                continue;
+            }
+            let v = self.collapse(vs, subject, &key)?;
+            map.insert(key, v);
+        }
+        for (key, by_lang) in langs {
+            let mut lm = HashMap::new();
+            for (lang, vs) in by_lang {
+                let v = self.collapse(vs, subject, &format!("{key}@{lang}"))?;
+                lm.insert(lang, v);
+            }
+            map.insert(key, PropertyValue::Map(lm));
+        }
+        Ok(PropertyValue::Map(map))
     }
 
     /// A literal as the property value its datatype names.
@@ -1143,6 +1257,14 @@ impl<'a> Applier<'a> {
             self.report.literals_as_string += 1;
             string(lit)
         })
+    }
+}
+
+/// A node's IRI, for an error that names it.
+fn subject_of(graph: &GraphStore, node: NodeId) -> String {
+    match graph.node_properties_merged(node).get(IRI_PROPERTY) {
+        Some(PropertyValue::String(s)) => s.clone(),
+        _ => format!("node {}", node.as_u64()),
     }
 }
 
