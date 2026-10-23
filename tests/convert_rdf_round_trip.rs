@@ -562,3 +562,81 @@ fn a_label_two_classes_map_to_is_reported_when_both_occur() {
     let one = "ex:owns a owl:ObjectProperty . ex:likes a owl:ObjectProperty .";
     assert!(read_losses("preset: owl", one).is_empty());
 }
+
+/// Four more ways a graph can hold RDF it cannot write back as it came:
+/// each is reported when read, and a key that would overwrite a node's
+/// identity is refused or dropped (#1954 review).
+#[test]
+fn key_collisions_blank_prefixed_iris_and_the_placeholder_are_reported() {
+    let losses = read_losses(
+        "prefixes: { ex: \"http://example.org/\" }\nproperties: { \"ex:p\": name, \"ex:q\": name }",
+        "ex:a ex:p \"1\" . ex:b ex:q \"2\" .",
+    );
+    assert!(
+        losses.contains(&"rdf_keys_ambiguous".to_string()),
+        "{losses:?}"
+    );
+
+    let losses = read_losses(
+        "",
+        "<https://samyama.ai/rdf/blank/customer> ex:name \"A\" .",
+    );
+    assert!(
+        losses.contains(&"rdf_blank_prefix_iris".to_string()),
+        "{losses:?}"
+    );
+
+    let losses = read_losses("", "ex:a a ex:Resource . ex:b ex:name \"B\" .");
+    assert!(
+        losses.contains(&"rdf_placeholder_labels_ambiguous".to_string()),
+        "{losses:?}"
+    );
+    // Untyped nodes alone are fine: the placeholder is only ours.
+    assert!(read_losses("", "ex:b ex:name \"B\" .").is_empty());
+}
+
+#[test]
+fn the_identity_key_cannot_be_overwritten() {
+    let err = Mapping::from_yaml(
+        "prefixes: { ex: \"http://example.org/\" }\nproperties: { \"ex:p\": \"__rdf_iri\" }",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            samyama::convert::rdf_mapping::MappingFileError::ReservedKey(_)
+        ),
+        "{err}"
+    );
+
+    // A predicate whose local name is the key is dropped and reported, and
+    // the node keeps its own IRI.
+    let dir = tempfile::tempdir().unwrap();
+    let input = write(
+        dir.path(),
+        "in.ttl",
+        &format!("{PREFIXES}ex:a ex:__rdf_iri \"http://example.org/b\" ; ex:name \"A\" .\n"),
+    );
+    let out = dir.path().join("out.sgsnap");
+    let report = convert(&input, &out, &Options::default()).unwrap();
+    assert!(
+        report
+            .input
+            .dropped()
+            .iter()
+            .any(|d| d.what == "rdf_predicates_dropped"),
+        "{:?}",
+        report.input.dropped()
+    );
+    let mut g = samyama::graph::GraphStore::new();
+    samyama::snapshot::import_tenant(&mut g, std::fs::File::open(&out).unwrap()).unwrap();
+    let iris: Vec<String> = g
+        .all_nodes()
+        .iter()
+        .filter_map(|n| match g.node_properties_merged(n.id).get("__rdf_iri") {
+            Some(samyama::graph::PropertyValue::String(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(iris, vec!["http://example.org/a".to_string()]);
+}

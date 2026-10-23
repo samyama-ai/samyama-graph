@@ -289,6 +289,8 @@ pub enum MappingFileError {
          name a key no predicate maps to"
     )]
     AliasesConflict { subject: String, property: String },
+    #[error("{0:?} is reserved for each node's own IRI and cannot be a mapping's key")]
+    ReservedKey(String),
     #[error("could not read the mapping file {path}: {source}")]
     Io {
         path: std::path::PathBuf,
@@ -404,6 +406,17 @@ impl Mapping {
             }),
             None => None,
         };
+        // `__rdf_iri` holds each node's own IRI; a mapping that sends values
+        // there would change which resource a node is (#1954 review).
+        let reserved = |k: &str| k == IRI_PROPERTY;
+        if let Some(key) = merged.properties.values().find(|k| reserved(k)) {
+            return Err(MappingFileError::ReservedKey(key.clone()));
+        }
+        if let Some(m) = &merge {
+            if reserved(&m.aliases_property) {
+                return Err(MappingFileError::ReservedKey(m.aliases_property.clone()));
+            }
+        }
         let languages = merged.languages.unwrap_or_default();
 
         Ok(Mapping {
@@ -551,6 +564,19 @@ pub struct RdfMapReport {
     /// label, which write back as the recorded class (#1954 review).
     #[serde(default)]
     pub labels_ambiguous: usize,
+    /// Values stored under a key another predicate also maps to, which write
+    /// back as that predicate (#1954 review).
+    #[serde(default)]
+    pub keys_ambiguous: usize,
+    /// Named IRIs under `{base}blank/`, the space generated blank nodes use,
+    /// which write back as blank nodes (#1954 review).
+    #[serde(default)]
+    pub blank_prefix_iris: usize,
+    /// Untyped nodes given the `Resource` placeholder while a real class also
+    /// maps to `Resource`, which write back as instances of it (#1954
+    /// review).
+    #[serde(default)]
+    pub placeholder_labels_ambiguous: usize,
     /// Keys holding both IRIs and text, which write back as IRIs wherever the
     /// text parses as one (#1954 review).
     #[serde(default)]
@@ -687,6 +713,27 @@ impl RdfMapReport {
             self.language_tags_mixed as u64,
             "A property's preferred-language values were tagged on some subjects and not \
              others; written back, they are all tagged."
+                .to_string(),
+        );
+        push(
+            "rdf_keys_ambiguous",
+            self.keys_ambiguous as u64,
+            "Values under a property key that more than one predicate maps to; written \
+             back, they all use the first predicate seen."
+                .to_string(),
+        );
+        push(
+            "rdf_blank_prefix_iris",
+            self.blank_prefix_iris as u64,
+            "Named IRIs in the space generated blank nodes use ({base}blank/); written \
+             back, they become blank nodes."
+                .to_string(),
+        );
+        push(
+            "rdf_placeholder_labels_ambiguous",
+            self.placeholder_labels_ambiguous as u64,
+            "Untyped nodes carry the Resource placeholder, which a real class also maps to; \
+             written back, they are typed with it."
                 .to_string(),
         );
         push(
@@ -964,7 +1011,14 @@ impl<'a> Applier<'a> {
         for term in &terms {
             let id = graph.create_node_with_labels(std::iter::empty());
             let iri = match term {
-                Term::Iri(i) => i.clone(),
+                Term::Iri(i) => {
+                    // A real IRI in the space generated blank nodes use
+                    // writes back as a blank node (#1954 review).
+                    if i.starts_with(&format!("{}blank/", m.base)) {
+                        self.report.blank_prefix_iris += 1;
+                    }
+                    i.clone()
+                }
                 Term::Blank(b) => {
                     self.report.blank_nodes_as_nodes += 1;
                     format!("{}blank/{b}", m.base)
@@ -1088,7 +1142,9 @@ impl<'a> Applier<'a> {
                         continue;
                     }
                     let key = self.key_for(p);
-                    self.record_key(&key, p);
+                    if !self.record_key(&key, p) {
+                        continue;
+                    }
                     self.literal_keys.insert(key.clone());
                     match lit.language() {
                         Some(lang) if m.other_languages == OtherLanguages::Map => {
@@ -1123,7 +1179,9 @@ impl<'a> Applier<'a> {
                 }
                 RdfObject::NamedNode(o) if m.properties.contains_key(p) => {
                     let key = self.key_for(p);
-                    self.record_key(&key, p);
+                    if !self.record_key(&key, p) {
+                        continue;
+                    }
                     self.report.names.iri_values.insert(key.clone());
                     let v = PropertyValue::String(o.as_str().to_string());
                     push_value(&mut values, &mut value_index, node, key, v);
@@ -1139,7 +1197,9 @@ impl<'a> Applier<'a> {
                     }
                     _ => {
                         let key = self.key_for(p);
-                        self.record_key(&key, p);
+                        if !self.record_key(&key, p) {
+                            continue;
+                        }
                         let mut stack = BTreeSet::new();
                         let v = self.inline(b.as_str(), &blank_triples, &mut stack)?;
                         self.report.blank_nodes_inlined += 1;
@@ -1205,9 +1265,15 @@ impl<'a> Applier<'a> {
         }
 
         // A node with no `rdf:type` still needs a label to be found by, as the
-        // engine's mapper gives it.
+        // engine's mapper gives it. If a real class also maps to `Resource`,
+        // the placeholder cannot be told from it, and an untyped node writes
+        // back typed (#1954 review).
+        let placeholder_is_a_class = self.report.names.labels.contains_key("Resource");
         for &id in ids.values() {
             if !labelled.contains(&id) {
+                if placeholder_is_a_class {
+                    self.report.placeholder_labels_ambiguous += 1;
+                }
                 graph
                     .add_label_to_node("default", id, "Resource")
                     .map_err(|e| MappingFileError::Engine(e.to_string()))?;
@@ -1216,12 +1282,27 @@ impl<'a> Applier<'a> {
         Ok(self.report)
     }
 
-    fn record_key(&mut self, key: &str, predicate: &str) {
-        self.report
-            .names
-            .keys
-            .entry(key.to_string())
-            .or_insert_with(|| predicate.to_string());
+    /// Record that `predicate` became `key`, and say whether the key may be
+    /// used. `__rdf_iri` may not: it holds the node's own IRI, and a value
+    /// written there would change which resource the node is (#1954 review);
+    /// such a triple is dropped and reported. A key another predicate already
+    /// fills is used, and counted, since it writes back as that predicate.
+    fn record_key(&mut self, key: &str, predicate: &str) -> bool {
+        if key == IRI_PROPERTY {
+            self.report.drop_predicate(predicate);
+            return false;
+        }
+        match self.report.names.keys.get(key) {
+            Some(recorded) if recorded != predicate => self.report.keys_ambiguous += 1,
+            Some(_) => {}
+            None => {
+                self.report
+                    .names
+                    .keys
+                    .insert(key.to_string(), predicate.to_string());
+            }
+        }
+        true
     }
 
     fn key_for(&self, predicate: &str) -> String {
@@ -1354,7 +1435,9 @@ impl<'a> Applier<'a> {
                 "type".to_string()
             } else {
                 let key = self.key_for(p);
-                self.record_key(&key, p);
+                if !self.record_key(&key, p) {
+                    continue;
+                }
                 key
             };
             match &t.object {
