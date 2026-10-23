@@ -112,7 +112,10 @@ fn labels_come_from_rdf_type_by_local_name_table_or_style() {
         ["Resource".to_string()].into()
     );
 
-    let (g, _) = map("labels: { \"ex:Person\": Human }", fixture);
+    let (g, _) = map(
+        "prefixes: { ex: \"http://example.org/\" }\nlabels: { \"ex:Person\": Human }",
+        fixture,
+    );
     assert_eq!(
         labels(&g, "http://example.org/a"),
         ["Human".to_string()].into()
@@ -378,7 +381,8 @@ fn base_names_the_iri_given_to_blank_nodes() {
 
 #[test]
 fn merge_folds_linked_subjects_into_one_node_keeping_the_others_as_aliases() {
-    let yaml = "merge: { predicate: \"ex:preferred\", into: object, aliases_property: altIri }";
+    let yaml = "prefixes: { ex: \"http://example.org/\" }\n\
+                merge: { predicate: \"ex:preferred\", into: object, aliases_property: altIri }";
     let fixture = "ex:graphdb ex:preferred ex:graph_database . ex:gdb ex:preferred ex:graphdb .
         ex:graph_database ex:name \"graph database\" .
         ex:graphdb ex:broader ex:databases . ex:gdb ex:broader ex:databases .";
