@@ -21,6 +21,16 @@ it out.
 | **Parquet / Arrow** | one *result set* | a warehouse, pandas, DuckDB |
 | **RDF / Turtle** | nodes, labels, properties, relationships, relationship properties (reified), IRIs | a triple store, SPARQL tooling |
 | **GraphML** | nodes, labels, relationships, relationship types, scalar properties; lists and temporals as text | Gephi, yEd, Cytoscape, NetworkX |
+| **CSV directory** | nodes, labels, relationships, relationship types, typed scalar columns | `neo4j-admin database import` |
+
+The last three are one command each from a snapshot, with `samyama convert`
+([MOVING-DATA.md](./MOVING-DATA.md)):
+
+```bash
+samyama convert graph.sgsnap graph.ttl        # or .nt, .rdf, .jsonld
+samyama convert graph.sgsnap graph.graphml
+samyama convert graph.sgsnap graph-csv        # a path with no extension is a CSV directory
+```
 
 Nothing here needs a licence key, a support ticket, or a running network
 connection to us.
@@ -128,9 +138,16 @@ job the Cypher script above is less work and loses less.
 
 ## 4. RDF — a round trip, with three named losses
 
-`GraphToRdfMapper::sync_to_rdf` writes the graph into an `RdfStore`, which the
-existing Turtle, N-Triples, RDF/XML and JSON-LD serialisers can write out.
-`RdfToGraphMapper::map_to_graph` reads it back. The mapping:
+```bash
+samyama convert graph.sgsnap graph.ttl
+```
+
+A graph that came in as RDF is written back with the mapping it was read
+under, recorded in the snapshot, so its own classes and predicates come back
+([MOVING-DATA.md](./MOVING-DATA.md#rdf-the-mapping-file-and-its-presets)).
+Any other graph is written in Samyama's own RDF form, which
+`GraphToRdfMapper::sync_to_rdf` produces and `RdfToGraphMapper::map_to_graph`
+reads back:
 
 | Property graph | RDF |
 |---|---|
@@ -172,7 +189,7 @@ are now here. Closed [#1362](https://github.com/samyama-ai/samyama-graph/issues/
 ## 5. GraphML — for the tools that draw graphs
 
 ```bash
-cargo run --release --example graphml_export -- --snapshot graph.sgsnap --out graph.graphml
+samyama convert graph.sgsnap graph.graphml --report report.json
 ```
 
 Gephi, yEd, Cytoscape and NetworkX all read GraphML. It carries the topology
@@ -207,9 +224,27 @@ The full list of narrowings:
 | labels | a `labels` attribute, space-separated — the convention every tool here follows, and ambiguous for a label containing a space, which is reported |
 | relationship type | a `label` attribute on the edge |
 
-`--json report.json` writes the same report machine-readably. The output is
+`--report report.json` writes the same report machine-readably. The output is
 byte-identical across runs of the same graph, so it can be diffed and
 checksummed.
+
+### To `neo4j-admin database import` — a CSV directory
+
+```bash
+samyama convert graph.sgsnap graph-csv
+neo4j-admin database import full neo4j \
+  --nodes=graph-csv/nodes_Person.csv --nodes=graph-csv/nodes_Movie.csv \
+  --relationships=graph-csv/edges_ACTED_IN.csv
+```
+
+One file per label combination (`nodes_<Label>[_<Label>].csv`, with `:ID` and
+`:LABEL`) and one per relationship type (`edges_<TYPE>.csv`, with `:START_ID`,
+`:END_ID`, `:TYPE`). Each property is a typed column (`born:long`) when every
+value in that file has one type, and otherwise `string`, which is reported.
+The ids are this graph's node ids. A property whose name contains `:` cannot
+be named in the header and is left out, which is also reported. The layout is
+checked by tests that parse it; it has not been run through a real
+`neo4j-admin`.
 
 ---
 
