@@ -43,6 +43,8 @@ the Rust SDK.
 
 - Per-SDK quickstarts: [Python](python/README.md) ·
   [TypeScript](typescript/README.md) · [Rust](../crates/samyama-sdk/README.md)
+- [`VALUE-TYPES.md`](VALUE-TYPES.md) — what each value type arrives as in
+  each SDK, what does not survive, and the shared round-trip suite.
 - [`docs/SDK-API-CLI-ARCHITECTURE.md`](../docs/SDK-API-CLI-ARCHITECTURE.md) —
   how the SDKs, the HTTP API and the CLI fit together.
 

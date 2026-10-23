@@ -416,8 +416,9 @@ fn render_row_shapes_every_kind_of_value() {
         row[4],
         json!({ "nodes": ["3", "4"], "edges": ["9"], "length": 1 })
     );
-    assert_eq!(row[5].as_array().unwrap().len(), 1);
-    assert!(row[6]["k"].as_str().unwrap().contains('2'), "{}", row[6]);
+    // The values themselves, not their debug text (#1728).
+    assert_eq!(row[5], json!([1]));
+    assert_eq!(row[6], json!({ "k": 2 }));
     assert_eq!(row[7], json!(0.5));
     assert!(row[8].is_null(), "a missing column renders as null");
     assert_eq!(nodes.len(), 2);
@@ -434,6 +435,56 @@ fn render_row_shapes_every_kind_of_value() {
     .collect();
     let row = render_row(&record, &columns[..1], &merged, &mut nodes, &mut edges);
     assert_eq!(row[0]["properties"]["name"], "merged");
+}
+
+#[test]
+fn a_list_or_map_renders_each_value_as_a_column_would() {
+    let mut node = crate::graph::Node::new(NodeId(5), "Person");
+    node.set_property("name", "ada");
+    let date = PropertyValue::Date(19_782); // 2024-02-29
+    let inner = Value::Map(
+        [
+            ("when".to_string(), Value::Property(date.clone())),
+            ("who".to_string(), Value::Node(NodeId(5), Box::new(node))),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let mut record = crate::query::Record::new();
+    record.bind(
+        "l",
+        Value::List(vec![
+            Value::Property(PropertyValue::String("a".into())),
+            Value::Property(PropertyValue::Float(1.0)),
+            Value::Null,
+            inner,
+        ]),
+    );
+
+    let (mut nodes, mut edges) = (HashMap::new(), HashMap::new());
+    let row = render_row(
+        &record,
+        &["l".to_string()],
+        &HashMap::new(),
+        &mut nodes,
+        &mut edges,
+    );
+
+    assert_eq!(
+        row[0],
+        json!([
+            "a",
+            1.0,
+            null,
+            {
+                "when": date.to_json(),
+                "who": { "id": "5", "labels": ["Person"], "properties": { "name": "ada" } }
+            }
+        ])
+    );
+    assert_eq!(row[0][3]["when"], "2024-02-29");
+    // A node inside a collection is a node of the result, as it is in a column.
+    assert!(nodes.contains_key("5"), "{nodes:?}");
 }
 
 // ---------- /api/query ----------
