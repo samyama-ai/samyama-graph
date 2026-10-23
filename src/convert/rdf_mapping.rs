@@ -541,6 +541,20 @@ pub struct RdfMapReport {
     /// written as null there (`blank_nodes: inline`).
     #[serde(default)]
     pub blank_node_cycles: usize,
+    /// Edges of a type another predicate (or the other direction) also
+    /// produced: the type records one predicate, so these write back as that
+    /// one -- under `skos`, a reversed `narrower` becomes `broader` (#1954
+    /// review).
+    #[serde(default)]
+    pub edge_predicates_ambiguous: usize,
+    /// Keys holding both IRIs and text, which write back as IRIs wherever the
+    /// text parses as one (#1954 review).
+    #[serde(default)]
+    pub term_kinds_mixed: usize,
+    /// Blank nodes inlined under more than one parent, which write back as
+    /// one blank node per parent (#1954 review).
+    #[serde(default)]
+    pub blank_nodes_shared: usize,
     /// Literals of a narrower numeric datatype (`xsd:int`, `xsd:long`,
     /// `xsd:float`, ...) stored as Integer or Float, which write back as
     /// `xsd:integer` or `xsd:double` (#1912).
@@ -666,6 +680,27 @@ impl RdfMapReport {
                 .to_string(),
         );
         push(
+            "rdf_edge_predicates_ambiguous",
+            self.edge_predicates_ambiguous as u64,
+            "Edges of a type that more than one predicate or direction produced; written \
+             back, they all use the first one seen."
+                .to_string(),
+        );
+        push(
+            "rdf_term_kinds_mixed",
+            self.term_kinds_mixed as u64,
+            "Properties holding both IRIs and text; written back, text that parses as an \
+             IRI becomes one."
+                .to_string(),
+        );
+        push(
+            "rdf_blank_nodes_shared",
+            self.blank_nodes_shared as u64,
+            "Blank nodes inlined under more than one parent; written back, each parent gets \
+             its own blank node."
+                .to_string(),
+        );
+        push(
             "rdf_blank_node_cycles",
             self.blank_node_cycles as u64,
             "Blank nodes that refer back to themselves cannot be inlined as a map; the \
@@ -712,6 +747,8 @@ struct Applier<'a> {
     label_names: HashMap<String, String>,
     key_names: HashMap<String, String>,
     edge_names: HashMap<String, String>,
+    /// Keys that received a literal anywhere, to find keys of mixed term kind.
+    literal_keys: BTreeSet<String>,
 }
 
 impl<'a> Applier<'a> {
@@ -724,6 +761,7 @@ impl<'a> Applier<'a> {
             label_names: HashMap::new(),
             key_names: HashMap::new(),
             edge_names: HashMap::new(),
+            literal_keys: BTreeSet::new(),
         }
     }
 
@@ -856,6 +894,7 @@ impl<'a> Applier<'a> {
         // Blank nodes' own triples, for inlining.
         let mut blank_triples: HashMap<String, Vec<&Triple>> = HashMap::new();
         let mut blank_referenced: BTreeSet<String> = BTreeSet::new();
+        let mut blank_references: HashMap<String, usize> = HashMap::new();
         for t in &self.triples {
             if let RdfSubject::BlankNode(b) = &t.subject {
                 blank_triples
@@ -865,7 +904,11 @@ impl<'a> Applier<'a> {
             }
             if let RdfObject::BlankNode(b) = &t.object {
                 blank_referenced.insert(b.as_str().to_string());
+                *blank_references.entry(b.as_str().to_string()).or_insert(0) += 1;
             }
+        }
+        if m.blank_nodes == BlankNodes::Inline {
+            self.report.blank_nodes_shared = blank_references.values().filter(|&&n| n > 1).count();
         }
 
         // Nodes: every subject, and every object an edge will point at.
@@ -1003,6 +1046,7 @@ impl<'a> Applier<'a> {
                     }
                     let key = self.key_for(p);
                     self.record_key(&key, p);
+                    self.literal_keys.insert(key.clone());
                     match lit.language() {
                         Some(lang) if m.other_languages == OtherLanguages::Map => {
                             self.report.names.language_maps.insert(key.clone());
@@ -1099,6 +1143,12 @@ impl<'a> Applier<'a> {
             .preferred_tagged
             .intersection(&untagged_keys)
             .count();
+        self.report.term_kinds_mixed = self
+            .report
+            .names
+            .iri_values
+            .intersection(&self.literal_keys)
+            .count();
         if let Some(rule) = &m.merge {
             for (node, list) in alias_lists {
                 let values = list.into_iter().map(PropertyValue::String).collect();
@@ -1162,14 +1212,19 @@ impl<'a> Applier<'a> {
                 false,
             ),
         };
-        self.report
-            .names
-            .edges
-            .entry(edge_type.clone())
-            .or_insert_with(|| AppliedEdge {
-                predicate: predicate.to_string(),
-                reverse,
-            });
+        let ambiguous = match self.report.names.edges.get(&edge_type) {
+            Some(e) => e.predicate != predicate || e.reverse != reverse,
+            None => {
+                self.report.names.edges.insert(
+                    edge_type.clone(),
+                    AppliedEdge {
+                        predicate: predicate.to_string(),
+                        reverse,
+                    },
+                );
+                false
+            }
+        };
         let (from, to) = if reverse {
             (target, node)
         } else {
@@ -1183,6 +1238,9 @@ impl<'a> Applier<'a> {
             .create_edge(from, to, edge_type)
             .map_err(|e| MappingFileError::Engine(e.to_string()))?;
         self.report.edges_created += 1;
+        if ambiguous {
+            self.report.edge_predicates_ambiguous += 1;
+        }
         Ok(())
     }
 
@@ -1257,33 +1315,36 @@ impl<'a> Applier<'a> {
                 key
             };
             match &t.object {
-                RdfObject::Literal(lit) => match lit.language() {
-                    Some(lang) if m.other_languages == OtherLanguages::Map => {
-                        self.report.names.language_maps.insert(key.clone());
-                        langs
-                            .entry(key)
-                            .or_default()
-                            .entry(lang.to_string())
-                            .or_default()
-                            .push(string(lit));
-                    }
-                    Some(lang) if !lang.eq_ignore_ascii_case(&m.prefer_language) => {
-                        match m.other_languages {
-                            OtherLanguages::Suffix => {
-                                self.report.languages_suffixed += 1;
-                                push(&mut entries, format!("{key}@{lang}"), string(lit));
+                RdfObject::Literal(lit) => {
+                    self.literal_keys.insert(key.clone());
+                    match lit.language() {
+                        Some(lang) if m.other_languages == OtherLanguages::Map => {
+                            self.report.names.language_maps.insert(key.clone());
+                            langs
+                                .entry(key)
+                                .or_default()
+                                .entry(lang.to_string())
+                                .or_default()
+                                .push(string(lit));
+                        }
+                        Some(lang) if !lang.eq_ignore_ascii_case(&m.prefer_language) => {
+                            match m.other_languages {
+                                OtherLanguages::Suffix => {
+                                    self.report.languages_suffixed += 1;
+                                    push(&mut entries, format!("{key}@{lang}"), string(lit));
+                                }
+                                _ => self.report.languages_dropped += 1,
                             }
-                            _ => self.report.languages_dropped += 1,
+                        }
+                        tag => {
+                            if tag.is_some() {
+                                self.report.names.preferred_tagged.insert(key.clone());
+                            }
+                            let v = self.literal_value(lit);
+                            push(&mut entries, key, v);
                         }
                     }
-                    tag => {
-                        if tag.is_some() {
-                            self.report.names.preferred_tagged.insert(key.clone());
-                        }
-                        let v = self.literal_value(lit);
-                        push(&mut entries, key, v);
-                    }
-                },
+                }
                 RdfObject::NamedNode(n) => {
                     self.report.names.iri_values.insert(key.clone());
                     push(

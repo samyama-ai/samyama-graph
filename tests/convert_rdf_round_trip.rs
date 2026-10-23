@@ -395,3 +395,84 @@ fn the_cli_takes_a_preset_or_a_mapping_file_for_rdf_input() {
     ]);
     assert_eq!(o.status.code(), Some(2));
 }
+
+/// The input's loss report for `body` read under `yaml`.
+fn read_losses(yaml: &str, body: &str) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write(dir.path(), "in.ttl", &format!("{PREFIXES}{body}"));
+    let opts = Options {
+        mapping: Some(Mapping::from_yaml(yaml).unwrap()),
+        ..Options::default()
+    };
+    let report = convert(&input, &dir.path().join("out.sgsnap"), &opts).unwrap();
+    report
+        .input
+        .dropped()
+        .iter()
+        .map(|d| d.what.clone())
+        .collect()
+}
+
+/// What cannot be written back exactly is reported on the way in, so
+/// `require_lossless` can refuse it (#1954 review): one edge type from two
+/// predicates, a key holding IRIs and text, a blank node inlined under two
+/// parents.
+#[test]
+fn what_cannot_be_written_back_exactly_is_reported_when_read() {
+    let losses = read_losses(
+        "preset: skos",
+        "ex:a skos:broader ex:b . ex:c skos:narrower ex:d .",
+    );
+    assert!(
+        losses.contains(&"rdf_edge_predicates_ambiguous".to_string()),
+        "{losses:?}"
+    );
+
+    let losses = read_losses(
+        "prefixes: { ex: \"http://example.org/\" }\nproperties: { \"ex:p\": p }",
+        "ex:a ex:p ex:b ; ex:p \"http://example.org/text\" .",
+    );
+    assert!(
+        losses.contains(&"rdf_term_kinds_mixed".to_string()),
+        "{losses:?}"
+    );
+
+    let losses = read_losses(
+        "blank_nodes: inline",
+        "ex:a ex:part _:b . ex:c ex:part _:b . _:b ex:v \"1\" .",
+    );
+    assert!(
+        losses.contains(&"rdf_blank_nodes_shared".to_string()),
+        "{losses:?}"
+    );
+
+    // None of them where nothing is ambiguous.
+    assert!(read_losses("preset: skos", "ex:a skos:broader ex:b .").is_empty());
+}
+
+/// A language map with several values in one language and untagged values
+/// round-trips: TTL -> .sgsnap -> TTL gives the same graph.
+#[test]
+fn a_language_map_with_repeated_and_untagged_values_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = format!("{PREFIXES}ex:a ex:title \"A\"@en , \"B\"@en , \"plain\" , \"C\"@fr .\n");
+    let input = write(dir.path(), "in.ttl", &text);
+    let mid = dir.path().join("mid.sgsnap");
+    let opts = Options {
+        mapping: Some(Mapping::from_yaml("languages: { others: map }").unwrap()),
+        ..Options::default()
+    };
+    let first = convert(&input, &mid, &opts).unwrap();
+    assert!(
+        first.input.dropped().is_empty(),
+        "{:?}",
+        first.input.dropped()
+    );
+    let out = dir.path().join("out.ttl");
+    convert(&mid, &out, &Options::default()).unwrap();
+    let back = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(
+        canonical(&parse(&back, RdfFormat::Turtle)),
+        canonical(&parse(&text, RdfFormat::Turtle))
+    );
+}
