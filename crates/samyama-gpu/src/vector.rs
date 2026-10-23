@@ -149,7 +149,7 @@ fn gpu_batch_distance(
 pub enum VectorMetric {
     /// Cosine distance (1 - cosine similarity).
     Cosine,
-    /// Inner-product distance (negated dot product).
+    /// Inner-product distance, `1 - dot product` (for unit vectors).
     InnerProduct,
 }
 

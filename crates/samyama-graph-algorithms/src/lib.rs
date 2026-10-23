@@ -1,6 +1,8 @@
 pub mod common;
 #[cfg(feature = "gpu")]
 pub mod gpu_dispatch;
+#[cfg(test)]
+mod gpu_parity_coverage;
 #[cfg(all(test, feature = "gpu"))]
 mod gpu_parity_tests;
 pub mod pagerank;
