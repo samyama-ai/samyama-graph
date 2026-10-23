@@ -476,3 +476,74 @@ fn a_language_map_with_repeated_and_untagged_values_round_trips() {
         canonical(&parse(&text, RdfFormat::Turtle))
     );
 }
+
+/// TTL read under `yaml`, written back as TTL, compared with the input.
+fn round_trip_under(yaml: &str, body: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let dir = tempfile::tempdir().unwrap();
+    let text = format!("{PREFIXES}{body}");
+    let input = write(dir.path(), "in.ttl", &text);
+    let mid = dir.path().join("mid.sgsnap");
+    let opts = Options {
+        mapping: Some(Mapping::from_yaml(yaml).unwrap()),
+        ..Options::default()
+    };
+    let first = convert(&input, &mid, &opts).unwrap();
+    let losses = first
+        .input
+        .dropped()
+        .iter()
+        .map(|d| d.what.clone())
+        .collect();
+    let out = dir.path().join("out.ttl");
+    convert(&mid, &out, &Options::default()).unwrap();
+    let back = std::fs::read_to_string(&out).unwrap();
+    (
+        canonical(&parse(&text, RdfFormat::Turtle)),
+        canonical(&parse(&back, RdfFormat::Turtle)),
+        losses,
+    )
+}
+
+/// Language-tagged literals inside an inlined blank node come back tagged,
+/// under both `others: suffix` and `others: map` (#1954 review).
+#[test]
+fn language_tags_inside_an_inlined_blank_node_round_trip() {
+    let body = "ex:a ex:part [ ex:title \"Hello\"@en , \"Hallo\"@de ; ex:n 1 ] .";
+    for yaml in [
+        "blank_nodes: inline",
+        "blank_nodes: inline\nlanguages: { others: map }",
+    ] {
+        let (input, output, losses) = round_trip_under(yaml, body);
+        assert!(losses.is_empty(), "{yaml}: {losses:?}");
+        assert_eq!(output, input, "{yaml}");
+    }
+}
+
+/// A merge moves an alias's own statements onto the node it merged into,
+/// and string-valued or untyped-away datatypes are not kept; each is
+/// reported (#1954 review).
+#[test]
+fn merged_statements_and_dropped_datatypes_are_reported() {
+    let losses = read_losses(
+        "prefixes: { ex: \"http://example.org/\" }\n\
+         merge: { predicate: \"ex:preferred\", into: object, aliases_property: aliases }",
+        "ex:a ex:preferred ex:b ; ex:name \"A\" . ex:b ex:name \"B\" .",
+    );
+    assert!(
+        losses.contains(&"rdf_merge_statements_reassigned".to_string()),
+        "{losses:?}"
+    );
+
+    let losses = read_losses("", "ex:a ex:home \"http://x.org/\"^^xsd:anyURI .");
+    assert!(
+        losses.contains(&"rdf_datatypes_normalized".to_string()),
+        "{losses:?}"
+    );
+    let losses = read_losses("typed_literals: false", "ex:a ex:n 3 .");
+    assert!(
+        losses.contains(&"rdf_datatypes_normalized".to_string()),
+        "{losses:?}"
+    );
+    // A plain string loses nothing, typed or not.
+    assert!(read_losses("typed_literals: false", "ex:a ex:s \"x\" .").is_empty());
+}

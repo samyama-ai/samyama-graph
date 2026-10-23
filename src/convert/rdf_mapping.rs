@@ -555,6 +555,11 @@ pub struct RdfMapReport {
     /// one blank node per parent (#1954 review).
     #[serde(default)]
     pub blank_nodes_shared: usize,
+    /// Statements about a merged alias (or pointing at one) that now belong
+    /// to the node it merged into; written back, they are said of that node
+    /// (#1954 review).
+    #[serde(default)]
+    pub merge_statements_reassigned: usize,
     /// Literals of a narrower numeric datatype (`xsd:int`, `xsd:long`,
     /// `xsd:float`, ...) stored as Integer or Float, which write back as
     /// `xsd:integer` or `xsd:double` (#1912).
@@ -668,8 +673,9 @@ impl RdfMapReport {
         push(
             "rdf_datatypes_normalized",
             self.datatypes_normalized as u64,
-            "Narrower numeric datatypes (xsd:int, xsd:long, xsd:float, ...) are stored as \
-             Integer or Float and write back as xsd:integer or xsd:double."
+            "Datatypes the graph does not keep: narrower numbers (xsd:int, xsd:float, ...) \
+             write back as xsd:integer or xsd:double, string-valued ones (xsd:anyURI, \
+             xsd:token, ...) and everything under `typed_literals: false` as plain text."
                 .to_string(),
         );
         push(
@@ -691,6 +697,13 @@ impl RdfMapReport {
             self.term_kinds_mixed as u64,
             "Properties holding both IRIs and text; written back, text that parses as an \
              IRI becomes one."
+                .to_string(),
+        );
+        push(
+            "rdf_merge_statements_reassigned",
+            self.merge_statements_reassigned as u64,
+            "Statements about a merged subject now belong to the node it merged into; \
+             written back, they are said of that node."
                 .to_string(),
         );
         push(
@@ -1013,6 +1026,15 @@ impl<'a> Applier<'a> {
                 self.report.drop_predicate(p);
                 continue;
             };
+            // A statement about a merged alias, or pointing at one, now
+            // belongs to the node it merged into; writing back cannot tell
+            // which subject it came from (#1954 review).
+            let alias = |iri: &str| self.merged_into.contains_key(iri);
+            let subject_is_alias = matches!(&subject, Term::Iri(i) if alias(i));
+            let object_is_alias = matches!(&t.object, RdfObject::NamedNode(o) if alias(o.as_str()));
+            if subject_is_alias || object_is_alias {
+                self.report.merge_statements_reassigned += 1;
+            }
 
             if p == RDF_TYPE {
                 let RdfObject::NamedNode(class) = &t.object else {
@@ -1384,7 +1406,15 @@ impl<'a> Applier<'a> {
 
     /// A literal as the property value its datatype names.
     fn literal_value(&mut self, lit: &Literal) -> PropertyValue {
-        if !self.m.typed_literals || lit.language().is_some() {
+        if lit.language().is_some() {
+            return string(lit);
+        }
+        if !self.m.typed_literals {
+            // Stored as text: any datatype but plain xsd:string is gone, and
+            // writes back as a plain literal (#1954 review).
+            if lit.datatype().as_str() != XSD_STRING_OR_PLAIN {
+                self.report.datatypes_normalized += 1;
+            }
             return string(lit);
         }
         let text = lit.value().trim();
@@ -1397,8 +1427,12 @@ impl<'a> Applier<'a> {
             return string(lit);
         };
         let parsed = match local {
-            "string" | "normalizedString" | "token" | "anyURI" | "language" | "Name" | "NCName" => {
-                return string(lit)
+            "string" => return string(lit),
+            // String-valued datatypes: the text is kept, the datatype is not,
+            // so it writes back as plain xsd:string (#1954 review).
+            "normalizedString" | "token" | "anyURI" | "language" | "Name" | "NCName" => {
+                self.report.datatypes_normalized += 1;
+                return string(lit);
             }
             "integer" => text.parse::<i64>().ok().map(PropertyValue::Integer),
             "int" | "long" | "short" | "byte" | "nonNegativeInteger" | "positiveInteger"
@@ -1870,18 +1904,18 @@ impl Writer<'_> {
                 let mut keys: Vec<&String> = map.keys().collect();
                 keys.sort();
                 for k in keys {
-                    for inner in elements(&map[k]) {
-                        if k == "type" {
+                    if k == "type" {
+                        for inner in elements(&map[k]) {
                             if let PropertyValue::String(class) = inner {
                                 self.add(s.clone(), RDF_TYPE, RdfObject::NamedNode(named(class)?))?;
                             }
-                            continue;
                         }
-                        let predicate = self.predicate_for_key(k);
-                        if let Some(o) = self.object(k, inner)? {
-                            self.add(s.clone(), &predicate, o)?;
-                        }
+                        continue;
                     }
+                    // The same writer as a node's own keys, so `key@de` and
+                    // language maps inside an inlined map come back as tagged
+                    // literals (#1954 review).
+                    self.property(&s, k, &map[k])?;
                 }
                 RdfObject::BlankNode(b)
             }
