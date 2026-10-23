@@ -612,3 +612,119 @@ fn every_preset_and_the_cso_example_resolve() {
         "superTopicOf is BROADER the other way round"
     );
 }
+
+/// A language map keeps every value: several in one language go through
+/// `multi_valued`, and untagged ones sit under `@none` instead of being
+/// replaced by the map (review on #1952).
+#[test]
+fn a_language_map_keeps_repeated_and_untagged_values() {
+    let fixture = r#"ex:a skos:prefLabel "Graph"@en , "Graphs"@en , "plain" , "Graphe"@fr ."#;
+    let (g, r) = map("languages: { others: map }", fixture);
+    match prop(&g, "http://example.org/a", "prefLabel") {
+        Some(PropertyValue::Map(m)) => {
+            match m.get("en") {
+                Some(PropertyValue::Array(v)) => assert_eq!(v.len(), 2, "{v:?}"),
+                other => panic!("en: {other:?}"),
+            }
+            assert_eq!(m.get("fr"), Some(&s("Graphe")));
+            assert_eq!(m.get("@none"), Some(&s("plain")));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(r.lossless(), "{:?}", r.dropped());
+
+    let mapping = Mapping::from_yaml("languages: { others: map }\nmulti_valued: error").unwrap();
+    let err = mapping
+        .apply(&store(fixture), &mut GraphStore::new())
+        .unwrap_err();
+    assert!(
+        matches!(err, MappingFileError::MultiValued { ref key, .. } if key == "prefLabel@en"),
+        "{err}"
+    );
+}
+
+/// An aliases key that a predicate also fills on the same node is refused,
+/// not resolved by one silently replacing the other (review on #1952).
+#[test]
+fn an_aliases_key_a_predicate_also_fills_is_refused() {
+    let yaml = "prefixes: { ex: \"http://example.org/\" }\n\
+                merge: { predicate: \"ex:preferred\", into: object, aliases_property: altLabel }";
+    let fixture = r#"ex:gdb ex:preferred ex:graph . ex:graph skos:altLabel "graph store" ."#;
+    let err = Mapping::from_yaml(yaml)
+        .unwrap()
+        .apply(&store(fixture), &mut GraphStore::new())
+        .unwrap_err();
+    assert!(
+        matches!(err, MappingFileError::AliasesConflict { ref property, .. } if property == "altLabel"),
+        "{err}"
+    );
+
+    // A distinct key keeps both.
+    let yaml = "prefixes: { ex: \"http://example.org/\" }\n\
+                merge: { predicate: \"ex:preferred\", into: object, aliases_property: aliases }";
+    let (g, _) = map(yaml, fixture);
+    assert_eq!(
+        prop(&g, "http://example.org/graph", "altLabel"),
+        Some(s("graph store"))
+    );
+    assert_eq!(
+        prop(&g, "http://example.org/graph", "aliases"),
+        Some(PropertyValue::Array(vec![s("http://example.org/gdb")]))
+    );
+}
+
+/// An inlined blank node follows the same rules as a node: `drop`, language
+/// tags and `multi_valued` (review on #1952).
+#[test]
+fn an_inlined_blank_node_follows_drop_languages_and_multi_valued() {
+    let fixture =
+        r#"ex:a ex:part [ skos:inScheme ex:s ; skos:prefLabel "x"@en , "y"@de ; ex:n 1 , 2 ] ."#;
+    let (g, r) = map("blank_nodes: inline\ndrop: [ \"skos:inScheme\" ]", fixture);
+    match prop(&g, "http://example.org/a", "part") {
+        Some(PropertyValue::Map(m)) => {
+            assert!(!m.contains_key("inScheme"), "{m:?}");
+            assert_eq!(m.get("prefLabel"), Some(&s("x")));
+            assert_eq!(m.get("prefLabel@de"), Some(&s("y")));
+            assert!(
+                matches!(m.get("n"), Some(PropertyValue::Array(v)) if v.len() == 2),
+                "{m:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        r.predicates_dropped
+            .get("http://www.w3.org/2004/02/skos/core#inScheme"),
+        Some(&1)
+    );
+
+    let mapping = Mapping::from_yaml("blank_nodes: inline\nmulti_valued: error").unwrap();
+    let err = mapping
+        .apply(&store(fixture), &mut GraphStore::new())
+        .unwrap_err();
+    assert!(matches!(err, MappingFileError::MultiValued { .. }), "{err}");
+}
+
+/// A blank node two parents share is inlined under both; one that refers
+/// back to itself is a cycle, written as null there and reported (review on
+/// #1952).
+#[test]
+fn a_shared_blank_node_is_inlined_twice_and_a_cycle_is_reported() {
+    let shared = "ex:a ex:left _:c ; ex:right _:c . _:c ex:v \"1\" .";
+    let (g, r) = map("blank_nodes: inline", shared);
+    for side in ["left", "right"] {
+        match prop(&g, "http://example.org/a", side) {
+            Some(PropertyValue::Map(m)) => assert_eq!(m.get("v"), Some(&s("1")), "{side}"),
+            other => panic!("{side}: {other:?}"),
+        }
+    }
+    assert_eq!(r.blank_node_cycles, 0);
+
+    let cyclic = "ex:a ex:p _:x . _:x ex:q _:y . _:y ex:r _:x .";
+    let (_, r) = map("blank_nodes: inline", cyclic);
+    assert_eq!(r.blank_node_cycles, 1);
+    assert!(r
+        .dropped()
+        .iter()
+        .any(|d| d.what == "rdf_blank_node_cycles"));
+}
