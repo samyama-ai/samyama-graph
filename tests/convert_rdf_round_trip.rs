@@ -547,3 +547,18 @@ fn merged_statements_and_dropped_datatypes_are_reported() {
     // A plain string loses nothing, typed or not.
     assert!(read_losses("typed_literals: false", "ex:a ex:s \"x\" .").is_empty());
 }
+
+/// Under `owl`, ObjectProperty and DatatypeProperty both become `Property`;
+/// an ontology with both cannot write back exactly, and says so when read
+/// (#1954 review).
+#[test]
+fn a_label_two_classes_map_to_is_reported_when_both_occur() {
+    let both = "ex:owns a owl:ObjectProperty . ex:age a owl:DatatypeProperty .";
+    let losses = read_losses("preset: owl", both);
+    assert!(
+        losses.contains(&"rdf_labels_ambiguous".to_string()),
+        "{losses:?}"
+    );
+    let one = "ex:owns a owl:ObjectProperty . ex:likes a owl:ObjectProperty .";
+    assert!(read_losses("preset: owl", one).is_empty());
+}

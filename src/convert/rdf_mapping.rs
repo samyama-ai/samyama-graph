@@ -547,6 +547,10 @@ pub struct RdfMapReport {
     /// review).
     #[serde(default)]
     pub edge_predicates_ambiguous: usize,
+    /// Labels applied from a class other than the one recorded for that
+    /// label, which write back as the recorded class (#1954 review).
+    #[serde(default)]
+    pub labels_ambiguous: usize,
     /// Keys holding both IRIs and text, which write back as IRIs wherever the
     /// text parses as one (#1954 review).
     #[serde(default)]
@@ -683,6 +687,13 @@ impl RdfMapReport {
             self.language_tags_mixed as u64,
             "A property's preferred-language values were tagged on some subjects and not \
              others; written back, they are all tagged."
+                .to_string(),
+        );
+        push(
+            "rdf_labels_ambiguous",
+            self.labels_ambiguous as u64,
+            "Labels that more than one class produced; written back, they all name the \
+             first class seen."
                 .to_string(),
         );
         push(
@@ -1047,11 +1058,21 @@ impl<'a> Applier<'a> {
                     .or_else(|| self.label_names.get(class.as_str()))
                     .cloned()
                     .unwrap_or_else(|| class.as_str().to_string());
-                self.report
-                    .names
-                    .labels
-                    .entry(label.clone())
-                    .or_insert_with(|| class.as_str().to_string());
+                // A label two classes map to records one of them, so the other
+                // writes back as it (#1954 review: owl's ObjectProperty and
+                // DatatypeProperty both become `Property`).
+                match self.report.names.labels.get(&label) {
+                    Some(recorded) if recorded != class.as_str() => {
+                        self.report.labels_ambiguous += 1;
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.report
+                            .names
+                            .labels
+                            .insert(label.clone(), class.as_str().to_string());
+                    }
+                }
                 graph
                     .add_label_to_node("default", node, label)
                     .map_err(|e| MappingFileError::Engine(e.to_string()))?;
