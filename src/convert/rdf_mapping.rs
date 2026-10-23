@@ -46,6 +46,11 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// The datatype a plain, untagged literal reports.
 const XSD_STRING_OR_PLAIN: &str = "http://www.w3.org/2001/XMLSchema#string";
 
+/// The key an inlined blank node's `rdf:type` goes under. `@` keeps it apart
+/// from any key a predicate's local name can produce, so an ordinary
+/// predicate named `type` cannot be taken for the class (#1954 review).
+pub const INLINE_CLASS_KEY: &str = "@type";
+
 /// The presets, by name.
 pub const PRESETS: [&str; 4] = ["generic", "skos", "owl", "samyama"];
 
@@ -285,8 +290,8 @@ pub enum MappingFileError {
     #[error("{subject} has more than one {key:?} and `multi_valued: error` was set")]
     MultiValued { subject: String, key: String },
     #[error(
-        "{subject} has merged aliases and its own {property:?} values; `aliases_property` must \
-         name a key no predicate maps to"
+        "{subject} has its own {property:?} values, but `aliases_property` reserves that key \
+         for merged aliases; name a key no predicate maps to"
     )]
     AliasesConflict { subject: String, property: String },
     #[error("{0:?} is reserved for each node's own IRI and cannot be a mapping's key")]
@@ -1219,13 +1224,14 @@ impl<'a> Applier<'a> {
                 map.entry("@none".to_string()).or_default().extend(vs);
                 continue;
             }
+            // Reserved on every node while merging is on, not only on nodes
+            // that acquired aliases: a value under this key would otherwise be
+            // read back as a merge alias (#1954 review).
             if let Some(rule) = m.merge.as_ref().filter(|r| r.aliases_property == key) {
-                if alias_lists.contains_key(&node) {
-                    return Err(MappingFileError::AliasesConflict {
-                        subject: subject_of(graph, node),
-                        property: rule.aliases_property.clone(),
-                    });
-                }
+                return Err(MappingFileError::AliasesConflict {
+                    subject: subject_of(graph, node),
+                    property: rule.aliases_property.clone(),
+                });
             }
             let value = self.collapse(vs, || subject_of(graph, node), &key)?;
             set_node(graph, node, &key, value)?;
@@ -1432,7 +1438,7 @@ impl<'a> Applier<'a> {
                 continue;
             }
             let key = if p == RDF_TYPE {
-                "type".to_string()
+                INLINE_CLASS_KEY.to_string()
             } else {
                 let key = self.key_for(p);
                 if !self.record_key(&key, p) {

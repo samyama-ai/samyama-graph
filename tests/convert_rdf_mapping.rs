@@ -728,3 +728,39 @@ fn a_shared_blank_node_is_inlined_twice_and_a_cycle_is_reported() {
         .iter()
         .any(|d| d.what == "rdf_blank_node_cycles"));
 }
+
+/// While merging is on, `aliases_property` is reserved on every node, merged
+/// or not, so a value there is never read back as an alias (#1954 review).
+#[test]
+fn the_aliases_key_is_reserved_on_unmerged_nodes_too() {
+    let yaml = "prefixes: { ex: \"http://example.org/\" }\n\
+                merge: { predicate: \"ex:preferred\", into: object, aliases_property: aliases }";
+    let err = Mapping::from_yaml(yaml)
+        .unwrap()
+        .apply(
+            &store("ex:a ex:aliases \"http://example.org/value\" ."),
+            &mut GraphStore::new(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, MappingFileError::AliasesConflict { .. }),
+        "{err}"
+    );
+}
+
+/// An inlined blank node's class goes under `@type`, so a predicate whose
+/// local name is `type` stays an ordinary key beside it (#1954 review).
+#[test]
+fn an_inlined_class_and_a_predicate_named_type_stay_apart() {
+    let (g, _) = map(
+        "blank_nodes: inline",
+        "ex:a ex:part [ rdf:type ex:Box ; ex:type \"text\" ] .",
+    );
+    match prop(&g, "http://example.org/a", "part") {
+        Some(PropertyValue::Map(m)) => {
+            assert_eq!(m.get("@type"), Some(&s("http://example.org/Box")));
+            assert_eq!(m.get("type"), Some(&s("text")));
+        }
+        other => panic!("{other:?}"),
+    }
+}
