@@ -16,6 +16,9 @@ not a converter to every other format:
               Samyama Graph
 ```
 
+The user guide, with the two-step model, the RDF mapping file and presets, loss reports and
+exit codes, is [docs/MOVING-DATA.md](https://github.com/samyama-ai/samyama-graph/blob/main/docs/MOVING-DATA.md).
+
 ## Formats
 
 <!-- format-matrix:start -->

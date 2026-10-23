@@ -1,6 +1,6 @@
 # Samyama Graph — Documentation Index
 
-**Last updated:** 2026-10-20 · **Engine version:** see [Releases](https://github.com/samyama-ai/samyama-graph/releases) — documents below state the version they were verified against
+**Last updated:** 2026-10-23 · **Engine version:** see [Releases](https://github.com/samyama-ai/samyama-graph/releases) — documents below state the version they were verified against
 
 ## Primary sources
 
@@ -33,6 +33,7 @@ eight of eighteen documents (#1450).
 - **[MIGRATING-FROM-NEO4J.md](./MIGRATING-FROM-NEO4J.md)** — bringing queries and data across, and the compatibility report that tells you what will run.
 - **[MIGRATING-FROM-FALKORDB.md](./MIGRATING-FROM-FALKORDB.md)** — FalkorDB and RedisGraph: the RESP differences (graph key, parameters, reply shape, `--compact`), the Cypher to rewrite, and how to move the data.
 - **[LEAVING-SAMYAMA.md](./LEAVING-SAMYAMA.md)** — getting your data out. Documented on purpose: an exit you cannot find is not an exit.
+- **[MOVING-DATA.md](./MOVING-DATA.md)** — `samyama convert`: which formats convert to and from `.sgsnap`, the RDF mapping file and presets, loss reports and exit codes.
 
 ### The query language
 
