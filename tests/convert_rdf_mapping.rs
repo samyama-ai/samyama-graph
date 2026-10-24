@@ -839,3 +839,92 @@ fn blank_nodes_no_named_subject_reaches_are_reported() {
     assert_eq!(r.blank_node_triples_dropped, 0);
     assert_eq!(r.blank_nodes_inlined, 1);
 }
+
+/// IRI-valued predicates inside an inlined blank node are map keys, named
+/// under key_style with clashes resolved like any other key (#1952 review).
+#[test]
+fn iri_valued_keys_inside_an_inlined_map_follow_key_style_and_clashes() {
+    let (g, _) = map(
+        "blank_nodes: inline\nkey_style: iri",
+        "ex:a ex:part [ ex:ref ex:b ] .",
+    );
+    match prop(&g, "http://example.org/a", "http://example.org/part") {
+        Some(PropertyValue::Map(m)) => {
+            assert_eq!(
+                m.get("http://example.org/ref"),
+                Some(&s("http://example.org/b")),
+                "{m:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let (g, _) = map(
+        "blank_nodes: inline\nprefixes: { ex: \"http://example.org/\", other: \"http://other.org/ns#\" }",
+        "ex:a ex:part [ ex:ref ex:b ; other:ref ex:c ] .",
+    );
+    match prop(&g, "http://example.org/a", "part") {
+        Some(PropertyValue::Map(m)) => {
+            assert_eq!(m.get("ex_ref"), Some(&s("http://example.org/b")), "{m:?}");
+            assert_eq!(
+                m.get("other_ref"),
+                Some(&s("http://example.org/c")),
+                "{m:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A merge-predicate triple the merge cannot represent -- a literal object,
+/// or a blank-node subject -- is dropped and reported, not skipped as merged
+/// (#1952 review).
+#[test]
+fn merge_triples_the_merge_cannot_represent_are_reported() {
+    let yaml = "prefixes: { ex: \"http://example.org/\" }\n\
+                merge: { predicate: \"ex:preferred\", into: object, aliases_property: aliases }";
+    let (_, r) = map(yaml, "ex:a ex:preferred \"not an IRI\" .");
+    assert_eq!(
+        r.predicates_dropped.get("http://example.org/preferred"),
+        Some(&1)
+    );
+
+    let inline = format!("{yaml}\nblank_nodes: inline");
+    let (_, r) = map(&inline, "ex:a ex:part [ ex:preferred ex:b ] .");
+    assert_eq!(
+        r.predicates_dropped.get("http://example.org/preferred"),
+        Some(&1)
+    );
+    assert!(!r.lossless());
+}
+
+/// Inlining is bounded: blank nodes nested past MAX_INLINE_DEPTH, or shared
+/// so widely that copies would pass MAX_INLINE_VALUES, are refused with a
+/// reason instead of overflowing the stack or memory (#1952 review).
+#[test]
+fn inlining_refuses_deep_and_exponentially_shared_blank_nodes() {
+    use samyama::convert::rdf_mapping::{MAX_INLINE_DEPTH, MAX_INLINE_VALUES};
+
+    let mut deep = String::from("ex:a ex:p _:b0 .\n");
+    for i in 0..MAX_INLINE_DEPTH + 5 {
+        deep.push_str(&format!("_:b{i} ex:p _:b{} .\n", i + 1));
+    }
+    let err = Mapping::from_yaml("blank_nodes: inline")
+        .unwrap()
+        .apply(&store(&deep), &mut GraphStore::new())
+        .unwrap_err();
+    assert!(matches!(err, MappingFileError::InlineTooLarge(_)), "{err}");
+
+    // Each layer points at the next twice: 2^layers copies of the bottom.
+    let layers = (MAX_INLINE_VALUES as f64).log2().ceil() as usize + 2;
+    assert!(layers < MAX_INLINE_DEPTH);
+    let mut wide = String::from("ex:a ex:p _:l0 .\n");
+    for i in 0..layers {
+        wide.push_str(&format!("_:l{i} ex:x _:l{n} ; ex:y _:l{n} .\n", n = i + 1));
+    }
+    let err = Mapping::from_yaml("blank_nodes: inline")
+        .unwrap()
+        .apply(&store(&wide), &mut GraphStore::new())
+        .unwrap_err();
+    assert!(matches!(err, MappingFileError::InlineTooLarge(_)), "{err}");
+}

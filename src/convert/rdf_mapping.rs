@@ -49,6 +49,15 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 /// predicate named `type` cannot be taken for the class (#1954 review).
 pub const INLINE_CLASS_KEY: &str = "@type";
 
+/// How deep inlined blank nodes may nest. Past it the read is refused rather
+/// than recursing until the stack overflows (#1952 review).
+pub const MAX_INLINE_DEPTH: usize = 64;
+
+/// How many triples inlining may read across every copy of a shared blank
+/// node. A blank node reached through several paths is copied into each map,
+/// so a small layered graph can expand exponentially (#1952 review).
+pub const MAX_INLINE_VALUES: usize = 1_000_000;
+
 /// The presets, by name.
 pub const PRESETS: [&str; 4] = ["generic", "skos", "owl", "samyama"];
 
@@ -294,6 +303,8 @@ pub enum MappingFileError {
     AliasesConflict { subject: String, property: String },
     #[error("{0:?} is reserved for each node's own IRI or an inlined class and cannot be a mapping's key")]
     ReservedKey(String),
+    #[error("{0}")]
+    InlineTooLarge(String),
     #[error("could not read the mapping file {path}: {source}")]
     Io {
         path: std::path::PathBuf,
@@ -668,6 +679,9 @@ struct Applier<'a> {
     label_names: HashMap<String, String>,
     key_names: HashMap<String, String>,
     edge_names: HashMap<String, String>,
+    /// Triples read into inlined maps so far, across every copy, for the
+    /// expansion bound.
+    inline_values: usize,
 }
 
 impl<'a> Applier<'a> {
@@ -680,6 +694,7 @@ impl<'a> Applier<'a> {
             label_names: HashMap::new(),
             key_names: HashMap::new(),
             edge_names: HashMap::new(),
+            inline_values: 0,
         }
     }
 
@@ -788,11 +803,17 @@ impl<'a> Applier<'a> {
                 }
                 continue;
             }
-            let as_edge = match &t.object {
-                RdfObject::Literal(_) => false,
-                RdfObject::NamedNode(_) => !m.properties.contains_key(p),
-                RdfObject::BlankNode(_) => m.blank_nodes == BlankNodes::Node,
-            };
+            // Inside an inlined blank node every predicate is a map key, an IRI
+            // object included, so it is named as a key -- under key_style and
+            // with clashes resolved -- not as an edge type (#1952 review).
+            let inline_subject = matches!(t.subject, RdfSubject::BlankNode(_))
+                && m.blank_nodes == BlankNodes::Inline;
+            let as_edge = !inline_subject
+                && match &t.object {
+                    RdfObject::Literal(_) => false,
+                    RdfObject::NamedNode(_) => !m.properties.contains_key(p),
+                    RdfObject::BlankNode(_) => m.blank_nodes == BlankNodes::Node,
+                };
             if as_edge {
                 if !m.edges.contains_key(p) {
                     edge_preds.insert(p.to_string());
@@ -945,6 +966,17 @@ impl<'a> Applier<'a> {
                 continue;
             }
             if m.merge.as_ref().is_some_and(|r| r.predicate == p) {
+                // The merge pass takes a named subject and a named object; any
+                // other merge-predicate triple it could not represent is
+                // dropped and reported, not skipped as if merged (#1952
+                // review).
+                let merged = matches!(
+                    (&t.subject, &t.object),
+                    (RdfSubject::NamedNode(_), RdfObject::NamedNode(_))
+                );
+                if !merged {
+                    self.report.drop_predicate(p);
+                }
                 continue;
             }
             let Some(&node) = ids.get(&self.canonical_term(&subject)) else {
@@ -1202,6 +1234,12 @@ impl<'a> Applier<'a> {
             self.report.blank_node_cycles += 1;
             return Ok(PropertyValue::Null);
         }
+        if stack.len() > MAX_INLINE_DEPTH {
+            return Err(MappingFileError::InlineTooLarge(format!(
+                "blank nodes nest more than {MAX_INLINE_DEPTH} deep, past what inlining \
+                 holds as nested maps. Use `blank_nodes: node`"
+            )));
+        }
         let m = self.m;
         let mut entries: Vec<(String, Vec<PropertyValue>)> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
@@ -1222,7 +1260,18 @@ impl<'a> Applier<'a> {
                 continue;
             }
             if m.merge.as_ref().is_some_and(|r| r.predicate == p) {
+                // A blank node is never merged, so its merge-predicate
+                // triples cannot be represented (#1952 review).
+                self.report.drop_predicate(p);
                 continue;
+            }
+            self.inline_values += 1;
+            if self.inline_values > MAX_INLINE_VALUES {
+                return Err(MappingFileError::InlineTooLarge(format!(
+                    "inlining blank nodes would expand to more than {MAX_INLINE_VALUES} values; \
+                     blank nodes shared through several paths are copied into each map. Use \
+                     `blank_nodes: node`"
+                )));
             }
             let key = if p == RDF_TYPE {
                 INLINE_CLASS_KEY.to_string()
