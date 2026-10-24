@@ -26,7 +26,7 @@ not a converter to every other format:
 | N-Triples | `.nt` | not yet | not yet |
 | RDF/XML | `.rdf`, `.owl`, `.xml` | not yet | not yet |
 | JSON-LD | `.jsonld` | not yet | not yet |
-| Neo4j apoc.export.json | `.json` | not yet | not yet |
+| Neo4j apoc.export.json | `.json` | yes | not yet |
 | GraphML | `.graphml` | not yet | not yet |
 | CSV directory | (a directory) | not yet | not yet |
 <!-- format-matrix:end -->

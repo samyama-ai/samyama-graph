@@ -77,21 +77,33 @@ pub struct ImportReport {
     /// Map values carrying a `crs` key, which is how APOC writes a `Point`.
     pub values_that_look_spatial: usize,
     /// Lines that parsed as JSON but carried a `type` this importer does not
-    /// know, with the value seen.
+    /// know, with the value seen. Each type once; `records_skipped` counts the
+    /// records.
     pub unknown_record_types: Vec<String>,
+    /// Records skipped because their `type` is unknown or missing: one per
+    /// record, where `unknown_record_types` names each type once (#1913).
+    #[serde(default)]
+    pub records_skipped: usize,
     /// Lines that were not valid JSON, as `(line number, message)`.
     pub unparseable_lines: Vec<(usize, String)>,
+    /// Nodes labelled `Unresolved` created for relationship endpoints the file
+    /// never defined, when [`ImportOptions::placeholders`] asked for them
+    /// (#1913). Each holds the missing Neo4j id as `neo4j_id`. Zero otherwise:
+    /// those relationships are counted in `dangling_edges` instead.
+    #[serde(default)]
+    pub placeholder_nodes: usize,
 }
 
 impl ImportReport {
     /// True when every line read turned into graph data.
     ///
-    /// Deliberately strict: a dangling relationship or an unparseable line
-    /// makes this false even though the import produced a usable graph. A
+    /// Deliberately strict: a dangling relationship, a placeholder node made
+    /// for a missing endpoint, or an unparseable line makes this false even though the import produced a usable graph. A
     /// migration that quietly lost an edge is the failure worth catching, and
     /// the individual counts say which kind of loss it was.
     pub fn lossless(&self) -> bool {
         self.dangling_edges == 0
+            && self.placeholder_nodes == 0
             && self.null_properties_dropped == 0
             && self.unknown_record_types.is_empty()
             && self.unparseable_lines.is_empty()
@@ -129,11 +141,31 @@ impl From<crate::graph::GraphError> for ImportError {
     }
 }
 
+/// How an import treats what the file does not resolve.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImportOptions {
+    /// Give a relationship whose endpoint the file never defines a node
+    /// labelled `Unresolved`, holding the missing id as `neo4j_id`, instead of
+    /// leaving the relationship out. Off by default: the relationship is
+    /// counted as dangling and not created (#1913).
+    pub placeholders: bool,
+}
+
 /// Import `apoc.export.json` text into `store`, appending to whatever it holds.
 pub fn import_str(
     text: &str,
     store: &mut GraphStore,
     tenant_id: &str,
+) -> Result<ImportReport, ImportError> {
+    import_str_with(text, store, tenant_id, ImportOptions::default())
+}
+
+/// [`import_str`] with [`ImportOptions`].
+pub fn import_str_with(
+    text: &str,
+    store: &mut GraphStore,
+    tenant_id: &str,
+    options: ImportOptions,
 ) -> Result<ImportReport, ImportError> {
     let mut report = ImportReport::default();
     let records = split_records(text, &mut report)?;
@@ -151,12 +183,14 @@ pub fn import_str(
             Some("node") => import_node(&record, store, tenant_id, &mut node_ids, &mut report)?,
             Some("relationship") => pending.push(record),
             Some(other) => {
+                report.records_skipped += 1;
                 let other = other.to_string();
                 if !report.unknown_record_types.contains(&other) {
                     report.unknown_record_types.push(other);
                 }
             }
             None => {
+                report.records_skipped += 1;
                 if !report
                     .unknown_record_types
                     .iter()
@@ -172,6 +206,9 @@ pub fn import_str(
 
     let mut missing: Vec<String> = Vec::new();
     for record in pending {
+        if options.placeholders {
+            resolve_with_placeholders(&record, store, tenant_id, &mut node_ids, &mut report)?;
+        }
         import_relationship(&record, store, &node_ids, &mut report, &mut missing)?;
     }
     missing.sort();
@@ -336,6 +373,40 @@ fn import_relationship(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Create an `Unresolved` node for each endpoint of `record` the file never
+/// defined, so the relationship can be created against it.
+///
+/// Only when **both** endpoints carry an id. With one missing there is nothing
+/// to hold for it, the relationship cannot be created whatever is done for the
+/// other end, and a placeholder made for that other end would be an orphan
+/// node in the graph, there only because of a record that was discarded
+/// (review on #1941). The relationship stays dangling and is counted as such.
+fn resolve_with_placeholders(
+    record: &Json,
+    store: &mut GraphStore,
+    tenant_id: &str,
+    node_ids: &mut HashMap<String, NodeId>,
+    report: &mut ImportReport,
+) -> Result<(), ImportError> {
+    let endpoint = |key: &str| -> Option<String> {
+        let v = record.get(key)?;
+        v.get("id").and_then(json_id).or_else(|| json_id(v))
+    };
+    let (Some(start), Some(end)) = (endpoint("start"), endpoint("end")) else {
+        return Ok(());
+    };
+    for id in [start, end] {
+        if node_ids.contains_key(&id) {
+            continue;
+        }
+        let node = store.create_node("Unresolved");
+        store.set_node_property(tenant_id, node, "neo4j_id", id.clone())?;
+        node_ids.insert(id, node);
+        report.placeholder_nodes += 1;
     }
     Ok(())
 }
@@ -603,5 +674,72 @@ this line is not json
         assert_eq!(json_id(&serde_json::json!("7")), Some("7".to_string()));
         assert_eq!(json_id(&serde_json::json!(7)), Some("7".to_string()));
         assert_eq!(json_id(&serde_json::json!(true)), None);
+    }
+
+    /// Every skipped record is counted, not each unknown type once (review on
+    /// #1941).
+    #[test]
+    fn repeated_unknown_types_count_every_skipped_record() {
+        let text = r#"
+{"type":"node","id":"a","labels":["A"],"properties":{}}
+{"type":"index","name":"i1"}
+{"type":"index","name":"i2"}
+{"type":"index","name":"i3"}
+{"id":"x"}
+"#;
+        let mut store = GraphStore::new();
+        let report = import_str(text, &mut store, "default").unwrap();
+        assert_eq!(report.records_skipped, 4);
+        assert_eq!(
+            report.unknown_record_types,
+            vec!["index".to_string(), "(no `type` field)".to_string()]
+        );
+        assert!(!report.lossless());
+    }
+
+    /// An import that made a placeholder for a missing endpoint is not
+    /// lossless: the placeholder's labels and properties are not in the input
+    /// (review on #1941).
+    #[test]
+    fn a_placeholder_import_is_not_lossless() {
+        let text = r#"
+{"type":"node","id":"a","labels":["A"],"properties":{}}
+{"type":"relationship","id":"r","label":"R","start":{"id":"a"},"end":{"id":"gone"}}
+"#;
+        let mut store = GraphStore::new();
+        let report = import_str_with(
+            text,
+            &mut store,
+            "default",
+            ImportOptions { placeholders: true },
+        )
+        .unwrap();
+        assert_eq!(report.placeholder_nodes, 1);
+        assert_eq!(report.dangling_edges, 0);
+        assert!(!report.lossless(), "{report:?}");
+    }
+
+    /// A relationship with one endpoint missing its id cannot be created, so
+    /// no placeholder is made for the other end: it would be an orphan node
+    /// left by a discarded record (review on #1941).
+    #[test]
+    fn no_placeholder_is_made_for_a_relationship_that_cannot_be_created() {
+        let text = r#"
+{"type":"node","id":"a","labels":["A"],"properties":{}}
+{"type":"relationship","id":"r1","label":"R","end":{"id":"99"}}
+{"type":"relationship","id":"r2","label":"R","start":{},"end":{"id":"98"}}
+"#;
+        let mut store = GraphStore::new();
+        let report = import_str_with(
+            text,
+            &mut store,
+            "default",
+            ImportOptions { placeholders: true },
+        )
+        .unwrap();
+        assert_eq!(report.placeholder_nodes, 0, "{report:?}");
+        assert_eq!(report.dangling_edges, 2, "{report:?}");
+        assert_eq!(store.all_nodes().len(), 1, "only the node the file defined");
+        assert_eq!(report.edges_created, 0);
     }
 }
