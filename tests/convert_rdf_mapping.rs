@@ -764,3 +764,78 @@ fn an_inlined_class_and_a_predicate_named_type_stay_apart() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A node's own IRI cannot be overwritten: a mapping file that names
+/// `__rdf_iri` as a key is refused, and a predicate whose local name is
+/// `__rdf_iri` is dropped and reported (#1952 review).
+#[test]
+fn the_reserved_iri_key_cannot_be_overwritten() {
+    for yaml in [
+        "prefixes: { ex: \"http://example.org/\" }\nproperties: { \"ex:p\": \"__rdf_iri\" }",
+        "prefixes: { ex: \"http://example.org/\" }\n\
+         merge: { predicate: \"ex:same\", aliases_property: \"__rdf_iri\" }",
+    ] {
+        assert!(
+            matches!(
+                Mapping::from_yaml(yaml),
+                Err(MappingFileError::ReservedKey(_))
+            ),
+            "{yaml}"
+        );
+    }
+
+    let (g, r) = map("", "ex:a ex:__rdf_iri \"replacement\" ; ex:name \"A\" .");
+    assert_eq!(prop(&g, "http://example.org/a", "name"), Some(s("A")));
+    assert_eq!(
+        r.predicates_dropped.get("http://example.org/__rdf_iri"),
+        Some(&1)
+    );
+    assert!(!r.lossless());
+}
+
+/// The aliases key is reserved for language maps too, on merged and unmerged
+/// nodes alike (#1952 review).
+#[test]
+fn a_language_map_under_the_aliases_key_is_refused() {
+    let yaml = "prefixes: { ex: \"http://example.org/\" }\n\
+                languages: { others: map }\n\
+                merge: { predicate: \"ex:preferred\", into: object, aliases_property: altLabel }";
+    for fixture in [
+        "ex:gdb ex:preferred ex:graph . ex:graph skos:altLabel \"graph store\"@en .",
+        "ex:a skos:altLabel \"unmerged\"@en .",
+    ] {
+        let err = Mapping::from_yaml(yaml)
+            .unwrap()
+            .apply(&store(fixture), &mut GraphStore::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, MappingFileError::AliasesConflict { .. }),
+            "{fixture}: {err}"
+        );
+    }
+}
+
+/// Under `blank_nodes: inline`, blank nodes no named subject reaches are
+/// never inlined; their triples are reported as dropped, not lost quietly
+/// (#1952 review).
+#[test]
+fn blank_nodes_no_named_subject_reaches_are_reported() {
+    let (g, r) = map("blank_nodes: inline", "_:a ex:p _:b . _:b ex:q _:a .");
+    assert_eq!(g.all_nodes().len(), 0);
+    assert_eq!(r.blank_node_triples_dropped, 2);
+    assert!(!r.lossless());
+
+    let (_, r) = map(
+        "blank_nodes: inline",
+        "_:a ex:p _:b . _:b ex:q _:a . _:b ex:r \"x\" . ex:n ex:name \"N\" .",
+    );
+    assert_eq!(r.blank_node_triples_dropped, 3);
+
+    // Reached from a named subject, the same shape is inlined, not dropped.
+    let (_, r) = map(
+        "blank_nodes: inline",
+        "ex:n ex:part _:a . _:a ex:p _:b . _:b ex:r \"x\" .",
+    );
+    assert_eq!(r.blank_node_triples_dropped, 0);
+    assert_eq!(r.blank_nodes_inlined, 1);
+}

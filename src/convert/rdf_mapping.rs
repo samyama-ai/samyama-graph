@@ -294,7 +294,7 @@ pub enum MappingFileError {
          for merged aliases; name a key no predicate maps to"
     )]
     AliasesConflict { subject: String, property: String },
-    #[error("{0:?} is reserved for each node's own IRI and cannot be a mapping's key")]
+    #[error("{0:?} is reserved for each node's own IRI or an inlined class and cannot be a mapping's key")]
     ReservedKey(String),
     #[error("could not read the mapping file {path}: {source}")]
     Io {
@@ -411,9 +411,10 @@ impl Mapping {
             }),
             None => None,
         };
-        // `__rdf_iri` holds each node's own IRI; a mapping that sends values
-        // there would change which resource a node is (#1954 review).
-        let reserved = |k: &str| k == IRI_PROPERTY;
+        // `__rdf_iri` holds each node's own IRI and `@type` an inlined class;
+        // a mapping that sends values to either would overwrite them (#1952
+        // review).
+        let reserved = |k: &str| k == IRI_PROPERTY || k == INLINE_CLASS_KEY;
         if let Some(key) = merged.properties.values().find(|k| reserved(k)) {
             return Err(MappingFileError::ReservedKey(key.clone()));
         }
@@ -647,6 +648,12 @@ pub struct AppliedNames {
     /// Keys whose values were IRIs (a `properties` entry over an IRI object,
     /// or an IRI inside an inlined blank node), written back as IRIs.
     pub iri_values: BTreeSet<String>,
+    /// Keys the reader generated for other languages (`title@de` under
+    /// `others: suffix`). Only these are decoded back into tagged literals,
+    /// so a real predicate whose local name contains `@` stays itself
+    /// (#1954 review).
+    #[serde(default)]
+    pub language_keys: BTreeSet<String>,
 }
 
 impl RdfMapReport {
@@ -991,7 +998,6 @@ impl<'a> Applier<'a> {
 
         // Blank nodes' own triples, for inlining.
         let mut blank_triples: HashMap<String, Vec<&Triple>> = HashMap::new();
-        let mut blank_referenced: BTreeSet<String> = BTreeSet::new();
         let mut blank_references: HashMap<String, usize> = HashMap::new();
         for t in &self.triples {
             if let RdfSubject::BlankNode(b) = &t.subject {
@@ -1001,8 +1007,37 @@ impl<'a> Applier<'a> {
                     .push(t);
             }
             if let RdfObject::BlankNode(b) = &t.object {
-                blank_referenced.insert(b.as_str().to_string());
                 *blank_references.entry(b.as_str().to_string()).or_insert(0) += 1;
+            }
+        }
+        // Blank nodes an inlined map will actually contain: those a named
+        // subject points at through a kept predicate, and what they point at
+        // in turn. Being pointed at by another blank node is not enough -- a
+        // component of blank nodes no named subject reaches is never inlined,
+        // and its triples are reported as dropped (#1952 review).
+        let kept =
+            |p: &str| !m.drop.contains(p) && !m.merge.as_ref().is_some_and(|r| r.predicate == p);
+        let mut reachable: BTreeSet<String> = BTreeSet::new();
+        let mut frontier: Vec<String> = self
+            .triples
+            .iter()
+            .filter(|t| matches!(t.subject, RdfSubject::NamedNode(_)))
+            .filter(|t| kept(t.predicate.as_named_node().as_str()))
+            .filter_map(|t| match &t.object {
+                RdfObject::BlankNode(b) => Some(b.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        while let Some(b) = frontier.pop() {
+            if !reachable.insert(b.clone()) {
+                continue;
+            }
+            for t in blank_triples.get(&b).into_iter().flatten() {
+                if let RdfObject::BlankNode(next) = &t.object {
+                    if kept(t.predicate.as_named_node().as_str()) {
+                        frontier.push(next.as_str().to_string());
+                    }
+                }
             }
         }
         if m.blank_nodes == BlankNodes::Inline {
@@ -1096,9 +1131,9 @@ impl<'a> Applier<'a> {
                     }
                     BlankNodes::Inline => {
                         if let Term::Blank(b) = &subject {
-                            // Read through its parent; counted only when
-                            // nothing points at it.
-                            if !blank_referenced.contains(b) {
+                            // Read through its parent's inlined map; counted
+                            // when no named subject reaches it.
+                            if !reachable.contains(b) {
                                 self.report.blank_node_triples_dropped += 1;
                             }
                             continue;
@@ -1188,6 +1223,7 @@ impl<'a> Applier<'a> {
                                 OtherLanguages::Suffix => {
                                     self.report.languages_suffixed += 1;
                                     let k = format!("{key}@{lang}");
+                                    self.report.names.language_keys.insert(k.clone());
                                     push_value(&mut values, &mut value_index, node, k, string(lit));
                                 }
                                 _ => self.report.languages_dropped += 1,
@@ -1260,6 +1296,15 @@ impl<'a> Applier<'a> {
             self.report.properties_set += 1;
         }
         for ((node, key), langs) in lang_maps {
+            // The same reservation as the values above: a language map under
+            // the aliases key would be replaced by the alias list, or read
+            // back as aliases (#1952 review).
+            if let Some(rule) = m.merge.as_ref().filter(|r| r.aliases_property == key) {
+                return Err(MappingFileError::AliasesConflict {
+                    subject: subject_of(graph, node),
+                    property: rule.aliases_property.clone(),
+                });
+            }
             let mut map = HashMap::new();
             for (lang, vs) in langs {
                 let v = self.collapse(vs, || subject_of(graph, node), &format!("{key}@{lang}"))?;
@@ -1273,6 +1318,15 @@ impl<'a> Applier<'a> {
             .names
             .preferred_tagged
             .intersection(&untagged_keys)
+            .count();
+        // A real predicate key equal to a generated language key shares its
+        // values with it, and writes back as one or the other (#1954 review).
+        self.report.keys_ambiguous += self
+            .report
+            .names
+            .language_keys
+            .iter()
+            .filter(|k| self.report.names.keys.contains_key(k.as_str()))
             .count();
         self.report.term_kinds_mixed = self
             .report
@@ -1486,7 +1540,9 @@ impl<'a> Applier<'a> {
                             match m.other_languages {
                                 OtherLanguages::Suffix => {
                                     self.report.languages_suffixed += 1;
-                                    push(&mut entries, format!("{key}@{lang}"), string(lit));
+                                    let k = format!("{key}@{lang}");
+                                    self.report.names.language_keys.insert(k.clone());
+                                    push(&mut entries, k, string(lit));
                                 }
                                 _ => self.report.languages_dropped += 1,
                             }
@@ -1977,9 +2033,10 @@ impl Writer<'_> {
         key: &str,
         value: &PropertyValue,
     ) -> Result<(), MappingFileError> {
-        // `key@de`, from a key the read applied: a literal in that language.
+        // `key@de`, a key the read generated for another language: a literal
+        // in that language. Only generated keys, not every key with an `@`.
         if let Some((base, lang)) = key.rsplit_once('@') {
-            if self.names.keys.contains_key(base) {
+            if self.names.language_keys.contains(key) {
                 let predicate = self.predicate_for_key(base);
                 for v in elements(value) {
                     if let PropertyValue::String(s) = v {

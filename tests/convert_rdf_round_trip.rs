@@ -671,3 +671,24 @@ fn a_flattened_merge_chain_is_reported() {
         "{losses:?}"
     );
 }
+
+/// Only keys the reader generated for another language are decoded back into
+/// tagged literals: a real predicate whose name contains `@` round-trips as
+/// itself, and one that collides with a generated key is reported (#1954
+/// review).
+#[test]
+fn a_predicate_named_like_a_language_key_stays_itself() {
+    let (input, output, losses) =
+        round_trip_under("", "ex:b <http://example.org/title@de> \"plain\" .");
+    assert!(losses.is_empty(), "{losses:?}");
+    assert_eq!(output, input);
+
+    let losses = read_losses(
+        "",
+        "ex:a ex:title \"Hallo\"@de . ex:b <http://example.org/title@de> \"plain\" .",
+    );
+    assert!(
+        losses.contains(&"rdf_keys_ambiguous".to_string()),
+        "{losses:?}"
+    );
+}
