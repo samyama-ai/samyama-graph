@@ -42,9 +42,14 @@ pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
     }
 
     // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
+    // Every path that stays on the CPU says why (HW-10, #1684).
+    #[cfg(not(feature = "gpu"))]
+    crate::cpu_fallback::note_not_compiled(crate::cpu_fallback::GpuAlgorithm::Cdlp);
     #[cfg(feature = "gpu")]
     {
-        if crate::gpu_dispatch::should_dispatch_gpu(n) {
+        if let Err(reason) = crate::gpu_dispatch::gpu_route(n) {
+            crate::cpu_fallback::note_cpu_fallback(crate::cpu_fallback::GpuAlgorithm::Cdlp, &reason);
+        } else {
             {
                 // Pass actual NodeIds as initial labels so tie-breaking matches the LDBC spec.
                 let node_ids: Vec<u32> = (0..n).map(|i| view.index_to_node[i] as u32).collect();
@@ -63,7 +68,10 @@ pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
                             .collect();
                         return CdlpResult { labels, iterations: gpu_result.iterations };
                     }
-                    Err(e) => tracing::warn!("GPU CDLP failed, falling back to CPU: {}", e),
+                    Err(e) => crate::cpu_fallback::note_cpu_fallback(
+                        crate::cpu_fallback::GpuAlgorithm::Cdlp,
+                        &crate::cpu_fallback::CpuFallbackReason::KernelFailed(e.to_string()),
+                    ),
                 }
             }
         }

@@ -43,11 +43,23 @@ pub fn page_rank(
     }
 
     // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
+    // Every path that stays on the CPU says why (HW-10, #1684).
+    #[cfg(not(feature = "gpu"))]
+    crate::cpu_fallback::note_not_compiled(crate::cpu_fallback::GpuAlgorithm::PageRank);
     // The GPU kernel does not implement dangling redistribution, so skip GPU when
     // that is requested (CPU path stays the source of truth).
     #[cfg(feature = "gpu")]
     {
-        if !config.dangling_redistribution && crate::gpu_dispatch::should_dispatch_gpu(n) {
+        let route = if config.dangling_redistribution {
+            Err(crate::cpu_fallback::CpuFallbackReason::UnsupportedOption(
+                "dangling redistribution",
+            ))
+        } else {
+            crate::gpu_dispatch::gpu_route(n)
+        };
+        if let Err(reason) = &route {
+            crate::cpu_fallback::note_cpu_fallback(crate::cpu_fallback::GpuAlgorithm::PageRank, reason);
+        } else {
             {
                 let gpu_config = samyama_gpu::pagerank::GpuPageRankConfig {
                     damping_factor: config.damping_factor,
@@ -69,7 +81,10 @@ pub fn page_rank(
                         }
                         return result;
                     }
-                    Err(e) => tracing::warn!("GPU PageRank failed, falling back to CPU: {}", e),
+                    Err(e) => crate::cpu_fallback::note_cpu_fallback(
+                        crate::cpu_fallback::GpuAlgorithm::PageRank,
+                        &crate::cpu_fallback::CpuFallbackReason::KernelFailed(e.to_string()),
+                    ),
                 }
             }
         }

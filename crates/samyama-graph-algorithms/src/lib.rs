@@ -1,4 +1,5 @@
 pub mod common;
+pub mod cpu_fallback;
 #[cfg(feature = "gpu")]
 pub mod gpu_dispatch;
 #[cfg(all(test, feature = "gpu"))]
