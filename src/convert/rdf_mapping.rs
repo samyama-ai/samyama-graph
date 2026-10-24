@@ -292,6 +292,8 @@ pub enum MappingFileError {
          for merged aliases; name a key no predicate maps to"
     )]
     AliasesConflict { subject: String, property: String },
+    #[error("{0:?} is reserved for each node's own IRI or an inlined class and cannot be a mapping's key")]
+    ReservedKey(String),
     #[error("could not read the mapping file {path}: {source}")]
     Io {
         path: std::path::PathBuf,
@@ -407,6 +409,18 @@ impl Mapping {
             }),
             None => None,
         };
+        // `__rdf_iri` holds each node's own IRI and `@type` an inlined class;
+        // a mapping that sends values to either would overwrite them (#1952
+        // review).
+        let reserved = |k: &str| k == IRI_PROPERTY || k == INLINE_CLASS_KEY;
+        if let Some(key) = merged.properties.values().find(|k| reserved(k)) {
+            return Err(MappingFileError::ReservedKey(key.clone()));
+        }
+        if let Some(m) = &merge {
+            if reserved(&m.aliases_property) {
+                return Err(MappingFileError::ReservedKey(m.aliases_property.clone()));
+            }
+        }
         let languages = merged.languages.unwrap_or_default();
 
         Ok(Mapping {
@@ -797,7 +811,6 @@ impl<'a> Applier<'a> {
 
         // Blank nodes' own triples, for inlining.
         let mut blank_triples: HashMap<String, Vec<&Triple>> = HashMap::new();
-        let mut blank_referenced: BTreeSet<String> = BTreeSet::new();
         for t in &self.triples {
             if let RdfSubject::BlankNode(b) = &t.subject {
                 blank_triples
@@ -805,8 +818,35 @@ impl<'a> Applier<'a> {
                     .or_default()
                     .push(t);
             }
-            if let RdfObject::BlankNode(b) = &t.object {
-                blank_referenced.insert(b.as_str().to_string());
+        }
+        // Blank nodes an inlined map will actually contain: those a named
+        // subject points at through a kept predicate, and what they point at
+        // in turn. Being pointed at by another blank node is not enough -- a
+        // component of blank nodes no named subject reaches is never inlined,
+        // and its triples are reported as dropped (#1952 review).
+        let kept =
+            |p: &str| !m.drop.contains(p) && !m.merge.as_ref().is_some_and(|r| r.predicate == p);
+        let mut reachable: BTreeSet<String> = BTreeSet::new();
+        let mut frontier: Vec<String> = self
+            .triples
+            .iter()
+            .filter(|t| matches!(t.subject, RdfSubject::NamedNode(_)))
+            .filter(|t| kept(t.predicate.as_named_node().as_str()))
+            .filter_map(|t| match &t.object {
+                RdfObject::BlankNode(b) => Some(b.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        while let Some(b) = frontier.pop() {
+            if !reachable.insert(b.clone()) {
+                continue;
+            }
+            for t in blank_triples.get(&b).into_iter().flatten() {
+                if let RdfObject::BlankNode(next) = &t.object {
+                    if kept(t.predicate.as_named_node().as_str()) {
+                        frontier.push(next.as_str().to_string());
+                    }
+                }
             }
         }
 
@@ -889,9 +929,9 @@ impl<'a> Applier<'a> {
                     }
                     BlankNodes::Inline => {
                         if let Term::Blank(b) = &subject {
-                            // Read through its parent; counted only when
-                            // nothing points at it.
-                            if !blank_referenced.contains(b) {
+                            // Read through its parent's inlined map; counted
+                            // when no named subject reaches it.
+                            if !reachable.contains(b) {
                                 self.report.blank_node_triples_dropped += 1;
                             }
                             continue;
@@ -938,6 +978,9 @@ impl<'a> Applier<'a> {
                         continue;
                     }
                     let key = self.key_for(p);
+                    if !self.usable_key(&key, p) {
+                        continue;
+                    }
                     match lit.language() {
                         Some(lang) if m.other_languages == OtherLanguages::Map => {
                             lang_maps
@@ -965,6 +1008,9 @@ impl<'a> Applier<'a> {
                 }
                 RdfObject::NamedNode(o) if m.properties.contains_key(p) => {
                     let key = self.key_for(p);
+                    if !self.usable_key(&key, p) {
+                        continue;
+                    }
                     let v = PropertyValue::String(o.as_str().to_string());
                     push_value(&mut values, &mut value_index, node, key, v);
                 }
@@ -979,6 +1025,9 @@ impl<'a> Applier<'a> {
                     }
                     _ => {
                         let key = self.key_for(p);
+                        if !self.usable_key(&key, p) {
+                            continue;
+                        }
                         let mut stack = BTreeSet::new();
                         let v = self.inline(b.as_str(), &blank_triples, &mut stack)?;
                         self.report.blank_nodes_inlined += 1;
@@ -1012,6 +1061,15 @@ impl<'a> Applier<'a> {
             self.report.properties_set += 1;
         }
         for ((node, key), langs) in lang_maps {
+            // The same reservation as the values above: a language map under
+            // the aliases key would be replaced by the alias list, or read
+            // back as aliases (#1952 review).
+            if let Some(rule) = m.merge.as_ref().filter(|r| r.aliases_property == key) {
+                return Err(MappingFileError::AliasesConflict {
+                    subject: subject_of(graph, node),
+                    property: rule.aliases_property.clone(),
+                });
+            }
             let mut map = HashMap::new();
             for (lang, vs) in langs {
                 let v = self.collapse(vs, || subject_of(graph, node), &format!("{key}@{lang}"))?;
@@ -1042,6 +1100,18 @@ impl<'a> Applier<'a> {
             }
         }
         Ok(self.report)
+    }
+
+    /// Whether `key` may hold a predicate's values. `__rdf_iri` holds the
+    /// node's own IRI and `@type` an inlined class, so a predicate that maps
+    /// to either would overwrite them; its triple is dropped and reported
+    /// instead (#1952 review).
+    fn usable_key(&mut self, key: &str, predicate: &str) -> bool {
+        if key == IRI_PROPERTY || key == INLINE_CLASS_KEY {
+            self.report.drop_predicate(predicate);
+            return false;
+        }
+        true
     }
 
     fn key_for(&self, predicate: &str) -> String {
@@ -1157,7 +1227,11 @@ impl<'a> Applier<'a> {
             let key = if p == RDF_TYPE {
                 INLINE_CLASS_KEY.to_string()
             } else {
-                self.key_for(p)
+                let key = self.key_for(p);
+                if !self.usable_key(&key, p) {
+                    continue;
+                }
+                key
             };
             match &t.object {
                 RdfObject::Literal(lit) => match lit.language() {
