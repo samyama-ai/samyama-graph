@@ -30,6 +30,8 @@
 //! something says so in its [`FormatReport`], and
 //! [`Options::require_lossless`] turns any such drop into an error.
 
+pub mod rdf_mapping;
+
 use std::fmt;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};

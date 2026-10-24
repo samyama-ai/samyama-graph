@@ -1,0 +1,15 @@
+# OWL ontologies: classes, the subclass tree, and properties with their
+# domain and range. Restrictions are blank nodes and are kept inline.
+labels:
+  "owl:Class": Class
+  "owl:ObjectProperty": Property
+  "owl:DatatypeProperty": Property
+properties:
+  "rdfs:label": label
+  "rdfs:comment": comment
+edges:
+  "rdfs:subClassOf": SUBCLASS_OF
+  "rdfs:domain": DOMAIN
+  "rdfs:range": RANGE
+  "owl:equivalentClass": EQUIVALENT
+blank_nodes: inline

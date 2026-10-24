@@ -139,7 +139,7 @@ fn usage_errors_exit_2_before_the_input_is_read() {
                 "--preset".into(),
                 "skos".into(),
             ],
-            "#1910",
+            "#1912",
         ),
         (
             vec![

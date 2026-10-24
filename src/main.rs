@@ -845,11 +845,12 @@ fn cmd_convert(argv: &[String]) -> i32 {
         usage();
         return 2;
     };
-    // The RDF mapping arrives with #1910; until then a flag that would change
+    // The RDF mapping exists (`convert::rdf_mapping`, #1910) but no RDF format
+    // is readable until #1912 wires one in; until then a flag that would change
     // the result is refused rather than ignored.
     for flag in ["--mapping", "--preset"] {
         if values.contains_key(flag) {
-            eprintln!("convert: {flag} is not supported yet (#1910)");
+            eprintln!("convert: {flag} applies to RDF input, which is not readable yet (#1912)");
             return 2;
         }
     }
