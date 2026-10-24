@@ -22,10 +22,10 @@ not a converter to every other format:
 | Format | Extensions | Read | Write |
 |---|---|---|---|
 | .sgsnap | `.sgsnap` | yes | yes |
-| Turtle | `.ttl` | not yet | not yet |
-| N-Triples | `.nt` | not yet | not yet |
-| RDF/XML | `.rdf`, `.owl`, `.xml` | not yet | not yet |
-| JSON-LD | `.jsonld` | not yet | not yet |
+| Turtle | `.ttl` | yes | yes |
+| N-Triples | `.nt` | yes | yes |
+| RDF/XML | `.rdf`, `.owl`, `.xml` | yes | yes |
+| JSON-LD | `.jsonld` | not yet | yes |
 | Neo4j apoc.export.json | `.json` | not yet | not yet |
 | GraphML | `.graphml` | not yet | not yet |
 | CSV directory | (a directory) | not yet | not yet |

@@ -118,7 +118,7 @@ fn usage_errors_exit_2_before_the_input_is_read() {
     let out = |name: &str| dir.path().join(name).to_str().unwrap().to_string();
 
     for (args, says) in [
-        (vec![i.to_string(), out("out.ttl")], "Turtle"),
+        (vec![i.to_string(), out("out.json")], "Neo4j"),
         (
             vec![i.to_string(), out("out.xyz")],
             "cannot tell the format",
@@ -139,7 +139,7 @@ fn usage_errors_exit_2_before_the_input_is_read() {
                 "--preset".into(),
                 "skos".into(),
             ],
-            "#1910",
+            "apply to RDF input",
         ),
         (
             vec![
@@ -162,9 +162,9 @@ fn usage_errors_exit_2_before_the_input_is_read() {
         assert!(stderr(&o).contains(says), "{args:?}: {}", stderr(&o));
     }
     // A refused output format is checked before a missing input is noticed.
-    let o = run(&[&out("missing.sgsnap"), &out("out.nt")]);
+    let o = run(&[&out("missing.sgsnap"), &out("out.json")]);
     assert_eq!(code(&o), 2, "{}", stderr(&o));
-    assert!(!dir.path().join("out.nt").exists());
+    assert!(!dir.path().join("out.json").exists());
 }
 
 #[test]
