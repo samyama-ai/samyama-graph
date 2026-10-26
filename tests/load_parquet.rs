@@ -26,7 +26,7 @@ const T: &str = "default";
 
 fn write_parquet(path: &std::path::Path, batch: &RecordBatch, row_group: usize) {
     let props = WriterProperties::builder()
-        .set_max_row_group_size(row_group)
+        .set_max_row_group_row_count(Some(row_group))
         .build();
     let file = std::fs::File::create(path).unwrap();
     let mut w = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
