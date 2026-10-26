@@ -232,6 +232,10 @@ pub struct ImportStats {
     pub merged_count: u64,
     /// Candidate merges refused because another declared identifier differed.
     pub merges_refused_conflicting: u64,
+    /// Parallel edges skipped under the explicit merge-edge policy.
+    pub edges_deduplicated: u64,
+    /// Parallel edges retained because their evidence or policy differs.
+    pub parallel_edges_kept: u64,
     /// How many distinct nodes absorbed at least one dedup merge (#1808).
     ///
     /// `merged_count` alone cannot tell a good key from a bad one: 300 merges
