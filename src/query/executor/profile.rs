@@ -321,7 +321,13 @@ fn estimate_section(nodes: &[ProfileNode], selves: &[Duration]) -> String {
             let detail: String = node.details.chars().take(24).collect();
             label.push_str(&format!(" ({detail})"));
         }
-        label.truncate(38);
+        // `String::truncate` is byte-indexed and panics when the cut is not on
+        // a char boundary. The details above are taken by CHARS, and the
+        // `{:<38}` below pads by chars, so the cut has to be by chars as well:
+        // #1614 gave TrieJoin a details string containing `∈` and `∩`, three
+        // bytes each, and PROFILE on a cyclic pattern nested two deep landed
+        // byte 38 inside `∩` and killed the process.
+        let label: String = label.chars().take(38).collect();
         let (estimated, q_error, flag) = match (node.estimated, node.q_error()) {
             (Some(e), Some(q)) => (
                 format!("{}", e.round() as u64),
@@ -377,7 +383,13 @@ pub fn report(nodes: &[ProfileNode], wall: Duration, uninstrumented: Option<Dura
             let detail: String = node.details.chars().take(24).collect();
             label.push_str(&format!(" ({})", detail));
         }
-        label.truncate(38);
+        // `String::truncate` is byte-indexed and panics when the cut is not on
+        // a char boundary. The details above are taken by CHARS, and the
+        // `{:<38}` below pads by chars, so the cut has to be by chars as well:
+        // #1614 gave TrieJoin a details string containing `∈` and `∩`, three
+        // bytes each, and PROFILE on a cyclic pattern nested two deep landed
+        // byte 38 inside `∩` and killed the process.
+        let label: String = label.chars().take(38).collect();
         out.push_str(&format!(
             "{:<38} {:>9.2}ms {:>9.2}ms {:>6.1}% {:>12} {:>10}\n",
             label,
@@ -436,6 +448,68 @@ pub fn report(nodes: &[ProfileNode], wall: Duration, uninstrumented: Option<Dura
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for the nightly `sweep (examples)` failure: `report` cut the
+    /// per-operator label with `String::truncate(38)`, which is byte-indexed
+    /// and panics when byte 38 is not a char boundary.
+    ///
+    /// #1614 gave TrieJoin a details string carrying `∈` and `∩`, three bytes
+    /// each. At indent depth 2 the label reaches 43 bytes and byte 38 lands
+    /// *inside* the `∩`, so PROFILE aborted the process rather than printing a
+    /// plan. `examples/cycle_close_pin` plans exactly that shape, which is how
+    /// a release shipped with it.
+    ///
+    /// Driven directly rather than through a cyclic Cypher query on purpose: a
+    /// planner that stops choosing TrieJoin would make a query-level test pass
+    /// while leaving `report` able to panic on the next multi-byte label.
+    #[test]
+    fn a_multibyte_operator_label_is_cut_on_a_char_boundary() {
+        let node = |depth: usize, details: &str| ProfileNode {
+            name: "TrieJoin".to_string(),
+            details: details.to_string(),
+            depth,
+            parent: None,
+            estimated: None,
+            counters: Arc::new(NodeCounters::default()),
+        };
+
+        // The real details string from operator.rs's TrieJoin arm.
+        let details = "c ∈ N_out(b)[:KNOWS] ∩ N_in(a)[:KNOWS]";
+        assert!(details.len() > details.chars().count(), "the fixture must be multi-byte");
+
+        // Depth 2 is the case that panicked; 0 and 1 happened to land on a
+        // boundary, which is why this survived every shallower plan.
+        for depth in 0..=4 {
+            let text = report(&[node(depth, details)], Duration::from_millis(5), None);
+            assert!(
+                text.contains("TrieJoin"),
+                "the operator must still be named at depth {depth}:\n{text}"
+            );
+        }
+
+        // The cut is by chars, which is what `{:<38}` pads by, so the label
+        // column is 38 wide however many bytes the symbols took.
+        let text = report(&[node(2, details)], Duration::from_millis(5), None);
+        let row = text
+            .lines()
+            .find(|l| l.contains("TrieJoin"))
+            .expect("the operator row must be printed");
+        let label: String = row.chars().take(38).collect();
+        assert_eq!(
+            label.chars().count(),
+            38,
+            "the label column is 38 chars wide whatever the symbols cost in bytes:\n{row}"
+        );
+        assert_eq!(
+            row.chars().nth(38),
+            Some(' '),
+            "the timing columns must still start where the format string puts them:\n{row}"
+        );
+        assert!(
+            label.contains('\u{2208}'),
+            "the details survive up to the cut rather than being dropped:\n{row}"
+        );
+    }
 
     /// Yields a fixed list of records, then nothing. A leaf, so it has no
     /// `children_mut` override and the walk must stop at it.

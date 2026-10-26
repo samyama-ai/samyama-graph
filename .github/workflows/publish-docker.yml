@@ -32,7 +32,7 @@ jobs:
     # only routes were a second release or a hand-built image, and the same
     # gap was already closed for npm (#1292) and PyPI (#1249).
     if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -186,7 +186,7 @@ jobs:
     # available in a job-level `if`, and a gate that silently evaluated to
     # empty would skip the mirror on every release without saying why.
     if: vars.ECR_PUBLIC_REGISTRY != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Same as publish-crate, publish-npm and publish-pypi. The role ARN lives
     # here as an environment secret, so it is reachable only from a job that
     # names this environment -- and any required-reviewer rule added later
@@ -293,7 +293,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04
             arch: amd64
           - runner: ubuntu-24.04-arm
             arch: arm64

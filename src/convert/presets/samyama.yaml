@@ -1,2 +1,4 @@
 # Samyama's own RDF export read back exactly as RdfToGraphMapper reads it, so
 # Samyama -> RDF -> Samyama stays an identity. Takes `base` and nothing else.
+
+{}

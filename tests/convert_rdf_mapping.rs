@@ -928,3 +928,14 @@ fn inlining_refuses_deep_and_exponentially_shared_blank_nodes() {
         .unwrap_err();
     assert!(matches!(err, MappingFileError::InlineTooLarge(_)), "{err}");
 }
+
+#[test]
+fn normalized_edge_name_collisions_are_refused_before_creating_nodes() {
+    for targets in ["ex:b", "ex:c"] {
+        let rdf = store(&format!("ex:a ex:fooBar ex:b . ex:a ex:foo_bar {targets} ."));
+        let mut graph = GraphStore::new();
+        let err = Mapping::preset("generic").unwrap().apply(&rdf, &mut graph).unwrap_err();
+        assert!(err.to_string().contains("edge name"), "{err}");
+        assert!(graph.all_nodes().is_empty());
+    }
+}

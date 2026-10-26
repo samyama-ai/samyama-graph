@@ -54,7 +54,7 @@ jobs:
     # Knowledge-graph data releases (kg-snapshots-v*) are Releases too, and
     # every one of them failed this workflow. Only a v* tag is an engine release.
     if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The engine's full test suite runs before anything is uploaded (see
     # "Test every crate"), and CI gives that suite 45 minutes on its own.
     timeout-minutes: 120

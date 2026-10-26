@@ -1,5 +1,9 @@
+# Cargo.lock is deliberately NOT ignored here. This is its own workspace
+# (excluded from the root one), so the root lockfile does not constrain it and
+# an ignored lock meant the native build re-resolved on every run: `cc` moved
+# 1.6.0 -> 1.9.0 between v1.11.0 and v1.12.0 with no commit from this repo.
+# A published wheel should be reproducible from the tag that built it.
 target/
-Cargo.lock
 *.so
 *.dylib
 __pycache__/

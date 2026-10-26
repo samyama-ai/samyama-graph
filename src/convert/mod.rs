@@ -129,7 +129,7 @@ impl Format {
     pub fn can_read(&self) -> bool {
         matches!(
             self,
-            Format::Sgsnap | Format::Turtle | Format::NTriples | Format::RdfXml
+            Format::Sgsnap | Format::Neo4jJson | Format::Turtle | Format::NTriples | Format::RdfXml
         )
     }
 
@@ -233,6 +233,12 @@ pub enum FormatReport {
         nodes: u64,
         edges: u64,
     },
+    /// A Neo4j `apoc.export.json` read: the importer's own report, and what it
+    /// means as losses.
+    Neo4jRead {
+        report: crate::migrate::neo4j_json::ImportReport,
+        dropped: Vec<Dropped>,
+    },
 }
 
 impl FormatReport {
@@ -244,6 +250,7 @@ impl FormatReport {
             FormatReport::RdfRead { dropped, .. } | FormatReport::RdfWrite { dropped, .. } => {
                 dropped
             }
+            FormatReport::Neo4jRead { dropped, .. } => dropped,
         }
     }
 
@@ -254,6 +261,9 @@ impl FormatReport {
             FormatReport::SgsnapWrite(s) => s.node_count,
             FormatReport::RdfRead { report, .. } => report.nodes_created as u64,
             FormatReport::RdfWrite { nodes, .. } => *nodes,
+            FormatReport::Neo4jRead { report, .. } => {
+                (report.nodes_created + report.placeholder_nodes) as u64
+            }
         }
     }
 
@@ -264,6 +274,7 @@ impl FormatReport {
             FormatReport::SgsnapWrite(s) => s.edge_count,
             FormatReport::RdfRead { report, .. } => report.edges_created as u64,
             FormatReport::RdfWrite { edges, .. } => *edges,
+            FormatReport::Neo4jRead { report, .. } => report.edges_created as u64,
         }
     }
 }
@@ -312,6 +323,14 @@ pub enum ConvertError {
     /// `require_lossless` was set and a step reported a drop.
     #[error("the conversion would drop {}; refused because lossless output was required", describe(.0))]
     Lossy(Vec<Dropped>),
+    /// Edges whose endpoint the input never defines, under
+    /// [`EndpointPolicy::Fail`]. Names up to ten of the missing ids.
+    #[error(
+        "{count} relationship(s) point at nodes the input does not contain (first missing ids: {}); \
+         pass --missing-endpoints drop or placeholder to convert anyway",
+        first.join(", ")
+    )]
+    MissingEndpoints { count: usize, first: Vec<String> },
     /// The engine refused the input or failed to write the output.
     #[error("{0}")]
     Engine(String),
@@ -411,6 +430,7 @@ pub fn read_named(
             let dropped = report.dropped();
             FormatReport::RdfRead { report, dropped }
         }
+        Format::Neo4jJson => read_neo4j(input, store, opts)?,
         other => return Err(ConvertError::CannotRead(other)),
     };
     check_lossless(&report, opts)?;
@@ -436,11 +456,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn recorded_mapping(
     store: &GraphStore,
 ) -> Result<(rdf_mapping::Mapping, rdf_mapping::AppliedNames), ConvertError> {
-    let recorded = store
-        .snapshot_sources()
-        .iter()
-        .rev()
-        .find_map(|s| s.mapping.as_ref().and_then(rdf_mapping::Mapping::from_recorded));
+    let recorded = store.snapshot_sources().iter().rev().find_map(|s| {
+        s.mapping
+            .as_ref()
+            .and_then(rdf_mapping::Mapping::from_recorded)
+    });
     match recorded {
         Some(pair) => Ok(pair),
         None => Ok((
@@ -478,6 +498,99 @@ fn rdf_text(store: &GraphStore, format: Format) -> Result<(String, FormatReport)
             edges: store.all_edges().len() as u64,
         },
     ))
+}
+
+/// Neo4j `apoc.export.json`, either shape (#1913).
+///
+/// The importer takes the whole document: the single-object shape
+/// (`jsonFormat:'JSON'`) cannot be split without parsing it, so the input is
+/// read into memory once.
+fn read_neo4j(
+    mut input: impl BufRead,
+    store: &mut GraphStore,
+    opts: &Options,
+) -> Result<FormatReport, ConvertError> {
+    use crate::migrate::neo4j_json::{import_str_with, ImportOptions};
+    let mut text = String::new();
+    input.read_to_string(&mut text).map_err(|e| {
+        ConvertError::Engine(format!("could not read the input as UTF-8 text: {e}"))
+    })?;
+    let placeholders = opts.on_missing_endpoint == EndpointPolicy::Placeholder;
+    let report = import_str_with(&text, store, "default", ImportOptions { placeholders })
+        .map_err(|e| ConvertError::Engine(e.to_string()))?;
+    if report.dangling_edges > 0 && opts.on_missing_endpoint == EndpointPolicy::Fail {
+        return Err(ConvertError::MissingEndpoints {
+            count: report.dangling_edges,
+            first: report.missing_endpoints.iter().take(10).cloned().collect(),
+        });
+    }
+    let dropped = neo4j_losses(&report);
+    Ok(FormatReport::Neo4jRead { report, dropped })
+}
+
+/// What a Neo4j import's report means as losses, one row per kind.
+///
+/// Values that only *look* temporal or spatial are not losses: they arrive as
+/// the strings and maps the file holds, exactly, and the importer's report
+/// counts them for a user who wants to convert them deliberately.
+fn neo4j_losses(r: &crate::migrate::neo4j_json::ImportReport) -> Vec<Dropped> {
+    let mut out = Vec::new();
+    let mut push = |what: &str, count: usize, detail: String| {
+        if count > 0 {
+            out.push(Dropped {
+                what: what.to_string(),
+                count: count as u64,
+                detail,
+            });
+        }
+    };
+    push(
+        "dangling_relationships",
+        r.dangling_edges,
+        format!(
+            "Relationships whose start or end node is not in the file were not created \
+             (first missing ids: {}).",
+            r.missing_endpoints
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
+    push(
+        "unresolved_endpoints",
+        r.placeholder_nodes,
+        "Endpoints the file never defines were created as `Unresolved` nodes holding \
+         only the Neo4j id (`neo4j_id`); their labels and properties are not in the input."
+            .to_string(),
+    );
+    push(
+        "null_properties",
+        r.null_properties_dropped,
+        "Properties whose value is JSON null were not stored: a graph cannot hold a null \
+         property, so the exporter, not the graph, wrote them."
+            .to_string(),
+    );
+    push(
+        "unknown_record_types",
+        r.records_skipped,
+        format!(
+            "Records whose type this importer does not know were skipped; their types: {}.",
+            r.unknown_record_types.join(", ")
+        ),
+    );
+    push(
+        "unparseable_lines",
+        r.unparseable_lines.len(),
+        match r.unparseable_lines.first() {
+            Some((line, err)) => {
+                format!("Lines that are not JSON were skipped; the first is line {line}: {err}.")
+            }
+            None => String::new(),
+        },
+    );
+    out
 }
 
 /// Write `store` to `out` in `format`.

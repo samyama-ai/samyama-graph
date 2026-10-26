@@ -1016,6 +1016,16 @@ impl<'a> Applier<'a> {
             .into_iter()
             .map(|(iri, name)| (iri, upper_snake(&name)))
             .collect();
+        // Normalization can collapse distinct names (fooBar and foo_bar).
+        // Refuse before creating nodes rather than silently merging predicates.
+        let mut normalized = BTreeMap::new();
+        for (iri, name) in &self.edge_names {
+            if let Some(previous) = normalized.insert(name, iri) {
+                return Err(MappingFileError::Engine(format!(
+                    "edge name {name:?} is shared by {previous:?} and {iri:?}; assign distinct explicit edge types"
+                )));
+            }
+        }
 
         // Blank nodes' own triples, for inlining.
         let mut blank_triples: HashMap<String, Vec<&Triple>> = HashMap::new();
