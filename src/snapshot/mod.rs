@@ -733,6 +733,16 @@ pub fn edit_header(
     Ok(header)
 }
 
+/// A qualified rule is eligible only for its named label; bare keys retain
+/// the historical behavior for every label.
+fn dedup_property<'a>(rule: &'a str, labels: &[String]) -> Option<&'a str> {
+    match rule.split_once('.') {
+        Some((label, key)) if labels.iter().any(|l| l == label) => Some(key),
+        Some(_) => None,
+        None => Some(rule),
+    }
+}
+
 /// The dedup keys a store node already carries, as `(key, normalized value)` in the order
 /// the index has always inserted them: per key, the row property and then the column.
 fn existing_dedup_entries(
@@ -743,13 +753,15 @@ fn existing_dedup_entries(
     let normalize_dedup = |s: &str| -> String { s.trim().to_lowercase() };
     let mut out = Vec::new();
     let Some(node) = store.get_node(id) else { return out };
+    let labels: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
     for &key in dedup_keys {
-        match node.get_property(key) {
+        let Some(property) = dedup_property(key, &labels) else { continue };
+        match node.get_property(property) {
             Some(PropertyValue::String(s)) => out.push((key.to_string(), normalize_dedup(s))),
             Some(PropertyValue::Integer(i)) => out.push((key.to_string(), i.to_string())),
             _ => {}
         }
-        match store.node_columns.get_property(id.as_u64() as usize, key) {
+        match store.node_columns.get_property(id.as_u64() as usize, property) {
             PropertyValue::String(s) if !s.is_empty() => {
                 out.push((key.to_string(), normalize_dedup(&s)))
             }
@@ -921,6 +933,15 @@ fn import_tenant_inner(
         .next()
         .ok_or("empty snapshot file: missing header")??;
     let header: SnapshotHeader = serde_json::from_str(&header_line)?;
+    // Validate rules before creating or merging any rows.
+    for rule in dedup_keys {
+        if let Some((label, key)) = rule.split_once('.') {
+            if label.is_empty() || key.is_empty() || !header.labels.iter().any(|l| l == label) {
+                return Err(format!("unknown snapshot label or empty property in dedup rule {rule:?}").into());
+            }
+        }
+    }
+
     // Judged before this import writes anything: whether sources the store
     // already holds still describe its data (#1911). Afterwards the import's
     // own writes would make them all look changed.
@@ -1039,7 +1060,8 @@ fn import_tenant_inner(
             // shield a free-text key listed after it (#1808).
             let mut matched_key: Option<&str> = None;
             'dedup: for &key in dedup_keys.iter() {
-                if let Some(json_val) = snap_node.props.get(key) {
+                let Some(property) = dedup_property(key, &snap_labels) else { continue };
+                if let Some(json_val) = snap_node.props.get(property) {
                     let val_str = match json_val {
                         serde_json::Value::String(s) => normalize_dedup(s),
                         serde_json::Value::Number(n) => n.to_string(),
@@ -1060,8 +1082,9 @@ fn import_tenant_inner(
             if !allow_conflicts {
                 if let Some(eid) = existing_id {
                     let conflict = dedup_keys.iter().any(|key| {
-                        let Some(incoming) = snap_node.props.get(*key) else { return false };
-                        let Some(existing) = store.node_property(eid, key) else { return false };
+                        let Some(property) = dedup_property(key, &snap_labels) else { return false };
+                        let Some(incoming) = snap_node.props.get(property) else { return false };
+                        let Some(existing) = store.node_property(eid, property) else { return false };
                         if existing == PropertyValue::Null || incoming.is_null() { return false; }
                         let old = existing.to_json();
                         match (&old, incoming) {
@@ -1224,7 +1247,8 @@ fn import_tenant_inner(
                 }
                 // Register in dedup index
                 for &key in dedup_keys {
-                    if let Some(json_val) = snap_node.props.get(key) {
+                    let Some(property) = dedup_property(key, &snap_labels) else { continue };
+                    if let Some(json_val) = snap_node.props.get(property) {
                         let val_str = match json_val {
                             serde_json::Value::String(s) => normalize_dedup(s),
                             serde_json::Value::Number(n) => n.to_string(),
@@ -1252,7 +1276,8 @@ fn import_tenant_inner(
                 }
                 // Register in dedup index
                 for &key in dedup_keys {
-                    if let Some(pv) = store.get_node(new_id).and_then(|n| n.get_property(key)) {
+                    let Some(property) = dedup_property(key, &snap_labels) else { continue };
+                    if let Some(pv) = store.get_node(new_id).and_then(|n| n.get_property(property)) {
                         let val_str = match pv {
                             PropertyValue::String(s) => normalize_dedup(s),
                             PropertyValue::Integer(i) => i.to_string(),
