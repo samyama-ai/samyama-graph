@@ -993,6 +993,9 @@ fn import_tenant_inner(
     let mut edges_deduplicated = 0u64;
     let mut parallel_edges_kept = 0u64;
     let mut merged_targets = HashSet::new();
+    let mut indexed_edge_sources = HashSet::new();
+    // Presence plus whether any existing parallel has no properties.
+    let mut merge_edge_index: HashMap<(NodeId, NodeId, String), bool> = HashMap::new();
     // Which key did the merging, and how many records landed on each target
     // (#1808). A bare count cannot distinguish duplicate pairs from a collapse.
     let mut merges_by_key: HashMap<String, u64> = HashMap::new();
@@ -1352,15 +1355,20 @@ fn import_tenant_inner(
             // Ordinary multigraph writes are unchanged. Only endpoints reused
             // through entity deduplication can manufacture merge duplicates.
             if merged_targets.contains(new_src) && merged_targets.contains(new_tgt) {
-                let parallels: Vec<_> = store.get_outgoing_edges(*new_src).into_iter()
-                    .filter(|edge| edge.target == *new_tgt && edge.edge_type.as_str() == snap_edge.edge_type)
-                    .collect();
-                if !parallels.is_empty() {
+                if indexed_edge_sources.insert(*new_src) {
+                    for edge in store.get_outgoing_edges(*new_src) {
+                        if merged_targets.contains(&edge.target) {
+                            let unpropertied = store.edge_properties_merged(edge.id).is_empty();
+                            merge_edge_index.entry((*new_src, edge.target, edge.edge_type.as_str().to_string()))
+                                .and_modify(|empty| *empty |= unpropertied).or_insert(unpropertied);
+                        }
+                    }
+                }
+                if let Some(&has_unpropertied) = merge_edge_index.get(&(*new_src, *new_tgt, snap_edge.edge_type.clone())) {
                     let collapse = match merge_edges {
                         MergeEdges::Never => false,
                         MergeEdges::Always => true,
-                        MergeEdges::Unpropertied => snap_edge.props.is_empty() && parallels.iter()
-                            .any(|edge| store.edge_properties_merged(edge.id).is_empty()),
+                        MergeEdges::Unpropertied => snap_edge.props.is_empty() && has_unpropertied,
                     };
                     if collapse {
                         edges_deduplicated += 1;
@@ -1393,6 +1401,11 @@ fn import_tenant_inner(
             }
 
             imported_edge_types.insert(snap_edge.edge_type.clone());
+            if indexed_edge_sources.contains(new_src) && merged_targets.contains(new_tgt) {
+                merge_edge_index.entry((*new_src, *new_tgt, snap_edge.edge_type.clone()))
+                    .and_modify(|empty| *empty |= snap_edge.props.is_empty())
+                    .or_insert(snap_edge.props.is_empty());
+            }
             imported_edge_count += 1;
         } else if line.contains("\"t\":\"i\"") {
             // Index catalog (#1506). Deferred like the hierarchy declarations:
