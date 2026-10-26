@@ -97,8 +97,8 @@ argon2 = "0.5"
 # export needs: `ipc` for the streaming format the HTTP endpoint writes, and
 # `prettyprint` left off deliberately (it pulls comfy-table for a debug
 # rendering nothing here uses).
-arrow = { version = "53", default-features = false, features = ["ipc"] }
-parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd"] }
+arrow = { version = "60", default-features = false, features = ["ipc"] }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd"] }
 # RFC 4180 parsing for `/api/import/csv`, which used to split on the delimiter (#1105).
 csv = "1.4"
 # The same parser, fed chunk by chunk, so a CSV upload is parsed as it arrives (#336).
