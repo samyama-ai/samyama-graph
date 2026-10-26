@@ -2940,6 +2940,9 @@ pub struct SnapshotImportParams {
     /// e.g. ?dedup_key=name,go_id
     #[serde(default)]
     pub dedup_key: Option<String>,
+    /// Explicitly permit merges despite conflicting declared identifiers.
+    #[serde(default)]
+    pub dedup_allow_conflicts: bool,
 }
 
 /// POST /api/snapshot/import — import a .sgsnap snapshot
@@ -3039,7 +3042,7 @@ pub async fn restore_snapshot_handler(
             ),
         }
     } else {
-        crate::snapshot::import_tenant_with_dedup(&mut store_guard, cursor, &dedup_key_refs)
+        crate::snapshot::import_tenant_with_dedup_options(&mut store_guard, cursor, &dedup_key_refs, params.dedup_allow_conflicts)
     };
     match imported {
         Ok(stats) => {
@@ -3075,6 +3078,7 @@ pub async fn restore_snapshot_handler(
                 "status": "ok",
                 "nodes_imported": stats.node_count,
                 "nodes_merged": stats.merged_count,
+                "merges_refused_conflicting": stats.merges_refused_conflicting,
                 // The shape of those merges, not just the count (#1808). A caller
                 // reading only `nodes_merged` cannot tell duplicate pairs from a
                 // collapse, and the larger number reads as the better result.
