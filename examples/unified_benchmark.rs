@@ -383,7 +383,10 @@ async fn main() -> Result<(), Error> {
         .as_deref()
         .map(|s| s.split(',').map(|k| k.trim()).filter(|k| !k.is_empty()).collect())
         .unwrap_or_default();
-    let merge_edges = match get_arg(&args, "--merge-edges").as_deref().unwrap_or("unpropertied") {
+    let merge_edges = match args.iter().find_map(|a| a.strip_prefix("--merge-edges="))
+        .or_else(|| args.iter().position(|a| a == "--merge-edges")
+            .and_then(|i| args.get(i + 1)).map(String::as_str))
+        .unwrap_or("unpropertied") {
         "never" => samyama::snapshot::MergeEdges::Never,
         "unpropertied" => samyama::snapshot::MergeEdges::Unpropertied,
         "always" => samyama::snapshot::MergeEdges::Always,
