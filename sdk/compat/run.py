@@ -9,14 +9,14 @@ built from this checkout.
 
     python3 sdk/compat/run.py --bin target/release/samyama
 
-Which versions: the latest published patch of the minor release in the
-version of record (`Cargo.toml`) and its immediately preceding minor. Two, not
-one, because the version of record does not say which release this build will
-become. Right after `1.12.0` ships, `dev` still reads `1.12.0` and is heading
-for `1.13.0`, whose N-1 is `1.12`; a build that becomes `1.12.1` must still
-serve `1.11`. Testing both covers either. Nothing here names a version: they
-are read from the manifest and the package indexes on every run, so the check
-moves forward with each release by itself.
+Which versions: by default, the latest published patch of the minor release in
+the version of record (`Cargo.toml`) and its immediately preceding minor. A
+release PR can pass `--version-ceiling` with the base version: the candidate
+minor's SDKs do not exist until the release publishes them, so CI tests that
+base minor and its predecessor against the candidate server. The required
+minors remain strict in either mode. Nothing here names package versions: they
+are read from the manifest (or supplied ceiling) and package indexes on every
+run, so the check moves forward with each release by itself.
 
 A version that cannot be found is a failure, not a skip. A compatibility check
 that passes because it found nothing to test is the failure mode of every
