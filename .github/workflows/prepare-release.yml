@@ -133,8 +133,24 @@ jobs:
       # range, only the six local entries move. This was verified by hand
       # during the version-unification work this PR builds on: the same
       # command was what actually produced the Cargo.lock diff there.
+      # `cargo check --workspace` refreshes the ROOT lockfile only. sdk/python is
+      # excluded from the root workspace, so it carries its own Cargo.lock --
+      # which the bump above has just made stale, because its `samyama-python`
+      # entry still names the previous version. publish-pypi.yml builds the
+      # wheels with `--locked`, so a stale lock here is not a warning at release
+      # time: it is five failed wheel jobs on a tag that already exists, which is
+      # exactly what v1.13.0 did. Reads `exclude` rather than naming sdk/python,
+      # so a second excluded workspace is covered the day it is added.
       - name: Refresh Cargo.lock
-        run: cargo check --workspace
+        run: |
+          set -euo pipefail
+          cargo check --workspace
+          for ws in $(python3 -c 'import tomllib; print(" ".join(tomllib.load(open("Cargo.toml","rb"))["workspace"].get("exclude", [])))'); do
+            [ -f "$ws/Cargo.toml" ] || continue
+            echo "refreshing $ws/Cargo.lock"
+            cargo metadata --manifest-path "$ws/Cargo.toml" --format-version 1 >/dev/null
+            cargo metadata --manifest-path "$ws/Cargo.toml" --format-version 1 --locked >/dev/null
+          done
 
       # A PR opened with the default GITHUB_TOKEN goes into GitHub's
       # "approval-required" state and never fires ci.yml's own `pull_request`

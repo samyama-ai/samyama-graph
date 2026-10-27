@@ -1102,6 +1102,50 @@ jobs:
           python3 scripts/check_triage_role_lookup.py --repo "$GITHUB_REPOSITORY"
           --maintainer "$ROLE_MAINTAINER" --outside-user "$ROLE_OUTSIDE_USER"
 
+  # The root workspace `exclude`s sdk/python, so nothing in the matrix above
+  # builds it and nothing checked its separate Cargo.lock. That lock drifted for
+  # an entire release cycle -- it still described Arrow 53 after #1965 moved the
+  # engine to Arrow 60, and it still named the previous version after a release
+  # bump -- and the first thing to notice was publish-pypi.yml building wheels
+  # with `--locked`, after the tag existed. Resolving a lock takes seconds here;
+  # discovering it there costs a release's wheels (v1.13.0 shipped the sdist
+  # alone). Reads `exclude` rather than naming sdk/python, so a second excluded
+  # workspace is covered the day it is added.
+  #
+  # Unfiltered on purpose: the drift that caused this came from a root Cargo.lock
+  # change, not from a file under sdk/python, so any path filter narrow enough to
+  # look relevant would have skipped the commit that broke it.
+  excluded-lockfiles:
+    name: excluded workspace lockfiles are current
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Every excluded workspace resolves with --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t EXCLUDED < <(python3 -c 'import tomllib; print("\n".join(tomllib.load(open("Cargo.toml", "rb"))["workspace"].get("exclude", [])))')
+          if [ "${#EXCLUDED[@]}" -eq 0 ]; then
+            echo "the root workspace excludes nothing"
+            exit 0
+          fi
+          for ws in "${EXCLUDED[@]}"; do
+            [ -f "$ws/Cargo.toml" ] || continue
+            if [ ! -f "$ws/Cargo.lock" ]; then
+              echo "::error::$ws is its own workspace and has no committed Cargo.lock, but publish-pypi.yml builds it with --locked"
+              exit 1
+            fi
+            echo "checking $ws"
+            if ! cargo metadata --manifest-path "$ws/Cargo.toml" --format-version 1 --locked >/dev/null; then
+              echo "::error::$ws/Cargo.lock is stale. Refresh it with: cargo metadata --manifest-path $ws/Cargo.toml >/dev/null && git add $ws/Cargo.lock"
+              exit 1
+            fi
+          done
+          echo "every excluded workspace lockfile is current"
+
   ci-ok:
     name: ci-ok
     # always() is load-bearing. Without it a failed dependency SKIPS this job, and
@@ -1118,6 +1162,7 @@ jobs:
       - snapshot-portability
       - snapshot-portability-read
       - sdk-compat
+      - excluded-lockfiles
     runs-on: ubuntu-latest
     steps:
       - name: Every suite either succeeded or was skipped
