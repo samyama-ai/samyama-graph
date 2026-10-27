@@ -983,9 +983,10 @@ jobs:
   # docs/VERSIONING.md promises that the previous minor's SDKs work against the
   # current server. This installs the Python and TypeScript SDKs AS PUBLISHED --
   # from PyPI and npm, not from this tree -- for the latest patch of each of the
-  # current and immediately preceding minors, and runs a suite through each
-  # against the release binary `test` built. Versions come from Cargo.toml and package
-  # indexes on every run (sdk/compat/run.py); nothing here names one.
+  # current and immediately preceding published minors, and runs a suite through
+  # each against the release binary `test` built. On a manifest version bump, the
+  # new SDKs do not exist until after the release, so use the base version as the
+  # ceiling. The check remains strict about the two required published minors.
   #
   # In `ci-ok`'s needs: a compatibility promise that does not block a merge that
   # breaks it is not enforced, and "enforced in CI" is the requirement.
@@ -997,6 +998,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Select the published SDK window
+        id: sdk_window
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          current=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          ceiling="$current"
+          if [ -n "${BASE_SHA:-}" ] && [ "$BASE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git fetch --no-tags origin "$BASE_SHA" --depth=1
+            base=$(git show "$BASE_SHA:Cargo.toml" | python3 -c 'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])')
+            if [ "$base" != "$current" ]; then
+              ceiling="$base"
+              echo "manifest version changed $base -> $current; checking SDKs through $ceiling"
+            fi
+          fi
+          echo "ceiling=$ceiling" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - uses: actions/setup-node@v4
@@ -1034,7 +1052,8 @@ jobs:
       - name: Run the published SDKs against this build
         run: |
           python3 -m unittest discover -s sdk/compat -p 'test_version_selection.py'
-          python3 sdk/compat/run.py --bin target/release/samyama
+          python3 sdk/compat/run.py --bin target/release/samyama \
+            --version-ceiling '${{ steps.sdk_window.outputs.ceiling }}'
 
   # The one check branch protection should require.
   #

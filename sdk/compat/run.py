@@ -116,8 +116,8 @@ def latest_of_recent_minors(published: list[Version], ceiling: Version, n: int) 
     return [newest[k] for k in required]
 
 
-def resolve() -> dict[str, list[Version]]:
-    ceiling = version_of_record()
+def resolve(ceiling: Version | None = None) -> dict[str, list[Version]]:
+    ceiling = ceiling or version_of_record()
     chosen = {}
     for sdk, published in (("python", pypi_versions), ("typescript", npm_versions)):
         try:
@@ -217,12 +217,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--bin", type=Path, default=REPO / "target" / "release" / "samyama",
                     help="server binary built from this checkout")
+    ap.add_argument("--version-ceiling", type=str,
+                    help="highest SDK minor to test (defaults to Cargo.toml; use the base version for a release bump)")
     ap.add_argument("--resolve-only", action="store_true",
                     help="print the versions that would be tested, and stop")
     args = ap.parse_args()
 
-    chosen = resolve()
+    ceiling = parse(args.version_ceiling) if args.version_ceiling else None
+    if args.version_ceiling and ceiling is None:
+        sys.exit(f"--version-ceiling must be X.Y.Z, got {args.version_ceiling!r}")
+    chosen = resolve(ceiling)
     print(f"version of record: {show(version_of_record())}")
+    print(f"published SDK ceiling: {show(ceiling or version_of_record())}")
     for sdk, versions in chosen.items():
         print(f"{sdk}: testing published {', '.join(show(v) for v in versions)}")
     if args.resolve_only:
