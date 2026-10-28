@@ -6766,6 +6766,9 @@ NodeDeleted { id, .. } => {
             IndexDefinition::Point { name, label, property } => {
                 (4u8, label.clone(), property.clone(), name.clone())
             }
+            IndexDefinition::VectorParams { label, property, .. } => {
+                (5u8, label.clone(), property.clone(), String::new())
+            }
         });
         IndexCatalog { definitions }
     }
@@ -6941,6 +6944,9 @@ NodeDeleted { id, .. } => {
         use crate::index::catalog::{IndexDefinition, RestoredIndexes};
         let mut report = RestoredIndexes::default();
         let mut any_vector = false;
+        // Applied after every index is declared, so a record that comes before
+        // its index's declaration still finds it (#1971).
+        let mut vector_params = Vec::new();
 
         for def in &catalog.definitions {
             match def {
@@ -6971,6 +6977,13 @@ NodeDeleted { id, .. } => {
                     self.create_point_index(name, label, property);
                     report.point += 1;
                 }
+                IndexDefinition::VectorParams { label, property, m, ef_construction, ef } => {
+                    vector_params.push((
+                        label,
+                        property,
+                        crate::vector::HnswParams { m: *m, ef_construction: *ef_construction, ef: *ef },
+                    ));
+                }
                 IndexDefinition::Vector {
                     name,
                     label,
@@ -6997,6 +7010,20 @@ NodeDeleted { id, .. } => {
                         report.failed += 1;
                     }
                 },
+            }
+        }
+
+        for (label, property, params) in vector_params {
+            match self.vector_index.set_params(label, property, params) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!("HNSW parameters for {label}.{property}, which has no vector index");
+                    report.failed += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("could not restore HNSW parameters on {label}.{property}: {e}");
+                    report.failed += 1;
+                }
             }
         }
 
@@ -7152,8 +7179,38 @@ NodeDeleted { id, .. } => {
         metric: DistanceMetric,
         quantization: crate::vector::index::Quantization,
     ) -> VectorResult<()> {
-        self.vector_index
-            .create_index_named(name, label, property_key, dimensions, metric, quantization)?;
+        self.create_vector_index_with_params(
+            name,
+            label,
+            property_key,
+            dimensions,
+            metric,
+            quantization,
+            crate::vector::HnswParams::default(),
+        )
+    }
+
+    /// Create a named vector index with the given HNSW parameters (#1971).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_vector_index_with_params(
+        &self,
+        name: Option<&str>,
+        label: &str,
+        property_key: &str,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: crate::vector::index::Quantization,
+        params: crate::vector::HnswParams,
+    ) -> VectorResult<()> {
+        self.vector_index.create_index_with_params(
+            name,
+            label,
+            property_key,
+            dimensions,
+            metric,
+            quantization,
+            params,
+        )?;
         self.mark_index_catalog_changed();
         Ok(())
     }
@@ -7175,18 +7232,20 @@ NodeDeleted { id, .. } => {
         query: &[f32],
         k: usize,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
-        self.vector_search_where(label, property_key, query, k, |_| true)
+        self.vector_search_where(label, property_key, query, k, None, |_| true)
     }
 
     /// The `k` nearest among the nodes `keep` passes (#1969): the search
     /// widens, and falls back to an exact scan, until it has `k` of them or
-    /// there are no more.
+    /// there are no more. `ef` is this query's search width (#1971); `None`
+    /// is the index's default.
     pub fn vector_search_where(
         &self,
         label: &str,
         property_key: &str,
         query: &[f32],
         k: usize,
+        ef: Option<usize>,
         keep: impl Fn(NodeId) -> bool,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
         // Only nodes that still carry the label: the HNSW graph cannot drop a
@@ -7194,7 +7253,7 @@ NodeDeleted { id, .. } => {
         // must not be returned (#1605).
         let label_key = Label::new(label);
         self.vector_index
-            .search_filtered(label, property_key, query, k, |id| {
+            .search_filtered_ef(label, property_key, query, k, ef, |id| {
                 self.get_node(id)
                     .is_some_and(|n| n.labels.contains(&label_key))
                     && keep(id)

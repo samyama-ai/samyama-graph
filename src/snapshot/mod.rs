@@ -1542,6 +1542,11 @@ fn conflicting_definition<'a>(
                 (la == lb && pa == pb)
                     || (na.is_some() && na == nb)
             }
+            // Other HNSW parameters for the same index (#1971).
+            (
+                D::VectorParams { label: la, property: pa, .. },
+                D::VectorParams { label: lb, property: pb, .. },
+            ) => la == lb && pa == pb,
             _ => false,
         }
     })

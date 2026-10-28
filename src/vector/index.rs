@@ -201,6 +201,90 @@ impl Quantization {
     }
 }
 
+/// The HNSW build and search parameters of one index (#1971).
+///
+/// Each is a point on the recall-latency curve, and which point is right
+/// depends on the corpus and the caller, so none is fixed here. `m` and
+/// `ef_construction` shape the graph and are set when it is built; `ef` is
+/// only the default search width, and a query can pass its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HnswParams {
+    /// Links per node on the upper layers; layer 0 keeps twice as many.
+    pub m: usize,
+    /// Candidates considered when linking a new node.
+    pub ef_construction: usize,
+    /// Default search width. `None` is `max(2 * k, 64)`, the width used
+    /// before this could be set.
+    pub ef: Option<usize>,
+}
+
+impl Default for HnswParams {
+    fn default() -> Self {
+        Self { m: 16, ef_construction: 200, ef: None }
+    }
+}
+
+impl HnswParams {
+    /// Accepted `m`. hnsw_rs refuses more than 256 links and reports the
+    /// count as a `u8`, so 256 itself would read back as 0.
+    pub const M_RANGE: std::ops::RangeInclusive<usize> = 2..=128;
+    /// Accepted `ef_construction`, and `ef`.
+    pub const EF_RANGE: std::ops::RangeInclusive<usize> = 1..=100_000;
+
+    /// Refuse a value outside the accepted ranges, naming the option.
+    pub fn validate(&self) -> Result<(), String> {
+        if !Self::M_RANGE.contains(&self.m) {
+            return Err(format!(
+                "`m` must be between {} and {}, got {}",
+                Self::M_RANGE.start(),
+                Self::M_RANGE.end(),
+                self.m
+            ));
+        }
+        if !Self::EF_RANGE.contains(&self.ef_construction) {
+            return Err(format!(
+                "`ef_construction` must be between {} and {}, got {}",
+                Self::EF_RANGE.start(),
+                Self::EF_RANGE.end(),
+                self.ef_construction
+            ));
+        }
+        if let Some(ef) = self.ef {
+            check_ef(ef)?;
+        }
+        Ok(())
+    }
+
+    /// Whether an index built with `self` has the graph `other` would build.
+    /// The search width is not part of the graph.
+    pub fn same_graph(&self, other: &Self) -> bool {
+        self.m == other.m && self.ef_construction == other.ef_construction
+    }
+}
+
+/// Refuse a search width outside [`HnswParams::EF_RANGE`].
+pub fn check_ef(ef: usize) -> Result<(), String> {
+    if HnswParams::EF_RANGE.contains(&ef) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`ef` must be between {} and {}, got {ef}",
+            HnswParams::EF_RANGE.start(),
+            HnswParams::EF_RANGE.end()
+        ))
+    }
+}
+
+impl std::fmt::Display for HnswParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "m={}, ef_construction={}, ef=", self.m, self.ef_construction)?;
+        match self.ef {
+            Some(ef) => write!(f, "{ef}"),
+            None => write!(f, "auto"),
+        }
+    }
+}
+
 /// Inner Product distance implementation for hnsw_rs
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InnerProductDistance;
@@ -312,6 +396,8 @@ pub struct VectorIndex {
     metric: DistanceMetric,
     /// How values are stored (NDS-09).
     quantization: Quantization,
+    /// Graph shape and default search width (#1971).
+    params: HnswParams,
     /// The actual HNSW index
     backend: Backend,
     /// All inserted vectors (for persistence — HNSW doesn't expose iteration),
@@ -351,6 +437,7 @@ impl std::fmt::Debug for VectorIndex {
             .field("dimensions", &self.dimensions)
             .field("metric", &self.metric)
             .field("quantization", &self.quantization)
+            .field("params", &self.params)
             .field("len", &self.len())
             .finish()
     }
@@ -368,32 +455,48 @@ impl VectorIndex {
         metric: DistanceMetric,
         quantization: Quantization,
     ) -> Self {
-        Self::build(dimensions, metric, quantization, 100_000)
+        Self::with_params(dimensions, metric, quantization, HnswParams::default())
     }
 
+    /// Create an index with the given HNSW parameters (#1971). The caller
+    /// validates them; see [`HnswParams::validate`].
+    pub fn with_params(
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+        params: HnswParams,
+    ) -> Self {
+        Self::build(dimensions, metric, quantization, params, 0)
+    }
+
+    /// `expected` sizes the graph's first allocation and nothing else: it is
+    /// not a capacity, and the graph grows past it. It was a fixed 100,000,
+    /// which reserved room for that many points in every index, the empty
+    /// ones included (#1971).
     fn build(
         dimensions: usize,
         metric: DistanceMetric,
         quantization: Quantization,
-        max_elements: usize,
+        params: HnswParams,
+        expected: usize,
     ) -> Self {
-        let m = 16;
-        let ef_construction = 200;
+        let HnswParams { m, ef_construction, .. } = params;
         // Built with the declared metric: before #1967 every index was
         // cosine, whatever `similarity` said.
         let distance = MetricDistance(metric);
         let backend = match quantization {
             Quantization::None => Backend::F32(Hnsw::new(
-                m, max_elements, 16, ef_construction, distance,
+                m, expected, 16, ef_construction, distance,
             )),
             Quantization::Fp16 => Backend::F16(Hnsw::new(
-                m, max_elements, 16, ef_construction, distance,
+                m, expected, 16, ef_construction, distance,
             )),
         };
         Self {
             dimensions,
             metric,
             quantization,
+            params,
             backend,
             stored_f32: Vec::new(),
             stored_f16: Vec::new(),
@@ -406,6 +509,22 @@ impl VectorIndex {
     /// How this index stores its values.
     pub fn quantization(&self) -> Quantization {
         self.quantization
+    }
+
+    /// The HNSW parameters this index was built with (#1971).
+    pub fn params(&self) -> HnswParams {
+        self.params
+    }
+
+    /// Change the parameters. A new `m` or `ef_construction` rebuilds the
+    /// graph from the current entries; a new default `ef` does not, since it
+    /// changes only how the graph is searched.
+    pub fn set_params(&mut self, params: HnswParams) {
+        if params.same_graph(&self.params) {
+            self.params = params;
+        } else {
+            self.rebuild_with(params);
+        }
     }
 
     /// Bytes held for the vectors themselves, across both copies the index
@@ -557,9 +676,13 @@ impl VectorIndex {
 
     /// The same index, holding only the current entries.
     pub fn compact(&mut self) {
+        self.rebuild_with(self.params);
+    }
+
+    /// Rebuild from the current entries with `params`.
+    fn rebuild_with(&mut self, params: HnswParams) {
         let live: Vec<StoredVector> = self.iter_stored().collect();
-        let max_elements = (live.len() + 10_000).max(100_000);
-        let mut fresh = Self::build(self.dimensions, self.metric, self.quantization, max_elements);
+        let mut fresh = Self::build(self.dimensions, self.metric, self.quantization, params, live.len());
         for sv in &live {
             // Every entry here was accepted at this dimension already.
             let _ = fresh.add(NodeId::new(sv.node_id), &sv.vector);
@@ -569,6 +692,19 @@ impl VectorIndex {
 
     /// Search for nearest neighbors
     pub fn search(&self, query: &[f32], k: usize) -> VectorResult<Vec<(NodeId, f32)>> {
+        self.search_ef(query, k, None)
+    }
+
+    /// [`search`](Self::search) with a search width for this query only
+    /// (#1971). `None` uses the index's default `ef`, and failing that
+    /// `max(2 * k, 64)`. The width never goes below the number of results
+    /// asked for, nor above the size of the graph.
+    pub fn search_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
         if query.len() != self.dimensions {
             return Err(VectorError::DimensionMismatch {
                 expected: self.dimensions,
@@ -599,7 +735,11 @@ impl VectorIndex {
         // (#1968). Ask for enough extra to cover them, and drop them after.
         let total = self.entries();
         let fetch = (k + self.superseded).min(total);
-        let ef_search = (fetch * 2).max(64).min(total);
+        let ef_search = match ef.or(self.params.ef) {
+            Some(ef) => ef.max(fetch),
+            None => (fetch * 2).max(64),
+        }
+        .min(total);
         // hnsw_rs 0.2.1 can panic deep in search_layer (hnsw.rs:938,
         // `return_points.peek().unwrap()`) on certain graphs. A panic here would
         // unwind across the await point and take the whole server down, so a single
@@ -841,16 +981,32 @@ impl VectorIndex {
         metric: DistanceMetric,
         quantization: Quantization,
     ) -> VectorResult<Self> {
+        Self::load_with_params(path, dimensions, metric, quantization, HnswParams::default())
+    }
+
+    /// Load, building the graph with `params` (#1971).
+    pub fn load_with_params(
+        path: &std::path::Path,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+        params: HnswParams,
+    ) -> VectorResult<Self> {
         if !path.exists() {
-            return Ok(Self::with_quantization(dimensions, metric, quantization));
+            return Ok(Self::with_params(dimensions, metric, quantization, params));
         }
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let stored_vectors: Vec<StoredVector> = bincode::deserialize_from(reader)
             .map_err(|e| VectorError::IndexError(format!("deserialization error: {}", e)))?;
 
-        let max_elements = (stored_vectors.len() + 10_000).max(100_000);
-        let mut index = Self::build(dimensions, metric, quantization, max_elements);
+        let mut index = Self::build(
+            dimensions,
+            metric,
+            quantization,
+            params,
+            stored_vectors.len(),
+        );
         for sv in &stored_vectors {
             index.add(NodeId::new(sv.node_id), &sv.vector)?;
         }

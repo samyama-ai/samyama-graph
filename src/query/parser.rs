@@ -1124,6 +1124,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
     let mut dimensions = 1536; // Default
     let mut similarity = "cosine".to_string(); // Default
     let mut quantization = Quantization::None; // NDS-09; unchanged unless asked for
+    let mut params = crate::vector::HnswParams::default(); // #1971
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1148,7 +1149,8 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                 // 1536-dimension index, and the mismatch only surfaced later
                 // against the caller's *vector*, which is the wrong thing to
                 // blame (#474).
-                const ACCEPTED: [&str; 3] = ["dimensions", "similarity", "quantization"];
+                const ACCEPTED: [&str; 6] =
+                    ["dimensions", "similarity", "quantization", "m", "ef_construction", "ef"];
                 let mut unknown: Vec<&String> = options_map
                     .keys()
                     .filter(|k| !ACCEPTED.contains(&k.as_str()))
@@ -1162,9 +1164,33 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                         .join(", ");
                     return Err(ParseError::SemanticError(format!(
                         "CREATE VECTOR INDEX: unknown option {listed}. Accepted options are \
-`dimensions` (integer), `similarity` (string) and `quantization` (string)."
+`dimensions` (integer), `similarity` (string), `quantization` (string), \
+`m`, `ef_construction` and `ef` (integers)."
                     )));
                 }
+
+                // HNSW parameters (#1971). Range-checked here, so a value the
+                // index could not be built with is refused by the statement
+                // that gave it.
+                let positive = |key: &str| -> ParseResult<Option<usize>> {
+                    match options_map.get(key) {
+                        None => Ok(None),
+                        Some(PropertyValue::Integer(v)) if *v > 0 => Ok(Some(*v as usize)),
+                        Some(other) => Err(ParseError::SemanticError(format!(
+                            "CREATE VECTOR INDEX: `{key}` must be a positive integer, got {other:?}"
+                        ))),
+                    }
+                };
+                if let Some(m) = positive("m")? {
+                    params.m = m;
+                }
+                if let Some(ef_construction) = positive("ef_construction")? {
+                    params.ef_construction = ef_construction;
+                }
+                params.ef = positive("ef")?;
+                params
+                    .validate()
+                    .map_err(|e| ParseError::SemanticError(format!("CREATE VECTOR INDEX: {e}")))?;
 
                 if let Some(value) = options_map.get("dimensions") {
                     match value {
@@ -1216,6 +1242,7 @@ Accepted values are `none` and `fp16`."
     query.create_vector_index_clause = Some(CreateVectorIndexClause {
         index_name,
         quantization,
+        params,
         label: label.ok_or_else(|| ParseError::SemanticError("Missing label in CREATE VECTOR INDEX".to_string()))?,
         property_key: property_key.ok_or_else(|| ParseError::SemanticError("Missing property key in CREATE VECTOR INDEX".to_string()))?,
         dimensions,
