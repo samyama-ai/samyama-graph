@@ -7175,6 +7175,20 @@ NodeDeleted { id, .. } => {
         query: &[f32],
         k: usize,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
+        self.vector_search_where(label, property_key, query, k, |_| true)
+    }
+
+    /// The `k` nearest among the nodes `keep` passes (#1969): the search
+    /// widens, and falls back to an exact scan, until it has `k` of them or
+    /// there are no more.
+    pub fn vector_search_where(
+        &self,
+        label: &str,
+        property_key: &str,
+        query: &[f32],
+        k: usize,
+        keep: impl Fn(NodeId) -> bool,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
         // Only nodes that still carry the label: the HNSW graph cannot drop a
         // node, so one that lost the label, or was deleted, is still in it and
         // must not be returned (#1605).
@@ -7183,6 +7197,7 @@ NodeDeleted { id, .. } => {
             .search_filtered(label, property_key, query, k, |id| {
                 self.get_node(id)
                     .is_some_and(|n| n.labels.contains(&label_key))
+                    && keep(id)
             })
     }
 

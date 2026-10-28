@@ -369,7 +369,7 @@ impl VectorIndexManager {
         // No index is an error, as in [`Self::search`] (#1660).
         let index_lock = self.get_index(label, property_key).ok_or_else(|| self.missing(label, property_key))?;
         let index = index_lock.read().unwrap();
-        widen(index.len(), k, |fetch| index.search(query, fetch), &keep)
+        widen(&index, query, k, &keep)
     }
 
     /// [`search_all`](Self::search_all), keeping only the `(label, node)` pairs
@@ -387,9 +387,7 @@ impl VectorIndexManager {
                 if index.dimensions() != query.len() {
                     continue;
                 }
-                let kept = widen(index.len(), k, |fetch| index.search(query, fetch), &|id| {
-                    keep(&key.label, id)
-                })?;
+                let kept = widen(&index, query, k, &|id| keep(&key.label, id))?;
                 for (node_id, distance) in kept {
                     best.entry(node_id)
                         .and_modify(|d| {
@@ -712,19 +710,28 @@ mod tests {
 /// Search with a growing fetch size until `k` results pass `keep`, or the
 /// index has nothing more to give. Results keep the search's order, which is
 /// nearest first; a node already taken is skipped.
+///
+/// Widening stops once it would fetch a quarter of the index. Past that, few
+/// nodes pass `keep`, the graph search is walking mostly nodes it will throw
+/// away, and an exact scan of the ones that pass is both cheaper and right
+/// (#1969). Each node is asked once: `keep` can be a query's WHERE.
 fn widen(
-    len: usize,
+    index: &VectorIndex,
+    query: &[f32],
     k: usize,
-    search: impl Fn(usize) -> VectorResult<Vec<(NodeId, f32)>>,
     keep: &dyn Fn(NodeId) -> bool,
 ) -> VectorResult<Vec<(NodeId, f32)>> {
+    let len = index.len();
+    let asked = std::cell::RefCell::new(HashMap::new());
+    let keep = |id: NodeId| *asked.borrow_mut().entry(id).or_insert_with(|| keep(id));
     // No shortcut for an empty index or `k == 0`: the search itself runs at
     // least once, so its checks -- a query of the wrong dimension -- still
     // refuse.
     let mut fetch = k.min(len);
     loop {
         let mut seen = std::collections::HashSet::new();
-        let kept: Vec<(NodeId, f32)> = search(fetch)?
+        let kept: Vec<(NodeId, f32)> = index
+            .search(query, fetch)?
             .into_iter()
             .filter(|(id, _)| seen.insert(*id) && keep(*id))
             .take(k)
@@ -733,5 +740,8 @@ fn widen(
             return Ok(kept);
         }
         fetch = (fetch * 2).min(len);
+        if fetch > len / 4 {
+            return index.search_exact_where(query, k, &keep);
+        }
     }
 }

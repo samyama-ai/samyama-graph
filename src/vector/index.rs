@@ -728,6 +728,34 @@ impl VectorIndex {
     /// index's own metric, so it matches the graph; non-finite distances are
     /// skipped.
     fn brute_force_search(&self, query: &[f32], k: usize) -> Vec<(NodeId, f32)> {
+        self.brute_force_where(query, k, &|_| true)
+    }
+
+    /// The `k` nearest among the nodes `keep` passes, by exact scan, with the
+    /// distances a search reports (#1969). For a filter that passes few
+    /// nodes, where widening a graph search would walk mostly nodes it then
+    /// throws away. `keep` is asked only about the index's current entries.
+    pub fn search_exact_where(
+        &self,
+        query: &[f32],
+        k: usize,
+        keep: &dyn Fn(NodeId) -> bool,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        if query.len() != self.dimensions {
+            return Err(VectorError::DimensionMismatch {
+                expected: self.dimensions,
+                got: query.len(),
+            });
+        }
+        Ok(self.report(self.brute_force_where(query, k, keep)))
+    }
+
+    fn brute_force_where(
+        &self,
+        query: &[f32],
+        k: usize,
+        keep: &dyn Fn(NodeId) -> bool,
+    ) -> Vec<(NodeId, f32)> {
         let distance = MetricDistance(self.metric);
         // The query is quantized to match what is stored, so the exact search
         // answers the same question the graph does. Comparing a full-precision
@@ -738,7 +766,7 @@ impl VectorIndex {
                 .stored_f32
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| self.is_current(*i))
+                .filter(|(i, sv)| self.is_current(*i) && keep(NodeId::new(sv.node_id)))
                 .map(|(_, sv)| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
                 .collect(),
             Quantization::Fp16 => {
@@ -746,7 +774,7 @@ impl VectorIndex {
                 self.stored_f16
                     .iter()
                     .enumerate()
-                    .filter(|(i, _)| self.is_current(*i))
+                    .filter(|(i, (id, _))| self.is_current(*i) && keep(NodeId::new(*id)))
                     .map(|(_, (id, v))| (NodeId::new(*id), distance.eval(&q, v)))
                     .collect()
             }
