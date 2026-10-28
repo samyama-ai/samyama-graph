@@ -864,6 +864,16 @@ impl DedupPrepopulate {
     }
 }
 
+/// How parallel edges manufactured by node merging are handled.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeEdges {
+    Never,
+    #[default]
+    Unpropertied,
+    Always,
+}
+
 /// Import with entity deduplication on specified property keys.
 pub fn import_tenant_with_dedup(
     store: &mut GraphStore,
@@ -880,6 +890,17 @@ pub fn import_tenant_with_dedup_options(
     dedup_keys: &[&str],
     allow_conflicts: bool,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
+    import_tenant_with_merge_policy(store, reader, dedup_keys, allow_conflicts, MergeEdges::default())
+}
+
+/// Import with explicit node-conflict and parallel-edge policies.
+pub fn import_tenant_with_merge_policy(
+    store: &mut GraphStore,
+    reader: impl Read,
+    dedup_keys: &[&str],
+    allow_conflicts: bool,
+    merge_edges: MergeEdges,
+) -> Result<ImportStats, Box<dyn std::error::Error>> {
     // A failed import used to leave whatever it had already applied in the graph: a
     // truncated snapshot returned "unexpected end of file" *and* several million nodes,
     // so the caller saw an error and a partially-populated graph, with no way to tell how
@@ -888,7 +909,7 @@ pub fn import_tenant_with_dedup_options(
     // What a dedup merge added to nodes that existed before this import, undone
     // too: a refused import must leave existing nodes as it found them (#1604).
     let mut merged: Vec<MergeUndo> = Vec::new();
-    match import_tenant_inner(store, reader, dedup_keys, allow_conflicts, &mut created_nodes, &mut merged) {
+    match import_tenant_inner(store, reader, dedup_keys, allow_conflicts, merge_edges, &mut created_nodes, &mut merged) {
         Ok(stats) => Ok(stats),
         Err(e) => {
             for undo in merged.into_iter().rev() {
@@ -921,6 +942,7 @@ fn import_tenant_inner(
     reader: impl Read,
     dedup_keys: &[&str],
     allow_conflicts: bool,
+    merge_edges: MergeEdges,
     created_nodes: &mut Vec<crate::graph::NodeId>,
     merged: &mut Vec<MergeUndo>,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
@@ -968,6 +990,12 @@ fn import_tenant_inner(
     let mut imported_edge_count: u64 = 0;
     let mut merged_node_count: u64 = 0;
     let mut merges_refused_conflicting: u64 = 0;
+    let mut edges_deduplicated = 0u64;
+    let mut parallel_edges_kept = 0u64;
+    let mut merged_targets = HashSet::new();
+    let mut indexed_edge_sources = HashSet::new();
+    // Presence plus whether any existing parallel has no properties.
+    let mut merge_edge_index: HashMap<(NodeId, NodeId, String), bool> = HashMap::new();
     // Which key did the merging, and how many records landed on each target
     // (#1808). A bare count cannot distinguish duplicate pairs from a collapse.
     let mut merges_by_key: HashMap<String, u64> = HashMap::new();
@@ -1105,6 +1133,7 @@ fn import_tenant_inner(
                 // Reuse existing node — remap the ID AND merge properties
                 id_remap.insert(snap_node.id, eid);
                 merged_node_count += 1;
+                merged_targets.insert(eid);
                 if let Some(key) = matched_key {
                     *merges_by_key.entry(key.to_string()).or_insert(0) += 1;
                 }
@@ -1323,6 +1352,32 @@ fn import_tenant_inner(
                 )
             })?;
 
+            // Ordinary multigraph writes are unchanged. Only endpoints reused
+            // through entity deduplication can manufacture merge duplicates.
+            if merged_targets.contains(new_src) && merged_targets.contains(new_tgt) {
+                if indexed_edge_sources.insert(*new_src) {
+                    for edge in store.get_outgoing_edges(*new_src) {
+                        if merged_targets.contains(&edge.target) {
+                            let unpropertied = store.edge_properties_merged(edge.id).is_empty();
+                            merge_edge_index.entry((*new_src, edge.target, edge.edge_type.as_str().to_string()))
+                                .and_modify(|empty| *empty |= unpropertied).or_insert(unpropertied);
+                        }
+                    }
+                }
+                if let Some(&has_unpropertied) = merge_edge_index.get(&(*new_src, *new_tgt, snap_edge.edge_type.clone())) {
+                    let collapse = match merge_edges {
+                        MergeEdges::Never => false,
+                        MergeEdges::Always => true,
+                        MergeEdges::Unpropertied => snap_edge.props.is_empty() && has_unpropertied,
+                    };
+                    if collapse {
+                        edges_deduplicated += 1;
+                        continue;
+                    }
+                    parallel_edges_kept += 1;
+                }
+            }
+
             if use_stubs && snap_edge.props.is_empty() {
                 // v2: use lightweight stub (adjacency-only, no Edge object)
                 store.create_edge_stub(*new_src, *new_tgt, snap_edge.edge_type.as_str())?;
@@ -1346,6 +1401,11 @@ fn import_tenant_inner(
             }
 
             imported_edge_types.insert(snap_edge.edge_type.clone());
+            if indexed_edge_sources.contains(new_src) && merged_targets.contains(new_tgt) {
+                merge_edge_index.entry((*new_src, *new_tgt, snap_edge.edge_type.clone()))
+                    .and_modify(|empty| *empty |= snap_edge.props.is_empty())
+                    .or_insert(snap_edge.props.is_empty());
+            }
             imported_edge_count += 1;
         } else if line.contains("\"t\":\"i\"") {
             // Index catalog (#1506). Deferred like the hierarchy declarations:
@@ -1533,6 +1593,8 @@ fn import_tenant_inner(
         edge_count: imported_edge_count,
         merged_count: merged_node_count,
         merges_refused_conflicting,
+        edges_deduplicated,
+        parallel_edges_kept,
         merge_groups,
         largest_merge_group,
         merges_by_key: merges_by_key_sorted,
