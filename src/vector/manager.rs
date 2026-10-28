@@ -197,6 +197,24 @@ impl VectorIndexManager {
         }
     }
 
+    /// Drop `node_id` from every index: the node was deleted (#1968).
+    pub fn remove_node(&self, node_id: NodeId) {
+        for index in self.indices.read().unwrap().values() {
+            index.write().unwrap().remove(node_id);
+        }
+    }
+
+    /// Drop `node_id` from the indexes on `label`, or only the one on
+    /// `property_key` when given: the node lost the label, or the property
+    /// stopped holding a vector (#1968).
+    pub fn remove_from(&self, label: &str, property_key: Option<&str>, node_id: NodeId) {
+        for (key, index) in self.indices.read().unwrap().iter() {
+            if key.label == label && property_key.is_none_or(|p| key.property_key == p) {
+                index.write().unwrap().remove(node_id);
+            }
+        }
+    }
+
     /// Search an index.
     ///
     /// No index is an error, not an empty answer. It used to return `[]`, so a

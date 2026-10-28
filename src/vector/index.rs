@@ -216,6 +216,76 @@ impl Distance<f32> for InnerProductDistance {
     }
 }
 
+/// The distance an index declared with `metric` is built and searched with
+/// (#1967). One type for both element widths: the metric is chosen when the
+/// index is declared, so it is a value here rather than a type parameter.
+///
+/// hnsw_rs needs distances that are never negative (its `search_layer`
+/// asserts it), so what the graph orders by is `rank`: cosine and L2 are
+/// already non-negative, and inner product is mapped through a positive,
+/// strictly decreasing function of the dot product. `VectorIndex::search`
+/// turns a rank back into the distance it reports.
+#[derive(Clone, Copy, Debug)]
+pub struct MetricDistance(pub DistanceMetric);
+
+impl MetricDistance {
+    fn rank(self, pairs: impl Iterator<Item = (f32, f32)>) -> f32 {
+        match self.0 {
+            DistanceMetric::Cosine => {
+                let (mut dot, mut norm_a, mut norm_b) = (0.0f32, 0.0f32, 0.0f32);
+                for (a, b) in pairs {
+                    dot += a * b;
+                    norm_a += a * a;
+                    norm_b += b * b;
+                }
+                if norm_a <= 0.0 || norm_b <= 0.0 {
+                    return 1.0;
+                }
+                // The clamp and floor of `CosineDistance`, for its reason.
+                let sim = (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0);
+                (1.0 - sim).max(0.0)
+            }
+            DistanceMetric::L2 => pairs.map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt(),
+            DistanceMetric::InnerProduct => {
+                let dot: f32 = pairs.map(|(a, b)| a * b).sum();
+                // Continuous at 0 (both sides give 1), positive, and larger
+                // for a smaller dot product: the order of `-dot`, without a
+                // negative value.
+                if dot >= 0.0 {
+                    1.0 / (1.0 + dot)
+                } else {
+                    1.0 - dot
+                }
+            }
+        }
+    }
+
+    /// The distance reported for a rank: cosine and L2 as they are, inner
+    /// product as `1 - dot`, as `InnerProductDistance` defines it.
+    fn reported(self, rank: f32) -> f32 {
+        match self.0 {
+            DistanceMetric::InnerProduct => {
+                let dot = if rank <= 1.0 { 1.0 / rank - 1.0 } else { 1.0 - rank };
+                1.0 - dot
+            }
+            _ => rank,
+        }
+    }
+}
+
+impl Distance<f32> for MetricDistance {
+    fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+        self.rank(va.iter().copied().zip(vb.iter().copied()))
+    }
+}
+
+/// Computed in f32, as `CosineDistanceF16` is, for its reason.
+impl Distance<f16> for MetricDistance {
+    fn eval(&self, va: &[f16], vb: &[f16]) -> f32 {
+        self.rank(va.iter().zip(vb).map(|(a, b)| (a.to_f32(), b.to_f32())))
+    }
+}
+
 /// Stored vector entry for persistence
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StoredVector {
@@ -230,8 +300,8 @@ pub struct StoredVector {
 /// f32 copy inside the graph, and the memory saving -- the entire point of
 /// NDS-09's quantization -- would be a claim about the persistence copy only.
 enum Backend {
-    F32(Hnsw<'static, f32, CosineDistance>),
-    F16(Hnsw<'static, f16, CosineDistanceF16>),
+    F32(Hnsw<'static, f32, MetricDistance>),
+    F16(Hnsw<'static, f16, MetricDistance>),
 }
 
 /// Wrapper around HNSW index
@@ -252,6 +322,16 @@ pub struct VectorIndex {
     /// `stored_f32` / `stored_f16`, so a query with a vector that is in the
     /// index finds it whether or not the graph can reach it (#1498).
     exact: HashMap<u64, Vec<usize>>,
+    /// Each node's current entry, as a position into the stored list (#1968).
+    /// HNSW has no delete, so a node that is deleted, leaves the label, or is
+    /// given a new vector keeps its old entry in the graph; only the position
+    /// named here answers for the node. The graph's data ids are positions,
+    /// not node ids, so an old entry is told apart from the current one.
+    current: HashMap<u64, usize>,
+    /// Entries in the graph that no longer answer for a node. When they reach
+    /// a fifth of the graph it is rebuilt from the current entries, so a
+    /// search is never walking a graph that is mostly dead (#1968).
+    superseded: usize,
 }
 
 /// Hash of a vector's exact bit pattern. Equal bits, equal hash; a hit is
@@ -299,12 +379,15 @@ impl VectorIndex {
     ) -> Self {
         let m = 16;
         let ef_construction = 200;
+        // Built with the declared metric: before #1967 every index was
+        // cosine, whatever `similarity` said.
+        let distance = MetricDistance(metric);
         let backend = match quantization {
             Quantization::None => Backend::F32(Hnsw::new(
-                m, max_elements, 16, ef_construction, CosineDistance,
+                m, max_elements, 16, ef_construction, distance,
             )),
             Quantization::Fp16 => Backend::F16(Hnsw::new(
-                m, max_elements, 16, ef_construction, CosineDistanceF16,
+                m, max_elements, 16, ef_construction, distance,
             )),
         };
         Self {
@@ -315,6 +398,8 @@ impl VectorIndex {
             stored_f32: Vec::new(),
             stored_f16: Vec::new(),
             exact: HashMap::new(),
+            current: HashMap::new(),
+            superseded: 0,
         }
     }
 
@@ -329,7 +414,7 @@ impl VectorIndex {
     /// Reported rather than asserted. A quantization that claims to halve
     /// memory has to be able to show it.
     pub fn vector_bytes(&self) -> usize {
-        2 * self.len() * self.dimensions * self.quantization.bytes_per_value()
+        2 * self.entries() * self.dimensions * self.quantization.bytes_per_value()
     }
 
     /// Bytes held by the HNSW navigable graph: each point's per-layer
@@ -392,14 +477,15 @@ impl VectorIndex {
         // layer index before doing any of the work that could panic, so catching would
         // leave a half-linked point live in the graph while this function returns Err
         // and skips the stored_vectors push below — desynchronising the HNSW from the
-        // vector list that backs len(), dump() and the brute-force fallback. The
-        // CosineDistance clamp keeps the metric in [0, 2], which is what the
+        // vector list that backs len(), dump() and the brute-force fallback.
+        // MetricDistance never returns a negative distance, which is what the
         // search_layer assertions (hnsw.rs:937-938) actually require.
+        let pos = self.entries();
         match &mut self.backend {
             Backend::F32(h) => {
-                h.insert((vector, node_id.0 as usize));
+                h.insert((vector, pos));
                 let key = bits_key(vector, |v: f32| v.to_bits() as u64);
-                self.exact.entry(key).or_default().push(self.stored_f32.len());
+                self.exact.entry(key).or_default().push(pos);
                 self.stored_f32.push(StoredVector {
                     node_id: node_id.0,
                     vector: vector.clone(),
@@ -411,14 +497,74 @@ impl VectorIndex {
                 // only the stored copy would build the graph on one set of
                 // vectors and answer from another.
                 let q: Vec<f16> = vector.iter().map(|v| f16::from_f32(*v)).collect();
-                h.insert((&q, node_id.0 as usize));
+                h.insert((&q, pos));
                 let key = bits_key(&q, |v: f16| v.to_bits() as u64);
-                self.exact.entry(key).or_default().push(self.stored_f16.len());
+                self.exact.entry(key).or_default().push(pos);
                 self.stored_f16.push((node_id.0, q));
             }
         }
+        // A node given a new vector: the old entry stops answering for it.
+        if self.current.insert(node_id.0, pos).is_some() {
+            self.superseded += 1;
+            self.compact_if_mostly_dead();
+        }
 
         Ok(())
+    }
+
+    /// Stop returning `node_id` from this index: it was deleted, lost the
+    /// label, or lost the property (#1968). Its entry stays in the graph until
+    /// the next rebuild. Returns whether the node was in the index.
+    pub fn remove(&mut self, node_id: NodeId) -> bool {
+        if self.current.remove(&node_id.0).is_none() {
+            return false;
+        }
+        self.superseded += 1;
+        self.compact_if_mostly_dead();
+        true
+    }
+
+    /// Entries in the graph, current or not.
+    fn entries(&self) -> usize {
+        self.stored_f32.len() + self.stored_f16.len()
+    }
+
+    fn node_at(&self, pos: usize) -> u64 {
+        match self.quantization {
+            Quantization::None => self.stored_f32[pos].node_id,
+            Quantization::Fp16 => self.stored_f16[pos].0,
+        }
+    }
+
+    /// Whether the entry at `pos` is its node's current one.
+    fn is_current(&self, pos: usize) -> bool {
+        self.current.get(&self.node_at(pos)) == Some(&pos)
+    }
+
+    /// Entries that no longer answer for a node, left in the graph.
+    pub fn superseded(&self) -> usize {
+        self.superseded
+    }
+
+    /// Rebuild from the current entries once a fifth of the graph is dead.
+    /// Each rebuild costs the graph's size and clears what a fifth of it
+    /// accrued, so a delete costs a constant share of a rebuild on average.
+    fn compact_if_mostly_dead(&mut self) {
+        if self.superseded > 0 && self.superseded * 5 >= self.entries() {
+            self.compact();
+        }
+    }
+
+    /// The same index, holding only the current entries.
+    pub fn compact(&mut self) {
+        let live: Vec<StoredVector> = self.iter_stored().collect();
+        let max_elements = (live.len() + 10_000).max(100_000);
+        let mut fresh = Self::build(self.dimensions, self.metric, self.quantization, max_elements);
+        for sv in &live {
+            // Every entry here was accepted at this dimension already.
+            let _ = fresh.add(NodeId::new(sv.node_id), &sv.vector);
+        }
+        *self = fresh;
     }
 
     /// Search for nearest neighbors
@@ -446,10 +592,14 @@ impl VectorIndex {
         // vectors costs microseconds and is always right, so there is nothing to trade.
         const EXACT_SEARCH_MAX: usize = 128;
         if n <= EXACT_SEARCH_MAX {
-            return Ok(self.brute_force_search(query, k.min(n)));
+            return Ok(self.report(self.brute_force_search(query, k.min(n))));
         }
 
-        let ef_search = (k * 2).max(64).min(n);
+        // The graph still holds entries that no longer answer for a node
+        // (#1968). Ask for enough extra to cover them, and drop them after.
+        let total = self.entries();
+        let fetch = (k + self.superseded).min(total);
+        let ef_search = (fetch * 2).max(64).min(total);
         // hnsw_rs 0.2.1 can panic deep in search_layer (hnsw.rs:938,
         // `return_points.peek().unwrap()`) on certain graphs. A panic here would
         // unwind across the await point and take the whole server down, so a single
@@ -457,13 +607,13 @@ impl VectorIndex {
         // surface a clean error instead.
         let results = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match &self.backend {
-                Backend::F32(h) => h.search(query, k.min(n), ef_search),
+                Backend::F32(h) => h.search(query, fetch, ef_search),
                 // The query is quantized to the stored precision before the
                 // search, so the graph is walked with the same arithmetic it
                 // was built with.
                 Backend::F16(h) => {
                     let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
-                    h.search(&q, k.min(n), ef_search)
+                    h.search(&q, fetch, ef_search)
                 }
             }
         })) {
@@ -476,14 +626,18 @@ impl VectorIndex {
                     "[vector] HNSW search panicked on {}-vector index; using exact brute-force fallback",
                     n
                 );
-                return Ok(self.brute_force_search(query, k.min(n)));
+                return Ok(self.report(self.brute_force_search(query, k.min(n))));
             }
         };
 
-        let mut neighbors = Vec::new();
-        for res in results {
-            neighbors.push((NodeId::new(res.d_id as u64), res.distance));
-        }
+        // Data ids are positions in the stored list; only a node's current
+        // entry answers for it.
+        let mut neighbors: Vec<(NodeId, f32)> = results
+            .into_iter()
+            .filter(|res| self.is_current(res.d_id))
+            .map(|res| (NodeId::new(self.node_at(res.d_id)), res.distance))
+            .take(k.min(n))
+            .collect();
 
         // HNSW can build a graph in which a stored vector has no path from the
         // entry point, and then no search width finds it: measured, every miss
@@ -504,59 +658,77 @@ impl VectorIndex {
 
         // An empty result from a non-empty index is not an answer, it is a failure of the
         // approximation — and unlike a panic it is silent. Fall back rather than report
-        // "no matches" for data that is present.
-        if neighbors.is_empty() {
+        // "no matches" for data that is present. A short one is the same failure
+        // when dead entries crowded out the live ones (#1968).
+        if neighbors.len() < k.min(n) {
             eprintln!(
                 "[vector] HNSW returned no neighbours from a {n}-vector index; using exact fallback"
             );
-            return Ok(self.brute_force_search(query, k.min(n)));
+            return Ok(self.report(self.brute_force_search(query, k.min(n))));
         }
 
-        Ok(neighbors)
+        Ok(self.report(neighbors))
+    }
+
+    /// Ranks, as the graph and the exact paths order by, as the distances a
+    /// search reports.
+    fn report(&self, mut ranked: Vec<(NodeId, f32)>) -> Vec<(NodeId, f32)> {
+        let distance = MetricDistance(self.metric);
+        for (_, d) in &mut ranked {
+            *d = distance.reported(*d);
+        }
+        ranked
     }
 
     /// The stored vectors bit-identical to `query` (after quantizing it to the
     /// stored precision), with their distance to it.
     fn exact_matches(&self, query: &[f32]) -> Vec<(NodeId, f32)> {
+        let distance = MetricDistance(self.metric);
         match self.quantization {
             Quantization::None => {
                 let key = bits_key(query, |v: f32| v.to_bits() as u64);
                 self.exact.get(&key).into_iter().flatten()
+                    .filter(|&&i| self.is_current(i))
                     .map(|&i| &self.stored_f32[i])
                     .filter(|sv| sv.vector.as_slice() == query)
-                    .map(|sv| (NodeId::new(sv.node_id), CosineDistance.eval(query, &sv.vector)))
+                    .map(|sv| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
                     .collect()
             }
             Quantization::Fp16 => {
                 let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
                 let key = bits_key(&q, |v: f16| v.to_bits() as u64);
                 self.exact.get(&key).into_iter().flatten()
+                    .filter(|&&i| self.is_current(i))
                     .map(|&i| &self.stored_f16[i])
                     .filter(|(_, v)| v.iter().zip(&q).all(|(a, b)| a.to_bits() == b.to_bits()))
-                    .map(|(id, v)| (NodeId::new(*id), CosineDistanceF16.eval(&q, v)))
+                    .map(|(id, v)| (NodeId::new(*id), distance.eval(&q, v)))
                     .collect()
             }
         }
     }
 
-    /// Every stored vector, at f32, whichever precision the index holds.
+    /// Every current vector, at f32, whichever precision the index holds.
     /// A quantized value widens back exactly -- f16 to f32 is lossless -- so
     /// this is the original value only when the index is unquantized, and the
     /// rounded one otherwise. That is what was stored, and what a reload must
     /// reproduce.
     fn iter_stored(&self) -> impl Iterator<Item = StoredVector> + '_ {
-        self.stored_f32.iter().cloned().chain(
-            self.stored_f16.iter().map(|(id, v)| StoredVector {
-                node_id: *id,
-                vector: v.iter().map(|x| x.to_f32()).collect(),
-            }),
-        )
+        let f32s = self.stored_f32.iter().enumerate().map(|(i, sv)| (i, sv.clone()));
+        let f16s = self.stored_f16.iter().enumerate().map(|(i, (id, v))| {
+            let vector = v.iter().map(|x| x.to_f32()).collect();
+            (i, StoredVector { node_id: *id, vector })
+        });
+        f32s.chain(f16s)
+            .filter(|(i, _)| self.is_current(*i))
+            .map(|(_, sv)| sv)
     }
 
     /// Exact nearest-neighbour search by linear scan over stored vectors.
-    /// Used as a fallback when the HNSW index search panics. The index uses
-    /// cosine distance, so this matches it; non-finite distances are skipped.
+    /// Used as a fallback when the HNSW index search panics. It ranks by the
+    /// index's own metric, so it matches the graph; non-finite distances are
+    /// skipped.
     fn brute_force_search(&self, query: &[f32], k: usize) -> Vec<(NodeId, f32)> {
+        let distance = MetricDistance(self.metric);
         // The query is quantized to match what is stored, so the exact search
         // answers the same question the graph does. Comparing a full-precision
         // query against quantized vectors would make the fallback disagree with
@@ -565,13 +737,17 @@ impl VectorIndex {
             Quantization::None => self
                 .stored_f32
                 .iter()
-                .map(|sv| (NodeId::new(sv.node_id), CosineDistance.eval(query, &sv.vector)))
+                .enumerate()
+                .filter(|(i, _)| self.is_current(*i))
+                .map(|(_, sv)| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
                 .collect(),
             Quantization::Fp16 => {
                 let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
                 self.stored_f16
                     .iter()
-                    .map(|(id, v)| (NodeId::new(*id), CosineDistanceF16.eval(&q, v)))
+                    .enumerate()
+                    .filter(|(i, _)| self.is_current(*i))
+                    .map(|(_, (id, v))| (NodeId::new(*id), distance.eval(&q, v)))
                     .collect()
             }
         };
@@ -592,9 +768,9 @@ impl VectorIndex {
         self.metric
     }
 
-    /// Get count of stored vectors
+    /// Nodes the index answers for. Superseded entries are not counted.
     pub fn len(&self) -> usize {
-        self.stored_f32.len() + self.stored_f16.len()
+        self.current.len()
     }
 
     /// Check if index is empty

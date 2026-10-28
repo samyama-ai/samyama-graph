@@ -15437,7 +15437,8 @@ impl PhysicalOperator for CreateVectorIndexOperator {
 
         let metric = match self.similarity.to_lowercase().as_str() {
             "cosine" => crate::vector::DistanceMetric::Cosine,
-            "l2" => crate::vector::DistanceMetric::L2,
+            "l2" | "euclidean" => crate::vector::DistanceMetric::L2,
+            "inner_product" | "dot" => crate::vector::DistanceMetric::InnerProduct,
             _ => return Err(ExecutionError::RuntimeError(format!("Unsupported similarity metric: {}", self.similarity))),
         };
 
