@@ -14395,6 +14395,9 @@ pub struct VectorSearchOperator {
     node_var: String,
     /// Variable name for similarity scores (optional)
     score_var: Option<String>,
+    /// The part of a following WHERE that names only the node, applied
+    /// inside the search so it decides which nodes count towards k (#1969).
+    filter: Option<Expression>,
     /// Search results
     results: Vec<(NodeId, f32)>,
     /// Current index in results
@@ -14417,9 +14420,16 @@ impl VectorSearchOperator {
             k,
             node_var,
             score_var,
+            filter: None,
             results: Vec::new(),
             current: 0,
         }
+    }
+
+    /// Search only among the nodes `filter` passes (#1969).
+    pub fn with_filter(mut self, filter: Option<Expression>) -> Self {
+        self.filter = filter;
+        self
     }
 
     fn initialize(&mut self, store: &GraphStore) -> ExecutionResult<()> {
@@ -14427,13 +14437,34 @@ impl VectorSearchOperator {
             return Ok(());
         }
 
-        self.results = store.vector_search(
-            &self.label,
-            &self.property_key,
-            &self.query_vector,
-            self.k,
-        ).map_err(|e| ExecutionError::GraphError(e.to_string()))?;
-
+        let Some(filter) = &self.filter else {
+            self.results = store
+                .vector_search(&self.label, &self.property_key, &self.query_vector, self.k)
+                .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+            return Ok(());
+        };
+        // The search asks about one node at a time and takes a yes or no, so
+        // the first error is kept and raised after it: a predicate that fails
+        // must fail the query, as it would above the search, not read as
+        // "no match".
+        let error = std::cell::RefCell::new(None);
+        let results = store
+            .vector_search_where(&self.label, &self.property_key, &self.query_vector, self.k, |id| {
+                if error.borrow().is_some() {
+                    return false;
+                }
+                let mut record = Record::new();
+                record.bind(self.node_var.clone(), Value::NodeRef(id));
+                eval_predicate_standalone(filter, &record, store).unwrap_or_else(|e| {
+                    *error.borrow_mut() = Some(e);
+                    false
+                })
+            })
+            .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+        if let Some(e) = error.into_inner() {
+            return Err(e);
+        }
+        self.results = results;
         Ok(())
     }
 }
@@ -14466,7 +14497,16 @@ impl PhysicalOperator for VectorSearchOperator {
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
             name: "VectorSearch".to_string(),
-            details: format!("{}.{}, k={}", self.label, self.property_key, self.k),
+            details: match &self.filter {
+                Some(f) => format!(
+                    "{}.{}, k={}, filter: {}",
+                    self.label,
+                    self.property_key,
+                    self.k,
+                    format_expression(f)
+                ),
+                None => format!("{}.{}, k={}", self.label, self.property_key, self.k),
+            },
             children: Vec::new(),
         }
     }
