@@ -27,7 +27,9 @@ impl FPASolver {
     }
 
     /// Levy flight random walk
-    fn levy_flight(&self, dim: usize) -> Array1<f64> {
+    /// Draws from the solver's one `rng`. Rebuilding it from the seed here
+    /// repeated the same draws on every call, so a seeded run never moved.
+    fn levy_flight(&self, dim: usize, rng: &mut impl Rng) -> Array1<f64> {
         let beta = 1.5;
         let sigma_u = ((gamma(1.0 + beta) * (PI * beta / 2.0).sin()) / 
                       (gamma((1.0 + beta) / 2.0) * beta * 2.0f64.powf((beta - 1.0) / 2.0)))
@@ -35,11 +37,10 @@ impl FPASolver {
         let sigma_v = 1.0;
 
         let mut step = Array1::zeros(dim);
-        let mut rng = crate::common::rng::solver_rng(self.seed);
 
         for i in 0..dim {
-            let u_n: f64 = rand_distr::Normal::new(0.0, sigma_u).unwrap().sample(&mut rng);
-            let v_n: f64 = rand_distr::Normal::new(0.0, sigma_v).unwrap().sample(&mut rng);
+            let u_n: f64 = rand_distr::Normal::new(0.0, sigma_u).unwrap().sample(rng);
+            let v_n: f64 = rand_distr::Normal::new(0.0, sigma_v).unwrap().sample(rng);
             let s = u_n / v_n.abs().powf(1.0 / beta);
             step[i] = s;
         }
@@ -84,7 +85,7 @@ impl FPASolver {
 
                 if rng.gen::<f64>() < self.p {
                     // Global Pollination (Levy Flight)
-                    let levy = self.levy_flight(dim);
+                    let levy = self.levy_flight(dim, &mut rng);
                     for j in 0..dim {
                         let step = levy[j] * (population[i].variables[j] - best_vars[j]);
                         new_vars[j] = (population[i].variables[j] + step).clamp(lower[j], upper[j]);
@@ -132,4 +133,23 @@ fn gamma(x: f64) -> f64 {
     let term1 = (2.0 * PI / x).sqrt();
     let term2 = (x / std::f64::consts::E).powf(x);
     term1 * term2
+}
+
+#[cfg(test)]
+mod rng_tests {
+    use super::*;
+
+    const SEED: u64 = 11;
+    const DIM: usize = 4;
+
+    #[test]
+    fn consecutive_levy_flights_draw_different_steps() {
+        // Each call draws on from the solver's one RNG. Rebuilt from the seed
+        // inside the call, every step of a seeded run was the same vector.
+        let solver = FPASolver::new(SolverConfig::default()).with_seed(SEED);
+        let mut rng = crate::common::rng::solver_rng(Some(SEED));
+        let first = solver.levy_flight(DIM, &mut rng);
+        let second = solver.levy_flight(DIM, &mut rng);
+        assert_ne!(first, second);
+    }
 }

@@ -953,7 +953,7 @@ fn gds_write_mode_and_unknown_procedures_are_refused() {
     let e = call_err(&s, "CALL gds.pageRank.write({})");
     assert!(e.contains("GDS's") && e.contains("write"), "{e}");
     let e = call_err(&s, "CALL no.such.procedure()");
-    assert!(e.contains("Unknown procedure: no.such.procedure"), "{e}");
+    assert!(e.contains("Unknown procedure: `no.such.procedure`"), "{e}");
     assert!(
         call(&s, "CALL algo.pageRank()").is_ok(),
         "an algorithm name is routed to the algorithm operator"

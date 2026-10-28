@@ -8,12 +8,12 @@
 The openCypher TCK **has now been run** (#434), so this page can give a measured
 number instead of withholding one:
 
-> **97.3% of evaluated scenarios** — 3,659 of 3,762, from 3,897 total with 135
-> skipped as unjudgeable by the harness. Measured 2026-08-26 at commit
-> `7708d60`.
+> **99.9% of evaluated scenarios** — 3,845 of 3,847, from 3,897 total with 50
+> skipped as unjudgeable by the harness. Measured 2026-09-15 at commit
+> `d2df42a`.
 
 Two numbers, both of which matter. The pass rate says what the engine gets
-right among scenarios the harness can judge; the **96.5% coverage** says how
+right among scenarios the harness can judge; the **98.7% coverage** says how
 many it can judge at all. Quoting either alone misleads, which is why the
 harness prints both.
 
@@ -42,7 +42,7 @@ was self-assessed, never checked against the TCK, and an earlier internal
 assessment of the same engine put it at 40–50%. It was withdrawn rather than
 defended.
 
-The measured number has since passed it — 97.3% against the withdrawn "~90%" —
+The measured number has since passed it — 99.9% against the withdrawn "~90%" —
 but the two are not comparable, and passing it settles nothing: one is a
 reproducible count over a named corpus at a named commit, the other was a
 guess. The point of withdrawing it was never the value.

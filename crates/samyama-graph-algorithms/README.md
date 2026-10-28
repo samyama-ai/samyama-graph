@@ -95,5 +95,42 @@ This crate is the backend for `algo.*` Cypher procedures in Samyama.
 | MST | `CALL algo.mst('weight')` |
 | Triangle Count | `CALL algo.triangleCount()` |
 
+## GPU acceleration and CPU fallback
+
+PageRank, CDLP, LCC and triangle count have a GPU path, compiled only with
+`--features gpu` (ADR-025). The CPU path is the source of truth, and no call
+fails because a GPU is missing: it runs on the CPU instead, and says why on
+the `samyama::gpu` log target (HW-10):
+
+| Reason | Level | Logged |
+|---|---|---|
+| Built without the `gpu` feature (the default build) | `info` | once per algorithm |
+| GPU build, no CUDA or wgpu device available | `warn` | once per algorithm |
+| Graph at or below the GPU threshold (`SAMYAMA_GPU_MIN_NODES`) | `debug` | every call |
+| An option the GPU kernel does not implement (PageRank's dangling redistribution) | `debug` | every call |
+| The GPU kernel returned an error: device busy, lost or failed | `warn` | every call |
+
+"Once" means once recorded. A call made before a subscriber is installed, or
+while `samyama::gpu` is filtered out, does not use up the report, so the
+first call after logging is enabled still says it.
+
+The threshold in a "graph at or below" line is the one dispatch applied. Before
+the GPU runtime is first initialised the backend is unknown, so a graph at or
+below the smallest threshold of any backend stays on the CPU without
+initialising it, and the line names that smallest threshold (or
+`SAMYAMA_GPU_MIN_NODES`, when set). Once the runtime
+is initialised, the line names the active backend's own threshold: on Metal
+that is 1,000,000 nodes, not 1,000.
+
+A line reads, for example:
+
+```text
+PageRank ran on the CPU, not a GPU: this build has no GPU support (built without the `gpu` feature) (reported once per process)
+```
+
+To see the per-call reasons, raise the level for that target, e.g.
+`RUST_LOG=samyama::gpu=debug`. The reasons themselves are
+`cpu_fallback::CpuFallbackReason`; `gpu_dispatch::gpu_route` returns one.
+
 ## License
 Apache-2.0

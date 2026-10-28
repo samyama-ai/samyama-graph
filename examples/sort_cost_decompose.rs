@@ -278,17 +278,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
     let one = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
-    let data_dir = one("--data-dir").map(PathBuf::from).unwrap_or_else(|| {
-        eprintln!("--data-dir <path> is required");
-        std::process::exit(2)
-    });
     let runs: usize = one("--runs").map(|s| s.parse()).transpose()?.unwrap_or(301);
-
+    if runs == 0 { return Err("--runs must be positive".into()); }
     let mut graph = GraphStore::new();
-    eprintln!("loading {} ...", data_dir.display());
-    let t = Instant::now();
-    ldbc_common::load_dataset(&mut graph, &data_dir)?;
-    eprintln!("loaded in {:.1}s", t.elapsed().as_secs_f64());
+    if args.iter().any(|a| a == "--synthetic") {
+        println!("dataset: deterministic synthetic anchors; NOT LDBC SF1");
+        for (anchor, count) in [(1i64,5usize),(2,142),(3,920)] {
+            let p=graph.create_node("Person");
+            graph.set_node_property("default",p,"id",anchor)?;
+            for i in 0..count {
+                let f=graph.create_node("Person");
+                // Match the real LDBC loader's column-backed property path.
+                graph.set_node_property("default",f,"id",anchor*10000+i as i64)?;
+                graph.set_node_property("default",f,"firstName",format!("name{:04}",(i*73)%count))?;
+                graph.set_node_property("default",f,"lastName",format!("family{:04}",(i*37)%count))?;
+                graph.create_edge(p,f,"KNOWS")?;
+            }
+        }
+    } else {
+        let data_dir = one("--data-dir").map(PathBuf::from)
+            .ok_or("--data-dir <path> or --synthetic is required")?;
+        eprintln!("loading {} ...", data_dir.display());
+        let t=Instant::now();
+        ldbc_common::load_dataset(&mut graph,&data_dir)?;
+        eprintln!("loaded in {:.1}s",t.elapsed().as_secs_f64());
+    }
     for label in ["Person", "Post", "Comment", "Forum", "Place", "Organisation", "Tag"] {
         let q = parse_query(&format!("CREATE INDEX ON :{label}(id)"))?;
         MutQueryExecutor::new(&mut graph, "default".to_string()).execute(&q)?;

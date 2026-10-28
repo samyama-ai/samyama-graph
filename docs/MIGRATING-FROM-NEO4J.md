@@ -22,7 +22,7 @@ You get a count and, more usefully, the refusals **grouped by cause**:
   refused        5
 
   Refusals by cause, commonest first:
-       1x  NotFound  Unknown procedure: apoc.periodic.iterate
+       1x  NotFound  Unknown procedure: '…'. The schema procedures are db.checkIntegrity, db.index.fullt…
        1x  SyntaxError  Parse error: expected label
        …
 ```
@@ -56,10 +56,12 @@ a declared index, a registered procedure — may not be one for you.
 CALL apoc.export.json.all('graph.json', {})
 ```
 
-then here:
+then here, convert it to a snapshot and import that
+([MOVING-DATA.md](./MOVING-DATA.md) explains the two steps):
 
 ```bash
-cargo run --release --example neo4j_import -- --file graph.json --json report.json
+samyama convert graph.json graph.sgsnap --report report.json
+curl -X POST http://localhost:8080/api/snapshot/import -F file=@graph.sgsnap
 ```
 
 Both APOC shapes are read: the default JSON Lines and the single object written
@@ -72,12 +74,14 @@ round trip, and the importer counts each rather than papering over it:
 
 | In the report | What it means |
 |---|---|
-| `dangling_edges`, `missing_endpoints` | A relationship whose endpoints were not in the export. A subgraph export produces these by construction; the ids are named so you can widen the export query. |
+| `dangling_relationships`, `unresolved_endpoints` | A relationship whose endpoints were not in the export. A subgraph export produces these by construction; the ids are named so you can widen the export query. By default the conversion stops (exit 65) and names the first one; `--missing-endpoints drop` leaves such relationships out, and `--missing-endpoints placeholder` keeps them against an `Unresolved` node holding the missing id. |
 | `values_that_look_temporal`, `values_that_look_spatial` | JSON has no date and no point, so APOC writes them as strings and maps, and that is how they arrive. **They are not converted.** A converter cannot tell your version string `"1.8.0"` from a date, and silently turning one into the other is invisible until a comparison behaves oddly. Convert deliberately: `MATCH (n:Label) SET n.when = datetime(n.when)`. |
-| `null_properties_dropped` | Neo4j cannot store a null, so a null in the file came from the exporter. The property is left absent, which is what the source graph had. |
+| `null_properties` | Neo4j cannot store a null, so a null in the file came from the exporter. The property is left absent, which is what the source graph had. |
 
-`--require-lossless` turns any of those into a non-zero exit, which is the form
-to use in a script. Node ids are **not** preserved: Neo4j ids are not stable
+`--require-lossless` turns any of those into exit 1 (converted, but something
+was dropped), which is the form to use in a script. Date-shaped strings are
+counted by the library report (`values_that_look_temporal`) but are not a loss:
+nothing was dropped, they arrive as the strings APOC wrote. Node ids are **not** preserved: Neo4j ids are not stable
 across databases and treating them as keys is the migration mistake that
 outlives the migration. Use a property you control.
 

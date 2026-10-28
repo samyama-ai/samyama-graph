@@ -216,6 +216,76 @@ impl Distance<f32> for InnerProductDistance {
     }
 }
 
+/// The distance an index declared with `metric` is built and searched with
+/// (#1967). One type for both element widths: the metric is chosen when the
+/// index is declared, so it is a value here rather than a type parameter.
+///
+/// hnsw_rs needs distances that are never negative (its `search_layer`
+/// asserts it), so what the graph orders by is `rank`: cosine and L2 are
+/// already non-negative, and inner product is mapped through a positive,
+/// strictly decreasing function of the dot product. `VectorIndex::search`
+/// turns a rank back into the distance it reports.
+#[derive(Clone, Copy, Debug)]
+pub struct MetricDistance(pub DistanceMetric);
+
+impl MetricDistance {
+    fn rank(self, pairs: impl Iterator<Item = (f32, f32)>) -> f32 {
+        match self.0 {
+            DistanceMetric::Cosine => {
+                let (mut dot, mut norm_a, mut norm_b) = (0.0f32, 0.0f32, 0.0f32);
+                for (a, b) in pairs {
+                    dot += a * b;
+                    norm_a += a * a;
+                    norm_b += b * b;
+                }
+                if norm_a <= 0.0 || norm_b <= 0.0 {
+                    return 1.0;
+                }
+                // The clamp and floor of `CosineDistance`, for its reason.
+                let sim = (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0);
+                (1.0 - sim).max(0.0)
+            }
+            DistanceMetric::L2 => pairs.map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt(),
+            DistanceMetric::InnerProduct => {
+                let dot: f32 = pairs.map(|(a, b)| a * b).sum();
+                // Continuous at 0 (both sides give 1), positive, and larger
+                // for a smaller dot product: the order of `-dot`, without a
+                // negative value.
+                if dot >= 0.0 {
+                    1.0 / (1.0 + dot)
+                } else {
+                    1.0 - dot
+                }
+            }
+        }
+    }
+
+    /// The distance reported for a rank: cosine and L2 as they are, inner
+    /// product as `1 - dot`, as `InnerProductDistance` defines it.
+    fn reported(self, rank: f32) -> f32 {
+        match self.0 {
+            DistanceMetric::InnerProduct => {
+                let dot = if rank <= 1.0 { 1.0 / rank - 1.0 } else { 1.0 - rank };
+                1.0 - dot
+            }
+            _ => rank,
+        }
+    }
+}
+
+impl Distance<f32> for MetricDistance {
+    fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+        self.rank(va.iter().copied().zip(vb.iter().copied()))
+    }
+}
+
+/// Computed in f32, as `CosineDistanceF16` is, for its reason.
+impl Distance<f16> for MetricDistance {
+    fn eval(&self, va: &[f16], vb: &[f16]) -> f32 {
+        self.rank(va.iter().zip(vb).map(|(a, b)| (a.to_f32(), b.to_f32())))
+    }
+}
+
 /// Stored vector entry for persistence
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StoredVector {
@@ -230,8 +300,8 @@ pub struct StoredVector {
 /// f32 copy inside the graph, and the memory saving -- the entire point of
 /// NDS-09's quantization -- would be a claim about the persistence copy only.
 enum Backend {
-    F32(Hnsw<'static, f32, CosineDistance>),
-    F16(Hnsw<'static, f16, CosineDistanceF16>),
+    F32(Hnsw<'static, f32, MetricDistance>),
+    F16(Hnsw<'static, f16, MetricDistance>),
 }
 
 /// Wrapper around HNSW index
@@ -299,12 +369,15 @@ impl VectorIndex {
     ) -> Self {
         let m = 16;
         let ef_construction = 200;
+        // Built with the declared metric: before #1967 every index was
+        // cosine, whatever `similarity` said.
+        let distance = MetricDistance(metric);
         let backend = match quantization {
             Quantization::None => Backend::F32(Hnsw::new(
-                m, max_elements, 16, ef_construction, CosineDistance,
+                m, max_elements, 16, ef_construction, distance,
             )),
             Quantization::Fp16 => Backend::F16(Hnsw::new(
-                m, max_elements, 16, ef_construction, CosineDistanceF16,
+                m, max_elements, 16, ef_construction, distance,
             )),
         };
         Self {
@@ -392,8 +465,8 @@ impl VectorIndex {
         // layer index before doing any of the work that could panic, so catching would
         // leave a half-linked point live in the graph while this function returns Err
         // and skips the stored_vectors push below — desynchronising the HNSW from the
-        // vector list that backs len(), dump() and the brute-force fallback. The
-        // CosineDistance clamp keeps the metric in [0, 2], which is what the
+        // vector list that backs len(), dump() and the brute-force fallback.
+        // MetricDistance never returns a negative distance, which is what the
         // search_layer assertions (hnsw.rs:937-938) actually require.
         match &mut self.backend {
             Backend::F32(h) => {
@@ -446,7 +519,7 @@ impl VectorIndex {
         // vectors costs microseconds and is always right, so there is nothing to trade.
         const EXACT_SEARCH_MAX: usize = 128;
         if n <= EXACT_SEARCH_MAX {
-            return Ok(self.brute_force_search(query, k.min(n)));
+            return Ok(self.report(self.brute_force_search(query, k.min(n))));
         }
 
         let ef_search = (k * 2).max(64).min(n);
@@ -476,7 +549,7 @@ impl VectorIndex {
                     "[vector] HNSW search panicked on {}-vector index; using exact brute-force fallback",
                     n
                 );
-                return Ok(self.brute_force_search(query, k.min(n)));
+                return Ok(self.report(self.brute_force_search(query, k.min(n))));
             }
         };
 
@@ -509,22 +582,33 @@ impl VectorIndex {
             eprintln!(
                 "[vector] HNSW returned no neighbours from a {n}-vector index; using exact fallback"
             );
-            return Ok(self.brute_force_search(query, k.min(n)));
+            return Ok(self.report(self.brute_force_search(query, k.min(n))));
         }
 
-        Ok(neighbors)
+        Ok(self.report(neighbors))
+    }
+
+    /// Ranks, as the graph and the exact paths order by, as the distances a
+    /// search reports.
+    fn report(&self, mut ranked: Vec<(NodeId, f32)>) -> Vec<(NodeId, f32)> {
+        let distance = MetricDistance(self.metric);
+        for (_, d) in &mut ranked {
+            *d = distance.reported(*d);
+        }
+        ranked
     }
 
     /// The stored vectors bit-identical to `query` (after quantizing it to the
     /// stored precision), with their distance to it.
     fn exact_matches(&self, query: &[f32]) -> Vec<(NodeId, f32)> {
+        let distance = MetricDistance(self.metric);
         match self.quantization {
             Quantization::None => {
                 let key = bits_key(query, |v: f32| v.to_bits() as u64);
                 self.exact.get(&key).into_iter().flatten()
                     .map(|&i| &self.stored_f32[i])
                     .filter(|sv| sv.vector.as_slice() == query)
-                    .map(|sv| (NodeId::new(sv.node_id), CosineDistance.eval(query, &sv.vector)))
+                    .map(|sv| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
                     .collect()
             }
             Quantization::Fp16 => {
@@ -533,7 +617,7 @@ impl VectorIndex {
                 self.exact.get(&key).into_iter().flatten()
                     .map(|&i| &self.stored_f16[i])
                     .filter(|(_, v)| v.iter().zip(&q).all(|(a, b)| a.to_bits() == b.to_bits()))
-                    .map(|(id, v)| (NodeId::new(*id), CosineDistanceF16.eval(&q, v)))
+                    .map(|(id, v)| (NodeId::new(*id), distance.eval(&q, v)))
                     .collect()
             }
         }
@@ -554,9 +638,11 @@ impl VectorIndex {
     }
 
     /// Exact nearest-neighbour search by linear scan over stored vectors.
-    /// Used as a fallback when the HNSW index search panics. The index uses
-    /// cosine distance, so this matches it; non-finite distances are skipped.
+    /// Used as a fallback when the HNSW index search panics. It ranks by the
+    /// index's own metric, so it matches the graph; non-finite distances are
+    /// skipped.
     fn brute_force_search(&self, query: &[f32], k: usize) -> Vec<(NodeId, f32)> {
+        let distance = MetricDistance(self.metric);
         // The query is quantized to match what is stored, so the exact search
         // answers the same question the graph does. Comparing a full-precision
         // query against quantized vectors would make the fallback disagree with
@@ -565,13 +651,13 @@ impl VectorIndex {
             Quantization::None => self
                 .stored_f32
                 .iter()
-                .map(|sv| (NodeId::new(sv.node_id), CosineDistance.eval(query, &sv.vector)))
+                .map(|sv| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
                 .collect(),
             Quantization::Fp16 => {
                 let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
                 self.stored_f16
                     .iter()
-                    .map(|(id, v)| (NodeId::new(*id), CosineDistanceF16.eval(&q, v)))
+                    .map(|(id, v)| (NodeId::new(*id), distance.eval(&q, v)))
                     .collect()
             }
         };

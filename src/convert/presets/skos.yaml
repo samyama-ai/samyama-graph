@@ -1,0 +1,17 @@
+# SKOS vocabularies: concepts, their labels, and the broader/narrower tree.
+labels:
+  "skos:Concept": Concept
+  "skos:ConceptScheme": ConceptScheme
+properties:
+  "skos:prefLabel": prefLabel
+  "skos:altLabel": altLabel
+  "skos:definition": definition
+  "skos:notation": notation
+edges:
+  "skos:broader": BROADER
+  "skos:narrower": { type: BROADER, reverse: true }
+  "skos:related": RELATED
+  "skos:exactMatch": EXACT_MATCH
+  "skos:closeMatch": CLOSE_MATCH
+drop:
+  - "skos:inScheme"

@@ -142,7 +142,11 @@ async fn the_benchmark_catalogue_describes_each_problem() {
     let (status, json) = get_json(app(), "/optimize/benchmarks").await;
     assert_eq!(status, StatusCode::OK);
     let b = json.as_array().unwrap();
-    assert_eq!(b.len(), 9);
+    assert_eq!(
+        b.len(),
+        benchmark_catalog().len(),
+        "every catalogue entry is served"
+    );
     let sphere = b.iter().find(|x| x["id"] == "sphere").unwrap();
     assert_eq!(sphere["type"], "single");
     assert_eq!(sphere["optimum"], 0.0);
@@ -271,6 +275,12 @@ async fn a_multi_objective_solve_stamps_the_pareto_front_on_the_last_iteration()
         front.iter().all(|p| p.as_array().unwrap().len() == 2),
         "ZDT1 has two objectives"
     );
+    // ZDT1 has a known front, so the done event measures against it (OPT-03).
+    let quality = done["quality"].as_object().expect("a quality object");
+    for metric in QUALITY_METRICS {
+        assert!(quality[metric].is_number(), "`{metric}` in {done}");
+    }
+    assert_eq!(quality["reference_point"].as_array().unwrap().len(), 2);
     let iters: Vec<_> = events.iter().filter(|(n, _)| n == "iteration").collect();
     assert!(iters.last().unwrap().1["pareto_front"].is_array());
     if iters.len() > 1 {
@@ -437,7 +447,7 @@ fn a_multi_objective_result_reports_no_feasibility_or_gap() {
 #[test]
 fn every_multi_objective_solver_runs_on_every_multi_objective_benchmark() {
     let algos = ["mo_bmr", "mo_bwr", "mo_bmwr", "mo_rao_de", "nsga2"];
-    for bench in ["zdt1", "zdt2", "zdt3", "dtlz1", "uc2_dosing"] {
+    for bench in multi_objective_benchmarks() {
         for algo in algos {
             let out = run_solver(algo, true, bench, 2, 0, cfg(), Some(5))
                 .unwrap_or_else(|e| panic!("{algo}/{bench}: {e}"));
@@ -489,43 +499,138 @@ fn the_single_objective_functions_are_zero_at_their_optimum() {
     assert_eq!(p.upper[3], 3.0);
 }
 
+/// The five measures OPT-03 asks every multi-objective run to report.
+const QUALITY_METRICS: [&str; 5] = ["hypervolume", "igd", "igd_plus", "spread", "coverage"];
+
+/// Every multi-objective benchmark in the catalogue, from the catalogue.
+fn multi_objective_benchmarks() -> Vec<&'static str> {
+    benchmark_catalog()
+        .into_iter()
+        .filter(|b| b.num_objectives > 1)
+        .map(|b| b.id)
+        .collect()
+}
+
 #[test]
-fn zdt_objectives_follow_their_definitions() {
-    let mut x = Array1::from_elem(30, 0.0);
-    x[0] = 0.25;
-    // g == 1 when the tail is zero.
-    for (variant, f2) in [
-        (1u8, 1.0 - 0.25f64.sqrt()),
-        (2, 1.0 - 0.25f64.powi(2)),
-        (
-            3,
-            1.0 - 0.25f64.sqrt() - 0.25 * (10.0 * std::f64::consts::PI * 0.25).sin(),
-        ),
-        (9, 1.0 - 0.25f64.sqrt()),
-    ] {
-        let p = ZDT { variant, dim: 30 };
-        assert_eq!(p.dim(), 30);
-        assert_eq!(p.num_objectives(), 2);
-        let (lo, hi) = p.bounds();
-        assert_eq!((lo[0], hi[29]), (0.0, 1.0));
-        let o = p.objectives(&x);
-        assert_eq!(o[0], 0.25);
-        assert!((o[1] - f2).abs() < 1e-12, "variant {variant}: {o:?}");
+fn the_catalogue_reaches_five_zdt_and_all_seven_dtlz_problems() {
+    let ids = multi_objective_benchmarks();
+    for variant in [1, 2, 3, 4, 6] {
+        assert!(
+            ids.contains(&format!("zdt{variant}").as_str()),
+            "zdt{variant}"
+        );
+    }
+    assert!(
+        !ids.contains(&"zdt5"),
+        "ZDT5 is binary-coded and cannot be posed here"
+    );
+    for variant in 1..=7 {
+        assert!(
+            ids.contains(&format!("dtlz{variant}").as_str()),
+            "dtlz{variant}"
+        );
     }
 }
 
 #[test]
-fn dtlz1_objectives_sum_to_half_on_the_optimal_front() {
-    let p = DTLZ1 { dim: 7, m: 3 };
-    assert_eq!(p.dim(), 7);
-    assert_eq!(p.num_objectives(), 3);
-    let (lo, hi) = p.bounds();
-    assert_eq!((lo[6], hi[0]), (0.0, 1.0));
-    // With every distance variable at 0.5, g = 0 and the objectives sum to 0.5.
-    let x = Array1::from(vec![0.3, 0.6, 0.5, 0.5, 0.5, 0.5, 0.5]);
-    let o = p.objectives(&x);
-    assert_eq!(o.len(), 3);
-    assert!((o.iter().sum::<f64>() - 0.5).abs() < 1e-9, "{o:?}");
+fn each_known_front_benchmark_is_the_crate_problem_at_the_catalogue_size() {
+    for b in benchmark_catalog().into_iter().filter(|b| b.ty == "multi") {
+        let problem = FrontProblem::for_benchmark(b.id).unwrap_or_else(|| panic!("{}", b.id));
+        let (dim, objectives) = match &problem {
+            FrontProblem::Zdt(p) => (p.dim(), p.num_objectives()),
+            FrontProblem::Dtlz(p) => (p.dim(), p.num_objectives()),
+        };
+        assert_eq!((dim, objectives), (b.dim, b.num_objectives), "{}", b.id);
+        assert!(
+            !problem.reference_front().is_empty(),
+            "{}: a known front",
+            b.id
+        );
+    }
+    // No known front: a use case, a single-objective benchmark, an unknown id.
+    for id in ["uc2_dosing", "sphere", "zdt5", "dtlz9", "moon"] {
+        assert!(FrontProblem::for_benchmark(id).is_none(), "{id}");
+    }
+}
+
+#[test]
+fn every_benchmark_with_a_known_front_reports_all_five_measures() {
+    for bench in multi_objective_benchmarks()
+        .into_iter()
+        .filter(|b| *b != "uc2_dosing")
+    {
+        let out = with_quality(
+            run_solver(
+                "nsga2",
+                true,
+                bench,
+                0,
+                CATALOG_DIM,
+                cfg(),
+                Some(ENVELOPE_SEED),
+            )
+            .unwrap_or_else(|e| panic!("{bench}: {e}")),
+            bench,
+        );
+        let q = out.quality.unwrap_or_else(|| panic!("{bench}: no quality"));
+        let objectives = out.final_pareto.unwrap()[0].len();
+        assert_eq!(q.reference_point.len(), objectives, "{bench}");
+        assert!(
+            q.hypervolume >= 0.0 && q.hypervolume.is_finite(),
+            "{bench}: {q:?}"
+        );
+        assert!(
+            q.igd.is_finite() && q.igd_plus.is_finite() && q.spread.is_finite(),
+            "{bench}: {q:?}"
+        );
+        assert!((0.0..=1.0).contains(&q.coverage), "{bench}: {q:?}");
+        assert!(
+            q.igd_plus <= q.igd + 1e-12,
+            "{bench}: IGD+ never exceeds IGD"
+        );
+    }
+}
+
+#[test]
+fn a_run_with_no_known_front_reports_no_quality() {
+    let use_case = run_solver(
+        "nsga2",
+        true,
+        "uc2_dosing",
+        0,
+        CATALOG_DIM,
+        cfg(),
+        Some(ENVELOPE_SEED),
+    )
+    .unwrap();
+    assert_eq!(with_quality(use_case, "uc2_dosing").quality, None);
+    let single = run_solver(
+        "jaya",
+        false,
+        "sphere",
+        1,
+        CATALOG_DIM,
+        cfg(),
+        Some(ENVELOPE_SEED),
+    )
+    .unwrap();
+    assert_eq!(with_quality(single, "sphere").quality, None);
+}
+
+#[test]
+fn run_solver_leaves_quality_to_be_measured_after_the_clock() {
+    // `run_solver` is what is timed; measuring is `with_quality`'s job.
+    let out = run_solver(
+        "nsga2",
+        true,
+        "zdt1",
+        0,
+        CATALOG_DIM,
+        cfg(),
+        Some(ENVELOPE_SEED),
+    )
+    .unwrap();
+    assert_eq!(out.quality, None);
 }
 
 #[tokio::test]
@@ -553,7 +658,7 @@ async fn the_test_router_serves_the_optimizer_alone() {
     let app = crate::http::build_router_for_tests(store);
     let (status, json) = get_json(app.clone(), "/optimize/benchmarks").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json.as_array().unwrap().len(), 9);
+    assert_eq!(json.as_array().unwrap().len(), benchmark_catalog().len());
     let resp = app
         .oneshot(
             Request::builder()

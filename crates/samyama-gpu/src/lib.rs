@@ -12,6 +12,11 @@
 //! When the `cuda` feature is enabled, each function tries CUDA first and falls back to wgpu.
 //! All GPU functions fall back gracefully when no GPU is available.
 //!
+//! **Parity:** every kernel is compared with a CPU reference within the
+//! tolerance [`tolerance`] declares for it (HW-09). The tests are in
+//! `samyama-graph-algorithms/src/gpu_parity_tests.rs`; a kernel exported here
+//! without one fails `gpu_parity_coverage` in that crate.
+//!
 //! This crate does NOT depend on samyama-graph-algorithms to avoid circular deps.
 //! Instead, it accepts raw CSR arrays (offsets, targets as &[usize]).
 
@@ -26,6 +31,7 @@ pub mod pca;
 pub mod runtime;
 pub mod sort;
 pub mod threshold;
+pub mod tolerance;
 pub mod topology;
 pub mod unified;
 pub mod vector;

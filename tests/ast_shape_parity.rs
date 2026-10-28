@@ -264,3 +264,27 @@ fn order_by_an_aggregate_alias_reaches_both_representations() {
         vec![("a".to_string(), 2), ("b".to_string(), 1)]
     );
 }
+
+#[test]
+fn expression_join_answers_agree_before_and_after_a_write_barrier() {
+    use samyama::graph::PropertyValue;
+    use samyama::query::executor::MutQueryExecutor;
+    let read = "MATCH (a:A) MATCH (b:B) WHERE a.k = b.k RETURN a, b";
+    let pipeline = format!("CREATE (:Marker) WITH 1 AS seed {read}");
+    assert_eq!(shape(read), "by-kind");
+    assert_eq!(shape(&pipeline), "pipeline");
+    for query in [read, pipeline.as_str()] {
+        let mut store = GraphStore::new();
+        for label in ["A", "B"] {
+            for _ in 0..2 {
+                let n=store.create_node(label);
+                let value=if label=="A" { PropertyValue::Integer(5) } else { PropertyValue::Float(5.0) };
+                store.get_node_mut(n).unwrap().set_property("k",value);
+            }
+            store.create_node(label); // missing keys must not pair
+        }
+        let q=parse_query(query).unwrap();
+        let batch=MutQueryExecutor::new(&mut store,"default".to_string()).execute(&q).unwrap();
+        assert_eq!(batch.records.len(),4,"{query}");
+    }
+}

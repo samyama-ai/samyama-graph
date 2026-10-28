@@ -235,12 +235,71 @@ What it refuses, before anything is written:
   `SET`;
 - a `writeProperty` that is not a non-empty string;
 - `gds.<name>.stream({writeProperty: ...})`: stream mode does not write;
-- `mutate` / `mutateProperty`: it writes into a graph projection, and there
-  are no projections yet (ALGO-05).
+- `mutate` / `mutateProperty`: it writes into a graph projection, and a
+  projection cannot hold a written property yet. Projections themselves exist
+  (see "Graph projections" below); `writeProperty` works on one.
 
 Config is read from a literal map. A config map passed as a parameter
 (`$config`) is not read by any algorithm here, so a `writeProperty` inside one
 is not honoured either.
+
+## Graph projections
+
+A projection keeps an algorithm's view of the graph under a name, so several
+algorithms run on one build of it instead of each building its own (ALGO-05):
+
+```cypher
+CREATE GRAPH PROJECTION social NODES :Person RELATIONSHIPS :KNOWS WEIGHT cost
+
+CALL algo.pageRank({graph: 'social'}) YIELD node, score
+
+CALL algo.louvain({graph: 'social'}) YIELD node, communityId
+
+SHOW GRAPH PROJECTIONS
+
+REFRESH GRAPH PROJECTION social
+
+DROP GRAPH PROJECTION social
+```
+
+| Statement | What it does |
+|---|---|
+| `CREATE GRAPH PROJECTION name [IF NOT EXISTS] [NODES :L] [RELATIONSHIPS :T] [WEIGHT p]` | Builds and keeps the view. A filter left out takes all of it. `IF NOT EXISTS` leaves an existing one as it is and reports it. |
+| `REFRESH GRAPH PROJECTION name` | Rebuilds it from the data as it is now, with the filters it was created with. |
+| `DROP GRAPH PROJECTION name [IF EXISTS]` | Releases it. |
+| `SHOW GRAPH PROJECTIONS` | One row each, by name: `name`, `node_label`, `relationship_type`, `weight_property`, `nodes`, `relationships`, `bytes`, `stale`, `status`. |
+
+The filters are the ones every algorithm's view is built from: one node label,
+one relationship type, one numeric weight property. A relationship whose weight
+is missing or not a number weighs 1.0.
+
+What it promises:
+
+- **The same answer.** An algorithm on a projection returns exactly the rows it
+  returns on the graph the projection was built from;
+  `tests/graph_projections.rs` checks this algorithm by algorithm.
+- **A snapshot.** Writes after the build do not reach it. `stale` turns true
+  once data may have changed since: any change counts, inside the projection
+  or not, so it can be true after a write the projection does not hold, and
+  is never false after one it does. `REFRESH` brings it up to date.
+- **Memory is reported, not capped.** `bytes` is the view's resident size,
+  also listed as kind `graph_projection` in `/api/memory` and `/metrics`. No
+  budget limits it yet (ALGO-12).
+- **In memory only.** A restart forgets projections, as it forgets hierarchy
+  indexes.
+- **Writes, except SHOW.** `CREATE`, `REFRESH` and `DROP` need the write path,
+  because they hold or free memory for every later query; a read-only
+  connection can list projections and run algorithms on them.
+
+What it refuses:
+
+- `graph` together with a label, a relationship type or a weight, positional
+  or in the config map: the projection already decides those;
+- `graph` on the algorithms that read more than a projection keeps: the four
+  temporal primitives (relationship times), `pca` (node properties) and
+  `or.solve`;
+- a `graph` that names no projection, or is not a non-empty string;
+- a `graph` an algorithm never takes a view from, rather than ignoring it.
 
 ## Embeddings
 

@@ -154,20 +154,26 @@ const OM08_NO_CONSTANT: &str =
 /// are what prove the replacement is faithful. It is written to say which of
 /// the two it saw rather than merely failing.
 #[test]
-fn the_equality_alone_plans_as_a_product_today() {
+fn the_equality_alone_plans_an_expression_hash_join() {
     let (indexed, _) = federation(3, 2);
     let text = plan(&indexed, OM08_NO_CONSTANT);
-    let product = text.contains("CartesianProduct");
-    let joined = text.contains("Join");
-    assert!(
-        product || joined,
-        "expected either the product or a join, got neither:\n{text}"
-    );
-    assert!(
-        product,
-        "a join now plans this shape -- #1822 has landed, so update this test \
-         and keep the answer tests below as the bar:\n{text}"
-    );
+    assert!(text.contains("ExpressionHashJoin"), "{text}");
+    assert!(!text.contains("CartesianProduct"), "{text}");
+}
+
+#[test]
+fn a_limit_keeps_the_lazy_product_startup_plan() {
+    let (indexed, _) = federation(3, 2);
+    let text = plan(&indexed, &format!("{OM08_NO_CONSTANT} LIMIT 1"));
+    assert!(!text.contains("ExpressionHashJoin"), "{text}");
+}
+
+#[test]
+fn disjoint_matches_after_with_use_the_same_expression_join_rule() {
+    let (mut indexed, _) = federation(3, 2);
+    write(&mut indexed, "CREATE (:Seed)");
+    let text = plan(&indexed, &format!("MATCH (seed:Seed) WITH seed {OM08_NO_CONSTANT}"));
+    assert!(text.contains("ExpressionHashJoin"), "{text}");
 }
 
 // ---------------------------------------------------------------------------
@@ -441,4 +447,12 @@ fn an_equality_within_one_pattern_is_not_a_join() {
              RETURN v.rs_id AS v";
     let got = agreed(&indexed, &plain, q);
     assert_eq!(got.len(), 2, "a reflexive equality excludes nothing: {got:?}");
+}
+
+#[test]
+fn one_row_scans_keep_the_cheaper_product_plan() {
+    let mut s=GraphStore::new();
+    write(&mut s,"CREATE (:TinyA {k: 1}), (:TinyB {k: 1})");
+    let text=plan(&s,"MATCH (a:TinyA) MATCH (b:TinyB) WHERE a.k = b.k RETURN a");
+    assert!(!text.contains("ExpressionHashJoin"),"{text}");
 }

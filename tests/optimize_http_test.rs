@@ -88,7 +88,8 @@ async fn benchmarks_endpoint_lists_standard_functions() {
         .collect();
     for required in [
         "sphere", "rastrigin", "ackley", "rosenbrock",
-        "zdt1", "zdt2", "zdt3", "dtlz1",
+        "zdt1", "zdt2", "zdt3", "zdt4", "zdt6",
+        "dtlz1", "dtlz2", "dtlz3", "dtlz4", "dtlz5", "dtlz6", "dtlz7",
     ] {
         assert!(ids.iter().any(|i| i == required), "missing benchmark: {required}");
     }

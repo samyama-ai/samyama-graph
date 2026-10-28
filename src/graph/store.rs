@@ -1348,6 +1348,10 @@ pub struct GraphStore {
     /// Hierarchy (OEH) index registry — subsumption + index-resident roll-up (ADR-035)
     pub hierarchy_index: Arc<HierarchyIndexManager>,
 
+    /// Named graph projections (ALGO-05): views kept for repeated analytics.
+    /// In memory only; see `crate::graph::projection`.
+    pub graph_projections: Arc<crate::graph::projection::GraphProjections>,
+
     /// Columnar storage for node properties
     pub node_columns: ColumnStore,
 
@@ -1398,6 +1402,18 @@ pub struct GraphStore {
     /// is `Relaxed`: a reader that sees a stale epoch re-executes the query,
     /// which is the safe direction.
     epoch: std::sync::atomic::AtomicU64,
+
+    /// Moves on with the epoch, except for the bumps that are housekeeping and
+    /// change no data: the per-statement version cleanup (`gc_versions`) and
+    /// re-laying adjacency out (`compact_adjacency`).
+    ///
+    /// The epoch is coarse on purpose -- every write statement moves it at
+    /// least once, through `gc_versions`, data or not -- which is right for a
+    /// cache and wrong for "has the data changed since?". A named graph
+    /// projection (ALGO-05) asks the second question. Everything not excluded
+    /// here counts, so a mutator added later makes a projection look stale,
+    /// never fresh: the safe direction.
+    data_changes: std::sync::atomic::AtomicU64,
     /// Where this graph's data came from, from the `.sgsnap` headers it was
     /// imported from or a converter that built it (#1911). Written back into
     /// the header of every export.
@@ -1478,6 +1494,7 @@ impl GraphStore {
             property_index: Arc::new(IndexManager::new()),
             index_catalog_dirty: std::sync::atomic::AtomicBool::new(false),
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
+            graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
             node_columns: ColumnStore::new(),
             edge_columns: ColumnStore::new(),
             index_sender: None,
@@ -1489,6 +1506,7 @@ impl GraphStore {
             catalog: GraphCatalog::new(),
             statistics_cache: std::sync::RwLock::new(None),
             epoch: std::sync::atomic::AtomicU64::new(0),
+            data_changes: std::sync::atomic::AtomicU64::new(0),
             snapshot_sources: Vec::new(),
             snapshot_sources_epoch: 0,
             snapshot_sources_stale: false,
@@ -1714,6 +1732,16 @@ impl GraphStore {
             property: h.edge_types.join("|"),
             name: Some(h.name),
             bytes: h.bytes,
+        }));
+        out.extend(self.graph_projections.list(self.data_changes()).into_iter().map(|p| {
+            crate::index::IndexMemory {
+                kind: "graph_projection",
+                entries: p.nodes,
+                label: p.spec.node_label.unwrap_or_default(),
+                property: p.spec.edge_type.unwrap_or_default(),
+                name: Some(p.name),
+                bytes: p.bytes,
+            }
         }));
         out.extend(self.point_index.index_memory().into_iter().map(
             |(name, label, property, bytes, entries)| crate::index::IndexMemory {
@@ -4922,6 +4950,20 @@ NodeDeleted { .. } => {
     /// mutable reference can call it before they give the reference away.
     pub fn bump_epoch(&self) {
         self.epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.data_changes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Move the epoch for housekeeping that changes no data. See
+    /// `data_changes`; only the two paths it names call this.
+    fn bump_epoch_for_housekeeping(&self) {
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How many times data may have changed: the epoch, less housekeeping.
+    /// Equal readings mean no node, relationship, label or property changed in
+    /// between. See `data_changes`.
+    pub fn data_changes(&self) -> u64 {
+        self.data_changes.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether a computed statistics set is currently cached.
@@ -5815,7 +5857,8 @@ NodeDeleted { .. } => {
     /// lives in the memory-efficient CSR format.
     /// Call this after bulk loading (snapshot import, batch CREATE) for memory savings.
     pub fn compact_adjacency(&mut self) {
-        self.bump_epoch();
+        // The same relationships, laid out differently.
+        self.bump_epoch_for_housekeeping();
         let buffer_out: usize = self.outgoing.iter().map(|v| v.len()).sum();
         let buffer_in: usize = self.incoming.iter().map(|v| v.len()).sum();
         if buffer_out == 0 && buffer_in == 0 {
@@ -6424,7 +6467,9 @@ NodeDeleted { .. } => {
     ///
     /// Returns `(nodes_pruned, edge_entries_pruned)`.
     pub fn gc_versions(&mut self, min_version: u64) -> (usize, usize) {
-        self.bump_epoch();
+        // Old versions are invisible to every reader left, so dropping them
+        // changes no data a query can see.
+        self.bump_epoch_for_housekeeping();
         let mut nodes_pruned = 0usize;
         let mut edges_pruned = 0usize;
 
@@ -6512,6 +6557,8 @@ NodeDeleted { .. } => {
         self.vector_index = Arc::new(VectorIndexManager::new());
         self.property_index = Arc::new(IndexManager::new());
         self.hierarchy_index = Arc::new(HierarchyIndexManager::new());
+        // A projection is a copy of data that `clear` just removed.
+        self.graph_projections = Arc::new(crate::graph::projection::GraphProjections::new());
         self.node_columns = ColumnStore::new();
         self.edge_columns = ColumnStore::new();
         self.next_node_id = 1;
@@ -7583,8 +7630,10 @@ mod tests {
         // A function bumps if it calls a bumper, or calls something that does.
         // Without this closure every delegating mutator needs an EXEMPT entry,
         // and the list stops meaning "cannot change query results".
+        // `bump_epoch_for_housekeeping` moves the epoch too; it only leaves
+        // `data_changes` alone (ALGO-05), which is not what this test guards.
         let mut bumps: std::collections::HashSet<String> =
-            ["bump_epoch", "invalidate_statistics_cache"]
+            ["bump_epoch", "bump_epoch_for_housekeeping", "invalidate_statistics_cache"]
                 .iter().map(|s| s.to_string()).collect();
         loop {
             let mut grew = false;

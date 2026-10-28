@@ -31,7 +31,9 @@ impl CuckooSolver {
     }
 
     /// Levy flight random walk
-    fn levy_flight(&self, dim: usize) -> Array1<f64> {
+    /// Draws from the solver's one `rng`. Rebuilding it from the seed here
+    /// repeated the same draws on every call, so a seeded run never moved.
+    fn levy_flight(&self, dim: usize, rng: &mut impl Rng) -> Array1<f64> {
         // Mantegna's algorithm for Levy flights
         let beta = 1.5;
         let sigma_u = ((gamma(1.0 + beta) * (PI * beta / 2.0).sin()) / 
@@ -40,13 +42,12 @@ impl CuckooSolver {
         let sigma_v = 1.0;
 
         let mut step = Array1::zeros(dim);
-        let mut rng = crate::common::rng::solver_rng(self.seed);
 
         for i in 0..dim {
             let _u: f64 = rng.gen_range(0.0..1.0) * sigma_u; // Standard normal * sigma_u? No, usually Gaussian(0, sigma_u^2)
             // Simulating Normal distribution
-            let u_n: f64 = rand_distr::Normal::new(0.0, sigma_u).unwrap().sample(&mut rng);
-            let v_n: f64 = rand_distr::Normal::new(0.0, sigma_v).unwrap().sample(&mut rng);
+            let u_n: f64 = rand_distr::Normal::new(0.0, sigma_u).unwrap().sample(rng);
+            let v_n: f64 = rand_distr::Normal::new(0.0, sigma_v).unwrap().sample(rng);
             
             let s = u_n / v_n.abs().powf(1.0 / beta);
             step[i] = s;
@@ -88,7 +89,7 @@ impl CuckooSolver {
             // 2. Generate new solutions via Levy Flights
             for i in 0..self.config.population_size {
                 let step_size = 0.01; // Step scale
-                let levy = self.levy_flight(dim);
+                let levy = self.levy_flight(dim, &mut rng);
                 let current_vars = &nests[i].variables;
                 
                 let mut new_vars = Array1::zeros(dim);
@@ -174,4 +175,23 @@ fn gamma(x: f64) -> f64 {
     let term1 = (2.0 * PI / x).sqrt();
     let term2 = (x / std::f64::consts::E).powf(x);
     term1 * term2
+}
+
+#[cfg(test)]
+mod rng_tests {
+    use super::*;
+
+    const SEED: u64 = 11;
+    const DIM: usize = 4;
+
+    #[test]
+    fn consecutive_levy_flights_draw_different_steps() {
+        // Each call draws on from the solver's one RNG. Rebuilt from the seed
+        // inside the call, every step of a seeded run was the same vector.
+        let solver = CuckooSolver::new(SolverConfig::default()).with_seed(SEED);
+        let mut rng = crate::common::rng::solver_rng(Some(SEED));
+        let first = solver.levy_flight(DIM, &mut rng);
+        let second = solver.levy_flight(DIM, &mut rng);
+        assert_ne!(first, second);
+    }
 }

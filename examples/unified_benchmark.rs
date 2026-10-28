@@ -461,8 +461,9 @@ async fn main() -> Result<(), Error> {
         let stats = if dedup_keys.is_empty() {
             client.import_snapshot("default", p).await?
         } else {
-            client.import_snapshot_dedup("default", p, &dedup_keys).await?
+            client.import_snapshot_dedup_options("default", p, &dedup_keys, args.iter().any(|a| a == "--dedup-allow-conflicts")).await?
         };
+        eprintln!("{} candidate merges refused for conflicting identifiers", stats.merges_refused_conflicting);
         eprintln!(
             "{} nodes, {} edges, {} MERGED in {:.1}s",
             stats.node_count,

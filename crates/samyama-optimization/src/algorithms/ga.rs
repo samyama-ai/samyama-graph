@@ -63,19 +63,19 @@ impl GASolver {
 
             while new_population.len() < self.config.population_size {
                 // Selection (Tournament)
-                let p1 = self.select(&population);
-                let p2 = self.select(&population);
+                let p1 = self.select(&population, &mut rng);
+                let p2 = self.select(&population, &mut rng);
 
                 // Crossover
                 let (mut c1_vars, mut c2_vars) = if rng.gen::<f64>() < self.crossover_rate {
-                    self.crossover(&p1.variables, &p2.variables)
+                    self.crossover(&p1.variables, &p2.variables, &mut rng)
                 } else {
                     (p1.variables.clone(), p2.variables.clone())
                 };
 
                 // Mutation
-                self.mutate(&mut c1_vars, &lower, &upper);
-                self.mutate(&mut c2_vars, &lower, &upper);
+                self.mutate(&mut c1_vars, &lower, &upper, &mut rng);
+                self.mutate(&mut c2_vars, &lower, &upper, &mut rng);
 
                 // Add to new population
                 let f1 = crate::common::evaluate(problem, &c1_vars);
@@ -104,8 +104,9 @@ impl GASolver {
         }
     }
 
-    fn select<'a>(&self, population: &'a [Individual]) -> &'a Individual {
-        let mut rng = crate::common::rng::solver_rng(self.seed);
+    /// Draws from the solver's one `rng`. Rebuilding it from the seed here
+    /// repeated the same draws on every call, so a seeded run never moved.
+    fn select<'a>(&self, population: &'a [Individual], rng: &mut impl Rng) -> &'a Individual {
         let i1 = rng.gen_range(0..population.len());
         let i2 = rng.gen_range(0..population.len());
         
@@ -116,8 +117,14 @@ impl GASolver {
         }
     }
 
-    fn crossover(&self, p1: &Array1<f64>, p2: &Array1<f64>) -> (Array1<f64>, Array1<f64>) {
-        let mut rng = crate::common::rng::solver_rng(self.seed);
+    /// Draws from the solver's one `rng`. Rebuilding it from the seed here
+    /// repeated the same draws on every call, so a seeded run never moved.
+    fn crossover(
+        &self,
+        p1: &Array1<f64>,
+        p2: &Array1<f64>,
+        rng: &mut impl Rng,
+    ) -> (Array1<f64>, Array1<f64>) {
         let dim = p1.len();
         let mut c1 = p1.clone();
         let mut c2 = p2.clone();
@@ -131,8 +138,15 @@ impl GASolver {
         (c1, c2)
     }
 
-    fn mutate(&self, vars: &mut Array1<f64>, lower: &Array1<f64>, upper: &Array1<f64>) {
-        let mut rng = crate::common::rng::solver_rng(self.seed);
+    /// Draws from the solver's one `rng`. Rebuilding it from the seed here
+    /// repeated the same draws on every call, so a seeded run never moved.
+    fn mutate(
+        &self,
+        vars: &mut Array1<f64>,
+        lower: &Array1<f64>,
+        upper: &Array1<f64>,
+        rng: &mut impl Rng,
+    ) {
         let dim = vars.len();
 
         for i in 0..dim {
@@ -140,7 +154,7 @@ impl GASolver {
                 // Small Gaussian mutation or random reset?
                 // Let's use Gaussian mutation for continuous space
                 let range = upper[i] - lower[i];
-                let delta = rand_distr::Normal::new(0.0, range * 0.1).unwrap().sample(&mut rng);
+                let delta = rand_distr::Normal::new(0.0, range * 0.1).unwrap().sample(rng);
                 vars[i] = (vars[i] + delta).clamp(lower[i], upper[i]);
             }
         }

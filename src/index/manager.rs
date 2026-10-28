@@ -17,7 +17,11 @@ pub struct PropertyIndexKey {
 /// What one index costs.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IndexMemory {
-    /// `index`, `unique_constraint`, `fulltext`, `vector`, `hierarchy` or `point`.
+    /// `index`, `unique_constraint`, `fulltext`, `vector`, `hierarchy`, `point`
+    /// or `graph_projection`. A projection is not an index, but it is a
+    /// resident structure kept for queries, and this is where resident
+    /// structures are accounted; its `label` is the node label and its
+    /// `property` the relationship type it holds.
     pub kind: &'static str,
     /// The name the DDL gave the index, for the kinds that carry one.
     #[serde(skip_serializing_if = "Option::is_none")]

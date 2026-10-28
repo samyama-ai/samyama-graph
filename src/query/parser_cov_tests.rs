@@ -951,3 +951,109 @@ fn load_parquet_parses_in_the_by_kind_shape() {
     err("LOAD PARQUET WITH HEADERS FROM 'x.parquet' AS row RETURN row");
     err("LOAD PARQUET FROM 'x.parquet' AS row FIELDTERMINATOR ';' RETURN row");
 }
+
+// ---------------------------------------------------------------------------
+// Named graph projections (ALGO-05)
+// ---------------------------------------------------------------------------
+
+fn projection_ddl(q: &str) -> GraphProjectionDdl {
+    ok(q).graph_projection_ddl.unwrap_or_else(|| panic!("{q}: no projection statement"))
+}
+
+#[test]
+fn create_graph_projection_reads_every_filter() {
+    match projection_ddl("CREATE GRAPH PROJECTION social IF NOT EXISTS NODES :Person RELATIONSHIPS :KNOWS WEIGHT cost") {
+        GraphProjectionDdl::Create { name, spec, if_not_exists } => {
+            assert_eq!(name, "social");
+            assert!(if_not_exists);
+            assert_eq!(spec.node_label.as_deref(), Some("Person"));
+            assert_eq!(spec.edge_type.as_deref(), Some("KNOWS"));
+            assert_eq!(spec.weight_property.as_deref(), Some("cost"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn create_graph_projection_filters_are_each_optional() {
+    match projection_ddl("CREATE GRAPH PROJECTION everything") {
+        GraphProjectionDdl::Create { name, spec, if_not_exists } => {
+            assert_eq!(name, "everything");
+            assert!(!if_not_exists);
+            assert_eq!(spec, crate::graph::projection::ProjectionSpec::default());
+        }
+        other => panic!("{other:?}"),
+    }
+    match projection_ddl("CREATE GRAPH PROJECTION weighted WEIGHT cost") {
+        GraphProjectionDdl::Create { spec, .. } => {
+            assert_eq!((spec.node_label, spec.edge_type), (None, None));
+            assert_eq!(spec.weight_property.as_deref(), Some("cost"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn graph_projection_names_and_filters_can_be_escaped() {
+    match projection_ddl("CREATE GRAPH PROJECTION `my graph` NODES :`Odd Label` WEIGHT `the cost`") {
+        GraphProjectionDdl::Create { name, spec, .. } => {
+            assert_eq!(name, "my graph");
+            assert_eq!(spec.node_label.as_deref(), Some("Odd Label"));
+            assert_eq!(spec.weight_property.as_deref(), Some("the cost"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_keyword_can_be_a_projection_name() {
+    // The name comes first and is required, so `nodes` is the name here, not
+    // the start of a filter.
+    match projection_ddl("CREATE GRAPH PROJECTION nodes NODES :Person") {
+        GraphProjectionDdl::Create { name, spec, .. } => {
+            assert_eq!(name, "nodes");
+            assert_eq!(spec.node_label.as_deref(), Some("Person"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn refresh_drop_and_show_graph_projections() {
+    assert_eq!(
+        projection_ddl("REFRESH GRAPH PROJECTION social"),
+        GraphProjectionDdl::Refresh { name: "social".into() }
+    );
+    assert_eq!(
+        projection_ddl("DROP GRAPH PROJECTION social"),
+        GraphProjectionDdl::Drop { name: "social".into(), if_exists: false }
+    );
+    assert_eq!(
+        projection_ddl("drop graph projection social if exists"),
+        GraphProjectionDdl::Drop { name: "social".into(), if_exists: true }
+    );
+    assert_eq!(projection_ddl("SHOW GRAPH PROJECTIONS"), GraphProjectionDdl::Show);
+    assert_eq!(projection_ddl("show graph projection"), GraphProjectionDdl::Show);
+}
+
+#[test]
+fn malformed_graph_projection_statements_do_not_parse() {
+    for q in [
+        "CREATE GRAPH PROJECTION",
+        "CREATE GRAPH PROJECTION p NODES Person",
+        "CREATE GRAPH PROJECTION p WEIGHT",
+        "REFRESH GRAPH PROJECTION",
+        "DROP GRAPH PROJECTION",
+        "CREATE GRAPH PROJECTION p RELATIONSHIPS :A RELATIONSHIPS :B",
+    ] {
+        let _ = err(q);
+    }
+}
+
+#[test]
+fn only_show_graph_projections_is_a_read() {
+    assert!(!ok("SHOW GRAPH PROJECTIONS").is_write());
+    for q in ["CREATE GRAPH PROJECTION p", "REFRESH GRAPH PROJECTION p", "DROP GRAPH PROJECTION p IF EXISTS"] {
+        assert!(ok(q).is_write(), "{q}");
+    }
+}

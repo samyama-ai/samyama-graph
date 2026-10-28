@@ -682,17 +682,23 @@ fn the_query_answers_under_a_budget_the_cross_product_blows() {
         });
     assert_eq!(out.records.len(), 400, "20 variants x 20 targets on MONDO:77");
 
-    // Not vacuous: without the pinning this *is* refused. The same query with
-    // the constant removed has no constant to propagate, and must still be
-    // refused by the budget.
+    // #1822 now joins the no-constant equality within the same budget.
+    let joined = q.replace(" AND d1.mondo_id = 'MONDO:77'", "");
+    let out = QueryExecutor::new(&s).with_row_budget(1_000_000)
+        .execute(&parse_query(&joined).unwrap()).unwrap();
+    assert_eq!(out.records.len(), 200 * 20 * 20);
+
+    // Keep a genuine product as the negative control: a disjunction must not
+    // be consumed as an equality join. No fixture row has the extra value.
     let unpinnable = "MATCH (v:Variant)-[:ASSOCIATED_WITH_DISEASE]->(d1:Disease) \
              MATCH (t:Target)-[:ASSOCIATED_WITH_DISEASE]->(d2:Disease) \
-             WHERE d1.mondo_id = d2.mondo_id \
+             WHERE d1.mondo_id = d2.mondo_id OR d1.mondo_id = '__missing__' \
              RETURN DISTINCT v.rs_id AS v, t.symbol AS t";
     let p = parse_query(unpinnable).unwrap();
     let err = QueryExecutor::new(&s)
         .with_row_budget(1_000_000)
         .execute(&p)
+        .map(|_| ())
         .expect_err("16M cartesian rows must still exceed a 1M budget");
     assert!(
         format!("{err}").contains("RowBudgetExceeded") || format!("{err:?}").contains("RowBudget"),

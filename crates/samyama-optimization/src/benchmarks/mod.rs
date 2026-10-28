@@ -22,6 +22,8 @@ pub mod multi_objective;
 pub mod runner;
 pub mod single_objective;
 
-pub use multi_objective::{moo_suite, MOProblemSpec, DTLZ, ZDT};
+pub use multi_objective::{
+    moo_suite, non_dominated, MOProblemSpec, DTLZ, DTLZ_FRONT_SAMPLES_PER_AXIS, ZDT, ZDT_FRONT_SAMPLES,
+};
 pub use runner::{run_mo_suite, run_so_suite, MORecord, SORecord};
 pub use single_objective::{so_suite, SOProblemSpec};

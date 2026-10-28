@@ -414,10 +414,10 @@ fn arithmetic_overflow_and_zero_division_are_errors() {
 #[test]
 fn arithmetic_type_errors() {
     assert!(err("true + 1").contains("`+`"));
-    assert!(err("true - 1").contains("Sub"));
-    assert!(err("'a' * 2").contains("Mul"));
-    assert!(err("'a' / 2").contains("Div"));
-    assert!(err("'a' % 2").contains("Mod"));
+    assert!(err("true - 1").contains("`-`"));
+    assert!(err("'a' * 2").contains("`*`"));
+    assert!(err("'a' / 2").contains("`/`"));
+    assert!(err("'a' % 2").contains("`%`"));
     assert!(err("'a' ^ 2").contains("^"));
     // Literals of the wrong type are refused when the query is parsed...
     assert!(err("1 XOR true").contains("XOR"));

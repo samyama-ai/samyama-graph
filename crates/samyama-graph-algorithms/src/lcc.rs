@@ -186,9 +186,14 @@ pub fn local_clustering_coefficient_with(
     }
 
     // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
+    // Every path that stays on the CPU says why (HW-10, #1684).
+    #[cfg(not(feature = "gpu"))]
+    crate::cpu_fallback::note_not_compiled(crate::cpu_fallback::GpuAlgorithm::Lcc);
     #[cfg(feature = "gpu")]
     {
-        if crate::gpu_dispatch::should_dispatch_gpu(n) {
+        if let Err(reason) = crate::gpu_dispatch::gpu_route(n) {
+            crate::cpu_fallback::note_cpu_fallback(crate::cpu_fallback::GpuAlgorithm::Lcc, &reason);
+        } else {
             {
                 match samyama_gpu::gpu_lcc(
                     n,
@@ -205,7 +210,10 @@ pub fn local_clustering_coefficient_with(
                         }
                         return LccResult { coefficients, average: gpu_result.average };
                     }
-                    Err(e) => tracing::warn!("GPU LCC failed, falling back to CPU: {}", e),
+                    Err(e) => crate::cpu_fallback::note_cpu_fallback(
+                        crate::cpu_fallback::GpuAlgorithm::Lcc,
+                        &crate::cpu_fallback::CpuFallbackReason::KernelFailed(e.to_string()),
+                    ),
                 }
             }
         }

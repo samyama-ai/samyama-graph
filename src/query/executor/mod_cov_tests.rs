@@ -227,7 +227,7 @@ fn a_call_subquery_streams_through_the_sink() {
 #[test]
 fn a_missing_parameter_is_named() {
     let msg = read_err("RETURN $nope AS x", &BoundParams::new());
-    assert!(msg.contains("Unresolved parameter: $nope"), "{msg}");
+    assert!(msg.contains("Unresolved parameter: `$nope`"), "{msg}");
 }
 
 #[test]

@@ -17,7 +17,7 @@ cypher_option = { cypher_option_key ~ "=" ~ cypher_option_value }
 cypher_option_key = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 cypher_option_value = @{ (ASCII_ALPHANUMERIC | "_" | "-" | ".")+ }
 union_clause = { ^"UNION" ~ ^"ALL"? }
-statement = { analyze_stmt | show_hierarchy_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_point_index_stmt | drop_point_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | load_parquet_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
+statement = { analyze_stmt | show_graph_projections_stmt | create_graph_projection_stmt | refresh_graph_projection_stmt | drop_graph_projection_stmt | show_hierarchy_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_point_index_stmt | drop_point_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | load_parquet_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
 
 // A query as what Cypher actually is: an ordered sequence of clauses.
 //
@@ -74,6 +74,20 @@ create_hierarchy_index_stmt = { ^"CREATE" ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable ~
 drop_hierarchy_index_stmt = { ^"DROP" ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable }
 show_hierarchy_indexes_stmt = { ^"SHOW" ~ ^"HIERARCHY" ~ (^"INDEXES" | ^"INDEX") }
 rebuild_hierarchy_index_stmt = { ^"REBUILD" ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable }
+// Named graph projections (ALGO-05, #1681): a view of the graph kept under a
+// name for repeated analytics, `CALL algo.x({graph: 'name'})`.
+//   CREATE GRAPH PROJECTION social IF NOT EXISTS NODES :Person RELATIONSHIPS :KNOWS WEIGHT cost
+// The three filters are exactly what an algorithm's view can be built from:
+// one node label, one relationship type, one numeric weight property. Each is
+// optional; leaving one out takes all of it.
+create_graph_projection_stmt = { ^"CREATE" ~ ^"GRAPH" ~ ^"PROJECTION" ~ variable ~ if_not_exists? ~ projection_nodes? ~ projection_relationships? ~ projection_weight? }
+projection_nodes = { ^"NODES" ~ ":" ~ label }
+projection_relationships = { ^"RELATIONSHIPS" ~ ":" ~ label }
+projection_weight = { ^"WEIGHT" ~ property_key }
+refresh_graph_projection_stmt = { ^"REFRESH" ~ ^"GRAPH" ~ ^"PROJECTION" ~ variable }
+drop_graph_projection_stmt = { ^"DROP" ~ ^"GRAPH" ~ ^"PROJECTION" ~ variable ~ if_exists? }
+show_graph_projections_stmt = { ^"SHOW" ~ ^"GRAPH" ~ (^"PROJECTIONS" | ^"PROJECTION") }
+if_exists = { ^"IF" ~ ^"EXISTS" }
 hier_relationship = { hier_rel_reverse | hier_rel_forward }
 hier_rel_forward = { "(" ~ ")" ~ "-" ~ "[" ~ ":" ~ hier_types ~ "]" ~ "->" ~ "(" ~ ")" }
 hier_rel_reverse = { "(" ~ ")" ~ "<-" ~ "[" ~ ":" ~ hier_types ~ "]" ~ "-" ~ "(" ~ ")" }

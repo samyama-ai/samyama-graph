@@ -48,7 +48,7 @@ impl MOTLBOSolver {
             let mut offspring = Vec::with_capacity(pop_size * 2);
 
             // Teacher Phase
-            let teacher_idx = self.select_teacher(&population);
+            let teacher_idx = self.select_teacher(&population, &mut rng);
             let teacher_vars = population[teacher_idx].variables.clone();
             let mean_vars = self.calculate_mean(&population, dim);
 
@@ -130,15 +130,16 @@ impl MOTLBOSolver {
         }
     }
 
-    fn select_teacher(&self, population: &[MultiObjectiveIndividual]) -> usize {
+    /// Draws from the solver's one `rng`. Rebuilding it from the seed here
+    /// repeated the same draws on every call, so a seeded run never moved.
+    fn select_teacher(&self, population: &[MultiObjectiveIndividual], rng: &mut impl Rng) -> usize {
         // Teacher is chosen from the first rank (best non-dominated front)
         let first_rank: Vec<usize> = population.iter().enumerate()
             .filter(|(_, ind)| ind.rank == 0)
             .map(|(i, _)| i)
             .collect();
         
-        let mut rng = crate::common::rng::solver_rng(self.seed);
-        *first_rank.choose(&mut rng).unwrap_or(&0)
+        *first_rank.choose(rng).unwrap_or(&0)
     }
 
     fn calculate_mean(&self, population: &[MultiObjectiveIndividual], dim: usize) -> Array1<f64> {
@@ -256,5 +257,39 @@ impl MOTLBOSolver {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rng_tests {
+    use super::*;
+    use ndarray::array;
+
+    const SEED: u64 = 11;
+    /// Enough calls that a fair choice among four reaches more than one.
+    const DRAWS: usize = 32;
+
+    #[test]
+    fn the_teacher_is_drawn_afresh_each_time() {
+        // Four individuals share the first rank, so the teacher is a draw
+        // among them. Rebuilt from the seed inside the call, a seeded run
+        // chose the same teacher on every iteration.
+        let solver = MOTLBOSolver::new(SolverConfig::default()).with_seed(SEED);
+        let population: Vec<MultiObjectiveIndividual> = (0..4)
+            .map(|i| {
+                let mut ind = MultiObjectiveIndividual::new(
+                    array![i as f64],
+                    vec![i as f64, 4.0 - i as f64],
+                    0.0,
+                );
+                ind.rank = 0;
+                ind
+            })
+            .collect();
+        let mut rng = crate::common::rng::solver_rng(Some(SEED));
+        let chosen: std::collections::BTreeSet<usize> = (0..DRAWS)
+            .map(|_| solver.select_teacher(&population, &mut rng))
+            .collect();
+        assert!(chosen.len() > 1, "always teacher {chosen:?}");
     }
 }

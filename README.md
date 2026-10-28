@@ -215,7 +215,7 @@ Plus surveillance, health-determinants, health-systems and football — [browse 
 
 **Cypher** — MATCH, CREATE, MERGE, aggregations, path finding, 30+ functions.
 99.9% of the openCypher TCK's evaluated scenarios pass (3,845 of 3,847, at 98.7%
-coverage of the corpus, measured 2026-09-15) — see [`docs/CYPHER-COMPATIBILITY.md`](docs/CYPHER-COMPATIBILITY.md).
+coverage of the 3,897-scenario corpus, measured 2026-09-15) — see [`docs/CYPHER-COMPATIBILITY.md`](docs/CYPHER-COMPATIBILITY.md).
 
 ```cypher
 MATCH p = shortestPath((a:Person)-[:KNOWS*1..3]->(b:Person))

@@ -1,0 +1,220 @@
+{
+  "about": "API-04 (#1728): one fixture per value type, read back through every SDK. `cypher` is an expression that produces the value; `json` is the exact JSON the engine sends for it, written compactly. Each SDK's suite returns the expression as a column of its own, inside a list, inside a map, and (when `storable`) as a node property, and compares what it decoded with `json` parsed by that SDK's own rules. `lossy` names an SDK that cannot hold the value exactly, and why; that SDK's suite checks the loss is still there, so a fix shows up as a failure to update this file. See sdk/VALUE-TYPES.md.",
+  "cases": [
+    {
+      "name": "integer",
+      "cypher": "42",
+      "json": "42",
+      "storable": true
+    },
+    {
+      "name": "negative integer",
+      "cypher": "-7",
+      "json": "-7",
+      "storable": true
+    },
+    {
+      "name": "largest integer",
+      "cypher": "9223372036854775807",
+      "json": "9223372036854775807",
+      "storable": true,
+      "lossy": {
+        "typescript": "A JavaScript number is a double, so JSON.parse rounds an integer beyond 2^53."
+      }
+    },
+    {
+      "name": "smallest integer",
+      "cypher": "-9223372036854775808",
+      "json": "-9223372036854775808",
+      "storable": true,
+      "lossy": {
+        "typescript": "A JavaScript number is a double, so JSON.parse rounds an integer beyond 2^53."
+      }
+    },
+    {
+      "name": "integer just past 2^53",
+      "cypher": "9007199254740993",
+      "json": "9007199254740993",
+      "storable": true,
+      "lossy": {
+        "typescript": "A JavaScript number is a double, so JSON.parse rounds an integer beyond 2^53."
+      }
+    },
+    {
+      "name": "float",
+      "cypher": "1.5",
+      "json": "1.5",
+      "storable": true
+    },
+    {
+      "name": "whole float",
+      "cypher": "1.0",
+      "json": "1.0",
+      "storable": true,
+      "lossy": {
+        "typescript": "JavaScript has one number type, so 1.0 and 1 decode to the same value."
+      }
+    },
+    {
+      "name": "pi",
+      "cypher": "3.141592653589793",
+      "json": "3.141592653589793",
+      "storable": true
+    },
+    {
+      "name": "tiny float",
+      "cypher": "1.0e-300",
+      "json": "1e-300",
+      "storable": true
+    },
+    {
+      "name": "negative float",
+      "cypher": "-2.5e10",
+      "json": "-25000000000.0",
+      "storable": true,
+      "lossy": {
+        "typescript": "JavaScript has one number type, so a whole float decodes as an integer."
+      }
+    },
+    {
+      "name": "NaN",
+      "cypher": "0.0 / 0.0",
+      "json": "null",
+      "storable": true,
+      "note": "JSON has no NaN or infinity, so the engine sends a non-finite float as null. Every SDK reads null."
+    },
+    {
+      "name": "infinity",
+      "cypher": "1.0 / 0.0",
+      "json": "null",
+      "storable": true,
+      "note": "JSON has no NaN or infinity, so the engine sends a non-finite float as null. Every SDK reads null."
+    },
+    {
+      "name": "true",
+      "cypher": "true",
+      "json": "true",
+      "storable": true
+    },
+    {
+      "name": "false",
+      "cypher": "false",
+      "json": "false",
+      "storable": true
+    },
+    {
+      "name": "null",
+      "cypher": "null",
+      "json": "null",
+      "storable": false
+    },
+    {
+      "name": "empty string",
+      "cypher": "''",
+      "json": "\"\"",
+      "storable": true
+    },
+    {
+      "name": "unicode string",
+      "cypher": "'नमस्ते 🙂 ünïcödé 日本'",
+      "json": "\"नमस्ते 🙂 ünïcödé 日本\"",
+      "storable": true
+    },
+    {
+      "name": "escaped string",
+      "cypher": "'line\\nbreak \"quoted\" back\\\\slash'",
+      "json": "\"line\\nbreak \\\"quoted\\\" back\\\\slash\"",
+      "storable": true
+    },
+    {
+      "name": "date",
+      "cypher": "date('2024-02-29')",
+      "json": "\"2024-02-29\"",
+      "storable": true
+    },
+    {
+      "name": "local time",
+      "cypher": "localtime('12:31:14.645876123')",
+      "json": "\"12:31:14.645876123\"",
+      "storable": true
+    },
+    {
+      "name": "time with offset",
+      "cypher": "time('12:31:14.645876123+05:30')",
+      "json": "\"12:31:14.645876123+05:30\"",
+      "storable": true
+    },
+    {
+      "name": "local datetime",
+      "cypher": "localdatetime('2024-01-02T03:04:05.123456789')",
+      "json": "\"2024-01-02T03:04:05.123456789\"",
+      "storable": true
+    },
+    {
+      "name": "datetime with offset",
+      "cypher": "datetime('2024-01-02T03:04:05+05:30')",
+      "json": "\"2024-01-02T03:04:05+05:30\"",
+      "storable": true
+    },
+    {
+      "name": "datetime with zone",
+      "cypher": "datetime('2024-07-01T12:00:00[Europe/Stockholm]')",
+      "json": "\"2024-07-01T12:00+02:00[Europe/Stockholm]\"",
+      "storable": true
+    },
+    {
+      "name": "duration",
+      "cypher": "duration('P1Y2M3DT4H5M6.5S')",
+      "json": "{\"days\":3,\"months\":14,\"nanos\":500000000,\"seconds\":14706}",
+      "storable": true
+    },
+    {
+      "name": "cartesian point",
+      "cypher": "point({x: 1.5, y: -2.0})",
+      "json": "{\"crs\":\"cartesian\",\"srid\":7203,\"x\":1.5,\"y\":-2.0}",
+      "storable": true
+    },
+    {
+      "name": "geographic point",
+      "cypher": "point({latitude: 12.97, longitude: 77.59})",
+      "json": "{\"crs\":\"wgs-84\",\"latitude\":12.97,\"longitude\":77.59,\"srid\":4326,\"x\":77.59,\"y\":12.97}",
+      "storable": true
+    },
+    {
+      "name": "empty list",
+      "cypher": "[]",
+      "json": "[]",
+      "storable": true
+    },
+    {
+      "name": "empty map",
+      "cypher": "{}",
+      "json": "{}",
+      "storable": true
+    },
+    {
+      "name": "mixed list",
+      "cypher": "[1, 'two', 3.5, true, null]",
+      "json": "[1,\"two\",3.5,true,null]",
+      "storable": true
+    },
+    {
+      "name": "nested list",
+      "cypher": "[1, [2, [3, []]]]",
+      "json": "[1,[2,[3,[]]]]",
+      "storable": true
+    },
+    {
+      "name": "nested map",
+      "cypher": "{a: {b: {c: [1, 'x', null]}}, z: 1.5}",
+      "json": "{\"a\":{\"b\":{\"c\":[1,\"x\",null]}},\"z\":1.5}",
+      "storable": true
+    },
+    {
+      "name": "temporals in a list",
+      "cypher": "[date('2024-02-29'), duration('PT1S')]",
+      "json": "[\"2024-02-29\",{\"days\":0,\"months\":0,\"nanos\":0,\"seconds\":1}]",
+      "storable": true
+    }
+  ]
+}

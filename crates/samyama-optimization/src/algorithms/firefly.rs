@@ -60,7 +60,7 @@ impl FireflySolver {
             }
         }
 
-        for _iter in 0..self.config.max_iterations {
+        for iter in 0..self.config.max_iterations {
             history.push(population[best_idx].fitness);
 
             // Firefly algorithm loop: move i towards j if j is brighter (better fitness)
@@ -72,7 +72,10 @@ impl FireflySolver {
 
             // We can parallelize the outer loop (i)
             let new_positions: Vec<Option<Array1<f64>>> = (0..pop_size).into_par_iter().map(|i| {
-                let mut rng = crate::common::rng::solver_rng(self.seed);
+                // Each firefly its own stream, derived from (seed, iteration,
+                // index) as in the other parallel solvers. `solver_rng(seed)`
+                // here gave every firefly, in every iteration, the same draws.
+                let mut rng = crate::common::rng::child_rng(self.seed, iter, i);
                 let mut moved = false;
                 let mut new_vars = old_population[i].variables.clone();
                 let fitness_i = old_population[i].fitness;

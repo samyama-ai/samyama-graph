@@ -172,5 +172,35 @@ YIELD objective, feasible, gap, total_time_ms
 `gap` against the benchmark's known optimum, and both `null` for a
 multi-objective benchmark (see #1795 for why feasibility cannot be read there yet).
 
+### Measuring a multi-objective front
+
+A multi-objective solve returns a front of trade-offs, not one answer, so its
+quality is measured against the problem's known Pareto front (OPT-03).
+`moo::quality_metrics(front, reference_front)` computes all five:
+
+| Measure | Function | Better | What it says |
+|---|---|---|---|
+| Hypervolume | `moo::hypervolume` | larger | Volume the front dominates, up to a reference point past the known front's worst values. Exact, any number of objectives. |
+| IGD | `moo::igd` | smaller | Mean distance from each known-front point to the nearest front point. |
+| IGD+ | `moo::igd_plus` | smaller | Like IGD, but a point is never charged for beating the known front. |
+| Spread | `moo::spread` | smaller | Generalised Δ: how evenly the front is spaced, and whether it reaches each extreme. 0 is perfectly even. |
+| Coverage | `moo::coverage(known, front)` | smaller | Share of the front's points the known front weakly dominates, so that are provably not optimal. |
+
+The hypervolume reference point is the known front's worst value in each
+objective, pushed out by `moo::HV_REFERENCE_MARGIN` (10%) of its range.
+
+**Known fronts** come from the problems themselves: `ZDT::reference_front` and
+`DTLZ::reference_front` evaluate the problem's own objectives on a grid of its
+position variables, with its distance variables at the value where it is
+optimal, and keep the non-dominated points. There is no copied table to drift
+from the formula. The tests check every point against each front's equation
+(ZDT1/4: f2 = 1 − √f1; ZDT2/6: f2 = 1 − f1²; DTLZ1: Σf = ½; DTLZ2–6: Σf² = 1).
+
+`/optimize/solve` reports them in its `done` event as `quality`, for every
+benchmark with a known front: ZDT1–4, ZDT6 and DTLZ1–7. It is `null` for
+`uc2_dosing`, which has no known front, and for single-objective runs. ZDT5 is
+binary-coded and is not offered. The measures are computed after the solve's
+clock stops, so `total_time_ms` is still the solve alone.
+
 ## License
 Apache-2.0

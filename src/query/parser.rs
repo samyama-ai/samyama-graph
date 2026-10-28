@@ -638,6 +638,24 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             Rule::show_hierarchy_indexes_stmt => {
                 query.show_hierarchy_indexes = true;
             }
+            Rule::show_graph_projections_stmt => {
+                query.graph_projection_ddl = Some(GraphProjectionDdl::Show);
+            }
+            Rule::create_graph_projection_stmt => {
+                query.graph_projection_ddl = Some(parse_create_graph_projection(inner));
+            }
+            Rule::refresh_graph_projection_stmt => {
+                query.graph_projection_ddl = Some(GraphProjectionDdl::Refresh {
+                    name: projection_name(inner),
+                });
+            }
+            Rule::drop_graph_projection_stmt => {
+                let if_exists = inner.clone().into_inner().any(|p| p.as_rule() == Rule::if_exists);
+                query.graph_projection_ddl = Some(GraphProjectionDdl::Drop {
+                    name: projection_name(inner),
+                    if_exists,
+                });
+            }
             Rule::create_hierarchy_index_stmt => {
                 parse_create_hierarchy_index_statement(inner, query)?;
             }
@@ -1259,6 +1277,45 @@ fn parse_call_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) ->
 /// and a key left with its backticks on round-trips through the engine
 /// perfectly well -- it just becomes a property nobody can find under the name
 /// they wrote (#847).
+/// The name a graph projection statement gives: its first `variable`, which
+/// the grammar requires.
+fn projection_name(pair: pest::iterators::Pair<Rule>) -> String {
+    pair.into_inner()
+        .find(|p| p.as_rule() == Rule::variable)
+        .map(|p| unescape_name(p.as_str()))
+        .unwrap_or_default()
+}
+
+/// The single `label` inside a `NODES :L` or `RELATIONSHIPS :T` filter.
+fn projection_filter(pair: pest::iterators::Pair<Rule>) -> Option<String> {
+    pair.into_inner()
+        .find(|p| p.as_rule() == Rule::label)
+        .map(|p| unescape_name(p.as_str()))
+}
+
+/// `CREATE GRAPH PROJECTION` (ALGO-05). A filter left out is `None`: all of it.
+fn parse_create_graph_projection(pair: pest::iterators::Pair<Rule>) -> GraphProjectionDdl {
+    let mut name = String::new();
+    let mut if_not_exists = false;
+    let mut spec = crate::graph::projection::ProjectionSpec::default();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::variable if name.is_empty() => name = unescape_name(part.as_str()),
+            Rule::if_not_exists => if_not_exists = true,
+            Rule::projection_nodes => spec.node_label = projection_filter(part),
+            Rule::projection_relationships => spec.edge_type = projection_filter(part),
+            Rule::projection_weight => {
+                spec.weight_property = part
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::property_key)
+                    .map(|p| unescape_name(p.as_str()))
+            }
+            _ => {}
+        }
+    }
+    GraphProjectionDdl::Create { name, spec, if_not_exists }
+}
+
 fn unescape_name(raw: &str) -> String {
     match raw.strip_prefix('`').and_then(|r| r.strip_suffix('`')) {
         Some(inner) => inner.replace("``", "`"),

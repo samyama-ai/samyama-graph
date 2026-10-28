@@ -3340,7 +3340,7 @@
       "query": "RETURN 1 / 0 AS x"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.RuntimeError] Runtime error: Division by zero"
+      "error": "[Samyama.ClientError.Statement.RuntimeError] Runtime error: Division by zero: `/` with a divisor of 0. Guard it, e.g. `CASE WHEN d = 0 THEN null ELSE n / d END`.\n --> 1:10\n  |\n1 | RETURN 1 / 0 AS x\n  |          ^"
     },
     "status": 400
   },
@@ -3378,7 +3378,7 @@
       "query": "RETURN 1 % 0 AS x"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.RuntimeError] Runtime error: Modulo by zero"
+      "error": "[Samyama.ClientError.Statement.RuntimeError] Runtime error: Modulo by zero: `%` with a divisor of 0. Guard it, e.g. `CASE WHEN d = 0 THEN null ELSE n % d END`.\n --> 1:10\n  |\n1 | RETURN 1 % 0 AS x\n  |          ^"
     },
     "status": 400
   },
@@ -5156,7 +5156,7 @@
       "query": "RETURN 'a' / 2"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.TypeError] Type error: Div requires numeric operands"
+      "error": "[Samyama.ClientError.Statement.TypeError] Type error: `/` requires numeric operands, got String and Integer. Convert the other side with toInteger(), toFloat() or toString() first.\n --> 1:12\n  |\n1 | RETURN 'a' / 2\n  |            ^"
     },
     "status": 400
   },
@@ -5168,7 +5168,7 @@
       "query": "MATCH (n) RETURN nosuchfn(n)"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.UnknownFunction] UnknownFunction: `nosuchfn` is not a function this engine implements. Checked at compile time on purpose: as a run-time error it only fired on a row that reached the call, so the same query over an empty graph returned no rows and reported success\n --> 1:18\n  |\n1 | MATCH (n) RETURN nosuchfn(n)\n  |                  ^^^^^^^^"
+      "error": "[Samyama.ClientError.Statement.UnknownFunction] UnknownFunction: `nosuchfn` is not a function this engine implements. Check its spelling; names match regardless of case.\n --> 1:18\n  |\n1 | MATCH (n) RETURN nosuchfn(n)\n  |                  ^^^^^^^^"
     },
     "status": 400
   },
@@ -5180,7 +5180,7 @@
       "query": "RETURN toUpper()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `toUpper()` takes at least 1 argument; got 0\n --> 1:8\n  |\n1 | RETURN toUpper()\n  |        ^^^^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `toUpper()` takes at least 1 argument; got 0. Call it as `toUpper(a)`.\n --> 1:8\n  |\n1 | RETURN toUpper()\n  |        ^^^^^^^^^"
     },
     "status": 400
   },
@@ -6080,7 +6080,7 @@
       "query": "RETURN toUpper()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `toUpper()` takes at least 1 argument; got 0\n --> 1:8\n  |\n1 | RETURN toUpper()\n  |        ^^^^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `toUpper()` takes at least 1 argument; got 0. Call it as `toUpper(a)`.\n --> 1:8\n  |\n1 | RETURN toUpper()\n  |        ^^^^^^^^^"
     },
     "status": 400
   },
@@ -6092,7 +6092,7 @@
       "query": "RETURN abs()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `abs()` takes at least 1 argument; got 0\n --> 1:8\n  |\n1 | RETURN abs()\n  |        ^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `abs()` takes at least 1 argument; got 0. Call it as `abs(a)`.\n --> 1:8\n  |\n1 | RETURN abs()\n  |        ^^^^^"
     },
     "status": 400
   },
@@ -6104,7 +6104,7 @@
       "query": "RETURN size()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `size()` takes at least 1 argument; got 0\n --> 1:8\n  |\n1 | RETURN size()\n  |        ^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `size()` takes at least 1 argument; got 0. Call it as `size(a)`.\n --> 1:8\n  |\n1 | RETURN size()\n  |        ^^^^^^"
     },
     "status": 400
   },
@@ -6116,7 +6116,7 @@
       "query": "RETURN atan2(1)"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `atan2()` takes at least 2 arguments; got 1"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `atan2()` takes at least 2 arguments; got 1. Call it as `atan2(a, b)`."
     },
     "status": 400
   },
@@ -6128,7 +6128,7 @@
       "query": "MATCH (p:Person) RETURN hasLabels(p)"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `hasLabels()` takes at least 2 arguments; got 1"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `hasLabels()` takes at least 2 arguments; got 1. Call it as `hasLabels(a, b)`."
     },
     "status": 400
   },
@@ -6140,7 +6140,7 @@
       "query": "RETURN toString()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `toString()` takes at least 1 argument; got 0\n --> 1:8\n  |\n1 | RETURN toString()\n  |        ^^^^^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `toString()` takes at least 1 argument; got 0. Call it as `toString(a)`.\n --> 1:8\n  |\n1 | RETURN toString()\n  |        ^^^^^^^^^^"
     },
     "status": 400
   },
@@ -6152,7 +6152,7 @@
       "query": "RETURN id()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `id()` takes at least 1 argument; got 0\n --> 1:8\n  |\n1 | RETURN id()\n  |        ^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `id()` takes at least 1 argument; got 0. Call it as `id(a)`.\n --> 1:8\n  |\n1 | RETURN id()\n  |        ^^^^"
     },
     "status": 400
   },
@@ -6164,7 +6164,7 @@
       "query": "RETURN keys()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `keys()` takes at least 1 argument; got 0\n --> 1:8\n  |\n1 | RETURN keys()\n  |        ^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `keys()` takes at least 1 argument; got 0. Call it as `keys(a)`.\n --> 1:8\n  |\n1 | RETURN keys()\n  |        ^^^^^^"
     },
     "status": 400
   },
@@ -6176,7 +6176,7 @@
       "query": "RETURN type()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `type()` takes at least 1 argument; got 0\n --> 1:8\n  |\n1 | RETURN type()\n  |        ^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `type()` takes at least 1 argument; got 0. Call it as `type(a)`.\n --> 1:8\n  |\n1 | RETURN type()\n  |        ^^^^^^"
     },
     "status": 400
   },
@@ -6188,7 +6188,7 @@
       "query": "RETURN left('abc')"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `left()` takes at least 2 arguments; got 1"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `left()` takes at least 2 arguments; got 1. Call it as `left(a, b)`."
     },
     "status": 400
   },
@@ -6200,7 +6200,7 @@
       "query": "RETURN right('abc')"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `right()` takes at least 2 arguments; got 1"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `right()` takes at least 2 arguments; got 1. Call it as `right(a, b)`."
     },
     "status": 400
   },
@@ -6212,7 +6212,7 @@
       "query": "RETURN 'a' / 2"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.TypeError] Type error: Div requires numeric operands"
+      "error": "[Samyama.ClientError.Statement.TypeError] Type error: `/` requires numeric operands, got String and Integer. Convert the other side with toInteger(), toFloat() or toString() first.\n --> 1:12\n  |\n1 | RETURN 'a' / 2\n  |            ^"
     },
     "status": 400
   },
@@ -6224,7 +6224,7 @@
       "query": "MATCH (n) RETURN nosuchfn(n)"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.UnknownFunction] UnknownFunction: `nosuchfn` is not a function this engine implements. Checked at compile time on purpose: as a run-time error it only fired on a row that reached the call, so the same query over an empty graph returned no rows and reported success\n --> 1:18\n  |\n1 | MATCH (n) RETURN nosuchfn(n)\n  |                  ^^^^^^^^"
+      "error": "[Samyama.ClientError.Statement.UnknownFunction] UnknownFunction: `nosuchfn` is not a function this engine implements. Check its spelling; names match regardless of case.\n --> 1:18\n  |\n1 | MATCH (n) RETURN nosuchfn(n)\n  |                  ^^^^^^^^"
     },
     "status": 400
   },
@@ -6320,7 +6320,7 @@
       "query": "RETURN no_such_function(1)"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.UnknownFunction] UnknownFunction: `no_such_function` is not a function this engine implements. Checked at compile time on purpose: as a run-time error it only fired on a row that reached the call, so the same query over an empty graph returned no rows and reported success\n --> 1:8\n  |\n1 | RETURN no_such_function(1)\n  |        ^^^^^^^^^^^^^^^^"
+      "error": "[Samyama.ClientError.Statement.UnknownFunction] UnknownFunction: `no_such_function` is not a function this engine implements. Check its spelling; names match regardless of case.\n --> 1:8\n  |\n1 | RETURN no_such_function(1)\n  |        ^^^^^^^^^^^^^^^^"
     },
     "status": 400
   },
@@ -6332,7 +6332,7 @@
       "query": "CALL db.nope()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Procedure.NotFound] Unknown procedure: db.nope\n --> 1:6\n  |\n1 | CALL db.nope()\n  |      ^^^^^^^"
+      "error": "[Samyama.ClientError.Procedure.NotFound] Unknown procedure: `db.nope`. The schema procedures are db.checkIntegrity, db.index.fulltext.queryNodes, db.index.point.nearest, db.index.vector.queryNodes, db.labels, db.propertyKeys, db.relationshipTypes, db.schema.forLLM, db.schema.visualization; graph algorithms are called as `algo.<name>()`.\n --> 1:6\n  |\n1 | CALL db.nope()\n  |      ^^^^^^^"
     },
     "status": 400
   },
@@ -6385,7 +6385,7 @@
       "query": "MATCH (a) RETURN b"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.VariableNotBound] `b` is not bound: nothing in this query defines it\n --> 1:18\n  |\n1 | MATCH (a) RETURN b\n  |                  ^"
+      "error": "[Samyama.ClientError.Statement.VariableNotBound] `b` is not bound: nothing in this query defines it. Did you mean `a`? Define it first, with MATCH, UNWIND or WITH, before the clause that uses it.\n --> 1:18\n  |\n1 | MATCH (a) RETURN b\n  |                  ^"
     },
     "status": 400
   },

@@ -16,6 +16,9 @@ not a converter to every other format:
               Samyama Graph
 ```
 
+The user guide, with the two-step model, the RDF mapping file and presets, loss reports and
+exit codes, is [docs/MOVING-DATA.md](https://github.com/samyama-ai/samyama-graph/blob/main/docs/MOVING-DATA.md).
+
 ## Formats
 
 <!-- format-matrix:start -->
@@ -27,8 +30,8 @@ not a converter to every other format:
 | RDF/XML | `.rdf`, `.owl`, `.xml` | not yet | not yet |
 | JSON-LD | `.jsonld` | not yet | not yet |
 | Neo4j apoc.export.json | `.json` | yes | not yet |
-| GraphML | `.graphml` | not yet | not yet |
-| CSV directory | (a directory) | not yet | not yet |
+| GraphML | `.graphml` | not yet | yes |
+| CSV directory | (a directory) | not yet | yes |
 <!-- format-matrix:end -->
 
 A format marked "not yet" is refused by name; it is never read or written approximately.

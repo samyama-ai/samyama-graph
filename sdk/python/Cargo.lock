@@ -3227,6 +3227,8 @@ dependencies = [
  "ndarray",
  "rand 0.8.8",
  "rayon",
+ "tracing",
+ "tracing-core",
 ]
 
 [[package]]

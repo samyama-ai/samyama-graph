@@ -131,6 +131,8 @@ pub struct Query {
     pub rebuild_hierarchy_index: Option<String>,
     /// SHOW HIERARCHY INDEXES flag
     pub show_hierarchy_indexes: bool,
+    /// CREATE / REFRESH / DROP / SHOW GRAPH PROJECTION(S) (ALGO-05)
+    pub graph_projection_ddl: Option<GraphProjectionDdl>,
     /// SHOW INDEXES flag
     pub show_indexes: bool,
     /// ANALYZE flag -- recompute the planner's statistics (LANG-13).
@@ -245,6 +247,36 @@ pub struct CreateFullTextIndexClause {
 pub enum PointIndexDdl {
     Create { name: String, label: Label, property: String },
     Drop { name: String },
+}
+
+/// The named graph projection statements (ALGO-05, #1681). See
+/// `crate::graph::projection` for what a projection is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GraphProjectionDdl {
+    /// `CREATE GRAPH PROJECTION name [IF NOT EXISTS] [NODES :L] [RELATIONSHIPS :T] [WEIGHT p]`
+    Create {
+        name: String,
+        spec: crate::graph::projection::ProjectionSpec,
+        if_not_exists: bool,
+    },
+    /// `REFRESH GRAPH PROJECTION name`
+    Refresh { name: String },
+    /// `DROP GRAPH PROJECTION name [IF EXISTS]`
+    Drop { name: String, if_exists: bool },
+    /// `SHOW GRAPH PROJECTIONS`
+    Show,
+}
+
+impl GraphProjectionDdl {
+    /// Whether the statement changes which projections exist or what they
+    /// hold. `SHOW` only reads.
+    ///
+    /// The others count as writes although no graph data changes: each holds
+    /// or frees memory for every later query, which a read-only connection
+    /// should not be able to do.
+    pub fn is_write(&self) -> bool {
+        !matches!(self, GraphProjectionDdl::Show)
+    }
 }
 
 /// DROP FULLTEXT INDEX clause
@@ -1365,6 +1397,7 @@ impl Query {
             || self.create_hierarchy_index_clause.is_some()
             || self.drop_hierarchy_index.is_some()
             || self.rebuild_hierarchy_index.is_some()
+            || self.graph_projection_ddl.as_ref().is_some_and(GraphProjectionDdl::is_write)
         {
             return true;
         }
@@ -1442,6 +1475,7 @@ impl Query {
             drop_hierarchy_index: None,
             rebuild_hierarchy_index: None,
             show_hierarchy_indexes: false,
+            graph_projection_ddl: None,
             show_indexes: false,
             analyze: false,
             hints: Vec::new(),

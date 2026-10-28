@@ -1,0 +1,43 @@
+name: Sort cost measurement
+on:
+  pull_request:
+    paths:
+      - 'examples/sort_cost_decompose.rs'
+      - '.github/workflows/sort-measurement.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sort-measurement-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  measure:
+    name: sort cost (synthetic, shipped allocator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sort-measurement
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake pkg-config
+      - name: Build the shipped-allocator probe
+        run: cargo build --release --locked --example sort_cost_decompose
+      - name: Record environment and three measurement trials
+        run: |
+          set -euo pipefail
+          mkdir -p measurements
+          { rustc -Vv; uname -a; lscpu; } > measurements/environment.txt
+          for trial in 1 2 3; do
+            target/release/examples/sort_cost_decompose --synthetic --runs 4001 | tee "measurements/trial-${trial}.txt"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: synthetic-sort-cost
+          path: measurements/
+          if-no-files-found: warn

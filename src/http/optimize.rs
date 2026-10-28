@@ -7,22 +7,26 @@
 use axum::{
     extract::{rejection::JsonRejection, Path, State},
     http::StatusCode,
-    response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Json},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Json,
+    },
     routing::{get, post},
     Router,
 };
 use futures::stream::Stream;
 use ndarray::Array1;
 use samyama_optimization::algorithms::{
-    BMRSolver, BMWRSolver, BWRSolver, DESolver, EHRJayaSolver, GASolver,
-    GOTLBOSolver, ITLBOSolver, JayaSolver, MOBMWRSolver, MOBMWRVariant,
-    MORaoDESolver, NSGA2Solver, PSOSolver, QORaoSolver, QOJayaSolver,
-    RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver,
+    BMRSolver, BMWRSolver, BWRSolver, DESolver, EHRJayaSolver, GASolver, GOTLBOSolver, ITLBOSolver,
+    JayaSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, NSGA2Solver, PSOSolver, QOJayaSolver,
+    QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver,
 };
+use samyama_optimization::benchmarks::{DTLZ, DTLZ_FRONT_SAMPLES_PER_AXIS, ZDT, ZDT_FRONT_SAMPLES};
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SimpleProblem,
     SolverConfig,
 };
+use samyama_optimization::moo::{quality_metrics, QualityMetrics};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, convert::Infallible, pin::Pin, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
@@ -97,145 +101,249 @@ fn algorithm_catalog() -> Vec<AlgorithmInfo> {
 
     let default_params = || {
         vec![
-            ParamSpec { name: "population_size", ty: "int", default: serde_json::json!(50) },
-            ParamSpec { name: "iterations",      ty: "int", default: serde_json::json!(200) },
+            ParamSpec {
+                name: "population_size",
+                ty: "int",
+                default: serde_json::json!(50),
+            },
+            ParamSpec {
+                name: "iterations",
+                ty: "int",
+                default: serde_json::json!(200),
+            },
         ]
     };
 
     vec![
         AlgorithmInfo {
-            id: "jaya", name: "Jaya", family: "rao", variant: None,
+            id: "jaya",
+            name: "Jaya",
+            family: "rao",
+            variant: None,
             equation_tex: r"V' = V + r_1(V_{best} - |V|) - r_2(V_{worst} - |V|)",
             paper_refs: vec![jaya_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "rao1", name: "Rao-1", family: "rao", variant: Some("Rao1"),
+            id: "rao1",
+            name: "Rao-1",
+            family: "rao",
+            variant: Some("Rao1"),
             equation_tex: r"V' = V + r_1(V_{best} - V_{worst})",
             paper_refs: vec![rao_series_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "rao2", name: "Rao-2", family: "rao", variant: Some("Rao2"),
+            id: "rao2",
+            name: "Rao-2",
+            family: "rao",
+            variant: Some("Rao2"),
             equation_tex: r"V' = V + r_1(V_{best}-V_{worst}) + r_2(\text{rand pairwise})",
             paper_refs: vec![rao_series_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "rao3", name: "Rao-3", family: "rao", variant: Some("Rao3"),
+            id: "rao3",
+            name: "Rao-3",
+            family: "rao",
+            variant: Some("Rao3"),
             equation_tex: r"V' = V + r_1(V_{best} - |V_{worst}|) + r_2(\cdot)",
             paper_refs: vec![rao_series_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "tlbo", name: "TLBO", family: "rao", variant: None,
+            id: "tlbo",
+            name: "TLBO",
+            family: "rao",
+            variant: None,
             equation_tex: r"\text{Teacher + Learner phases}",
             paper_refs: vec![tlbo_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "itlbo", name: "ITLBO", family: "rao", variant: None,
+            id: "itlbo",
+            name: "ITLBO",
+            family: "rao",
+            variant: None,
             equation_tex: r"\text{TLBO with elitism}",
             paper_refs: vec![tlbo_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "qojaya", name: "QO-Jaya", family: "rao", variant: None,
+            id: "qojaya",
+            name: "QO-Jaya",
+            family: "rao",
+            variant: None,
             equation_tex: r"\text{Jaya + quasi-oppositional learning}",
             paper_refs: vec![jaya_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "gotlbo", name: "GO-TLBO", family: "rao", variant: None,
+            id: "gotlbo",
+            name: "GO-TLBO",
+            family: "rao",
+            variant: None,
             equation_tex: r"\text{Generalized-oppositional TLBO}",
             paper_refs: vec![tlbo_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "bmr", name: "BMR (Best-Mean-Random)", family: "rao", variant: None,
+            id: "bmr",
+            name: "BMR (Best-Mean-Random)",
+            family: "rao",
+            variant: None,
             equation_tex: r"V' = V + r_1(V_{best}-TV_{mean}) + r_2(V_{best}-V_{rand})",
             paper_refs: vec![rao_bmr_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "bwr", name: "BWR (Best-Worst-Random)", family: "rao", variant: None,
+            id: "bwr",
+            name: "BWR (Best-Worst-Random)",
+            family: "rao",
+            variant: None,
             equation_tex: r"V' = V + r_1(V_{best}-TV_{rand}) - r_2(V_{worst}-V_{rand})",
             paper_refs: vec![rao_bmr_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "bmwr", name: "BMWR (Best-Mean-Worst-Random)", family: "rao", variant: None,
+            id: "bmwr",
+            name: "BMWR (Best-Mean-Worst-Random)",
+            family: "rao",
+            variant: None,
             equation_tex: r"V' = V + r_1(V_{best}-TV_{mean}) + r_2(V_{best}-V_{rand}) - r_5(V_{worst}-V_{rand})",
             paper_refs: vec![rao_casting_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "samp_jaya", name: "SAMP-Jaya", family: "rao", variant: None,
+            id: "samp_jaya",
+            name: "SAMP-Jaya",
+            family: "rao",
+            variant: None,
             equation_tex: r"\text{Self-adaptive multi-population Jaya}",
             paper_refs: vec![jaya_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "qo_rao", name: "QO-Rao", family: "rao", variant: Some("Rao1"),
+            id: "qo_rao",
+            name: "QO-Rao",
+            family: "rao",
+            variant: Some("Rao1"),
             equation_tex: r"\text{Rao + quasi-oppositional learning}",
             paper_refs: vec![rao_series_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "ehrjaya", name: "EHR-Jaya", family: "rao", variant: None,
+            id: "ehrjaya",
+            name: "EHR-Jaya",
+            family: "rao",
+            variant: None,
             equation_tex: r"\text{Classification-based hybrid Jaya + Rao-1}",
             paper_refs: vec![jaya_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "saphr", name: "SAPHR", family: "rao", variant: None,
+            id: "saphr",
+            name: "SAPHR",
+            family: "rao",
+            variant: None,
             equation_tex: r"\text{Self-adaptive hybrid Rao-1/2/3}",
             paper_refs: vec![rao_series_paper.clone()],
-            params: default_params(), multi_objective: false,
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "mo_bmr", name: "MO-BMR", family: "rao", variant: Some("MOBMR"),
+            id: "mo_bmr",
+            name: "MO-BMR",
+            family: "rao",
+            variant: Some("MOBMR"),
             equation_tex: r"\text{MO extension of BMR}",
             paper_refs: vec![rao_casting_paper.clone(), rao_mo_mfg_paper.clone()],
-            params: default_params(), multi_objective: true,
+            params: default_params(),
+            multi_objective: true,
         },
         AlgorithmInfo {
-            id: "mo_bwr", name: "MO-BWR", family: "rao", variant: Some("MOBWR"),
+            id: "mo_bwr",
+            name: "MO-BWR",
+            family: "rao",
+            variant: Some("MOBWR"),
             equation_tex: r"\text{MO extension of BWR}",
             paper_refs: vec![rao_casting_paper.clone(), rao_mo_mfg_paper.clone()],
-            params: default_params(), multi_objective: true,
+            params: default_params(),
+            multi_objective: true,
         },
         AlgorithmInfo {
-            id: "mo_bmwr", name: "MO-BMWR", family: "rao", variant: Some("MOBMWR"),
+            id: "mo_bmwr",
+            name: "MO-BMWR",
+            family: "rao",
+            variant: Some("MOBMWR"),
             equation_tex: r"\text{MO extension of BMWR}",
             paper_refs: vec![rao_energy_paper.clone(), rao_mo_mfg_paper.clone()],
-            params: default_params(), multi_objective: true,
+            params: default_params(),
+            multi_objective: true,
         },
         AlgorithmInfo {
-            id: "mo_rao_de", name: "MO-Rao+DE", family: "rao", variant: None,
+            id: "mo_rao_de",
+            name: "MO-Rao+DE",
+            family: "rao",
+            variant: None,
             equation_tex: r"\text{Rao-1 hybridised with DE/rand/1/bin}",
             paper_refs: vec![rao_series_paper.clone()],
-            params: default_params(), multi_objective: true,
+            params: default_params(),
+            multi_objective: true,
         },
         AlgorithmInfo {
-            id: "pso", name: "PSO", family: "swarm", variant: None,
+            id: "pso",
+            name: "PSO",
+            family: "swarm",
+            variant: None,
             equation_tex: r"v \leftarrow wv + c_1r_1(p_{best}-x) + c_2r_2(g_{best}-x)",
-            paper_refs: vec![], params: default_params(), multi_objective: false,
+            paper_refs: vec![],
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "de", name: "Differential Evolution", family: "evolutionary", variant: None,
+            id: "de",
+            name: "Differential Evolution",
+            family: "evolutionary",
+            variant: None,
             equation_tex: r"v = x_{r1} + F(x_{r2}-x_{r3})",
-            paper_refs: vec![], params: default_params(), multi_objective: false,
+            paper_refs: vec![],
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "ga", name: "Genetic Algorithm", family: "evolutionary", variant: None,
+            id: "ga",
+            name: "Genetic Algorithm",
+            family: "evolutionary",
+            variant: None,
             equation_tex: r"\text{Crossover + mutation}",
-            paper_refs: vec![], params: default_params(), multi_objective: false,
+            paper_refs: vec![],
+            params: default_params(),
+            multi_objective: false,
         },
         AlgorithmInfo {
-            id: "nsga2", name: "NSGA-II", family: "multi-objective", variant: None,
+            id: "nsga2",
+            name: "NSGA-II",
+            family: "multi-objective",
+            variant: None,
             equation_tex: r"\text{FNDS + crowding distance + elitist truncation}",
-            paper_refs: vec![], params: default_params(), multi_objective: true,
+            paper_refs: vec![],
+            params: default_params(),
+            multi_objective: true,
         },
     ]
 }
@@ -255,39 +363,217 @@ struct BenchmarkInfo {
 
 fn benchmark_catalog() -> Vec<BenchmarkInfo> {
     vec![
-        BenchmarkInfo { id: "sphere",     name: "Sphere",     dim: 10, lower: -10.0,    upper: 10.0,    num_objectives: 1, ty: "single", optimum: Some(0.0) },
-        BenchmarkInfo { id: "rastrigin",  name: "Rastrigin",  dim: 10, lower: -5.12,    upper: 5.12,    num_objectives: 1, ty: "single", optimum: Some(0.0) },
-        BenchmarkInfo { id: "ackley",     name: "Ackley",     dim: 10, lower: -32.768,  upper: 32.768,  num_objectives: 1, ty: "single", optimum: Some(0.0) },
-        BenchmarkInfo { id: "rosenbrock", name: "Rosenbrock", dim: 10, lower: -5.0,     upper: 10.0,    num_objectives: 1, ty: "single", optimum: Some(0.0) },
-        BenchmarkInfo { id: "zdt1",       name: "ZDT1",       dim: 30, lower: 0.0,      upper: 1.0,     num_objectives: 2, ty: "multi",  optimum: None },
-        BenchmarkInfo { id: "zdt2",       name: "ZDT2",       dim: 30, lower: 0.0,      upper: 1.0,     num_objectives: 2, ty: "multi",  optimum: None },
-        BenchmarkInfo { id: "zdt3",       name: "ZDT3",       dim: 30, lower: 0.0,      upper: 1.0,     num_objectives: 2, ty: "multi",  optimum: None },
-        BenchmarkInfo { id: "dtlz1",      name: "DTLZ1",      dim: 7,  lower: 0.0,      upper: 1.0,     num_objectives: 3, ty: "multi",  optimum: None },
-        BenchmarkInfo { id: "uc2_dosing", name: "UC2 — Drug-combination dosing", dim: 6, lower: 0.0, upper: 1.0, num_objectives: 3, ty: "usecase", optimum: None },
+        BenchmarkInfo {
+            id: "sphere",
+            name: "Sphere",
+            dim: 10,
+            lower: -10.0,
+            upper: 10.0,
+            num_objectives: 1,
+            ty: "single",
+            optimum: Some(0.0),
+        },
+        BenchmarkInfo {
+            id: "rastrigin",
+            name: "Rastrigin",
+            dim: 10,
+            lower: -5.12,
+            upper: 5.12,
+            num_objectives: 1,
+            ty: "single",
+            optimum: Some(0.0),
+        },
+        BenchmarkInfo {
+            id: "ackley",
+            name: "Ackley",
+            dim: 10,
+            lower: -32.768,
+            upper: 32.768,
+            num_objectives: 1,
+            ty: "single",
+            optimum: Some(0.0),
+        },
+        BenchmarkInfo {
+            id: "rosenbrock",
+            name: "Rosenbrock",
+            dim: 10,
+            lower: -5.0,
+            upper: 10.0,
+            num_objectives: 1,
+            ty: "single",
+            optimum: Some(0.0),
+        },
+        BenchmarkInfo {
+            id: "zdt1",
+            name: "ZDT1",
+            dim: 30,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 2,
+            ty: "multi",
+            optimum: None,
+        },
+        BenchmarkInfo {
+            id: "zdt2",
+            name: "ZDT2",
+            dim: 30,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 2,
+            ty: "multi",
+            optimum: None,
+        },
+        BenchmarkInfo {
+            id: "zdt3",
+            name: "ZDT3",
+            dim: 30,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 2,
+            ty: "multi",
+            optimum: None,
+        },
+        // ZDT5 is binary-coded and cannot be posed to these continuous
+        // solvers, so the ZDT suite here is the other five (OPT-03).
+        BenchmarkInfo {
+            id: "zdt4",
+            name: "ZDT4",
+            dim: 10,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 2,
+            ty: "multi",
+            optimum: None,
+        },
+        BenchmarkInfo {
+            id: "zdt6",
+            name: "ZDT6",
+            dim: 10,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 2,
+            ty: "multi",
+            optimum: None,
+        },
+        // The usual DTLZ sizes at three objectives: k = 5 distance variables
+        // for DTLZ1, 10 for DTLZ2-6, 20 for DTLZ7 (Deb et al. 2002).
+        BenchmarkInfo {
+            id: "dtlz1",
+            name: "DTLZ1",
+            dim: 7,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 3,
+            ty: "multi",
+            optimum: None,
+        },
+        BenchmarkInfo {
+            id: "dtlz2",
+            name: "DTLZ2",
+            dim: 12,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 3,
+            ty: "multi",
+            optimum: None,
+        },
+        BenchmarkInfo {
+            id: "dtlz3",
+            name: "DTLZ3",
+            dim: 12,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 3,
+            ty: "multi",
+            optimum: None,
+        },
+        BenchmarkInfo {
+            id: "dtlz4",
+            name: "DTLZ4",
+            dim: 12,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 3,
+            ty: "multi",
+            optimum: None,
+        },
+        BenchmarkInfo {
+            id: "dtlz5",
+            name: "DTLZ5",
+            dim: 12,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 3,
+            ty: "multi",
+            optimum: None,
+        },
+        BenchmarkInfo {
+            id: "dtlz6",
+            name: "DTLZ6",
+            dim: 12,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 3,
+            ty: "multi",
+            optimum: None,
+        },
+        BenchmarkInfo {
+            id: "dtlz7",
+            name: "DTLZ7",
+            dim: 22,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 3,
+            ty: "multi",
+            optimum: None,
+        },
+        BenchmarkInfo {
+            id: "uc2_dosing",
+            name: "UC2 — Drug-combination dosing",
+            dim: 6,
+            lower: 0.0,
+            upper: 1.0,
+            num_objectives: 3,
+            ty: "usecase",
+            optimum: None,
+        },
     ]
 }
 
 // ---------- Problems ----------
 
-fn single_obj(name: &str, dim: usize, lower: f64, upper: f64) -> SimpleProblem<fn(&Array1<f64>) -> f64> {
+fn single_obj(
+    name: &str,
+    dim: usize,
+    lower: f64,
+    upper: f64,
+) -> SimpleProblem<fn(&Array1<f64>) -> f64> {
     let f: fn(&Array1<f64>) -> f64 = match name {
-        "sphere"     => |x| x.iter().map(|&v| v * v).sum(),
-        "rastrigin"  => |x| {
+        "sphere" => |x| x.iter().map(|&v| v * v).sum(),
+        "rastrigin" => |x| {
             let n = x.len() as f64;
-            10.0 * n + x.iter().map(|&v| v * v - 10.0 * (2.0 * std::f64::consts::PI * v).cos()).sum::<f64>()
+            10.0 * n
+                + x.iter()
+                    .map(|&v| v * v - 10.0 * (2.0 * std::f64::consts::PI * v).cos())
+                    .sum::<f64>()
         },
-        "ackley"     => |x| {
+        "ackley" => |x| {
             let n = x.len() as f64;
             let s1: f64 = x.iter().map(|&v| v * v).sum();
-            let s2: f64 = x.iter().map(|&v| (2.0 * std::f64::consts::PI * v).cos()).sum();
+            let s2: f64 = x
+                .iter()
+                .map(|&v| (2.0 * std::f64::consts::PI * v).cos())
+                .sum();
             -20.0 * (-0.2 * (s1 / n).sqrt()).exp() - (s2 / n).exp() + 20.0 + std::f64::consts::E
         },
         "rosenbrock" => |x| {
-            (0..x.len()-1).map(|i| {
-                let a = x[i + 1] - x[i] * x[i];
-                let b = 1.0 - x[i];
-                100.0 * a * a + b * b
-            }).sum()
+            (0..x.len() - 1)
+                .map(|i| {
+                    let a = x[i + 1] - x[i] * x[i];
+                    let b = 1.0 - x[i];
+                    100.0 * a * a + b * b
+                })
+                .sum()
         },
         _ => |x| x.iter().map(|&v| v * v).sum(), // default sphere
     };
@@ -299,50 +585,46 @@ fn single_obj(name: &str, dim: usize, lower: f64, upper: f64) -> SimpleProblem<f
     }
 }
 
-struct ZDT { variant: u8, dim: usize }
-impl MultiObjectiveProblem for ZDT {
-    fn dim(&self) -> usize { self.dim }
-    fn num_objectives(&self) -> usize { 2 }
-    fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
-        (Array1::zeros(self.dim), Array1::ones(self.dim))
-    }
-    fn objectives(&self, x: &Array1<f64>) -> Vec<f64> {
-        let f1 = x[0];
-        let n = self.dim as f64;
-        let g = 1.0 + 9.0 * x.iter().skip(1).sum::<f64>() / (n - 1.0);
-        let f2 = match self.variant {
-            1 => g * (1.0 - (f1 / g).sqrt()),
-            2 => g * (1.0 - (f1 / g).powi(2)),
-            3 => g * (1.0 - (f1 / g).sqrt() - (f1 / g) * (10.0 * std::f64::consts::PI * f1).sin()),
-            _ => g * (1.0 - (f1 / g).sqrt()),
-        };
-        vec![f1, f2]
-    }
+/// A catalogue benchmark with a known Pareto front: a ZDT or DTLZ problem
+/// from `samyama-optimization`, at the catalogue's size.
+///
+/// The crate's definitions, not copies of them: this file used to carry its
+/// own ZDT and DTLZ1, and its ZDT quietly ran ZDT1 for any variant it did not
+/// know. One definition means the problem a client solves is the one its
+/// quality is measured against.
+enum FrontProblem {
+    Zdt(ZDT),
+    Dtlz(DTLZ),
 }
 
-struct DTLZ1 { dim: usize, m: usize }
-impl MultiObjectiveProblem for DTLZ1 {
-    fn dim(&self) -> usize { self.dim }
-    fn num_objectives(&self) -> usize { self.m }
-    fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
-        (Array1::zeros(self.dim), Array1::ones(self.dim))
-    }
-    fn objectives(&self, x: &Array1<f64>) -> Vec<f64> {
-        let k = self.dim - self.m + 1;
-        let xm: f64 = x.iter().skip(self.dim - k).map(|&v| {
-            (v - 0.5).powi(2) - (20.0 * std::f64::consts::PI * (v - 0.5)).cos()
-        }).sum();
-        let g = 100.0 * (k as f64 + xm);
-        let mut f = vec![0.5 * (1.0 + g); self.m];
-        for i in 0..self.m {
-            for j in 0..(self.m - 1 - i) {
-                f[i] *= x[j];
-            }
-            if i > 0 {
-                f[i] *= 1.0 - x[self.m - 1 - i];
-            }
+impl FrontProblem {
+    /// The problem for a catalogue id, or `None` for one that has no known
+    /// front (single-objective, or a use case such as `uc2_dosing`).
+    fn for_benchmark(bench_id: &str) -> Option<Self> {
+        let info = benchmark_catalog()
+            .into_iter()
+            .find(|b| b.id == bench_id && b.ty == "multi")?;
+        if let Some(variant) = bench_id.strip_prefix("zdt") {
+            return Some(FrontProblem::Zdt(ZDT {
+                variant: variant.parse().ok()?,
+                dim: info.dim,
+            }));
         }
-        f
+        let variant = bench_id.strip_prefix("dtlz")?.parse().ok()?;
+        Some(FrontProblem::Dtlz(DTLZ {
+            variant,
+            dim: info.dim,
+            m: info.num_objectives,
+        }))
+    }
+
+    /// The known front, sampled; see `ZDT::reference_front` and
+    /// `DTLZ::reference_front`.
+    fn reference_front(&self) -> Vec<Vec<f64>> {
+        match self {
+            FrontProblem::Zdt(p) => p.reference_front(ZDT_FRONT_SAMPLES),
+            FrontProblem::Dtlz(p) => p.reference_front(DTLZ_FRONT_SAMPLES_PER_AXIS),
+        }
     }
 }
 
@@ -366,7 +648,11 @@ struct CancelHandle {
 
 #[derive(Debug, Clone)]
 enum SseEvent {
-    Iteration { iter: usize, best_fitness: f64, pareto_front: Option<Vec<Vec<f64>>> },
+    Iteration {
+        iter: usize,
+        best_fitness: f64,
+        pareto_front: Option<Vec<Vec<f64>>>,
+    },
     Done {
         final_fitness: f64,
         iterations: usize,
@@ -385,8 +671,13 @@ enum SseEvent {
         /// `final_fitness` minus the benchmark's known optimum (OPT-09, #1776);
         /// null when the benchmark has no single known optimum.
         gap: Option<f64>,
+        /// The five front-quality measures (OPT-03, #1753); see
+        /// [`SolverOutcome::quality`] for when it is null.
+        quality: Option<QualityMetrics>,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 pub fn router() -> Router<Arc<OptimizeState>> {
@@ -428,11 +719,17 @@ struct SolveReq {
     #[serde(default)]
     seed: Option<u64>,
 }
-fn default_pop() -> usize { 50 }
-fn default_iter() -> usize { 200 }
+fn default_pop() -> usize {
+    50
+}
+fn default_iter() -> usize {
+    200
+}
 
 #[derive(Serialize)]
-struct SolveResp { job_id: String }
+struct SolveResp {
+    job_id: String,
+}
 
 /// The innermost message of a JSON rejection.
 ///
@@ -471,11 +768,17 @@ async fn start_solve(
     let bench = benchmark_catalog()
         .into_iter()
         .find(|b| b.id == req.benchmark)
-        .ok_or((StatusCode::BAD_REQUEST, format!("unknown benchmark: {}", req.benchmark)))?;
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            format!("unknown benchmark: {}", req.benchmark),
+        ))?;
     let algo = algorithm_catalog()
         .into_iter()
         .find(|a| a.id == req.algorithm)
-        .ok_or((StatusCode::BAD_REQUEST, format!("unknown algorithm: {}", req.algorithm)))?;
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            format!("unknown algorithm: {}", req.algorithm),
+        ))?;
 
     let job_id = Uuid::new_v4().to_string();
     let (event_tx, event_rx) = mpsc::channel::<SseEvent>(256);
@@ -485,7 +788,11 @@ async fn start_solve(
         let mut jobs = state.jobs.lock().await;
         jobs.insert(
             job_id.clone(),
-            JobHandle { cancel_tx: Some(cancel_tx), cancel_flag: None, event_rx: Some(event_rx) },
+            JobHandle {
+                cancel_tx: Some(cancel_tx),
+                cancel_flag: None,
+                event_rx: Some(event_rx),
+            },
         );
     }
 
@@ -503,7 +810,9 @@ async fn start_solve(
     // Run in a blocking task so we don't stall the async runtime.
     // AtomicBool cancel flag — polled between the compute future and emit loop.
     let cancelled_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let cancel_state = CancelHandle { flag: cancelled_flag.clone() };
+    let cancel_state = CancelHandle {
+        flag: cancelled_flag.clone(),
+    };
 
     {
         // Re-lock and swap the JobHandle cancel field to the AtomicBool handle.
@@ -522,27 +831,58 @@ async fn start_solve(
         // a blocking thread is not billed to the solver.
         let compute = tokio::task::spawn_blocking(move || {
             let started = std::time::Instant::now();
-            let outcome =
-                run_solver(&algo.id, algo.multi_objective, &bench.id, bench.num_objectives, dim, cfg, seed);
-            (outcome, started.elapsed())
+            let outcome = run_solver(
+                &algo.id,
+                algo.multi_objective,
+                &bench.id,
+                bench.num_objectives,
+                dim,
+                cfg,
+                seed,
+            );
+            let elapsed = started.elapsed();
+            // Measured after the clock stops: `total_time_ms` is the solve.
+            (outcome.map(|o| with_quality(o, bench.id)), elapsed)
         });
 
         match compute.await {
-            Ok((Ok(SolverOutcome { history, final_fitness, final_pareto, feasible, gap }), elapsed)) => {
+            Ok((
+                Ok(SolverOutcome {
+                    history,
+                    final_fitness,
+                    final_pareto,
+                    feasible,
+                    gap,
+                    quality,
+                }),
+                elapsed,
+            )) => {
                 let total_time_ms = duration_ms(elapsed);
                 let iterations = history.len();
                 let last_iter = iterations.saturating_sub(1);
                 for (iter, best) in history.iter().enumerate() {
                     if cancelled_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        let _ = event_tx.send(SseEvent::Error { message: "cancelled".into() }).await;
+                        let _ = event_tx
+                            .send(SseEvent::Error {
+                                message: "cancelled".into(),
+                            })
+                            .await;
                         return;
                     }
                     // Stamp the final Pareto front onto the LAST iteration event
                     // so the samyama-insight hook (which reads pareto_front from
                     // iteration events, not from done) renders the chart.
-                    let pareto_for_event = if iter == last_iter { final_pareto.clone() } else { None };
+                    let pareto_for_event = if iter == last_iter {
+                        final_pareto.clone()
+                    } else {
+                        None
+                    };
                     if event_tx
-                        .send(SseEvent::Iteration { iter, best_fitness: *best, pareto_front: pareto_for_event })
+                        .send(SseEvent::Iteration {
+                            iter,
+                            best_fitness: *best,
+                            pareto_front: pareto_for_event,
+                        })
                         .await
                         .is_err()
                     {
@@ -558,6 +898,7 @@ async fn start_solve(
                         total_time_ms,
                         feasible,
                         gap,
+                        quality,
                     })
                     .await;
             }
@@ -565,7 +906,11 @@ async fn start_solve(
                 let _ = event_tx.send(SseEvent::Error { message: e }).await;
             }
             Err(e) => {
-                let _ = event_tx.send(SseEvent::Error { message: format!("join: {e}") }).await;
+                let _ = event_tx
+                    .send(SseEvent::Error {
+                        message: format!("join: {e}"),
+                    })
+                    .await;
             }
         }
     });
@@ -593,6 +938,23 @@ struct SolverOutcome {
     /// (OPT-09, #1776). None when the catalog lists no optimum, which is every
     /// multi-objective benchmark: a front has no single optimum to subtract.
     gap: Option<f64>,
+    /// Hypervolume, IGD, IGD+, spread and coverage of the final front against
+    /// the benchmark's known front (OPT-03, #1753). None for a single-objective
+    /// run and for a benchmark with no known front (`uc2_dosing`). Filled in
+    /// by [`with_quality`] after the solve's clock has stopped, so measuring
+    /// the answer is not billed to `total_time_ms`.
+    quality: Option<QualityMetrics>,
+}
+
+/// Measure `outcome`'s final front against `bench_id`'s known front, if both
+/// exist. Runs after the solve is timed.
+fn with_quality(mut outcome: SolverOutcome, bench_id: &str) -> SolverOutcome {
+    if let (Some(front), Some(problem)) =
+        (&outcome.final_pareto, FrontProblem::for_benchmark(bench_id))
+    {
+        outcome.quality = quality_metrics(front, &problem.reference_front());
+    }
+    outcome
 }
 
 /// Apply the request's seed to a solver, if one was given.
@@ -611,6 +973,46 @@ macro_rules! seeded {
     }};
 }
 
+/// What one multi-objective run hands back: its convergence history, the best
+/// first objective on its final front, and the front's finite points.
+type MultiObjectiveRun = (Vec<f64>, f64, Vec<Vec<f64>>);
+
+/// Run one multi-objective solver on `problem`: its convergence history, the
+/// best first objective on the final front, and the front's finite points.
+///
+/// One function for every multi-objective benchmark; each used to repeat the
+/// same solver `match` and the same post-processing.
+fn solve_multi_objective<P: MultiObjectiveProblem>(
+    algo_id: &str,
+    cfg: SolverConfig,
+    seed: Option<u64>,
+    problem: &P,
+) -> Result<MultiObjectiveRun, String> {
+    let r = match algo_id {
+        "mo_bmr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR), seed).solve(problem),
+        "mo_bwr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(problem),
+        "mo_bmwr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR), seed).solve(problem),
+        "mo_rao_de" => seeded!(MORaoDESolver::new(cfg), seed).solve(problem),
+        "nsga2" => seeded!(NSGA2Solver::new(cfg), seed).solve(problem),
+        _ => return Err(format!("algorithm {} not multi-objective", algo_id)),
+    };
+    let final_first = r
+        .pareto_front
+        .iter()
+        .map(|ind| ind.fitness[0])
+        .fold(f64::INFINITY, f64::min);
+    // Drop individuals with non-finite objective values — serde_json
+    // serializes NaN/Inf as null, which breaks downstream consumers
+    // (e.g. the samyama-insight Pareto chart).
+    let pareto: Vec<Vec<f64>> = r
+        .pareto_front
+        .iter()
+        .filter(|ind| ind.fitness.iter().all(|v| v.is_finite()))
+        .map(|ind| ind.fitness.clone())
+        .collect();
+    Ok((r.history, final_first, pareto))
+}
+
 fn run_solver(
     algo_id: &str,
     multi_objective: bool,
@@ -621,72 +1023,23 @@ fn run_solver(
     seed: Option<u64>,
 ) -> Result<SolverOutcome, String> {
     if multi_objective {
-        let (hist, final_f, pareto) = match bench_id {
-            "zdt1" | "zdt2" | "zdt3" => {
-                let v = bench_id.chars().last().unwrap().to_digit(10).unwrap() as u8;
-                let problem = ZDT { variant: v, dim: 30 };
-                let r = match algo_id {
-                    "mo_bmr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR), seed).solve(&problem),
-                    "mo_bwr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(&problem),
-                    "mo_bmwr"   => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR), seed).solve(&problem),
-                    "mo_rao_de" => seeded!(MORaoDESolver::new(cfg), seed).solve(&problem),
-                    "nsga2"     => seeded!(NSGA2Solver::new(cfg), seed).solve(&problem),
-                    _           => return Err(format!("algorithm {} not multi-objective", algo_id)),
-                };
-                let final_first = r.pareto_front.iter()
-                    .map(|ind| ind.fitness[0])
-                    .fold(f64::INFINITY, f64::min);
-                // Drop individuals with non-finite objective values — serde_json
-                // serializes NaN/Inf as null, which breaks downstream consumers
-                // (e.g. the samyama-insight Pareto chart).
-                let pareto: Vec<Vec<f64>> = r.pareto_front.iter()
-                    .filter(|ind| ind.fitness.iter().all(|v| v.is_finite()))
-                    .map(|ind| ind.fitness.clone())
-                    .collect();
-                (r.history, final_first, pareto)
+        let (hist, final_f, pareto) = if bench_id == "uc2_dosing" {
+            solve_multi_objective(
+                algo_id,
+                cfg,
+                seed,
+                &super::uc_problems::UC2DosingProblem::new(),
+            )?
+        } else {
+            match FrontProblem::for_benchmark(bench_id) {
+                Some(FrontProblem::Zdt(problem)) => {
+                    solve_multi_objective(algo_id, cfg, seed, &problem)?
+                }
+                Some(FrontProblem::Dtlz(problem)) => {
+                    solve_multi_objective(algo_id, cfg, seed, &problem)?
+                }
+                None => return Err(format!("benchmark {} is not multi-objective", bench_id)),
             }
-            "uc2_dosing" => {
-                let problem = super::uc_problems::UC2DosingProblem::new();
-                let r = match algo_id {
-                    "mo_bmr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR), seed).solve(&problem),
-                    "mo_bwr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(&problem),
-                    "mo_bmwr"   => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR), seed).solve(&problem),
-                    "mo_rao_de" => seeded!(MORaoDESolver::new(cfg), seed).solve(&problem),
-                    "nsga2"     => seeded!(NSGA2Solver::new(cfg), seed).solve(&problem),
-                    _           => return Err(format!("algorithm {} not multi-objective", algo_id)),
-                };
-                let final_first = r.pareto_front.iter()
-                    .map(|ind| ind.fitness[0])
-                    .fold(f64::INFINITY, f64::min);
-                let pareto: Vec<Vec<f64>> = r.pareto_front.iter()
-                    .filter(|ind| ind.fitness.iter().all(|v| v.is_finite()))
-                    .map(|ind| ind.fitness.clone())
-                    .collect();
-                (r.history, final_first, pareto)
-            }
-            "dtlz1" => {
-                let problem = DTLZ1 { dim: 7, m: 3 };
-                let r = match algo_id {
-                    "mo_bmr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR), seed).solve(&problem),
-                    "mo_bwr"    => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(&problem),
-                    "mo_bmwr"   => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR), seed).solve(&problem),
-                    "mo_rao_de" => seeded!(MORaoDESolver::new(cfg), seed).solve(&problem),
-                    "nsga2"     => seeded!(NSGA2Solver::new(cfg), seed).solve(&problem),
-                    _           => return Err(format!("algorithm {} not multi-objective", algo_id)),
-                };
-                let final_first = r.pareto_front.iter()
-                    .map(|ind| ind.fitness[0])
-                    .fold(f64::INFINITY, f64::min);
-                // Drop individuals with non-finite objective values — serde_json
-                // serializes NaN/Inf as null, which breaks downstream consumers
-                // (e.g. the samyama-insight Pareto chart).
-                let pareto: Vec<Vec<f64>> = r.pareto_front.iter()
-                    .filter(|ind| ind.fitness.iter().all(|v| v.is_finite()))
-                    .map(|ind| ind.fitness.clone())
-                    .collect();
-                (r.history, final_first, pareto)
-            }
-            other => return Err(format!("benchmark {} is not multi-objective", other)),
         };
         Ok(SolverOutcome {
             history: hist,
@@ -694,33 +1047,41 @@ fn run_solver(
             final_pareto: Some(pareto),
             feasible: None,
             gap: None,
+            quality: None,
         })
     } else {
-        let bench = benchmark_catalog().into_iter().find(|b| b.id == bench_id)
+        let bench = benchmark_catalog()
+            .into_iter()
+            .find(|b| b.id == bench_id)
             .ok_or_else(|| format!("unknown benchmark: {bench_id}"))?;
         let dim = if bench_dim == 0 { bench.dim } else { bench_dim };
         let problem = single_obj(bench.id, dim, bench.lower, bench.upper);
 
         let result = match algo_id {
-            "jaya"      => seeded!(JayaSolver::new(cfg), seed).solve(&problem),
-            "rao1"      => seeded!(RaoSolver::new(cfg, RaoVariant::Rao1), seed).solve(&problem),
-            "rao2"      => seeded!(RaoSolver::new(cfg, RaoVariant::Rao2), seed).solve(&problem),
-            "rao3"      => seeded!(RaoSolver::new(cfg, RaoVariant::Rao3), seed).solve(&problem),
-            "tlbo"      => seeded!(TLBOSolver::new(cfg), seed).solve(&problem),
-            "itlbo"     => seeded!(ITLBOSolver::new(cfg), seed).solve(&problem),
-            "qojaya"    => seeded!(QOJayaSolver::new(cfg), seed).solve(&problem),
-            "gotlbo"    => seeded!(GOTLBOSolver::new(cfg), seed).solve(&problem),
-            "bmr"       => seeded!(BMRSolver::new(cfg), seed).solve(&problem),
-            "bwr"       => seeded!(BWRSolver::new(cfg), seed).solve(&problem),
-            "bmwr"      => seeded!(BMWRSolver::new(cfg), seed).solve(&problem),
+            "jaya" => seeded!(JayaSolver::new(cfg), seed).solve(&problem),
+            "rao1" => seeded!(RaoSolver::new(cfg, RaoVariant::Rao1), seed).solve(&problem),
+            "rao2" => seeded!(RaoSolver::new(cfg, RaoVariant::Rao2), seed).solve(&problem),
+            "rao3" => seeded!(RaoSolver::new(cfg, RaoVariant::Rao3), seed).solve(&problem),
+            "tlbo" => seeded!(TLBOSolver::new(cfg), seed).solve(&problem),
+            "itlbo" => seeded!(ITLBOSolver::new(cfg), seed).solve(&problem),
+            "qojaya" => seeded!(QOJayaSolver::new(cfg), seed).solve(&problem),
+            "gotlbo" => seeded!(GOTLBOSolver::new(cfg), seed).solve(&problem),
+            "bmr" => seeded!(BMRSolver::new(cfg), seed).solve(&problem),
+            "bwr" => seeded!(BWRSolver::new(cfg), seed).solve(&problem),
+            "bmwr" => seeded!(BMWRSolver::new(cfg), seed).solve(&problem),
             "samp_jaya" => seeded!(SAMPJayaSolver::new(cfg), seed).solve(&problem),
-            "qo_rao"    => seeded!(QORaoSolver::new(cfg, RaoVariant::Rao1), seed).solve(&problem),
-            "ehrjaya"   => seeded!(EHRJayaSolver::new(cfg), seed).solve(&problem),
-            "saphr"     => seeded!(SAPHRSolver::new(cfg), seed).solve(&problem),
-            "pso"       => seeded!(PSOSolver::new(cfg), seed).solve(&problem),
-            "de"        => seeded!(DESolver::new(cfg), seed).solve(&problem),
-            "ga"        => seeded!(GASolver::new(cfg), seed).solve(&problem),
-            other       => return Err(format!("algorithm {} not supported on single-objective benchmarks", other)),
+            "qo_rao" => seeded!(QORaoSolver::new(cfg, RaoVariant::Rao1), seed).solve(&problem),
+            "ehrjaya" => seeded!(EHRJayaSolver::new(cfg), seed).solve(&problem),
+            "saphr" => seeded!(SAPHRSolver::new(cfg), seed).solve(&problem),
+            "pso" => seeded!(PSOSolver::new(cfg), seed).solve(&problem),
+            "de" => seeded!(DESolver::new(cfg), seed).solve(&problem),
+            "ga" => seeded!(GASolver::new(cfg), seed).solve(&problem),
+            other => {
+                return Err(format!(
+                    "algorithm {} not supported on single-objective benchmarks",
+                    other
+                ))
+            }
         };
         let objective = problem.objective(&result.best_variables);
         Ok(SolverOutcome {
@@ -728,7 +1089,10 @@ fn run_solver(
             history: result.history,
             final_pareto: None,
             feasible: Some(is_feasible(problem.penalty(&result.best_variables))),
-            gap: bench.optimum.map(|optimum| gap_to_best_known(objective, optimum)),
+            gap: bench
+                .optimum
+                .map(|optimum| gap_to_best_known(objective, optimum)),
+            quality: None,
         })
     }
 }
@@ -752,7 +1116,11 @@ async fn stream_solve(
 
     let stream = ReceiverStream::new(rx).map(|evt| {
         let ev = match evt {
-            SseEvent::Iteration { iter, best_fitness, pareto_front } => Event::default()
+            SseEvent::Iteration {
+                iter,
+                best_fitness,
+                pareto_front,
+            } => Event::default()
                 .event("iteration")
                 .json_data(serde_json::json!({
                     "iter": iter,
@@ -760,7 +1128,16 @@ async fn stream_solve(
                     "pareto_front": pareto_front,
                 }))
                 .unwrap(),
-            SseEvent::Done { final_fitness, iterations, final_pareto, seed, total_time_ms, feasible, gap } => Event::default()
+            SseEvent::Done {
+                final_fitness,
+                iterations,
+                final_pareto,
+                seed,
+                total_time_ms,
+                feasible,
+                gap,
+                quality,
+            } => Event::default()
                 .event("done")
                 .json_data(serde_json::json!({
                     "final_fitness": final_fitness,
@@ -773,6 +1150,8 @@ async fn stream_solve(
                     // The rest of the result envelope (OPT-09, #1776).
                     "feasible": feasible,
                     "gap": gap,
+                    // How good the front is against the known one (OPT-03).
+                    "quality": quality,
                 }))
                 .unwrap(),
             SseEvent::Error { message } => Event::default()
@@ -787,7 +1166,9 @@ async fn stream_solve(
 }
 
 #[derive(Serialize)]
-struct CancelResp { cancelled: bool }
+struct CancelResp {
+    cancelled: bool,
+}
 
 async fn cancel_solve(
     State(state): State<Arc<OptimizeState>>,
@@ -797,7 +1178,9 @@ async fn cancel_solve(
     match jobs.get_mut(&id) {
         Some(h) => {
             if let Some(handle) = h.cancel_flag.as_ref() {
-                handle.flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                handle
+                    .flag
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 Json(CancelResp { cancelled: true })
             } else {
                 Json(CancelResp { cancelled: false })

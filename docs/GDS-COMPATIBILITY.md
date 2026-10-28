@@ -63,8 +63,8 @@ node's result (see "Write-back" in `ALGORITHM-CONVENTIONS.md`). It is not
 aliased onto `gds.<name>.write` because GDS's write mode returns one summary
 row (`nodePropertiesWritten`, ...) where ours returns the rows, and running a
 different result shape under a name the user already trusts is worse than not
-recognising the name. `mutate` needs graph projections, which do not exist
-yet.
+recognising the name. `mutate` writes into a graph projection; projections
+exist (`CREATE GRAPH PROJECTION`), but cannot hold a written property yet.
 
 ### Divergent semantics
 
@@ -74,14 +74,29 @@ yet.
 
 ### Not implemented
 
-`gds.graph.project`, `gds.fastRP.stream`, `gds.knn.stream`,
+`gds.fastRP.stream`, `gds.knn.stream`,
 `gds.beta.node2vec.stream`, `gds.alpha.ml.linkPrediction.train`. These have no
 counterpart here. They are listed so the absence is a statement rather than a
 gap in the table.
 
-There is no named graph catalog: GDS projects a graph before running anything,
-and our algorithms run against the store directly. A port drops the
-`gds.graph.project` call rather than translating it.
+### Named graphs
+
+GDS projects a named graph with `gds.graph.project` and runs algorithms on it.
+The counterpart here is a statement, not a procedure, and is not aliased:
+
+| GDS | here |
+|---|---|
+| `gds.graph.project('social', 'Person', 'KNOWS')` | `CREATE GRAPH PROJECTION social NODES :Person RELATIONSHIPS :KNOWS` |
+| `gds.graph.project(..., {relationshipProperties: 'cost'})` | `... WEIGHT cost` |
+| `gds.pageRank.stream('social')` | `CALL algo.pageRank({graph: 'social'})` |
+| `gds.graph.list()` | `SHOW GRAPH PROJECTIONS` |
+| `gds.graph.drop('social')` | `DROP GRAPH PROJECTION social` |
+
+`gds.graph.project` itself still does not resolve: GDS's form takes several
+labels, several types and per-type property maps, and a projection here takes
+one of each. Mapping the call would accept projections it then built
+differently. Without a projection, our algorithms run against the store
+directly, so a port can also simply drop the `gds.graph.project` call.
 
 ## What is not measured
 

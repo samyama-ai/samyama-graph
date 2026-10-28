@@ -15,9 +15,14 @@ pub fn count_triangles(view: &GraphView) -> usize {
     let n = view.node_count;
 
     // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
+    // Every path that stays on the CPU says why (HW-10, #1684).
+    #[cfg(not(feature = "gpu"))]
+    crate::cpu_fallback::note_not_compiled(crate::cpu_fallback::GpuAlgorithm::TriangleCount);
     #[cfg(feature = "gpu")]
     {
-        if crate::gpu_dispatch::should_dispatch_gpu(n) {
+        if let Err(reason) = crate::gpu_dispatch::gpu_route(n) {
+            crate::cpu_fallback::note_cpu_fallback(crate::cpu_fallback::GpuAlgorithm::TriangleCount, &reason);
+        } else {
             {
                 match samyama_gpu::gpu_count_triangles(
                     n,
@@ -27,9 +32,10 @@ pub fn count_triangles(view: &GraphView) -> usize {
                     &view.in_sources,
                 ) {
                     Ok(result) => return result,
-                    Err(e) => {
-                        tracing::warn!("GPU triangle count failed, falling back to CPU: {}", e)
-                    }
+                    Err(e) => crate::cpu_fallback::note_cpu_fallback(
+                        crate::cpu_fallback::GpuAlgorithm::TriangleCount,
+                        &crate::cpu_fallback::CpuFallbackReason::KernelFailed(e.to_string()),
+                    ),
                 }
             }
         }

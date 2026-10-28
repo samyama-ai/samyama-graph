@@ -81,6 +81,7 @@ pub mod analyze_ops;
 pub mod cost_model;
 pub mod hierarchy_detector;
 pub mod hierarchy_ops;
+pub mod projection_ops;
 pub mod point_ops;
 pub mod semi_join_detector;
 pub mod leapfrog;
@@ -1206,7 +1207,7 @@ fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<St
             if let Some(val) = params.get(name.as_str()) {
                 *expr = Expression::Literal(val.clone());
             } else {
-                return Err(ExecutionError::RuntimeError(format!("Unresolved parameter: ${}", name)));
+                return Err(operator::unresolved_parameter(name));
             }
         }
         Expression::Binary { left, right, .. } => {

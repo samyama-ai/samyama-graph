@@ -29,10 +29,18 @@ Build status: `cargo check` (default), `cargo check --features gpu --tests --ben
       size-threshold → `try_global()` → GPU with transparent CPU fallback. (PCA deferred per workstream.)
 - [x] **`eprintln!` → `tracing::warn!`** on fallback; **`SAMYAMA_GPU_MIN_NODES`** knob via
       `gpu_dispatch::min_gpu_nodes()` (thresholds were tuned only on the 4050).
+- [x] **Every CPU fallback logs its reason** (HW-10, #1684): no build, no device, below threshold,
+      unsupported option, or kernel failure, through `cpu_fallback::note_cpu_fallback`. The default
+      build reports it too. See the algorithms crate README.
 - [x] **CPU/GPU parity test** (`src/gpu_parity_tests.rs`, `#[cfg(all(test, feature="gpu"))]`):
       same `GraphView` through both paths; **PASSES on RTX 4050** — PageRank & LCC to 1e-6, triangle
       count exact, CDLP smoke. Sanity-guarded so it can't silently degrade to CPU-vs-CPU.
       Suite: **39 pass with `--features gpu`, 38 without** (gates cfg-out cleanly).
+- [x] **Parity for the other five kernels** (HW-09, #1682): `gpu_sum_f64`, `gpu_argsort_f64`,
+      `gpu_batch_cosine`, `gpu_batch_inner_product`, `gpu_pca` each against a CPU reference, so 9 of 9
+      exported kernels are covered. Tolerances are declared in `src/tolerance.rs` with the error each
+      allows for and what was measured; **passes on Apple M-series (Metal)**. CUDA not yet run.
+      `gpu_parity_coverage` fails any build where an exported kernel has no parity test.
 
 **⇒ E1 (per-operator ablation) is now runnable on SG.** `algo` calls route CPU→GPU in-engine.
 

@@ -4059,6 +4059,7 @@ dependencies = [
  "samyama-gpu",
  "serde",
  "tracing",
+ "tracing-core",
 ]
 
 [[package]]

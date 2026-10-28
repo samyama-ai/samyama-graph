@@ -63,7 +63,8 @@ pub enum ValidationError {
     /// An ORDER BY naming something the projection did not keep.
     OrderByUndefinedVariable(String),
     /// A name used in an expression that nothing in the query binds.
-    UnboundVariable(String),
+    /// The unbound name, and a bound one it may be a typo of.
+    UnboundVariable(String, Option<String>),
     /// A `WITH` item that is not a bare variable and has no alias.
     UnaliasedWithItem,
     /// A call to a function this engine does not implement.
@@ -158,9 +159,11 @@ impl ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnboundVariable(v) => write!(
+            Self::UnboundVariable(v, suggestion) => write!(
                 f,
-                "`{v}` is not bound: nothing in this query defines it"
+                "`{v}` is not bound: nothing in this query defines it.{} Define it first, \
+                 with MATCH, UNWIND or WITH, before the clause that uses it.",
+                crate::query::suggest::did_you_mean(suggestion.as_deref())
             ),
             Self::UnaliasedWithItem => write!(
                 f,
@@ -171,12 +174,23 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "`{func}()` takes {wanted}, and was given {got}"
             ),
+            // Checked at compile time on purpose: as a run-time error it only
+            // fired on a row that reached the call, so the same query over an
+            // empty graph returned no rows and reported success.
             Self::UnknownFunction(name) => write!(
                 f,
-                "UnknownFunction: `{name}` is not a function this engine implements. \
-                 Checked at compile time on purpose: as a run-time error it only \
-                 fired on a row that reached the call, so the same query over an \
-                 empty graph returned no rows and reported success"
+                "UnknownFunction: `{name}` is not a function this engine implements.{}",
+                match crate::query::suggest::closest(
+                    name,
+                    crate::query::executor::operator::KNOWN_FUNCTIONS
+                        .iter()
+                        .copied()
+                ) {
+                    Some(known) => format!(" Did you mean `{known}()`?"),
+                    // No published list of every function exists to point
+                    // to, so the advice is only what is true without one.
+                    None => " Check its spelling; names match regardless of case.".to_string(),
+                }
             ),
             Self::MergeNullProperty(key) => write!(
                 f,
@@ -262,7 +276,8 @@ impl std::fmt::Display for ValidationError {
             Self::PropertyAccessOnNonMap { name, what } => write!(
                 f,
                 "`{name}` is {what}, so it has no properties to read. Only a map, \
-                 a node or a relationship does."
+                 a node or a relationship does: use `{name}` itself, or bind it to \
+                 one of those first."
             ),
             Self::NonBooleanOperand(what) => write!(
                 f,
@@ -317,7 +332,8 @@ impl std::fmt::Display for ValidationError {
             ),
             Self::DuplicateColumn(name) => write!(
                 f,
-                "Multiple result columns with the same name are not supported: `{name}`"
+                "Multiple result columns with the same name are not supported: `{name}`. \
+                 Give each its own name with AS, e.g. `AS {name}_2`."
             ),
             Self::UnionColumnMismatch { left, right } => write!(
                 f,
@@ -2095,7 +2111,10 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
 
     for name in used {
         if !bound.contains(&name) {
-            return Err(ValidationError::UnboundVariable(name));
+            let suggestion =
+                crate::query::suggest::closest(&name, bound.iter().map(String::as_str))
+                    .map(str::to_string);
+            return Err(ValidationError::UnboundVariable(name, suggestion));
         }
     }
     Ok(())

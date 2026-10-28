@@ -908,108 +908,124 @@ fn render_row(
     nodes: &mut HashMap<String, serde_json::Value>,
     edges: &mut HashMap<String, serde_json::Value>,
 ) -> Vec<serde_json::Value> {
-    let mut row = Vec::new();
-    for col in columns {
-        let val = record.get(col).unwrap_or(&Value::Null);
+    columns
+        .iter()
+        .map(|col| {
+            let val = record.get(col).unwrap_or(&Value::Null);
+            render_value(val, full_props, nodes, edges)
+        })
+        .collect()
+}
 
-        // Extract graph elements for visualization
-        match val {
-            Value::Map(entries) => {
-                row.push(json!(entries
-                    .iter()
-                    .map(|(k, v)| (k.clone(), format!("{v:?}")))
-                    .collect::<std::collections::BTreeMap<_, _>>()));
-            }
-            Value::List(items) => {
-                row.push(serde_json::Value::Array(
-                    items.iter().map(|i| json!(format!("{i:?}"))).collect(),
-                ));
-            }
-            Value::Node(id, node) => {
-                let mut properties = serde_json::Map::new();
-                if let Some(merged) = full_props.get(&id.as_u64()) {
-                    for (k, v) in merged {
-                        properties.insert(k.clone(), v.to_json());
-                    }
-                }
-                // fall back to whatever the value itself carries if the node is
-                // no longer in the store (e.g. one returned by a DELETE)
-                if properties.is_empty() {
-                    for (k, v) in &node.properties {
-                        properties.insert(k.clone(), v.to_json());
-                    }
-                }
-                let node_json = json!({
-                    "id": id.as_u64().to_string(),
-                    // Sorted: a node's labels are a set, and
-                    // serialising the hash order made the same
-                    // node come back as ["Employee","Person"] on
-                    // one call and ["Person","Employee"] on the
-                    // next. Cypher's `labels()` has sorted since
-                    // it was written; this is the same contract
-                    // (#1353).
-                    "labels": sorted_label_strs(&node.labels),
-                    "properties": properties,
-                });
-                nodes.insert(id.as_u64().to_string(), node_json.clone());
-                row.push(node_json);
-            }
-            Value::NodeRef(id) => {
-                // Lazy ref — minimal JSON (no properties available without store)
-                let node_json = json!({
-                    "id": id.as_u64().to_string(),
-                    "labels": [],
-                    "properties": {},
-                });
-                nodes.insert(id.as_u64().to_string(), node_json.clone());
-                row.push(node_json);
-            }
-            Value::Edge(id, edge) => {
-                let mut properties = serde_json::Map::new();
-                for (k, v) in &edge.properties {
+/// One result value as JSON, recording any graph element in `nodes` / `edges`.
+///
+/// Lists and maps recurse, so a value inside one renders exactly as it would
+/// in a column of its own. They used to render each item with `{:?}`, which
+/// sent `[n.name]` to every remote SDK as `["Property(String(\"a\"))"]`: the
+/// Rust debug text of the value, not the value (API-04, #1728). A list or map
+/// written only of literals did not show it, because the parser folds those
+/// into one property value; anything built from an expression did.
+fn render_value(
+    val: &Value,
+    full_props: &HashMap<u64, HashMap<String, PropertyValue>>,
+    nodes: &mut HashMap<String, serde_json::Value>,
+    edges: &mut HashMap<String, serde_json::Value>,
+) -> serde_json::Value {
+    // Extract graph elements for visualization
+    match val {
+        Value::Map(entries) => {
+            // Sorted, as before: a map's keys have no order of their own.
+            let rendered: std::collections::BTreeMap<_, _> = entries
+                .iter()
+                .map(|(k, v)| (k.clone(), render_value(v, full_props, nodes, edges)))
+                .collect();
+            json!(rendered)
+        }
+        Value::List(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|i| render_value(i, full_props, nodes, edges))
+                .collect(),
+        ),
+        Value::Node(id, node) => {
+            let mut properties = serde_json::Map::new();
+            if let Some(merged) = full_props.get(&id.as_u64()) {
+                for (k, v) in merged {
                     properties.insert(k.clone(), v.to_json());
                 }
-                let edge_json = json!({
-                    "id": id.as_u64().to_string(),
-                    "source": edge.source.as_u64().to_string(),
-                    "target": edge.target.as_u64().to_string(),
-                    "type": edge.edge_type.as_str(),
-                    "properties": properties,
-                });
-                edges.insert(id.as_u64().to_string(), edge_json.clone());
-                row.push(edge_json);
             }
-            Value::EdgeRef(id, src, tgt, et) => {
-                let edge_json = json!({
-                    "id": id.as_u64().to_string(),
-                    "source": src.as_u64().to_string(),
-                    "target": tgt.as_u64().to_string(),
-                    "type": et.as_str(),
-                    "properties": {},
-                });
-                edges.insert(id.as_u64().to_string(), edge_json.clone());
-                row.push(edge_json);
+            // fall back to whatever the value itself carries if the node is
+            // no longer in the store (e.g. one returned by a DELETE)
+            if properties.is_empty() {
+                for (k, v) in &node.properties {
+                    properties.insert(k.clone(), v.to_json());
+                }
             }
-            Value::Property(p) => {
-                row.push(p.to_json());
-            }
-            Value::Path {
-                nodes: path_nodes,
-                edges: path_edges,
-            } => {
-                let path_json = json!({
-                    "nodes": path_nodes.iter().map(|n| n.as_u64().to_string()).collect::<Vec<_>>(),
-                    "edges": path_edges.iter().map(|e| e.as_u64().to_string()).collect::<Vec<_>>(),
-                    "length": path_edges.len(),
-                });
-                row.push(path_json);
-            }
-            Value::Null => {
-                row.push(serde_json::Value::Null);
-            }
+            let node_json = json!({
+                "id": id.as_u64().to_string(),
+                // Sorted: a node's labels are a set, and
+                // serialising the hash order made the same
+                // node come back as ["Employee","Person"] on
+                // one call and ["Person","Employee"] on the
+                // next. Cypher's `labels()` has sorted since
+                // it was written; this is the same contract
+                // (#1353).
+                "labels": sorted_label_strs(&node.labels),
+                "properties": properties,
+            });
+            nodes.insert(id.as_u64().to_string(), node_json.clone());
+            node_json
         }
+        Value::NodeRef(id) => {
+            // Lazy ref — minimal JSON (no properties available without store)
+            let node_json = json!({
+                "id": id.as_u64().to_string(),
+                "labels": [],
+                "properties": {},
+            });
+            nodes.insert(id.as_u64().to_string(), node_json.clone());
+            node_json
+        }
+        Value::Edge(id, edge) => {
+            let mut properties = serde_json::Map::new();
+            for (k, v) in &edge.properties {
+                properties.insert(k.clone(), v.to_json());
+            }
+            let edge_json = json!({
+                "id": id.as_u64().to_string(),
+                "source": edge.source.as_u64().to_string(),
+                "target": edge.target.as_u64().to_string(),
+                "type": edge.edge_type.as_str(),
+                "properties": properties,
+            });
+            edges.insert(id.as_u64().to_string(), edge_json.clone());
+            edge_json
+        }
+        Value::EdgeRef(id, src, tgt, et) => {
+            let edge_json = json!({
+                "id": id.as_u64().to_string(),
+                "source": src.as_u64().to_string(),
+                "target": tgt.as_u64().to_string(),
+                "type": et.as_str(),
+                "properties": {},
+            });
+            edges.insert(id.as_u64().to_string(), edge_json.clone());
+            edge_json
+        }
+        Value::Property(p) => p.to_json(),
+        Value::Path {
+            nodes: path_nodes,
+            edges: path_edges,
+        } => {
+            let path_json = json!({
+                "nodes": path_nodes.iter().map(|n| n.as_u64().to_string()).collect::<Vec<_>>(),
+                "edges": path_edges.iter().map(|e| e.as_u64().to_string()).collect::<Vec<_>>(),
+                "length": path_edges.len(),
+            });
+            path_json
+        }
+        Value::Null => serde_json::Value::Null,
     }
-    row
 }
 
 fn render_query_result(
@@ -2940,6 +2956,9 @@ pub struct SnapshotImportParams {
     /// e.g. ?dedup_key=name,go_id
     #[serde(default)]
     pub dedup_key: Option<String>,
+    /// Explicitly permit merges despite conflicting declared identifiers.
+    #[serde(default)]
+    pub dedup_allow_conflicts: bool,
 }
 
 /// POST /api/snapshot/import — import a .sgsnap snapshot
@@ -3039,7 +3058,7 @@ pub async fn restore_snapshot_handler(
             ),
         }
     } else {
-        crate::snapshot::import_tenant_with_dedup(&mut store_guard, cursor, &dedup_key_refs)
+        crate::snapshot::import_tenant_with_dedup_options(&mut store_guard, cursor, &dedup_key_refs, params.dedup_allow_conflicts)
     };
     match imported {
         Ok(stats) => {
@@ -3075,6 +3094,7 @@ pub async fn restore_snapshot_handler(
                 "status": "ok",
                 "nodes_imported": stats.node_count,
                 "nodes_merged": stats.merged_count,
+                "merges_refused_conflicting": stats.merges_refused_conflicting,
                 // The shape of those merges, not just the count (#1808). A caller
                 // reading only `nodes_merged` cannot tell duplicate pairs from a
                 // collapse, and the larger number reads as the better result.

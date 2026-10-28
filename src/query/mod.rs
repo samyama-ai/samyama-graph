@@ -79,6 +79,7 @@ pub mod validate;
 pub mod executor;
 pub mod csv_source;
 pub mod span;
+pub mod suggest;
 pub mod metrics;
 
 use std::num::NonZeroUsize;
@@ -211,6 +212,11 @@ struct ResultKey {
     params: String,
     /// The store's data epoch at the time the answer was computed.
     epoch: u64,
+    /// The store's graph projection generation then (ALGO-05). A query that
+    /// runs an algorithm on a projection is answered from that projection, and
+    /// a refresh, drop or re-create changes the answer without changing any
+    /// data, so the epoch alone would serve the old one.
+    projections: u64,
 }
 
 /// Canonical, order-independent rendering of bound parameters.
@@ -659,6 +665,7 @@ impl QueryEngine {
             query: query_str.split_whitespace().collect::<Vec<_>>().join(" "),
             params: canonical_params(&effective),
             epoch: store.epoch(),
+            projections: store.graph_projections.generation(),
         };
 
         {
@@ -677,7 +684,7 @@ impl QueryEngine {
         // epoch would publish an answer computed partly before it. Storing
         // nothing when the epoch moved is the honest outcome: the answer is
         // still returned, it is just not remembered.
-        if store.epoch() == key.epoch {
+        if store.epoch() == key.epoch && store.graph_projections.generation() == key.projections {
             self.insert_with_budget(key, batch.clone());
         }
         Ok((batch, false))

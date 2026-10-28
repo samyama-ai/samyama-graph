@@ -52,12 +52,12 @@ impl NSGA2Solver {
             // 2. Create Offspring (Crossover + Mutation)
             let mut offspring = Vec::with_capacity(pop_size);
             while offspring.len() < pop_size {
-                let p1 = self.tournament_select(&population);
-                let p2 = self.tournament_select(&population);
+                let p1 = self.tournament_select(&population, &mut rng);
+                let p2 = self.tournament_select(&population, &mut rng);
                 
-                let (mut c1_vars, mut c2_vars) = self.crossover(&p1.variables, &p2.variables);
-                self.mutate(&mut c1_vars, &lower, &upper);
-                self.mutate(&mut c2_vars, &lower, &upper);
+                let (mut c1_vars, mut c2_vars) = self.crossover(&p1.variables, &p2.variables, &mut rng);
+                self.mutate(&mut c1_vars, &lower, &upper, &mut rng);
+                self.mutate(&mut c2_vars, &lower, &upper, &mut rng);
                 
                 let f1 = crate::common::evaluate_objectives(problem, &c1_vars);
                 let v1 = problem.penalties(&c1_vars).iter().sum();
@@ -213,8 +213,9 @@ impl NSGA2Solver {
         }
     }
 
-    fn tournament_select<'a>(&self, population: &'a [MultiObjectiveIndividual]) -> &'a MultiObjectiveIndividual {
-        let mut rng = crate::common::rng::solver_rng(self.seed);
+    /// Draws from the solver's one `rng`. Rebuilding it from the seed here
+    /// repeated the same draws on every call, so a seeded run never moved.
+    fn tournament_select<'a>(&self, population: &'a [MultiObjectiveIndividual], rng: &mut impl Rng) -> &'a MultiObjectiveIndividual {
         let i1 = rng.gen_range(0..population.len());
         let i2 = rng.gen_range(0..population.len());
         
@@ -227,8 +228,9 @@ impl NSGA2Solver {
         else { p2 }
     }
 
-    fn crossover(&self, p1: &Array1<f64>, p2: &Array1<f64>) -> (Array1<f64>, Array1<f64>) {
-        let mut rng = crate::common::rng::solver_rng(self.seed);
+    /// Draws from the solver's one `rng`. Rebuilding it from the seed here
+    /// repeated the same draws on every call, so a seeded run never moved.
+    fn crossover(&self, p1: &Array1<f64>, p2: &Array1<f64>, rng: &mut impl Rng) -> (Array1<f64>, Array1<f64>) {
         let dim = p1.len();
         let mut c1 = p1.clone();
         let mut c2 = p2.clone();
@@ -253,8 +255,9 @@ impl NSGA2Solver {
         (c1, c2)
     }
 
-    fn mutate(&self, vars: &mut Array1<f64>, lower: &Array1<f64>, upper: &Array1<f64>) {
-        let mut rng = crate::common::rng::solver_rng(self.seed);
+    /// Draws from the solver's one `rng`. Rebuilding it from the seed here
+    /// repeated the same draws on every call, so a seeded run never moved.
+    fn mutate(&self, vars: &mut Array1<f64>, lower: &Array1<f64>, upper: &Array1<f64>, rng: &mut impl Rng) {
         for i in 0..vars.len() {
             if rng.gen::<f64>() < self.mutation_rate {
                 let range = upper[i] - lower[i];

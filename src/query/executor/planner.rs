@@ -899,6 +899,34 @@ fn plan_return_projection(
     (operator, output_columns)
 }
 
+/// The `db.*` procedures `plan_call` dispatches, spelled as it accepts them.
+/// Offered as "did you mean" for an unknown procedure (DX-06);
+/// `every_listed_procedure_plans` keeps the list honest.
+pub const KNOWN_DB_PROCEDURES: &[&str] = &[
+    "db.checkIntegrity",
+    "db.index.fulltext.queryNodes",
+    "db.index.point.nearest",
+    "db.index.vector.queryNodes",
+    "db.labels",
+    "db.propertyKeys",
+    "db.relationshipTypes",
+    "db.schema.forLLM",
+    "db.schema.visualization",
+];
+
+/// The refusal for a procedure name nothing dispatches: a likely intended
+/// name when there is one, and otherwise where the procedures are.
+pub fn unknown_procedure_message(name: &str) -> String {
+    match crate::query::suggest::closest(name, KNOWN_DB_PROCEDURES.iter().copied()) {
+        Some(known) => format!("Unknown procedure: `{name}`. Did you mean `{known}`?"),
+        None => format!(
+            "Unknown procedure: `{name}`. The schema procedures are {}; graph \
+             algorithms are called as `algo.<name>()`.",
+            KNOWN_DB_PROCEDURES.join(", ")
+        ),
+    }
+}
+
 impl QueryPlanner {
     /// Create a new query planner
     pub fn new() -> Self {
@@ -1564,6 +1592,15 @@ impl QueryPlanner {
                 root: Box::new(ShowIndexesOperator::new()),
                 output_columns: vec!["label".to_string(), "property".to_string(), "type".to_string()],
                 is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
+        // Handle the graph projection statements (ALGO-05)
+        if let Some(ddl) = &query.graph_projection_ddl {
+            return Ok(ExecutionPlan {
+                root: Box::new(super::projection_ops::GraphProjectionOperator::new(ddl.clone())),
+                output_columns: super::projection_ops::columns_for(ddl),
+                is_write: ddl.is_write(), candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -2361,7 +2398,7 @@ impl QueryPlanner {
                         ) {
                             Ok(lookup) => lookup,
                             Err(existing) => {
-                                Box::new(CartesianProductOperator::new(existing, match_op)) as OperatorBox
+                                Self::join_disjoint(existing, match_op, &known_vars, &clause_vars, &cross_match_predicates, query.limit.is_none(), store)
                             }
                         }
                     }
@@ -2910,8 +2947,7 @@ impl QueryPlanner {
                                     store,
                                 ) {
                                     Ok(lookup) => lookup,
-                                    Err(existing) => Box::new(CartesianProductOperator::new(existing, match_op))
-                                        as OperatorBox,
+                                    Err(existing) => Self::join_disjoint(existing, match_op, &known_vars, &clause_vars, &cross_match_preds, query.limit.is_none(), store),
                                 }
                             }
                         }
@@ -3999,7 +4035,7 @@ impl QueryPlanner {
                 mode,
                 match mode.to_ascii_lowercase().as_str() {
                     "write" => "returns a summary row instead",
-                    "mutate" => "writes them into a graph projection, and there are no projections here yet",
+                    "mutate" => "writes them into a graph projection, and a projection here cannot hold a written property yet",
                     _ => "returns a summary instead of the rows",
                 }
             )))
@@ -4028,8 +4064,9 @@ impl QueryPlanner {
             // Its own code: the procedure surface is fine and this name is not
             // on it, which is a different recovery from "the planner could not
             // build a plan".
-            Err(ExecutionError::unknown_procedure(format!(
-                "Unknown procedure: {}", call_clause.procedure_name)))
+            Err(ExecutionError::unknown_procedure(
+                unknown_procedure_message(&call_clause.procedure_name),
+            ))
         }
     }
 
@@ -6420,6 +6457,54 @@ impl QueryPlanner {
     /// n.id = x.id`): the `lookup_chain` over the cross-clause predicates, the
     /// ones it used taken out of `cross_preds`. `existing` comes back when the
     /// shape does not apply.
+    /// Disjoint inner patterns may join on top-level property equalities.
+    /// Retain the predicates as filters, and leave OPTIONAL/OR/NOT unchanged.
+    fn join_disjoint(
+        mut left: OperatorBox,
+        mut right: OperatorBox,
+        left_vars: &HashSet<String>,
+        right_vars: &HashSet<String>,
+        predicates: &[Expression],
+        allow_hash: bool,
+        store: &GraphStore,
+    ) -> OperatorBox {
+        let mut keys = Vec::new();
+        if allow_hash {
+            for predicate in predicates {
+                for conjunct in flatten_and_predicates(predicate) {
+                    if let Expression::Binary { left, op: BinaryOp::Eq, right } = conjunct {
+                        if let (Expression::Property { variable: a, .. }, Expression::Property { variable: b, .. }) = (&*left, &*right) {
+                            if left_vars.contains(a) && right_vars.contains(b) {
+                                keys.push((*left, *right));
+                            } else if left_vars.contains(b) && right_vars.contains(a) {
+                                keys.push((*right, *left));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // With LIMIT a lazy filtered product can stop early, whereas the hash
+        // join materializes both inputs. Preserve that cheaper startup plan.
+        fn estimate(op: &mut OperatorBox, store: &GraphStore) -> Option<f64> {
+            // Expansion estimates can floor to one even for many matching
+            // paths. Only use direct scan counts to prove a product is tiny.
+            match op.describe().name.as_str() {
+                "NodeScan" | "SingleRow" => op.estimate_rows(store, &[]),
+                _ => None,
+            }
+        }
+        let product_is_cheaper = match (estimate(&mut left, store), estimate(&mut right, store)) {
+            (Some(l), Some(r)) => l * r <= l + r,
+            _ => false,
+        };
+        if keys.is_empty() || product_is_cheaper {
+            Box::new(CartesianProductOperator::new(left, right))
+        } else {
+            Box::new(JoinOperator::on_expressions(left, right, keys))
+        }
+    }
+
     fn try_correlated_index_lookup(
         existing: OperatorBox,
         match_clause: &MatchClause,
@@ -11077,6 +11162,7 @@ mod tests {
             drop_hierarchy_index: None,
             rebuild_hierarchy_index: None,
             show_hierarchy_indexes: false,
+            graph_projection_ddl: None,
             show_indexes: false,
             show_constraints: false,
             profile: false,

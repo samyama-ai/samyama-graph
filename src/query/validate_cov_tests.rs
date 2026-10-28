@@ -136,7 +136,7 @@ fn catalogue() -> Vec<(ValidationError, &'static str, &'static str)> {
             "`n` is not available to ORDER BY",
         ),
         (
-            V::UnboundVariable("m".into()),
+            V::UnboundVariable("m".into(), None),
             c::VARIABLE_NOT_BOUND,
             "`m` is not bound",
         ),

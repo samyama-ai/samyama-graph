@@ -858,6 +858,16 @@ pub fn import_tenant_with_dedup(
     reader: impl Read,
     dedup_keys: &[&str],
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
+    import_tenant_with_dedup_options(store, reader, dedup_keys, false)
+}
+
+/// Import with an explicit opt-out from identifier conflict protection (#1947).
+pub fn import_tenant_with_dedup_options(
+    store: &mut GraphStore,
+    reader: impl Read,
+    dedup_keys: &[&str],
+    allow_conflicts: bool,
+) -> Result<ImportStats, Box<dyn std::error::Error>> {
     // A failed import used to leave whatever it had already applied in the graph: a
     // truncated snapshot returned "unexpected end of file" *and* several million nodes,
     // so the caller saw an error and a partially-populated graph, with no way to tell how
@@ -866,7 +876,7 @@ pub fn import_tenant_with_dedup(
     // What a dedup merge added to nodes that existed before this import, undone
     // too: a refused import must leave existing nodes as it found them (#1604).
     let mut merged: Vec<MergeUndo> = Vec::new();
-    match import_tenant_inner(store, reader, dedup_keys, &mut created_nodes, &mut merged) {
+    match import_tenant_inner(store, reader, dedup_keys, allow_conflicts, &mut created_nodes, &mut merged) {
         Ok(stats) => Ok(stats),
         Err(e) => {
             for undo in merged.into_iter().rev() {
@@ -898,6 +908,7 @@ fn import_tenant_inner(
     store: &mut GraphStore,
     reader: impl Read,
     dedup_keys: &[&str],
+    allow_conflicts: bool,
     created_nodes: &mut Vec<crate::graph::NodeId>,
     merged: &mut Vec<MergeUndo>,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
@@ -935,6 +946,7 @@ fn import_tenant_inner(
     let mut imported_node_count: u64 = 0;
     let mut imported_edge_count: u64 = 0;
     let mut merged_node_count: u64 = 0;
+    let mut merges_refused_conflicting: u64 = 0;
     // Which key did the merging, and how many records landed on each target
     // (#1808). A bare count cannot distinguish duplicate pairs from a collapse.
     let mut merges_by_key: HashMap<String, u64> = HashMap::new();
@@ -1040,6 +1052,28 @@ fn import_tenant_inner(
                             matched_key = Some(key);
                             break 'dedup;
                         }
+                    }
+                }
+            }
+
+            // Matching one identifier is insufficient when another one disagrees.
+            if !allow_conflicts {
+                if let Some(eid) = existing_id {
+                    let conflict = dedup_keys.iter().any(|key| {
+                        let Some(incoming) = snap_node.props.get(*key) else { return false };
+                        let Some(existing) = store.node_property(eid, key) else { return false };
+                        if existing == PropertyValue::Null || incoming.is_null() { return false; }
+                        let old = existing.to_json();
+                        match (&old, incoming) {
+                            (serde_json::Value::String(a), serde_json::Value::String(b)) =>
+                                normalize_dedup(a) != normalize_dedup(b),
+                            _ => old != *incoming,
+                        }
+                    });
+                    if conflict {
+                        merges_refused_conflicting += 1;
+                        existing_id = None;
+                        matched_key = None;
                     }
                 }
             }
@@ -1473,6 +1507,7 @@ fn import_tenant_inner(
         node_count: imported_node_count,
         edge_count: imported_edge_count,
         merged_count: merged_node_count,
+        merges_refused_conflicting,
         merge_groups,
         largest_merge_group,
         merges_by_key: merges_by_key_sorted,

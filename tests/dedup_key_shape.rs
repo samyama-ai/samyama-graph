@@ -17,7 +17,7 @@
 //! three nodes rather than on 26 million.
 
 use samyama::graph::{GraphStore, PropertyValue};
-use samyama::snapshot::{export_tenant, import_tenant_with_dedup};
+use samyama::snapshot::{export_tenant, import_tenant_with_dedup, import_tenant_with_dedup_options};
 
 /// One snapshot holding `(accession, symbol)` pairs, each as a `:Protein`.
 ///
@@ -110,7 +110,7 @@ fn a_shared_non_identifier_value_collapses_entities_within_one_snapshot() {
 /// have different accessions, so the identifier never matches; the loop falls
 /// through to `symbol`, which does.
 #[test]
-fn an_identifier_key_first_does_not_protect_against_a_bad_key_after_it() {
+fn a_declared_identifier_now_protects_against_a_conflicting_annotation() {
     let mut store = GraphStore::new();
     let stats = import_tenant_with_dedup(
         &mut store,
@@ -119,12 +119,9 @@ fn an_identifier_key_first_does_not_protect_against_a_bad_key_after_it() {
     )
     .expect("import");
 
-    assert_eq!(
-        store.node_count(),
-        1,
-        "listing the identifier first did not prevent the symbol collapse"
-    );
-    assert_eq!(stats.merged_count, 2);
+    assert_eq!(store.node_count(), 3);
+    assert_eq!(stats.merged_count, 0);
+    assert_eq!(stats.merges_refused_conflicting, 2);
 }
 
 /// The reported count cannot distinguish a good merge from a bad one, which is
@@ -192,10 +189,11 @@ fn the_merge_shape_separates_a_correct_merge_from_a_collapse() {
 #[test]
 fn the_attributed_key_is_the_one_that_matched_not_the_first_listed() {
     let mut store = GraphStore::new();
-    let stats = import_tenant_with_dedup(
+    let stats = import_tenant_with_dedup_options(
         &mut store,
         &proteins(ORTHOLOGUES)[..],
         &["accession", "symbol"],
+        true, // explicitly exercise legacy annotation-level merges
     )
     .expect("import");
 
