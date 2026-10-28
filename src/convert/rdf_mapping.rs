@@ -43,6 +43,8 @@ use crate::snapshot::format::Dropped;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+/// The datatype a plain, untagged literal reports.
+const XSD_STRING_OR_PLAIN: &str = "http://www.w3.org/2001/XMLSchema#string";
 
 /// The key an inlined blank node's `rdf:type` goes under. `@` keeps it apart
 /// from any key a predicate's local name can produce, so an ordinary
@@ -244,7 +246,7 @@ impl MappingFile {
 }
 
 /// An edge rule with its predicate expanded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeRule {
     #[serde(rename = "type")]
     pub edge_type: String,
@@ -252,7 +254,7 @@ pub struct EdgeRule {
 }
 
 /// A merge rule with its predicate expanded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeRule {
     pub predicate: String,
     pub into: MergeInto,
@@ -262,7 +264,7 @@ pub struct MergeRule {
 /// A mapping resolved from a preset and a file: every decision made, every
 /// prefixed name expanded to a full IRI. This is what [`Mapping::to_json`]
 /// records in the snapshot header.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mapping {
     pub preset: String,
     pub base: String,
@@ -569,6 +571,105 @@ pub struct RdfMapReport {
     /// written as null there (`blank_nodes: inline`).
     #[serde(default)]
     pub blank_node_cycles: usize,
+    /// Edges of a type another predicate (or the other direction) also
+    /// produced: the type records one predicate, so these write back as that
+    /// one -- under `skos`, a reversed `narrower` becomes `broader` (#1954
+    /// review).
+    #[serde(default)]
+    pub edge_predicates_ambiguous: usize,
+    /// Labels applied from a class other than the one recorded for that
+    /// label, which write back as the recorded class (#1954 review).
+    #[serde(default)]
+    pub labels_ambiguous: usize,
+    /// Values stored under a key another predicate also maps to, which write
+    /// back as that predicate (#1954 review).
+    #[serde(default)]
+    pub keys_ambiguous: usize,
+    /// Named IRIs under `{base}blank/`, the space generated blank nodes use,
+    /// which write back as blank nodes (#1954 review).
+    #[serde(default)]
+    pub blank_prefix_iris: usize,
+    /// Untyped nodes given the `Resource` placeholder while a real class also
+    /// maps to `Resource`, which write back as instances of it (#1954
+    /// review).
+    #[serde(default)]
+    pub placeholder_labels_ambiguous: usize,
+    /// Keys holding both IRIs and text, which write back as IRIs wherever the
+    /// text parses as one (#1954 review).
+    #[serde(default)]
+    pub term_kinds_mixed: usize,
+    /// Blank nodes inlined under more than one parent, which write back as
+    /// one blank node per parent (#1954 review).
+    #[serde(default)]
+    pub blank_nodes_shared: usize,
+    /// Statements about a merged alias (or pointing at one) that now belong
+    /// to the node it merged into; written back, they are said of that node
+    /// (#1954 review).
+    #[serde(default)]
+    pub merge_statements_reassigned: usize,
+    /// Merge links whose target was itself merged (a chain a -> b -> c);
+    /// written back, each alias points at the end of the chain (#1954
+    /// review).
+    #[serde(default)]
+    pub merge_chains_flattened: usize,
+    /// Literals of a narrower numeric datatype (`xsd:int`, `xsd:long`,
+    /// `xsd:float`, ...) stored as Integer or Float, which write back as
+    /// `xsd:integer` or `xsd:double` (#1912).
+    #[serde(default)]
+    pub datatypes_normalized: usize,
+    /// Properties whose preferred-language values were tagged on some
+    /// subjects and untagged on others; written back, they are all tagged
+    /// (#1912).
+    #[serde(default)]
+    pub language_tags_mixed: usize,
+    /// Typed literals whose text is not the form the value writes back as
+    /// (`"01"^^xsd:integer` as `"1"`, `"1"^^xsd:boolean` as `"true"`): the
+    /// value is kept, the spelling is not (#1954 review).
+    #[serde(default)]
+    pub lexical_forms_normalized: usize,
+    /// The names this read actually used, so the graph can be written back
+    /// as the RDF it came from. Recorded in the snapshot header with the
+    /// mapping (#1912).
+    #[serde(default)]
+    pub names: AppliedNames,
+}
+
+/// One edge type and the predicate it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedEdge {
+    pub predicate: String,
+    pub reverse: bool,
+}
+
+/// The names a mapping run gave things, kept so the graph can be written back
+/// to RDF with the IRIs it came in with rather than `{base}prop/<key>`.
+///
+/// Recorded from what was *applied*, not re-derived from the mapping: a
+/// clash fallback, a `labels` table entry and a local name all end up here
+/// the same way, and a later read under a different file of the same
+/// vocabulary cannot change what this graph's names meant.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AppliedNames {
+    /// Label -> the class IRI it came from.
+    pub labels: BTreeMap<String, String>,
+    /// Property key -> the predicate IRI it came from.
+    pub keys: BTreeMap<String, String>,
+    /// Edge type -> the predicate it came from, and whether it was reversed.
+    pub edges: BTreeMap<String, AppliedEdge>,
+    /// Keys whose preferred-language values carried the tag (`"x"@en`), so
+    /// they are written back tagged rather than plain.
+    pub preferred_tagged: BTreeSet<String>,
+    /// Keys holding a language map (`others: map`).
+    pub language_maps: BTreeSet<String>,
+    /// Keys whose values were IRIs (a `properties` entry over an IRI object,
+    /// or an IRI inside an inlined blank node), written back as IRIs.
+    pub iri_values: BTreeSet<String>,
+    /// Keys the reader generated for other languages (`title@de` under
+    /// `others: suffix`). Only these are decoded back into tagged literals,
+    /// so a real predicate whose local name contains `@` stays itself
+    /// (#1954 review).
+    #[serde(default)]
+    pub language_keys: BTreeSet<String>,
 }
 
 impl RdfMapReport {
@@ -633,6 +734,91 @@ impl RdfMapReport {
             "Edges a merge made identical to another were stored once.".to_string(),
         );
         push(
+            "rdf_datatypes_normalized",
+            self.datatypes_normalized as u64,
+            "Datatypes the graph does not keep: narrower numbers (xsd:int, xsd:float, ...) \
+             write back as xsd:integer or xsd:double, string-valued ones (xsd:anyURI, \
+             xsd:token, ...) and everything under `typed_literals: false` as plain text."
+                .to_string(),
+        );
+        push(
+            "rdf_language_tags_mixed",
+            self.language_tags_mixed as u64,
+            "A property's preferred-language values were tagged on some subjects and not \
+             others; written back, they are all tagged."
+                .to_string(),
+        );
+        push(
+            "rdf_lexical_forms_normalized",
+            self.lexical_forms_normalized as u64,
+            "Typed literals not in their canonical spelling (\"01\"^^xsd:integer, \
+             \"1\"^^xsd:boolean, ...) keep their value and write back canonical."
+                .to_string(),
+        );
+        push(
+            "rdf_keys_ambiguous",
+            self.keys_ambiguous as u64,
+            "Values under a property key that more than one predicate maps to; written \
+             back, they all use the first predicate seen."
+                .to_string(),
+        );
+        push(
+            "rdf_blank_prefix_iris",
+            self.blank_prefix_iris as u64,
+            "Named IRIs in the space generated blank nodes use ({base}blank/); written \
+             back, they become blank nodes."
+                .to_string(),
+        );
+        push(
+            "rdf_placeholder_labels_ambiguous",
+            self.placeholder_labels_ambiguous as u64,
+            "Untyped nodes carry the Resource placeholder, which a real class also maps to; \
+             written back, they are typed with it."
+                .to_string(),
+        );
+        push(
+            "rdf_labels_ambiguous",
+            self.labels_ambiguous as u64,
+            "Labels that more than one class produced; written back, they all name the \
+             first class seen."
+                .to_string(),
+        );
+        push(
+            "rdf_edge_predicates_ambiguous",
+            self.edge_predicates_ambiguous as u64,
+            "Edges of a type that more than one predicate or direction produced; written \
+             back, they all use the first one seen."
+                .to_string(),
+        );
+        push(
+            "rdf_term_kinds_mixed",
+            self.term_kinds_mixed as u64,
+            "Properties holding both IRIs and text; written back, text that parses as an \
+             IRI becomes one."
+                .to_string(),
+        );
+        push(
+            "rdf_merge_chains_flattened",
+            self.merge_chains_flattened as u64,
+            "Merge links that formed a chain; written back, every alias links straight to \
+             the end of the chain."
+                .to_string(),
+        );
+        push(
+            "rdf_merge_statements_reassigned",
+            self.merge_statements_reassigned as u64,
+            "Statements about a merged subject now belong to the node it merged into; \
+             written back, they are said of that node."
+                .to_string(),
+        );
+        push(
+            "rdf_blank_nodes_shared",
+            self.blank_nodes_shared as u64,
+            "Blank nodes inlined under more than one parent; written back, each parent gets \
+             its own blank node."
+                .to_string(),
+        );
+        push(
             "rdf_blank_node_cycles",
             self.blank_node_cycles as u64,
             "Blank nodes that refer back to themselves cannot be inlined as a map; the \
@@ -679,6 +865,11 @@ struct Applier<'a> {
     label_names: HashMap<String, String>,
     key_names: HashMap<String, String>,
     edge_names: HashMap<String, String>,
+    /// Keys that received a literal anywhere, to find keys of mixed term kind.
+    literal_keys: BTreeSet<String>,
+    /// Keys that received a plain untagged string anywhere, nodes and inlined
+    /// maps alike, to find keys whose language tagging is mixed.
+    untagged_keys: BTreeSet<String>,
     /// Triples read into inlined maps so far, across every copy, for the
     /// expansion bound.
     inline_values: usize,
@@ -694,6 +885,8 @@ impl<'a> Applier<'a> {
             label_names: HashMap::new(),
             key_names: HashMap::new(),
             edge_names: HashMap::new(),
+            literal_keys: BTreeSet::new(),
+            untagged_keys: BTreeSet::new(),
             inline_values: 0,
         }
     }
@@ -765,6 +958,7 @@ impl<'a> Applier<'a> {
         self.report.triples_read = self.triples.len();
 
         // Merges first: every later step talks about canonical IRIs.
+        let mut merge_links: Vec<String> = Vec::new();
         if let Some(rule) = &m.merge {
             for t in &self.triples {
                 if t.predicate.as_named_node().as_str() != rule.predicate {
@@ -778,11 +972,20 @@ impl<'a> Applier<'a> {
                     MergeInto::Object => (s.as_str(), o.as_str()),
                     MergeInto::Subject => (o.as_str(), s.as_str()),
                 };
+                merge_links.push(into.to_string());
                 let (from, into) = (self.canonical(from), self.canonical(into));
                 if from != into {
                     self.merged_into.insert(from, into);
                 }
             }
+            // A link whose target was itself merged into something else is a
+            // chain (a -> b -> c); written back, every alias points straight
+            // at the end of it (a -> c, b -> c), so the link changes (#1954
+            // review).
+            self.report.merge_chains_flattened = merge_links
+                .iter()
+                .filter(|into| self.merged_into.contains_key(into.as_str()))
+                .count();
         }
 
         // Which predicates and classes are used how, so names are chosen once
@@ -842,12 +1045,16 @@ impl<'a> Applier<'a> {
 
         // Blank nodes' own triples, for inlining.
         let mut blank_triples: HashMap<String, Vec<&Triple>> = HashMap::new();
+        let mut blank_references: HashMap<String, usize> = HashMap::new();
         for t in &self.triples {
             if let RdfSubject::BlankNode(b) = &t.subject {
                 blank_triples
                     .entry(b.as_str().to_string())
                     .or_default()
                     .push(t);
+            }
+            if let RdfObject::BlankNode(b) = &t.object {
+                *blank_references.entry(b.as_str().to_string()).or_insert(0) += 1;
             }
         }
         // Blank nodes an inlined map will actually contain: those a named
@@ -880,6 +1087,9 @@ impl<'a> Applier<'a> {
                 }
             }
         }
+        if m.blank_nodes == BlankNodes::Inline {
+            self.report.blank_nodes_shared = blank_references.values().filter(|&&n| n > 1).count();
+        }
 
         // Nodes: every subject, and every object an edge will point at.
         let mut terms: BTreeSet<Term> = BTreeSet::new();
@@ -910,7 +1120,14 @@ impl<'a> Applier<'a> {
         for term in &terms {
             let id = graph.create_node_with_labels(std::iter::empty());
             let iri = match term {
-                Term::Iri(i) => i.clone(),
+                Term::Iri(i) => {
+                    // A real IRI in the space generated blank nodes use
+                    // writes back as a blank node (#1954 review).
+                    if i.starts_with(&format!("{}blank/", m.base)) {
+                        self.report.blank_prefix_iris += 1;
+                    }
+                    i.clone()
+                }
                 Term::Blank(b) => {
                     self.report.blank_nodes_as_nodes += 1;
                     format!("{}blank/{b}", m.base)
@@ -993,6 +1210,15 @@ impl<'a> Applier<'a> {
                 self.report.drop_predicate(p);
                 continue;
             };
+            // A statement about a merged alias, or pointing at one, now
+            // belongs to the node it merged into; writing back cannot tell
+            // which subject it came from (#1954 review).
+            let alias = |iri: &str| self.merged_into.contains_key(iri);
+            let subject_is_alias = matches!(&subject, Term::Iri(i) if alias(i));
+            let object_is_alias = matches!(&t.object, RdfObject::NamedNode(o) if alias(o.as_str()));
+            if subject_is_alias || object_is_alias {
+                self.report.merge_statements_reassigned += 1;
+            }
 
             if p == RDF_TYPE {
                 let RdfObject::NamedNode(class) = &t.object else {
@@ -1005,6 +1231,21 @@ impl<'a> Applier<'a> {
                     .or_else(|| self.label_names.get(class.as_str()))
                     .cloned()
                     .unwrap_or_else(|| class.as_str().to_string());
+                // A label two classes map to records one of them, so the other
+                // writes back as it (#1954 review: owl's ObjectProperty and
+                // DatatypeProperty both become `Property`).
+                match self.report.names.labels.get(&label) {
+                    Some(recorded) if recorded != class.as_str() => {
+                        self.report.labels_ambiguous += 1;
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.report
+                            .names
+                            .labels
+                            .insert(label.clone(), class.as_str().to_string());
+                    }
+                }
                 graph
                     .add_label_to_node("default", node, label)
                     .map_err(|e| MappingFileError::Engine(e.to_string()))?;
@@ -1020,11 +1261,13 @@ impl<'a> Applier<'a> {
                         continue;
                     }
                     let key = self.key_for(p);
-                    if !self.usable_key(&key, p) {
+                    if !self.record_key(&key, p) {
                         continue;
                     }
+                    self.literal_keys.insert(key.clone());
                     match lit.language() {
                         Some(lang) if m.other_languages == OtherLanguages::Map => {
+                            self.report.names.language_maps.insert(key.clone());
                             lang_maps
                                 .entry((node, key))
                                 .or_default()
@@ -1037,12 +1280,18 @@ impl<'a> Applier<'a> {
                                 OtherLanguages::Suffix => {
                                     self.report.languages_suffixed += 1;
                                     let k = format!("{key}@{lang}");
+                                    self.report.names.language_keys.insert(k.clone());
                                     push_value(&mut values, &mut value_index, node, k, string(lit));
                                 }
                                 _ => self.report.languages_dropped += 1,
                             }
                         }
-                        _ => {
+                        tag => {
+                            if tag.is_some() {
+                                self.report.names.preferred_tagged.insert(key.clone());
+                            } else if lit.datatype().as_str() == XSD_STRING_OR_PLAIN {
+                                self.untagged_keys.insert(key.clone());
+                            }
                             let v = self.literal_value(lit);
                             push_value(&mut values, &mut value_index, node, key, v);
                         }
@@ -1050,9 +1299,10 @@ impl<'a> Applier<'a> {
                 }
                 RdfObject::NamedNode(o) if m.properties.contains_key(p) => {
                     let key = self.key_for(p);
-                    if !self.usable_key(&key, p) {
+                    if !self.record_key(&key, p) {
                         continue;
                     }
+                    self.report.names.iri_values.insert(key.clone());
                     let v = PropertyValue::String(o.as_str().to_string());
                     push_value(&mut values, &mut value_index, node, key, v);
                 }
@@ -1067,7 +1317,7 @@ impl<'a> Applier<'a> {
                     }
                     _ => {
                         let key = self.key_for(p);
-                        if !self.usable_key(&key, p) {
+                        if !self.record_key(&key, p) {
                             continue;
                         }
                         let mut stack = BTreeSet::new();
@@ -1120,6 +1370,27 @@ impl<'a> Applier<'a> {
             set_node(graph, node, &key, PropertyValue::Map(map))?;
             self.report.properties_set += 1;
         }
+        self.report.language_tags_mixed = self
+            .report
+            .names
+            .preferred_tagged
+            .intersection(&self.untagged_keys)
+            .count();
+        // A real predicate key equal to a generated language key shares its
+        // values with it, and writes back as one or the other (#1954 review).
+        self.report.keys_ambiguous += self
+            .report
+            .names
+            .language_keys
+            .iter()
+            .filter(|k| self.report.names.keys.contains_key(k.as_str()))
+            .count();
+        self.report.term_kinds_mixed = self
+            .report
+            .names
+            .iri_values
+            .intersection(&self.literal_keys)
+            .count();
         if let Some(rule) = &m.merge {
             for (node, list) in alias_lists {
                 let values = list.into_iter().map(PropertyValue::String).collect();
@@ -1133,9 +1404,15 @@ impl<'a> Applier<'a> {
         }
 
         // A node with no `rdf:type` still needs a label to be found by, as the
-        // engine's mapper gives it.
+        // engine's mapper gives it. If a real class also maps to `Resource`,
+        // the placeholder cannot be told from it, and an untyped node writes
+        // back typed (#1954 review).
+        let placeholder_is_a_class = self.report.names.labels.contains_key("Resource");
         for &id in ids.values() {
             if !labelled.contains(&id) {
+                if placeholder_is_a_class {
+                    self.report.placeholder_labels_ambiguous += 1;
+                }
                 graph
                     .add_label_to_node("default", id, "Resource")
                     .map_err(|e| MappingFileError::Engine(e.to_string()))?;
@@ -1144,14 +1421,26 @@ impl<'a> Applier<'a> {
         Ok(self.report)
     }
 
-    /// Whether `key` may hold a predicate's values. `__rdf_iri` holds the
-    /// node's own IRI and `@type` an inlined class, so a predicate that maps
-    /// to either would overwrite them; its triple is dropped and reported
-    /// instead (#1952 review).
-    fn usable_key(&mut self, key: &str, predicate: &str) -> bool {
+    /// Record that `predicate` became `key`, and say whether the key may be
+    /// used. `__rdf_iri` may not: it holds the node's own IRI, and a value
+    /// written there would change which resource the node is (#1954 review);
+    /// such a triple is dropped and reported. A key another predicate already
+    /// fills is used, and counted, since it writes back as that predicate.
+    fn record_key(&mut self, key: &str, predicate: &str) -> bool {
+        // `@type` is the inlined class entry's key, never a predicate's.
         if key == IRI_PROPERTY || key == INLINE_CLASS_KEY {
             self.report.drop_predicate(predicate);
             return false;
+        }
+        match self.report.names.keys.get(key) {
+            Some(recorded) if recorded != predicate => self.report.keys_ambiguous += 1,
+            Some(_) => {}
+            None => {
+                self.report
+                    .names
+                    .keys
+                    .insert(key.to_string(), predicate.to_string());
+            }
         }
         true
     }
@@ -1187,6 +1476,19 @@ impl<'a> Applier<'a> {
                 false,
             ),
         };
+        let ambiguous = match self.report.names.edges.get(&edge_type) {
+            Some(e) => e.predicate != predicate || e.reverse != reverse,
+            None => {
+                self.report.names.edges.insert(
+                    edge_type.clone(),
+                    AppliedEdge {
+                        predicate: predicate.to_string(),
+                        reverse,
+                    },
+                );
+                false
+            }
+        };
         let (from, to) = if reverse {
             (target, node)
         } else {
@@ -1200,6 +1502,9 @@ impl<'a> Applier<'a> {
             .create_edge(from, to, edge_type)
             .map_err(|e| MappingFileError::Engine(e.to_string()))?;
         self.report.edges_created += 1;
+        if ambiguous {
+            self.report.edge_predicates_ambiguous += 1;
+        }
         Ok(())
     }
 
@@ -1287,40 +1592,57 @@ impl<'a> Applier<'a> {
                 INLINE_CLASS_KEY.to_string()
             } else {
                 let key = self.key_for(p);
-                if !self.usable_key(&key, p) {
+                if !self.record_key(&key, p) {
                     continue;
                 }
                 key
             };
             match &t.object {
-                RdfObject::Literal(lit) => match lit.language() {
-                    Some(lang) if m.other_languages == OtherLanguages::Map => {
-                        langs
-                            .entry(key)
-                            .or_default()
-                            .entry(lang.to_string())
-                            .or_default()
-                            .push(string(lit));
-                    }
-                    Some(lang) if !lang.eq_ignore_ascii_case(&m.prefer_language) => {
-                        match m.other_languages {
-                            OtherLanguages::Suffix => {
-                                self.report.languages_suffixed += 1;
-                                push(&mut entries, format!("{key}@{lang}"), string(lit));
+                RdfObject::Literal(lit) => {
+                    self.literal_keys.insert(key.clone());
+                    match lit.language() {
+                        Some(lang) if m.other_languages == OtherLanguages::Map => {
+                            self.report.names.language_maps.insert(key.clone());
+                            langs
+                                .entry(key)
+                                .or_default()
+                                .entry(lang.to_string())
+                                .or_default()
+                                .push(string(lit));
+                        }
+                        Some(lang) if !lang.eq_ignore_ascii_case(&m.prefer_language) => {
+                            match m.other_languages {
+                                OtherLanguages::Suffix => {
+                                    self.report.languages_suffixed += 1;
+                                    let k = format!("{key}@{lang}");
+                                    self.report.names.language_keys.insert(k.clone());
+                                    push(&mut entries, k, string(lit));
+                                }
+                                _ => self.report.languages_dropped += 1,
                             }
-                            _ => self.report.languages_dropped += 1,
+                        }
+                        tag => {
+                            if tag.is_some() {
+                                self.report.names.preferred_tagged.insert(key.clone());
+                            } else if lit.datatype().as_str() == XSD_STRING_OR_PLAIN {
+                                // Untagged inside an inlined map counts as much
+                                // as on a node: the key is written tagged
+                                // everywhere (#1954 review).
+                                self.untagged_keys.insert(key.clone());
+                            }
+                            let v = self.literal_value(lit);
+                            push(&mut entries, key, v);
                         }
                     }
-                    _ => {
-                        let v = self.literal_value(lit);
-                        push(&mut entries, key, v);
-                    }
-                },
-                RdfObject::NamedNode(n) => push(
-                    &mut entries,
-                    key,
-                    PropertyValue::String(n.as_str().to_string()),
-                ),
+                }
+                RdfObject::NamedNode(n) => {
+                    self.report.names.iri_values.insert(key.clone());
+                    push(
+                        &mut entries,
+                        key,
+                        PropertyValue::String(n.as_str().to_string()),
+                    )
+                }
                 RdfObject::BlankNode(b) => {
                     let v = self.inline(b.as_str(), triples, stack)?;
                     push(&mut entries, key, v);
@@ -1352,7 +1674,15 @@ impl<'a> Applier<'a> {
 
     /// A literal as the property value its datatype names.
     fn literal_value(&mut self, lit: &Literal) -> PropertyValue {
-        if !self.m.typed_literals || lit.language().is_some() {
+        if lit.language().is_some() {
+            return string(lit);
+        }
+        if !self.m.typed_literals {
+            // Stored as text: any datatype but plain xsd:string is gone, and
+            // writes back as a plain literal (#1954 review).
+            if lit.datatype().as_str() != XSD_STRING_OR_PLAIN {
+                self.report.datatypes_normalized += 1;
+            }
             return string(lit);
         }
         let text = lit.value().trim();
@@ -1365,15 +1695,31 @@ impl<'a> Applier<'a> {
             return string(lit);
         };
         let parsed = match local {
-            "string" | "normalizedString" | "token" | "anyURI" | "language" | "Name" | "NCName" => {
-                return string(lit)
+            "string" => return string(lit),
+            // String-valued datatypes: the text is kept, the datatype is not,
+            // so it writes back as plain xsd:string (#1954 review).
+            "normalizedString" | "token" | "anyURI" | "language" | "Name" | "NCName" => {
+                self.report.datatypes_normalized += 1;
+                return string(lit);
             }
-            "integer" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
-            | "positiveInteger" | "negativeInteger" | "nonPositiveInteger" | "unsignedLong"
-            | "unsignedInt" | "unsignedShort" | "unsignedByte" => {
-                text.parse::<i64>().ok().map(PropertyValue::Integer)
+            "integer" => text.parse::<i64>().ok().map(PropertyValue::Integer),
+            "int" | "long" | "short" | "byte" | "nonNegativeInteger" | "positiveInteger"
+            | "negativeInteger" | "nonPositiveInteger" | "unsignedLong" | "unsignedInt"
+            | "unsignedShort" | "unsignedByte" => {
+                let v = text.parse::<i64>().ok().map(PropertyValue::Integer);
+                if v.is_some() {
+                    self.report.datatypes_normalized += 1;
+                }
+                v
             }
-            "double" | "float" => text.parse::<f64>().ok().map(PropertyValue::Float),
+            "double" => text.parse::<f64>().ok().map(PropertyValue::Float),
+            "float" => {
+                let v = text.parse::<f64>().ok().map(PropertyValue::Float);
+                if v.is_some() {
+                    self.report.datatypes_normalized += 1;
+                }
+                v
+            }
             "decimal" => {
                 let v = text.parse::<f64>().ok().map(PropertyValue::Float);
                 if v.is_some() {
@@ -1392,10 +1738,24 @@ impl<'a> Applier<'a> {
             "dateTime" => date_time(text),
             _ => None,
         };
-        parsed.unwrap_or_else(|| {
-            self.report.literals_as_string += 1;
-            string(lit)
-        })
+        match parsed {
+            Some(v) => {
+                // Only where the datatype itself survives: a narrower one is
+                // already counted as normalized.
+                let kept = matches!(
+                    local,
+                    "integer" | "double" | "boolean" | "date" | "dateTime"
+                );
+                if kept && lexical_form(&v).is_none_or(|(text, _)| text != lit.value()) {
+                    self.report.lexical_forms_normalized += 1;
+                }
+                v
+            }
+            None => {
+                self.report.literals_as_string += 1;
+                string(lit)
+            }
+        }
     }
 }
 
@@ -1460,4 +1820,511 @@ fn set_node(
     graph
         .set_node_property("default", id, key, value)
         .map_err(|e| MappingFileError::Engine(e.to_string()))
+}
+
+/// What writing a graph back to RDF wrote, and what it could not carry
+/// (#1912).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RdfWriteReport {
+    pub triples_written: usize,
+    /// Edge properties, which a mapped graph has no RDF form for.
+    pub edge_properties_not_written: usize,
+    /// Values with no XSD datatype -- vectors, durations, local times -- written
+    /// as a JSON literal of Samyama's own datatype, which only Samyama reads.
+    pub values_as_json: usize,
+    /// Triples the graph said twice, written once: RDF is a set.
+    pub duplicates_collapsed: usize,
+}
+
+impl RdfWriteReport {
+    /// What the RDF written does not say, for the converter's loss report.
+    pub fn dropped(&self) -> Vec<Dropped> {
+        let mut out = Vec::new();
+        let mut push = |what: &str, count: usize, detail: &str| {
+            if count > 0 {
+                out.push(Dropped {
+                    what: what.to_string(),
+                    count: count as u64,
+                    detail: detail.to_string(),
+                });
+            }
+        };
+        push(
+            "rdf_edge_properties_not_written",
+            self.edge_properties_not_written,
+            "Edge properties have no RDF form under a mapping and were not written.",
+        );
+        push(
+            "rdf_values_as_json",
+            self.values_as_json,
+            "Values with no XSD datatype were written as JSON literals of Samyama's own \
+             datatype, which other RDF tools read as text.",
+        );
+        push(
+            "rdf_duplicates_collapsed",
+            self.duplicates_collapsed,
+            "Triples the graph said more than once were written once; RDF is a set.",
+        );
+        out
+    }
+}
+
+impl Mapping {
+    /// This mapping and the names a read under it applied, as recorded in the
+    /// `.sgsnap` header's `sources[].mapping`: [`to_json`](Self::to_json)
+    /// with the names alongside.
+    pub fn recorded(&self, names: &AppliedNames) -> serde_json::Value {
+        let mut v = self.to_json();
+        if let serde_json::Value::Object(map) = &mut v {
+            map.insert(
+                "names".to_string(),
+                serde_json::to_value(names).unwrap_or_default(),
+            );
+        }
+        v
+    }
+
+    /// The mapping and names [`recorded`](Self::recorded) wrote, or `None`
+    /// for a value that is not one.
+    pub fn from_recorded(v: &serde_json::Value) -> Option<(Mapping, AppliedNames)> {
+        let mapping: Mapping = serde_json::from_value(v.clone()).ok()?;
+        let names = v
+            .get("names")
+            .and_then(|n| serde_json::from_value(n.clone()).ok())
+            .unwrap_or_default();
+        Some((mapping, names))
+    }
+
+    /// The graph as RDF triples, undoing this mapping with the names a read
+    /// under it applied: labels back to their classes, keys to their
+    /// predicates, `key@de` to a tagged literal, edges to their predicates
+    /// (re-reversed where they were reversed), merged aliases back as
+    /// subjects carrying the merge predicate, `{base}blank/<id>` nodes back to
+    /// blank nodes, and inlined maps back to blank nodes.
+    ///
+    /// The `samyama` preset writes through the engine's `GraphToRdfMapper`,
+    /// as it reads through the engine's mapper.
+    pub fn write_rdf(
+        &self,
+        names: &AppliedNames,
+        graph: &GraphStore,
+    ) -> Result<(Vec<Triple>, RdfWriteReport), MappingFileError> {
+        let mut store = RdfStore::new();
+        let mut report = RdfWriteReport::default();
+        if self.preset == "samyama" {
+            let r = crate::rdf::GraphToRdfMapper::new(self.base.clone())
+                .sync_to_rdf(graph, &mut store)
+                .map_err(|e| MappingFileError::Engine(e.to_string()))?;
+            report.triples_written = r.triples_written;
+            report.duplicates_collapsed = r.duplicates_collapsed;
+        } else {
+            Writer {
+                m: self,
+                names,
+                store: &mut store,
+                report: &mut report,
+                blanks: 0,
+            }
+            .run(graph)?;
+        }
+        Ok((store.iter().cloned().collect(), report))
+    }
+}
+
+/// Percent-encode what cannot appear in an IRI path segment, as the engine's
+/// mapper does for `{base}prop/<key>`.
+fn escape_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(c),
+            _ => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One write of a graph back to RDF.
+struct Writer<'a> {
+    m: &'a Mapping,
+    names: &'a AppliedNames,
+    store: &'a mut RdfStore,
+    report: &'a mut RdfWriteReport,
+    /// Counter for blank nodes made from inlined maps.
+    blanks: usize,
+}
+
+fn engine_err(e: impl std::fmt::Display) -> MappingFileError {
+    MappingFileError::Engine(e.to_string())
+}
+
+fn named(iri: &str) -> Result<crate::rdf::NamedNode, MappingFileError> {
+    crate::rdf::NamedNode::new(iri)
+        .map_err(|_| MappingFileError::Engine(format!("not an IRI: {iri}")))
+}
+
+impl Writer<'_> {
+    fn add(&mut self, s: RdfSubject, p: &str, o: RdfObject) -> Result<(), MappingFileError> {
+        let p = crate::rdf::RdfPredicate::new(p)
+            .map_err(|_| MappingFileError::Engine(format!("not an IRI: {p}")))?;
+        match self.store.insert(Triple::new(s, p, o)) {
+            Ok(()) => self.report.triples_written += 1,
+            Err(crate::rdf::RdfStoreError::DuplicateTriple) => {
+                self.report.duplicates_collapsed += 1
+            }
+            Err(e) => return Err(engine_err(e)),
+        }
+        Ok(())
+    }
+
+    /// A node's RDF term: its `__rdf_iri`, a blank node for one this mapping
+    /// made from a blank node, or `{base}node/<id>` for a node that never was
+    /// RDF.
+    fn term(
+        &self,
+        graph: &GraphStore,
+        id: NodeId,
+    ) -> Result<(RdfSubject, RdfObject), MappingFileError> {
+        let iri = match graph.node_properties_merged(id).get(IRI_PROPERTY) {
+            Some(PropertyValue::String(s)) => s.clone(),
+            _ => format!("{}node/{}", self.m.base, id.as_u64()),
+        };
+        let blank_prefix = format!("{}blank/", self.m.base);
+        Ok(match iri.strip_prefix(&blank_prefix) {
+            Some(label) => {
+                let b = crate::rdf::BlankNode::from_str(label).map_err(engine_err)?;
+                (RdfSubject::BlankNode(b.clone()), RdfObject::BlankNode(b))
+            }
+            None => {
+                let n = named(&iri)?;
+                (RdfSubject::NamedNode(n.clone()), RdfObject::NamedNode(n))
+            }
+        })
+    }
+
+    fn class_iri(&self, label: &str) -> Option<String> {
+        if let Some(iri) = self.names.labels.get(label) {
+            return Some(iri.clone());
+        }
+        if let Some((iri, _)) = self.m.labels.iter().find(|(_, l)| l.as_str() == label) {
+            return Some(iri.clone());
+        }
+        // The placeholder the reader gives an untyped node is not a class.
+        if label == "Resource" {
+            return None;
+        }
+        Some(format!("{}class/{}", self.m.base, escape_segment(label)))
+    }
+
+    fn predicate_for_key(&self, key: &str) -> String {
+        if let Some(p) = self.names.keys.get(key) {
+            return p.clone();
+        }
+        if let Some((p, _)) = self.m.properties.iter().find(|(_, k)| k.as_str() == key) {
+            return p.clone();
+        }
+        format!("{}prop/{}", self.m.base, escape_segment(key))
+    }
+
+    fn edge_predicate(&self, edge_type: &str) -> (String, bool) {
+        if let Some(e) = self.names.edges.get(edge_type) {
+            return (e.predicate.clone(), e.reverse);
+        }
+        if let Some((p, rule)) = self.m.edges.iter().find(|(_, r)| r.edge_type == edge_type) {
+            return (p.clone(), rule.reverse);
+        }
+        (
+            format!("{}rel/{}", self.m.base, escape_segment(edge_type)),
+            false,
+        )
+    }
+
+    fn run(mut self, graph: &GraphStore) -> Result<(), MappingFileError> {
+        let rdf_type = RDF_TYPE.to_string();
+        for node in graph.all_nodes() {
+            let (subject, object) = self.term(graph, node.id)?;
+            let mut labels: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
+            labels.sort_unstable();
+            for label in labels {
+                if let Some(class) = self.class_iri(label) {
+                    self.add(
+                        subject.clone(),
+                        &rdf_type,
+                        RdfObject::NamedNode(named(&class)?),
+                    )?;
+                }
+            }
+            let props = graph.node_properties_merged(node.id);
+            let mut keys: Vec<&String> = props.keys().collect();
+            keys.sort();
+            for key in keys {
+                if key == IRI_PROPERTY {
+                    continue;
+                }
+                let value = &props[key];
+                if let Some(rule) = self.m.merge.as_ref().filter(|r| &r.aliases_property == key) {
+                    self.aliases(&subject, &object, rule, value)?;
+                    continue;
+                }
+                self.property(&subject, key, value)?;
+            }
+        }
+        for edge in graph.all_edges() {
+            let (predicate, reverse) = self.edge_predicate(edge.edge_type.as_str());
+            let (s, _) = self.term(graph, edge.source)?;
+            let (_, o) = self.term(graph, edge.target)?;
+            let (s, o) = if reverse {
+                let (ts, _) = self.term(graph, edge.target)?;
+                let (_, to) = self.term(graph, edge.source)?;
+                (ts, to)
+            } else {
+                (s, o)
+            };
+            self.add(s, &predicate, o)?;
+            self.report.edge_properties_not_written += graph.edge_properties_merged(edge.id).len();
+        }
+        Ok(())
+    }
+
+    /// Merged aliases back as separate subjects with the merge predicate.
+    fn aliases(
+        &mut self,
+        subject: &RdfSubject,
+        object: &RdfObject,
+        rule: &MergeRule,
+        value: &PropertyValue,
+    ) -> Result<(), MappingFileError> {
+        let list: Vec<&PropertyValue> = match value {
+            PropertyValue::Array(items) => items.iter().collect(),
+            single => vec![single],
+        };
+        for alias in list {
+            let PropertyValue::String(alias) = alias else {
+                continue;
+            };
+            let a = named(alias)?;
+            match rule.into {
+                MergeInto::Object => {
+                    self.add(RdfSubject::NamedNode(a), &rule.predicate, object.clone())?
+                }
+                MergeInto::Subject => {
+                    self.add(subject.clone(), &rule.predicate, RdfObject::NamedNode(a))?
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn property(
+        &mut self,
+        subject: &RdfSubject,
+        key: &str,
+        value: &PropertyValue,
+    ) -> Result<(), MappingFileError> {
+        // `key@de`, a key the read generated for another language: a literal
+        // in that language. Only generated keys, not every key with an `@`.
+        if let Some((base, lang)) = key.rsplit_once('@') {
+            if self.names.language_keys.contains(key) {
+                let predicate = self.predicate_for_key(base);
+                for v in elements(value) {
+                    if let PropertyValue::String(s) = v {
+                        let lit = Literal::new_language_tagged_literal(s.clone(), lang)
+                            .map_err(engine_err)?;
+                        self.add(subject.clone(), &predicate, RdfObject::Literal(lit))?;
+                    }
+                }
+                return Ok(());
+            }
+        }
+        let predicate = self.predicate_for_key(key);
+        if let (PropertyValue::Map(map), true) = (value, self.names.language_maps.contains(key)) {
+            let mut langs: Vec<&String> = map.keys().collect();
+            langs.sort();
+            for lang in langs {
+                // Each language may hold several values (multi_valued:
+                // list); `@none` holds the untagged ones, written back as
+                // plain or typed literals.
+                for v in elements(&map[lang]) {
+                    if lang == "@none" {
+                        if let Some(o) = self.object(key, v)? {
+                            self.add(subject.clone(), &predicate, o)?;
+                        }
+                    } else if let PropertyValue::String(s) = v {
+                        let lit = Literal::new_language_tagged_literal(s.clone(), lang.as_str())
+                            .map_err(engine_err)?;
+                        self.add(subject.clone(), &predicate, RdfObject::Literal(lit))?;
+                    }
+                }
+            }
+            return Ok(());
+        }
+        for v in elements(value) {
+            if let Some(o) = self.object(key, v)? {
+                self.add(subject.clone(), &predicate, o)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One value as an RDF object; an inlined map becomes a blank node.
+    fn object(
+        &mut self,
+        key: &str,
+        v: &PropertyValue,
+    ) -> Result<Option<RdfObject>, MappingFileError> {
+        Ok(Some(match v {
+            PropertyValue::Null => return Ok(None),
+            PropertyValue::Map(map) => {
+                self.blanks += 1;
+                let b = crate::rdf::BlankNode::from_str(&format!("inline{}", self.blanks))
+                    .map_err(engine_err)?;
+                let s = RdfSubject::BlankNode(b.clone());
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                for k in keys {
+                    if k == INLINE_CLASS_KEY {
+                        for inner in elements(&map[k]) {
+                            if let PropertyValue::String(class) = inner {
+                                self.add(s.clone(), RDF_TYPE, RdfObject::NamedNode(named(class)?))?;
+                            }
+                        }
+                        continue;
+                    }
+                    // The same writer as a node's own keys, so `key@de` and
+                    // language maps inside an inlined map come back as tagged
+                    // literals (#1954 review).
+                    self.property(&s, k, &map[k])?;
+                }
+                RdfObject::BlankNode(b)
+            }
+            PropertyValue::String(s) if self.names.iri_values.contains(key) => {
+                match crate::rdf::NamedNode::new(s) {
+                    Ok(n) => RdfObject::NamedNode(n),
+                    Err(_) => RdfObject::Literal(Literal::new_simple_literal(s.clone())),
+                }
+            }
+            PropertyValue::String(s) if self.names.preferred_tagged.contains(key) => {
+                RdfObject::Literal(
+                    Literal::new_language_tagged_literal(
+                        s.clone(),
+                        self.m.prefer_language.as_str(),
+                    )
+                    .map_err(engine_err)?,
+                )
+            }
+            other => RdfObject::Literal(self.literal(other)?),
+        }))
+    }
+
+    /// A value as a typed literal, undoing `literal_value`.
+    fn literal(&mut self, v: &PropertyValue) -> Result<Literal, MappingFileError> {
+        let typed = |text: String, t: &str| -> Result<Literal, MappingFileError> {
+            Ok(Literal::new_typed_literal(
+                text,
+                named(&format!("{XSD}{t}"))?,
+            ))
+        };
+        match v {
+            PropertyValue::String(s) => Ok(Literal::new_simple_literal(s.clone())),
+            other => match lexical_form(other) {
+                Some((text, t)) => typed(text, t),
+                None => self.json(other),
+            },
+        }
+    }
+
+    fn json(&mut self, v: &PropertyValue) -> Result<Literal, MappingFileError> {
+        self.report.values_as_json += 1;
+        let text = serde_json::to_string(v).map_err(engine_err)?;
+        Ok(Literal::new_typed_literal(
+            text,
+            named("https://samyama.ai/rdf/PropertyValue")?,
+        ))
+    }
+}
+
+/// The lexical form and XSD datatype a typed value writes back as, or `None`
+/// for a value that has no XSD form and is written as JSON. The reader
+/// compares a literal's text against this to find one whose spelling a
+/// round trip changes (`"01"^^xsd:integer` writes back as `"1"`).
+fn lexical_form(v: &PropertyValue) -> Option<(String, &'static str)> {
+    match v {
+        PropertyValue::Integer(i) => Some((i.to_string(), "integer")),
+        PropertyValue::Float(f) => Some((double_text(*f), "double")),
+        PropertyValue::Boolean(b) => Some((b.to_string(), "boolean")),
+        PropertyValue::Date(days) => Some((date_text(*days as i64)?, "date")),
+        PropertyValue::LocalDateTime { secs, nanos } => {
+            Some((clock_text(*secs, *nanos)?, "dateTime"))
+        }
+        PropertyValue::ZonedDateTime {
+            secs,
+            nanos,
+            offset_seconds,
+            ..
+        } => {
+            let text = clock_text(secs + *offset_seconds as i64, *nanos)?;
+            Some((
+                format!("{text}{}", offset_text(*offset_seconds)),
+                "dateTime",
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// An `xsd:double` lexical form. `{:?}` so a whole float stays a float on the
+/// way back, as the engine's mapper writes it; the non-finite values take
+/// XML Schema's spellings, not Rust's `inf` and `NaN` (#1954 review).
+fn double_text(f: f64) -> String {
+    if f.is_nan() {
+        "NaN".to_string()
+    } else if f == f64::INFINITY {
+        "INF".to_string()
+    } else if f == f64::NEG_INFINITY {
+        "-INF".to_string()
+    } else {
+        format!("{f:?}")
+    }
+}
+
+/// A multi-valued property's values, one per triple; anything else is one.
+fn elements(v: &PropertyValue) -> Vec<&PropertyValue> {
+    match v {
+        PropertyValue::Array(items) => items.iter().collect(),
+        single => vec![single],
+    }
+}
+
+/// `YYYY-MM-DD` for days since 1970-01-01.
+fn date_text(days: i64) -> Option<String> {
+    // 719,163 days from 0001-01-01 to 1970-01-01.
+    let d = chrono::NaiveDate::from_num_days_from_ce_opt(i32::try_from(days + 719_163).ok()?)?;
+    Some(d.format("%Y-%m-%d").to_string())
+}
+
+/// `YYYY-MM-DDTHH:MM:SS[.fraction]` for wall-clock seconds and nanoseconds.
+fn clock_text(secs: i64, nanos: u32) -> Option<String> {
+    let t = chrono::DateTime::from_timestamp(secs, nanos)?.naive_utc();
+    let mut text = t.format("%Y-%m-%dT%H:%M:%S").to_string();
+    if nanos > 0 {
+        let frac = format!("{nanos:09}");
+        text.push('.');
+        text.push_str(frac.trim_end_matches('0'));
+    }
+    Some(text)
+}
+
+/// `Z`, or `+HH:MM` / `-HH:MM`.
+fn offset_text(offset_seconds: i32) -> String {
+    if offset_seconds == 0 {
+        return "Z".to_string();
+    }
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let m = offset_seconds.unsigned_abs() / 60;
+    format!("{sign}{:02}:{:02}", m / 60, m % 60)
 }
