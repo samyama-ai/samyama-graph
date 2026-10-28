@@ -129,7 +129,7 @@ impl Format {
 
     /// Whether this crate can write a graph out in the format today.
     pub fn can_write(&self) -> bool {
-        matches!(self, Format::Sgsnap)
+        matches!(self, Format::Sgsnap | Format::GraphMl | Format::Csv)
     }
 }
 
@@ -183,6 +183,16 @@ pub enum FormatReport {
     SgsnapRead(ImportStats),
     /// A `.sgsnap` write: the engine's export report, its loss report included.
     SgsnapWrite(ExportStats),
+    /// A GraphML write: the exporter's report, and what it means as losses.
+    GraphMlWrite {
+        report: crate::export::graphml::GraphMlReport,
+        dropped: Vec<Dropped>,
+    },
+    /// A CSV directory write: the exporter's report, and what it means as losses.
+    CsvWrite {
+        report: crate::export::csv::GraphCsvReport,
+        dropped: Vec<Dropped>,
+    },
     /// A Neo4j `apoc.export.json` read: the importer's own report, and what it
     /// means as losses.
     Neo4jRead {
@@ -197,6 +207,9 @@ impl FormatReport {
         match self {
             FormatReport::SgsnapRead(_) => &[],
             FormatReport::SgsnapWrite(stats) => &stats.dropped,
+            FormatReport::GraphMlWrite { dropped, .. } | FormatReport::CsvWrite { dropped, .. } => {
+                dropped
+            }
             FormatReport::Neo4jRead { dropped, .. } => dropped,
         }
     }
@@ -206,6 +219,8 @@ impl FormatReport {
         match self {
             FormatReport::SgsnapRead(s) => s.node_count,
             FormatReport::SgsnapWrite(s) => s.node_count,
+            FormatReport::GraphMlWrite { report, .. } => report.nodes_written as u64,
+            FormatReport::CsvWrite { report, .. } => report.nodes_written as u64,
             FormatReport::Neo4jRead { report, .. } => {
                 (report.nodes_created + report.placeholder_nodes) as u64
             }
@@ -217,6 +232,8 @@ impl FormatReport {
         match self {
             FormatReport::SgsnapRead(s) => s.edge_count,
             FormatReport::SgsnapWrite(s) => s.edge_count,
+            FormatReport::GraphMlWrite { report, .. } => report.edges_written as u64,
+            FormatReport::CsvWrite { report, .. } => report.edges_written as u64,
             FormatReport::Neo4jRead { report, .. } => report.edges_created as u64,
         }
     }
@@ -436,12 +453,18 @@ pub fn write(
     out: impl Write,
     opts: &Options,
 ) -> Result<FormatReport, ConvertError> {
-    let report = match format {
-        Format::Sgsnap => {
-            FormatReport::SgsnapWrite(crate::snapshot::export_tenant(store, out).map_err(engine)?)
-        }
-        other => return Err(ConvertError::CannotWrite(other)),
-    };
+    let report =
+        match format {
+            Format::Sgsnap => FormatReport::SgsnapWrite(
+                crate::snapshot::export_tenant(store, out).map_err(engine)?,
+            ),
+            Format::GraphMl => write_graphml(store, out)?,
+            Format::Csv => return Err(ConvertError::Engine(
+                "a CSV export is a directory of files, not one stream; use write_path or convert"
+                    .to_string(),
+            )),
+            other => return Err(ConvertError::CannotWrite(other)),
+        };
     check_lossless(&report, opts)?;
     Ok(report)
 }
@@ -468,10 +491,208 @@ pub fn write_path(
                 .map_err(engine)?;
             FormatReport::SgsnapWrite(stats)
         }
+        Format::Csv => write_csv_dir(store, path, opts)?,
+        Format::GraphMl => write_file_atomically(path, opts, |f| write_graphml(store, f))?,
         other => return Err(ConvertError::CannotWrite(other)),
     };
     check_lossless(&report, opts)?;
     Ok(report)
+}
+
+/// GraphML into `out` (#1914). The exporter builds the document in memory:
+/// GraphML declares every attribute's type before the first element, so the
+/// whole graph is read before anything is written in any case.
+fn write_graphml(store: &GraphStore, mut out: impl Write) -> Result<FormatReport, ConvertError> {
+    let (text, report) = crate::export::graphml::to_graphml(store);
+    out.write_all(text.as_bytes())
+        .and_then(|_| out.flush())
+        .map_err(|e| ConvertError::Engine(format!("could not write GraphML: {e}")))?;
+    let mut dropped = Vec::new();
+    let mut push = |what: &str, count: usize, detail: String| {
+        if count > 0 {
+            dropped.push(Dropped {
+                what: what.to_string(),
+                count: count as u64,
+                detail,
+            });
+        }
+    };
+    push(
+        "attributes_widened_to_string",
+        report.attributes_widened_to_string.len(),
+        format!(
+            "GraphML declares one type per attribute; these held more than one and are \
+             written as text: {}.",
+            report.attributes_widened_to_string.join(", ")
+        ),
+    );
+    push(
+        "values_written_as_json",
+        report.values_written_as_json,
+        "Lists, maps and vectors have no GraphML type and are written as JSON text.".to_string(),
+    );
+    push(
+        "temporal_values_written_as_text",
+        report.temporal_values_written_as_text,
+        "Dates and times have no GraphML type and are written as ISO-8601 text.".to_string(),
+    );
+    push(
+        "labels_containing_a_space",
+        report.labels_containing_a_space.len(),
+        format!(
+            "Labels are written space-separated, which these cannot be read back from: {}.",
+            report.labels_containing_a_space.join(", ")
+        ),
+    );
+    Ok(FormatReport::GraphMlWrite { report, dropped })
+}
+
+/// What a CSV directory export's report means as losses.
+fn csv_losses(r: &crate::export::csv::GraphCsvReport) -> Vec<Dropped> {
+    let mut out = Vec::new();
+    let mut push = |what: &str, count: usize, detail: String| {
+        if count > 0 {
+            out.push(Dropped {
+                what: what.to_string(),
+                count: count as u64,
+                detail,
+            });
+        }
+    };
+    push(
+        "columns_widened_to_string",
+        r.columns_widened_to_string.len(),
+        format!(
+            "A CSV column has one type; these held more than one and are written as text: {}.",
+            r.columns_widened_to_string.join(", ")
+        ),
+    );
+    push(
+        "values_written_as_json",
+        r.values_written_as_json,
+        "Lists, maps and vectors are written as JSON text in one field.".to_string(),
+    );
+    push(
+        "temporal_values_written_as_text",
+        r.temporal_values_written_as_text,
+        "Dates and times are written as ISO-8601 text in a string column.".to_string(),
+    );
+    push(
+        "labels_containing_a_semicolon",
+        r.labels_containing_a_semicolon.len(),
+        format!(
+            "neo4j-admin reads `;` as the separator between labels, so these split on import: {}.",
+            r.labels_containing_a_semicolon.join(", ")
+        ),
+    );
+    push(
+        "properties_with_a_colon_omitted",
+        r.properties_with_a_colon_omitted.len(),
+        format!(
+            "neo4j-admin reads `:` in a header as the start of the column type and has no \
+             escape for it, so these properties are not written: {}.",
+            r.properties_with_a_colon_omitted.join(", ")
+        ),
+    );
+    out
+}
+
+/// The whole graph as a CSV directory at `dir`, whole or not at all: written
+/// into `<dir>.tmp` and renamed into place. A `dir` that exists and is not
+/// empty is refused rather than mixed with or overwritten.
+fn write_csv_dir(
+    store: &GraphStore,
+    dir: &Path,
+    opts: &Options,
+) -> Result<FormatReport, ConvertError> {
+    let io = |path: &Path, source: std::io::Error| ConvertError::Io {
+        path: path.into(),
+        source,
+    };
+    if let Ok(mut entries) = std::fs::read_dir(dir) {
+        if entries.next().is_some() {
+            return Err(ConvertError::Engine(format!(
+                "{} exists and is not empty; a CSV export writes a new directory",
+                dir.display()
+            )));
+        }
+    }
+    // Staged in a directory of its own, uniquely named beside `dir` so the
+    // rename stays on one filesystem. Nothing that already exists is deleted
+    // or reused, and the staging directory removes itself on any early return.
+    let parent = staging_parent(dir).map_err(|e| io(dir, e))?;
+    let staging = tempfile::Builder::new()
+        .prefix(&staging_prefix(dir))
+        .suffix(".tmp")
+        .tempdir_in(&parent)
+        .map_err(|e| io(&parent, e))?;
+    let report = crate::export::csv::write_graph_dir(store, staging.path())
+        .map_err(|e| io(staging.path(), e))?;
+    let dropped = csv_losses(&report);
+    let report = FormatReport::CsvWrite { report, dropped };
+    // Refused before the directory appears, so a lossy export leaves no output.
+    check_lossless(&report, opts)?;
+    // An empty directory the caller made is replaced; a non-empty one was
+    // refused above.
+    let _ = std::fs::remove_dir(dir);
+    let staged = staging.keep();
+    std::fs::rename(&staged, dir).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&staged);
+        io(dir, e)
+    })?;
+    Ok(report)
+}
+
+/// Write a single-file format through `<path>.tmp`, renamed into place only
+/// once complete, so a failure never leaves a partial file at `path`.
+fn write_file_atomically(
+    path: &Path,
+    opts: &Options,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<FormatReport, ConvertError>,
+) -> Result<FormatReport, ConvertError> {
+    let io = |p: &Path, source: std::io::Error| ConvertError::Io {
+        path: p.into(),
+        source,
+    };
+    let parent = staging_parent(path).map_err(|e| io(path, e))?;
+    // A new, uniquely named file beside `path`: an existing `<path>.tmp` or a
+    // symlink is never truncated or followed, and concurrent conversions do
+    // not share a staging file. It is removed on any early return.
+    let staging = tempfile::Builder::new()
+        .prefix(&staging_prefix(path))
+        .suffix(".tmp")
+        .tempfile_in(&parent)
+        .map_err(|e| io(&parent, e))?;
+    let (file, staged) = staging.into_parts();
+    let mut out = std::io::BufWriter::new(file);
+    let report = write(&mut out)?;
+    let file = out.into_inner().map_err(|e| io(&staged, e.into_error()))?;
+    file.sync_all().map_err(|e| io(&staged, e))?;
+    // Refused before the rename, so a lossy export leaves `path` as it was.
+    check_lossless(&report, opts)?;
+    staged.persist(path).map_err(|e| io(path, e.error))?;
+    Ok(report)
+}
+
+/// The directory a staged output is created in: `path`'s own parent, created
+/// if missing, so the final rename never crosses a filesystem.
+fn staging_parent(path: &Path) -> std::io::Result<PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    std::fs::create_dir_all(&parent)?;
+    Ok(parent)
+}
+
+/// `.<name>.` -- a hidden prefix naming the output a staging entry belongs to.
+fn staging_prefix(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!(".{name}.")
 }
 
 /// Convert the file at `input` to the file at `output`, each in the format its
@@ -594,9 +815,10 @@ mod tests {
             "{msg}"
         );
         assert!(msg.contains("Turtle") && msg.contains(".sgsnap"), "{msg}");
-        let err = write(Format::GraphMl, &store, Vec::new(), &Options::default()).unwrap_err();
+        // A format with no writer yet. Not GraphML: that one writes (#1914).
+        let err = write(Format::Turtle, &store, Vec::new(), &Options::default()).unwrap_err();
         assert!(
-            matches!(err, ConvertError::CannotWrite(Format::GraphMl)),
+            matches!(err, ConvertError::CannotWrite(Format::Turtle)),
             "{err}"
         );
     }
