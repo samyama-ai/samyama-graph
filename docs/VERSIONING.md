@@ -70,11 +70,13 @@ minors.
 SDKs **as published** -- from PyPI and npm, not from this tree -- for the
 latest installable patch of the minor in the version of record and its
 immediately preceding minor, and runs a suite through each against a server
-built from the change under review: connecting, status, reads and writes, typed values, nodes and
-edges, streaming, a read-only call refusing a write, and an error raising. The
-versions are read from `Cargo.toml` and the package indexes on every run, so the
-check moves forward with each release by itself. A version it cannot find fails
-the job rather than skipping it.
+built from the change under review: connecting, status, reads and writes, typed
+values, nodes and edges, streaming, a read-only call refusing a write, and an
+error raising. During a release PR that raises the workspace version, the
+candidate SDKs have not been published yet, so CI uses the base version as the
+ceiling until the tag publishes them. The check still requires that version and
+its predecessor; it never silently skips or substitutes an older minor. The
+versions come from Cargo manifests and the package indexes on every run.
 
 Missing either required minor fails the job; an older minor cannot substitute
 for it. Deprecated npm releases remain eligible because users can still install
@@ -82,9 +84,12 @@ and hold them. Yanked PyPI files are excluded; if no installable patch remains
 in a required minor, the job fails. At a major boundary (`x.0.0`), an explicit
 compatibility window must be defined rather than inferred from available SDKs.
 
-Two minors rather than one because the version of record does not say which
-release a build will become: just after 1.12.0 ships, `dev` still reads 1.12.0
-on its way to 1.13.0, whose N-1 is 1.12, while a 1.12.1 must still serve 1.11.
+Two minors rather than one because a build on `dev` can become either a new
+minor or a patch: just after 1.12.0 ships, `dev` still reads 1.12.0 on its way
+to 1.13.0, whose N-1 is 1.12, while a 1.12.1 must still serve 1.11. On the
+1.13.0 release PR, CI therefore tests published 1.12 and 1.11 SDKs against the
+1.13.0 server candidate. Later builds use the 1.13 and 1.12 SDKs once 1.13 is
+published.
 
 The Rust SDK (`crates/samyama-sdk`) is not published, so there is no previous
 release of it for a user to hold; the guarantee starts when it is published.

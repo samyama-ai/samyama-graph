@@ -31,7 +31,7 @@ use crate::graph::store::GraphStore;
 use crate::graph::types::NodeId;
 use codec::{json_to_property, property_to_json};
 use format::{
-    ExportStats, ImportStats, SnapshotEdge, SnapshotHeader, SnapshotHierarchyIndex,
+    ExportStats, ImportStats, PropertyConflict, UnusedDedupKey, SnapshotEdge, SnapshotHeader, SnapshotHierarchyIndex,
     SnapshotIndexCatalog, SnapshotNode, SNAPSHOT_VERSION,
 };
 
@@ -733,6 +733,45 @@ pub fn edit_header(
     Ok(header)
 }
 
+/// A dedup rule, `[Label.]name[=alias|alias...]`.
+///
+/// A label scopes it to that label (#1946). Aliases are other property names
+/// for the same identifier (#1948): UMLS writes `cui` and SIDER `umls_cui`,
+/// so `cui=umls_cui` lets the two meet. Every name's values are indexed under
+/// the rule, so a value found under one name matches the same value under
+/// another. The names are tried in the order given, the first one first.
+struct DedupRule<'a> {
+    label: Option<&'a str>,
+    names: Vec<&'a str>,
+}
+
+fn parse_dedup_rule(rule: &str) -> DedupRule<'_> {
+    let (head, aliases) = match rule.split_once('=') {
+        Some((head, aliases)) => (head, Some(aliases)),
+        None => (rule, None),
+    };
+    let (label, name) = match head.split_once('.') {
+        Some((label, name)) => (Some(label.trim()), name.trim()),
+        None => (None, head.trim()),
+    };
+    let mut names = vec![name];
+    if let Some(aliases) = aliases {
+        names.extend(aliases.split('|').map(str::trim));
+    }
+    DedupRule { label, names }
+}
+
+/// The property names a rule reads on a node with these labels. A qualified
+/// rule is eligible only for its named label; bare keys retain the historical
+/// behavior for every label.
+fn dedup_properties<'a>(rule: &'a str, labels: &[String]) -> Vec<&'a str> {
+    let rule = parse_dedup_rule(rule);
+    match rule.label {
+        Some(label) if !labels.iter().any(|l| l == label) => Vec::new(),
+        _ => rule.names,
+    }
+}
+
 /// The dedup keys a store node already carries, as `(key, normalized value)` in the order
 /// the index has always inserted them: per key, the row property and then the column.
 fn existing_dedup_entries(
@@ -743,18 +782,21 @@ fn existing_dedup_entries(
     let normalize_dedup = |s: &str| -> String { s.trim().to_lowercase() };
     let mut out = Vec::new();
     let Some(node) = store.get_node(id) else { return out };
+    let labels: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
     for &key in dedup_keys {
-        match node.get_property(key) {
-            Some(PropertyValue::String(s)) => out.push((key.to_string(), normalize_dedup(s))),
-            Some(PropertyValue::Integer(i)) => out.push((key.to_string(), i.to_string())),
-            _ => {}
-        }
-        match store.node_columns.get_property(id.as_u64() as usize, key) {
-            PropertyValue::String(s) if !s.is_empty() => {
-                out.push((key.to_string(), normalize_dedup(&s)))
+        for property in dedup_properties(key, &labels) {
+            match node.get_property(property) {
+                Some(PropertyValue::String(s)) => out.push((key.to_string(), normalize_dedup(s))),
+                Some(PropertyValue::Integer(i)) => out.push((key.to_string(), i.to_string())),
+                _ => {}
             }
-            PropertyValue::Integer(i) => out.push((key.to_string(), i.to_string())),
-            _ => {}
+            match store.node_columns.get_property(id.as_u64() as usize, property) {
+                PropertyValue::String(s) if !s.is_empty() => {
+                    out.push((key.to_string(), normalize_dedup(&s)))
+                }
+                PropertyValue::Integer(i) => out.push((key.to_string(), i.to_string())),
+                _ => {}
+            }
         }
     }
     out
@@ -852,6 +894,16 @@ impl DedupPrepopulate {
     }
 }
 
+/// How parallel edges manufactured by node merging are handled.
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeEdges {
+    Never,
+    #[default]
+    Unpropertied,
+    Always,
+}
+
 /// Import with entity deduplication on specified property keys.
 pub fn import_tenant_with_dedup(
     store: &mut GraphStore,
@@ -868,6 +920,17 @@ pub fn import_tenant_with_dedup_options(
     dedup_keys: &[&str],
     allow_conflicts: bool,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
+    import_tenant_with_merge_policy(store, reader, dedup_keys, allow_conflicts, MergeEdges::default())
+}
+
+/// Import with explicit node-conflict and parallel-edge policies.
+pub fn import_tenant_with_merge_policy(
+    store: &mut GraphStore,
+    reader: impl Read,
+    dedup_keys: &[&str],
+    allow_conflicts: bool,
+    merge_edges: MergeEdges,
+) -> Result<ImportStats, Box<dyn std::error::Error>> {
     // A failed import used to leave whatever it had already applied in the graph: a
     // truncated snapshot returned "unexpected end of file" *and* several million nodes,
     // so the caller saw an error and a partially-populated graph, with no way to tell how
@@ -876,7 +939,7 @@ pub fn import_tenant_with_dedup_options(
     // What a dedup merge added to nodes that existed before this import, undone
     // too: a refused import must leave existing nodes as it found them (#1604).
     let mut merged: Vec<MergeUndo> = Vec::new();
-    match import_tenant_inner(store, reader, dedup_keys, allow_conflicts, &mut created_nodes, &mut merged) {
+    match import_tenant_inner(store, reader, dedup_keys, allow_conflicts, merge_edges, &mut created_nodes, &mut merged) {
         Ok(stats) => Ok(stats),
         Err(e) => {
             for undo in merged.into_iter().rev() {
@@ -909,6 +972,7 @@ fn import_tenant_inner(
     reader: impl Read,
     dedup_keys: &[&str],
     allow_conflicts: bool,
+    merge_edges: MergeEdges,
     created_nodes: &mut Vec<crate::graph::NodeId>,
     merged: &mut Vec<MergeUndo>,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
@@ -921,6 +985,19 @@ fn import_tenant_inner(
         .next()
         .ok_or("empty snapshot file: missing header")??;
     let header: SnapshotHeader = serde_json::from_str(&header_line)?;
+    // Validate rules before creating or merging any rows.
+    for rule in dedup_keys {
+        let parsed = parse_dedup_rule(rule);
+        if let Some(label) = parsed.label {
+            if label.is_empty() || !header.labels.iter().any(|l| l == label) {
+                return Err(format!("unknown snapshot label or empty property in dedup rule {rule:?}").into());
+            }
+        }
+        if parsed.names.iter().any(|name| name.is_empty()) {
+            return Err(format!("empty property in dedup rule {rule:?}").into());
+        }
+    }
+
     // Judged before this import writes anything: whether sources the store
     // already holds still describe its data (#1911). Afterwards the import's
     // own writes would make them all look changed.
@@ -947,9 +1024,22 @@ fn import_tenant_inner(
     let mut imported_edge_count: u64 = 0;
     let mut merged_node_count: u64 = 0;
     let mut merges_refused_conflicting: u64 = 0;
+    let mut edges_deduplicated = 0u64;
+    let mut parallel_edges_kept = 0u64;
+    let mut merged_targets = HashSet::new();
+    let mut indexed_edge_sources = HashSet::new();
+    // Presence plus whether any existing parallel has no properties.
+    let mut merge_edge_index: HashMap<(NodeId, NodeId, String), bool> = HashMap::new();
     // Which key did the merging, and how many records landed on each target
     // (#1808). A bare count cannot distinguish duplicate pairs from a collapse.
     let mut merges_by_key: HashMap<String, u64> = HashMap::new();
+    // Properties a merge kept from the existing node over a different incoming
+    // value, per key, with a few examples (#1951).
+    let mut property_conflicts: HashMap<String, u64> = HashMap::new();
+    let mut property_conflict_samples: Vec<PropertyConflict> = Vec::new();
+    // Incoming nodes carrying a value for each rule, so a rule that merged
+    // nothing can say whether it had anything to merge on (#1948).
+    let mut dedup_key_carriers: HashMap<&str, u64> = HashMap::new();
     let mut merge_group_sizes: HashMap<NodeId, u64> = HashMap::new();
     let mut imported_labels: HashSet<String> = HashSet::new();
     let mut imported_edge_types: HashSet<String> = HashSet::new();
@@ -1038,8 +1128,20 @@ fn import_tenant_inner(
             // the first value *found*, so an identifier listed first does not
             // shield a free-text key listed after it (#1808).
             let mut matched_key: Option<&str> = None;
+            for &key in dedup_keys.iter() {
+                let carried = dedup_properties(key, &snap_labels).iter().any(|p| {
+                    matches!(
+                        snap_node.props.get(*p),
+                        Some(serde_json::Value::String(_) | serde_json::Value::Number(_))
+                    )
+                });
+                if carried {
+                    *dedup_key_carriers.entry(key).or_insert(0) += 1;
+                }
+            }
             'dedup: for &key in dedup_keys.iter() {
-                if let Some(json_val) = snap_node.props.get(key) {
+                for property in dedup_properties(key, &snap_labels) {
+                    let Some(json_val) = snap_node.props.get(property) else { continue };
                     let val_str = match json_val {
                         serde_json::Value::String(s) => normalize_dedup(s),
                         serde_json::Value::Number(n) => n.to_string(),
@@ -1060,9 +1162,22 @@ fn import_tenant_inner(
             if !allow_conflicts {
                 if let Some(eid) = existing_id {
                     let conflict = dedup_keys.iter().any(|key| {
-                        let Some(incoming) = snap_node.props.get(*key) else { return false };
-                        let Some(existing) = store.node_property(eid, key) else { return false };
-                        if existing == PropertyValue::Null || incoming.is_null() { return false; }
+                        // Each side's value under the first of the rule's
+                        // names it carries: with aliases the two sides may
+                        // spell the key differently (#1948).
+                        let properties = dedup_properties(key, &snap_labels);
+                        let Some(incoming) = properties
+                            .iter()
+                            .find_map(|p| snap_node.props.get(*p).filter(|v| !v.is_null()))
+                        else {
+                            return false;
+                        };
+                        let Some(existing) = properties
+                            .iter()
+                            .find_map(|p| store.node_property(eid, p).filter(|v| *v != PropertyValue::Null))
+                        else {
+                            return false;
+                        };
                         let old = existing.to_json();
                         match (&old, incoming) {
                             (serde_json::Value::String(a), serde_json::Value::String(b)) =>
@@ -1082,6 +1197,7 @@ fn import_tenant_inner(
                 // Reuse existing node — remap the ID AND merge properties
                 id_remap.insert(snap_node.id, eid);
                 merged_node_count += 1;
+                merged_targets.insert(eid);
                 if let Some(key) = matched_key {
                     *merges_by_key.entry(key.to_string()).or_insert(0) += 1;
                 }
@@ -1095,6 +1211,27 @@ fn import_tenant_inner(
 
                 // Merge properties from snapshot into existing node (additive only)
                 for (key, json_val) in &snap_node.props {
+                    // First writer wins. When both sides have the key and
+                    // disagree, count what is dropped (#1951).
+                    let held = store.node_columns.get_property(eid.as_u64() as usize, key);
+                    if held != PropertyValue::Null && !json_val.is_null() {
+                        // Both sides through the same rendering, so a value
+                        // the snapshot encodes (a date, say) compares as the
+                        // store holds it.
+                        let kept = held.to_json();
+                        let incoming = json_to_property(json_val).to_json();
+                        if !same_merged_value(&kept, &incoming) {
+                            let n = property_conflicts.entry(key.clone()).or_insert(0);
+                            *n += 1;
+                            if *n <= PROPERTY_CONFLICT_SAMPLES as u64 {
+                                property_conflict_samples.push(PropertyConflict {
+                                    key: key.clone(),
+                                    kept: sample_value(kept),
+                                    discarded: sample_value(incoming),
+                                });
+                            }
+                        }
+                    }
                     let pv = json_to_property(json_val);
                     match &pv {
                         PropertyValue::String(_) | PropertyValue::Integer(_)
@@ -1224,7 +1361,8 @@ fn import_tenant_inner(
                 }
                 // Register in dedup index
                 for &key in dedup_keys {
-                    if let Some(json_val) = snap_node.props.get(key) {
+                    for property in dedup_properties(key, &snap_labels) {
+                        let Some(json_val) = snap_node.props.get(property) else { continue };
                         let val_str = match json_val {
                             serde_json::Value::String(s) => normalize_dedup(s),
                             serde_json::Value::Number(n) => n.to_string(),
@@ -1252,7 +1390,10 @@ fn import_tenant_inner(
                 }
                 // Register in dedup index
                 for &key in dedup_keys {
-                    if let Some(pv) = store.get_node(new_id).and_then(|n| n.get_property(key)) {
+                    for property in dedup_properties(key, &snap_labels) {
+                        let Some(pv) = store.get_node(new_id).and_then(|n| n.get_property(property)) else {
+                            continue;
+                        };
                         let val_str = match pv {
                             PropertyValue::String(s) => normalize_dedup(s),
                             PropertyValue::Integer(i) => i.to_string(),
@@ -1298,6 +1439,32 @@ fn import_tenant_inner(
                 )
             })?;
 
+            // Ordinary multigraph writes are unchanged. Only endpoints reused
+            // through entity deduplication can manufacture merge duplicates.
+            if merged_targets.contains(new_src) && merged_targets.contains(new_tgt) {
+                if indexed_edge_sources.insert(*new_src) {
+                    for edge in store.get_outgoing_edges(*new_src) {
+                        if merged_targets.contains(&edge.target) {
+                            let unpropertied = store.edge_properties_merged(edge.id).is_empty();
+                            merge_edge_index.entry((*new_src, edge.target, edge.edge_type.as_str().to_string()))
+                                .and_modify(|empty| *empty |= unpropertied).or_insert(unpropertied);
+                        }
+                    }
+                }
+                if let Some(&has_unpropertied) = merge_edge_index.get(&(*new_src, *new_tgt, snap_edge.edge_type.clone())) {
+                    let collapse = match merge_edges {
+                        MergeEdges::Never => false,
+                        MergeEdges::Always => true,
+                        MergeEdges::Unpropertied => snap_edge.props.is_empty() && has_unpropertied,
+                    };
+                    if collapse {
+                        edges_deduplicated += 1;
+                        continue;
+                    }
+                    parallel_edges_kept += 1;
+                }
+            }
+
             if use_stubs && snap_edge.props.is_empty() {
                 // v2: use lightweight stub (adjacency-only, no Edge object)
                 store.create_edge_stub(*new_src, *new_tgt, snap_edge.edge_type.as_str())?;
@@ -1321,6 +1488,11 @@ fn import_tenant_inner(
             }
 
             imported_edge_types.insert(snap_edge.edge_type.clone());
+            if indexed_edge_sources.contains(new_src) && merged_targets.contains(new_tgt) {
+                merge_edge_index.entry((*new_src, *new_tgt, snap_edge.edge_type.clone()))
+                    .and_modify(|empty| *empty |= snap_edge.props.is_empty())
+                    .or_insert(snap_edge.props.is_empty());
+            }
             imported_edge_count += 1;
         } else if line.contains("\"t\":\"i\"") {
             // Index catalog (#1506). Deferred like the hierarchy declarations:
@@ -1355,6 +1527,33 @@ fn import_tenant_inner(
     let largest_merge_group = merge_group_sizes.values().copied().max().map_or(0, |m| m + 1);
     let mut merges_by_key_sorted: Vec<(String, u64)> = merges_by_key.into_iter().collect();
     merges_by_key_sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut property_conflicts_by_key: Vec<(String, u64)> = property_conflicts.into_iter().collect();
+    property_conflicts_by_key.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let dedup_keys_unused: Vec<UnusedDedupKey> = dedup_keys
+        .iter()
+        .filter(|key| !merges_by_key_sorted.iter().any(|(k, _)| k == *key))
+        .map(|key| UnusedDedupKey {
+            key: key.to_string(),
+            incoming_nodes_with_key: dedup_key_carriers.get(key).copied().unwrap_or(0),
+        })
+        .collect();
+    // Printed whether or not anything merged: a load where every key is dead
+    // is the one that most needs to say so (#1948).
+    if !dedup_keys_unused.is_empty() {
+        let unused = dedup_keys_unused
+            .iter()
+            .map(|u| match u.incoming_nodes_with_key {
+                0 => format!("{} (on no incoming node)", u.key),
+                n => format!("{} (on {n} incoming nodes, none matched)", u.key),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "[dedup] keys that merged nothing: {unused}. A key on no incoming node is a typo, \
+             an absent property or a label the rule does not name; one that never matched may \
+             be spelled differently in the existing data (alias it: `cui=umls_cui`)."
+        );
+    }
 
     if merged_node_count > 0 {
         // Not "duplicate nodes": that is the claim under test. A merge means two
@@ -1388,6 +1587,18 @@ fn import_tenant_inner(
                 .unwrap_or_else(|| "unknown".to_string());
             eprintln!(
                 "[dedup] WARNING: {lost_pct:.1}% of this source merged away, above the                  {SUSPECT_MERGE_FRACTION:.0}% a well-identified corpus would show. Most merges                  came from {worst}. If that key is not an entity identifier -- a gene symbol, a                  display name -- it is collapsing distinct entities, and a larger merge count is                  the symptom, not the result. Re-run with identifier keys only to compare."
+            );
+        }
+        // Which source's value survived depends on the order the sources
+        // were imported in; this says how often that mattered (#1951).
+        if !property_conflicts_by_key.is_empty() {
+            let by_key = property_conflicts_by_key
+                .iter()
+                .map(|(k, n)| format!("{k}={n}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!(
+                "[dedup] property conflicts (existing value kept, incoming dropped): {by_key}"
             );
         }
         if largest_merge_group > 2 {
@@ -1508,15 +1719,51 @@ fn import_tenant_inner(
         edge_count: imported_edge_count,
         merged_count: merged_node_count,
         merges_refused_conflicting,
+        edges_deduplicated,
+        parallel_edges_kept,
         merge_groups,
         largest_merge_group,
         merges_by_key: merges_by_key_sorted,
+        property_conflicts_by_key,
+        property_conflict_samples,
+        dedup_keys_unused,
         labels,
         edge_types,
         hierarchy_count,
         indexes,
         index_conflicts,
     })
+}
+
+/// How many conflicts per key [`ImportStats::property_conflict_samples`]
+/// keeps (#1951).
+pub const PROPERTY_CONFLICT_SAMPLES: usize = 5;
+
+/// Whether a merge's existing and incoming values are the same value: strings
+/// as the dedup lookup compares them, numbers by value, anything else exactly
+/// (#1951).
+fn same_merged_value(kept: &serde_json::Value, incoming: &serde_json::Value) -> bool {
+    use serde_json::Value as J;
+    match (kept, incoming) {
+        (J::String(a), J::String(b)) => a.trim().to_lowercase() == b.trim().to_lowercase(),
+        (J::Number(a), J::Number(b)) => match (a.as_i64(), b.as_i64()) {
+            (Some(x), Some(y)) => x == y,
+            _ => a.as_f64() == b.as_f64(),
+        },
+        _ => kept == incoming,
+    }
+}
+
+/// A value as a conflict sample shows it. Long strings are cut, so a sample
+/// stays small whatever the property holds.
+fn sample_value(value: serde_json::Value) -> serde_json::Value {
+    const MAX_CHARS: usize = 200;
+    match value {
+        serde_json::Value::String(s) if s.chars().count() > MAX_CHARS => {
+            serde_json::Value::String(format!("{}…", s.chars().take(MAX_CHARS).collect::<String>()))
+        }
+        other => other,
+    }
 }
 
 /// The target's definition that `incoming` would silently replace, if any.

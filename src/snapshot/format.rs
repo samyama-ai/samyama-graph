@@ -224,6 +224,24 @@ pub struct SnapshotIndexCatalog {
     pub definitions: Vec<crate::index::catalog::IndexDefinition>,
 }
 
+/// One property a merge kept from the node already in the graph, with the
+/// incoming value it dropped (#1951).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropertyConflict {
+    pub key: String,
+    pub kept: serde_json::Value,
+    pub discarded: serde_json::Value,
+}
+
+/// A dedup key that merged nothing in an import (#1948).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnusedDedupKey {
+    /// The rule as given, aliases included.
+    pub key: String,
+    /// Incoming nodes carrying a value under any of the rule's names.
+    pub incoming_nodes_with_key: u64,
+}
+
 /// Stats returned from import
 #[derive(Debug)]
 pub struct ImportStats {
@@ -232,6 +250,10 @@ pub struct ImportStats {
     pub merged_count: u64,
     /// Candidate merges refused because another declared identifier differed.
     pub merges_refused_conflicting: u64,
+    /// Parallel edges skipped under the explicit merge-edge policy.
+    pub edges_deduplicated: u64,
+    /// Parallel edges retained because their evidence or policy differs.
+    pub parallel_edges_kept: u64,
     /// How many distinct nodes absorbed at least one dedup merge (#1808).
     ///
     /// `merged_count` alone cannot tell a good key from a bad one: 300 merges
@@ -252,6 +274,31 @@ pub struct ImportStats {
     /// and the lookup falls through to `symbol`. This names the key that actually
     /// did the merging.
     pub merges_by_key: Vec<(String, u64)>,
+    /// Per property key, how many merges found a value on both nodes and the
+    /// two disagreed, highest first (#1951).
+    ///
+    /// The node already in the graph keeps its value and the incoming one is
+    /// dropped, so which value survives depends on import order. These counts
+    /// are how much was dropped. Strings are compared as the dedup lookup
+    /// compares them, trimmed and case-folded, and numbers by value, so
+    /// `"TP53"` against `" tp53 "` or `1` against `1.0` is not a conflict. A
+    /// property only one side carries is the ordinary additive merge.
+    pub property_conflicts_by_key: Vec<(String, u64)>,
+    /// Up to [`PROPERTY_CONFLICT_SAMPLES`] conflicts per key, in import order,
+    /// to look at (#1951).
+    ///
+    /// [`PROPERTY_CONFLICT_SAMPLES`]: crate::snapshot::PROPERTY_CONFLICT_SAMPLES
+    pub property_conflict_samples: Vec<PropertyConflict>,
+    /// The dedup keys that merged nothing in this import, in the order given
+    /// (#1948).
+    ///
+    /// A key that never fires is otherwise silent: nine of thirteen keys in
+    /// one federation load merged nothing, and the load reported success.
+    /// `incoming_nodes_with_key` tells the two causes apart. Zero means no
+    /// incoming node carried the property under any of the key's names: a
+    /// typo, an absent property, or a label the rule does not name. More than
+    /// zero means the values were there and none matched an existing node.
+    pub dedup_keys_unused: Vec<UnusedDedupKey>,
     pub labels: Vec<String>,
     pub edge_types: Vec<String>,
     /// Hierarchy indexes rebuilt from declarations in the snapshot.

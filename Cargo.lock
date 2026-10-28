@@ -2004,7 +2004,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core",
 ]
 
 [[package]]
@@ -3943,7 +3943,7 @@ dependencies = [
 
 [[package]]
 name = "samyama"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4014,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-cli"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -4030,7 +4030,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-convert"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "samyama",
  "serde",
@@ -4040,7 +4040,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-gpu"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "bytemuck",
  "cudarc",
@@ -4051,7 +4051,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-graph-algorithms"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "ndarray",
  "rand 0.8.8",
@@ -4064,7 +4064,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-optimization"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "criterion",
  "ndarray",
@@ -4077,7 +4077,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-sdk"
-version = "1.12.0"
+version = "1.13.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5257,7 +5257,7 @@ dependencies = [
  "web-sys",
  "wgpu-types",
  "windows 0.58.0",
- "windows-core 0.58.0",
+ "windows-core",
 ]
 
 [[package]]
@@ -5324,7 +5324,7 @@ version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6"
 dependencies = [
- "windows-core 0.58.0",
+ "windows-core",
  "windows-targets 0.52.6",
 ]
 
@@ -5334,24 +5334,11 @@ version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ba6d44ec8c2591c134257ce647b7ea6b20335bf6379a27dac5f1641fcf59f99"
 dependencies = [
- "windows-implement 0.58.0",
- "windows-interface 0.58.0",
+ "windows-implement",
+ "windows-interface",
  "windows-result 0.2.0",
  "windows-strings 0.1.0",
  "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-core"
-version = "0.62.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
-dependencies = [
- "windows-implement 0.60.2",
- "windows-interface 0.59.3",
- "windows-link",
- "windows-result 0.4.1",
- "windows-strings 0.5.1",
 ]
 
 [[package]]
@@ -5366,32 +5353,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-implement"
-version = "0.60.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "windows-interface"
 version = "0.58.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "053c4c462dc91d3b1504c6fe5a726dd15e216ba718e84a0e46a88fbe5ded3515"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "windows-interface"
-version = "0.59.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
 dependencies = [
  "proc-macro2",
  "quote",

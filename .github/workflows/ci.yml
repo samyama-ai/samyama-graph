@@ -983,9 +983,10 @@ jobs:
   # docs/VERSIONING.md promises that the previous minor's SDKs work against the
   # current server. This installs the Python and TypeScript SDKs AS PUBLISHED --
   # from PyPI and npm, not from this tree -- for the latest patch of each of the
-  # current and immediately preceding minors, and runs a suite through each
-  # against the release binary `test` built. Versions come from Cargo.toml and package
-  # indexes on every run (sdk/compat/run.py); nothing here names one.
+  # current and immediately preceding published minors, and runs a suite through
+  # each against the release binary `test` built. On a manifest version bump, the
+  # new SDKs do not exist until after the release, so use the base version as the
+  # ceiling. The check remains strict about the two required published minors.
   #
   # In `ci-ok`'s needs: a compatibility promise that does not block a merge that
   # breaks it is not enforced, and "enforced in CI" is the requirement.
@@ -997,6 +998,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Select the published SDK window
+        id: sdk_window
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          current=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          ceiling="$current"
+          if [ -n "${BASE_SHA:-}" ] && [ "$BASE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git fetch --no-tags origin "$BASE_SHA" --depth=1
+            base=$(git show "$BASE_SHA:Cargo.toml" | python3 -c 'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])')
+            if [ "$base" != "$current" ]; then
+              ceiling="$base"
+              echo "manifest version changed $base -> $current; checking SDKs through $ceiling"
+            fi
+          fi
+          echo "ceiling=$ceiling" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - uses: actions/setup-node@v4
@@ -1034,7 +1052,8 @@ jobs:
       - name: Run the published SDKs against this build
         run: |
           python3 -m unittest discover -s sdk/compat -p 'test_version_selection.py'
-          python3 sdk/compat/run.py --bin target/release/samyama
+          python3 sdk/compat/run.py --bin target/release/samyama \
+            --version-ceiling '${{ steps.sdk_window.outputs.ceiling }}'
 
   # The one check branch protection should require.
   #
@@ -1083,6 +1102,50 @@ jobs:
           python3 scripts/check_triage_role_lookup.py --repo "$GITHUB_REPOSITORY"
           --maintainer "$ROLE_MAINTAINER" --outside-user "$ROLE_OUTSIDE_USER"
 
+  # The root workspace `exclude`s sdk/python, so nothing in the matrix above
+  # builds it and nothing checked its separate Cargo.lock. That lock drifted for
+  # an entire release cycle -- it still described Arrow 53 after #1965 moved the
+  # engine to Arrow 60, and it still named the previous version after a release
+  # bump -- and the first thing to notice was publish-pypi.yml building wheels
+  # with `--locked`, after the tag existed. Resolving a lock takes seconds here;
+  # discovering it there costs a release's wheels (v1.13.0 shipped the sdist
+  # alone). Reads `exclude` rather than naming sdk/python, so a second excluded
+  # workspace is covered the day it is added.
+  #
+  # Unfiltered on purpose: the drift that caused this came from a root Cargo.lock
+  # change, not from a file under sdk/python, so any path filter narrow enough to
+  # look relevant would have skipped the commit that broke it.
+  excluded-lockfiles:
+    name: excluded workspace lockfiles are current
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Every excluded workspace resolves with --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t EXCLUDED < <(python3 -c 'import tomllib; print("\n".join(tomllib.load(open("Cargo.toml", "rb"))["workspace"].get("exclude", [])))')
+          if [ "${#EXCLUDED[@]}" -eq 0 ]; then
+            echo "the root workspace excludes nothing"
+            exit 0
+          fi
+          for ws in "${EXCLUDED[@]}"; do
+            [ -f "$ws/Cargo.toml" ] || continue
+            if [ ! -f "$ws/Cargo.lock" ]; then
+              echo "::error::$ws is its own workspace and has no committed Cargo.lock, but publish-pypi.yml builds it with --locked"
+              exit 1
+            fi
+            echo "checking $ws"
+            if ! cargo metadata --manifest-path "$ws/Cargo.toml" --format-version 1 --locked >/dev/null; then
+              echo "::error::$ws/Cargo.lock is stale. Refresh it with: cargo metadata --manifest-path $ws/Cargo.toml >/dev/null && git add $ws/Cargo.lock"
+              exit 1
+            fi
+          done
+          echo "every excluded workspace lockfile is current"
+
   ci-ok:
     name: ci-ok
     # always() is load-bearing. Without it a failed dependency SKIPS this job, and
@@ -1099,6 +1162,7 @@ jobs:
       - snapshot-portability
       - snapshot-portability-read
       - sdk-compat
+      - excluded-lockfiles
     runs-on: ubuntu-latest
     steps:
       - name: Every suite either succeeded or was skipped

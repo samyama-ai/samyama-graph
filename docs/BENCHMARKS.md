@@ -152,15 +152,15 @@ cargo run --release --example tck_runner -- --features <openCypher>/tck/features
 | | |
 |---|---:|
 | scenarios in the TCK | 3,897 |
-| **evaluated** by the harness | **3,762** (96.5%) |
-| pass | 3,659 |
-| skipped | 135 |
-| **pass rate, of evaluated** | **97.3%** |
+| **evaluated** by the harness | **3,847** (98.7%) |
+| pass | 3,845 |
+| skipped | 50 |
+| **pass rate, of evaluated** | **99.9%** |
 | gate `CH-TCK ≥ 85%` | **met** |
-| gate *≥ best competitor* | **met** — 17.6 points ahead |
-| wrong answers, of the 103 failures | 79 |
+| gate *≥ best competitor* | **met** — 17.6 points ahead (judge path, 3,766 scenarios, measured at `7708d60`; not re-run at `d2df42a`) |
+| wrong answers, of the 2 failures | see the `CH-TCK` envelope for `d2df42a` |
 
-Measured at `7708d60`; the CI floor is a **count**, currently `--min-pass 3659`,
+Measured at `d2df42a`; the CI floor is a **count**, currently `--min-pass 3700`,
 and rises with each merge that earns it.
 
 The last row is tracked separately from the pass rate because the two failure
@@ -194,7 +194,7 @@ executes and renders:
 | Memgraph | 89.8% | 65.9% |
 | FalkorDB | 89.1% | 65.7% |
 
-The Samyama row reads **97.0%** where the table above reads 97.3%, and both are
+The Samyama row, measured at `7708d60`, reads **97.0%** where that run's direct count read 97.3%, and both were
 right: the cross-engine comparison scores 3,766 scenarios through the judge
 path, the direct run evaluates 3,762. The judge scores five the direct run
 skips and passes five fewer, identically across measurements. The judge figure

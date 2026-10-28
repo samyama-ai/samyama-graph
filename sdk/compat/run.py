@@ -9,14 +9,14 @@ built from this checkout.
 
     python3 sdk/compat/run.py --bin target/release/samyama
 
-Which versions: the latest published patch of the minor release in the
-version of record (`Cargo.toml`) and its immediately preceding minor. Two, not
-one, because the version of record does not say which release this build will
-become. Right after `1.12.0` ships, `dev` still reads `1.12.0` and is heading
-for `1.13.0`, whose N-1 is `1.12`; a build that becomes `1.12.1` must still
-serve `1.11`. Testing both covers either. Nothing here names a version: they
-are read from the manifest and the package indexes on every run, so the check
-moves forward with each release by itself.
+Which versions: by default, the latest published patch of the minor release in
+the version of record (`Cargo.toml`) and its immediately preceding minor. A
+release PR can pass `--version-ceiling` with the base version: the candidate
+minor's SDKs do not exist until the release publishes them, so CI tests that
+base minor and its predecessor against the candidate server. The required
+minors remain strict in either mode. Nothing here names package versions: they
+are read from the manifest (or supplied ceiling) and package indexes on every
+run, so the check moves forward with each release by itself.
 
 A version that cannot be found is a failure, not a skip. A compatibility check
 that passes because it found nothing to test is the failure mode of every
@@ -116,8 +116,8 @@ def latest_of_recent_minors(published: list[Version], ceiling: Version, n: int) 
     return [newest[k] for k in required]
 
 
-def resolve() -> dict[str, list[Version]]:
-    ceiling = version_of_record()
+def resolve(ceiling: Version | None = None) -> dict[str, list[Version]]:
+    ceiling = ceiling or version_of_record()
     chosen = {}
     for sdk, published in (("python", pypi_versions), ("typescript", npm_versions)):
         try:
@@ -217,12 +217,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--bin", type=Path, default=REPO / "target" / "release" / "samyama",
                     help="server binary built from this checkout")
+    ap.add_argument("--version-ceiling", type=str,
+                    help="highest SDK minor to test (defaults to Cargo.toml; use the base version for a release bump)")
     ap.add_argument("--resolve-only", action="store_true",
                     help="print the versions that would be tested, and stop")
     args = ap.parse_args()
 
-    chosen = resolve()
+    ceiling = parse(args.version_ceiling) if args.version_ceiling else None
+    if args.version_ceiling and ceiling is None:
+        sys.exit(f"--version-ceiling must be X.Y.Z, got {args.version_ceiling!r}")
+    chosen = resolve(ceiling)
     print(f"version of record: {show(version_of_record())}")
+    print(f"published SDK ceiling: {show(ceiling or version_of_record())}")
     for sdk, versions in chosen.items():
         print(f"{sdk}: testing published {', '.join(show(v) for v in versions)}")
     if args.resolve_only:
