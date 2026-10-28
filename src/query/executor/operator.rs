@@ -14398,6 +14398,9 @@ pub struct VectorSearchOperator {
     /// The part of a following WHERE that names only the node, applied
     /// inside the search so it decides which nodes count towards k (#1969).
     filter: Option<Expression>,
+    /// This query's search width, from `{ef: ...}` (#1971). `None` is the
+    /// index's default.
+    ef: Option<usize>,
     /// Search results
     results: Vec<(NodeId, f32)>,
     /// Current index in results
@@ -14421,6 +14424,7 @@ impl VectorSearchOperator {
             node_var,
             score_var,
             filter: None,
+            ef: None,
             results: Vec::new(),
             current: 0,
         }
@@ -14432,6 +14436,12 @@ impl VectorSearchOperator {
         self
     }
 
+    /// Search with this width rather than the index's default (#1971).
+    pub fn with_ef(mut self, ef: Option<usize>) -> Self {
+        self.ef = ef;
+        self
+    }
+
     fn initialize(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         if !self.results.is_empty() || self.current > 0 {
             return Ok(());
@@ -14439,7 +14449,14 @@ impl VectorSearchOperator {
 
         let Some(filter) = &self.filter else {
             self.results = store
-                .vector_search(&self.label, &self.property_key, &self.query_vector, self.k)
+                .vector_search_where(
+                    &self.label,
+                    &self.property_key,
+                    &self.query_vector,
+                    self.k,
+                    self.ef,
+                    |_| true,
+                )
                 .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
             return Ok(());
         };
@@ -14449,7 +14466,7 @@ impl VectorSearchOperator {
         // "no match".
         let error = std::cell::RefCell::new(None);
         let results = store
-            .vector_search_where(&self.label, &self.property_key, &self.query_vector, self.k, |id| {
+            .vector_search_where(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, |id| {
                 if error.borrow().is_some() {
                     return false;
                 }
@@ -14495,18 +14512,16 @@ impl PhysicalOperator for VectorSearchOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
+        let mut details = format!("{}.{}, k={}", self.label, self.property_key, self.k);
+        if let Some(ef) = self.ef {
+            details.push_str(&format!(", ef={ef}"));
+        }
+        if let Some(f) = &self.filter {
+            details.push_str(&format!(", filter: {}", format_expression(f)));
+        }
         OperatorDescription {
             name: "VectorSearch".to_string(),
-            details: match &self.filter {
-                Some(f) => format!(
-                    "{}.{}, k={}, filter: {}",
-                    self.label,
-                    self.property_key,
-                    self.k,
-                    format_expression(f)
-                ),
-                None => format!("{}.{}, k={}", self.label, self.property_key, self.k),
-            },
+            details,
             children: Vec::new(),
         }
     }
@@ -15433,6 +15448,8 @@ pub struct CreateVectorIndexOperator {
     /// dropped would build a full-precision index for a caller who asked for
     /// half of one and report success.
     quantization: crate::vector::index::Quantization,
+    /// `m`, `ef_construction` and the default `ef` (#1971).
+    params: crate::vector::HnswParams,
     /// The name the DDL gave this index, kept so Neo4j's form of
     /// `db.index.vector.queryNodes(indexName, k, vector)` can resolve it (#1041).
     name: Option<String>,
@@ -15447,6 +15464,7 @@ impl CreateVectorIndexOperator {
             dimensions,
             similarity,
             quantization: crate::vector::index::Quantization::None,
+            params: crate::vector::HnswParams::default(),
             name: None,
             executed: false,
         }
@@ -15459,6 +15477,11 @@ impl CreateVectorIndexOperator {
 
     pub fn with_quantization(mut self, q: crate::vector::index::Quantization) -> Self {
         self.quantization = q;
+        self
+    }
+
+    pub fn with_params(mut self, params: crate::vector::HnswParams) -> Self {
+        self.params = params;
         self
     }
 }
@@ -15482,9 +15505,9 @@ impl PhysicalOperator for CreateVectorIndexOperator {
             _ => return Err(ExecutionError::RuntimeError(format!("Unsupported similarity metric: {}", self.similarity))),
         };
 
-        store.create_vector_index_named(self.name.as_deref(), self.label.as_str(),
-                                        &self.property_key, self.dimensions, metric,
-                                        self.quantization)
+        store.create_vector_index_with_params(self.name.as_deref(), self.label.as_str(),
+                                              &self.property_key, self.dimensions, metric,
+                                              self.quantization, self.params)
             .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
         // Backfill nodes that already carry the embedding. Registering the index without
@@ -15516,8 +15539,8 @@ impl PhysicalOperator for CreateVectorIndexOperator {
         OperatorDescription {
             name: "CreateVectorIndex".to_string(),
             details: format!(
-                "{} dims={} {} quantization={:?}",
-                named, self.dimensions, self.similarity, self.quantization
+                "{} dims={} {} quantization={:?} {}",
+                named, self.dimensions, self.similarity, self.quantization, self.params
             ),
             children: Vec::new(),
         }
@@ -15975,7 +15998,16 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .vector_index
                     .list_indices()
                     .into_iter()
-                    .map(|k| (k.label, k.property_key, "VECTOR".to_string())),
+                    .map(|k| {
+                        // With its HNSW parameters (#1971), in the bracket the
+                        // other kinds use for their name.
+                        let params = store
+                            .vector_index
+                            .get_index(&k.label, &k.property_key)
+                            .map(|i| i.read().unwrap().params())
+                            .unwrap_or_default();
+                        (k.label, k.property_key, format!("VECTOR[{params}]"))
+                    }),
             );
             // Full-text indexes too, or the only way to learn that one exists
             // is to search it and read the error naming the ones that do. The

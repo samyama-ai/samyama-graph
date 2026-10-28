@@ -1748,7 +1748,8 @@ impl QueryPlanner {
                     clause.dimensions,
                     clause.similarity.clone(),
                 ).with_name(clause.index_name.clone())
-                 .with_quantization(clause.quantization)),
+                 .with_quantization(clause.quantization)
+                 .with_params(clause.params)),
                 output_columns: vec![],
                 is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
@@ -3929,17 +3930,24 @@ impl QueryPlanner {
             // documentation, which is most of them — writes the second. Taking a name with
             // an established meaning and giving it a different one is the defect; accepting
             // both is the fix that does not break the queries already written against ours.
+            //
+            // Either form takes a trailing options map, `{ef: 200}` (#1971).
             let args = &call_clause.arguments;
-            let neo4j_form = args.len() == 3
-                && matches!(args.first(), Some(Expression::Literal(PropertyValue::String(_))))
+            let neo4j_form = matches!(args.first(), Some(Expression::Literal(PropertyValue::String(_))))
                 && matches!(args.get(1), Some(Expression::Literal(PropertyValue::Integer(_))));
+            let positional = if neo4j_form { 3 } else { 4 };
 
-            if args.len() < 3 || (args.len() == 3 && !neo4j_form) {
+            if args.len() < positional || args.len() > positional + 1 {
                 return Err(ExecutionError::PlanningError(
                     "db.index.vector.queryNodes takes either (label, property, queryVector, k) \
-                     or Neo4j's (indexName, k, queryVector)".to_string()
+                     or Neo4j's (indexName, k, queryVector), and optionally an options map \
+                     such as {ef: 200}".to_string()
                 ));
             }
+            let ef = match args.get(positional) {
+                Some(options) => vector_query_ef(options)?,
+                None => None,
+            };
 
             let (label, property, vector_arg, k_arg) = if neo4j_form {
                 let name = match &args[0] {
@@ -4002,7 +4010,8 @@ impl QueryPlanner {
 
             Ok(Box::new(
                 VectorSearchOperator::new(label, property, query_vector, k, node_var, score_var)
-                    .with_filter(vector_filter),
+                    .with_filter(vector_filter)
+                    .with_ef(ef),
             ))
         } else if call_clause.procedure_name == "db.checkIntegrity"
             || call_clause.procedure_name == "db.checkintegrity"
@@ -8423,6 +8432,48 @@ fn choose_anchor_index(
 
 /// Flatten an AND-chain expression into a list of individual predicates.
 /// E.g., `a AND b AND c` → `[a, b, c]`
+/// The `ef` of `db.index.vector.queryNodes`'s options map (#1971). Any other
+/// key is refused: an option the search ignored would answer at a width the
+/// caller did not ask for, and say nothing.
+fn vector_query_ef(options: &Expression) -> ExecutionResult<Option<usize>> {
+    let bad = |msg: String| ExecutionError::PlanningError(format!("db.index.vector.queryNodes: {msg}"));
+    let entries: Vec<(String, Option<i64>)> = match options {
+        Expression::MapExpr(entries) => entries
+            .iter()
+            .map(|(k, v)| {
+                let n = match v {
+                    Expression::Literal(PropertyValue::Integer(i)) => Some(*i),
+                    _ => None,
+                };
+                (k.clone(), n)
+            })
+            .collect(),
+        Expression::Literal(PropertyValue::Map(map)) => map
+            .iter()
+            .map(|(k, v)| {
+                let n = match v {
+                    PropertyValue::Integer(i) => Some(*i),
+                    _ => None,
+                };
+                (k.clone(), n)
+            })
+            .collect(),
+        _ => return Err(bad("the options must be a map literal, such as {ef: 200}".to_string())),
+    };
+    let mut ef = None;
+    for (key, value) in entries {
+        if key != "ef" {
+            return Err(bad(format!("unknown option `{key}`; the accepted option is `ef`")));
+        }
+        let value = value
+            .filter(|v| *v > 0)
+            .ok_or_else(|| bad("`ef` must be a positive integer literal".to_string()))?;
+        crate::vector::index::check_ef(value as usize).map_err(bad)?;
+        ef = Some(value as usize);
+    }
+    Ok(ef)
+}
+
 fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
     match expr {
         Expression::Binary { left, op: BinaryOp::And, right } => {
