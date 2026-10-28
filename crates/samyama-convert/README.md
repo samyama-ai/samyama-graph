@@ -25,10 +25,10 @@ exit codes, is [docs/MOVING-DATA.md](https://github.com/samyama-ai/samyama-graph
 | Format | Extensions | Read | Write |
 |---|---|---|---|
 | .sgsnap | `.sgsnap` | yes | yes |
-| Turtle | `.ttl` | not yet | not yet |
-| N-Triples | `.nt` | not yet | not yet |
-| RDF/XML | `.rdf`, `.owl`, `.xml` | not yet | not yet |
-| JSON-LD | `.jsonld` | not yet | not yet |
+| Turtle | `.ttl` | yes | yes |
+| N-Triples | `.nt` | yes | yes |
+| RDF/XML | `.rdf`, `.owl`, `.xml` | yes | yes |
+| JSON-LD | `.jsonld` | not yet | yes |
 | Neo4j apoc.export.json | `.json` | yes | not yet |
 | GraphML | `.graphml` | not yet | yes |
 | CSV directory | (a directory) | not yet | yes |
