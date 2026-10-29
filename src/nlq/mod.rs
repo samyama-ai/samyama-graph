@@ -3,6 +3,7 @@
 //! Implements Text-to-Cypher translation using LLMs.
 
 pub mod client;
+pub mod metrics;
 #[cfg(test)] #[path = "test_http_cov.rs"] pub(crate) mod test_http;
 
 use thiserror::Error;
@@ -24,6 +25,17 @@ pub enum NLQError {
 
 pub type NLQResult<T> = Result<T, NLQError>;
 
+/// A question translated to Cypher, with what the model call cost.
+#[derive(Clone, Debug)]
+pub struct Translation {
+    pub cypher: String,
+    /// Tokens the provider reported; see [`client::TokenUsage`].
+    pub usage: client::TokenUsage,
+    /// How long the model call took. The schema summary and the safety check
+    /// around it are not included.
+    pub llm_latency: std::time::Duration,
+}
+
 pub struct NLQPipeline {
     client: client::NLQClient,
 }
@@ -35,15 +47,26 @@ impl NLQPipeline {
     }
 
     pub async fn text_to_cypher(&self, question: &str, schema_summary: &str) -> NLQResult<String> {
+        self.translate(question, schema_summary)
+            .await
+            .map(|t| t.cypher)
+    }
+
+    /// [`Self::text_to_cypher`], with what the model call cost (COST-07).
+    pub async fn translate(&self, question: &str, schema_summary: &str) -> NLQResult<Translation> {
         let prompt = Self::build_prompt(question, schema_summary);
 
-        let cypher = self.client.generate_cypher(&prompt).await?;
+        let completion = self.client.complete(&prompt).await?;
 
         // Extract Cypher from LLM response — handle markdown fences and explanations
-        let cleaned_cypher = Self::extract_cypher(&cypher);
+        let cleaned_cypher = Self::extract_cypher(&completion.text);
 
         if self.is_safe_query(&cleaned_cypher) {
-            Ok(cleaned_cypher)
+            Ok(Translation {
+                cypher: cleaned_cypher,
+                usage: completion.usage,
+                llm_latency: completion.latency,
+            })
         } else {
             Err(NLQError::ValidationError("Generated query contains write operations or unsafe keywords".to_string()))
         }

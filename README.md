@@ -284,7 +284,7 @@ FinBench, cricket, IMDB and more. Run the curated demos with
 
 ## Related repositories
 
-- **KGs:** [pubmed-kg](https://github.com/samyama-ai/pubmed-kg), [clinicaltrials-kg](https://github.com/samyama-ai/clinicaltrials-kg), [druginteractions-kg](https://github.com/samyama-ai/druginteractions-kg), [pathways-kg](https://github.com/samyama-ai/pathways-kg), [cricket-kg](https://github.com/samyama-ai/cricket-kg), [imdb-kg](https://github.com/samyama-ai/imdb-kg), [football-kg](https://github.com/samyama-ai/football-kg), [assetops-kg](https://github.com/samyama-ai/assetops-kg)
+- **KGs:** [pubmed-kg](https://github.com/samyama-ai/pubmed-kg), [clinicaltrials-kg](https://github.com/samyama-ai/clinicaltrials-kg), [druginteractions-kg](https://github.com/samyama-ai/druginteractions-kg), [pathways-kg](https://github.com/samyama-ai/pathways-kg), [cricket-kg](https://github.com/samyama-ai/cricket-kg), [imdb-kg](https://github.com/samyama-ai/imdb-kg), [football-kg](https://github.com/samyama-ai/football-kg), [assetops-kg](https://github.com/samyama-ai/assetops-kg), and the rest in the [KG catalog](docs/KG-CATALOG.md)
 - **Benchmarks:** [biomedqa](https://github.com/samyama-ai/biomedqa) — 40-question pharmacology benchmark across three KGs
 - **Companions:** [graphrag-rs](https://github.com/samyama-ai/graphrag-rs) — doc-to-KG + MCP server; [optimization_algorithms](https://github.com/samyama-ai/optimization_algorithms) — PyPI `rao-algorithms`
 

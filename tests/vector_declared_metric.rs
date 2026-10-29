@@ -35,9 +35,16 @@ fn ids(s: &GraphStore, q: &str) -> Vec<i64> {
         .collect()
 }
 
-/// The issue's own reproduction: 200 vectors along the query's direction and
-/// 200 just off its tip. Under L2 the nearest are the query itself and the
-/// ones a hundredth away, not the collinear ones far down the line.
+/// The issue's own reproduction: vectors along the query's direction and
+/// vectors just off its tip. Under L2 the nearest are the query itself and
+/// the ones a hundredth away, not the collinear ones far down the line.
+///
+/// 60 of each, not the issue's 200: at 120 vectors the index searches
+/// exactly, so this pins the metric and nothing else. Two straight lines in
+/// two dimensions are the HNSW graph's worst case. At 400 vectors the greedy
+/// search sometimes stays on the line it entered by and returns 2..5 instead
+/// of 1001..1004, which looked exactly like the cosine bug and failed CI on
+/// unrelated PRs. The graph path is covered by the recall test below.
 #[test]
 fn an_l2_index_answers_with_l2_distance() {
     let mut s = GraphStore::new();
@@ -47,11 +54,11 @@ fn an_l2_index_answers_with_l2_distance() {
     );
     write(
         &mut s,
-        "UNWIND range(1,200) AS i CREATE (:L2T {id:i, v:[toFloat(i), 0.0]})",
+        "UNWIND range(1,60) AS i CREATE (:L2T {id:i, v:[toFloat(i), 0.0]})",
     );
     write(
         &mut s,
-        "UNWIND range(1,200) AS i CREATE (:L2T {id:1000+i, v:[1.0, toFloat(i)/100.0]})",
+        "UNWIND range(1,60) AS i CREATE (:L2T {id:1000+i, v:[1.0, toFloat(i)/100.0]})",
     );
     let got = ids(
         &s,

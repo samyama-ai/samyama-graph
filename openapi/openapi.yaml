@@ -992,6 +992,12 @@ paths:
         `GEMINI_API_KEY`; none for `ollama`, `claudecode` or `mock` -- and optional
         `NLQ_API_BASE_URL`). Returns the
         generated Cypher only; execute it with `/api/query`.
+
+        The response also says what the model call cost (COST-07): the tokens the
+        provider reported and how long the call took. A count the provider did not
+        report is null, not 0; the Claude Code CLI and the mock report none. There is
+        no dollar cost, because the engine holds no price for any model. The same
+        calls are counted in `/metrics` as `samyama_llm_*`.
       requestBody:
         required: true
         content:
@@ -1019,6 +1025,27 @@ paths:
                 properties:
                   cypher:
                     type: string
+                  usage:
+                    type: object
+                    description: Tokens the provider reported for this call.
+                    properties:
+                      prompt_tokens:
+                        type: integer
+                        nullable: true
+                      completion_tokens:
+                        type: integer
+                        nullable: true
+                      total_tokens:
+                        type: integer
+                        nullable: true
+                        description: >
+                          The provider's total, or the sum of the other two when it
+                          gives none; null when either is unknown.
+                  llm_latency_ms:
+                    type: number
+                    description: >
+                      Wall-clock time of the model call alone, in milliseconds;
+                      the schema summary and safety check are not included.
         '400':
           description: NLQ disabled or generation error
           content:

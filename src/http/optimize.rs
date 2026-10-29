@@ -19,7 +19,7 @@ use ndarray::Array1;
 use samyama_optimization::algorithms::{
     BMRSolver, BMWRSolver, BWRSolver, DESolver, EHRJayaSolver, GASolver, GOTLBOSolver, ITLBOSolver,
     JayaSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, NSGA2Solver, PSOSolver, QOJayaSolver,
-    QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver,
+    QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver, LSHADESolver,
 };
 use samyama_optimization::benchmarks::{DTLZ, DTLZ_FRONT_SAMPLES_PER_AXIS, ZDT, ZDT_FRONT_SAMPLES};
 use samyama_optimization::common::{
@@ -322,6 +322,20 @@ fn algorithm_catalog() -> Vec<AlgorithmInfo> {
             variant: None,
             equation_tex: r"v = x_{r1} + F(x_{r2}-x_{r3})",
             paper_refs: vec![],
+            params: default_params(),
+            multi_objective: false,
+        },
+        AlgorithmInfo {
+            id: "lshade",
+            name: "L-SHADE",
+            family: "evolutionary",
+            variant: None,
+            equation_tex: r"v = x_i + F(x_{pbest}-x_i) + F(x_{r1}-\tilde{x}_{r2})",
+            paper_refs: vec![PaperRef {
+                title: "Improving the search performance of SHADE using linear population size reduction",
+                url: "https://doi.org/10.1109/CEC.2014.6900380",
+                year: 2014,
+            }],
             params: default_params(),
             multi_objective: false,
         },
@@ -924,15 +938,17 @@ struct SolverOutcome {
     /// Final Pareto front, one entry per non-dominated individual, each a vector
     /// of objective values. None for single-objective runs.
     final_pareto: Option<Vec<Vec<f64>>>,
-    /// Whether the best solution satisfies the problem's constraints
-    /// (OPT-09, #1776), read from `Problem::penalty`.
+    /// Whether the answer satisfies the problem's constraints (OPT-09, #1776).
     ///
-    /// None for multi-objective runs, deliberately. UC2 adds its
-    /// contraindication penalty to every objective instead of reporting it
-    /// through `MultiObjectiveProblem::penalties`, so each front point's
-    /// `constraint_violation` is 0 whether or not it is penalised (#1795).
-    /// Reading that field would report a penalised point as feasible; null
-    /// says the surface cannot tell, which is true.
+    /// Single-objective: the best solution, read from `Problem::penalty`.
+    /// Multi-objective: the returned front, read from each point's
+    /// `constraint_violation` (#1795). True means every returned point is
+    /// feasible; false means no feasible point was found and the front holds
+    /// the least-violating ones. None for an empty front.
+    ///
+    /// It was always None for multi-objective runs while UC2 folded its
+    /// contraindication into the objectives, because every point then read as
+    /// feasible whether or not it was penalised.
     feasible: Option<bool>,
     /// The best solution's objective minus the benchmark's known optimum
     /// (OPT-09, #1776). None when the catalog lists no optimum, which is every
@@ -973,9 +989,16 @@ macro_rules! seeded {
     }};
 }
 
-/// What one multi-objective run hands back: its convergence history, the best
-/// first objective on its final front, and the front's finite points.
-type MultiObjectiveRun = (Vec<f64>, f64, Vec<Vec<f64>>);
+/// What one multi-objective run hands back.
+struct MultiObjectiveRun {
+    history: Vec<f64>,
+    /// The best first objective on the returned front.
+    final_first: f64,
+    /// The returned front's finite points.
+    pareto: Vec<Vec<f64>>,
+    /// See [`SolverOutcome::feasible`].
+    feasible: Option<bool>,
+}
 
 /// Run one multi-objective solver on `problem`: its convergence history, the
 /// best first objective on the final front, and the front's finite points.
@@ -996,21 +1019,50 @@ fn solve_multi_objective<P: MultiObjectiveProblem>(
         "nsga2" => seeded!(NSGA2Solver::new(cfg), seed).solve(problem),
         _ => return Err(format!("algorithm {} not multi-objective", algo_id)),
     };
-    let final_first = r
-        .pareto_front
+    let (returned, feasible) = returned_front(&r.pareto_front);
+    let final_first = returned
         .iter()
         .map(|ind| ind.fitness[0])
         .fold(f64::INFINITY, f64::min);
     // Drop individuals with non-finite objective values — serde_json
     // serializes NaN/Inf as null, which breaks downstream consumers
     // (e.g. the samyama-insight Pareto chart).
-    let pareto: Vec<Vec<f64>> = r
-        .pareto_front
+    let pareto: Vec<Vec<f64>> = returned
         .iter()
         .filter(|ind| ind.fitness.iter().all(|v| v.is_finite()))
         .map(|ind| ind.fitness.clone())
         .collect();
-    Ok((r.history, final_first, pareto))
+    Ok(MultiObjectiveRun {
+        history: r.history,
+        final_first,
+        feasible,
+        pareto,
+    })
+}
+
+/// The points of `front` to return, and whether they are feasible.
+///
+/// An infeasible point is never returned beside a feasible one (#1795).
+/// Constrained dominance already ranks every feasible point above every
+/// infeasible one, so a final front mixes them only through a solver's own
+/// front selection; filtering here holds every solver to it. When nothing
+/// feasible was found, the points are returned and marked infeasible, rather
+/// than answering with nothing. Feasibility is None for an empty front.
+fn returned_front(
+    front: &[samyama_optimization::common::MultiObjectiveIndividual],
+) -> (
+    Vec<&samyama_optimization::common::MultiObjectiveIndividual>,
+    Option<bool>,
+) {
+    let any_feasible = front
+        .iter()
+        .any(|ind| is_feasible(ind.constraint_violation));
+    let returned: Vec<_> = front
+        .iter()
+        .filter(|ind| !any_feasible || is_feasible(ind.constraint_violation))
+        .collect();
+    let feasible = (!returned.is_empty()).then_some(any_feasible);
+    (returned, feasible)
 }
 
 fn run_solver(
@@ -1023,7 +1075,7 @@ fn run_solver(
     seed: Option<u64>,
 ) -> Result<SolverOutcome, String> {
     if multi_objective {
-        let (hist, final_f, pareto) = if bench_id == "uc2_dosing" {
+        let run = if bench_id == "uc2_dosing" {
             solve_multi_objective(
                 algo_id,
                 cfg,
@@ -1042,10 +1094,10 @@ fn run_solver(
             }
         };
         Ok(SolverOutcome {
-            history: hist,
-            final_fitness: final_f,
-            final_pareto: Some(pareto),
-            feasible: None,
+            history: run.history,
+            final_fitness: run.final_first,
+            final_pareto: Some(run.pareto),
+            feasible: run.feasible,
             gap: None,
             quality: None,
         })
@@ -1075,6 +1127,7 @@ fn run_solver(
             "saphr" => seeded!(SAPHRSolver::new(cfg), seed).solve(&problem),
             "pso" => seeded!(PSOSolver::new(cfg), seed).solve(&problem),
             "de" => seeded!(DESolver::new(cfg), seed).solve(&problem),
+            "lshade" => seeded!(LSHADESolver::new(cfg), seed).solve(&problem),
             "ga" => seeded!(GASolver::new(cfg), seed).solve(&problem),
             other => {
                 return Err(format!(

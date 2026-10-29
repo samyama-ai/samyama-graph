@@ -2450,3 +2450,91 @@ async fn a_stream_that_fails_after_its_first_chunk_ends_with_an_error_trailer() 
         "rows counts what was sent"
     );
 }
+
+// ---------- what an NLQ call cost (COST-07, #1790) ----------
+
+/// A state whose default tenant asks a stub OpenAI at `base_url`.
+fn state_asking(base_url: &str) -> AppState {
+    let tenants = crate::persistence::TenantManager::new();
+    tenants
+        .update_nlq_config(
+            "default",
+            Some(crate::persistence::tenant::NLQConfig {
+                enabled: true,
+                provider: crate::persistence::tenant::LLMProvider::OpenAI,
+                model: "stub".to_string(),
+                api_key: Some("stub-key".to_string()),
+                api_base_url: Some(base_url.to_string()),
+                system_prompt: None,
+            }),
+        )
+        .unwrap();
+    let mut s = state();
+    s.tenant_manager = Some(Arc::new(tenants));
+    s
+}
+
+#[tokio::test]
+async fn nlq_returns_the_tokens_and_latency_of_its_model_call() {
+    let srv = crate::nlq::test_http::MockHttp::serve(vec![(
+        200,
+        json!({
+            "choices": [ { "message": { "content": "MATCH (n:Person) RETURN n.name LIMIT 5" } } ],
+            "usage": { "prompt_tokens": 412, "completion_tokens": 17, "total_tokens": 429 }
+        })
+        .to_string(),
+    )]);
+    let r = post_json(
+        routes(state_asking(&srv.base_url)),
+        "/api/nlq",
+        json!({ "question": "five people" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["cypher"], "MATCH (n:Person) RETURN n.name LIMIT 5");
+    assert_eq!(
+        j["usage"],
+        json!({ "prompt_tokens": 412, "completion_tokens": 17, "total_tokens": 429 })
+    );
+    let ms = j["llm_latency_ms"].as_f64().unwrap();
+    assert!(ms > 0.0 && ms.is_finite(), "{ms}");
+    assert!(
+        j.get("cost_usd").is_none(),
+        "no price is known, so none is made up"
+    );
+}
+
+#[tokio::test]
+async fn nlq_says_null_when_the_provider_reported_no_tokens() {
+    let srv = crate::nlq::test_http::MockHttp::serve(vec![(
+        200,
+        json!({ "choices": [ { "message": { "content": "MATCH (n) RETURN n" } } ] }).to_string(),
+    )]);
+    let j = post_json(
+        routes(state_asking(&srv.base_url)),
+        "/api/nlq",
+        json!({ "question": "everything" }),
+    )
+    .await
+    .json();
+    assert_eq!(
+        j["usage"],
+        json!({ "prompt_tokens": null, "completion_tokens": null, "total_tokens": null })
+    );
+}
+
+#[tokio::test]
+async fn metrics_lists_the_model_call_counters() {
+    let t = get_uri(routes(state()), "/metrics").await.text();
+    for name in [
+        "samyama_llm_calls_total",
+        "samyama_llm_calls_failed_total",
+        "samyama_llm_calls_without_usage_total",
+        "samyama_llm_prompt_tokens_total",
+        "samyama_llm_completion_tokens_total",
+        "samyama_llm_call_duration_seconds_total",
+    ] {
+        assert!(t.contains(&format!("# TYPE {name} counter")), "{name}");
+    }
+}

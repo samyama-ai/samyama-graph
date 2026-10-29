@@ -103,6 +103,7 @@ fn every_single_objective_solver_finishes_and_never_returns_a_nan_best() {
         "EHRJaya" => EHRJayaSolver::new(config()).with_seed(SEED),
         "QORao1" => QORaoSolver::new(config(), RaoVariant::Rao1).with_seed(SEED),
         "SAPHR" => SAPHRSolver::new(config()).with_seed(SEED),
+        "LSHADE" => LSHADESolver::new(config()).with_seed(SEED),
     ];
     let mut bad = Vec::new();
     for (name, run) in &solvers {

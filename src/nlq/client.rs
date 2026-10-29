@@ -4,7 +4,50 @@ use crate::persistence::tenant::{NLQConfig, LLMProvider};
 use crate::nlq::{NLQError, NLQResult};
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Tokens a model reports for one call (COST-07, #1790).
+///
+/// Each field is what the provider said, or `None` when it said nothing:
+/// a missing count is not a count of 0. OpenAI sends `usage`, Ollama
+/// `prompt_eval_count` and `eval_count`, Gemini `usageMetadata`; the Claude
+/// Code CLI's plain-text output carries none, and the mock calls no model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct TokenUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+impl TokenUsage {
+    /// Prompt and completion counts, with the total the provider gave or,
+    /// when it gave none, their sum.
+    fn from_counts(prompt: Option<u64>, completion: Option<u64>, total: Option<u64>) -> Self {
+        let total = total.or_else(|| Some(prompt? + completion?));
+        Self {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: total,
+        }
+    }
+
+    /// Whether the provider reported anything at all.
+    pub fn is_reported(&self) -> bool {
+        self.prompt_tokens.is_some()
+            || self.completion_tokens.is_some()
+            || self.total_tokens.is_some()
+    }
+}
+
+/// One model call: its text, the tokens it used and how long it took.
+#[derive(Clone, Debug)]
+pub struct Completion {
+    pub text: String,
+    pub usage: TokenUsage,
+    /// Wall-clock time of the call, from sending the request to having the
+    /// parsed answer.
+    pub latency: Duration,
+}
 
 pub struct NLQClient {
     client: Client,
@@ -59,21 +102,54 @@ impl NLQClient {
         })
     }
 
+    /// The model's answer to `prompt`. See [`Self::complete`] for its tokens
+    /// and latency.
     pub async fn generate_cypher(&self, prompt: &str) -> NLQResult<String> {
-        match self.config.provider {
+        self.complete(prompt).await.map(|c| c.text)
+    }
+
+    /// The model's answer to `prompt`, with the tokens it used and how long
+    /// the call took. Every call is also counted in `/metrics`
+    /// ([`crate::nlq::metrics`]), so agent and enrichment calls through this
+    /// client are counted as well as NLQ.
+    pub async fn complete(&self, prompt: &str) -> NLQResult<Completion> {
+        let started = Instant::now();
+        let answer = match self.config.provider {
             LLMProvider::OpenAI => self.openai_chat(prompt).await,
             LLMProvider::Ollama => self.ollama_chat(prompt).await,
             LLMProvider::Gemini => self.gemini_chat(prompt).await,
-            LLMProvider::ClaudeCode => self.claude_code_generate(prompt).await,
-            LLMProvider::Mock => Ok("MATCH (n) RETURN n LIMIT 10".to_string()),
+            LLMProvider::ClaudeCode => self
+                .claude_code_generate(prompt)
+                .await
+                .map(|text| (text, TokenUsage::default())),
+            LLMProvider::Mock => Ok((
+                "MATCH (n) RETURN n LIMIT 10".to_string(),
+                TokenUsage::default(),
+            )),
             // Refused by `new`, so not reachable through a constructed client.
             LLMProvider::AzureOpenAI | LLMProvider::Anthropic => {
-                check_implemented(&self.config.provider).map(|()| String::new())
+                check_implemented(&self.config.provider)
+                    .map(|()| (String::new(), TokenUsage::default()))
+            }
+        };
+        let latency = started.elapsed();
+        match answer {
+            Ok((text, usage)) => {
+                crate::nlq::metrics::record_call(latency, &usage);
+                Ok(Completion {
+                    text,
+                    usage,
+                    latency,
+                })
+            }
+            Err(e) => {
+                crate::nlq::metrics::record_failure(latency);
+                Err(e)
             }
         }
     }
 
-    async fn openai_chat(&self, prompt: &str) -> NLQResult<String> {
+    async fn openai_chat(&self, prompt: &str) -> NLQResult<(String, TokenUsage)> {
         #[derive(Serialize)]
         struct Message {
             role: String,
@@ -90,6 +166,15 @@ impl NLQClient {
         #[derive(Deserialize)]
         struct Response {
             choices: Vec<Choice>,
+            #[serde(default)]
+            usage: Option<Usage>,
+        }
+
+        #[derive(Deserialize)]
+        struct Usage {
+            prompt_tokens: Option<u64>,
+            completion_tokens: Option<u64>,
+            total_tokens: Option<u64>,
         }
 
         #[derive(Deserialize)]
@@ -125,10 +210,18 @@ impl NLQClient {
         }
 
         let result: Response = resp.json().await.map_err(|e| NLQError::SerializationError(e.to_string()))?;
-        Ok(result.choices.first().map(|c| c.message.content.clone()).unwrap_or_default())
+        let usage = result.usage.map_or_else(TokenUsage::default, |u| {
+            TokenUsage::from_counts(u.prompt_tokens, u.completion_tokens, u.total_tokens)
+        });
+        let text = result
+            .choices
+            .first()
+            .map(|c| c.message.content.clone())
+            .unwrap_or_default();
+        Ok((text, usage))
     }
 
-    async fn ollama_chat(&self, prompt: &str) -> NLQResult<String> {
+    async fn ollama_chat(&self, prompt: &str) -> NLQResult<(String, TokenUsage)> {
         #[derive(Serialize)]
         struct Request<'a> {
             model: &'a str,
@@ -140,6 +233,10 @@ impl NLQClient {
         #[derive(Deserialize)]
         struct Response {
             response: String,
+            /// Tokens in the prompt; Ollama omits it when the prompt was cached.
+            prompt_eval_count: Option<u64>,
+            /// Tokens generated.
+            eval_count: Option<u64>,
         }
 
         let system_prompt = self.config.system_prompt.clone().unwrap_or_else(|| "You are a Cypher expert.".to_string());
@@ -161,7 +258,8 @@ impl NLQClient {
         }
 
         let result: Response = resp.json().await.map_err(|e| NLQError::SerializationError(e.to_string()))?;
-        Ok(result.response)
+        let usage = TokenUsage::from_counts(result.prompt_eval_count, result.eval_count, None);
+        Ok((result.response, usage))
     }
 
     async fn claude_code_generate(&self, prompt: &str) -> NLQResult<String> {
@@ -183,7 +281,7 @@ impl NLQClient {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    async fn gemini_chat(&self, prompt: &str) -> NLQResult<String> {
+    async fn gemini_chat(&self, prompt: &str) -> NLQResult<(String, TokenUsage)> {
         #[derive(Serialize)]
         struct Request {
             contents: Vec<Content>,
@@ -210,6 +308,16 @@ impl NLQClient {
         #[derive(Deserialize)]
         struct Response {
             candidates: Option<Vec<Candidate>>,
+            #[serde(rename = "usageMetadata")]
+            usage_metadata: Option<UsageMetadata>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct UsageMetadata {
+            prompt_token_count: Option<u64>,
+            candidates_token_count: Option<u64>,
+            total_token_count: Option<u64>,
         }
 
         #[derive(Deserialize)]
@@ -247,16 +355,23 @@ impl NLQClient {
         }
 
         let result: Response = resp.json().await.map_err(|e| NLQError::SerializationError(e.to_string()))?;
-        
+        let usage = result.usage_metadata.map_or_else(TokenUsage::default, |u| {
+            TokenUsage::from_counts(
+                u.prompt_token_count,
+                u.candidates_token_count,
+                u.total_token_count,
+            )
+        });
+
         if let Some(candidates) = result.candidates {
             if let Some(first) = candidates.first() {
                 if let Some(part) = first.content.parts.first() {
-                    return Ok(part.text.clone());
+                    return Ok((part.text.clone(), usage));
                 }
             }
         }
-        
-        Ok(String::new())
+
+        Ok((String::new(), usage))
     }
 }
 

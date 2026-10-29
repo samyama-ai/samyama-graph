@@ -1180,6 +1180,8 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
     // for. Everything above describes the graph; this describes what asking it
     // questions costs (REL-10).
     out.push_str(&crate::query::metrics::render());
+    // And what the model calls behind NLQ cost (COST-07).
+    out.push_str(&crate::nlq::metrics::render());
 
     (
         [(
@@ -3277,6 +3279,9 @@ pub async fn verify_handler(
     (StatusCode::OK, Json(report)).into_response()
 }
 
+/// Seconds to milliseconds, for `llm_latency_ms`.
+const MILLIS_PER_SECOND: f64 = 1_000.0;
+
 /// Request for a natural-language query (NLQ -> Cypher). Epic #696, step #697.
 #[derive(Deserialize)]
 pub struct NlqRequest {
@@ -3336,8 +3341,20 @@ pub async fn nlq_handler(
         store_guard.schema_summary()
     };
 
-    match pipeline.text_to_cypher(&payload.question, &schema).await {
-        Ok(cypher) => (StatusCode::OK, Json(json!({ "cypher": cypher }))).into_response(),
+    match pipeline.translate(&payload.question, &schema).await {
+        // What the call cost, so a caller can account for it per access
+        // method (COST-07, #1790). The provider's token counts used to be
+        // dropped. There is no `cost_usd`: the engine holds no price for any
+        // model, and a made-up one would be worse than none.
+        Ok(t) => (
+            StatusCode::OK,
+            Json(json!({
+                "cypher": t.cypher,
+                "usage": t.usage,
+                "llm_latency_ms": t.llm_latency.as_secs_f64() * MILLIS_PER_SECOND,
+            })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),

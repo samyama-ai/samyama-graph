@@ -17,13 +17,28 @@ use std::sync::RwLock;
 /// 6 drugs, 7 genes, 4 pathways, 1 disease, 7 INTERACTS_WITH edges
 /// including a contraindicated pair (D3+D4, severity 1.0). Fitness runs
 /// two Cypher queries per candidate and composes a 3-vector of
-/// (-efficacy, risk, total_dose), with a 1e6 penalty added to every
-/// objective when the contraindicated pair is simultaneously active.
+/// (-efficacy, risk, total_dose).
+///
+/// A plan with both drugs of a contraindicated pair active is infeasible, and
+/// says so through [`MultiObjectiveProblem::penalties`]. It used to add a 1e6
+/// penalty to every objective instead, which left each point's
+/// `constraint_violation` at 0: every solver's constrained-dominance ranking
+/// read an unsafe plan as feasible, kept it on the front, and the front came
+/// back with penalised points in it (53 of 87 in the OPT-10 measurement,
+/// #1795).
 pub struct UC2DosingProblem {
     engine: QueryEngine,
     store: RwLock<GraphStore>,
     drug_dids: Vec<&'static str>,
+    /// Index pairs of drugs that must not be given together, read from the
+    /// graph once.
+    contraindicated: Vec<(usize, usize)>,
 }
+
+/// A drug at this fraction of its maximum dose or more counts as given.
+const ACTIVE_DOSE: f64 = 0.05;
+/// An interaction this severe or more is a contraindication.
+const CONTRAINDICATED_SEVERITY: f64 = 0.999;
 
 const UC2_DISEASE: &str = "type2_diabetes";
 const UC2_DRUGS: &[(&str, &str, f64)] = &[
@@ -97,11 +112,35 @@ impl UC2DosingProblem {
             store.set_edge_property(eid, "severity_score", *sev).unwrap();
         }
 
-        Self {
+        let mut problem = Self {
             engine: QueryEngine::new(),
             store: RwLock::new(store),
             drug_dids: UC2_DRUGS.iter().map(|(d, ..)| *d).collect(),
-        }
+            contraindicated: Vec::new(),
+        };
+        problem.contraindicated = problem.contraindicated_pairs();
+        problem
+    }
+
+    /// The pairs the graph marks as contraindicated, as indices into
+    /// `drug_dids`.
+    fn contraindicated_pairs(&self) -> Vec<(usize, usize)> {
+        use crate::graph::PropertyValue as P;
+        use crate::query::executor::record::Value as V;
+        let q = format!(
+            "MATCH (a:Drug)-[r:INTERACTS_WITH]->(b:Drug) \
+             WHERE r.severity_score >= {CONTRAINDICATED_SEVERITY} \
+             RETURN a.did AS a, b.did AS b"
+        );
+        let index = |rec: &crate::query::executor::record::Record, key: &str| match rec.get(key) {
+            Some(V::Property(P::String(s))) => self.drug_dids.iter().position(|d| d == s),
+            _ => None,
+        };
+        self.run(&q)
+            .records
+            .iter()
+            .filter_map(|rec| Some((index(rec, "a")?, index(rec, "b")?)))
+            .collect()
     }
 
     fn run(&self, q: &str) -> crate::query::RecordBatch {
@@ -124,10 +163,17 @@ impl MultiObjectiveProblem for UC2DosingProblem {
         use crate::graph::PropertyValue as P;
         use crate::query::executor::record::Value as V;
 
-        let active_idx: Vec<usize> = (0..self.drug_dids.len()).filter(|&i| x[i] >= 0.05).collect();
-        if active_idx.is_empty() { return vec![0.0, 0.0, 0.0]; }
-        let id_list = active_idx.iter().map(|&i| format!("\"{}\"", self.drug_dids[i]))
-            .collect::<Vec<_>>().join(", ");
+        let active_idx: Vec<usize> = (0..self.drug_dids.len())
+            .filter(|&i| x[i] >= ACTIVE_DOSE)
+            .collect();
+        if active_idx.is_empty() {
+            return vec![0.0, 0.0, 0.0];
+        }
+        let id_list = active_idx
+            .iter()
+            .map(|&i| format!("\"{}\"", self.drug_dids[i]))
+            .collect::<Vec<_>>()
+            .join(", ");
 
         let q1 = format!(
             "MATCH (d:Drug)-[:TARGETS]->(:Gene)-[:PART_OF]->(p:Pathway)-[:IMPLICATED_IN]->(dz:Disease) \
@@ -157,7 +203,6 @@ impl MultiObjectiveProblem for UC2DosingProblem {
         let did_to_idx: HashMap<&str, usize> = self.drug_dids.iter().enumerate()
             .map(|(i, &d)| (d, i)).collect();
         let mut risk = 0.0_f64;
-        let mut bad = false;
         for rec in &r2.records {
             let a = match rec.get("a") { Some(V::Property(P::String(s))) => s.as_str(), _ => continue };
             let b = match rec.get("b") { Some(V::Property(P::String(s))) => s.as_str(), _ => continue };
@@ -168,12 +213,26 @@ impl MultiObjectiveProblem for UC2DosingProblem {
             };
             if let (Some(&ia), Some(&ib)) = (did_to_idx.get(a), did_to_idx.get(b)) {
                 risk += sev * x[ia] * x[ib];
-                if sev >= 0.999 && x[ia] >= 0.05 && x[ib] >= 0.05 { bad = true; }
             }
         }
         let total_dose: f64 = (0..self.drug_dids.len()).map(|i| x[i]).sum();
-        let penalty = if bad { 1e6 } else { 0.0 };
-        vec![-efficacy + penalty, risk + penalty, total_dose + penalty]
+        vec![-efficacy, risk, total_dose]
+    }
+
+    /// One entry per contraindicated pair: 0 unless both drugs are given, and
+    /// then the smaller of the two doses, so lowering either dose moves a plan
+    /// toward feasible rather than leaving every unsafe plan equally bad.
+    fn penalties(&self, x: &Array1<f64>) -> Vec<f64> {
+        self.contraindicated
+            .iter()
+            .map(|&(a, b)| {
+                if x[a] >= ACTIVE_DOSE && x[b] >= ACTIVE_DOSE {
+                    x[a].min(x[b])
+                } else {
+                    0.0
+                }
+            })
+            .collect()
     }
 }
 
@@ -200,13 +259,33 @@ mod tests {
     }
 
     #[test]
-    fn uc2_contraindicated_pair_gets_penalty() {
+    fn uc2_contraindicated_pair_is_a_constraint_violation_not_an_objective_offset() {
         let p = UC2DosingProblem::new();
-        // D3 + D4 both active at 0.5, others zero — penalty must apply.
+        assert_eq!(p.contraindicated, vec![(3, 4)], "D3 + D4, from the graph");
+        // D3 + D4 both active at 0.5: infeasible, through `penalties`.
         let x = Array1::from(vec![0.0, 0.0, 0.0, 0.5, 0.5, 0.0]);
-        let obj = p.objectives(&x);
-        // Every objective carries the 1e6 penalty.
-        for v in &obj { assert!(*v >= 1e5, "expected penalty in {:?}", obj); }
+        assert_eq!(p.penalties(&x), vec![0.5]);
+        // The objectives are the plan's own, with no 1e6 folded in.
+        assert!(
+            p.objectives(&x).iter().all(|v| v.abs() < 1e5),
+            "{:?}",
+            p.objectives(&x)
+        );
+    }
+
+    #[test]
+    fn uc2_violation_shrinks_with_the_smaller_dose_and_vanishes_below_active() {
+        let p = UC2DosingProblem::new();
+        let plan = |d3: f64, d4: f64| Array1::from(vec![0.0, 0.0, 0.0, d3, d4, 0.0]);
+        assert_eq!(p.penalties(&plan(0.9, 0.2)), vec![0.2]);
+        assert_eq!(p.penalties(&plan(0.9, ACTIVE_DOSE)), vec![ACTIVE_DOSE]);
+        assert_eq!(p.penalties(&plan(0.9, 0.04)), vec![0.0], "D4 not given");
+        assert_eq!(p.penalties(&plan(0.5, 0.0)), vec![0.0]);
+        // Other pairs, however severe their risk, are not contraindications.
+        assert_eq!(
+            p.penalties(&Array1::from(vec![0.0, 0.0, 0.0, 0.8, 0.0, 0.8])),
+            vec![0.0]
+        );
     }
 
     #[test]

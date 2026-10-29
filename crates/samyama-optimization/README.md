@@ -40,6 +40,7 @@ We support 15+ algorithms across various families:
 - **GWO**: Grey Wolf Optimizer (Alpha, Beta, Delta hierarchy).
 - **PSO**: Particle Swarm Optimization.
 - **DE**: Differential Evolution.
+- **L-SHADE**: Differential Evolution that adapts its own F and CR from a success history and shrinks its population linearly (Tanabe & Fukunaga, CEC 2014). Not parallel: one generation runs sequentially.
 - **Firefly**: Firefly Algorithm (Light intensity based attraction).
 - **Cuckoo**: Cuckoo Search (Levy flights and nest abandonment).
 - **Bat**: Bat Algorithm (Echolocation).

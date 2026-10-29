@@ -2223,7 +2223,7 @@ fn or_solve_every_single_objective_solver_dispatches() {
     for name in [
         "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "SAMPJaya", "QOJaya",
         "EHRJaya", "BMR", "BWR", "BMWR", "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
-        "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR",
+        "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR", "LSHADE",
     ] {
         let mut store = solve_store();
         let rows = run_algo_mut(
