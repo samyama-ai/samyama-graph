@@ -46,6 +46,9 @@ impl GASolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for _iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             // Find best for history
             let mut best_idx = 0;
             for i in 1..population.len() {

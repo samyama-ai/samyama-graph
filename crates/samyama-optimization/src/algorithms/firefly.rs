@@ -61,6 +61,9 @@ impl FireflySolver {
         }
 
         for iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             history.push(population[best_idx].fitness);
 
             // Firefly algorithm loop: move i towards j if j is brighter (better fitness)

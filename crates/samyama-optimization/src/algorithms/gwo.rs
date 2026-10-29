@@ -50,6 +50,9 @@ impl GWOSolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             // Update Alpha, Beta, Delta
             for ind in &population {
                 if ind.fitness < alpha.fitness {

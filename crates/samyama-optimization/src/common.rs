@@ -40,6 +40,13 @@ pub trait Problem: Send + Sync {
 
     /// Lower and upper bounds for each variable.
     fn bounds(&self) -> (Array1<f64>, Array1<f64>);
+
+    /// Whether the run's budget is spent. Every solver asks at the top of each
+    /// iteration and stops when this is true. Always false unless the problem
+    /// is wrapped in a [`crate::budget::Budgeted`].
+    fn budget_exhausted(&self) -> bool {
+        false
+    }
 }
 
 /// Represents a candidate solution in a multi-objective space.
@@ -134,6 +141,11 @@ pub trait MultiObjectiveProblem: Send + Sync {
     
     /// Number of objectives.
     fn num_objectives(&self) -> usize;
+
+    /// Whether the run's budget is spent; see [`Problem::budget_exhausted`].
+    fn budget_exhausted(&self) -> bool {
+        false
+    }
 }
 
 /// The result of a multi-objective optimization run (Pareto Front).

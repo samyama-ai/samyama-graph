@@ -54,6 +54,9 @@ impl GSASolver {
         let mut best_fitness = population[0].fitness;
 
         for iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             // Update fitness and find best/worst
             let mut worst_fitness = population[0].fitness;
             for ind in &population {

@@ -818,3 +818,138 @@ async fn every_algorithm_reports_a_measured_time_over_http() {
         assert_eq!(done["seed"], 11, "{id}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Budgets (OPT-11, #1798)
+// ---------------------------------------------------------------------------
+
+/// Far more iterations than any budget below lets a solve run.
+const UNBUDGETED_ITERATIONS: usize = 100_000;
+
+fn budgeted_body(algorithm: &str, benchmark: &str, budget: &str) -> String {
+    format!(
+        r#"{{"algorithm":"{algorithm}","benchmark":"{benchmark}","population_size":8,"iterations":{UNBUDGETED_ITERATIONS},"seed":11,{budget}}}"#
+    )
+}
+
+#[tokio::test]
+async fn every_algorithm_stops_at_an_evaluation_budget_over_http() {
+    const MAX_EVALUATIONS: u64 = 200;
+    let (_, algos) = get_json(app(), "/optimize/algorithms").await;
+    for a in algos.as_array().unwrap() {
+        let id = a["id"].as_str().unwrap();
+        let bench = if a["multi_objective"].as_bool().unwrap() {
+            "zdt1"
+        } else {
+            "sphere"
+        };
+        let done = done_of(
+            app(),
+            &budgeted_body(
+                id,
+                bench,
+                &format!(r#""max_evaluations":{MAX_EVALUATIONS}"#),
+            ),
+        )
+        .await;
+        assert_eq!(done["stopped_by"], "evaluation_budget", "{id}: {done}");
+        assert_eq!(done["max_evaluations"], MAX_EVALUATIONS, "{id}: echoed");
+        let evaluations = done["evaluations"].as_u64().unwrap();
+        assert!(evaluations >= MAX_EVALUATIONS, "{id}: {evaluations}");
+        let iterations = done["iterations"].as_u64().unwrap() as usize;
+        assert!(iterations < UNBUDGETED_ITERATIONS, "{id}: ran {iterations}");
+        assert!(done["final_fitness"].as_f64().is_some(), "{id}: {done}");
+    }
+}
+
+#[tokio::test]
+async fn a_time_budget_stops_a_solve_that_would_run_far_longer() {
+    const TIME_BUDGET_MS: u64 = 100;
+    let started = std::time::Instant::now();
+    let done = done_of(
+        app(),
+        &budgeted_body(
+            "jaya",
+            "rastrigin",
+            &format!(r#""time_budget_ms":{TIME_BUDGET_MS}"#),
+        ),
+    )
+    .await;
+    assert_eq!(done["stopped_by"], "time_budget", "{done}");
+    assert_eq!(done["time_budget_ms"], TIME_BUDGET_MS);
+    assert!(done["max_evaluations"].is_null());
+    // Generous, so a slow runner cannot fail it; 100,000 iterations take far
+    // longer than this.
+    let bound = std::time::Duration::from_millis(TIME_BUDGET_MS * 50);
+    assert!(started.elapsed() < bound, "took {:?}", started.elapsed());
+}
+
+#[tokio::test]
+async fn without_a_budget_a_solve_runs_its_iterations_and_counts_its_evaluations() {
+    let done = done_of(
+        app(),
+        r#"{"algorithm":"jaya","benchmark":"sphere","population_size":8,"iterations":3,"seed":11}"#,
+    )
+    .await;
+    assert_eq!(done["stopped_by"], "iterations");
+    assert_eq!(done["iterations"], 3);
+    assert!(done["evaluations"].as_u64().unwrap() > 0, "{done}");
+    assert!(done["time_budget_ms"].is_null() && done["max_evaluations"].is_null());
+}
+
+#[tokio::test]
+async fn a_zero_or_negative_budget_is_a_400_that_names_the_field() {
+    for (field, value, says) in [
+        ("time_budget_ms", "0", "time_budget_ms must be at least 1"),
+        ("max_evaluations", "0", "max_evaluations must be at least 1"),
+        ("max_evaluations", "-5", "max_evaluations"),
+        ("time_budget_ms", "\"soon\"", "time_budget_ms"),
+    ] {
+        let body = format!(r#"{{"algorithm":"jaya","benchmark":"sphere","{field}":{value}}}"#);
+        let (status, msg) = post(app(), "/optimize/solve", &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {msg}");
+        assert!(msg.contains(says), "{body}: {msg}");
+    }
+}
+
+#[tokio::test]
+async fn the_catalogue_lists_both_budgets_as_optional() {
+    let (_, algos) = get_json(app(), "/optimize/algorithms").await;
+    for a in algos.as_array().unwrap() {
+        let params = a["params"].as_array().unwrap();
+        for name in ["time_budget_ms", "max_evaluations"] {
+            let p = params
+                .iter()
+                .find(|p| p["name"] == name)
+                .unwrap_or_else(|| panic!("{}: no {name}", a["id"]));
+            assert_eq!(p["type"], "int");
+            assert!(p["default"].is_null(), "{name} has no default limit");
+        }
+    }
+}
+
+#[test]
+fn checking_the_answer_is_not_billed_to_the_budget() {
+    // The single-objective path re-evaluates the best answer for its gap and
+    // feasibility on the bare problem, after the solve; a budget of exactly
+    // what the solve used must still report the solve's own count.
+    let out = run_solver_within(
+        "jaya",
+        false,
+        "sphere",
+        1,
+        2,
+        cfg(),
+        Some(3),
+        Budget::default(),
+    )
+    .unwrap();
+    let population = cfg().population_size as u64;
+    let per_iteration = population;
+    let expected = population + per_iteration * cfg().max_iterations as u64;
+    assert_eq!(
+        out.evaluations, expected,
+        "Jaya: one population, then one per iteration"
+    );
+    assert_eq!(out.stopped_by, StopReason::Iterations);
+}

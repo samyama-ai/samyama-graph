@@ -84,6 +84,9 @@ impl CuckooSolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for _iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             history.push(best_ind.fitness);
 
             // 2. Generate new solutions via Levy Flights

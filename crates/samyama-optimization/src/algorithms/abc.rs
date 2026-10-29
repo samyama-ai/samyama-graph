@@ -58,6 +58,9 @@ impl ABCSolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for _iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             history.push(best_fitness);
 
             // 2. Employed Bees Phase
