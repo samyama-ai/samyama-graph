@@ -38,7 +38,7 @@ so this needs no engine and no build:
     python3 scripts/snapshot_property_audit.py football.sgsnap --strict   # exit 1 on a flag
 
 Exit status: 0 normally; 1 with `--strict` when anything is flagged; 2 when the
-file cannot be read as a snapshot.
+file cannot be read as a snapshot or an option is out of range.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ import argparse
 import gzip
 import json
 import sys
+import zlib
 from pathlib import Path
 
 # A column with more distinct values than this is not low-cardinality by any
@@ -153,12 +154,21 @@ def audit(lines) -> dict:
             raise SnapshotError(f"line {number}: \"props\" is not an object")
         if kind == "n":
             nodes += 1
+            labels = rec.get("labels")
+            if labels is None:
+                labels = []
+            # A bare string would be iterated letter by letter into one group each.
+            if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
+                raise SnapshotError(f"line {number}: \"labels\" is not an array of strings")
             # A node with several labels counts under each of them.
-            for label in rec.get("labels") or ["(no label)"]:
-                bump(f"({label})", props)
+            for group in [f"({label})" for label in labels] or ["(no label)"]:
+                bump(group, props)
         elif kind == "e":
             edges += 1
-            bump(f"[:{rec.get('type', '(no type)')}]", props)
+            etype = rec.get("type")
+            if etype is not None and not isinstance(etype, str):
+                raise SnapshotError(f"line {number}: \"type\" is not a string")
+            bump(f"[:{etype}]" if etype else "[no type]", props)
         # Index (`i`) and hierarchy (`h`) records carry no properties.
 
     if header is None:
@@ -201,8 +211,9 @@ def render(path: Path, result: dict, table: list[dict], flagged_only: bool) -> s
     header = result["header"]
     out = [f"snapshot: {path.name}   {result['nodes']:,} nodes, {result['edges']:,} edges"]
     for what, got in (("node_count", result["nodes"]), ("edge_count", result["edges"])):
-        if header.get(what) is not None and header[what] != got:
-            out.append(f"warning: header says {what} {header[what]:,}, the file holds {got:,}")
+        claimed = header.get(what)
+        if isinstance(claimed, int) and not isinstance(claimed, bool) and claimed != got:
+            out.append(f"warning: header says {what} {claimed:,}, the file holds {got:,}")
     shown = [r for r in table if r["flags"]] if flagged_only else table
     if shown:
         w = max(len(r["group"]) for r in shown)
@@ -229,16 +240,23 @@ def main(argv: list[str] | None = None) -> int:
                     help="constant / few-values only count columns with at least N non-empty "
                          "values; a small column can legitimately repeat (default 100)")
     ap.add_argument("--few", type=int, default=3, metavar="N",
-                    help="few-values means 2..N distinct values (default 3)")
+                    help=f"few-values means 2..N distinct values (default 3, at most {MAX_TRACKED:,}: "
+                         "distinct values are not tracked beyond that)")
     ap.add_argument("--flagged-only", action="store_true", help="print only the flagged properties")
     ap.add_argument("--json", action="store_true", help="print the table as JSON")
     ap.add_argument("--strict", action="store_true", help="exit 1 if any property is flagged")
     args = ap.parse_args(argv)
+    # A column past the tracking cap is never classified, so a threshold above
+    # the cap would silently miss columns it should flag.
+    if not 2 <= args.few <= MAX_TRACKED:
+        ap.error(f"--few must be between 2 and {MAX_TRACKED:,}")
+    if args.min_records < 1:
+        ap.error("--min-records must be at least 1")
 
     try:
         with open_snapshot(args.snapshot) as f:
             result = audit(f)
-    except (SnapshotError, UnicodeDecodeError, EOFError, gzip.BadGzipFile) as e:
+    except (SnapshotError, UnicodeDecodeError, EOFError, gzip.BadGzipFile, zlib.error) as e:
         print(f"{args.snapshot}: {e}", file=sys.stderr)
         return 2
 
