@@ -36,6 +36,14 @@ fn ids(s: &GraphStore, q: &str) -> Vec<i64> {
 }
 
 /// The issue's reproduction, after the delete.
+///
+/// 60 + 60 points, not the issue's 200 + 200: two lines in 2-D are a worst
+/// case for HNSW, whose greedy search sometimes stays on the line it entered
+/// by (it failed this way on arm CI). At 120 vectors the index searches
+/// exactly, so this checks the delete and nothing else. The old code still
+/// fails it: deleted node 1 sits on the query and takes a top-3 slot before
+/// the label check drops it. Recall after deletes at HNSW sizes is checked
+/// further down.
 #[test]
 fn deleted_nodes_do_not_crowd_out_the_survivors() {
     let mut s = GraphStore::new();
@@ -45,13 +53,13 @@ fn deleted_nodes_do_not_crowd_out_the_survivors() {
     );
     write(
         &mut s,
-        "UNWIND range(1,200) AS i CREATE (:L2T {id:i, v:[toFloat(i), 0.0]})",
+        "UNWIND range(1,60) AS i CREATE (:L2T {id:i, v:[toFloat(i), 0.0]})",
     );
     write(
         &mut s,
-        "UNWIND range(1,200) AS i CREATE (:L2T {id:1000+i, v:[1.0, toFloat(i)/100.0]})",
+        "UNWIND range(1,60) AS i CREATE (:L2T {id:1000+i, v:[1.0, toFloat(i)/100.0]})",
     );
-    write(&mut s, "MATCH (n:L2T) WHERE n.id <= 150 DETACH DELETE n");
+    write(&mut s, "MATCH (n:L2T) WHERE n.id <= 40 DETACH DELETE n");
     let got = ids(
         &s,
         "CALL db.index.vector.queryNodes('L2T','v',[1.0,0.0],3) YIELD node, score \
