@@ -268,11 +268,11 @@ benches/           # Criterion microbenchmarks and LDBC / FinBench / Graphalytic
 benchmarks/        # Benchmark inputs and corpora (LDBC parameter files, Neo4j idiom and APOC export
                    #   fixtures, hierarchy corpus generator) — data, not code; the harnesses are in benches/
 case_studies/      # End-to-end domain datasets with loaders and queries (health, legal, sport, finance, …)
-cli/               # `samyama-cli` binary crate — connects to a running server via samyama-sdk
 crates/            # Workspace member crates (the algorithm and optimization code lives here, not in src/)
 ├── samyama-graph-algorithms/  # Graph algorithms (PageRank, WCC, BFS, Dijkstra, …)
 ├── samyama-optimization/      # Metaheuristic optimizers (Jaya, Rao, TLBO, BMR/BWR, NSGA-II, …)
 ├── samyama-gpu/               # GPU-accelerated graph algorithms and vector operations
+├── samyama-cli/               # `samyama-cli` binary crate — connects to a running server via samyama-sdk
 └── samyama-sdk/               # Rust client SDK — embedded and remote modes
 docs/              # Architecture docs, ADRs, compatibility notes
 examples/          # Runnable demos and data loaders
