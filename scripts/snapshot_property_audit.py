@@ -30,6 +30,11 @@ every `System` node is constant and may be true. It is a cheap, generic
 screen, so it can run over every published snapshot rather than being found by
 hand in three.
 
+Every record must be one of the engine's types: `n` (node), `e` (edge), `i` (index
+catalog) or `h` (hierarchy declaration). The engine's own loader skips a record
+type it does not know; this script rejects it (exit 2), because a record that
+was skipped is a record that was never audited and the report would read clean.
+
 A `.sgsnap` is gzipped newline-delimited JSON (an uncompressed one is read too),
 so this needs no engine and no build:
 
@@ -54,6 +59,9 @@ from pathlib import Path
 # threshold a caller can ask for, so the exact set is no longer worth holding.
 MAX_TRACKED = 100_000
 GZIP_MAGIC = b"\x1f\x8b"
+# Record types the engine writes (src/snapshot/mod.rs): node, edge, index
+# catalog and hierarchy declaration. The last two carry no properties.
+METADATA_RECORDS = ("i", "h")
 
 
 class SnapshotError(Exception):
@@ -151,6 +159,16 @@ def audit(lines) -> dict:
             header = rec
             continue
         kind = rec.get("t")
+        # The engine's own loader skips record types it does not know, so a
+        # snapshot with a misspelt or missing "t" still loads there. Here a
+        # skipped record is a record that was never audited, and the report
+        # would read as clean, so an unknown type is an error.
+        if kind not in ("n", "e") + METADATA_RECORDS:
+            shown = "missing" if "t" not in rec else json.dumps(kind)
+            raise SnapshotError(f"line {number}: unknown record type {shown} "
+                                f"(expected one of \"n\", \"e\", \"i\", \"h\")")
+        if kind in METADATA_RECORDS:
+            continue
         # Only a missing or null "props" means "no properties". Falsy payloads
         # such as [], false, 0 and "" are malformed and must not read as empty.
         props = rec.get("props")
@@ -169,13 +187,12 @@ def audit(lines) -> dict:
             # A node with several labels counts under each of them.
             for group in [f"({label})" for label in labels] or ["(no label)"]:
                 bump(group, props)
-        elif kind == "e":
+        else:
             edges += 1
             etype = rec.get("type")
             if etype is not None and not isinstance(etype, str):
                 raise SnapshotError(f"line {number}: \"type\" is not a string")
             bump(f"[:{etype}]" if etype else "[no type]", props)
-        # Index (`i`) and hierarchy (`h`) records carry no properties.
 
     if header is None:
         raise SnapshotError("empty file: no header line")

@@ -399,6 +399,47 @@ def t_a_directory_and_invalid_utf8_exit_2():
             assert out.returncode == 2 and out.stderr and "Traceback" not in out.stderr, (path.name, out)
 
 
+def t_every_record_must_have_a_known_type():
+    # Before: a missing or unknown "t" fell through silently, so a snapshot
+    # whose records were all misspelt audited as empty and exited 0.
+    props = {"labels": ["Country"], "props": {"income_level": ""}}
+    for rec in ({**props}, {"t": None, **props}, {"t": "", **props}, {"t": "node", **props},
+                {"t": "N", **props}, {"t": "z", **props}, {"t": 5, **props}, {"t": True, **props},
+                {"t": ["n"], **props}, {"t": {"a": 1}, **props}):
+        try:
+            audit_mod.audit(snapshot() + [json.dumps(rec)])
+        except audit_mod.SnapshotError as e:
+            assert "line 2" in str(e) and "record type" in str(e), (rec, e)
+        else:
+            raise AssertionError(f"record {rec!r} was accepted")
+
+
+def t_an_unknown_type_is_reported_as_the_type_not_as_something_else():
+    # The first thing wrong with the record is what the message should say.
+    rec = {"t": "node", "labels": 123, "props": []}
+    try:
+        audit_mod.audit(snapshot() + [json.dumps(rec)])
+    except audit_mod.SnapshotError as e:
+        assert "record type" in str(e), e
+    else:
+        raise AssertionError("accepted")
+
+
+def t_unknown_record_type_exits_2_even_with_strict():
+    line = '{"t":"node","labels":["Country"],"props":{"income_level":""}}'
+    with tempfile.TemporaryDirectory() as td:
+        out = cli(str(write(Path(td), snapshot() + [line])), "--strict")
+    assert out.returncode == 2 and "record type" in out.stderr and "Traceback" not in out.stderr, out
+
+
+def t_index_and_hierarchy_records_need_no_props():
+    lines = snapshot(many("A", lambda i: {"p": i}, n=2))
+    lines.insert(1, json.dumps({"t": "i", "definitions": [{"label": "A"}]}))
+    lines.insert(2, json.dumps({"t": "h", "name": "tax", "edge_types": ["IS_A"], "props": [1]}))
+    result = audit_mod.audit(lines)
+    assert result["nodes"] == 2 and list(result["groups"]) == ["(A)"], result["groups"]
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_") and callable(v)]
 
 if __name__ == "__main__":
