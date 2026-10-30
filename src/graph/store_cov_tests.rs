@@ -1105,10 +1105,17 @@ async fn background_indexer_adds_vectors_for_every_event_kind() {
 
     GraphStore::start_background_indexer(rx, vector_index.clone(), property_index, tenants).await;
 
-    for (q, want) in [([1.0f32, 0.0], 1u64), ([0.0, 1.0], 2), ([-1.0, 0.0], 3)] {
+    for (q, want) in [([1.0f32, 0.0], 1u64), ([0.0, 1.0], 2)] {
         let hits = vector_index.search("Doc", "v", &q, 1).unwrap();
         assert_eq!(hits[0].0, NodeId::new(want), "query {q:?}");
     }
+    // Node 3 was added and then deleted, and a deleted node leaves the index
+    // (#1968): its own vector no longer finds it.
+    let hits = vector_index.search("Doc", "v", &[-1.0, 0.0], 3).unwrap();
+    assert!(
+        hits.iter().all(|(id, _)| *id != NodeId::new(3)),
+        "deleted node 3 still found: {hits:?}"
+    );
 }
 
 /// Wait until `check` holds, polling briefly. The auto-embed task is spawned
@@ -1541,6 +1548,7 @@ fn index_catalog_lists_every_kind_in_a_stable_order() {
             IndexDefinition::FullText { .. } => 2,
             IndexDefinition::Vector { .. } => 3,
             IndexDefinition::Point { .. } => 4,
+            IndexDefinition::VectorParams { .. } => 5,
         })
         .collect();
     let mut sorted = kinds.clone();

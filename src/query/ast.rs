@@ -296,6 +296,9 @@ pub struct CreateVectorIndexClause {
     /// How the index stores its values (NDS-09). `None` unless the caller asked
     /// for `quantization: "fp16"`, so the default is unchanged.
     pub quantization: crate::vector::index::Quantization,
+    /// `m`, `ef_construction` and the default `ef` (#1971). The defaults
+    /// unless the DDL gave them.
+    pub params: crate::vector::HnswParams,
 }
 
 /// CREATE INDEX clause

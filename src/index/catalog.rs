@@ -55,6 +55,18 @@ pub enum IndexDefinition {
     /// `CREATE POINT INDEX name FOR (n:Label) ON (n.property)` (#1618). Last,
     /// so a catalog written before it still decodes.
     Point { name: String, label: String, property: String },
+    /// HNSW parameters of the vector index on `label.property`, when they are
+    /// not the defaults (#1971). A record of its own rather than fields on
+    /// `Vector`, because the RocksDB catalog is bincode, which has no optional
+    /// fields: a `Vector` with more fields would not decode a catalog written
+    /// before them. Last, for the same reason as `Point`.
+    VectorParams {
+        label: String,
+        property: String,
+        m: usize,
+        ef_construction: usize,
+        ef: Option<usize>,
+    },
 }
 
 /// Every index declaration a tenant has, as one record.
