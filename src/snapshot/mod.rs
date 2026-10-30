@@ -593,26 +593,94 @@ pub fn import_tenant_maybe_encrypted(
     import_tenant_with_dedup(store, dec, &[])
 }
 
+/// The longest line a snapshot may carry, in bytes, not counting its newline.
+///
+/// `BufRead::lines` has no limit: a gzip body that inflates to one line with no
+/// newline in it is read into a single `String` until memory runs out, whatever
+/// the header declares. One record per line means a line is one node, edge or
+/// declaration, and 64 MiB is far past any of those that a real export writes —
+/// a 4,096-dimension embedding is under 100 KB as JSON.
+pub const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// `BufRead::lines`, refusing a line longer than `max` bytes instead of
+/// buffering it.
+///
+/// The line is refused as soon as it passes `max`, before the rest of it is
+/// read. Line endings are stripped as `lines` strips them: `\n`, and a `\r`
+/// before it.
+struct BoundedLines<R> {
+    reader: R,
+    max: usize,
+}
+
+impl<R: BufRead> BoundedLines<R> {
+    fn new(reader: R, max: usize) -> Self {
+        Self { reader, max }
+    }
+
+    fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        let mut line = Vec::new();
+        loop {
+            let available = match self.reader.fill_buf() {
+                Ok(buf) => buf,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            if available.is_empty() {
+                if line.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            }
+            let (take, done) = match available.iter().position(|&b| b == b'\n') {
+                Some(i) => (i, true),
+                None => (available.len(), false),
+            };
+            if line.len() + take > self.max {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("snapshot line longer than {} bytes", self.max),
+                ));
+            }
+            line.extend_from_slice(&available[..take]);
+            self.reader.consume(take + done as usize);
+            if done {
+                break;
+            }
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        String::from_utf8(line)
+            .map(Some)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
+impl<R: BufRead> Iterator for BoundedLines<R> {
+    type Item = std::io::Result<String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.read_line().transpose()
+    }
+}
+
 /// Read only line 0 of a snapshot and return its header.
 ///
-/// The header declares `node_count` and `edge_count`, so a caller can ask
-/// whether the file fits before any of it is written. `/api/snapshot/import`
-/// needs that: it takes the store lock directly rather than going through
-/// `AppState::mutate`, so the admission ceiling `mutate` installs was never
-/// set, and `create_node` cannot refuse in any case (#1495). Checking after
-/// the import is not equivalent — the graph is already over the limit by then,
-/// and undoing it is the rollback path, not admission control.
+/// The header declares `node_count` and `edge_count`, so a caller can refuse a
+/// file that says it will not fit before any of it is written. That is an early
+/// answer, not the limit: the header is whatever the uploader wrote, and a body
+/// longer than its header declares is held to the quota row by row inside the
+/// import, where each node asks `admit_node` and each edge `admit_edge`.
 ///
 /// Reads one line and stops; the rest of a hundred-million-node file is never
 /// decompressed.
 pub fn peek_header(reader: impl Read) -> Result<SnapshotHeader, Box<dyn std::error::Error>> {
     let decoder = GzDecoder::new(reader);
-    let mut buf_reader = BufReader::new(decoder);
-    let mut header_line = String::new();
-    if buf_reader.read_line(&mut header_line)? == 0 {
-        return Err("empty snapshot file: missing header".into());
-    }
-    let header: SnapshotHeader = serde_json::from_str(header_line.trim_end())?;
+    let header_line = BoundedLines::new(BufReader::new(decoder), MAX_LINE_BYTES)
+        .next()
+        .ok_or("empty snapshot file: missing header")??;
+    let header: SnapshotHeader = serde_json::from_str(&header_line)?;
     if header.format != "sgsnap" {
         return Err(format!(
             "invalid snapshot format: expected \"sgsnap\", got \"{}\"",
@@ -978,8 +1046,7 @@ fn import_tenant_inner(
     merged: &mut Vec<MergeUndo>,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
     let decoder = GzDecoder::new(reader);
-    let buf_reader = BufReader::new(decoder);
-    let mut lines = buf_reader.lines();
+    let mut lines = BoundedLines::new(BufReader::new(decoder), MAX_LINE_BYTES);
 
     // Parse header (first line)
     let header_line = lines
@@ -1313,6 +1380,7 @@ fn import_tenant_inner(
                 // by exactly one of its labels, and **which one was
                 // arbitrary** -- the snapshot's label order comes from a
                 // HashSet. `create_node_with_labels` indexes all of them.
+                store.admit_node()?;
                 let new_id = store.create_node_with_labels(
                     snap_node.labels.iter().map(|l| Label::new(l.as_str())),
                 );
@@ -1380,6 +1448,7 @@ fn import_tenant_inner(
                 id_remap.insert(snap_node.id, new_id);
             } else {
                 // v1: use full create_node with HashMap properties
+                store.admit_node()?;
                 let new_id = store.create_node_with_labels(
                     snap_node.labels.iter().map(|l| Label::new(l.as_str())),
                 );
@@ -1797,6 +1866,37 @@ fn conflicting_definition<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bounded_lines_reads_lines_as_lines_does() {
+        let text = "a\r\nbb\n\nccc";
+        let got: Vec<String> = BoundedLines::new(text.as_bytes(), 3)
+            .map(Result::unwrap)
+            .collect();
+        let want: Vec<String> = text.lines().map(str::to_string).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn bounded_lines_refuses_a_line_past_the_limit() {
+        let mut lines = BoundedLines::new(std::io::BufReader::with_capacity(2, &b"abc\nabcd\n"[..]), 3);
+        assert_eq!(lines.next().unwrap().unwrap(), "abc");
+        let err = lines.next().unwrap().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_line_with_no_newline_is_refused_not_buffered() {
+        // The decompression-bomb shape: a body that inflates to one long line.
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(&vec![b'x'; MAX_LINE_BYTES + 1]).unwrap();
+        let data = gz.finish().unwrap();
+        let err = peek_header(data.as_slice()).unwrap_err();
+        assert!(err.to_string().contains("longer than"), "{err}");
+        let mut store = GraphStore::new();
+        let err = import_tenant(&mut store, data.as_slice()).unwrap_err();
+        assert!(err.to_string().contains("longer than"), "{err}");
+    }
+
     use super::*;
     use std::io::Cursor;
 
