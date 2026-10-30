@@ -145,6 +145,44 @@ CALL algo.or.solve({
 })
 ```
 
+### The model a call describes
+
+`algo.or.solve` builds one fixed shape of problem from the nodes of a label.
+There is no general modelling language yet: the objective is always linear in
+the node values, and the two constraints are the two keys below.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `label` | Every node with this label is one decision variable. | required |
+| `property` | The node property the solution is written to. | required |
+| `lowerBound` / `min`, `upperBound` / `max` | Every variable lies in `[lowerBound, upperBound]`. `lowerBound` must be less than `upperBound`; equal or inverted bounds are refused. | `0.0`, `100.0` |
+| `costProperty` / `cost_property` | The objective is **minimise Σ value × cost**, reading each node's cost from this property (`1.0` where a node has none). | every cost `1.0` |
+| `costProperties` / `cost_properties` | Two or more cost properties make it multi-objective: one Σ value × cost per property, solved as a Pareto front. | — |
+| `budget` | Constraint Σ value × cost ≤ `budget`. | none |
+| `minTotal` / `min_total` | Constraint Σ value ≥ `minTotal`. | none |
+| `algorithm` | Any solver in `algo.or.solve`'s list; an unknown name is refused, not replaced. | `Jaya` |
+| `populationSize`, `maxIterations` | Solver settings. | `50`, `100` |
+| `bestKnown` | A reference objective to report `gap` against (single-objective only). | none |
+
+The constraints are penalties, not hard limits: a solver can return a point
+that breaks them, and `feasible` says whether it did. In a multi-objective
+solve they are not part of the search at all; `feasible` still reports whether
+the point written back meets them. `budget` is measured with the first cost
+property. A label with no nodes returns no rows and writes nothing.
+
+### Writing the solution back
+
+The solution is written to `property` on every node of `label`. For a
+multi-objective solve that is the first point of the Pareto front.
+
+**It is written whole or not at all.** Each value is an ordinary property
+write, so constraints, indexes and the write log apply. If the store refuses
+any one of them (a `UNIQUE` constraint, a quota), the call fails with the
+store's message and the whole statement is undone: no node keeps a value from
+the failed solve (#1593, #1637). `tests/or_solve_write_back_is_atomic.rs`
+checks this by making a write fail part-way, for both a single- and a
+multi-objective solve (OPT-07, #1773).
+
 ### What a solve returns
 
 Every row reports how good the answer is, not only the answer (OPT-09):
