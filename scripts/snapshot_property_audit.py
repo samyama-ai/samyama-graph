@@ -140,6 +140,8 @@ def audit(lines) -> dict:
             rec = json.loads(line)
         except json.JSONDecodeError as e:
             raise SnapshotError(f"line {number}: not JSON ({e.msg})") from e
+        except RecursionError as e:
+            raise SnapshotError(f"line {number}: nested too deeply to read") from e
         if not isinstance(rec, dict):
             raise SnapshotError(f"line {number}: expected a JSON object")
         if header is None:
@@ -149,7 +151,11 @@ def audit(lines) -> dict:
             header = rec
             continue
         kind = rec.get("t")
-        props = rec.get("props") or {}
+        # Only a missing or null "props" means "no properties". Falsy payloads
+        # such as [], false, 0 and "" are malformed and must not read as empty.
+        props = rec.get("props")
+        if props is None:
+            props = {}
         if not isinstance(props, dict):
             raise SnapshotError(f"line {number}: \"props\" is not an object")
         if kind == "n":
@@ -256,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with open_snapshot(args.snapshot) as f:
             result = audit(f)
-    except (SnapshotError, UnicodeDecodeError, EOFError, gzip.BadGzipFile, zlib.error) as e:
+    except (SnapshotError, UnicodeDecodeError, EOFError, gzip.BadGzipFile, zlib.error, RecursionError) as e:
         print(f"{args.snapshot}: {e}", file=sys.stderr)
         return 2
 

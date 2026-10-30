@@ -343,6 +343,62 @@ def t_a_corrupt_deflate_stream_exits_2():
     assert out.returncode == 2 and out.stderr and "Traceback" not in out.stderr, out
 
 
+def t_props_must_be_missing_null_or_an_object():
+    # Before: `rec.get("props") or {}` turned [], false, 0 and "" into "no
+    # properties", so a malformed record read as a clean one.
+    for bad in ([], False, 0, "", 3, "x", [1], True, 1.5):
+        lines = snapshot() + [json.dumps({"t": "n", "id": 1, "labels": ["A"], "props": bad})]
+        try:
+            audit_mod.audit(lines)
+        except audit_mod.SnapshotError as e:
+            assert "line 2" in str(e) and "props" in str(e), (bad, e)
+        else:
+            raise AssertionError(f"props {bad!r} was accepted")
+        lines = snapshot() + [json.dumps({"t": "e", "id": 1, "src": 1, "tgt": 2, "type": "R", "props": bad})]
+        try:
+            audit_mod.audit(lines)
+        except audit_mod.SnapshotError:
+            pass
+        else:
+            raise AssertionError(f"edge props {bad!r} was accepted")
+
+
+def t_missing_or_null_props_are_allowed():
+    for rec in ({"t": "n", "labels": ["A"]}, {"t": "n", "labels": ["A"], "props": None},
+                {"t": "n", "labels": ["A"], "props": {}}):
+        result = audit_mod.audit(snapshot() + [json.dumps(rec)])
+        assert result["nodes"] == 1 and result["group_size"] == {"(A)": 1}, rec
+
+
+def t_falsy_props_exit_2_even_with_strict():
+    with tempfile.TemporaryDirectory() as td:
+        for bad in ([], False, 0, ""):
+            lines = snapshot() + [json.dumps({"t": "n", "id": 1, "labels": ["A"], "props": bad})]
+            out = cli(str(write(Path(td), lines)), "--strict")
+            assert out.returncode == 2 and "props" in out.stderr and "Traceback" not in out.stderr, (bad, out)
+
+
+def t_a_deeply_nested_value_exits_2():
+    deep = "[" * 200_000 + "]" * 200_000
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "d.sgsnap"
+        p.write_text(json.dumps({"format": "sgsnap"}) + "\n"
+                     + '{"t": "n", "labels": ["A"], "props": {"x": ' + deep + "}}\n")
+        out = cli(str(p))
+    assert out.returncode == 2 and "line 2" in out.stderr and "Traceback" not in out.stderr, out
+
+
+def t_a_directory_and_invalid_utf8_exit_2():
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        bad = json.dumps({"format": "sgsnap"}).encode() + b'\n{"t":"n","labels":["A"],"props":{"x":"\xff"}}\n'
+        (td / "p").write_bytes(bad)
+        (td / "g").write_bytes(gzip.compress(bad))
+        for path in (td, td / "p", td / "g"):
+            out = cli(str(path))
+            assert out.returncode == 2 and out.stderr and "Traceback" not in out.stderr, (path.name, out)
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_") and callable(v)]
 
 if __name__ == "__main__":
