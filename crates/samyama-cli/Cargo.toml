@@ -12,8 +12,8 @@ name = "samyama-cli"
 path = "src/main.rs"
 
 [dependencies]
-samyama-sdk = { path = "../crates/samyama-sdk", version = "1.13.0" }
-samyama = { path = "..", version = "1.13.0", default-features = false }
+samyama-sdk = { path = "../samyama-sdk", version = "1.13.0" }
+samyama = { path = "../..", version = "1.13.0", default-features = false }
 clap = { version = "4", features = ["derive"] }
 # `completions` (API-14 asks for shell completion) and `doctor` (DX-09).
 clap_complete = "4"
