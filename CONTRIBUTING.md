@@ -191,8 +191,19 @@ Small, well-scoped PRs are reviewed and merged faster than large ones.
 | **GPU CI** (`gpu-ci.yml`) | manual dispatch only | GPU-path tests on a self-hosted runner | — |
 | **Triage SLA** (`triage-sla.yml`) | 03:30 UTC on weekdays, or manual dispatch | `scripts/triage_sla.py` — fails if an outside issue waited more than 2 business days for a first response ([SUPPORT.md](SUPPORT.md)) | ~1 min |
 
-**`test (ubuntu-latest)` is a required check on `main`.** A PR cannot merge until
-it passes.
+**`ci-ok` is the one required check on `main` and `dev`.** It waits for every
+suite in `ci.yml` and passes only if each one succeeded or was skipped by the
+path filter, so a PR cannot merge until it does.
+
+The `test` matrix runs on **x86-64 Linux** (`ubuntu-latest`) and **ARM64 Linux**
+(`ubuntu-24.04-arm`) for every PR that touches code. The `platforms` job adds
+**macOS ARM64** (`macos-15`) and **Windows x64** (`windows-2022`) and runs
+`cargo test --workspace` there for every PR into `main`, every push to `main`,
+and any PR that edits `ci.yml`. Releases are tagged from `main`, so a release
+PR cannot merge until it has passed on all four (HW-16, #1696). A PR into
+`dev` skips them to stay fast; if your change is platform-sensitive (paths,
+file locking, line endings, process handling), run `cargo test --workspace` on
+the platform yourself or ask a maintainer to run it before it reaches `main`.
 
 Tests run in the **dev** profile, not release. Release compilation of the test
 binaries is what costs the wall-clock time; the tests themselves run in under a

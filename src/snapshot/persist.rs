@@ -63,6 +63,13 @@ pub fn persist_snapshot(data_path: &str, bytes: &[u8]) -> std::io::Result<()> {
         f.sync_all()?;
     }
     // Make the rename and the marker's directory entry durable.
+    //
+    // Unix only. A directory is opened like a file there, and fsyncing it is
+    // what makes a rename durable. Windows refuses to open a directory with
+    // `File::open` ("Access is denied", os error 5) -- which failed every
+    // persist after the snapshot was already in place (#1696) -- and NTFS
+    // journals the rename itself, so there is no directory entry to flush.
+    #[cfg(unix)]
     File::open(&dir)?.sync_all()?;
 
     Ok(())

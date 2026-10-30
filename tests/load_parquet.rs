@@ -203,7 +203,11 @@ fn load_parquet_end_to_end() {
     );
 
     // ---- file:// URLs, and the clause after a WITH (the pipeline shape) ----
-    let url = format!("file://{}", dir.path().join("mixed.parquet").display());
+    // `\` in a Cypher string is an escape; Windows accepts `/`.
+    let url = format!(
+        "file://{}",
+        dir.path().join("mixed.parquet").display().to_string().replace('\\', "/")
+    );
     let n = engine
         .execute(
             &format!("LOAD PARQUET FROM '{url}' AS row RETURN count(*) AS c"),
@@ -342,7 +346,7 @@ fn load_parquet_end_to_end() {
         .execute(
             &format!(
                 "LOAD PARQUET FROM 'file://{}' AS row RETURN row",
-                outside.path().join("secret.parquet").display()
+                outside.path().join("secret.parquet").display().to_string().replace('\\', "/")
             ),
             &empty,
         )

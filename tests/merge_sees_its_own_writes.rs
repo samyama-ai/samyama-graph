@@ -72,7 +72,8 @@ fn load_csv_merge_builds_the_same_graph_with_and_without_an_index() {
          MERGE (a:N {{id: toInteger(row.a)}}) \
          MERGE (b:N {{id: toInteger(row.b)}}) \
          MERGE (a)-[:R]->(b)",
-        path.display()
+        // `\` in a Cypher string is an escape; Windows accepts `/`.
+        path.display().to_string().replace('\\', "/")
     );
 
     let without = run(&query, false);

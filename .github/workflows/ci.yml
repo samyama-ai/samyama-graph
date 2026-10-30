@@ -81,6 +81,15 @@ jobs:
       # architectures. `ci-ok` passed and was right to: skipped is success by
       # design. The filter was what was wrong (#1854).
       docs: ${{ steps.filter.outputs.docs }}
+      # A fourth: does this run need the macOS ARM64 and Windows legs? HW-16
+      # asks for every release to be tested on four platforms (#1696). Releases
+      # are cut from main, so every pull request into main and every push to it
+      # runs them, and the `ci-ok` that main requires waits for them. A pull
+      # request into dev does not: a Windows leg roughly doubles the wall clock,
+      # and dev reaches main only through a pull request that runs it anyway.
+      # Editing this file runs them too, so a change to the job is tested by
+      # the pull request that makes it.
+      platforms: ${{ steps.filter.outputs.platforms }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -92,6 +101,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
 
@@ -102,6 +112,7 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "conformance=true" >> "$GITHUB_OUTPUT"
             echo "docs=true" >> "$GITHUB_OUTPUT"
+            echo "platforms=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -110,6 +121,7 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "conformance=true" >> "$GITHUB_OUTPUT"
             echo "docs=true" >> "$GITHUB_OUTPUT"
+            echo "platforms=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -181,6 +193,20 @@ jobs:
             echo "no markdown touched; the documentation gate will be skipped"
           fi
           echo "docs=$DOCS" >> "$GITHUB_OUTPUT"
+
+          # macOS ARM64 and Windows: on the way to a release, or when this file
+          # changes. Skipped with the rest when no code is touched.
+          PLATFORMS=false
+          if [ "$CODE" = "true" ] && [ "${BASE_REF:-}" = "main" ]; then
+            echo "a pull request into main: the macOS and Windows legs run"
+            PLATFORMS=true
+          elif printf '%s\n' $CHANGED | grep -qx '.github/workflows/ci.yml'; then
+            echo "ci.yml changed: the macOS and Windows legs run"
+            PLATFORMS=true
+          else
+            echo "not a pull request into main; the macOS and Windows legs will be skipped"
+          fi
+          echo "platforms=$PLATFORMS" >> "$GITHUB_OUTPUT"
 
   docs-gate:
     # CH-DOC-EXEC for a PR that changes documentation and no code (#1854).
@@ -581,6 +607,68 @@ jobs:
   #
   # The two halves are independent -- different language, different directory, no
   # shared artefact -- so neither failing is a reason to stop asking the other.
+  # The two release platforms the `test` matrix does not cover (HW-16, #1696).
+  #
+  # A separate job rather than two more entries in `test`'s matrix because
+  # nearly every step there after `Tests` is Linux-specific (apt-get, the
+  # release binary the conformance job downloads, the GPML gates). What has to
+  # hold on every platform we ship to is the test suite itself, so that is what
+  # runs here. The python wheels for both platforms are built and tested by
+  # publish-pypi.yml, but only at release time and only through the SDK.
+  #
+  # macos-15 is arm64 (macos-14 retires 2026-11-02, see publish-pypi.yml).
+  # windows-2022 is pinned for the same reason publish-pypi.yml pins it: the
+  # floating windows-latest moved to an MSVC that broke the RocksDB build.
+  platforms:
+    name: platforms (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.platforms == 'true'
+    runs-on: ${{ matrix.os }}
+    # Cold, both runners compile RocksDB from source; Windows is the slower.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    steps:
+      # Windows runners default to core.autocrlf=true, which would hand the
+      # tests that read fixtures and corpora byte-for-byte CRLF files that no
+      # other platform sees.
+      - name: Check out with the repository's line endings
+        run: git config --global core.autocrlf false
+
+      # The first macos-15 run died at the linker with "No space left on
+      # device": every test binary and example links the whole engine
+      # statically, and the arm64 runner has far less free disk than the Linux
+      # ones. The Android SDK and the Xcode versions other than the selected one
+      # are the bulk of the image and nothing here uses them.
+      - name: Free disk space
+        if: runner.os == 'macOS'
+        run: |
+          df -h /
+          keep=$(xcode-select -p | sed 's#/Contents/Developer$##')
+          echo "keeping $keep"
+          sudo rm -rf "${ANDROID_HOME:-$HOME/Library/Android/sdk}" "$HOME/Library/Android"
+          for x in /Applications/Xcode*.app; do
+            [ "$(cd "$x" && pwd -P)" = "$(cd "$keep" && pwd -P)" ] && continue
+            [ -L "$x" ] && continue
+            sudo rm -rf "$x"
+          done
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate from ci-test: nothing compiled for Linux is reusable here.
+          shared-key: ci-platforms
+
+      - name: Tests
+        shell: bash
+        run: cargo test --workspace --no-fail-fast
+
   sdks:
     name: sdks (typescript transport, python MCP tools)
     needs: changes
@@ -1163,6 +1251,7 @@ jobs:
       - snapshot-portability-read
       - sdk-compat
       - excluded-lockfiles
+      - platforms
     runs-on: ubuntu-latest
     steps:
       - name: Every suite either succeeded or was skipped

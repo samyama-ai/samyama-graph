@@ -97,12 +97,24 @@ pub fn read_key(path: &std::path::Path) -> Result<[u8; KEY_BYTES], String> {
     Ok(k)
 }
 
+/// Fill `buf` from the operating system's random source.
+///
+/// `OsRng` is `getrandom`: the `getrandom` syscall or `/dev/urandom` on Linux,
+/// `getentropy` on macOS, `BCryptGenRandom` on Windows. Opening `/dev/urandom`
+/// by path, as this did, works on the first two and fails on Windows with
+/// "the system cannot find the path specified" -- so on Windows no key could be
+/// generated and no encrypted snapshot written (#1696).
+pub fn os_random(buf: &mut [u8]) -> Result<(), String> {
+    use rand::RngCore;
+    rand::rngs::OsRng
+        .try_fill_bytes(buf)
+        .map_err(|e| format!("cannot read the OS random source: {e}"))
+}
+
 /// A fresh key from the OS random source, as hex.
 pub fn generate_key() -> Result<String, String> {
     let mut raw = [0u8; KEY_BYTES];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut raw))
-        .map_err(|e| format!("cannot read /dev/urandom: {e}"))?;
+    os_random(&mut raw)?;
     Ok(raw.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -131,9 +143,7 @@ pub struct EncryptingWriter<W: Write> {
 impl<W: Write> EncryptingWriter<W> {
     pub fn new(mut inner: W, key: &[u8; KEY_BYTES]) -> Result<Self, String> {
         let mut prefix = [0u8; 8];
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut f| f.read_exact(&mut prefix))
-            .map_err(|e| format!("cannot read /dev/urandom: {e}"))?;
+        os_random(&mut prefix)?;
 
         inner.write_all(MAGIC).map_err(|e| e.to_string())?;
         inner.write_all(&prefix).map_err(|e| e.to_string())?;
