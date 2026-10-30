@@ -1566,6 +1566,27 @@ impl GraphStore {
         self.admission
     }
 
+    /// Run `body` under `admission` with a tally of its own, then put back the
+    /// ceiling and tally that were in force before.
+    ///
+    /// For a write that does not go through a write log, so has no
+    /// `take_write_log` to clear its births: `/api/snapshot/import` is one.
+    /// Without the restore, an import's births would stay in the tally and be
+    /// charged a second time to whatever statement ran next — or, inside an
+    /// open session transaction, be mixed into that transaction's own count.
+    pub fn with_write_admission<T>(
+        &mut self,
+        admission: Option<WriteAdmission>,
+        body: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let saved = (self.admission, self.admission_births);
+        self.admission = admission;
+        self.admission_births = (0, 0);
+        let out = body(self);
+        (self.admission, self.admission_births) = saved;
+        out
+    }
+
     /// May one more node be created?
     ///
     /// Asked *before* the node exists. A creation path that does not ask is not
@@ -7557,6 +7578,7 @@ mod tests {
             ("begin_deferred_bulk_load", "raises the deferral counter; it changes when the held-back finish runs, not what any read returns -- every structure it holds back is guarded against being read short (#1807)"),
             ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
             ("set_write_admission", "stores the quota ceiling this statement is admitted under; it refuses writes, it does not change one (#1483)"),
+            ("with_write_admission", "swaps the quota ceiling and tally around a caller's body; the body's writes go through mutators that bump on their own"),
             ("log_edge_write", "records what an edge write replaces for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
             ("log_edge_map", "records an edge's whole map for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
             ("note_edge_created", "records a new edge's creation version for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),

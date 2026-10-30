@@ -2144,6 +2144,74 @@ async fn a_snapshot_past_the_quota_is_refused_whole() {
     assert_eq!(s.store.read().await.node_count(), 0);
 }
 
+/// `data` with its header's declared counts replaced, the body untouched.
+fn declaring(data: &[u8], nodes: u64, edges: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    crate::snapshot::edit_header(data, &mut out, |h| {
+        h.insert("node_count".into(), json!(nodes));
+        h.insert("edge_count".into(), json!(edges));
+        Ok(())
+    })
+    .unwrap();
+    out
+}
+
+#[tokio::test]
+async fn a_header_that_understates_its_nodes_is_still_held_to_the_quota() {
+    // The header said zero, so the up-front check passed, and every node in
+    // the body was created regardless of the quota.
+    let src = state();
+    run(&src, "CREATE (:S), (:S), (:S)").await;
+    let data = declaring(&snapshot_bytes(&src).await, 0, 0);
+    let (s, _pm, _dir) = state_with_quota(2, 0);
+    let r = post_multipart(routes(s.clone()), "/api/snapshot/import", vec![file(data)]).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.text());
+    assert_eq!(r.json()["nodes_imported"], 0);
+    assert_eq!(s.store.read().await.node_count(), 0, "the import is rolled back whole");
+}
+
+#[tokio::test]
+async fn a_header_that_understates_its_edges_is_still_held_to_the_quota() {
+    let src = state();
+    run(&src, "CREATE (:S)-[:R]->(:S), (:S)-[:R]->(:S)").await;
+    let data = declaring(&snapshot_bytes(&src).await, 4, 0);
+    let (s, _pm, _dir) = state_with_quota(100, 1);
+    let r = post_multipart(routes(s.clone()), "/api/snapshot/import", vec![file(data)]).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.text());
+    let store = s.store.read().await;
+    assert_eq!((store.node_count(), store.edge_count()), (0, 0));
+}
+
+#[tokio::test]
+async fn an_understated_header_that_fits_still_imports() {
+    // The header is not trusted, but neither is it required to be right: a
+    // file from another tool that gets the counts wrong imports if its body
+    // fits.
+    let src = state();
+    run(&src, "CREATE (:S), (:S)").await;
+    let data = declaring(&snapshot_bytes(&src).await, 0, 0);
+    let (s, _pm, _dir) = state_with_quota(5, 0);
+    let r = post_multipart(routes(s.clone()), "/api/snapshot/import", vec![file(data)]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert_eq!(s.store.read().await.node_count(), 2);
+}
+
+#[tokio::test]
+async fn repeated_snapshot_imports_count_what_earlier_ones_added() {
+    // A snapshot import is not journalled, so the quota counter does not see
+    // its rows; each upload used to be checked against the count before any
+    // of them.
+    let src = state();
+    run(&src, "CREATE (:S), (:S)").await;
+    let data = snapshot_bytes(&src).await;
+    let (s, _pm, _dir) = state_with_quota(3, 0);
+    let r = post_multipart(routes(s.clone()), "/api/snapshot/import", vec![file(data.clone())]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let r = post_multipart(routes(s.clone()), "/api/snapshot/import", vec![file(data)]).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.text());
+    assert_eq!(s.store.read().await.node_count(), 2);
+}
+
 #[tokio::test]
 async fn encrypted_snapshots_need_the_key_and_refuse_dedup() {
     let key = Arc::new([3u8; crate::snapshot::encryption::KEY_BYTES]);
