@@ -3931,10 +3931,18 @@ impl QueryPlanner {
             // an established meaning and giving it a different one is the defect; accepting
             // both is the fix that does not break the queries already written against ours.
             //
-            // Either form takes a trailing options map, `{ef: 200}` (#1971).
+            // Either form takes a trailing options map, `{ef: 200}` (#1971). A fourth
+            // argument makes it Neo4j's form only when that argument is a map: without
+            // the check, `('Doc', 1, [1.0], 2)` -- our form with a bad property -- was
+            // read as Neo4j's with `2` for its options, and the error named the wrong
+            // mistake.
             let args = &call_clause.arguments;
+            let options_map = |e: &Expression| {
+                matches!(e, Expression::MapExpr(_) | Expression::Literal(PropertyValue::Map(_)))
+            };
             let neo4j_form = matches!(args.first(), Some(Expression::Literal(PropertyValue::String(_))))
-                && matches!(args.get(1), Some(Expression::Literal(PropertyValue::Integer(_))));
+                && matches!(args.get(1), Some(Expression::Literal(PropertyValue::Integer(_))))
+                && (args.len() == 3 || (args.len() == 4 && options_map(&args[3])));
             let positional = if neo4j_form { 3 } else { 4 };
 
             if args.len() < positional || args.len() > positional + 1 {
