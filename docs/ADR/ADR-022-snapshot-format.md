@@ -176,7 +176,7 @@ Properties are encoded as JSON values. Edge records ("stub edges") carry only `i
 
 ### Typed values
 
-A string, integer, float, boolean, null, list or map property is the JSON value
+A string, integer, finite float, boolean, null, list or map property is the JSON value
 of the same kind; lists and map values are encoded recursively. Every other
 `PropertyValue` is a JSON object whose `__type` names it (#1907). The codec is
 `samyama::snapshot::codec::{property_to_json, json_to_property}`, public so a
@@ -192,6 +192,7 @@ converter outside the server calls it rather than copying this table.
 | `ZonedDateTime` | `secs` (i64), `nanos` (u32), `offset` (i32), `zone` (string or null) | `ZonedDateTime` | an instant, its offset in seconds, and the IANA zone name when there was one |
 | `Duration` | `months`, `days`, `seconds` (i64), `nanos` (i32) | `Duration` | the four components kept apart, as Cypher keeps them |
 | `Vector` | `value` (array of numbers) | `Vector` | an `f32` embedding |
+| `Float` | `value` (`"INF"`, `"-INF"` or `"NaN"`) | `Float` | a non-finite `f64`, which JSON cannot hold as a number. A finite float stays a plain JSON number |
 
 Reading rules, which a second implementation must follow to agree with this one:
 
