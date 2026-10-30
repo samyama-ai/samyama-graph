@@ -62,6 +62,13 @@ GZIP_MAGIC = b"\x1f\x8b"
 # Record types the engine writes (src/snapshot/mod.rs): node, edge, index
 # catalog and hierarchy declaration. The last two carry no properties.
 METADATA_RECORDS = ("i", "h")
+# A group is named for what it holds: `(Label)` for a node label, `[:TYPE]` for
+# an edge type. Records with no label or no type go in these two instead. They
+# start with neither "(" nor "[:", so they cannot equal the name of any real
+# label or type -- including one literally called "no label" or "" -- and the
+# group name can be both the identity and the display text.
+UNLABELED = "<unlabeled>"
+UNTYPED = "<untyped>"
 
 
 class SnapshotError(Exception):
@@ -185,14 +192,14 @@ def audit(lines) -> dict:
             if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
                 raise SnapshotError(f"line {number}: \"labels\" is not an array of strings")
             # A node with several labels counts under each of them.
-            for group in [f"({label})" for label in labels] or ["(no label)"]:
+            for group in [f"({label})" for label in labels] or [UNLABELED]:
                 bump(group, props)
         else:
             edges += 1
             etype = rec.get("type")
             if etype is not None and not isinstance(etype, str):
                 raise SnapshotError(f"line {number}: \"type\" is not a string")
-            bump(f"[:{etype}]" if etype else "[no type]", props)
+            bump(UNTYPED if etype is None else f"[:{etype}]", props)
 
     if header is None:
         raise SnapshotError("empty file: no header line")

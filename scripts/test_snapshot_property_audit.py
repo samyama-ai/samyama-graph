@@ -303,12 +303,12 @@ def t_missing_or_null_labels_are_still_allowed():
     for rec in ({"t": "n", "props": {"x": 1}}, {"t": "n", "labels": None, "props": {"x": 1}},
                 {"t": "n", "labels": [], "props": {"x": 1}}):
         result = audit_mod.audit(snapshot() + [json.dumps(rec)])
-        assert list(result["groups"]) == ["(no label)"], (rec, result["groups"])
+        assert list(result["groups"]) == [audit_mod.UNLABELED], (rec, result["groups"])
 
 
 def t_an_edge_with_no_type_is_grouped_not_dropped():
     result = audit_mod.audit(snapshot() + [json.dumps({"t": "e", "id": 1, "src": 1, "tgt": 2, "props": {"w": 1}})])
-    assert list(result["groups"]) == ["[no type]"], result["groups"]
+    assert list(result["groups"]) == [audit_mod.UNTYPED], result["groups"]
 
 
 def t_an_edge_type_must_be_a_string():
@@ -438,6 +438,38 @@ def t_index_and_hierarchy_records_need_no_props():
     lines.insert(2, json.dumps({"t": "h", "name": "tax", "edge_types": ["IS_A"], "props": [1]}))
     result = audit_mod.audit(lines)
     assert result["nodes"] == 2 and list(result["groups"]) == ["(A)"], result["groups"]
+
+
+def t_a_label_called_no_label_is_not_the_unlabeled_group():
+    # Before both were "(no label)": 60 nodes with an always-empty column and 60
+    # unlabeled nodes with real values merged into one group of 120, and the
+    # empty column stopped being flagged.
+    lines = snapshot([(["no label"], {"income": ""})] * 60 + [([], {"income": f"v{i}"}) for i in range(60)])
+    result = audit_mod.audit(lines)
+    assert result["group_size"] == {"(no label)": 60, audit_mod.UNLABELED: 60}, result["group_size"]
+    f = flags(lines, min_records=50)
+    assert f[("(no label)", "income")] == ["always-empty"], f
+    assert f[(audit_mod.UNLABELED, "income")] == [], f
+
+
+def t_two_halves_do_not_add_up_to_reach_min_records():
+    # 60 + 60 must not read as 120 and clear --min-records 100.
+    lines = snapshot([(["no label"], {"c": "a"})] * 60 + [([], {"c": "a"})] * 60)
+    assert all(v == [] for v in flags(lines).values()), flags(lines)
+    assert flags(lines, min_records=60)[("(no label)", "c")] == ["constant"]
+
+
+def t_empty_and_odd_names_get_their_own_groups():
+    result = audit_mod.audit(snapshot([([""], {"p": 1}), ([], {"p": 1}), (["<unlabeled>"], {"p": 1}),
+                                       (["a)"], {"p": 1}), (["a"], {"p": 1})],
+                                      [("", {"w": 1}), (None, {"w": 1}), ("<untyped>", {"w": 1}), ("no type", {"w": 1})]))
+    assert result["group_size"] == {"()": 1, audit_mod.UNLABELED: 1, "(<unlabeled>)": 1, "(a))": 1, "(a)": 1,
+                                    "[:]": 1, audit_mod.UNTYPED: 1, "[:<untyped>]": 1, "[:no type]": 1}, result["group_size"]
+
+
+def t_no_real_group_name_can_equal_a_sentinel():
+    for sentinel in (audit_mod.UNLABELED, audit_mod.UNTYPED):
+        assert not sentinel.startswith("(") and not sentinel.startswith("[:"), sentinel
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_") and callable(v)]
