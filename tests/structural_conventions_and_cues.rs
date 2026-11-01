@@ -41,7 +41,7 @@ fn sgsnap_header_omits_structures_when_empty_and_roundtrips_when_present() {
     // 1. No explicit structures registered -> header line has no `structures` key
     let empty_bytes = export_bytes(&store);
     assert!(!header_raw_json(&empty_bytes).contains_key("structures"));
-    let parsed_empty: SnapshotHeader = samyama::snapshot::peek_header(&empty_bytes).unwrap();
+    let parsed_empty: SnapshotHeader = samyama::snapshot::peek_header(&empty_bytes[..]).unwrap();
     assert!(parsed_empty.structures.is_empty());
 
     // 2. Register an explicit convention -> survives export + import + re-export
@@ -64,7 +64,7 @@ fn sgsnap_header_omits_structures_when_empty_and_roundtrips_when_present() {
 
     let with_struct_bytes = export_bytes(&store);
     assert!(header_raw_json(&with_struct_bytes).contains_key("structures"));
-    let parsed_header: SnapshotHeader = samyama::snapshot::peek_header(&with_struct_bytes).unwrap();
+    let parsed_header: SnapshotHeader = samyama::snapshot::peek_header(&with_struct_bytes[..]).unwrap();
     assert_eq!(parsed_header.structures, vec![conv.clone()]);
 
     let mut restored = GraphStore::new();
@@ -105,6 +105,7 @@ async fn http_hierarchies_endpoint_serves_whole_poset_rollups_lca_and_3d_cone_cu
         .execute_mut(
             "CREATE HIERARCHY INDEX tax ON ()-[:IS_A]->() MEASURE units AGGREGATE sum, min, max, count",
             &mut store,
+            "default",
         )
         .unwrap();
 
