@@ -60,6 +60,11 @@ pub struct SnapshotHeader {
     /// format version stays 2.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<SnapshotSource>,
+    /// Declarative structural conventions (`samyama.structure/1`, #2035) for 3D Euclidean,
+    /// geospatial spherical, or hierarchical poset layouts. Additive like `sources`: absent
+    /// when empty so existing snapshots serialize byte-for-byte unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub structures: Vec<crate::index::structure::StructuralConvention>,
 }
 
 /// Where a snapshot's sidecar -- its query catalog (#1154) or its materialized
