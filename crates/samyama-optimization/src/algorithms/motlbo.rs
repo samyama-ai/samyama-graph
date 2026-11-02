@@ -45,6 +45,9 @@ impl MOTLBOSolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for _iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             let mut offspring = Vec::with_capacity(pop_size * 2);
 
             // Teacher Phase
