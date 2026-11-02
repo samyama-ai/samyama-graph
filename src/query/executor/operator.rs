@@ -20652,115 +20652,11 @@ impl AlgorithmOperator {
     }
 
     /// Is this a name the algorithm operator can run?
+    ///
+    /// Read from the catalogue `GET /api/algorithms/catalog` serves (#2013),
+    /// so a name is callable exactly when a client can discover it.
     pub fn is_algorithm(name: &str) -> bool {
-        matches!(
-            Self::canonical_name(name).as_str(),
-            "pagerank"
-                | "shortestpath"
-                | "wcc"
-                | "scc"
-                | "weightedpath"
-                | "maxflow"
-                | "mst"
-                | "trianglecount"
-                | "cdlp"
-                | "lcc"
-                // Principal component analysis over numeric node properties
-                // (#1022): in the algorithms crate and the SDK, and refused
-                // here as unknown.
-                | "pca"
-                | "or.solve"
-                // Graph embeddings (ML-06): node2vec's biased walks and
-                // FastRP's sparse-projection propagation, both writing a
-                // vector property rather than only streaming -- see
-                // `execute_fastrp`/`execute_node2vec` for what each does and
-                // does not do.
-                | "fastrp"
-                | "node2vec"
-                // The four causal/temporal primitives (ALGO-15). Reachability
-                // in a temporal graph is not transitive -- an edge that fired
-                // before you arrived is not traversable -- so none of these
-                // can be expressed with the static algorithms above.
-                | "temporalreachability"
-                | "temporalshortestpath"
-                | "propagationranking"
-                | "symptomexplanation"
-                // Centrality. Three different answers to "which nodes matter":
-                // degree is local, closeness finds the well-placed node, and
-                // betweenness finds the bottleneck -- often a low-degree node
-                // the other two miss, since the single bridge between two
-                // clusters has degree 2.
-                | "degree"
-                | "degreecentrality"
-                | "closeness"
-                | "closenesscentrality"
-                | "betweenness"
-                | "betweennesscentrality"
-                | "harmonic"
-                | "harmoniccentrality"
-                | "eigenvector"
-                | "eigenvectorcentrality"
-                | "kcore"
-                | "corenumber"
-                // Link prediction: a score over a *pair*, so these yield
-                // `node1, node2, score` rather than a column beside the nodes.
-                | "commonneighbors"
-                | "commonneighbours"
-                | "jaccard"
-                | "adamicadar"
-                // Structural: one DFS answers all four.
-                | "topologicalsort"
-                | "toposort"
-                | "cycledetection"
-                | "findcycle"
-                | "bridges"
-                | "articulationpoints"
-                // Whole-graph shape.
-                | "eccentricity"
-                | "diameter"
-                | "radius"
-                | "averageneighbordegree"
-                | "averageneighbourdegree"
-                | "degreeassortativity"
-                // Community detection. `labelpropagation` routes to cdlp:
-                // that *is* label propagation, LDBC's, and a second
-                // deterministic one collapses every connected graph to a
-                // single community.
-                | "louvain"
-                | "modularity"
-                | "labelpropagation"
-                // Path enumeration and a PageRank variant.
-                | "allshortestpaths"
-                | "astar"
-                | "yens"
-                | "randomwalk"
-                | "articlerank"
-                // Ranking beyond PageRank: influence that decays with
-                // distance, the hub/authority pair, a source-biased rank, and
-                // a seed set chosen to spread out rather than cluster.
-                | "katz" | "katzcentrality"
-                | "hits" | "hubsandauthorities"
-                | "personalizedpagerank" | "personalisedpagerank"
-                | "voterank"
-                // Paths: negative weights, all-pairs, DAG longest, closure.
-                | "bellmanford" | "allpairsshortestpath" | "allpairs"
-                | "wienerindex" | "daglongestpath" | "longestpath"
-                | "transitiveclosure"
-                // Structure and cohesion.
-                | "bipartite" | "bipartitesets"
-                | "maximalmatching" | "matching"
-                | "colouring" | "coloring" | "greedycolouring"
-                | "dominatingset" | "ktruss" | "truss"
-                | "transitivity" | "globalefficiency" | "squareclustering"
-                | "richclub" | "richclubcoefficient"
-                | "biconnectedcomponents" | "biconnected"
-                // Similarity and structural holes.
-                | "nodesimilarity"
-                | "overlap" | "overlapcoefficient"
-                | "cosine" | "cosinesimilarity"
-                | "effectivesize" | "constraint" | "burtconstraint"
-                | "reciprocity"
-        )
+        super::algorithm_catalog::find(name).is_some()
     }
 }
 
