@@ -78,6 +78,9 @@ impl FPASolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for _iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             history.push(best_fitness);
 
             for i in 0..pop_size {

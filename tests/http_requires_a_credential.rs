@@ -448,8 +448,20 @@ async fn every_mutating_route_needs_more_than_read() {
         let s = status_of(app(creds.clone()), post_json(path, serde_json::json!({}))).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "{path} let a read credential through");
     }
-    let s = status_of(app(creds), get("/api/tenants", Some(TOKEN))).await;
+    let s = status_of(app(creds.clone()), get("/api/tenants", Some(TOKEN))).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "tenant listing is admin-only");
+    let put_struct = axum::http::Request::builder()
+        .method("PUT")
+        .uri("/api/structure")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .body(Body::from(r#"{"structures":[]}"#))
+        .unwrap();
+    assert_eq!(
+        status_of(app(creds), put_struct).await,
+        StatusCode::FORBIDDEN,
+        "PUT /api/structure must require write role"
+    );
 }
 
 #[tokio::test]

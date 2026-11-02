@@ -49,6 +49,9 @@ impl NSGA2Solver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for _iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             // 2. Create Offspring (Crossover + Mutation)
             let mut offspring = Vec::with_capacity(pop_size);
             while offspring.len() < pop_size {

@@ -452,20 +452,24 @@ impl Poset {
         self.parents.iter().all(|p| p.len() <= 1)
     }
 
-    /// Maximum depth from any root, for diagnostics and benchmark stratification.
-    pub fn max_depth(&self) -> usize {
-        let mut depth = vec![0usize; self.n()];
-        let mut max = 0usize;
+    /// Per-node depth from roots (`0` for roots; longest path from a root on DAGs),
+    /// indexed by dense node index `0..n`.
+    pub fn depths(&self) -> Vec<u32> {
+        let mut depth = vec![0u32; self.n()];
         for &v in self.topo_down().iter() {
             let d = self.parents[v as usize]
                 .iter()
-                .map(|&p| depth[p as usize] + 1)
+                .map(|&p| depth[p as usize].saturating_add(1))
                 .max()
                 .unwrap_or(0);
             depth[v as usize] = d;
-            max = max.max(d);
         }
-        max
+        depth
+    }
+
+    /// Maximum depth from any root, for diagnostics and benchmark stratification.
+    pub fn max_depth(&self) -> usize {
+        self.depths().into_iter().max().unwrap_or(0) as usize
     }
 }
 
