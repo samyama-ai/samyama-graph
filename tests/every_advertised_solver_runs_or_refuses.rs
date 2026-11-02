@@ -43,7 +43,7 @@ const ADVERTISED: &[&str] = &[
     "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "MOTLBO",
     "Jaya", "QOJaya", "SAMPJaya", "EHRJaya",
     "BMR", "BWR", "BMWR", "MOBMWR",
-    "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
+    "PSO", "DE", "LSHADE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
     "Firefly", "Cuckoo", "GWO", "Bat",
     "NSGA2", "MORaoDE", "SAPHR",
 ];

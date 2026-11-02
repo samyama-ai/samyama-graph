@@ -123,7 +123,7 @@ fn cargo_package_version(rel: &str) -> Option<String> {
 fn every_cargo_manifest_carries_the_version_of_record() {
     for rel in [
         "Cargo.toml",
-        "cli/Cargo.toml",
+        "crates/samyama-cli/Cargo.toml",
         "crates/samyama-sdk/Cargo.toml",
         "crates/samyama-convert/Cargo.toml",
         "crates/samyama-optimization/Cargo.toml",
@@ -153,7 +153,7 @@ fn every_internal_dependency_pin_names_the_version_of_record() {
     let mut checked = 0;
     for rel in [
         "Cargo.toml",
-        "cli/Cargo.toml",
+        "crates/samyama-cli/Cargo.toml",
         "crates/samyama-sdk/Cargo.toml",
         "crates/samyama-convert/Cargo.toml",
         "crates/samyama-optimization/Cargo.toml",
@@ -282,7 +282,7 @@ fn the_release_checklist_locations_all_exist() {
     // nothing, and a green test means "nothing was checked".
     for rel in [
         "Cargo.toml",
-        "cli/Cargo.toml",
+        "crates/samyama-cli/Cargo.toml",
         "crates/samyama-sdk/Cargo.toml",
         "crates/samyama-convert/Cargo.toml",
         "crates/samyama-optimization/Cargo.toml",

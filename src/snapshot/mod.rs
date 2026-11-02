@@ -12,6 +12,7 @@
 pub mod codec;
 pub mod encryption;
 pub mod format;
+pub mod keys;
 pub mod persist;
 pub mod verify;
 pub mod results;

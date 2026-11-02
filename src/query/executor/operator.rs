@@ -75,7 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
 
 /// A store error on a write path, classified for the caller (#1483).
@@ -17652,7 +17652,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "MOTLBO",
         "Jaya", "QOJaya", "SAMPJaya", "EHRJaya",
         "BMR", "BWR", "BMWR", "MOBMWR",
-        "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
+        "PSO", "DE", "LSHADE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
         "Firefly", "Cuckoo", "GWO", "Bat",
         "NSGA2", "MORaoDE", "SAPHR",
     ];
@@ -20107,7 +20107,17 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         };
         let min_val = cfg_f("lowerBound", "min").unwrap_or(0.0);
         let max_val = cfg_f("upperBound", "max").unwrap_or(100.0);
-        
+        // The solvers draw their starting population with
+        // `gen_range(lower..upper)`, which panics on an empty or inverted
+        // range, so `{lowerBound: 5, upperBound: 5}` died with "cannot sample
+        // empty range" instead of being refused (#1773). A NaN bound compares
+        // false both ways, so it is refused by name.
+        if min_val.is_nan() || max_val.is_nan() || min_val >= max_val {
+            return Err(ExecutionError::bad_argument(format!(
+                "or.solve: `lowerBound` ({min_val}) must be less than `upperBound` ({max_val})"
+            )));
+        }
+
         // Objective: minimize sum(variable * cost_property)
         let cost_prop = config_map.get("costProperty")
             .or_else(|| config_map.get("cost_property"))
@@ -20293,6 +20303,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 "GOTLBO" => GOTLBOSolver::new(solver_config).solve(&problem),
                 "QORao" => QORaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
                 "SAPHR" => SAPHRSolver::new(solver_config).solve(&problem),
+                // Success-history adaptive DE with linear population
+                // reduction (OPT-13, #1803).
+                "LSHADE" => LSHADESolver::new(solver_config).solve(&problem),
                 // Jaya by name, and by omitting `algorithm` -- the default is
                 // applied where the name is read, not here.
                 "Jaya" => JayaSolver::new(solver_config).solve(&problem),

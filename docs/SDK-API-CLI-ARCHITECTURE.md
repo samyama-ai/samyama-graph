@@ -176,7 +176,7 @@ sequenceDiagram
 
 ### 2. CLI (`samyama-cli`)
 
-**File:** `cli/src/main.rs`
+**File:** `crates/samyama-cli/src/main.rs`
 
 - Thin wrapper around `RemoteClient`
 - Built with `clap` (arg parsing) + `comfy-table` (table formatting)
@@ -331,7 +331,7 @@ pub trait SamyamaClient {
 | | `crates/samyama-sdk/src/error.rs` | `SamyamaError` enum |
 | **Python SDK** | `sdk/python/src/lib.rs` | PyO3 bindings (embedded + HTTP) |
 | **TypeScript SDK** | `sdk/typescript/src/client.ts` | Fetch-based HTTP client |
-| **CLI** | `cli/src/main.rs` | Clap subcommands + table/json/csv output |
+| **CLI** | `crates/samyama-cli/src/main.rs` | Clap subcommands + table/json/csv output |
 | **HTTP Server** | `src/http/server.rs` | Axum server setup |
 | | `src/http/handler.rs` | `/api/query`, `/api/status` handlers |
 | **RESP Server** | `src/protocol/server.rs` | TCP listener + connection handler |

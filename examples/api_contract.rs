@@ -26,7 +26,7 @@ const SURFACES: &[(&str, &str)] = &[
     ("rust_sdk", "crates/samyama-sdk/src/lib.rs"),
     ("python_sdk", "sdk/python/pyproject.toml"),
     ("typescript_sdk", "sdk/typescript/package.json"),
-    ("cli", "cli/Cargo.toml"),
+    ("cli", "crates/samyama-cli/Cargo.toml"),
     ("openapi", OPENAPI),
 ];
 
