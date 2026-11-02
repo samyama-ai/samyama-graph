@@ -20107,7 +20107,17 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         };
         let min_val = cfg_f("lowerBound", "min").unwrap_or(0.0);
         let max_val = cfg_f("upperBound", "max").unwrap_or(100.0);
-        
+        // The solvers draw their starting population with
+        // `gen_range(lower..upper)`, which panics on an empty or inverted
+        // range, so `{lowerBound: 5, upperBound: 5}` died with "cannot sample
+        // empty range" instead of being refused (#1773). A NaN bound compares
+        // false both ways, so it is refused by name.
+        if min_val.is_nan() || max_val.is_nan() || min_val >= max_val {
+            return Err(ExecutionError::bad_argument(format!(
+                "or.solve: `lowerBound` ({min_val}) must be less than `upperBound` ({max_val})"
+            )));
+        }
+
         // Objective: minimize sum(variable * cost_property)
         let cost_prop = config_map.get("costProperty")
             .or_else(|| config_map.get("cost_property"))
