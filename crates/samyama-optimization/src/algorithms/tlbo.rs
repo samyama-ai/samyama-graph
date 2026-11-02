@@ -41,6 +41,9 @@ impl TLBOSolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             if iter % 10 == 0 {
                 println!("TLBO Solver: Iteration {}/{}", iter, self.config.max_iterations);
             }

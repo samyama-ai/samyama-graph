@@ -119,10 +119,10 @@ async fn the_algorithm_catalogue_lists_every_solver_once() {
     let (status, json) = get_json(app(), "/optimize/algorithms").await;
     assert_eq!(status, StatusCode::OK);
     let algos = json.as_array().unwrap();
-    assert_eq!(algos.len(), 23);
+    assert_eq!(algos.len(), 24);
     let ids: std::collections::HashSet<&str> =
         algos.iter().map(|a| a["id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 23, "duplicate ids");
+    assert_eq!(ids.len(), 24, "duplicate ids");
     let nsga2 = algos.iter().find(|a| a["id"] == "nsga2").unwrap();
     assert_eq!(nsga2["multi_objective"], true);
     assert_eq!(nsga2["family"], "multi-objective");
@@ -265,9 +265,10 @@ async fn a_multi_objective_solve_stamps_the_pareto_front_on_the_last_iteration()
     let (name, done) = events.last().unwrap();
     assert_eq!(name, "done");
     assert_solve_was_timed(done);
-    // A front has no single optimum, and its feasibility cannot be read on
-    // this surface (#1795): both fields are present and null, never guessed.
-    assert!(done.get("feasible").is_some_and(|v| v.is_null()), "{done}");
+    // A front has no single optimum, so `gap` is null. Its feasibility is
+    // read from each point's constraint violation (#1795); ZDT1 has no
+    // constraints, so every point is feasible.
+    assert_eq!(done["feasible"], true, "{done}");
     assert!(done.get("gap").is_some_and(|v| v.is_null()), "{done}");
     let front = done["final_pareto"].as_array().expect("a pareto front");
     assert!(!front.is_empty());
@@ -399,6 +400,7 @@ fn every_single_objective_solver_runs_on_every_single_objective_benchmark() {
         "saphr",
         "pso",
         "de",
+        "lshade",
         "ga",
     ];
     for algo in algos {
@@ -434,14 +436,116 @@ fn every_single_objective_benchmark_reports_feasibility_and_its_gap() {
 }
 
 #[test]
-fn a_multi_objective_result_reports_no_feasibility_or_gap() {
+fn a_multi_objective_result_reports_feasibility_and_no_gap() {
+    // ZDT and DTLZ have no constraints, so every front point is feasible;
+    // UC2's front is feasible or says it is not (#1795). None of them has a
+    // single optimum to report a gap against.
     for bench in ["zdt1", "dtlz1", "uc2_dosing"] {
         let out =
             run_solver("nsga2", true, bench, 2, CATALOG_DIM, cfg(), Some(ENVELOPE_SEED)).unwrap();
-        assert_eq!(out.feasible, None, "{bench}");
+        if bench != "uc2_dosing" {
+            assert_eq!(out.feasible, Some(true), "{bench}");
+        }
+        assert!(out.feasible.is_some(), "{bench}: a non-empty front says");
         assert_eq!(out.gap, None, "{bench}");
         assert_eq!(optimum_of(bench), None, "{bench}: the catalog lists no optimum");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Infeasible points on the front (OPT-10, #1795)
+// ---------------------------------------------------------------------------
+
+fn point(objective: f64, violation: f64) -> samyama_optimization::common::MultiObjectiveIndividual {
+    samyama_optimization::common::MultiObjectiveIndividual::new(
+        Array1::zeros(1),
+        vec![objective],
+        violation,
+    )
+}
+
+#[test]
+fn a_front_with_feasible_points_returns_only_those() {
+    let front = [point(1.0, 0.0), point(0.5, 0.3), point(2.0, 0.0)];
+    let (returned, feasible) = returned_front(&front);
+    assert_eq!(feasible, Some(true));
+    let kept: Vec<f64> = returned.iter().map(|p| p.fitness[0]).collect();
+    assert_eq!(
+        kept,
+        vec![1.0, 2.0],
+        "the infeasible 0.5 is dropped, better or not"
+    );
+}
+
+#[test]
+fn a_front_with_no_feasible_point_is_returned_and_marked_infeasible() {
+    let front = [point(1.0, 0.2), point(0.5, 0.3)];
+    let (returned, feasible) = returned_front(&front);
+    assert_eq!(feasible, Some(false));
+    assert_eq!(returned.len(), 2, "something to look at, marked as such");
+    let (returned, feasible) = returned_front(&[]);
+    assert!(returned.is_empty());
+    assert_eq!(feasible, None);
+}
+
+#[test]
+fn no_uc2_front_point_is_infeasible_when_reported_feasible() {
+    // The OPT-10 measurement: UC2, population 4, one generation, 30 seeds,
+    // where 53 of 87 returned points carried the penalty. Each returned
+    // point is checked against the problem itself, from its own doses.
+    const POPULATION: usize = 4;
+    const GENERATIONS: usize = 1;
+    const RUNS: u64 = 30;
+    let problem = super::super::uc_problems::UC2DosingProblem::new();
+    let config = || SolverConfig {
+        population_size: POPULATION,
+        max_iterations: GENERATIONS,
+    };
+    // Checked from the doses directly, not through `penalties`, so a broken
+    // `penalties` cannot also break the check: UC2's contraindicated pair is
+    // simvastatin (D3) with clarithromycin (D4), each given at 5% or more.
+    const D3: usize = 3;
+    const D4: usize = 4;
+    const GIVEN: f64 = 0.05;
+    let violated = |vars: &Array1<f64>| vars[D3] >= GIVEN && vars[D4] >= GIVEN;
+    let (mut returned_total, mut infeasible_marked) = (0, 0);
+    for seed in 0..RUNS {
+        let fronts = [
+            (
+                "nsga2",
+                NSGA2Solver::new(config()).with_seed(seed).solve(&problem),
+            ),
+            (
+                "mo_rao_de",
+                MORaoDESolver::new(config()).with_seed(seed).solve(&problem),
+            ),
+            (
+                "mo_bmwr",
+                MOBMWRSolver::new(config(), MOBMWRVariant::MOBMWR)
+                    .with_seed(seed)
+                    .solve(&problem),
+            ),
+        ];
+        for (name, r) in &fronts {
+            let (returned, feasible) = returned_front(&r.pareto_front);
+            returned_total += returned.len();
+            for p in &returned {
+                if feasible == Some(true) {
+                    assert!(
+                        !violated(&p.variables),
+                        "{name} seed {seed}: {:?}",
+                        p.variables
+                    );
+                } else {
+                    infeasible_marked += 1;
+                }
+            }
+        }
+    }
+    assert!(returned_total > 0);
+    // Not an assertion on the count, which depends on the seeds: printed so a
+    // reader of the test log sees how often a whole front was infeasible.
+    println!("{returned_total} points returned, {infeasible_marked} in fronts marked infeasible");
 }
 
 #[test]
@@ -797,7 +901,7 @@ async fn error_and_cancel_events_carry_no_time() {
 async fn every_algorithm_reports_a_measured_time_over_http() {
     let (_, algos) = get_json(app(), "/optimize/algorithms").await;
     let algos = algos.as_array().unwrap();
-    assert_eq!(algos.len(), 23);
+    assert_eq!(algos.len(), 24);
     for a in algos {
         let id = a["id"].as_str().unwrap();
         let bench = if a["multi_objective"].as_bool().unwrap() {
@@ -817,4 +921,139 @@ async fn every_algorithm_reports_a_measured_time_over_http() {
         );
         assert_eq!(done["seed"], 11, "{id}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Budgets (OPT-11, #1798)
+// ---------------------------------------------------------------------------
+
+/// Far more iterations than any budget below lets a solve run.
+const UNBUDGETED_ITERATIONS: usize = 100_000;
+
+fn budgeted_body(algorithm: &str, benchmark: &str, budget: &str) -> String {
+    format!(
+        r#"{{"algorithm":"{algorithm}","benchmark":"{benchmark}","population_size":8,"iterations":{UNBUDGETED_ITERATIONS},"seed":11,{budget}}}"#
+    )
+}
+
+#[tokio::test]
+async fn every_algorithm_stops_at_an_evaluation_budget_over_http() {
+    const MAX_EVALUATIONS: u64 = 200;
+    let (_, algos) = get_json(app(), "/optimize/algorithms").await;
+    for a in algos.as_array().unwrap() {
+        let id = a["id"].as_str().unwrap();
+        let bench = if a["multi_objective"].as_bool().unwrap() {
+            "zdt1"
+        } else {
+            "sphere"
+        };
+        let done = done_of(
+            app(),
+            &budgeted_body(
+                id,
+                bench,
+                &format!(r#""max_evaluations":{MAX_EVALUATIONS}"#),
+            ),
+        )
+        .await;
+        assert_eq!(done["stopped_by"], "evaluation_budget", "{id}: {done}");
+        assert_eq!(done["max_evaluations"], MAX_EVALUATIONS, "{id}: echoed");
+        let evaluations = done["evaluations"].as_u64().unwrap();
+        assert!(evaluations >= MAX_EVALUATIONS, "{id}: {evaluations}");
+        let iterations = done["iterations"].as_u64().unwrap() as usize;
+        assert!(iterations < UNBUDGETED_ITERATIONS, "{id}: ran {iterations}");
+        assert!(done["final_fitness"].as_f64().is_some(), "{id}: {done}");
+    }
+}
+
+#[tokio::test]
+async fn a_time_budget_stops_a_solve_that_would_run_far_longer() {
+    const TIME_BUDGET_MS: u64 = 100;
+    let started = std::time::Instant::now();
+    let done = done_of(
+        app(),
+        &budgeted_body(
+            "jaya",
+            "rastrigin",
+            &format!(r#""time_budget_ms":{TIME_BUDGET_MS}"#),
+        ),
+    )
+    .await;
+    assert_eq!(done["stopped_by"], "time_budget", "{done}");
+    assert_eq!(done["time_budget_ms"], TIME_BUDGET_MS);
+    assert!(done["max_evaluations"].is_null());
+    // Generous, so a slow runner cannot fail it; 100,000 iterations take far
+    // longer than this.
+    let bound = std::time::Duration::from_millis(TIME_BUDGET_MS * 50);
+    assert!(started.elapsed() < bound, "took {:?}", started.elapsed());
+}
+
+#[tokio::test]
+async fn without_a_budget_a_solve_runs_its_iterations_and_counts_its_evaluations() {
+    let done = done_of(
+        app(),
+        r#"{"algorithm":"jaya","benchmark":"sphere","population_size":8,"iterations":3,"seed":11}"#,
+    )
+    .await;
+    assert_eq!(done["stopped_by"], "iterations");
+    assert_eq!(done["iterations"], 3);
+    assert!(done["evaluations"].as_u64().unwrap() > 0, "{done}");
+    assert!(done["time_budget_ms"].is_null() && done["max_evaluations"].is_null());
+}
+
+#[tokio::test]
+async fn a_zero_or_negative_budget_is_a_400_that_names_the_field() {
+    for (field, value, says) in [
+        ("time_budget_ms", "0", "time_budget_ms must be at least 1"),
+        ("max_evaluations", "0", "max_evaluations must be at least 1"),
+        ("max_evaluations", "-5", "max_evaluations"),
+        ("time_budget_ms", "\"soon\"", "time_budget_ms"),
+    ] {
+        let body = format!(r#"{{"algorithm":"jaya","benchmark":"sphere","{field}":{value}}}"#);
+        let (status, msg) = post(app(), "/optimize/solve", &body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {msg}");
+        assert!(msg.contains(says), "{body}: {msg}");
+    }
+}
+
+#[tokio::test]
+async fn the_catalogue_lists_both_budgets_as_optional() {
+    let (_, algos) = get_json(app(), "/optimize/algorithms").await;
+    for a in algos.as_array().unwrap() {
+        let params = a["params"].as_array().unwrap();
+        for name in ["time_budget_ms", "max_evaluations"] {
+            let p = params
+                .iter()
+                .find(|p| p["name"] == name)
+                .unwrap_or_else(|| panic!("{}: no {name}", a["id"]));
+            assert_eq!(p["type"], "int");
+            assert!(p["default"].is_null(), "{name} has no default limit");
+        }
+    }
+}
+
+#[test]
+fn checking_the_answer_is_not_billed_to_the_budget() {
+    // The single-objective path re-evaluates the best answer for its gap and
+    // feasibility on the bare problem, after the solve; a budget of exactly
+    // what the solve used must still report the solve's own count.
+    let out = run_solver_within(
+        "jaya",
+        false,
+        "sphere",
+        1,
+        2,
+        cfg(),
+        Some(3),
+        Budget::default(),
+    )
+    .unwrap();
+    let population = cfg().population_size as u64;
+    let per_iteration = population;
+    let expected = population + per_iteration * cfg().max_iterations as u64;
+    assert_eq!(
+        out.evaluations, expected,
+        "Jaya: one population, then one per iteration"
+    );
+    assert_eq!(out.stopped_by, StopReason::Iterations);
 }

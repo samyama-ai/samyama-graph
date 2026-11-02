@@ -4021,6 +4021,7 @@ dependencies = [
  "comfy-table",
  "dirs",
  "rustyline",
+ "samyama",
  "samyama-sdk",
  "serde",
  "serde_json",

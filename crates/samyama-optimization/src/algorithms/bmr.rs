@@ -40,6 +40,9 @@ impl BMRSolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             if iter % 10 == 0 {
                 println!("BMR Solver: Iteration {}/{}", iter, self.config.max_iterations);
             }

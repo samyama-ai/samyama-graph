@@ -1180,6 +1180,8 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
     // for. Everything above describes the graph; this describes what asking it
     // questions costs (REL-10).
     out.push_str(&crate::query::metrics::render());
+    // And what the model calls behind NLQ cost (COST-07).
+    out.push_str(&crate::nlq::metrics::render());
 
     (
         [(
@@ -2959,6 +2961,8 @@ pub struct SnapshotImportParams {
     /// Explicitly permit merges despite conflicting declared identifiers.
     #[serde(default)]
     pub dedup_allow_conflicts: bool,
+    #[serde(default)]
+    pub merge_edges: crate::snapshot::MergeEdges,
 }
 
 /// POST /api/snapshot/import — import a .sgsnap snapshot
@@ -3058,7 +3062,7 @@ pub async fn restore_snapshot_handler(
             ),
         }
     } else {
-        crate::snapshot::import_tenant_with_dedup_options(&mut store_guard, cursor, &dedup_key_refs, params.dedup_allow_conflicts)
+        crate::snapshot::import_tenant_with_merge_policy(&mut store_guard, cursor, &dedup_key_refs, params.dedup_allow_conflicts, params.merge_edges)
     };
     match imported {
         Ok(stats) => {
@@ -3095,6 +3099,8 @@ pub async fn restore_snapshot_handler(
                 "nodes_imported": stats.node_count,
                 "nodes_merged": stats.merged_count,
                 "merges_refused_conflicting": stats.merges_refused_conflicting,
+                "edges_deduplicated": stats.edges_deduplicated,
+                "parallel_edges_kept": stats.parallel_edges_kept,
                 // The shape of those merges, not just the count (#1808). A caller
                 // reading only `nodes_merged` cannot tell duplicate pairs from a
                 // collapse, and the larger number reads as the better result.
@@ -3102,6 +3108,19 @@ pub async fn restore_snapshot_handler(
                 "largest_merge_group": stats.largest_merge_group,
                 "merges_by_key": stats.merges_by_key.iter()
                     .map(|(k, n)| json!({"key": k, "merged": n}))
+                    .collect::<Vec<_>>(),
+                // Values a merge dropped because the existing node had a
+                // different one; first writer wins (#1951).
+                "property_conflicts_by_key": stats.property_conflicts_by_key.iter()
+                    .map(|(k, n)| json!({"key": k, "conflicts": n}))
+                    .collect::<Vec<_>>(),
+                "property_conflict_samples": stats.property_conflict_samples.iter()
+                    .map(|c| json!({"key": c.key, "kept": c.kept, "discarded": c.discarded}))
+                    .collect::<Vec<_>>(),
+                // Keys that merged nothing; 0 carriers means no incoming node
+                // had the property under any of its names (#1948).
+                "dedup_keys_unused": stats.dedup_keys_unused.iter()
+                    .map(|u| json!({"key": u.key, "incoming_nodes_with_key": u.incoming_nodes_with_key}))
                     .collect::<Vec<_>>(),
                 "edges_imported": stats.edge_count,
                 "labels": stats.labels,
@@ -3260,6 +3279,9 @@ pub async fn verify_handler(
     (StatusCode::OK, Json(report)).into_response()
 }
 
+/// Seconds to milliseconds, for `llm_latency_ms`.
+const MILLIS_PER_SECOND: f64 = 1_000.0;
+
 /// Request for a natural-language query (NLQ -> Cypher). Epic #696, step #697.
 #[derive(Deserialize)]
 pub struct NlqRequest {
@@ -3319,8 +3341,20 @@ pub async fn nlq_handler(
         store_guard.schema_summary()
     };
 
-    match pipeline.text_to_cypher(&payload.question, &schema).await {
-        Ok(cypher) => (StatusCode::OK, Json(json!({ "cypher": cypher }))).into_response(),
+    match pipeline.translate(&payload.question, &schema).await {
+        // What the call cost, so a caller can account for it per access
+        // method (COST-07, #1790). The provider's token counts used to be
+        // dropped. There is no `cost_usd`: the engine holds no price for any
+        // model, and a made-up one would be worse than none.
+        Ok(t) => (
+            StatusCode::OK,
+            Json(json!({
+                "cypher": t.cypher,
+                "usage": t.usage,
+                "llm_latency_ms": t.llm_latency.as_secs_f64() * MILLIS_PER_SECOND,
+            })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),

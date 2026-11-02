@@ -316,3 +316,158 @@ async fn pipeline_propagates_client_errors() {
     let err = pipeline.text_to_cypher("q", "").await.unwrap_err();
     assert!(matches!(err, NLQError::ApiError(_)), "{err:?}");
 }
+
+// ------------------------------------------------- token usage (COST-07)
+
+/// What a provider said its call used, as a stub would send it.
+const PROMPT_TOKENS: u64 = 412;
+const COMPLETION_TOKENS: u64 = 17;
+const TOTAL_TOKENS: u64 = 429;
+
+fn reported() -> TokenUsage {
+    TokenUsage {
+        prompt_tokens: Some(PROMPT_TOKENS),
+        completion_tokens: Some(COMPLETION_TOKENS),
+        total_tokens: Some(TOTAL_TOKENS),
+    }
+}
+
+#[tokio::test]
+async fn openai_usage_is_kept_not_dropped() {
+    // The stub CH-AI-COST used: the engine parsed `choices` only and threw
+    // `usage` away (#1790).
+    let body = serde_json::json!({
+        "choices": [ { "message": { "content": "MATCH (n) RETURN n" } } ],
+        "usage": {
+            "prompt_tokens": PROMPT_TOKENS,
+            "completion_tokens": COMPLETION_TOKENS,
+            "total_tokens": TOTAL_TOKENS
+        }
+    })
+    .to_string();
+    let srv = MockHttp::serve(vec![(200, body)]);
+    let client = NLQClient::new(&cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
+    let c = client.complete("q").await.unwrap();
+    assert_eq!(c.text, "MATCH (n) RETURN n");
+    assert_eq!(c.usage, reported());
+    assert!(c.latency > Duration::ZERO);
+}
+
+#[tokio::test]
+async fn openai_without_usage_reports_none_rather_than_zero() {
+    let srv = MockHttp::serve(vec![(200, openai_ok("x"))]);
+    let client = NLQClient::new(&cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
+    let c = client.complete("q").await.unwrap();
+    assert_eq!(c.usage, TokenUsage::default());
+    assert!(!c.usage.is_reported());
+}
+
+#[tokio::test]
+async fn ollama_eval_counts_are_its_usage_and_their_sum_its_total() {
+    let body = format!(
+        r#"{{"response": "RETURN 1", "prompt_eval_count": {PROMPT_TOKENS}, "eval_count": {COMPLETION_TOKENS}}}"#
+    );
+    let srv = MockHttp::serve(vec![(200, body)]);
+    let client = NLQClient::new(&cfg(LLMProvider::Ollama, &srv.base_url, None, None)).unwrap();
+    assert_eq!(client.complete("q").await.unwrap().usage, reported());
+}
+
+#[tokio::test]
+async fn ollama_with_a_cached_prompt_has_no_total_to_invent() {
+    // Ollama leaves `prompt_eval_count` out when the prompt was cached; the
+    // total is then unknown, not the completion count alone.
+    let body = format!(r#"{{"response": "RETURN 1", "eval_count": {COMPLETION_TOKENS}}}"#);
+    let srv = MockHttp::serve(vec![(200, body)]);
+    let client = NLQClient::new(&cfg(LLMProvider::Ollama, &srv.base_url, None, None)).unwrap();
+    let usage = client.complete("q").await.unwrap().usage;
+    assert_eq!(usage.completion_tokens, Some(COMPLETION_TOKENS));
+    assert_eq!(usage.prompt_tokens, None);
+    assert_eq!(usage.total_tokens, None);
+}
+
+#[tokio::test]
+async fn gemini_usage_metadata_is_its_usage() {
+    let body = serde_json::json!({
+        "candidates": [ { "content": { "role": "model", "parts": [ { "text": "RETURN 1" } ] } } ],
+        "usageMetadata": {
+            "promptTokenCount": PROMPT_TOKENS,
+            "candidatesTokenCount": COMPLETION_TOKENS,
+            "totalTokenCount": TOTAL_TOKENS
+        }
+    })
+    .to_string();
+    let srv = MockHttp::serve(vec![(200, body)]);
+    let client = NLQClient::new(&cfg(LLMProvider::Gemini, &srv.base_url, Some("g"), None)).unwrap();
+    assert_eq!(client.complete("q").await.unwrap().usage, reported());
+}
+
+#[tokio::test]
+async fn the_mock_calls_no_model_and_reports_no_usage() {
+    let client = NLQClient::new(&cfg(LLMProvider::Mock, "", None, None)).unwrap();
+    assert!(!client.complete("q").await.unwrap().usage.is_reported());
+}
+
+#[tokio::test]
+async fn every_call_lands_in_the_metrics_failed_ones_too() {
+    use crate::nlq::metrics::snapshot;
+    let ok = MockHttp::serve(vec![(
+        200,
+        serde_json::json!({
+            "choices": [ { "message": { "content": "x" } } ],
+            "usage": { "prompt_tokens": PROMPT_TOKENS, "completion_tokens": COMPLETION_TOKENS }
+        })
+        .to_string(),
+    )]);
+    let before = snapshot();
+    NLQClient::new(&cfg(LLMProvider::OpenAI, &ok.base_url, Some("k"), None))
+        .unwrap()
+        .complete("q")
+        .await
+        .unwrap();
+    let after = snapshot();
+    // Other tests in this binary make calls too, so these are lower bounds.
+    assert!(after.calls > before.calls);
+    assert!(after.prompt_tokens >= before.prompt_tokens + PROMPT_TOKENS);
+    assert!(after.completion_tokens >= before.completion_tokens + COMPLETION_TOKENS);
+
+    let failing = MockHttp::serve(vec![(500, String::new())]);
+    let before = snapshot();
+    NLQClient::new(&cfg(
+        LLMProvider::OpenAI,
+        &failing.base_url,
+        Some("k"),
+        None,
+    ))
+    .unwrap()
+    .complete("q")
+    .await
+    .unwrap_err();
+    assert!(snapshot().failed_calls > before.failed_calls);
+}
+
+#[test]
+fn a_total_is_the_providers_or_the_sum_of_both_counts() {
+    assert_eq!(
+        TokenUsage::from_counts(Some(1), Some(2), Some(9)).total_tokens,
+        Some(9)
+    );
+    assert_eq!(
+        TokenUsage::from_counts(Some(1), Some(2), None).total_tokens,
+        Some(3)
+    );
+    assert_eq!(
+        TokenUsage::from_counts(None, Some(2), None).total_tokens,
+        None
+    );
+    assert!(TokenUsage::from_counts(None, None, Some(4)).is_reported());
+    assert!(!TokenUsage::from_counts(None, None, None).is_reported());
+}
+
+#[test]
+fn usage_serialises_with_null_for_what_was_not_reported() {
+    let json = serde_json::to_value(TokenUsage::from_counts(None, Some(2), None)).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({ "prompt_tokens": null, "completion_tokens": 2, "total_tokens": null })
+    );
+}

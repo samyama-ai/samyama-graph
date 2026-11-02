@@ -115,7 +115,7 @@ jobs:
           set -euo pipefail
           V="${{ inputs.version }}"
           PREV=$(git show HEAD:Cargo.toml | grep -m1 '^version = ' | cut -d'"' -f2)
-          MANIFESTS="Cargo.toml cli/Cargo.toml sdk/python/Cargo.toml $(ls crates/*/Cargo.toml)"
+          MANIFESTS="Cargo.toml sdk/python/Cargo.toml $(ls crates/*/Cargo.toml)"
           sed -i -E "s/(path = \"[^\"]*\", version = \")${PREV//./\\.}\"/\1$V\"/" $MANIFESTS
           if grep -n "path = .*version = \"$PREV\"" $MANIFESTS; then
             echo "::error::an internal dependency still pins $PREV after the bump"

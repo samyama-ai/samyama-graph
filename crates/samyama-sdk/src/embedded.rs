@@ -141,10 +141,22 @@ impl EmbeddedClient {
         dedup_keys: &[&str],
         allow_conflicts: bool,
     ) -> Result<samyama::snapshot::format::ImportStats, Box<dyn std::error::Error>> {
+        self.import_snapshot_merge_policy(_tenant, path, dedup_keys, allow_conflicts, samyama::snapshot::MergeEdges::default()).await
+    }
+
+    /// Import with an explicit policy for parallel edges introduced by merging.
+    pub async fn import_snapshot_merge_policy(
+        &self,
+        _tenant: &str,
+        path: &std::path::Path,
+        dedup_keys: &[&str],
+        allow_conflicts: bool,
+        merge_edges: samyama::snapshot::MergeEdges,
+    ) -> Result<samyama::snapshot::format::ImportStats, Box<dyn std::error::Error>> {
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let mut store_guard = self.store.write().await;
-        let stats = samyama::snapshot::import_tenant_with_dedup_options(&mut store_guard, reader, dedup_keys, allow_conflicts)?;
+        let stats = samyama::snapshot::import_tenant_with_merge_policy(&mut store_guard, reader, dedup_keys, allow_conflicts, merge_edges)?;
         Ok(stats)
     }
 

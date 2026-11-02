@@ -75,7 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
 
 /// A store error on a write path, classified for the caller (#1483).
@@ -121,6 +121,30 @@ fn check_deadline() -> ExecutionResult<()> {
         }
         Ok(())
     })
+}
+
+/// Stops a long algorithm at the query deadline (ALGO-12, #1693).
+///
+/// An algorithm runs inside one call, so without this the deadline was only
+/// looked at once that call returned: `algo.pageRank` on a large graph ran
+/// every iteration however long they took, and the query reported
+/// `Query timed out` only afterwards, if at all. Checked between iterations, on
+/// the executor's thread, which is where the deadline is set.
+struct DeadlineProgress;
+
+impl crate::algo::Progress for DeadlineProgress {
+    fn step(&self, _done: usize, _total: usize) -> bool {
+        check_deadline().is_ok()
+    }
+}
+
+/// The error for an algorithm the deadline stopped: still `Query timed out`,
+/// the deadline's message everywhere else, and how far it got.
+fn algorithm_timed_out(call: &str, stopped: crate::algo::Stopped) -> ExecutionError {
+    ExecutionError::RuntimeError(format!(
+        "Query timed out: {call} stopped after {} of {} iterations",
+        stopped.done, stopped.total
+    ))
 }
 
 /// Extract node ID from a Value for identity comparison
@@ -17652,7 +17676,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "MOTLBO",
         "Jaya", "QOJaya", "SAMPJaya", "EHRJaya",
         "BMR", "BWR", "BMWR", "MOBMWR",
-        "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
+        "PSO", "DE", "LSHADE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
         "Firefly", "Cuckoo", "GWO", "Bat",
         "NSGA2", "MORaoDE", "SAPHR",
     ];
@@ -17808,7 +17832,12 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         weight_property: Option<&str>,
     ) -> ExecutionResult<AlgoView> {
         let Some(projection) = self.requested_projection(store)? else {
-            return Ok(AlgoView::Built(crate::algo::build_view(store, label, edge_type, weight_property)));
+            let view = crate::algo::build_view_with(store, label, edge_type, weight_property, &DeadlineProgress)
+                .map_err(|stopped| ExecutionError::RuntimeError(format!(
+                    "Query timed out: {} stopped building its graph view after {} of {} nodes",
+                    self.name, stopped.done, stopped.total
+                )))?;
+            return Ok(AlgoView::Built(view));
         };
         let given: Vec<&str> = [("a label", label), ("a relationship type", edge_type), ("a weight", weight_property)]
             .into_iter()
@@ -18116,10 +18145,15 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
         // Build view and run
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
-        let scores = crate::algo::page_rank(&view, config);
+        let scores = crate::algo::page_rank_with(&view, config, &DeadlineProgress)
+            .map_err(|stopped| algorithm_timed_out("algo.pageRank", stopped))?;
 
-        // Convert to records
-        for (algo_id, score) in scores {
+        // Convert to records. One per node, with a copy of the node, so on a
+        // large graph this is not free either: checked like the iterations.
+        for (i, (algo_id, score)) in scores.into_iter().enumerate() {
+            if i % 4096 == 0 {
+                check_deadline()?;
+            }
             let node_id = NodeId::new(algo_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(node_id) {
@@ -20107,7 +20141,17 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         };
         let min_val = cfg_f("lowerBound", "min").unwrap_or(0.0);
         let max_val = cfg_f("upperBound", "max").unwrap_or(100.0);
-        
+        // The solvers draw their starting population with
+        // `gen_range(lower..upper)`, which panics on an empty or inverted
+        // range, so `{lowerBound: 5, upperBound: 5}` died with "cannot sample
+        // empty range" instead of being refused (#1773). A NaN bound compares
+        // false both ways, so it is refused by name.
+        if min_val.is_nan() || max_val.is_nan() || min_val >= max_val {
+            return Err(ExecutionError::bad_argument(format!(
+                "or.solve: `lowerBound` ({min_val}) must be less than `upperBound` ({max_val})"
+            )));
+        }
+
         // Objective: minimize sum(variable * cost_property)
         let cost_prop = config_map.get("costProperty")
             .or_else(|| config_map.get("cost_property"))
@@ -20293,6 +20337,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 "GOTLBO" => GOTLBOSolver::new(solver_config).solve(&problem),
                 "QORao" => QORaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
                 "SAPHR" => SAPHRSolver::new(solver_config).solve(&problem),
+                // Success-history adaptive DE with linear population
+                // reduction (OPT-13, #1803).
+                "LSHADE" => LSHADESolver::new(solver_config).solve(&problem),
                 // Jaya by name, and by omitting `algorithm` -- the default is
                 // applied where the name is read, not here.
                 "Jaya" => JayaSolver::new(solver_config).solve(&problem),

@@ -19,9 +19,10 @@ use ndarray::Array1;
 use samyama_optimization::algorithms::{
     BMRSolver, BMWRSolver, BWRSolver, DESolver, EHRJayaSolver, GASolver, GOTLBOSolver, ITLBOSolver,
     JayaSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, NSGA2Solver, PSOSolver, QOJayaSolver,
-    QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver,
+    QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver, LSHADESolver,
 };
 use samyama_optimization::benchmarks::{DTLZ, DTLZ_FRONT_SAMPLES_PER_AXIS, ZDT, ZDT_FRONT_SAMPLES};
+use samyama_optimization::budget::{Budget, Budgeted, StopReason};
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SimpleProblem,
     SolverConfig,
@@ -110,6 +111,17 @@ fn algorithm_catalog() -> Vec<AlgorithmInfo> {
                 name: "iterations",
                 ty: "int",
                 default: serde_json::json!(200),
+            },
+            // Optional limits (OPT-11, #1798); null means none.
+            ParamSpec {
+                name: "time_budget_ms",
+                ty: "int",
+                default: serde_json::Value::Null,
+            },
+            ParamSpec {
+                name: "max_evaluations",
+                ty: "int",
+                default: serde_json::Value::Null,
             },
         ]
     };
@@ -322,6 +334,20 @@ fn algorithm_catalog() -> Vec<AlgorithmInfo> {
             variant: None,
             equation_tex: r"v = x_{r1} + F(x_{r2}-x_{r3})",
             paper_refs: vec![],
+            params: default_params(),
+            multi_objective: false,
+        },
+        AlgorithmInfo {
+            id: "lshade",
+            name: "L-SHADE",
+            family: "evolutionary",
+            variant: None,
+            equation_tex: r"v = x_i + F(x_{pbest}-x_i) + F(x_{r1}-\tilde{x}_{r2})",
+            paper_refs: vec![PaperRef {
+                title: "Improving the search performance of SHADE using linear population size reduction",
+                url: "https://doi.org/10.1109/CEC.2014.6900380",
+                year: 2014,
+            }],
             params: default_params(),
             multi_objective: false,
         },
@@ -674,6 +700,12 @@ enum SseEvent {
         /// The five front-quality measures (OPT-03, #1753); see
         /// [`SolverOutcome::quality`] for when it is null.
         quality: Option<QualityMetrics>,
+        /// Objective evaluations the solve made (OPT-11, #1798).
+        evaluations: u64,
+        /// Whether the solve ran all its iterations or a budget stopped it.
+        stopped_by: StopReason,
+        /// The budget it ran within, echoed so the result says what it cost.
+        budget: Budget,
     },
     Error {
         message: String,
@@ -718,7 +750,35 @@ struct SolveReq {
     dim: Option<usize>,
     #[serde(default)]
     seed: Option<u64>,
+    /// Stop once this much wall-clock time has passed (OPT-11, #1798).
+    #[serde(default)]
+    time_budget_ms: Option<u64>,
+    /// Stop once the objective has been evaluated this many times (OPT-11).
+    #[serde(default)]
+    max_evaluations: Option<u64>,
 }
+
+impl SolveReq {
+    /// The request's budget. A limit of 0 is refused rather than read as "no
+    /// limit" or "stop at once": either reading would be a guess.
+    fn budget(&self) -> Result<Budget, String> {
+        for (field, value) in [
+            ("time_budget_ms", self.time_budget_ms),
+            ("max_evaluations", self.max_evaluations),
+        ] {
+            if value == Some(0) {
+                return Err(format!(
+                    "{field} must be at least 1; leave it out for no limit"
+                ));
+            }
+        }
+        Ok(Budget {
+            time: self.time_budget_ms.map(std::time::Duration::from_millis),
+            evaluations: self.max_evaluations,
+        })
+    }
+}
+
 fn default_pop() -> usize {
     50
 }
@@ -779,6 +839,7 @@ async fn start_solve(
             StatusCode::BAD_REQUEST,
             format!("unknown algorithm: {}", req.algorithm),
         ))?;
+    let budget = req.budget().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let job_id = Uuid::new_v4().to_string();
     let (event_tx, event_rx) = mpsc::channel::<SseEvent>(256);
@@ -831,7 +892,7 @@ async fn start_solve(
         // a blocking thread is not billed to the solver.
         let compute = tokio::task::spawn_blocking(move || {
             let started = std::time::Instant::now();
-            let outcome = run_solver(
+            let outcome = run_solver_within(
                 &algo.id,
                 algo.multi_objective,
                 &bench.id,
@@ -839,6 +900,7 @@ async fn start_solve(
                 dim,
                 cfg,
                 seed,
+                budget,
             );
             let elapsed = started.elapsed();
             // Measured after the clock stops: `total_time_ms` is the solve.
@@ -854,6 +916,8 @@ async fn start_solve(
                     feasible,
                     gap,
                     quality,
+                    evaluations,
+                    stopped_by,
                 }),
                 elapsed,
             )) => {
@@ -899,6 +963,9 @@ async fn start_solve(
                         feasible,
                         gap,
                         quality,
+                        evaluations,
+                        stopped_by,
+                        budget,
                     })
                     .await;
             }
@@ -924,15 +991,17 @@ struct SolverOutcome {
     /// Final Pareto front, one entry per non-dominated individual, each a vector
     /// of objective values. None for single-objective runs.
     final_pareto: Option<Vec<Vec<f64>>>,
-    /// Whether the best solution satisfies the problem's constraints
-    /// (OPT-09, #1776), read from `Problem::penalty`.
+    /// Whether the answer satisfies the problem's constraints (OPT-09, #1776).
     ///
-    /// None for multi-objective runs, deliberately. UC2 adds its
-    /// contraindication penalty to every objective instead of reporting it
-    /// through `MultiObjectiveProblem::penalties`, so each front point's
-    /// `constraint_violation` is 0 whether or not it is penalised (#1795).
-    /// Reading that field would report a penalised point as feasible; null
-    /// says the surface cannot tell, which is true.
+    /// Single-objective: the best solution, read from `Problem::penalty`.
+    /// Multi-objective: the returned front, read from each point's
+    /// `constraint_violation` (#1795). True means every returned point is
+    /// feasible; false means no feasible point was found and the front holds
+    /// the least-violating ones. None for an empty front.
+    ///
+    /// It was always None for multi-objective runs while UC2 folded its
+    /// contraindication into the objectives, because every point then read as
+    /// feasible whether or not it was penalised.
     feasible: Option<bool>,
     /// The best solution's objective minus the benchmark's known optimum
     /// (OPT-09, #1776). None when the catalog lists no optimum, which is every
@@ -944,6 +1013,10 @@ struct SolverOutcome {
     /// by [`with_quality`] after the solve's clock has stopped, so measuring
     /// the answer is not billed to `total_time_ms`.
     quality: Option<QualityMetrics>,
+    /// Objective evaluations the solve made, counted by [`Budgeted`].
+    evaluations: u64,
+    /// Whether the solve ran all its iterations or a budget stopped it.
+    stopped_by: StopReason,
 }
 
 /// Measure `outcome`'s final front against `bench_id`'s known front, if both
@@ -973,9 +1046,16 @@ macro_rules! seeded {
     }};
 }
 
-/// What one multi-objective run hands back: its convergence history, the best
-/// first objective on its final front, and the front's finite points.
-type MultiObjectiveRun = (Vec<f64>, f64, Vec<Vec<f64>>);
+/// What one multi-objective run hands back.
+struct MultiObjectiveRun {
+    history: Vec<f64>,
+    /// The best first objective on the returned front.
+    final_first: f64,
+    /// The returned front's finite points.
+    pareto: Vec<Vec<f64>>,
+    /// See [`SolverOutcome::feasible`].
+    feasible: Option<bool>,
+}
 
 /// Run one multi-objective solver on `problem`: its convergence history, the
 /// best first objective on the final front, and the front's finite points.
@@ -986,8 +1066,10 @@ fn solve_multi_objective<P: MultiObjectiveProblem>(
     algo_id: &str,
     cfg: SolverConfig,
     seed: Option<u64>,
-    problem: &P,
-) -> Result<MultiObjectiveRun, String> {
+    budget: Budget,
+    problem: P,
+) -> Result<(MultiObjectiveRun, u64, StopReason), String> {
+    let problem = &Budgeted::new(problem, budget);
     let r = match algo_id {
         "mo_bmr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR), seed).solve(problem),
         "mo_bwr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(problem),
@@ -996,24 +1078,82 @@ fn solve_multi_objective<P: MultiObjectiveProblem>(
         "nsga2" => seeded!(NSGA2Solver::new(cfg), seed).solve(problem),
         _ => return Err(format!("algorithm {} not multi-objective", algo_id)),
     };
-    let final_first = r
-        .pareto_front
+    let (returned, feasible) = returned_front(&r.pareto_front);
+    let final_first = returned
         .iter()
         .map(|ind| ind.fitness[0])
         .fold(f64::INFINITY, f64::min);
     // Drop individuals with non-finite objective values — serde_json
     // serializes NaN/Inf as null, which breaks downstream consumers
     // (e.g. the samyama-insight Pareto chart).
-    let pareto: Vec<Vec<f64>> = r
-        .pareto_front
+    let pareto: Vec<Vec<f64>> = returned
         .iter()
         .filter(|ind| ind.fitness.iter().all(|v| v.is_finite()))
         .map(|ind| ind.fitness.clone())
         .collect();
-    Ok((r.history, final_first, pareto))
+    Ok((
+        MultiObjectiveRun {
+            history: r.history,
+            final_first,
+            feasible,
+            pareto,
+        },
+        problem.evaluations(),
+        problem.stop_reason(),
+    ))
 }
 
+/// The points of `front` to return, and whether they are feasible.
+///
+/// An infeasible point is never returned beside a feasible one (#1795).
+/// Constrained dominance already ranks every feasible point above every
+/// infeasible one, so a final front mixes them only through a solver's own
+/// front selection; filtering here holds every solver to it. When nothing
+/// feasible was found, the points are returned and marked infeasible, rather
+/// than answering with nothing. Feasibility is None for an empty front.
+fn returned_front(
+    front: &[samyama_optimization::common::MultiObjectiveIndividual],
+) -> (
+    Vec<&samyama_optimization::common::MultiObjectiveIndividual>,
+    Option<bool>,
+) {
+    let any_feasible = front
+        .iter()
+        .any(|ind| is_feasible(ind.constraint_violation));
+    let returned: Vec<_> = front
+        .iter()
+        .filter(|ind| !any_feasible || is_feasible(ind.constraint_violation))
+        .collect();
+    let feasible = (!returned.is_empty()).then_some(any_feasible);
+    (returned, feasible)
+}
+
+/// [`run_solver_within`] with no budget.
+#[cfg(test)]
 fn run_solver(
+    algo_id: &str,
+    multi_objective: bool,
+    bench_id: &str,
+    num_obj: usize,
+    bench_dim: usize,
+    cfg: SolverConfig,
+    seed: Option<u64>,
+) -> Result<SolverOutcome, String> {
+    run_solver_within(
+        algo_id,
+        multi_objective,
+        bench_id,
+        num_obj,
+        bench_dim,
+        cfg,
+        seed,
+        Budget::default(),
+    )
+}
+
+/// Run one solve, stopping early if `budget` is spent first.
+#[allow(clippy::too_many_arguments)]
+fn run_solver_within(
     algo_id: &str,
     multi_objective: bool,
     bench_id: &str,
@@ -1021,33 +1161,37 @@ fn run_solver(
     bench_dim: usize,
     cfg: SolverConfig,
     seed: Option<u64>,
+    budget: Budget,
 ) -> Result<SolverOutcome, String> {
     if multi_objective {
-        let (hist, final_f, pareto) = if bench_id == "uc2_dosing" {
+        let (run, evaluations, stopped_by) = if bench_id == "uc2_dosing" {
             solve_multi_objective(
                 algo_id,
                 cfg,
                 seed,
-                &super::uc_problems::UC2DosingProblem::new(),
+                budget,
+                super::uc_problems::UC2DosingProblem::new(),
             )?
         } else {
             match FrontProblem::for_benchmark(bench_id) {
                 Some(FrontProblem::Zdt(problem)) => {
-                    solve_multi_objective(algo_id, cfg, seed, &problem)?
+                    solve_multi_objective(algo_id, cfg, seed, budget, problem)?
                 }
                 Some(FrontProblem::Dtlz(problem)) => {
-                    solve_multi_objective(algo_id, cfg, seed, &problem)?
+                    solve_multi_objective(algo_id, cfg, seed, budget, problem)?
                 }
                 None => return Err(format!("benchmark {} is not multi-objective", bench_id)),
             }
         };
         Ok(SolverOutcome {
-            history: hist,
-            final_fitness: final_f,
-            final_pareto: Some(pareto),
-            feasible: None,
+            history: run.history,
+            final_fitness: run.final_first,
+            final_pareto: Some(run.pareto),
+            feasible: run.feasible,
             gap: None,
             quality: None,
+            evaluations,
+            stopped_by,
         })
     } else {
         let bench = benchmark_catalog()
@@ -1055,27 +1199,29 @@ fn run_solver(
             .find(|b| b.id == bench_id)
             .ok_or_else(|| format!("unknown benchmark: {bench_id}"))?;
         let dim = if bench_dim == 0 { bench.dim } else { bench_dim };
-        let problem = single_obj(bench.id, dim, bench.lower, bench.upper);
+        let budgeted = Budgeted::new(single_obj(bench.id, dim, bench.lower, bench.upper), budget);
+        let problem = &budgeted;
 
         let result = match algo_id {
-            "jaya" => seeded!(JayaSolver::new(cfg), seed).solve(&problem),
-            "rao1" => seeded!(RaoSolver::new(cfg, RaoVariant::Rao1), seed).solve(&problem),
-            "rao2" => seeded!(RaoSolver::new(cfg, RaoVariant::Rao2), seed).solve(&problem),
-            "rao3" => seeded!(RaoSolver::new(cfg, RaoVariant::Rao3), seed).solve(&problem),
-            "tlbo" => seeded!(TLBOSolver::new(cfg), seed).solve(&problem),
-            "itlbo" => seeded!(ITLBOSolver::new(cfg), seed).solve(&problem),
-            "qojaya" => seeded!(QOJayaSolver::new(cfg), seed).solve(&problem),
-            "gotlbo" => seeded!(GOTLBOSolver::new(cfg), seed).solve(&problem),
-            "bmr" => seeded!(BMRSolver::new(cfg), seed).solve(&problem),
-            "bwr" => seeded!(BWRSolver::new(cfg), seed).solve(&problem),
-            "bmwr" => seeded!(BMWRSolver::new(cfg), seed).solve(&problem),
-            "samp_jaya" => seeded!(SAMPJayaSolver::new(cfg), seed).solve(&problem),
-            "qo_rao" => seeded!(QORaoSolver::new(cfg, RaoVariant::Rao1), seed).solve(&problem),
-            "ehrjaya" => seeded!(EHRJayaSolver::new(cfg), seed).solve(&problem),
-            "saphr" => seeded!(SAPHRSolver::new(cfg), seed).solve(&problem),
-            "pso" => seeded!(PSOSolver::new(cfg), seed).solve(&problem),
-            "de" => seeded!(DESolver::new(cfg), seed).solve(&problem),
-            "ga" => seeded!(GASolver::new(cfg), seed).solve(&problem),
+            "jaya" => seeded!(JayaSolver::new(cfg), seed).solve(problem),
+            "rao1" => seeded!(RaoSolver::new(cfg, RaoVariant::Rao1), seed).solve(problem),
+            "rao2" => seeded!(RaoSolver::new(cfg, RaoVariant::Rao2), seed).solve(problem),
+            "rao3" => seeded!(RaoSolver::new(cfg, RaoVariant::Rao3), seed).solve(problem),
+            "tlbo" => seeded!(TLBOSolver::new(cfg), seed).solve(problem),
+            "itlbo" => seeded!(ITLBOSolver::new(cfg), seed).solve(problem),
+            "qojaya" => seeded!(QOJayaSolver::new(cfg), seed).solve(problem),
+            "gotlbo" => seeded!(GOTLBOSolver::new(cfg), seed).solve(problem),
+            "bmr" => seeded!(BMRSolver::new(cfg), seed).solve(problem),
+            "bwr" => seeded!(BWRSolver::new(cfg), seed).solve(problem),
+            "bmwr" => seeded!(BMWRSolver::new(cfg), seed).solve(problem),
+            "samp_jaya" => seeded!(SAMPJayaSolver::new(cfg), seed).solve(problem),
+            "qo_rao" => seeded!(QORaoSolver::new(cfg, RaoVariant::Rao1), seed).solve(problem),
+            "ehrjaya" => seeded!(EHRJayaSolver::new(cfg), seed).solve(problem),
+            "saphr" => seeded!(SAPHRSolver::new(cfg), seed).solve(problem),
+            "pso" => seeded!(PSOSolver::new(cfg), seed).solve(problem),
+            "de" => seeded!(DESolver::new(cfg), seed).solve(problem),
+            "lshade" => seeded!(LSHADESolver::new(cfg), seed).solve(problem),
+            "ga" => seeded!(GASolver::new(cfg), seed).solve(problem),
             other => {
                 return Err(format!(
                     "algorithm {} not supported on single-objective benchmarks",
@@ -1083,6 +1229,9 @@ fn run_solver(
                 ))
             }
         };
+        // Measured on the bare problem: checking the answer is not part of
+        // the solve, so it does not count against the budget.
+        let problem = budgeted.inner();
         let objective = problem.objective(&result.best_variables);
         Ok(SolverOutcome {
             final_fitness: result.best_fitness,
@@ -1093,6 +1242,8 @@ fn run_solver(
                 .optimum
                 .map(|optimum| gap_to_best_known(objective, optimum)),
             quality: None,
+            evaluations: budgeted.evaluations(),
+            stopped_by: budgeted.stop_reason(),
         })
     }
 }
@@ -1137,6 +1288,9 @@ async fn stream_solve(
                 feasible,
                 gap,
                 quality,
+                evaluations,
+                stopped_by,
+                budget,
             } => Event::default()
                 .event("done")
                 .json_data(serde_json::json!({
@@ -1152,6 +1306,11 @@ async fn stream_solve(
                     "gap": gap,
                     // How good the front is against the known one (OPT-03).
                     "quality": quality,
+                    // What the solve cost and why it stopped (OPT-11, #1798).
+                    "evaluations": evaluations,
+                    "stopped_by": stopped_by,
+                    "time_budget_ms": budget.time.map(|t| t.as_millis() as u64),
+                    "max_evaluations": budget.evaluations,
                 }))
                 .unwrap(),
             SseEvent::Error { message } => Event::default()

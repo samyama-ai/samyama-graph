@@ -2,12 +2,14 @@
 //!
 //! Uses the samyama-sdk RemoteClient to connect to a running server.
 
+use crate::snapshot_keys::run_snapshot_keys;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use comfy_table::{Table, ContentArrangement};
 use samyama_sdk::{RemoteClient, SamyamaClient};
 
 mod doctor;
+mod snapshot_keys;
 
 #[derive(Parser)]
 #[command(name = "samyama", version, about = "Samyama Graph Database CLI")]
@@ -87,11 +89,41 @@ enum Commands {
         /// Shell to generate for
         shell: Shell,
     },
+    /// Inspect snapshots without importing them into a graph store
+    Snapshot {
+        #[command(subcommand)]
+        command: SnapshotCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotCommands {
+    /// Analyze dedup keys across snapshots before a federation load
+    Keys {
+        /// Snapshot files, processed in this order when predicting merges
+        #[arg(required = true, num_args = 1..)]
+        files: Vec<std::path::PathBuf>,
+
+        /// Restrict the report to this node label
+        #[arg(long)]
+        label: Option<String>,
+
+        /// Emit a machine-readable JSON report
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    let json_errors = matches!(&cli.format, OutputFormat::Json)
+        || matches!(
+            &cli.command,
+            Commands::Snapshot {
+                command: SnapshotCommands::Keys { json: true, .. }
+            }
+        );
     let client = RemoteClient::new(&cli.url);
 
     let result = match cli.command {
@@ -124,19 +156,27 @@ async fn main() {
             clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
             Ok(())
         }
+        Commands::Snapshot { command } => match command {
+            SnapshotCommands::Keys { files, label, json } => {
+                run_snapshot_keys(
+                    &files,
+                    label.as_deref(),
+                    json || matches!(&cli.format, OutputFormat::Json),
+                )
+            }
+        },
     };
 
     if let Err(e) = result {
         // API-14 asks for `--json` output *everywhere*. An error printed as
         // prose while the caller asked for JSON is the case that breaks a
         // script, because the failure is exactly when it is parsing output.
-        match cli.format {
-            OutputFormat::Json => {
-                let body = serde_json::json!({"error": e.to_string()});
-                eprintln!("{}", serde_json::to_string_pretty(&body)
-                    .unwrap_or_else(|_| format!("{{\"error\": \"{e}\"}}")));
-            }
-            _ => eprintln!("Error: {}", e),
+        if json_errors {
+            let body = serde_json::json!({"error": e.to_string()});
+            eprintln!("{}", serde_json::to_string_pretty(&body)
+                .unwrap_or_else(|_| format!("{{\"error\": \"{e}\"}}")));
+        } else {
+            eprintln!("Error: {}", e);
         }
         std::process::exit(1);
     }

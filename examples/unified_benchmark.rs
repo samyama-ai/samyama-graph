@@ -383,6 +383,15 @@ async fn main() -> Result<(), Error> {
         .as_deref()
         .map(|s| s.split(',').map(|k| k.trim()).filter(|k| !k.is_empty()).collect())
         .unwrap_or_default();
+    let merge_edges = match args.iter().find_map(|a| a.strip_prefix("--merge-edges="))
+        .or_else(|| args.iter().position(|a| a == "--merge-edges")
+            .and_then(|i| args.get(i + 1)).map(String::as_str))
+        .unwrap_or("unpropertied") {
+        "never" => samyama::snapshot::MergeEdges::Never,
+        "unpropertied" => samyama::snapshot::MergeEdges::Unpropertied,
+        "always" => samyama::snapshot::MergeEdges::Always,
+        other => return Err(format!("unknown --merge-edges policy {other:?}").into()),
+    };
     let di_data = get_arg(&args, "--di-data");
     let surv_data = get_arg(&args, "--surv-data");
     let hd_data = get_arg(&args, "--hd-data");
@@ -461,8 +470,9 @@ async fn main() -> Result<(), Error> {
         let stats = if dedup_keys.is_empty() {
             client.import_snapshot("default", p).await?
         } else {
-            client.import_snapshot_dedup_options("default", p, &dedup_keys, args.iter().any(|a| a == "--dedup-allow-conflicts")).await?
+            client.import_snapshot_merge_policy("default", p, &dedup_keys, args.iter().any(|a| a == "--dedup-allow-conflicts"), merge_edges).await?
         };
+        eprintln!("{} edges deduplicated, {} parallel edges kept", stats.edges_deduplicated, stats.parallel_edges_kept);
         eprintln!("{} candidate merges refused for conflicting identifiers", stats.merges_refused_conflicting);
         eprintln!(
             "{} nodes, {} edges, {} MERGED in {:.1}s",

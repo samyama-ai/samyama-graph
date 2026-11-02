@@ -5,7 +5,7 @@ members = [
     "crates/samyama-sdk",
     "crates/samyama-convert",
     "crates/samyama-gpu",
-    "cli",
+    "crates/samyama-cli",
 ]
 exclude = ["sdk/python"]
 
