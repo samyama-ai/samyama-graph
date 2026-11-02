@@ -11,6 +11,7 @@ pub mod manager;
 pub mod fulltext;
 pub mod point;
 pub mod hierarchy;
+pub mod structure;
 pub mod catalog;
 
 pub use property_index::PropertyIndex;

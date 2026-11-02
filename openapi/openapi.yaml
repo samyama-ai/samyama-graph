@@ -1076,6 +1076,365 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/hierarchies:
+    get:
+      operationId: listHierarchies
+      summary: List the declared OEH hierarchy indexes
+      description: >
+        Every `CREATE HIERARCHY INDEX` (ADR-035) registered on the graph, with its
+        probe, encoding and roll-up metadata. An index that was declined carries
+        `declined` with the reason, and one whose graph has moved under it carries
+        `stale` — both are reported rather than hidden, because a cue computed from
+        a stale index is wrong in a way the caller cannot see.
+      parameters:
+        - name: graph
+          in: query
+          required: false
+          schema:
+            type: string
+            default: default
+          description: Target graph/tenant name
+      responses:
+        '200':
+          description: The registered hierarchy indexes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hierarchies:
+                    type: array
+                    items:
+                      type: object
+                  count:
+                    type: integer
+        '403':
+          description: The subject may not read this graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/hierarchies/{name}/cues:
+    post:
+      operationId: hierarchyCues
+      summary: Whole-hierarchy roll-ups, LCA and 3D/2.5D visual cues for one OEH index
+      description: >
+        Authoritative `descendant_count`, index-resident `rollups`, whole-poset
+        lowest common ancestors, deterministic 3D cone-tree coordinates and a
+        non-WebGL 2.5D isometric projection, read from the index rather than
+        recomputed per request.
+
+        `node_ids` restricts the cues to a subset; omitting it returns the whole
+        hierarchy, bounded by `lod_budget` when one is given. The counts and
+        roll-ups are always whole-hierarchy figures, so a budgeted response is a
+        smaller set of nodes carrying unabridged numbers, not a subgraph's.
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The hierarchy index name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                graph:
+                  type: string
+                  default: default
+                  description: Target graph/tenant name
+                node_ids:
+                  type: array
+                  nullable: true
+                  items:
+                    type: integer
+                    format: int64
+                  description: >
+                    Cues for these nodes only; null or absent returns the whole
+                    hierarchy.
+                lca_pair:
+                  type: array
+                  nullable: true
+                  minItems: 2
+                  maxItems: 2
+                  items:
+                    type: integer
+                    format: int64
+                  description: >
+                    A node pair whose lowest common ancestors are returned in
+                    `lca_node_ids`. A poset may have several, so this is a list.
+                lod_budget:
+                  type: integer
+                  nullable: true
+                  description: >
+                    Return at most this many nodes, chosen as the top
+                    macro-subtrees.
+      responses:
+        '200':
+          description: The hierarchy's cues
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  encoding:
+                    type: string
+                  stale:
+                    type: boolean
+                  total_poset_nodes:
+                    type: integer
+                  total_poset_edges:
+                    type: integer
+                  measure:
+                    type: string
+                    nullable: true
+                  lca_node_ids:
+                    type: array
+                    nullable: true
+                    items:
+                      type: integer
+                      format: int64
+                  cues:
+                    type: object
+        '403':
+          description: The subject may not read this graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No hierarchy index of that name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: >
+            The index exists but carries no cues — it was declined, or it has not
+            been built.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/structure:
+    get:
+      operationId: getStructure
+      summary: The graph's structural conventions, declared and auto-detected
+      description: >
+        `explicit` is what was registered through `PUT`; `effective` is what the
+        engine will actually use, which includes conventions detected from the
+        data (3D Euclidean or protein coordinates, geospatial, or a built
+        hierarchy index). The two are reported separately so a caller can tell a
+        declaration from an inference.
+      parameters:
+        - name: graph
+          in: query
+          required: false
+          schema:
+            type: string
+            default: default
+          description: Target graph/tenant name
+      responses:
+        '200':
+          description: The graph's conventions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StructureResponse'
+        '403':
+          description: The subject may not read this graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      operationId: putStructure
+      summary: Replace the graph's explicit structural conventions
+      description: >
+        Replaces the whole set rather than merging, so the request body is the
+        graph's conventions in full. At most 64 may be registered, and a
+        convention needs a non-empty name. Requires a credential with write
+        access to the graph; auto-detected conventions are not affected, and the
+        response reports both sets as `GET` does.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - structures
+              properties:
+                graph:
+                  type: string
+                  default: default
+                  description: Target graph/tenant name
+                structures:
+                  type: array
+                  maxItems: 64
+                  items:
+                    type: object
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                      manifold:
+                        type: object
+                        description: >
+                          One of Euclidean3d, GeoSpherical, HierarchyPoset or
+                          CausalSpacetime, with that manifold's own fields.
+      responses:
+        '200':
+          description: The conventions after the replacement
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StructureResponse'
+        '400':
+          description: More than 64 conventions, or one with an empty name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The subject may not write to this graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/structure/cues:
+    post:
+      operationId: structureCues
+      summary: 3D and 2.5D visual cues, contact edges, stress and manifold A* for a convention
+      description: >
+        Computes the cues for one structural convention: 3D coordinates and a
+        non-WebGL 2.5D isometric projection, ordered backbone chains, implicit 3D
+        contact edges with their topological-geometric stress
+        (graph distance over manifold distance, which is what makes a long-range
+        protein contact or a routing detour visible), and index-resident roll-ups.
+
+        `convention_name` selects among the effective conventions and defaults to
+        the first. A `HierarchyPoset` convention answers from its hierarchy index
+        and returns `hierarchy_cues` in place of the geometric fields, so the
+        response shape follows the manifold.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                graph:
+                  type: string
+                  default: default
+                  description: Target graph/tenant name
+                convention_name:
+                  type: string
+                  nullable: true
+                  description: >
+                    Which effective convention to use; null or absent takes the
+                    first.
+                node_ids:
+                  type: array
+                  nullable: true
+                  items:
+                    type: integer
+                    format: int64
+                  description: Cues for these nodes only.
+                max_nodes:
+                  type: integer
+                  nullable: true
+                  default: 2000
+                  description: Cap on the nodes returned.
+                contact_radius:
+                  type: number
+                  format: double
+                  nullable: true
+                  description: >
+                    Override the implicit 3D contact radius used to extract
+                    `contact_edges`.
+                astar_pair:
+                  type: array
+                  nullable: true
+                  minItems: 2
+                  maxItems: 2
+                  items:
+                    type: integer
+                    format: int64
+                  description: >
+                    A start and goal node whose manifold-guided A* shortest path
+                    is returned in `astar_path`; null when no path exists.
+      responses:
+        '200':
+          description: The convention's cues
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  convention:
+                    type: object
+                  bbox:
+                    type: object
+                  total_indexed_nodes:
+                    type: integer
+                  nodes:
+                    type: array
+                    items:
+                      type: object
+                  backbone_chains:
+                    type: array
+                    items:
+                      type: object
+                  contact_edges:
+                    type: array
+                    items:
+                      type: object
+                  whole_graph_rollups:
+                    type: object
+                  astar_path:
+                    type: array
+                    nullable: true
+                    items:
+                      type: integer
+                      format: int64
+                  hierarchy_encoding:
+                    type: string
+                    description: >
+                      Present instead of the geometric fields when the chosen
+                      convention is a HierarchyPoset.
+                  hierarchy_cues:
+                    type: object
+        '403':
+          description: The subject may not read this graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: >
+            No convention is declared or detected, none carries the requested
+            name, or the convention's hierarchy index is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The convention's hierarchy index is not built
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     QueryRequest:
@@ -1353,6 +1712,25 @@ components:
           type: integer
         label:
           type: string
+
+    StructureResponse:
+      type: object
+      properties:
+        format:
+          type: string
+          description: The conventions' wire format, currently samyama.structure/1.
+        explicit:
+          type: array
+          items:
+            type: object
+          description: The conventions registered through PUT /api/structure.
+        effective:
+          type: array
+          items:
+            type: object
+          description: >
+            What the engine will use: the explicit conventions plus those
+            detected from the data.
 
     ErrorResponse:
       type: object
