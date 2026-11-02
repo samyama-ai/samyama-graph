@@ -442,6 +442,13 @@ pub struct SgiPoint {
     pub measure: Option<RollupValue>,
 }
 
+/// An [`SgiPoint`] before its Morton code is known: `(node_id, coords, cartesian, measure)`.
+///
+/// The code quantizes against the bounding box, and the box is not known until
+/// every point has been read -- so [`SgiIndex::build`] collects these on a first
+/// pass and attaches the code on a second.
+type UnrankedPoint = (NodeId, [f64; 3], [f64; 3], Option<RollupValue>);
+
 /// Structural-Geometric Index (`SGI`, `#2036`): a 3D Morton Z-order index with index-resident
 /// [`Fenwick`] (`SUM`/`COUNT`) and [`SegmentTree`] (`MIN`/`MAX`) monoid roll-ups.
 #[derive(Debug, Clone)]
@@ -474,7 +481,7 @@ impl SgiIndex {
             None => store.all_nodes().into_iter().map(|n| n.id).collect(),
         };
 
-        let mut raw: Vec<(NodeId, [f64; 3], [f64; 3], Option<RollupValue>)> = Vec::new();
+        let mut raw: Vec<UnrankedPoint> = Vec::new();
         let mut min = [f64::INFINITY; 3];
         let mut max = [f64::NEG_INFINITY; 3];
 
