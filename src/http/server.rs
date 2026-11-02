@@ -25,6 +25,10 @@ use super::handler::{
     nlq_handler, algorithm_catalog_handler,
 };
 use super::vector::{list_indexes_handler, create_index_handler, search_handler};
+use super::structure::{
+    list_hierarchies_handler, hierarchy_cues_handler,
+    get_structure_handler, put_structure_handler, structure_cues_handler,
+};
 
 /// HA-09: Build the tenant CRUD sub-router backed by the shared `TenantManager`.
 /// Exposed at the crate level so integration tests can mount it in isolation.
@@ -204,6 +208,9 @@ pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::a
             || path == "/api/enrich"
             || path == "/api/vector/indexes")
     {
+        return Role::Write;
+    }
+    if *method == Method::PUT && path == "/api/structure" {
         return Role::Write;
     }
     Role::Read
@@ -901,6 +908,10 @@ impl HttpServer {
             .route("/api/vector/indexes", get(list_indexes_handler))
             .route("/api/vector/indexes", post(create_index_handler))
             .route("/api/vector-search", post(search_handler))
+            .route("/api/hierarchies", get(list_hierarchies_handler))
+            .route("/api/hierarchies/:name/cues", post(hierarchy_cues_handler))
+            .route("/api/structure", get(get_structure_handler).put(put_structure_handler))
+            .route("/api/structure/cues", post(structure_cues_handler))
             .route("/api/snapshot/export", post(export_snapshot_handler))
             .route("/api/snapshot/import", post(restore_snapshot_handler)
                 .layer(DefaultBodyLimit::max(SNAPSHOT_IMPORT_BODY_LIMIT)))
