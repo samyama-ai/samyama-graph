@@ -5,13 +5,16 @@
 //! for a seeded solver, a run stopped after `k` iterations gives the same
 //! answer and the same evaluation count as an unbudgeted run of `k`
 //! iterations, the budget was not yet spent after `k - 1`, and it was after
-//! `k`. Each of the 29 solvers is held to that.
+//! `k`. Each of the 30 solvers is held to that.
 //!
-//! Two solvers follow a schedule over `max_iterations`: GWO's step and GSA's
-//! gravity shrink from the first iteration to the last. Stopped early, they
-//! are partway along a longer schedule, which is not the search a shorter run
-//! makes, so for them the answer is not compared; the iteration and
-//! evaluation counts still are.
+//! Three solvers follow a schedule over `max_iterations`: GWO's step, GSA's
+//! gravity and L-SHADE's population shrink from the first iteration to the
+//! last. Stopped early, they are partway along a longer schedule, which is not
+//! the search a shorter run makes, so for them the answer is not compared; the
+//! iteration count still is. GWO's and GSA's evaluation counts are compared
+//! too. L-SHADE's are not: its population is the schedule, so a shorter run
+//! evaluates fewer points per iteration. For it, the budget checks below still
+//! hold: it stops on the evaluation budget, early, with the budget spent.
 
 use ndarray::Array1;
 use samyama_optimization::algorithms::*;
@@ -28,7 +31,11 @@ const EVALUATIONS: u64 = 500;
 const SPHERE_DIM: usize = 4;
 const ZDT_DIM: usize = 6;
 /// Solvers whose updates depend on `max_iterations`; see the module comment.
-const SCHEDULED: [&str; 2] = ["gwo", "gsa"];
+const SCHEDULED: [&str; 3] = ["gwo", "gsa", "lshade"];
+/// Scheduled solvers whose *population* follows the schedule, so a shorter
+/// run evaluates fewer points per iteration than a longer run stopped at the
+/// same iteration. For them only the iteration count is compared.
+const SHRINKING_POPULATION: [&str; 1] = ["lshade"];
 
 fn config(iterations: usize) -> SolverConfig {
     SolverConfig {
@@ -91,6 +98,7 @@ fn single_solvers() -> Vec<(&'static str, Single)> {
         ("itlbo", |c, p| ITLBOSolver::new(c).with_seed(SEED).solve(p)),
         ("pso", |c, p| PSOSolver::new(c).with_seed(SEED).solve(p)),
         ("de", |c, p| DESolver::new(c).with_seed(SEED).solve(p)),
+        ("lshade", |c, p| LSHADESolver::new(c).with_seed(SEED).solve(p)),
         ("gotlbo", |c, p| {
             GOTLBOSolver::new(c).with_seed(SEED).solve(p)
         }),
@@ -189,7 +197,9 @@ fn assert_stops_as_fewer_iterations_would(
 
     let (unbudgeted, reason) = run(k, Budget::default());
     assert_eq!(reason, StopReason::Iterations, "{name}");
-    let same = if SCHEDULED.contains(&name) {
+    let same = if SHRINKING_POPULATION.contains(&name) {
+        budgeted.iterations == unbudgeted.iterations
+    } else if SCHEDULED.contains(&name) {
         (budgeted.iterations, budgeted.evaluations)
             == (unbudgeted.iterations, unbudgeted.evaluations)
     } else {
@@ -216,7 +226,7 @@ fn assert_stops_as_fewer_iterations_would(
 #[test]
 fn every_single_objective_solver_stops_at_its_evaluation_budget() {
     let solvers = single_solvers();
-    assert_eq!(solvers.len(), 25);
+    assert_eq!(solvers.len(), 26);
     for (name, solve) in solvers {
         assert_stops_as_fewer_iterations_would(name, |n, b| run_single(solve, n, b));
     }
