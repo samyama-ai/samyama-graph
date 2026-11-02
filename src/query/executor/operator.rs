@@ -18228,8 +18228,13 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     }
 
     fn execute_wcc(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label", "startTime", "timeProperty"])?;
-        // Arguments: (label?, edge_type?)
+        // `startTime` and `timeProperty` were allowed here and read by nothing,
+        // so `{label: ...}` and `{startTime: ...}` both ran on the whole graph
+        // and reported success -- the silent drop `reject_unknown_config_keys`
+        // exists to refuse. The filters are read from the map as well as
+        // positionally, as the centrality procedures read them.
+        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label"])?;
+        // Arguments: (label?, edge_type?) or ({label, edgeType})
         let mut label = None;
         let mut edge_type = None;
 
@@ -18241,6 +18246,16 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         if self.args.len() > 1 {
             if let Expression::Literal(PropertyValue::String(s)) = &self.args[1] {
                 edge_type = Some(s.clone());
+            }
+        }
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::String(v)) = m.get("label") {
+                    label = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("edgeType") {
+                    edge_type = Some(v.clone());
+                }
             }
         }
 
@@ -18805,7 +18820,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// smaller number indistinguishable from a real one, and a caller sizing a
     /// traversal budget from it would under-provision.
     fn execute_metric(&mut self, store: &GraphStore, which: Metric) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, &self.name, &["undirected"])?;
+        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "undirected"])?;
         let view = self.structural_view(store)?;
         // Undirected by default, as every one of these is a statement about
         // graph shape rather than about flow.
@@ -19090,7 +19105,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// reproduce is not a result: someone who sees something surprising in a
     /// walk has to be able to get the same walk back.
     fn execute_random_walk(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "randomWalk", &["seed", "steps"])?;
+        Self::reject_unknown_config_keys(&self.args, "randomWalk", &["edgeType", "label", "seed", "steps"])?;
         let (mut steps, mut seed) = (10usize, 42u64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19118,7 +19133,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.articleRank()` -- PageRank that discounts prolific linkers.
     fn execute_article_rank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "articleRank", &["dampingFactor", "iterations"])?;
+        Self::reject_unknown_config_keys(&self.args, "articleRank", &["dampingFactor", "edgeType", "iterations", "label"])?;
         let (mut damping, mut iters) = (0.85f64, 20usize);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19139,7 +19154,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.katz({alpha, beta, iterations, tolerance})`.
     fn execute_katz(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "katz", &["alpha", "beta", "iterations", "tolerance"])?;
+        Self::reject_unknown_config_keys(&self.args, "katz", &["alpha", "beta", "edgeType", "iterations", "label", "tolerance"])?;
         let (mut alpha, mut beta, mut iters, mut tol) = (0.1f64, 1.0f64, 1000usize, 1e-6f64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19176,7 +19191,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// procedures would run the same fixed point twice and invite a caller to
     /// compare hubs from one run with authorities from another.
     fn execute_hits(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "hits", &["iterations", "tolerance"])?;
+        Self::reject_unknown_config_keys(&self.args, "hits", &["edgeType", "iterations", "label", "tolerance"])?;
         let (mut iters, mut tol) = (500usize, 1e-8f64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19536,7 +19551,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.nodeSimilarity({topK, cutoff})`.
     fn execute_node_similarity(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "nodeSimilarity", &["cutoff"])?;
+        Self::reject_unknown_config_keys(&self.args, "nodeSimilarity", &["cutoff", "edgeType", "label", "topK"])?;
         let k = self.usize_arg("topK", 10);
         let mut cutoff = 0.0f64;
         for arg in &self.args {
