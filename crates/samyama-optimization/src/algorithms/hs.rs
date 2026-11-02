@@ -48,6 +48,9 @@ impl HSSolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for _iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             // Find current best for history
             let mut best_idx = 0;
             let mut worst_idx = 0;
