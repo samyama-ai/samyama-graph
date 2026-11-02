@@ -503,6 +503,22 @@ paths:
                 seed:
                   type: integer
                   format: int64
+                time_budget_ms:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: >
+                    Stop once this many milliseconds have passed since the first
+                    evaluation (OPT-11). Checked between iterations, so a run can
+                    overrun by one iteration. Leave it out for no limit.
+                max_evaluations:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: >
+                    Stop once the objective has been evaluated this many times
+                    (OPT-11). Checked between iterations, so a run can make up to
+                    one iteration's evaluations more. Leave it out for no limit.
       responses:
         '200':
           description: The run's id
@@ -512,8 +528,9 @@ paths:
                 type: object
         '400':
           description: >
-            Unknown algorithm or benchmark, or a body carrying a field the
-            request does not declare. The message names the offending field.
+            Unknown algorithm or benchmark, a body carrying a field the
+            request does not declare, or a budget of 0. The message names the
+            offending field.
   /optimize/solve/{id}/stream:
     get:
       operationId: streamSolve
@@ -521,6 +538,12 @@ paths:
       description: >
         Server-sent events for a run in progress. The one streaming route in the
         server; `/api/query` buffers its whole result (API-07).
+
+
+        The final `done` event carries `evaluations` (how many times the
+        objective was evaluated), `stopped_by` (`iterations`, `time_budget` or
+        `evaluation_budget`) and the request's `time_budget_ms` and
+        `max_evaluations`, null when not set (OPT-11).
       parameters:
         - name: id
           in: path
