@@ -57,6 +57,9 @@ impl SAMPJayaSolver {
             .fold(f64::INFINITY, f64::min);
 
         for iter in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             if iter % 10 == 0 {
                 println!(
                     "SAMP-Jaya Solver: Iteration {}/{} (m={})",

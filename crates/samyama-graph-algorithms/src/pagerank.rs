@@ -3,6 +3,7 @@
 //! Node centrality. Counted towards ALGO-01 (algorithms callable from Cypher).
 
 use super::common::{GraphView, NodeId};
+use super::progress::{NoProgress, Progress, Stopped};
 use std::collections::HashMap;
 use rayon::prelude::*;
 
@@ -36,10 +37,31 @@ pub fn page_rank(
     view: &GraphView,
     config: PageRankConfig,
 ) -> HashMap<NodeId, f64> {
+    match page_rank_with(view, config, &NoProgress) {
+        Ok(scores) => scores,
+        Err(_) => unreachable!("NoProgress never stops a run"),
+    }
+}
+
+/// [`page_rank`], reporting each finished iteration to `progress` and stopping
+/// when it answers `false` (ALGO-12, #1693). The total is `config.iterations`;
+/// a run that converges early stops reporting there, short of the total.
+///
+/// The GPU path runs its iterations inside one kernel call, so it reports
+/// only before it starts and once it is done.
+pub fn page_rank_with(
+    view: &GraphView,
+    config: PageRankConfig,
+    progress: &dyn Progress,
+) -> Result<HashMap<NodeId, f64>, Stopped> {
     let n = view.node_count;
+    let total = config.iterations;
 
     if n == 0 {
-        return HashMap::new();
+        return Ok(HashMap::new());
+    }
+    if !progress.step(0, total) {
+        return Err(Stopped { done: 0, total });
     }
 
     // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
@@ -79,7 +101,9 @@ pub fn page_rank(
                         for (idx, score) in scores.into_iter().enumerate() {
                             result.insert(view.index_to_node[idx], score);
                         }
-                        return result;
+                        // Finished, so a `false` here has nothing left to stop.
+                        progress.step(total, total);
+                        return Ok(result);
                     }
                     Err(e) => crate::cpu_fallback::note_cpu_fallback(
                         crate::cpu_fallback::GpuAlgorithm::PageRank,
@@ -104,7 +128,7 @@ pub fn page_rank(
     // Use parallel iteration for graphs with 1000+ nodes
     let use_parallel = n >= 1000;
 
-    for _ in 0..config.iterations {
+    for iter in 0..config.iterations {
         // Compute dangling node mass if enabled
         let dangling_contrib = if config.dangling_redistribution {
             let dangling_sum: f64 = if use_parallel {
@@ -158,6 +182,13 @@ pub fn page_rank(
         if total_diff < config.tolerance {
             break;
         }
+
+        // One iteration done. Asked to stop with more to do, the scores are
+        // half-iterated and not an answer; after the last one they are.
+        let done = iter + 1;
+        if !progress.step(done, total) && done < total {
+            return Err(Stopped { done, total });
+        }
     }
 
     // 4. Map back to NodeIds
@@ -166,7 +197,7 @@ pub fn page_rank(
         result.insert(view.index_to_node[idx], score);
     }
 
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -358,5 +389,82 @@ mod tests {
         let total_high: f64 = high_damping.values().sum();
         assert!((total_low - 1.0).abs() < 0.01);
         assert!((total_high - 1.0).abs() < 0.01);
+    }
+
+    // --- ALGO-12 (#1693): progress and stopping ---------------------------
+
+    /// Records every `step` it is told about, and answers `false` once `done`
+    /// reaches `stop_at`.
+    struct Recorder {
+        steps: std::cell::RefCell<Vec<(usize, usize)>>,
+        stop_at: Option<usize>,
+    }
+
+    impl Recorder {
+        fn new(stop_at: Option<usize>) -> Self {
+            Self { steps: std::cell::RefCell::new(Vec::new()), stop_at }
+        }
+        fn steps(&self) -> Vec<(usize, usize)> {
+            self.steps.borrow().clone()
+        }
+    }
+
+    impl Progress for Recorder {
+        fn step(&self, done: usize, total: usize) -> bool {
+            self.steps.borrow_mut().push((done, total));
+            !self.stop_at.is_some_and(|s| done >= s)
+        }
+    }
+
+    /// Tolerance 0 so the run never converges early and does every iteration.
+    fn five_iterations() -> PageRankConfig {
+        PageRankConfig { iterations: 5, tolerance: 0.0, ..PageRankConfig::default() }
+    }
+
+    #[test]
+    fn progress_is_reported_before_the_first_iteration_and_after_each_one() {
+        let view = build_star_graph();
+        let rec = Recorder::new(None);
+        page_rank_with(&view, five_iterations(), &rec).unwrap();
+        assert_eq!(rec.steps(), vec![(0, 5), (1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]);
+    }
+
+    #[test]
+    fn a_run_stopped_part_way_returns_stopped_not_half_iterated_scores() {
+        let view = build_star_graph();
+        let rec = Recorder::new(Some(2));
+        let err = page_rank_with(&view, five_iterations(), &rec).unwrap_err();
+        assert_eq!(err, Stopped { done: 2, total: 5 });
+        assert_eq!(rec.steps(), vec![(0, 5), (1, 5), (2, 5)], "no iteration after the stop");
+    }
+
+    #[test]
+    fn a_run_stopped_before_it_starts_does_no_iteration() {
+        let view = build_star_graph();
+        let rec = Recorder::new(Some(0));
+        let err = page_rank_with(&view, five_iterations(), &rec).unwrap_err();
+        assert_eq!(err, Stopped { done: 0, total: 5 });
+        assert_eq!(rec.steps(), vec![(0, 5)]);
+    }
+
+    /// A stop that arrives with the last iteration finished has nothing left
+    /// to stop: the scores are complete, so they are returned.
+    #[test]
+    fn a_stop_after_the_last_iteration_still_returns_the_scores() {
+        let view = build_star_graph();
+        let rec = Recorder::new(Some(5));
+        let with = page_rank_with(&view, five_iterations(), &rec).unwrap();
+        assert_eq!(with, page_rank(&view, five_iterations()));
+    }
+
+    /// The hook observes; it does not change the answer.
+    #[test]
+    fn reporting_progress_does_not_change_the_scores() {
+        let view = build_triangle_graph();
+        let plain = page_rank(&view, PageRankConfig::default());
+        let rec = Recorder::new(None);
+        let watched = page_rank_with(&view, PageRankConfig::default(), &rec).unwrap();
+        assert_eq!(plain, watched);
+        assert!(!rec.steps().is_empty());
     }
 }
