@@ -1963,15 +1963,21 @@ impl GraphStore {
                         }
                     }
                 }
-NodeDeleted { .. } => {
-                    // The property index is maintained by the writer now
-                    // (#1467), and nothing here ever removed the node's vectors
-                    // from the HNSW index, so this arm has no work left.
+NodeDeleted { id, .. } => {
+                    // The writer has already dropped the node's vectors. A
+                    // create still queued ahead of this event put them back,
+                    // and events arrive in order, so drop them again (#1968).
+                    vector_index.remove_node(id);
                 }
-                PropertySet { tenant_id, id, labels, key, old_value: _, new_value } => {
+                PropertySet { tenant_id, id, labels, key, old_value, new_value } => {
                     if let Some(vec) = new_value.to_vector() {
                         for label in &labels {
                             let _ = vector_index.add_vector(label.as_str(), &key, id, &vec);
+                        }
+                    } else if old_value.as_ref().is_some_and(|v| v.to_vector().is_some()) {
+                        // The property no longer holds a vector (#1968).
+                        for label in &labels {
+                            vector_index.remove_from(label.as_str(), Some(&key), id);
                         }
                     }
                     // Auto-Embed check (#310)
@@ -2798,6 +2804,9 @@ NodeDeleted { .. } => {
         // reader asks, the labels are what is being torn down.
         self.fulltext.on_node_deleted(id);
         self.point_index.on_node_removed(None, id);
+        // Same for the vector indexes, and more so: the id is reused, so the
+        // old vector would answer for whichever node takes it next (#1968).
+        self.vector_index.remove_node(id);
 
         // `label_index` changes here, so the derived bitsets are stale (#730).
         self.invalidate_label_bits();
@@ -2905,6 +2914,9 @@ NodeDeleted { .. } => {
         }
         if had && !self.point_index.is_empty() {
             self.point_index.on_node_removed(Some(label.as_str()), node_id);
+        }
+        if had {
+            self.vector_index.remove_from(label.as_str(), None, node_id);
         }
         let current_version = self.current_version;
 
@@ -4184,6 +4196,12 @@ NodeDeleted { .. } => {
                 for label in &node.labels {
                     self.point_index.on_property_set(label.as_str(), key, node_id, None);
                 }
+            }
+        }
+        // A removed vector leaves its index (#1968).
+        if let Some(node) = self.get_node(node_id) {
+            for label in &node.labels {
+                self.vector_index.remove_from(label.as_str(), Some(key), node_id);
             }
         }
         self.node_columns.remove_property(node_id.as_u64() as usize, key);
@@ -6589,6 +6607,12 @@ NodeDeleted { .. } => {
         if let Some(vec) = new_value.to_vector() {
             for label in labels {
                 let _ = self.vector_index.add_vector(label.as_str(), key, id, &vec);
+            }
+        } else if old_value.is_some_and(|v| v.to_vector().is_some()) {
+            // A vector overwritten by something that is not one leaves the
+            // index; a new vector supersedes the old in `add` (#1968).
+            for label in labels {
+                self.vector_index.remove_from(label.as_str(), Some(key), id);
             }
         }
     }
