@@ -200,10 +200,25 @@ jobs:
           if [ "$CODE" = "true" ] && [ "${BASE_REF:-}" = "main" ]; then
             echo "a pull request into main: the macOS and Windows legs run"
             PLATFORMS=true
-          elif printf '%s\n' $CHANGED | grep -qx '.github/workflows/ci.yml'; then
-            echo "ci.yml changed: the macOS and Windows legs run"
-            PLATFORMS=true
           else
+            # Deliberately a loop and a string comparison, not
+            # `printf '%s\n' $CHANGED | grep -qx`. `grep -q` exits on its first
+            # match, and under `pipefail` the printf it orphans exits 141, which
+            # becomes the pipeline's status -- so a match reads as a miss as soon
+            # as the list outgrows the 64K pipe buffer, which it does at around a
+            # thousand paths. That fails *open*: the legs would be skipped and
+            # `ci-ok` would go green having measured nothing, which is #1134
+            # again. The CODE loop above pipes one path at a time, one write that
+            # cannot be orphaned, which is why it is safe and this would not be.
+            for f in $CHANGED; do
+              if [ "$f" = ".github/workflows/ci.yml" ]; then
+                echo "ci.yml changed: the macOS and Windows legs run"
+                PLATFORMS=true
+                break
+              fi
+            done
+          fi
+          if [ "$PLATFORMS" = "false" ]; then
             echo "not a pull request into main; the macOS and Windows legs will be skipped"
           fi
           echo "platforms=$PLATFORMS" >> "$GITHUB_OUTPUT"
@@ -588,25 +603,6 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
-  # One job for both SDKs.
-  #
-  # These were two check runs for two directories that share a trigger, a runner
-  # image and a purpose, and between them they were the whole of the pull-request
-  # lane's non-cargo testing. Collapsing them removes a check run and a runner VM;
-  # it costs about twenty seconds of wall clock, because the TypeScript half takes
-  # that long and now runs before the Python half instead of beside it.
-  #
-  # Every step is `continue-on-error` with a final gate, which is not decoration.
-  # Two jobs fail independently; six sequential steps do not. #1134 is what that
-  # costs here: the CH gates were sequential steps in one job, a failure at step N
-  # skipped N+1 onwards, and nothing in the log distinguished "passed" from "never
-  # ran" -- CH-API was red for a day and took four gates with it. Merging two jobs
-  # into one job's steps reintroduces exactly that, so it is answered the same way
-  # the GATES step above answers it. `skipped` is a failure here too: a check that
-  # did not run has not passed.
-  #
-  # The two halves are independent -- different language, different directory, no
-  # shared artefact -- so neither failing is a reason to stop asking the other.
   # The two release platforms the `test` matrix does not cover (HW-16, #1696).
   #
   # A separate job rather than two more entries in `test`'s matrix because
@@ -669,6 +665,25 @@ jobs:
         shell: bash
         run: cargo test --workspace --no-fail-fast
 
+  # One job for both SDKs.
+  #
+  # These were two check runs for two directories that share a trigger, a runner
+  # image and a purpose, and between them they were the whole of the pull-request
+  # lane's non-cargo testing. Collapsing them removes a check run and a runner VM;
+  # it costs about twenty seconds of wall clock, because the TypeScript half takes
+  # that long and now runs before the Python half instead of beside it.
+  #
+  # Every step is `continue-on-error` with a final gate, which is not decoration.
+  # Two jobs fail independently; six sequential steps do not. #1134 is what that
+  # costs here: the CH gates were sequential steps in one job, a failure at step N
+  # skipped N+1 onwards, and nothing in the log distinguished "passed" from "never
+  # ran" -- CH-API was red for a day and took four gates with it. Merging two jobs
+  # into one job's steps reintroduces exactly that, so it is answered the same way
+  # the GATES step above answers it. `skipped` is a failure here too: a check that
+  # did not run has not passed.
+  #
+  # The two halves are independent -- different language, different directory, no
+  # shared artefact -- so neither failing is a reason to stop asking the other.
   sdks:
     name: sdks (typescript transport, python MCP tools)
     needs: changes
