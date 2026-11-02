@@ -718,6 +718,27 @@ def t_output_with_characters_the_terminal_cannot_print_does_not_crash():
         assert "Z\\xfcrich" in subprocess.run([sys.executable, str(SCRIPT), p], capture_output=True, text=True, env=env).stdout
 
 
+def t_a_number_too_large_for_a_double_is_refused():
+    # `1e400` is valid JSON text. Python reads it as infinity without calling
+    # parse_constant, so it reached the report and --strict could exit 0.
+    node = '{"t":"n","id":1,"labels":["A"],"props":%s}'
+    edge = '{"t":"e","id":1,"src":1,"tgt":2,"type":"R","props":%s}'
+    for props in ('{"x":1e400}', '{"x":-1e400}', '{"x":1E+999}', '{"x":[1,[2.5,1e400]]}',
+                  '{"x":{"k":{"deep":[1e400]}}}', '{"x":1e400,"y":"ok"}'):
+        refuses(snapshot() + [node % props], "out of range")
+        refuses(snapshot() + [edge % props], "out of range")
+    # The header is parsed the same way.
+    refuses([json.dumps(HEADER)[:-1] + ', "x": 1e400}'], "out of range")
+
+
+def t_large_but_finite_numbers_and_underflow_are_fine():
+    # serde_json accepts these: 1e308 is a double, and 1e-400 underflows to 0.
+    for lit in ("1e308", "-1.7976931348623157e308", "1e-400", "0.0", "5e-324", "123456789012345678901234567890"):
+        line = '{"t":"n","id":1,"labels":["A"],"props":{"x":%s}}' % lit
+        lines = [json.dumps({**HEADER, "node_count": 1}), line]
+        assert audit_mod.audit(lines)["nodes"] == 1, lit
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("t_") and callable(v)]
 
 if __name__ == "__main__":

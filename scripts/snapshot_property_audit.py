@@ -53,8 +53,8 @@ report, so it exits 2 instead of reading on when:
   * a node or edge lacks a field the engine requires (`id`, `labels` as an
     array of strings, `props` as an object; for an edge also `src`, `tgt` and a
     string `type`);
-  * the JSON holds NaN or Infinity, a lone surrogate, or is nested or large
-    beyond what Python will read.
+  * the JSON holds NaN, Infinity or a number too large for a double (`1e400`), a
+    lone surrogate, or is nested or large beyond what Python will read.
 
     python3 scripts/snapshot_property_audit.py football.sgsnap
     python3 scripts/snapshot_property_audit.py football.sgsnap --flagged-only
@@ -70,6 +70,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 import os
 import sys
 import zlib
@@ -174,6 +175,19 @@ def _no_constant(name: str):
     raise ValueError(f"{name} is not valid JSON")
 
 
+def _finite_float(text: str) -> float:
+    """A JSON number with a fraction or exponent, refused if it overflows.
+
+    `1e400` is valid JSON text, but Python reads it as infinity without going
+    through `parse_constant`; serde_json, which the engine reads with, rejects it
+    as out of range. This hook sees every such number, however deeply nested.
+    """
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"number {text} is out of range")
+    return value
+
+
 def _require_id(rec: dict, key: str, number: int) -> None:
     v = rec.get(key)
     if isinstance(v, bool) or not isinstance(v, int) or v < 0:
@@ -199,7 +213,7 @@ def audit(lines) -> dict:
         if not line:
             continue
         try:
-            rec = json.loads(line, parse_constant=_no_constant)
+            rec = json.loads(line, parse_constant=_no_constant, parse_float=_finite_float)
         except json.JSONDecodeError as e:
             raise SnapshotError(f"line {number}: not JSON ({e.msg})") from e
         except RecursionError as e:
