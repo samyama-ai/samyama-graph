@@ -1,4 +1,5 @@
 pub mod common;
+pub mod constrained_path;
 pub mod cpu_fallback;
 #[cfg(feature = "gpu")]
 pub mod gpu_dispatch;
@@ -29,6 +30,7 @@ pub mod temporal;
 pub mod embeddings;
 
 pub use common::{GraphView, NodeId};
+pub use constrained_path::{constrained_shortest_path, ConstrainedPath, ConstrainedPathError};
 pub use pagerank::{page_rank, PageRankConfig};
 pub use community::{weakly_connected_components, WccResult, strongly_connected_components, SccResult};
 pub use pathfinding::{bfs, dijkstra, bfs_all_shortest_paths, PathResult};
