@@ -15,7 +15,6 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY crates ./crates
-COPY cli ./cli
 COPY benches ./benches
 COPY examples ./examples
 
