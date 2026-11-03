@@ -8426,9 +8426,6 @@ fn choose_anchor_index(
     best_idx
 }
 
-/// Flatten an AND-chain expression into a list of individual predicates.
-/// E.g., `a AND b AND c` → `[a, b, c]`
-
 /// Whether `expr` can give a different answer when evaluated twice for the
 /// same row within one statement (#1969).
 ///
@@ -8486,6 +8483,8 @@ fn is_volatile(expr: &Expression) -> bool {
     }
 }
 
+/// Flatten an AND-chain expression into a list of individual predicates.
+/// E.g., `a AND b AND c` → `[a, b, c]`
 fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
     match expr {
         Expression::Binary { left, op: BinaryOp::And, right } => {
