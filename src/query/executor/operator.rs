@@ -20201,6 +20201,17 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     .to_string(),
             ));
         }
+        // A multi-objective solver minimises one objective per cost property.
+        // With none it was handed an empty objective vector and panicked on
+        // the first index (#2060) -- the zero-property case #1499 did not
+        // reach, since it fixed the one-property case.
+        if is_multi_objective && cost_props.is_empty() {
+            return Err(ExecutionError::bad_argument(format!(
+                "or.solve: `{algorithm}` is multi-objective and needs `costProperties`, \
+                 the node properties to minimise (for example \
+                 {{costProperties: ['cost', 'risk']}})"
+            )));
+        }
 
         let pop_size = cfg_i("populationSize", "population_size").unwrap_or(50) as usize;
         let max_iter = cfg_i("maxIterations", "max_iterations").unwrap_or(100) as usize;
