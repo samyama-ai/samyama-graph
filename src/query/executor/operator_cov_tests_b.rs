@@ -2245,6 +2245,31 @@ fn or_solve_every_single_objective_solver_dispatches() {
 }
 
 #[test]
+fn or_solve_multi_objective_without_cost_properties_is_refused() {
+    // #2060: an empty objective vector panicked inside the solver.
+    for name in AlgorithmOperator::MULTI_OBJECTIVE_SOLVERS {
+        let mut store = solve_store();
+        let e = match run_algo_mut(
+            &mut store,
+            "algo.or.solve",
+            vec![lmap(&[
+                ("algorithm", pstr(name)),
+                ("label", pstr("Item")),
+                ("property", pstr("qty")),
+                ("populationSize", pint(6)),
+                ("maxIterations", pint(2)),
+            ])],
+        ) {
+            Ok(rows) => panic!("{name} ran with no cost properties: {} rows", rows.len()),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains("needs `costProperties`"), "{name}: {e}");
+        let written = read(&store, "MATCH (n:Item) WHERE n.qty IS NOT NULL RETURN count(n) AS c");
+        assert_eq!(int(&written, 0, "c"), 0, "{name}: refused, so nothing is written");
+    }
+}
+
+#[test]
 fn or_solve_multi_objective_reports_a_front() {
     for name in ["NSGA2", "MOTLBO", "MOBMWR", "MORaoDE"] {
         let mut store = solve_store();
