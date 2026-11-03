@@ -21,10 +21,57 @@
 //! an engine aggregation the index merely filters — is the property that turns O(subtree)
 //! into O(log n), and is what distinguishes this from an index-assisted hierarchy index.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use serde::{Deserialize, Serialize};
 
 use super::monoid::{Fenwick, RollupOp, RollupValue, SegmentTree};
 use super::poset::{HierarchyError, HierarchyResult, Poset};
+
+/// Server-computed structural and visual analytic cues for one node in an `OEH` hierarchy
+/// (`#2035`).
+///
+/// Turns `OehIndex`'s internal order embedding (`NestedSet` `[tin, tout]` intervals or
+/// `Chain` `(chain_id, pos)` fibers) and index-resident roll-up tables into deterministic
+/// 3D Cone-Tree coordinates (`x, y, z`), non-WebGL 2.5D Isometric projection coordinates
+/// (`iso_x, iso_y, depth_norm, opacity`), and 1D `[tin_norm, tout_norm]` containment
+/// intervals for Sunburst / Icicle lenses — with zero client-side force simulation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HierarchyNodeCue {
+    /// Graph `NodeId`.
+    pub id: u64,
+    /// Primary parent `NodeId` in the poset (`None` for roots).
+    pub parent_id: Option<u64>,
+    /// Number of parents in the covering relation (`> 1` for poly-hierarchical DAG nodes).
+    pub parent_count: usize,
+    /// Topological depth from roots (`0` at roots).
+    pub depth: u32,
+    /// Pre-order rank (`tin`) in `NestedSet`/`NearTree` mode, or chain id in `Chain` mode.
+    pub tin: u32,
+    /// Subtree end rank (`tout`) in `NestedSet`/`NearTree` mode, or chain position in `Chain` mode.
+    pub tout: u32,
+    /// Normalized interval start in `[0.0, 1.0]` for Sunburst / Icicle rendering.
+    pub tin_norm: f64,
+    /// Normalized interval end in `[0.0, 1.0]` for Sunburst / Icicle rendering.
+    pub tout_norm: f64,
+    /// Deterministic 3D Cone-Tree / Cylinder X coordinate in `[-1.0, 1.0]`.
+    pub x: f64,
+    /// Deterministic 3D Cone-Tree / Cylinder Y coordinate in `[-1.0, 1.0]`.
+    pub y: f64,
+    /// Deterministic 3D Cone-Tree / Cylinder Z coordinate (elevation by depth).
+    pub z: f64,
+    /// Non-WebGL 2.5D isometric projected X coordinate.
+    pub iso_x: f64,
+    /// Non-WebGL 2.5D isometric projected Y coordinate.
+    pub iso_y: f64,
+    /// Normalized camera depth in `[0.0, 1.0]` (`0.0` = frontmost, `1.0` = backmost) for painter's-algorithm Z-sorting.
+    pub depth_norm: f64,
+    /// Suggested depth-fog opacity in `[0.3, 1.0]` for non-WebGL 2D canvas rendering.
+    pub opacity: f64,
+    /// Authoritative whole-hierarchy descendant count (including self) from `OehIndex`.
+    pub descendant_count: usize,
+    /// Authoritative index-resident roll-up values (`sum`, `min`, `max`, `count`).
+    pub rollups: BTreeMap<String, serde_json::Value>,
+}
 
 /// Which encoding the structural probe selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -914,6 +961,140 @@ impl OehIndex {
         } else {
             self.size_bytes() as f64 / self.poset.n() as f64
         }
+    }
+
+    /// Compute authoritative whole-hierarchy roll-up and deterministic 3D / 2.5D visual cues
+    /// directly from the `OehIndex` (`#2035`).
+    ///
+    /// - When `filter_nodes` is `Some`, cues are emitted for those graph `NodeId`s (skipping
+    ///   any id outside the poset).
+    /// - When `filter_nodes` is `None`, cues are emitted for the whole poset, or for the top
+    ///   `lod_budget` macro-subtree frontier (ordered by shallowest `depth` then largest
+    ///   `descendant_count`) when `lod_budget` is set.
+    pub fn visual_cues(
+        &self,
+        filter_nodes: Option<&[crate::graph::types::NodeId]>,
+        lod_budget: Option<usize>,
+    ) -> Vec<HierarchyNodeCue> {
+        let n = self.poset.n();
+        if n == 0 {
+            return Vec::new();
+        }
+        let depths = self.poset.depths();
+        let max_depth = depths.iter().copied().max().unwrap_or(0).max(1) as f64;
+        let nf = n as f64;
+
+        let mut candidate_indices: Vec<u32> = match filter_nodes {
+            Some(ids) => ids
+                .iter()
+                .filter_map(|&id| self.poset.idx(id))
+                .collect(),
+            None => (0..n as u32).collect(),
+        };
+
+        if let Some(budget) = lod_budget {
+            if candidate_indices.len() > budget && budget > 0 {
+                candidate_indices.sort_by(|&a, &b| {
+                    depths[a as usize]
+                        .cmp(&depths[b as usize])
+                        .then_with(|| self.descendant_count(b).cmp(&self.descendant_count(a)))
+                        .then_with(|| a.cmp(&b))
+                });
+                candidate_indices.truncate(budget);
+            }
+        }
+
+        // Isometric camera angles: 30 deg elevation, 45 deg azimuth.
+        let cos_az = std::f64::consts::FRAC_PI_4.cos();
+        let sin_el = (30.0_f64).to_radians().sin();
+        let cos_el = (30.0_f64).to_radians().cos();
+
+        let mut cues = Vec::with_capacity(candidate_indices.len());
+        for i in candidate_indices {
+            let node_id = self.poset.node_at(i).as_u64();
+            let parents = self.poset.parents(i);
+            let parent_id = parents.first().map(|&p| self.poset.node_at(p).as_u64());
+            let parent_count = parents.len();
+            let depth = depths[i as usize];
+            let z = 1.0 - 2.0 * (depth as f64 / max_depth);
+
+            let (tin, tout, tin_norm, tout_norm, x, y) = match &self.data {
+                EncodingData::NestedSet { tin, tout, .. }
+                | EncodingData::NearTree { tin, tout, .. } => {
+                    let ti = tin[i as usize];
+                    let to = tout[i as usize];
+                    let ti_n = ti as f64 / nf;
+                    let to_n = (to as f64 + 1.0) / nf;
+                    let mid = 0.5 * (ti_n + to_n);
+                    let theta = std::f64::consts::TAU * mid;
+                    // Cone radius expands with depth so roots sit at the apex (0, 0, 1)
+                    // and deeper tiers fan out on concentric rings of the 3D cone.
+                    let radius = if depth == 0 && self.poset.roots().len() == 1 {
+                        0.0
+                    } else {
+                        0.15 + 0.85 * (depth as f64 / max_depth)
+                    };
+                    (ti, to, ti_n, to_n, radius * theta.cos(), radius * theta.sin())
+                }
+                EncodingData::Chain {
+                    chain_of, chains, ..
+                } => {
+                    let (cid, pos) = chain_of[i as usize];
+                    let num_chains = chains.len().max(1) as f64;
+                    let chain_len = chains
+                        .get(cid as usize)
+                        .map(|c| c.len().max(1) as f64)
+                        .unwrap_or(1.0);
+                    let ti_n = cid as f64 / num_chains;
+                    let to_n = (cid as f64 + 1.0) / num_chains;
+                    let theta = std::f64::consts::TAU * ((cid as f64 + 0.5) / num_chains);
+                    let radius = 0.35 + 0.65 * (pos as f64 / chain_len);
+                    (cid, pos, ti_n, to_n, radius * theta.cos(), radius * theta.sin())
+                }
+            };
+
+            // 2.5D Isometric projection + camera depth for non-WebGL Canvas/SVG rendering
+            let iso_x = (x - y) * cos_az;
+            let iso_y = (x + y) * sin_el - z * cos_el;
+            let cam_depth = (x + y) * cos_el + z * sin_el;
+            let depth_norm = ((cam_depth + 2.0) / 4.0).clamp(0.0, 1.0);
+            let opacity = (1.0 - 0.6 * depth_norm).clamp(0.3, 1.0);
+
+            let descendant_count = self.descendant_count(i);
+            let mut rollups = BTreeMap::new();
+            rollups.insert("count".to_string(), serde_json::json!(descendant_count));
+            for op in [RollupOp::Sum, RollupOp::Min, RollupOp::Max] {
+                if let Some(val) = self.rollup(i, op) {
+                    let json_val = match val {
+                        RollupValue::Int(v) => serde_json::json!(v as i64),
+                        RollupValue::Float(v) => serde_json::json!(v),
+                        RollupValue::Null => serde_json::Value::Null,
+                    };
+                    rollups.insert(op.name().to_string(), json_val);
+                }
+            }
+
+            cues.push(HierarchyNodeCue {
+                id: node_id,
+                parent_id,
+                parent_count,
+                depth,
+                tin,
+                tout,
+                tin_norm,
+                tout_norm,
+                x,
+                y,
+                z,
+                iso_x,
+                iso_y,
+                depth_norm,
+                opacity,
+                descendant_count,
+                rollups,
+            });
+        }
+        cues
     }
 }
 
