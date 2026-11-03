@@ -775,18 +775,34 @@ fn a_language_map_and_an_inlined_map_under_one_key_are_reported() {
     );
 }
 
-/// The `.sgsnap` of a graph built in Samyama, holding `props`.
+/// The `.sgsnap` of one node holding `props`, in a graph whose header records
+/// the generic RDF mapping. A graph that never was RDF is written with the
+/// `samyama` preset, which is a different writer; the recorded mapping makes
+/// the write go through the mapped one, where these losses are counted.
 fn snapshot_of(
     dir: &Path,
     name: &str,
     props: &[(&str, samyama::graph::PropertyValue)],
 ) -> std::path::PathBuf {
+    let ttl = write(dir, &format!("{name}.ttl"), &format!("{PREFIXES}{SKOS}"));
+    let read = dir.join(format!("{name}.read.sgsnap"));
+    let generic = Options {
+        mapping: Some(Mapping::from_yaml("").unwrap()),
+        ..Options::default()
+    };
+    convert(&ttl, &read, &generic).unwrap();
+    let sources = samyama::snapshot::peek_header(std::fs::File::open(&read).unwrap())
+        .unwrap()
+        .sources;
+    assert!(sources.iter().any(|s| s.mapping.is_some()), "{sources:?}");
+
     let mut store = samyama::graph::GraphStore::new();
     let id = store.create_node("Thing");
     let node = store.get_node_mut(id).unwrap();
     for (k, v) in props {
         node.set_property(*k, v.clone());
     }
+    store.add_snapshot_sources(sources);
     let path = dir.join(name);
     samyama::snapshot::export_tenant(&store, std::fs::File::create(&path).unwrap()).unwrap();
     path
