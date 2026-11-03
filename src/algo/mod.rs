@@ -11,7 +11,8 @@ use std::collections::HashMap;
 
 // Re-export algorithms
 pub use samyama_graph_algorithms::{
-    page_rank, PageRankConfig,
+    page_rank, page_rank_with, PageRankConfig,
+    Progress, NoProgress, Stopped,
     weakly_connected_components, WccResult,
     strongly_connected_components, SccResult,
     bfs, dijkstra, bfs_all_shortest_paths, PathResult,
@@ -47,7 +48,32 @@ pub fn build_view(
     edge_type: Option<&str>,
     weight_property: Option<&str>,
 ) -> GraphView {
-    build_view_inner(store, node_label, edge_type, weight_property, None).0
+    match build_view_with(store, node_label, edge_type, weight_property, &NoProgress) {
+        Ok(view) => view,
+        Err(_) => unreachable!("NoProgress never stops a build"),
+    }
+}
+
+/// How many nodes' edges are read between two reports to `progress`. A report
+/// reads the clock, so not on every node.
+const VIEW_PROGRESS_EVERY: usize = 4096;
+
+/// [`build_view`], reporting the nodes whose edges have been read to
+/// `progress` and stopping when it answers `false` (ALGO-12, #1693).
+///
+/// Building the view is often most of an algorithm's time: `algo.pageRank`
+/// on 50,000 nodes and 500,000 edges spent about 750 ms here and about 100 ms
+/// iterating (debug build). Every algorithm the engine runs goes through it,
+/// so this is where a deadline stops all of them, not only those that report
+/// their own iterations.
+pub fn build_view_with(
+    store: &GraphStore,
+    node_label: Option<&str>,
+    edge_type: Option<&str>,
+    weight_property: Option<&str>,
+    progress: &dyn Progress,
+) -> Result<GraphView, Stopped> {
+    build_view_inner(store, node_label, edge_type, weight_property, None, progress).map(|(view, _)| view)
 }
 
 /// A view plus edge timestamps aligned with its `out_targets`, for the
@@ -70,7 +96,10 @@ pub fn build_temporal_view(
     edge_type: Option<&str>,
     time_property: Option<&str>,
 ) -> (GraphView, Vec<i64>) {
-    let (view, times) = build_view_inner(store, node_label, edge_type, None, Some(time_property));
+    let (view, times) = match build_view_inner(store, node_label, edge_type, None, Some(time_property), &NoProgress) {
+        Ok(built) => built,
+        Err(_) => unreachable!("NoProgress never stops a build"),
+    };
     (view, times.unwrap_or_default())
 }
 
@@ -84,7 +113,8 @@ fn build_view_inner(
     edge_type: Option<&str>,
     weight_property: Option<&str>,
     time_property: Option<Option<&str>>,
-) -> (GraphView, Option<Vec<i64>>) {
+    progress: &dyn Progress,
+) -> Result<(GraphView, Option<Vec<i64>>), Stopped> {
     // 1. Collect relevant nodes
     //
     // Sorted by id regardless of source. `get_nodes_by_label` walks a
@@ -138,6 +168,9 @@ fn build_view_inner(
     let mut temp_times: Option<Vec<Vec<i64>>> = time_property.map(|_| vec![Vec::new(); node_count]);
 
     for (u_idx, &u_id) in index_to_node.iter().enumerate() {
+        if u_idx % VIEW_PROGRESS_EVERY == 0 && !progress.step(u_idx, node_count) {
+            return Err(Stopped { done: u_idx, total: node_count });
+        }
         let u_node_id = crate::graph::NodeId::new(u_id);
         let edges = store.get_outgoing_edges(u_node_id);
         
@@ -210,7 +243,7 @@ fn build_view_inner(
         in_offsets.push(in_sources.len());
     }
 
-    (
+    Ok((
         GraphView {
             node_count,
             index_to_node,
@@ -222,7 +255,7 @@ fn build_view_inner(
             weights,
         },
         times,
-    )
+    ))
 }
 
 /// The time an edge fired: a named property if it has one, else `created_at`.
