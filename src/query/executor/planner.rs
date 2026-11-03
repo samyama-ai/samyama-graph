@@ -11166,6 +11166,7 @@ mod tests {
             show_indexes: false,
             show_constraints: false,
             profile: false,
+            plan_json: false,
             analyze: false,
             hints: Vec::new(),
             plan_options: Default::default(),
