@@ -2243,7 +2243,7 @@ fn or_solve_every_single_objective_solver_dispatches() {
 
 #[test]
 fn or_solve_multi_objective_reports_a_front() {
-    for name in ["NSGA2", "MOTLBO", "MOBMWR", "MORaoDE"] {
+    for name in ["NSGA2", "MOTLBO", "MOBMWR", "MORaoDE", "SPEA2"] {
         let mut store = solve_store();
         let rows = run_algo_mut(
             &mut store,

@@ -45,7 +45,7 @@ const ADVERTISED: &[&str] = &[
     "BMR", "BWR", "BMWR", "MOBMWR",
     "PSO", "DE", "LSHADE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
     "Firefly", "Cuckoo", "GWO", "Bat",
-    "NSGA2", "MORaoDE", "SAPHR",
+    "NSGA2", "MORaoDE", "SPEA2", "SAPHR",
 ];
 
 fn store() -> GraphStore {

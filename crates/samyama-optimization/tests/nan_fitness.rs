@@ -219,6 +219,10 @@ fn every_multi_objective_solver_finishes_with_no_nan_on_its_front() {
                     .solve(&HalfNanMo)
             }),
         ),
+        (
+            "SPEA2",
+            Box::new(|| SPEA2Solver::new(config()).with_seed(SEED).solve(&HalfNanMo)),
+        ),
     ];
     let mut bad = Vec::new();
     for (name, run) in &runs {

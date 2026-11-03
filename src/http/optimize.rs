@@ -18,7 +18,7 @@ use futures::stream::Stream;
 use ndarray::Array1;
 use samyama_optimization::algorithms::{
     BMRSolver, BMWRSolver, BWRSolver, DESolver, EHRJayaSolver, GASolver, GOTLBOSolver, ITLBOSolver,
-    JayaSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, NSGA2Solver, PSOSolver, QOJayaSolver,
+    JayaSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, NSGA2Solver, SPEA2Solver, PSOSolver, QOJayaSolver,
     QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver, LSHADESolver,
 };
 use samyama_optimization::benchmarks::{DTLZ, DTLZ_FRONT_SAMPLES_PER_AXIS, ZDT, ZDT_FRONT_SAMPLES};
@@ -314,6 +314,20 @@ fn algorithm_catalog() -> Vec<AlgorithmInfo> {
             variant: None,
             equation_tex: r"\text{Rao-1 hybridised with DE/rand/1/bin}",
             paper_refs: vec![rao_series_paper.clone()],
+            params: default_params(),
+            multi_objective: true,
+        },
+        AlgorithmInfo {
+            id: "spea2",
+            name: "SPEA2",
+            family: "multi-objective",
+            variant: None,
+            equation_tex: r"F(i) = \sum_{j \succ i} |\{k : j \succ k\}| + \frac{1}{\sigma_i^k + 2}",
+            paper_refs: vec![PaperRef {
+                title: "SPEA2: Improving the Strength Pareto Evolutionary Algorithm",
+                url: "https://doi.org/10.3929/ethz-a-004284029",
+                year: 2001,
+            }],
             params: default_params(),
             multi_objective: true,
         },
@@ -1075,6 +1089,7 @@ fn solve_multi_objective<P: MultiObjectiveProblem>(
         "mo_bwr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(problem),
         "mo_bmwr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR), seed).solve(problem),
         "mo_rao_de" => seeded!(MORaoDESolver::new(cfg), seed).solve(problem),
+        "spea2" => seeded!(SPEA2Solver::new(cfg), seed).solve(problem),
         "nsga2" => seeded!(NSGA2Solver::new(cfg), seed).solve(problem),
         _ => return Err(format!("algorithm {} not multi-objective", algo_id)),
     };

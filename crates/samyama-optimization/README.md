@@ -56,6 +56,7 @@ We support 15+ algorithms across various families:
 ### Multi-Objective (Pareto)
 - **NSGA-II**: Non-dominated Sorting Genetic Algorithm II.
 - **MOTLBO**: Multi-Objective TLBO.
+- **SPEA2**: Strength Pareto Evolutionary Algorithm 2 (Zitzler, Laumanns & Thiele, 2001): strength-based fitness, a k-nearest-neighbour density, and an archive truncated by crowding.
 
 ## Features
 - **Parallel Evaluation**: Automatic multi-threaded fitness calculation via `rayon`.
