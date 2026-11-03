@@ -28,5 +28,5 @@ pub use manager::{
     HierarchyEntry, HierarchyIndexManager, HierarchyInfo, HierarchySpec, MeasureSpec, Unusable,
 };
 pub use monoid::{RollupOp, RollupValue};
-pub use oeh::{Encoding, OehIndex, Probe};
+pub use oeh::{Encoding, HierarchyNodeCue, OehIndex, Probe};
 pub use poset::{HierarchyError, HierarchyResult, Poset};

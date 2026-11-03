@@ -7,6 +7,7 @@ pub mod tenants;
 pub mod transactions;
 pub mod uc_problems;
 pub mod vector;
+pub mod structure;
 
 pub use server::HttpServer;
 
