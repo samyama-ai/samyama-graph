@@ -2284,6 +2284,51 @@ fn or_solve_multi_objective_reports_a_front() {
     assert!(rows[0].get("front_size").is_some());
 }
 
+fn seeded_solve(name: &str, seed: PropertyValue) -> Result<String, String> {
+    let mut store = solve_store();
+    let mut cfg = vec![
+        ("algorithm", pstr(name)),
+        ("label", pstr("Item")),
+        ("property", pstr("qty")),
+        ("populationSize", pint(6)),
+        ("maxIterations", pint(3)),
+        ("seed", seed),
+    ];
+    if AlgorithmOperator::MULTI_OBJECTIVE_SOLVERS.contains(&name) {
+        cfg.push((
+            "costProperties",
+            PropertyValue::Array(vec![pstr("cost"), pstr("risk")]),
+        ));
+    }
+    run_algo_mut(&mut store, "algo.or.solve", vec![lmap(&cfg)]).map_err(|e| e.to_string())?;
+    let written = read(&store, "MATCH (n:Item) RETURN n.qty AS q ORDER BY id(n)");
+    Ok(format!("{:?}", written.records))
+}
+
+#[test]
+fn or_solve_same_seed_gives_the_same_result() {
+    // #2061: CALL passed no seed, so two identical calls wrote different values.
+    let mut names = vec![
+        "Jaya", "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "SAMPJaya",
+        "QOJaya", "EHRJaya", "BMR", "BWR", "BMWR", "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS",
+        "FPA", "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR", "LSHADE",
+    ];
+    names.extend_from_slice(AlgorithmOperator::MULTI_OBJECTIVE_SOLVERS);
+    for name in names {
+        let a = seeded_solve(name, pint(42)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let b = seeded_solve(name, pint(42)).unwrap();
+        assert_eq!(a, b, "{name}: same seed, different result");
+    }
+}
+
+#[test]
+fn or_solve_rejects_a_bad_seed() {
+    for seed in [pint(-1), pstr("abc"), PropertyValue::Float(1.5)] {
+        let e = seeded_solve("Jaya", seed).unwrap_err();
+        assert!(e.contains("`seed` must be a non-negative integer"), "{e}");
+    }
+}
+
 #[test]
 fn or_solve_argument_errors() {
     let mut store = solve_store();
