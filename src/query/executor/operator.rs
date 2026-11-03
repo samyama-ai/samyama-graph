@@ -17914,6 +17914,18 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         (&["bellmanford"], "distance"),
     ];
 
+    /// Whether this algorithm can run on a named projection: not one of
+    /// [`Self::NOT_ON_A_PROJECTION`]. For the catalogue (#2013).
+    pub fn runs_on_projection(name: &str) -> bool {
+        let canonical = Self::canonical_name(name);
+        !Self::NOT_ON_A_PROJECTION.iter().any(|(n, _)| *n == canonical)
+    }
+
+    /// [`Self::write_back_column`] by procedure name, for the catalogue (#2013).
+    pub fn write_back_column_for(name: &str) -> Option<&'static str> {
+        Self::write_back_column(&Self::canonical_name(name))
+    }
+
     /// The column `writeProperty` stores for this canonical name, if any.
     fn write_back_column(canonical: &str) -> Option<&'static str> {
         Self::WRITE_BACK

@@ -207,9 +207,11 @@ paths:
       summary: Algorithms `CALL algo.*` can run
       description: |
         Every graph algorithm the engine dispatches, with its aliases, category,
-        the columns each returned row carries, and whether it writes to the graph
-        (and so needs write access). Names resolve case-insensitively, with or
-        without the `algo.`/`samyama.` prefix. Parameters are not described yet.
+        parameters, the columns its rows carry, whether it writes to the graph
+        (and so needs write access), whether it can run on a named projection
+        (`graph`), and the column `writeProperty` stores when it can write its
+        result back. Names resolve case-insensitively, with or without the
+        `algo.`/`samyama.` prefix.
         The optimisation solvers `algo.or.solve` accepts are listed by
         `/optimize/algorithms`.
       responses:
@@ -227,7 +229,7 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [name, aliases, category, yields, writes]
+                      required: [name, aliases, category, parameters, yields, writes, runs_on_projection, write_back_column]
                       properties:
                         name:
                           type: string
@@ -241,6 +243,29 @@ paths:
                           type: string
                           enum: [centrality, community, path, link_prediction, similarity,
                                  structure, graph_metric, temporal, embedding, optimization]
+                        parameters:
+                          type: array
+                          items:
+                            type: object
+                            required: [name, kind, type, required, default]
+                            properties:
+                              name:
+                                type: string
+                                example: alpha
+                              kind:
+                                type: string
+                                enum: [positional, config]
+                              type:
+                                type: string
+                                enum: [integer, float, boolean, string, node_id, list]
+                              required:
+                                type: boolean
+                              default:
+                                description: Value used when left out; null when required or when leaving it out applies nothing.
+                                example: 0.1
+                              also:
+                                type: string
+                                description: A second spelling the engine also accepts for this key.
                         yields:
                           type: array
                           items:
@@ -248,6 +273,12 @@ paths:
                           example: [node, score]
                         writes:
                           type: boolean
+                        runs_on_projection:
+                          type: boolean
+                        write_back_column:
+                          type: string
+                          nullable: true
+                          example: score
 
   /api/import/csv:
     post:
