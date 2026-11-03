@@ -263,7 +263,7 @@ Full results, provenance and caveats: **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)
 
 These run in-tree; LDBC certification is a formal third-party process we have not been through.
 
-**HIER** ([`benchmarks/hier/`](benchmarks/hier)) covers subsumption and hierarchical roll-up, which LDBC and FinBench do not. Latest: **108/108 agree** — `benchmarks/hier/results/PROVENANCE.json`, engine commit `30d0731` with uncommitted changes (`"dirty": true`), committed 2026-09-21; 4 further corpus queries are specified but uncontrolled and are not in that denominator.
+**HIER** ([`benches/hier/`](benches/hier)) covers subsumption and hierarchical roll-up, which LDBC and FinBench do not. Latest: **108/108 agree** — `benches/hier/results/PROVENANCE.json`, engine commit `30d0731` with uncommitted changes (`"dirty": true`), committed 2026-09-21; 4 further corpus queries are specified but uncontrolled and are not in that denominator.
 
 | ID | Query | Time | First row (CSV) |
 |----|-------|------|-----------------|

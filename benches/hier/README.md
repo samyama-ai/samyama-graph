@@ -20,7 +20,7 @@ measurable.
 cargo run --release --example hier_benchmark              # full corpus
 cargo run --release --example hier_benchmark -- --reps 20 --class H2
 cargo bench --bench hierarchy_benchmark                   # index micro-benchmarks
-python3 benchmarks/hier/generate_corpus.py                # regenerate queries.json
+python3 benches/hier/generate_corpus.py                # regenerate queries.json
 ```
 
 The dataset is **generated, deterministic and self-contained** — no download, no license

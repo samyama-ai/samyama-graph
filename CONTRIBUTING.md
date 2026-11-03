@@ -264,9 +264,8 @@ src/                  # The server engine — the `samyama` library crate and it
 ├── lib.rs            # Library crate root — re-exports the modules above
 └── main.rs           # Server binary entry point
 
-benches/           # Criterion microbenchmarks and LDBC / FinBench / Graphalytics harnesses
-benchmarks/        # Benchmark inputs and corpora (LDBC parameter files, Neo4j idiom and APOC export
-                   #   fixtures, hierarchy corpus generator) — data, not code; the harnesses are in benches/
+benches/           # Criterion microbenchmarks and LDBC / FinBench / Graphalytics harnesses, plus the
+                   #   inputs they read (hier/ corpus and generator, ldbc/ parameter files)
 case_studies/      # End-to-end domain datasets with loaders and queries (health, legal, sport, finance, …)
 crates/            # Workspace member crates (the algorithm and optimization code lives here, not in src/)
 ├── samyama-graph-algorithms/  # Graph algorithms (PageRank, WCC, BFS, Dijkstra, …)
@@ -280,7 +279,7 @@ openapi/           # OpenAPI 3 specification for the HTTP/REST surface (openapi.
 ops/               # Operational assets (Grafana dashboard JSON)
 scripts/           # CI gates, coverage, release checks, dataset downloads
 sdk/               # Python and TypeScript client SDKs (outside the cargo workspace)
-tests/             # Integration tests
+tests/             # Integration tests; fixtures/ holds their inputs (compat/ idiom corpora, migrate/ APOC exports, …)
 ```
 
 ## Releasing
