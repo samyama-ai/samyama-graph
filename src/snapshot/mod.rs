@@ -1670,8 +1670,43 @@ fn import_tenant_inner(
         Some(snap) => {
             let existing = store.index_catalog().definitions;
             let mut accepted = crate::index::catalog::IndexCatalog::default();
+            // A vector index's HNSW parameters live in a `VectorParams` record
+            // that is written only when they are not the defaults (#1971), so
+            // two catalogs can declare the same `Vector` and still build it
+            // differently. Compare the parameters each side would build with,
+            // and skip a vector index's parameters along with the index.
+            let ours = effective_vector_params(&existing);
+            let theirs = effective_vector_params(&snap.definitions);
+            let skipped_vectors: std::collections::HashSet<(String, String)> = snap
+                .definitions
+                .iter()
+                .filter_map(|def| match def {
+                    crate::index::catalog::IndexDefinition::Vector { label, property, .. } => {
+                        let key = (label.clone(), property.clone());
+                        let differs = ours
+                            .get(&key)
+                            .is_some_and(|o| Some(o) != theirs.get(&key));
+                        (differs || conflicting_definition(&existing, def).is_some())
+                            .then_some(key)
+                    }
+                    _ => None,
+                })
+                .collect();
             for def in snap.definitions {
-                if let Some(theirs) = conflicting_definition(&existing, &def) {
+                if let Some(key) = vector_key(&def).filter(|k| skipped_vectors.contains(k)) {
+                    // Counted once per index, on its `Vector` record.
+                    if matches!(def, crate::index::catalog::IndexDefinition::Vector { .. }) {
+                        eprintln!(
+                            "[snapshot] kept the target's vector index on {}.{} ({}); \
+                             skipped the snapshot's ({})",
+                            key.0,
+                            key.1,
+                            ours.get(&key).map_or("absent".to_string(), |p| p.to_string()),
+                            theirs.get(&key).map_or("absent".to_string(), |p| p.to_string()),
+                        );
+                        index_conflicts += 1;
+                    }
+                } else if let Some(theirs) = conflicting_definition(&existing, &def) {
                     eprintln!(
                         "[snapshot] kept the target's index {:?}; skipped the snapshot's {:?}",
                         theirs, def
@@ -1770,6 +1805,41 @@ fn sample_value(value: serde_json::Value) -> serde_json::Value {
         }
         other => other,
     }
+}
+
+/// The `(label, property)` a vector index or its parameters are declared on.
+fn vector_key(def: &crate::index::catalog::IndexDefinition) -> Option<(String, String)> {
+    use crate::index::catalog::IndexDefinition as D;
+    match def {
+        D::Vector { label, property, .. } | D::VectorParams { label, property, .. } => {
+            Some((label.clone(), property.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// The HNSW parameters each declared vector index is built with. An index
+/// with no `VectorParams` record has the defaults, which is why that record
+/// is not written for them (#1971).
+fn effective_vector_params(
+    defs: &[crate::index::catalog::IndexDefinition],
+) -> std::collections::HashMap<(String, String), crate::vector::HnswParams> {
+    use crate::index::catalog::IndexDefinition as D;
+    let mut out = std::collections::HashMap::new();
+    for def in defs {
+        if let D::Vector { label, property, .. } = def {
+            out.entry((label.clone(), property.clone()))
+                .or_insert_with(crate::vector::HnswParams::default);
+        }
+    }
+    for def in defs {
+        if let D::VectorParams { label, property, m, ef_construction, ef } = def {
+            if let Some(p) = out.get_mut(&(label.clone(), property.clone())) {
+                *p = crate::vector::HnswParams { m: *m, ef_construction: *ef_construction, ef: *ef };
+            }
+        }
+    }
+    out
 }
 
 /// The target's definition that `incoming` would silently replace, if any.
