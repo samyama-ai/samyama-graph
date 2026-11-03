@@ -2201,28 +2201,40 @@ impl Writer<'_> {
             }
         }
         let predicate = self.predicate_for_key(key);
+        // A key read as a language map on some nodes can hold an inlined
+        // blank node on others (`rdf_language_maps_ambiguous`). A map whose
+        // keys are not all language tags is that blank node, so it is written
+        // as one rather than failing the whole write on its first key.
+        let is_language_map = |map: &HashMap<String, PropertyValue>| {
+            map.keys().all(|lang| {
+                lang == "@none" || Literal::new_language_tagged_literal("", lang.as_str()).is_ok()
+            })
+        };
         if let (PropertyValue::Map(map), true) = (value, self.names.language_maps.contains(key)) {
-            let mut langs: Vec<&String> = map.keys().collect();
-            langs.sort();
-            for lang in langs {
-                // Each language may hold several values (multi_valued:
-                // list); `@none` holds the untagged ones, written back as
-                // plain or typed literals.
-                for v in elements(&map[lang]) {
-                    if lang == "@none" {
-                        if let Some(o) = self.object(key, v)? {
-                            self.add(subject.clone(), &predicate, o)?;
+            if is_language_map(map) {
+                let mut langs: Vec<&String> = map.keys().collect();
+                langs.sort();
+                for lang in langs {
+                    // Each language may hold several values (multi_valued:
+                    // list); `@none` holds the untagged ones, written back as
+                    // plain or typed literals.
+                    for v in elements(&map[lang]) {
+                        if lang == "@none" {
+                            if let Some(o) = self.object(key, v)? {
+                                self.add(subject.clone(), &predicate, o)?;
+                            }
+                        } else if let PropertyValue::String(s) = v {
+                            let lit =
+                                Literal::new_language_tagged_literal(s.clone(), lang.as_str())
+                                    .map_err(engine_err)?;
+                            self.add(subject.clone(), &predicate, RdfObject::Literal(lit))?;
+                        } else {
+                            self.report.values_not_written += 1;
                         }
-                    } else if let PropertyValue::String(s) = v {
-                        let lit = Literal::new_language_tagged_literal(s.clone(), lang.as_str())
-                            .map_err(engine_err)?;
-                        self.add(subject.clone(), &predicate, RdfObject::Literal(lit))?;
-                    } else {
-                        self.report.values_not_written += 1;
                     }
                 }
+                return Ok(());
             }
-            return Ok(());
         }
         for v in elements(value) {
             if let Some(o) = self.object(key, v)? {
