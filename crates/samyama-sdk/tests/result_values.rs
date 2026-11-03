@@ -23,7 +23,10 @@ async fn one_value(setup: &[&str], cypher: &str) -> serde_json::Value {
     for s in setup {
         client.query("default", s).await.expect("setup should run");
     }
-    let result = client.query("default", cypher).await.expect("query should run");
+    let result = client
+        .query("default", cypher)
+        .await
+        .expect("query should run");
     let row = result.records.first().expect("one row").clone();
     row.into_iter().next().expect("one column")
 }
@@ -40,8 +43,15 @@ async fn collected_nodes_keep_their_labels_and_properties() {
             item.is_object(),
             "a collected node must be an object with id/labels/properties, got {item}"
         );
-        assert_eq!(item["labels"], serde_json::json!(["P"]), "labels lost: {item}");
-        assert!(item["properties"]["n"].is_number(), "properties lost: {item}");
+        assert_eq!(
+            item["labels"],
+            serde_json::json!(["P"]),
+            "labels lost: {item}"
+        );
+        assert!(
+            item["properties"]["n"].is_number(),
+            "properties lost: {item}"
+        );
     }
 }
 
@@ -55,17 +65,31 @@ async fn nodes_of_a_path_are_entities() {
 
 #[tokio::test]
 async fn relationships_of_a_path_are_entities() {
-    let v = one_value(TWO_NODES, "MATCH p=(:P)-[:R]->(:P) RETURN relationships(p) AS xs").await;
+    let v = one_value(
+        TWO_NODES,
+        "MATCH p=(:P)-[:R]->(:P) RETURN relationships(p) AS xs",
+    )
+    .await;
     let items = v.as_array().expect("a JSON array");
     assert_eq!(items.len(), 1);
-    assert!(items[0].is_object(), "a relationship must not be a Debug string: {v}");
-    assert_eq!(items[0]["type"], serde_json::json!("R"), "edge type lost: {v}");
+    assert!(
+        items[0].is_object(),
+        "a relationship must not be a Debug string: {v}"
+    );
+    assert_eq!(
+        items[0]["type"],
+        serde_json::json!("R"),
+        "edge type lost: {v}"
+    );
 }
 
 #[tokio::test]
 async fn a_map_value_that_is_a_node_is_an_entity() {
     let v = one_value(TWO_NODES, "MATCH (n:P {n: 1}) RETURN {v: n} AS m").await;
-    assert!(v["v"].is_object(), "a node in a map must not be a Debug string: {v}");
+    assert!(
+        v["v"].is_object(),
+        "a node in a map must not be a Debug string: {v}"
+    );
 }
 
 /// The half that already worked, pinned so a fix does not break it.

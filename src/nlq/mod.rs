@@ -1,13 +1,15 @@
 //! Natural Language Querying (NLQ)
-//! 
+//!
 //! Implements Text-to-Cypher translation using LLMs.
 
 pub mod client;
 pub mod metrics;
-#[cfg(test)] #[path = "test_http_cov.rs"] pub(crate) mod test_http;
+#[cfg(test)]
+#[path = "test_http_cov.rs"]
+pub(crate) mod test_http;
 
-use thiserror::Error;
 use crate::persistence::tenant::{LLMProvider, NLQConfig};
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum NLQError {
@@ -68,7 +70,9 @@ impl NLQPipeline {
                 llm_latency: completion.latency,
             })
         } else {
-            Err(NLQError::ValidationError("Generated query contains write operations or unsafe keywords".to_string()))
+            Err(NLQError::ValidationError(
+                "Generated query contains write operations or unsafe keywords".to_string(),
+            ))
         }
     }
 
@@ -110,7 +114,8 @@ impl NLQPipeline {
 
         // No fences — take lines that look like Cypher (start with MATCH/RETURN/WITH/etc.)
         let cypher_keywords = ["MATCH", "RETURN", "WITH", "UNWIND", "CALL", "OPTIONAL"];
-        let lines: Vec<&str> = trimmed.lines()
+        let lines: Vec<&str> = trimmed
+            .lines()
             .filter(|line| {
                 let upper = line.trim().to_uppercase();
                 cypher_keywords.iter().any(|kw| upper.starts_with(kw))
@@ -285,7 +290,7 @@ pub fn config_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::tenant::{NLQConfig, LLMProvider};
+    use crate::persistence::tenant::{LLMProvider, NLQConfig};
 
     fn make_pipeline() -> NLQPipeline {
         NLQPipeline::new(NLQConfig {
@@ -295,9 +300,9 @@ mod tests {
             api_key: None,
             api_base_url: None,
             system_prompt: None,
-        }).unwrap()
+        })
+        .unwrap()
     }
-
 
     // --- config_for: the tenant's saved NLQConfig, else the environment (#438) ---
     //
@@ -382,12 +387,13 @@ mod tests {
 
     #[test]
     fn config_for_prefers_a_key_the_tenant_carries() {
-        let got = config_for(Some(saved(LLMProvider::OpenAI, Some("sk-from-tenant"))), |v| {
-            match v {
+        let got = config_for(
+            Some(saved(LLMProvider::OpenAI, Some("sk-from-tenant"))),
+            |v| match v {
                 "OPENAI_API_KEY" => Some("sk-from-env".to_string()),
                 _ => None,
-            }
-        })
+            },
+        )
         .expect("the tenant carries a key");
         assert_eq!(got.api_key.as_deref(), Some("sk-from-tenant"));
     }
@@ -418,10 +424,7 @@ mod tests {
         // and the request path must refuse it rather than build a client for it.
         let err = config_for(Some(saved(LLMProvider::Anthropic, Some("k"))), no_env)
             .expect_err("anthropic is not implemented");
-        assert!(
-            err.contains("not implemented"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("not implemented"), "unexpected error: {err}");
     }
 
     #[test]
@@ -532,13 +535,11 @@ mod tests {
     #[test]
     fn text_that_does_not_parse_is_not_safe() {
         let pipeline = make_pipeline();
-        for q in [
-            "MATCH (((",
-            "MATCH n RETURN",
-            "WITH",
-            "",
-        ] {
-            assert!(!pipeline.is_safe_query(q), "accepted unparseable text: {q:?}");
+        for q in ["MATCH (((", "MATCH n RETURN", "WITH", ""] {
+            assert!(
+                !pipeline.is_safe_query(q),
+                "accepted unparseable text: {q:?}"
+            );
         }
     }
 
@@ -553,7 +554,8 @@ mod tests {
 
     #[test]
     fn test_extract_cypher_markdown_fenced() {
-        let input = "Here is the query:\n```cypher\nMATCH (n:Person) RETURN n.name\n```\nHope this helps!";
+        let input =
+            "Here is the query:\n```cypher\nMATCH (n:Person) RETURN n.name\n```\nHope this helps!";
         let result = NLQPipeline::extract_cypher(input);
         assert_eq!(result, "MATCH (n:Person) RETURN n.name");
     }
@@ -868,5 +870,3 @@ mod tests {
         }
     }
 }
-
-

@@ -30,7 +30,9 @@ fn write(store: &mut GraphStore, cypher: &str) {
 
 fn scalar(store: &GraphStore, cypher: &str) -> i64 {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
+    let batch = QueryExecutor::new(store)
+        .execute(&q)
+        .expect("query should run");
     match batch.records[0].get("c") {
         Some(Value::Property(PropertyValue::Integer(n))) => *n,
         other => panic!("expected an integer, got {other:?}"),
@@ -62,7 +64,10 @@ fn the_reused_node_keeps_the_labels_it_was_created_with() {
     assert_eq!(nodes(&store), 2);
     assert_eq!(scalar(&store, "MATCH (:A) RETURN count(*) AS c"), 1);
     assert_eq!(scalar(&store, "MATCH (:B) RETURN count(*) AS c"), 1);
-    assert_eq!(scalar(&store, "MATCH (:A)-[:R]->(:B) RETURN count(*) AS c"), 1);
+    assert_eq!(
+        scalar(&store, "MATCH (:A)-[:R]->(:B) RETURN count(*) AS c"),
+        1
+    );
 }
 
 #[test]
@@ -94,7 +99,11 @@ fn a_run_of_create_clauses_building_a_small_graph_lands_the_right_counts() {
     );
     assert_eq!(nodes(&store), 4, "one hub and three leaves");
     assert_eq!(edges(&store), 3);
-    assert_eq!(scalar(&store, "MATCH (:Hub) RETURN count(*) AS c"), 1, "the hub is created once");
+    assert_eq!(
+        scalar(&store, "MATCH (:Hub) RETURN count(*) AS c"),
+        1,
+        "the hub is created once"
+    );
 }
 
 #[test]
@@ -124,7 +133,10 @@ fn properties_on_the_first_mention_survive() {
     let mut store = GraphStore::new();
     write(&mut store, "CREATE (a {v: 7}), (b), (a)-[:R]->(b)");
     assert_eq!(nodes(&store), 2);
-    assert_eq!(scalar(&store, "MATCH (n) WHERE n.v = 7 RETURN count(*) AS c"), 1);
+    assert_eq!(
+        scalar(&store, "MATCH (n) WHERE n.v = 7 RETURN count(*) AS c"),
+        1
+    );
 }
 
 /// Every label on every node in the store, sorted, one entry per node.
@@ -151,9 +163,15 @@ fn a_node_carries_exactly_the_labels_that_were_written() {
         ("CREATE ({id: 0})", vec![Vec::<String>::new()]),
         ("MERGE ({id: 2})", vec![Vec::new()]),
         ("CREATE ()-[:R]->()", vec![Vec::new(), Vec::new()]),
-        ("UNWIND [1, 2] AS x CREATE ({v: x})", vec![Vec::new(), Vec::new()]),
+        (
+            "UNWIND [1, 2] AS x CREATE ({v: x})",
+            vec![Vec::new(), Vec::new()],
+        ),
         ("CREATE (:A {id: 1})", vec![vec!["A".to_string()]]),
-        ("CREATE (:A:B)", vec![vec!["A".to_string(), "B".to_string()]]),
+        (
+            "CREATE (:A:B)",
+            vec![vec!["A".to_string(), "B".to_string()]],
+        ),
         ("MERGE (:A:B)", vec![vec!["A".to_string(), "B".to_string()]]),
     ] {
         let mut store = GraphStore::new();
@@ -173,16 +191,26 @@ fn an_unlabelled_node_is_not_findable_by_an_invented_label() {
 
     let found = |cypher: &str| -> usize {
         let q = parse_query(cypher).expect("query should parse");
-        QueryExecutor::new(&store).execute(&q).unwrap().records.len()
+        QueryExecutor::new(&store)
+            .execute(&q)
+            .unwrap()
+            .records
+            .len()
     };
     assert_eq!(found("MATCH (n) RETURN n"), 2, "both nodes exist");
-    assert_eq!(found("MATCH (n:Node) RETURN n"), 0, "`Node` was never written");
+    assert_eq!(
+        found("MATCH (n:Node) RETURN n"),
+        0,
+        "`Node` was never written"
+    );
 
     // The catalog is where a phantom label does real damage: it becomes a
     // class with a count, and the anchor-choice cost model reads those counts.
     for phantom in ["Node", ""] {
         assert_eq!(
-            store.catalog().estimate_label_scan(&samyama::graph::types::Label::new(phantom)),
+            store
+                .catalog()
+                .estimate_label_scan(&samyama::graph::types::Label::new(phantom)),
             0.0,
             "the catalog should not carry a `{phantom}` class"
         );

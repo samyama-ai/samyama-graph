@@ -51,7 +51,9 @@ async fn preflight_from_a_public_origin_opts_into_the_loopback_address_space() {
         .unwrap();
 
     assert_eq!(
-        response.headers().get("access-control-allow-private-network"),
+        response
+            .headers()
+            .get("access-control-allow-private-network"),
         Some(&axum::http::HeaderValue::from_static("true")),
         "preflight must opt in, or Chrome blocks the request before it reaches the engine"
     );

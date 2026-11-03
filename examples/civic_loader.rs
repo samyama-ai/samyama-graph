@@ -78,8 +78,17 @@ async fn main() -> Result<(), Error> {
         let gene_idx = build_gene_symbol_index(&graph);
         let clinvar_idx = build_clinvar_index(&graph);
         eprintln!("  :Gene bridge:    {} symbols", format_num(gene_idx.len()));
-        eprintln!("  :Variant bridge: {} ClinVar IDs", format_num(clinvar_idx.len()));
-        load_civic_variants_tsv(&mut graph, &variants_path, &gene_idx, &clinvar_idx, max_rows)?
+        eprintln!(
+            "  :Variant bridge: {} ClinVar IDs",
+            format_num(clinvar_idx.len())
+        );
+        load_civic_variants_tsv(
+            &mut graph,
+            &variants_path,
+            &gene_idx,
+            &clinvar_idx,
+            max_rows,
+        )?
     };
 
     let total_elapsed = total_start.elapsed();
@@ -87,7 +96,10 @@ async fn main() -> Result<(), Error> {
     eprintln!("========================================");
     eprintln!("CIViC variant load complete.");
     eprintln!("  Variant nodes:      {}", format_num(result.variant_nodes));
-    eprintln!("  HAS_VARIANT edges:  {}", format_num(result.has_variant_edges));
+    eprintln!(
+        "  HAS_VARIANT edges:  {}",
+        format_num(result.has_variant_edges)
+    );
     eprintln!("  SAME_AS edges:      {}", format_num(result.same_as_edges));
     eprintln!("  Time:               {}", format_duration(total_elapsed));
     eprintln!("========================================");

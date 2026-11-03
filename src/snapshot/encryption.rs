@@ -156,7 +156,13 @@ impl<W: Write> EncryptingWriter<W> {
         let aad = self.counter.to_le_bytes();
         let sealed = self
             .cipher
-            .encrypt(&nonce, Payload { msg: plaintext, aad: &aad })
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad: &aad,
+                },
+            )
             .map_err(|_| std::io::Error::other("snapshot encryption failed"))?;
         self.counter = self.counter.checked_add(1).ok_or_else(|| {
             // 2^32 frames is 256 TiB at this frame size. Refusing beats reusing
@@ -274,7 +280,13 @@ impl<R: Read> DecryptingReader<R> {
         let aad = self.counter.to_le_bytes();
         let plain = self
             .cipher
-            .decrypt(&nonce, Payload { msg: &sealed, aad: &aad })
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: &sealed,
+                    aad: &aad,
+                },
+            )
             .map_err(|_| {
                 std::io::Error::other(
                     "snapshot frame failed authentication: wrong key, or the file was altered",
@@ -327,8 +339,8 @@ mod tests {
 
     fn open(bytes: &[u8], k: &[u8; KEY_BYTES]) -> std::io::Result<Vec<u8>> {
         let head = bytes[..MAGIC.len().min(bytes.len())].to_vec();
-        let mut r = DecryptingReader::new(&bytes[head.len()..], k, &head)
-            .map_err(std::io::Error::other)?;
+        let mut r =
+            DecryptingReader::new(&bytes[head.len()..], k, &head).map_err(std::io::Error::other)?;
         let mut out = Vec::new();
         r.read_to_end(&mut out)?;
         Ok(out)
@@ -366,7 +378,10 @@ mod tests {
         let mut sealed = seal(b"secret payload", &key());
         let last = sealed.len() - 1;
         sealed[last] ^= 0x01;
-        assert!(open(&sealed, &key()).is_err(), "a flipped bit must not open");
+        assert!(
+            open(&sealed, &key()).is_err(),
+            "a flipped bit must not open"
+        );
     }
 
     #[test]
@@ -379,7 +394,8 @@ mod tests {
         let cut = sealed.len() / 2;
         let err = open(&sealed[..cut], &key()).expect_err("a truncated stream must fail");
         assert!(
-            err.to_string().contains("truncated") || err.kind() == std::io::ErrorKind::UnexpectedEof,
+            err.to_string().contains("truncated")
+                || err.kind() == std::io::ErrorKind::UnexpectedEof,
             "{err}"
         );
     }
@@ -396,7 +412,10 @@ mod tests {
             b[MAGIC.len()..MAGIC.len() + 8],
             "the per-file nonce prefix repeated"
         );
-        assert_ne!(a, b, "two sealings of the same bytes produced the same file");
+        assert_ne!(
+            a, b,
+            "two sealings of the same bytes produced the same file"
+        );
     }
 
     #[test]

@@ -32,7 +32,10 @@ use samyama::query::{parse_query, QueryEngine};
 mod ldbc_common;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 /// Resident set size in bytes, read from the kernel rather than estimated.
@@ -41,7 +44,11 @@ fn rss_bytes() -> u64 {
         Ok(s) => s,
         Err(_) => return 0,
     };
-    let pages: u64 = s.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+    let pages: u64 = s
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     pages * 4096
 }
 
@@ -57,10 +64,14 @@ fn pct(v: &mut Vec<f64>, p: f64) -> f64 {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let data_dir = PathBuf::from(arg(&args, "--data-dir").unwrap_or_else(|| {
-        format!("{}/sgwork/ldbc-data/social_network-sf1-CsvBasic-LongDateFormatter",
-                std::env::var("HOME").unwrap_or_default())
+        format!(
+            "{}/sgwork/ldbc-data/social_network-sf1-CsvBasic-LongDateFormatter",
+            std::env::var("HOME").unwrap_or_default()
+        )
     }));
-    let iters: usize = arg(&args, "--iters").and_then(|v| v.parse().ok()).unwrap_or(200);
+    let iters: usize = arg(&args, "--iters")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
 
     if !data_dir.exists() {
         eprintln!("SKIP: dataset not present at {}", data_dir.display());
@@ -70,8 +81,12 @@ fn main() {
     let mut store = GraphStore::new();
     let t = Instant::now();
     let loaded = ldbc_common::load_dataset(&mut store, &data_dir).expect("load");
-    eprintln!("loaded {} nodes / {} edges in {:.1}s",
-              loaded.total_nodes, loaded.total_edges, t.elapsed().as_secs_f64());
+    eprintln!(
+        "loaded {} nodes / {} edges in {:.1}s",
+        loaded.total_nodes,
+        loaded.total_edges,
+        t.elapsed().as_secs_f64()
+    );
 
     let person_id = {
         let label = samyama::Label::new("Person");
@@ -79,7 +94,9 @@ fn main() {
         let node = nodes.first().expect("no Person nodes loaded");
         // `node_property`, not `node.properties`: the loader's columnar store
         // can hold the id, and the node's own map is then empty for it.
-        store.node_property(node.id, "id").map(|v| format!("{v}"))
+        store
+            .node_property(node.id, "id")
+            .map(|v| format!("{v}"))
             .expect("Person has no id property")
     };
 
@@ -94,21 +111,39 @@ fn main() {
 
     let queries: Vec<(&str, String)> = vec![
         ("RETURN-1-floor", "RETURN 1".to_string()),
-        ("IS1-selective-1row", format!(
-            "MATCH (p:Person {{id: {person_id}}}) \
-             RETURN p.firstName, p.lastName, p.birthday, p.locationIP, p.browserUsed")),
-        ("agg-small-result", "MATCH (p:Person) RETURN count(p) AS n".to_string()),
+        (
+            "IS1-selective-1row",
+            format!(
+                "MATCH (p:Person {{id: {person_id}}}) \
+             RETURN p.firstName, p.lastName, p.birthday, p.locationIP, p.browserUsed"
+            ),
+        ),
+        (
+            "agg-small-result",
+            "MATCH (p:Person) RETURN count(p) AS n".to_string(),
+        ),
         // Wide results, where a hit stops being free because the answer is cloned.
         // Comment, not Person: SF1 has only 9,892 Person nodes, so LIMIT 10000 and
         // LIMIT 100000 over Person both return 9,892 rows and the two lines
         // measure one case twice. Comment has ~2M.
-        ("scan-10k-rows", "MATCH (c:Comment) RETURN c.id, c.browserUsed LIMIT 10000".to_string()),
-        ("scan-100k-rows", "MATCH (c:Comment) RETURN c.id, c.browserUsed LIMIT 100000".to_string()),
-        ("scan-500k-rows", "MATCH (c:Comment) RETURN c.id, c.browserUsed LIMIT 500000".to_string()),
+        (
+            "scan-10k-rows",
+            "MATCH (c:Comment) RETURN c.id, c.browserUsed LIMIT 10000".to_string(),
+        ),
+        (
+            "scan-100k-rows",
+            "MATCH (c:Comment) RETURN c.id, c.browserUsed LIMIT 100000".to_string(),
+        ),
+        (
+            "scan-500k-rows",
+            "MATCH (c:Comment) RETURN c.id, c.browserUsed LIMIT 500000".to_string(),
+        ),
     ];
 
-    println!("\n{:<22} {:>7} {:>11} {:>11} {:>11} {:>11} {:>9}",
-             "query", "rows", "cold p50", "hit p50", "cold p95", "hit p95", "speedup");
+    println!(
+        "\n{:<22} {:>7} {:>11} {:>11} {:>11} {:>11} {:>9}",
+        "query", "rows", "cold p50", "hit p50", "cold p95", "hit p95", "speedup"
+    );
     println!("{}", "-".repeat(92));
 
     let mut any_slower = Vec::new();
@@ -120,12 +155,17 @@ fn main() {
         // nothing would time the empty case and report a flattering speedup.
         let rows = match engine.execute(cypher, &store) {
             Ok(b) => b.records.len(),
-            Err(e) => { println!("{id:<22} FAILED: {e}"); continue; }
+            Err(e) => {
+                println!("{id:<22} FAILED: {e}");
+                continue;
+            }
         };
 
         // Uncached: `execute` never consults or fills the result cache, so this
         // is the engine's own latency and not a cache-miss path.
-        for _ in 0..20 { let _ = engine.execute(cypher, &store); }
+        for _ in 0..20 {
+            let _ = engine.execute(cypher, &store);
+        }
         let mut cold = Vec::with_capacity(iters);
         for _ in 0..iters {
             let t = Instant::now();
@@ -135,7 +175,10 @@ fn main() {
 
         // Cached: prime once, then every call must be a hit.
         let (_, was_cached) = engine.execute_cached(cypher, &store).expect("prime");
-        assert!(!was_cached, "{id}: first call reported a hit on an empty cache");
+        assert!(
+            !was_cached,
+            "{id}: first call reported a hit on an empty cache"
+        );
         let hits_before = engine.result_cache_stats().hits();
         let mut warm = Vec::with_capacity(iters);
         for _ in 0..iters {
@@ -145,16 +188,23 @@ fn main() {
             assert!(hit, "{id}: a warm call missed; the epoch moved mid-run");
         }
         let hit_rate = (engine.result_cache_stats().hits() - hits_before) as f64 / iters as f64;
-        assert!((hit_rate - 1.0).abs() < 1e-9, "{id}: hit rate {hit_rate}, expected 1.0");
+        assert!(
+            (hit_rate - 1.0).abs() < 1e-9,
+            "{id}: hit rate {hit_rate}, expected 1.0"
+        );
 
         let c50 = pct(&mut cold, 0.50);
         let w50 = pct(&mut warm, 0.50);
         let c95 = pct(&mut cold, 0.95);
         let w95 = pct(&mut warm, 0.95);
         let speedup = if w50 > 0.0 { c50 / w50 } else { f64::NAN };
-        if speedup < 1.0 { any_slower.push((*id, speedup)); }
+        if speedup < 1.0 {
+            any_slower.push((*id, speedup));
+        }
 
-        println!("{id:<22} {rows:>7} {c50:>11.1} {w50:>11.1} {c95:>11.1} {w95:>11.1} {speedup:>8.1}x");
+        println!(
+            "{id:<22} {rows:>7} {c50:>11.1} {w50:>11.1} {c95:>11.1} {w95:>11.1} {speedup:>8.1}x"
+        );
     }
 
     // --- what it costs -----------------------------------------------------
@@ -173,8 +223,15 @@ fn main() {
     let after = rss_bytes();
     let entries = engine.result_cache_len();
     let delta = after.saturating_sub(before);
-    let small_per_entry = if entries > 0 { delta as f64 / entries as f64 } else { 0.0 };
-    println!("narrow entries held : {entries} (mean {} rows each)", cap_probe / 2);
+    let small_per_entry = if entries > 0 {
+        delta as f64 / entries as f64
+    } else {
+        0.0
+    };
+    println!(
+        "narrow entries held : {entries} (mean {} rows each)",
+        cap_probe / 2
+    );
     println!("RSS delta           : {:.1} MB", delta as f64 / 1e6);
     println!("per entry (mean)    : {:.1} KB", small_per_entry / 1e3);
 
@@ -183,13 +240,20 @@ fn main() {
     let wide_n = 16usize;
     let before_w = rss_bytes();
     for i in 0..wide_n {
-        let q = format!("MATCH (c:Comment) RETURN c.id, c.browserUsed LIMIT {}", 100_000 + i);
+        let q = format!(
+            "MATCH (c:Comment) RETURN c.id, c.browserUsed LIMIT {}",
+            100_000 + i
+        );
         let _ = engine_wide.execute_cached(&q, &store);
     }
     let after_w = rss_bytes();
     let wide_entries = engine_wide.result_cache_len();
     let wide_delta = after_w.saturating_sub(before_w);
-    let wide_per_entry = if wide_entries > 0 { wide_delta as f64 / wide_entries as f64 } else { 0.0 };
+    let wide_per_entry = if wide_entries > 0 {
+        wide_delta as f64 / wide_entries as f64
+    } else {
+        0.0
+    };
     println!("\nwide entries held   : {wide_entries} (100k rows each)");
     println!("RSS delta           : {:.1} MB", wide_delta as f64 / 1e6);
     println!("per entry (mean)    : {:.1} KB", wide_per_entry / 1e3);
@@ -197,12 +261,17 @@ fn main() {
     if small_per_entry > 0.0 && wide_per_entry > 0.0 {
         let ratio = wide_per_entry / small_per_entry;
         println!("\nentry size spread   : {ratio:.0}x between the two workloads");
-        println!("At the 1024-entry default the cache holds {:.0} MB of the narrow \
+        println!(
+            "At the 1024-entry default the cache holds {:.0} MB of the narrow \
                   results, or {:.1} GB of the wide ones.",
-                 small_per_entry * 1024.0 / 1e6, wide_per_entry * 1024.0 / 1e9);
-        println!("An entry count is therefore not a memory bound. PERF-10 is a \
+            small_per_entry * 1024.0 / 1e6,
+            wide_per_entry * 1024.0 / 1e9
+        );
+        println!(
+            "An entry count is therefore not a memory bound. PERF-10 is a \
                   bytes/edge budget; a cache capped in entries cannot be budgeted \
-                  against it, and the cap should be bytes.");
+                  against it, and the cap should be bytes."
+        );
     }
 
     if !any_slower.is_empty() {

@@ -68,7 +68,11 @@ fn an_answer_larger_than_the_whole_budget_is_not_cached() {
     let big = "MATCH (n:N) RETURN n.id, n.pad ORDER BY n.id";
     let (rows, cached) = engine.execute_cached(big, &store).expect("big");
     assert!(!cached);
-    assert_eq!(rows.records.len(), 200, "the query must actually return rows");
+    assert_eq!(
+        rows.records.len(),
+        200,
+        "the query must actually return rows"
+    );
 
     let (_, cached_again) = engine.execute_cached(big, &store).expect("big again");
     assert!(
@@ -97,11 +101,15 @@ fn an_oversized_answer_does_not_flush_the_warm_entries() {
     let _ = engine.execute_cached(big, &store).unwrap();
 
     assert_eq!(
-        engine.result_cache_len(), entries_before,
+        engine.result_cache_len(),
+        entries_before,
         "the oversized answer changed the cache contents"
     );
     let (_, still_warm) = engine.execute_cached(small, &store).unwrap();
-    assert!(still_warm, "the oversized answer evicted a warm entry to hold nothing");
+    assert!(
+        still_warm,
+        "the oversized answer evicted a warm entry to hold nothing"
+    );
 }
 
 /// Re-inserting the same key charges the difference, not the whole entry.
@@ -125,7 +133,8 @@ fn re_caching_the_same_query_does_not_drift_the_total() {
         let _ = engine.execute_cached(q, &store).unwrap();
     }
     assert_eq!(
-        engine.result_cache_bytes(), after_first,
+        engine.result_cache_bytes(),
+        after_first,
         "the byte total drifted across repeated inserts of one key"
     );
 }

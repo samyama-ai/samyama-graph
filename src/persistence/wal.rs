@@ -133,15 +133,9 @@ pub enum WalEntry {
         properties: Vec<u8>, // Serialized property map
     },
     /// Delete node
-    DeleteNode {
-        tenant: String,
-        node_id: u64,
-    },
+    DeleteNode { tenant: String, node_id: u64 },
     /// Delete edge
-    DeleteEdge {
-        tenant: String,
-        edge_id: u64,
-    },
+    DeleteEdge { tenant: String, edge_id: u64 },
     /// Update node properties
     UpdateNodeProperties {
         tenant: String,
@@ -161,10 +155,7 @@ pub enum WalEntry {
         version: u64,
     },
     /// Checkpoint marker
-    Checkpoint {
-        sequence: u64,
-        timestamp: i64,
-    },
+    Checkpoint { sequence: u64, timestamp: i64 },
 }
 
 /// Top bit of the length word: set on format-1 records, clear on legacy ones.
@@ -291,7 +282,10 @@ impl Wal {
     /// any particular write.
     fn sync_mode_from_env() -> bool {
         matches!(
-            std::env::var("SAMYAMA_FSYNC").unwrap_or_default().to_lowercase().as_str(),
+            std::env::var("SAMYAMA_FSYNC")
+                .unwrap_or_default()
+                .to_lowercase()
+                .as_str(),
             "1" | "true" | "yes" | "on"
         )
     }
@@ -499,7 +493,10 @@ impl Wal {
             }
         }
 
-        info!("Replayed {} WAL entries, last sequence: {}", replayed, last_sequence);
+        info!(
+            "Replayed {} WAL entries, last sequence: {}",
+            replayed, last_sequence
+        );
         Ok(last_sequence)
     }
 
@@ -556,7 +553,10 @@ impl Wal {
             if let Some(filename) = entry.file_name().to_str() {
                 if filename.starts_with("wal-") && filename.ends_with(".log") {
                     // Parse sequence from filename
-                    if let Some(seq_str) = filename.strip_prefix("wal-").and_then(|s| s.strip_suffix(".log")) {
+                    if let Some(seq_str) = filename
+                        .strip_prefix("wal-")
+                        .and_then(|s| s.strip_suffix(".log"))
+                    {
                         if let Ok(seq) = u64::from_str_radix(seq_str, 16) {
                             max_sequence = max_sequence.max(seq);
                         }
@@ -642,7 +642,8 @@ mod tests {
         wal.replay(0, |_entry| {
             count += 1;
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(count, 5);
     }
@@ -673,7 +674,8 @@ mod tests {
                 found_checkpoint = true;
             }
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         assert!(found_checkpoint);
     }
@@ -695,13 +697,17 @@ mod tests {
 
         let mut found = false;
         wal.replay(0, |entry| {
-            if let WalEntry::UpdateNodeProperties { node_id, version, .. } = entry {
+            if let WalEntry::UpdateNodeProperties {
+                node_id, version, ..
+            } = entry
+            {
                 assert_eq!(*node_id, 42);
                 assert_eq!(*version, 5);
                 found = true;
             }
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         assert!(found);
     }
 
@@ -721,13 +727,17 @@ mod tests {
 
         let mut found = false;
         wal.replay(0, |entry| {
-            if let WalEntry::UpdateEdgeProperties { edge_id, version, .. } = entry {
+            if let WalEntry::UpdateEdgeProperties {
+                edge_id, version, ..
+            } = entry
+            {
                 assert_eq!(*edge_id, 99);
                 assert_eq!(*version, 3);
                 found = true;
             }
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         assert!(found);
     }
 
@@ -751,7 +761,8 @@ mod tests {
                 found_version = Some(*version);
             }
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(found_version, Some(0));
     }
 

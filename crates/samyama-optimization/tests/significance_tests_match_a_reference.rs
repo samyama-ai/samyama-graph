@@ -43,7 +43,10 @@ fn ties_share_the_average_of_the_positions_they_span() {
     assert_eq!(average_ranks(&[3.0, 1.0, 2.0]), vec![3.0, 1.0, 2.0]);
     assert_eq!(average_ranks(&[1.0, 1.0, 3.0]), vec![1.5, 1.5, 3.0]);
     assert_eq!(average_ranks(&[5.0, 5.0, 5.0]), vec![2.0, 2.0, 2.0]);
-    assert_eq!(average_ranks(&[2.0, 1.0, 1.0, 2.0]), vec![3.5, 1.5, 1.5, 3.5]);
+    assert_eq!(
+        average_ranks(&[2.0, 1.0, 1.0, 2.0]),
+        vec![3.5, 1.5, 1.5, 3.5]
+    );
 }
 
 #[test]
@@ -151,7 +154,10 @@ fn wilcoxon_drops_zero_differences_and_says_so_by_its_method() {
     let x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
     let y = [1.0, 3.0, 2.5, 4.7, 5.0, 6.9, 6.2, 8.8, 9.1, 9.0];
     let r = wilcoxon_signed_rank(&x, &y).expect("8 non-zero differences");
-    assert_eq!(r.n, 8, "the tied pairs are dropped, not counted as agreement");
+    assert_eq!(
+        r.n, 8,
+        "the tied pairs are dropped, not counted as agreement"
+    );
     assert_eq!(r.method, WilcoxonMethod::Normal);
     close(r.statistic, 13.5, 1e-12);
     close(r.p_two_sided, 5.281061253471e-01, 1e-11);
@@ -193,7 +199,10 @@ fn holm_adjusts_by_the_step_down_ladder_and_stays_monotone() {
 
     // Capped at 1, never above.
     let got = holm_adjust(&[0.5, 0.6, 0.7]);
-    assert!(got.iter().all(|p| *p <= 1.0), "an adjusted p-value is still a p-value: {got:?}");
+    assert!(
+        got.iter().all(|p| *p <= 1.0),
+        "an adjusted p-value is still a p-value: {got:?}"
+    );
 
     // A single test is its own family and is not inflated.
     close(holm_adjust(&[0.02])[0], 0.02, 1e-12);

@@ -3,14 +3,8 @@
 //! This module provides wrapper types around the oxrdf library for RDF primitives.
 
 use oxrdf::{
-    NamedNode as OxNamedNode,
-    BlankNode as OxBlankNode,
-    Literal as OxLiteral,
-    Subject as OxSubject,
-    Term as OxTerm,
-    Triple as OxTriple,
-    Quad as OxQuad,
-    NamedOrBlankNode,
+    BlankNode as OxBlankNode, Literal as OxLiteral, NamedNode as OxNamedNode, NamedOrBlankNode,
+    Quad as OxQuad, Subject as OxSubject, Term as OxTerm, Triple as OxTriple,
 };
 use std::fmt;
 use thiserror::Error;
@@ -137,7 +131,10 @@ impl Literal {
     }
 
     /// Create a literal with language tag
-    pub fn new_language_tagged_literal(value: impl Into<String>, language: impl Into<String>) -> RdfResult<Self> {
+    pub fn new_language_tagged_literal(
+        value: impl Into<String>,
+        language: impl Into<String>,
+    ) -> RdfResult<Self> {
         OxLiteral::new_language_tagged_literal(value, language)
             .map(Self)
             .map_err(|e| RdfError::InvalidLiteral(e.to_string()))
@@ -627,11 +624,7 @@ mod tests {
         let predicate = RdfPredicate::new("http://xmlns.com/foaf/0.1/name").unwrap();
         let object = Literal::new_simple_literal("Alice");
 
-        let triple = Triple::new(
-            subject.into(),
-            predicate,
-            object.into(),
-        );
+        let triple = Triple::new(subject.into(), predicate, object.into());
 
         assert!(triple.subject.is_named_node());
         assert!(triple.object.is_literal());
@@ -643,27 +636,15 @@ mod tests {
         let predicate = RdfPredicate::new("http://xmlns.com/foaf/0.1/name").unwrap();
         let object = Literal::new_simple_literal("Alice");
 
-        let triple = Triple::new(
-            subject.clone().into(),
-            predicate.clone(),
-            object.into(),
-        );
+        let triple = Triple::new(subject.clone().into(), predicate.clone(), object.into());
 
         // Pattern with subject
-        let pattern = TriplePattern::new(
-            Some(subject.into()),
-            None,
-            None,
-        );
+        let pattern = TriplePattern::new(Some(subject.into()), None, None);
         assert!(pattern.matches(&triple));
 
         // Pattern with wrong subject
         let wrong_subject = NamedNode::new("http://example.org/bob").unwrap();
-        let pattern = TriplePattern::new(
-            Some(wrong_subject.into()),
-            None,
-            None,
-        );
+        let pattern = TriplePattern::new(Some(wrong_subject.into()), None, None);
         assert!(!pattern.matches(&triple));
 
         // Pattern with all variables
@@ -678,12 +659,7 @@ mod tests {
         let object = Literal::new_simple_literal("Alice");
         let graph = NamedNode::new("http://example.org/graph/social").unwrap();
 
-        let quad = Quad::new(
-            subject.into(),
-            predicate,
-            object.into(),
-            Some(graph),
-        );
+        let quad = Quad::new(subject.into(), predicate, object.into(), Some(graph));
 
         assert!(quad.graph.is_some());
 
@@ -798,7 +774,9 @@ mod tests {
 
     #[test]
     fn test_triple_pattern_new() {
-        let subj = Some(RdfSubject::from(NamedNode::new("http://example.org/s").unwrap()));
+        let subj = Some(RdfSubject::from(
+            NamedNode::new("http://example.org/s").unwrap(),
+        ));
         let pattern = TriplePattern::new(subj, None, None);
         assert!(pattern.subject.is_some());
         assert!(pattern.predicate.is_none());
@@ -1272,7 +1250,12 @@ mod tests {
         let quad = Quad::from_triple(Triple::new(subj.clone(), pred.clone(), obj.clone()));
 
         let other = RdfSubject::from(NamedNode::new("http://example.org/other").unwrap());
-        let mismatch = QuadPattern { subject: Some(other), predicate: None, object: None, graph: None };
+        let mismatch = QuadPattern {
+            subject: Some(other),
+            predicate: None,
+            object: None,
+            graph: None,
+        };
         assert!(!mismatch.matches(&quad));
 
         let all = QuadPattern {

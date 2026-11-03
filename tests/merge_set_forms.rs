@@ -72,19 +72,31 @@ fn a_plain_set_replaces_or_merges() {
 #[test]
 fn on_create_set_copies_from_a_node_or_a_map() {
     let mut s = two_nodes();
-    exec(&mut s, "MATCH (a:A), (b:B) MERGE (a)-[r:T]->(b) ON CREATE SET r = a");
-    assert_eq!(keys(&s, "MATCH ()-[r:T]->() RETURN keys(r) AS r"), vec!["x"]);
+    exec(
+        &mut s,
+        "MATCH (a:A), (b:B) MERGE (a)-[r:T]->(b) ON CREATE SET r = a",
+    );
+    assert_eq!(
+        keys(&s, "MATCH ()-[r:T]->() RETURN keys(r) AS r"),
+        vec!["x"]
+    );
 
     let mut s = two_nodes();
     exec(
         &mut s,
         "MATCH (a:A), (b:B) MERGE (a)-[r:T]->(b) ON CREATE SET r = {name: 'bar', name2: 'baz'}",
     );
-    assert_eq!(keys(&s, "MATCH ()-[r:T]->() RETURN keys(r) AS r"), vec!["name", "name2"]);
+    assert_eq!(
+        keys(&s, "MATCH ()-[r:T]->() RETURN keys(r) AS r"),
+        vec!["name", "name2"]
+    );
 
     // `+=` on a node created by MERGE.
     let mut s = two_nodes();
-    exec(&mut s, "MATCH (a:A) MERGE (n:N {p: 1}) ON CREATE SET n += a");
+    exec(
+        &mut s,
+        "MATCH (a:A) MERGE (n:N {p: 1}) ON CREATE SET n += a",
+    );
     assert_eq!(keys(&s, "MATCH (n:N) RETURN keys(n) AS r"), vec!["p", "x"]);
 }
 
@@ -94,8 +106,14 @@ fn on_create_set_copies_from_a_node_or_a_map() {
 fn on_match_set_copies_too() {
     let mut s = two_nodes();
     exec(&mut s, "MATCH (a:A), (b:B) CREATE (a)-[:T]->(b)");
-    exec(&mut s, "MATCH (a:A), (b:B) MERGE (a)-[r:T]->(b) ON MATCH SET r = a");
-    assert_eq!(keys(&s, "MATCH ()-[r:T]->() RETURN keys(r) AS r"), vec!["x"]);
+    exec(
+        &mut s,
+        "MATCH (a:A), (b:B) MERGE (a)-[r:T]->(b) ON MATCH SET r = a",
+    );
+    assert_eq!(
+        keys(&s, "MATCH ()-[r:T]->() RETURN keys(r) AS r"),
+        vec!["x"]
+    );
 }
 
 /// Assigning null **removes** the property, on every path that sets one.
@@ -103,18 +121,27 @@ fn on_match_set_copies_too() {
 fn setting_null_removes_the_property() {
     let mut s = two_nodes();
     exec(&mut s, "MATCH (b:B) SET b.y = null");
-    assert_eq!(keys(&s, "MATCH (b:B) RETURN keys(b) AS r"), Vec::<String>::new());
+    assert_eq!(
+        keys(&s, "MATCH (b:B) RETURN keys(b) AS r"),
+        Vec::<String>::new()
+    );
 
     let mut s = two_nodes();
     exec(
         &mut s,
         "MATCH (a:A), (b:B) MERGE (a)-[r:T {k: 1}]->(b) ON CREATE SET r.k = null",
     );
-    assert_eq!(keys(&s, "MATCH ()-[r:T]->() RETURN keys(r) AS r"), Vec::<String>::new());
+    assert_eq!(
+        keys(&s, "MATCH ()-[r:T]->() RETURN keys(r) AS r"),
+        Vec::<String>::new()
+    );
 
     let mut s = two_nodes();
     exec(&mut s, "MERGE (n:N {p: 1}) ON CREATE SET n.p = null");
-    assert_eq!(keys(&s, "MATCH (n:N) RETURN keys(n) AS r"), Vec::<String>::new());
+    assert_eq!(
+        keys(&s, "MATCH (n:N) RETURN keys(n) AS r"),
+        Vec::<String>::new()
+    );
 }
 
 /// A non-null value still sets, so "remove on null" has not become

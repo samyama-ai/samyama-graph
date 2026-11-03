@@ -22,11 +22,26 @@ use samyama::query::parser::parse_query;
 fn graph() -> GraphStore {
     let mut store = GraphStore::new();
     let a = store.create_node("P");
-    let _ = store.set_node_property("default", a, "name".to_string(), PropertyValue::String("Ada".into()));
+    let _ = store.set_node_property(
+        "default",
+        a,
+        "name".to_string(),
+        PropertyValue::String("Ada".into()),
+    );
     let b = store.create_node("P");
-    let _ = store.set_node_property("default", b, "name".to_string(), PropertyValue::String("Bob".into()));
+    let _ = store.set_node_property(
+        "default",
+        b,
+        "name".to_string(),
+        PropertyValue::String("Bob".into()),
+    );
     let c = store.create_node("P");
-    let _ = store.set_node_property("default", c, "name".to_string(), PropertyValue::String("Cy".into()));
+    let _ = store.set_node_property(
+        "default",
+        c,
+        "name".to_string(),
+        PropertyValue::String("Cy".into()),
+    );
     store.create_edge(a, b, "KNOWS").unwrap();
     store.create_edge(b, c, "KNOWS").unwrap();
     store
@@ -68,7 +83,10 @@ fn grouped(store: &GraphStore, cypher: &str) -> Vec<(String, i64)> {
 fn count_of_a_variable_ignores_the_unmatched_row() {
     let store = graph();
     assert_eq!(
-        scalar(&store, "MATCH (p:P) OPTIONAL MATCH (p)-[:KNOWS]->(f:P) RETURN count(f) AS r"),
+        scalar(
+            &store,
+            "MATCH (p:P) OPTIONAL MATCH (p)-[:KNOWS]->(f:P) RETURN count(f) AS r"
+        ),
         2,
         "Cy matched nothing, so f is null on that row and must not be counted"
     );
@@ -80,7 +98,10 @@ fn count_of_a_property_was_already_right_and_stays_right() {
     // fast path has been widened back.
     let store = graph();
     assert_eq!(
-        scalar(&store, "MATCH (p:P) OPTIONAL MATCH (p)-[:KNOWS]->(f:P) RETURN count(f.name) AS r"),
+        scalar(
+            &store,
+            "MATCH (p:P) OPTIONAL MATCH (p)-[:KNOWS]->(f:P) RETURN count(f.name) AS r"
+        ),
         2
     );
 }
@@ -91,7 +112,10 @@ fn count_star_still_counts_rows() {
     // every row including the unmatched one.
     let store = graph();
     assert_eq!(
-        scalar(&store, "MATCH (p:P) OPTIONAL MATCH (p)-[:KNOWS]->(f:P) RETURN count(*) AS r"),
+        scalar(
+            &store,
+            "MATCH (p:P) OPTIONAL MATCH (p)-[:KNOWS]->(f:P) RETURN count(*) AS r"
+        ),
         3
     );
 }
@@ -106,7 +130,11 @@ fn the_grouped_form_reports_zero_for_the_person_with_none() {
             &store,
             "MATCH (p:P) OPTIONAL MATCH (p)-[:KNOWS]->(f:P) RETURN p.name AS g, count(f) AS r"
         ),
-        vec![("Ada".to_string(), 1), ("Bob".to_string(), 1), ("Cy".to_string(), 0)]
+        vec![
+            ("Ada".to_string(), 1),
+            ("Bob".to_string(), 1),
+            ("Cy".to_string(), 0)
+        ]
     );
 }
 
@@ -133,7 +161,10 @@ fn a_required_match_is_unaffected() {
         2
     );
     assert_eq!(
-        grouped(&store, "MATCH (p:P)-[:KNOWS]->(f:P) RETURN p.name AS g, count(f) AS r"),
+        grouped(
+            &store,
+            "MATCH (p:P)-[:KNOWS]->(f:P) RETURN p.name AS g, count(f) AS r"
+        ),
         vec![("Ada".to_string(), 1), ("Bob".to_string(), 1)],
         "a required match drops the unmatched row entirely, rather than nulling it"
     );
@@ -143,7 +174,10 @@ fn a_required_match_is_unaffected() {
 fn counting_an_edge_variable_behaves_the_same_way() {
     let store = graph();
     assert_eq!(
-        scalar(&store, "MATCH (p:P) OPTIONAL MATCH (p)-[e:KNOWS]->(:P) RETURN count(e) AS r"),
+        scalar(
+            &store,
+            "MATCH (p:P) OPTIONAL MATCH (p)-[e:KNOWS]->(:P) RETURN count(e) AS r"
+        ),
         2
     );
 }

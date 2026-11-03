@@ -49,8 +49,14 @@ fn a_row_limit_does_not_cancel_the_write() {
 #[test]
 fn a_row_limit_still_trims() {
     assert_eq!(run("CREATE (n:N {num: 42}) RETURN n LIMIT 1"), (1, 1));
-    assert_eq!(run("UNWIND [1, 2, 3] AS x CREATE (n:N {num: x}) RETURN n LIMIT 2"), (2, 3));
-    assert_eq!(run("UNWIND [1, 2, 3] AS x CREATE (n:N {num: x}) RETURN n SKIP 2"), (1, 3));
+    assert_eq!(
+        run("UNWIND [1, 2, 3] AS x CREATE (n:N {num: x}) RETURN n LIMIT 2"),
+        (2, 3)
+    );
+    assert_eq!(
+        run("UNWIND [1, 2, 3] AS x CREATE (n:N {num: x}) RETURN n SKIP 2"),
+        (1, 3)
+    );
 }
 
 /// **`ORDER BY` above a write.** This raised "requires mutable store access",
@@ -58,8 +64,14 @@ fn a_row_limit_still_trims() {
 /// closed on `SKIP` and `LIMIT`.
 #[test]
 fn a_sort_above_a_write_runs() {
-    assert_eq!(run("CREATE (n:N {num: 42}) RETURN n ORDER BY n.num LIMIT 0"), (0, 1));
-    assert_eq!(run("CREATE (n:N {num: 42}) RETURN n ORDER BY n.num"), (1, 1));
+    assert_eq!(
+        run("CREATE (n:N {num: 42}) RETURN n ORDER BY n.num LIMIT 0"),
+        (0, 1)
+    );
+    assert_eq!(
+        run("CREATE (n:N {num: 42}) RETURN n ORDER BY n.num"),
+        (1, 1)
+    );
     assert_eq!(
         run("UNWIND [3, 1, 2] AS x CREATE (n:N {num: x}) RETURN n ORDER BY n.num LIMIT 2"),
         (2, 3)
@@ -91,7 +103,11 @@ fn reads_are_unaffected() {
         ("MATCH (n) RETURN n", 3),
     ] {
         let p = parse_query(cypher).expect("parses");
-        let rows = QueryExecutor::new(&store).execute(&p).expect("runs").records.len();
+        let rows = QueryExecutor::new(&store)
+            .execute(&p)
+            .expect("runs")
+            .records
+            .len();
         assert_eq!(rows, want, "{cypher}");
     }
 }

@@ -58,7 +58,8 @@ fn fingerprint(s: &GraphStore) -> String {
 
 #[test]
 fn twelve_identical_stores_give_one_numbering() {
-    let seen: std::collections::HashSet<String> = (0..12).map(|_| fingerprint(&store(30))).collect();
+    let seen: std::collections::HashSet<String> =
+        (0..12).map(|_| fingerprint(&store(30))).collect();
     assert_eq!(
         seen.len(),
         1,
@@ -103,7 +104,10 @@ fn the_numbering_is_ascending_by_node_id() {
     // makes two hierarchies comparable by eye.
     let p = Poset::from_store(&store(25), &[EdgeType::new(ET)], false).expect("poset");
     let ids: Vec<u64> = p.node_ids().iter().map(|n| n.as_u64()).collect();
-    assert!(ids.windows(2).all(|w| w[0] < w[1]), "not ascending: {ids:?}");
+    assert!(
+        ids.windows(2).all(|w| w[0] < w[1]),
+        "not ascending: {ids:?}"
+    );
 }
 
 #[test]
@@ -112,11 +116,22 @@ fn the_poset_still_describes_the_same_graph() {
     let s = store(30);
     let p = Poset::from_store(&s, &[EdgeType::new(ET)], false).expect("poset");
     assert_eq!(p.n(), 30, "every class is a node");
-    assert!(p.m() >= 29, "at least the chain's edges are present, got {}", p.m());
-    assert_eq!(p.topo_up().len(), p.n(), "the topological order covers every node");
+    assert!(
+        p.m() >= 29,
+        "at least the chain's edges are present, got {}",
+        p.m()
+    );
+    assert_eq!(
+        p.topo_up().len(),
+        p.n(),
+        "the topological order covers every node"
+    );
     let mut seen = vec![false; p.n()];
     for &i in p.topo_up() {
-        assert!(!seen[i as usize], "node {i} appears twice in the topological order");
+        assert!(
+            !seen[i as usize],
+            "node {i} appears twice in the topological order"
+        );
         seen[i as usize] = true;
     }
 }

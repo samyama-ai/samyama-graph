@@ -34,7 +34,9 @@ fn shuffled(n: i64) -> GraphStore {
 
 fn values(store: &GraphStore, cypher: &str) -> Vec<i64> {
     let query = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store).execute(&query).expect("query should execute");
+    let batch = QueryExecutor::new(store)
+        .execute(&query)
+        .expect("query should execute");
     batch
         .records
         .iter()
@@ -58,7 +60,10 @@ fn ascending_top_k_is_the_k_smallest_in_order() {
 fn descending_top_k_is_the_k_largest_in_order() {
     let store = shuffled(5000);
     assert_eq!(
-        values(&store, "MATCH (n:N) RETURN n.v AS c ORDER BY c DESC LIMIT 5"),
+        values(
+            &store,
+            "MATCH (n:N) RETURN n.v AS c ORDER BY c DESC LIMIT 5"
+        ),
         vec![4999, 4998, 4997, 4996, 4995]
     );
 }
@@ -70,7 +75,10 @@ fn skip_is_added_to_the_bound() {
     // back short.
     let store = shuffled(5000);
     assert_eq!(
-        values(&store, "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP 3 LIMIT 5"),
+        values(
+            &store,
+            "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP 3 LIMIT 5"
+        ),
         vec![3, 4, 5, 6, 7]
     );
 }
@@ -78,7 +86,10 @@ fn skip_is_added_to_the_bound() {
 #[test]
 fn a_large_skip_past_several_trim_thresholds_still_pages_correctly() {
     let store = shuffled(5000);
-    let rows = values(&store, "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP 4990 LIMIT 10");
+    let rows = values(
+        &store,
+        "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP 4990 LIMIT 10",
+    );
     assert_eq!(rows, (4990..5000).collect::<Vec<_>>());
 }
 
@@ -91,7 +102,10 @@ fn every_page_of_a_full_scan_is_correct() {
     for page in 0..10 {
         let rows = values(
             &store,
-            &format!("MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP {} LIMIT 20", page * 20),
+            &format!(
+                "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP {} LIMIT 20",
+                page * 20
+            ),
         );
         assert_eq!(rows.len(), 20, "page {page} was short: {rows:?}");
         seen.extend(rows);
@@ -122,10 +136,9 @@ fn without_a_limit_every_row_survives_in_order() {
 #[test]
 fn a_multi_key_sort_orders_by_every_key() {
     let store = shuffled(300);
-    let query = parse_query(
-        "MATCH (n:N) RETURN n.band AS b, n.v AS c ORDER BY b ASC, c DESC LIMIT 4",
-    )
-    .unwrap();
+    let query =
+        parse_query("MATCH (n:N) RETURN n.band AS b, n.v AS c ORDER BY b ASC, c DESC LIMIT 4")
+            .unwrap();
     let batch = QueryExecutor::new(&store).execute(&query).unwrap();
     let rows: Vec<(i64, i64)> = batch
         .records
@@ -151,9 +164,17 @@ fn distinct_between_the_sort_and_the_limit_does_not_lose_rows() {
     for i in 0..300 {
         let id = store.create_node("N");
         // Ten distinct values, each repeated thirty times.
-        let _ = store.set_node_property("default", id, "v".to_string(), PropertyValue::Integer(i % 10));
+        let _ = store.set_node_property(
+            "default",
+            id,
+            "v".to_string(),
+            PropertyValue::Integer(i % 10),
+        );
     }
-    let rows = values(&store, "MATCH (n:N) RETURN DISTINCT n.v AS c ORDER BY c LIMIT 10");
+    let rows = values(
+        &store,
+        "MATCH (n:N) RETURN DISTINCT n.v AS c ORDER BY c LIMIT 10",
+    );
     assert_eq!(rows, (0..10).collect::<Vec<_>>());
 }
 
@@ -176,7 +197,8 @@ fn nulls_sort_consistently_under_a_bound() {
     for i in 0..100 {
         let id = store.create_node("N");
         if i % 2 == 0 {
-            let _ = store.set_node_property("default", id, "v".to_string(), PropertyValue::Integer(i));
+            let _ =
+                store.set_node_property("default", id, "v".to_string(), PropertyValue::Integer(i));
         }
     }
     let query = parse_query("MATCH (n:N) RETURN n.v AS c ORDER BY c").unwrap();
@@ -190,7 +212,14 @@ fn nulls_sort_consistently_under_a_bound() {
 
     let query = parse_query("MATCH (n:N) RETURN n.v AS c ORDER BY c LIMIT 10").unwrap();
     let bounded = QueryExecutor::new(&store).execute(&query).unwrap();
-    let bounded_ten: Vec<String> = bounded.records.iter().map(|r| format!("{:?}", r.get("c"))).collect();
+    let bounded_ten: Vec<String> = bounded
+        .records
+        .iter()
+        .map(|r| format!("{:?}", r.get("c")))
+        .collect();
 
-    assert_eq!(bounded_ten, first_ten, "a bound must not change which rows win");
+    assert_eq!(
+        bounded_ten, first_ten,
+        "a bound must not change which rows win"
+    );
 }

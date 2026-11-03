@@ -184,12 +184,24 @@ mod tests {
         let b = batch(
             &["a", "b,c"],
             vec![
-                vec![("a", Value::Property(P::String("x, y".into()))), ("b,c", Value::Property(P::Integer(3)))],
+                vec![
+                    ("a", Value::Property(P::String("x, y".into()))),
+                    ("b,c", Value::Property(P::Integer(3))),
+                ],
                 vec![("a", Value::Null), ("b,c", Value::Property(P::Null))],
                 vec![("a", Value::Property(P::Array(vec![P::Integer(1)])))],
-                vec![("a", Value::Property(P::Map(m))), ("b,c", Value::Property(P::Vector(vec![0.5])))],
-                vec![("a", Value::NodeRef(NodeId::new(9))), ("b,c", Value::Property(P::String("=cmd".into())))],
-                vec![("a", Value::Property(P::Boolean(true))), ("b,c", Value::Property(P::Float(1.5)))],
+                vec![
+                    ("a", Value::Property(P::Map(m))),
+                    ("b,c", Value::Property(P::Vector(vec![0.5]))),
+                ],
+                vec![
+                    ("a", Value::NodeRef(NodeId::new(9))),
+                    ("b,c", Value::Property(P::String("=cmd".into()))),
+                ],
+                vec![
+                    ("a", Value::Property(P::Boolean(true))),
+                    ("b,c", Value::Property(P::Float(1.5))),
+                ],
             ],
         );
         let (text, rep) = to_csv(&b);
@@ -324,7 +336,13 @@ fn graph_cell(v: &crate::graph::PropertyValue, report: &mut GraphCsvReport) -> S
 /// becomes `_`.
 fn file_part(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -372,12 +390,15 @@ pub fn write_graph_dir(
                 report.labels_containing_a_semicolon.push(l.clone());
             }
         }
-        let t = tables.entry((false, labels.clone())).or_insert_with(|| Table {
-            fixed_header: vec![":ID", ":LABEL"],
-            fixed: Vec::new(),
-            props: Vec::new(),
-        });
-        t.fixed.push(vec![node.id.as_u64().to_string(), labels.join(";")]);
+        let t = tables
+            .entry((false, labels.clone()))
+            .or_insert_with(|| Table {
+                fixed_header: vec![":ID", ":LABEL"],
+                fixed: Vec::new(),
+                props: Vec::new(),
+            });
+        t.fixed
+            .push(vec![node.id.as_u64().to_string(), labels.join(";")]);
         t.props.push(store.node_properties_merged(node.id));
         report.nodes_written += 1;
     }
@@ -390,7 +411,11 @@ pub fn write_graph_dir(
                 fixed: Vec::new(),
                 props: Vec::new(),
             });
-        t.fixed.push(vec![edge.source.as_u64().to_string(), edge.target.as_u64().to_string(), ty]);
+        t.fixed.push(vec![
+            edge.source.as_u64().to_string(),
+            edge.target.as_u64().to_string(),
+            ty,
+        ]);
         t.props.push(store.edge_properties_merged(edge.id));
         report.edges_written += 1;
     }
@@ -404,7 +429,11 @@ pub fn write_graph_dir(
             (false, true) => "nodes__unlabelled".to_string(),
             (false, false) => format!(
                 "nodes_{}",
-                parts.iter().map(|l| file_part(l)).collect::<Vec<_>>().join("_")
+                parts
+                    .iter()
+                    .map(|l| file_part(l))
+                    .collect::<Vec<_>>()
+                    .join("_")
             ),
             (true, _) => format!("edges_{}", file_part(&parts[0])),
         };
@@ -469,7 +498,15 @@ pub fn write_graph_dir(
         let mut out = std::io::BufWriter::new(std::fs::File::create(dir.join(name))?);
         let mut header: Vec<String> = t.fixed_header.iter().map(|h| h.to_string()).collect();
         header.extend(types.iter().map(|(k, ty)| format!("{k}:{}", ty.name())));
-        writeln!(out, "{}", header.iter().map(|h| quote(h)).collect::<Vec<_>>().join(","))?;
+        writeln!(
+            out,
+            "{}",
+            header
+                .iter()
+                .map(|h| quote(h))
+                .collect::<Vec<_>>()
+                .join(",")
+        )?;
         for (fixed, props) in t.fixed.iter().zip(&t.props) {
             let mut row: Vec<String> = fixed.iter().map(|f| quote(f)).collect();
             for k in types.keys() {

@@ -98,9 +98,8 @@ fn labelled_nodes_are_unaffected() {
     // The fix branches on "no labels", so the ordinary path needs a guard too:
     // a change that dropped the *first* label from every node would satisfy
     // both tests above.
-    let src = graph(
-        "CREATE (:Person:Employee {n: 'a'}) CREATE (:Company {n: 'c'}) CREATE ({n: 'u'})",
-    );
+    let src =
+        graph("CREATE (:Person:Employee {n: 'a'}) CREATE (:Company {n: 'c'}) CREATE ({n: 'u'})");
     let dst = round_trip(&src);
 
     for q in [
@@ -125,7 +124,10 @@ fn an_unlabelled_node_keeps_its_properties() {
     let dst = round_trip(&src);
 
     assert_eq!(
-        count(&dst, "MATCH (n) WHERE n.name = 'solo' AND n.n = 7 RETURN count(n) AS c"),
+        count(
+            &dst,
+            "MATCH (n) WHERE n.name = 'solo' AND n.n = 7 RETURN count(n) AS c"
+        ),
         1,
         "the unlabelled node lost its properties"
     );

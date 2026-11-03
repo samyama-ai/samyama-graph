@@ -137,7 +137,10 @@ pub struct PersistentStorage {
 /// of what a user can *choose*, not of what they get without asking.
 pub fn fsync_enabled() -> bool {
     matches!(
-        std::env::var("SAMYAMA_FSYNC").unwrap_or_default().to_lowercase().as_str(),
+        std::env::var("SAMYAMA_FSYNC")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
         "1" | "true" | "yes" | "on"
     )
 }
@@ -217,7 +220,9 @@ impl PersistentStorage {
     /// column store (#545, #1129). A `Node` on its own cannot reach the columns, so
     /// this function cannot fix it — the caller has to pass a merged node.
     pub fn put_node(&self, tenant: &str, node: &Node) -> StorageResult<()> {
-        let cf = self.db.cf_handle("nodes")
+        let cf = self
+            .db
+            .cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
         let (key, value) = Self::encode_node(tenant, node)?;
 
@@ -255,7 +260,9 @@ impl PersistentStorage {
     pub fn get_node(&self, tenant: &str, node_id: u64) -> StorageResult<Option<Node>> {
         #[cfg(test)]
         ROW_READS.with(|c| c.set(c.get() + 1));
-        let cf = self.db.cf_handle("nodes")
+        let cf = self
+            .db
+            .cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
 
         let key = Self::node_key(tenant, node_id);
@@ -268,7 +275,9 @@ impl PersistentStorage {
                 let node = Node {
                     id: NodeId::new(stored.id),
                     version: 1,
-                    labels: stored.labels.into_iter()
+                    labels: stored
+                        .labels
+                        .into_iter()
                         .map(|s| crate::graph::Label::new(s))
                         .collect(),
                     properties,
@@ -316,7 +325,9 @@ impl PersistentStorage {
 
     /// Store an edge
     pub fn put_edge(&self, tenant: &str, edge: &Edge) -> StorageResult<()> {
-        let cf = self.db.cf_handle("edges")
+        let cf = self
+            .db
+            .cf_handle("edges")
             .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
         let (key, value) = Self::encode_edge(tenant, edge)?;
 
@@ -354,7 +365,9 @@ impl PersistentStorage {
     pub fn get_edge(&self, tenant: &str, edge_id: u64) -> StorageResult<Option<Edge>> {
         #[cfg(test)]
         ROW_READS.with(|c| c.set(c.get() + 1));
-        let cf = self.db.cf_handle("edges")
+        let cf = self
+            .db
+            .cf_handle("edges")
             .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
 
         let key = Self::edge_key(tenant, edge_id);
@@ -382,7 +395,9 @@ impl PersistentStorage {
 
     /// Delete a node
     pub fn delete_node(&self, tenant: &str, node_id: u64) -> StorageResult<()> {
-        let cf = self.db.cf_handle("nodes")
+        let cf = self
+            .db
+            .cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
 
         let key = Self::node_key(tenant, node_id);
@@ -395,7 +410,9 @@ impl PersistentStorage {
 
     /// Delete an edge
     pub fn delete_edge(&self, tenant: &str, edge_id: u64) -> StorageResult<()> {
-        let cf = self.db.cf_handle("edges")
+        let cf = self
+            .db
+            .cf_handle("edges")
             .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
 
         let key = Self::edge_key(tenant, edge_id);
@@ -408,8 +425,15 @@ impl PersistentStorage {
 
     /// Stage a node write into `batch`; nothing reaches the database until
     /// [`Self::commit_rows`]. Same key and bytes as [`Self::put_node`].
-    pub fn stage_put_node(&self, batch: &mut RowBatch, tenant: &str, node: &Node) -> StorageResult<()> {
-        let cf = self.db.cf_handle("nodes")
+    pub fn stage_put_node(
+        &self,
+        batch: &mut RowBatch,
+        tenant: &str,
+        node: &Node,
+    ) -> StorageResult<()> {
+        let cf = self
+            .db
+            .cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
         let (key, value) = Self::encode_node(tenant, node)?;
         batch.inner.put_cf(&cf, key, value);
@@ -418,8 +442,15 @@ impl PersistentStorage {
     }
 
     /// Stage an edge write; see [`Self::stage_put_node`].
-    pub fn stage_put_edge(&self, batch: &mut RowBatch, tenant: &str, edge: &Edge) -> StorageResult<()> {
-        let cf = self.db.cf_handle("edges")
+    pub fn stage_put_edge(
+        &self,
+        batch: &mut RowBatch,
+        tenant: &str,
+        edge: &Edge,
+    ) -> StorageResult<()> {
+        let cf = self
+            .db
+            .cf_handle("edges")
             .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
         let (key, value) = Self::encode_edge(tenant, edge)?;
         batch.inner.put_cf(&cf, key, value);
@@ -428,8 +459,15 @@ impl PersistentStorage {
     }
 
     /// Stage a node delete; see [`Self::stage_put_node`].
-    pub fn stage_delete_node(&self, batch: &mut RowBatch, tenant: &str, node_id: u64) -> StorageResult<()> {
-        let cf = self.db.cf_handle("nodes")
+    pub fn stage_delete_node(
+        &self,
+        batch: &mut RowBatch,
+        tenant: &str,
+        node_id: u64,
+    ) -> StorageResult<()> {
+        let cf = self
+            .db
+            .cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
         batch.inner.delete_cf(&cf, Self::node_key(tenant, node_id));
         batch.rows += 1;
@@ -437,8 +475,15 @@ impl PersistentStorage {
     }
 
     /// Stage an edge delete; see [`Self::stage_put_node`].
-    pub fn stage_delete_edge(&self, batch: &mut RowBatch, tenant: &str, edge_id: u64) -> StorageResult<()> {
-        let cf = self.db.cf_handle("edges")
+    pub fn stage_delete_edge(
+        &self,
+        batch: &mut RowBatch,
+        tenant: &str,
+        edge_id: u64,
+    ) -> StorageResult<()> {
+        let cf = self
+            .db
+            .cf_handle("edges")
             .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
         batch.inner.delete_cf(&cf, Self::edge_key(tenant, edge_id));
         batch.rows += 1;
@@ -494,7 +539,8 @@ impl PersistentStorage {
             .ok_or_else(|| StorageError::ColumnFamily("indices".to_string()))?;
         let key = format!("catalog:{}", tenant);
         let value = bincode::serialize(catalog)?;
-        self.db.put_cf_opt(&cf, key.as_bytes(), value, &self.write_opts)?;
+        self.db
+            .put_cf_opt(&cf, key.as_bytes(), value, &self.write_opts)?;
         debug!("Wrote {} index definitions for {}", catalog.len(), tenant);
         Ok(())
     }
@@ -518,7 +564,9 @@ impl PersistentStorage {
 
     /// Get all nodes for a tenant (for recovery)
     pub fn scan_nodes(&self, tenant: &str) -> StorageResult<Vec<Node>> {
-        let cf = self.db.cf_handle("nodes")
+        let cf = self
+            .db
+            .cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
 
         let prefix = format!("{}:", tenant);
@@ -534,7 +582,9 @@ impl PersistentStorage {
             let node = Node {
                 id: NodeId::new(stored.id),
                 version: 1,
-                labels: stored.labels.into_iter()
+                labels: stored
+                    .labels
+                    .into_iter()
                     .map(|s| crate::graph::Label::new(s))
                     .collect(),
                 properties,
@@ -550,7 +600,9 @@ impl PersistentStorage {
 
     /// Get all edges for a tenant (for recovery)
     pub fn scan_edges(&self, tenant: &str) -> StorageResult<Vec<Edge>> {
-        let cf = self.db.cf_handle("edges")
+        let cf = self
+            .db
+            .cf_handle("edges")
             .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
 
         let prefix = format!("{}:", tenant);
@@ -581,7 +633,9 @@ impl PersistentStorage {
 
     /// List all tenants that have persisted data
     pub fn list_persisted_tenants(&self) -> StorageResult<Vec<String>> {
-        let cf = self.db.cf_handle("nodes")
+        let cf = self
+            .db
+            .cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
 
         let mut tenants = HashSet::new();
@@ -641,8 +695,8 @@ impl PersistentStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use crate::graph::Label;
+    use tempfile::TempDir;
 
     #[test]
     fn test_storage_open() {
@@ -666,7 +720,14 @@ mod tests {
 
         let retrieved_node = retrieved.unwrap();
         assert_eq!(retrieved_node.id, NodeId::new(1));
-        assert_eq!(retrieved_node.get_property("name").unwrap().as_string().unwrap(), "Alice");
+        assert_eq!(
+            retrieved_node
+                .get_property("name")
+                .unwrap()
+                .as_string()
+                .unwrap(),
+            "Alice"
+        );
     }
 
     #[test]

@@ -33,10 +33,7 @@ pub enum TenantError {
 
     /// Quota exceeded
     #[error("Quota exceeded for tenant {tenant}: {resource}")]
-    QuotaExceeded {
-        tenant: String,
-        resource: String,
-    },
+    QuotaExceeded { tenant: String, resource: String },
 
     /// Permission denied
     #[error("Permission denied for tenant {0}")]
@@ -65,12 +62,12 @@ pub struct ResourceQuotas {
 impl Default for ResourceQuotas {
     fn default() -> Self {
         Self {
-            max_nodes: Some(1_000_000),        // 1M nodes
-            max_edges: Some(10_000_000),       // 10M edges
-            max_memory_bytes: Some(1_073_741_824), // 1 GB
+            max_nodes: Some(1_000_000),              // 1M nodes
+            max_edges: Some(10_000_000),             // 10M edges
+            max_memory_bytes: Some(1_073_741_824),   // 1 GB
             max_storage_bytes: Some(10_737_418_240), // 10 GB
             max_connections: Some(100),
-            max_query_time_ms: Some(60_000),   // 60 seconds
+            max_query_time_ms: Some(60_000), // 60 seconds
         }
     }
 }
@@ -464,7 +461,12 @@ impl TenantManager {
     }
 
     /// Create a new tenant
-    pub fn create_tenant(&self, id: String, name: String, quotas: Option<ResourceQuotas>) -> TenantResult<()> {
+    pub fn create_tenant(
+        &self,
+        id: String,
+        name: String,
+        quotas: Option<ResourceQuotas>,
+    ) -> TenantResult<()> {
         let mut tenants = self.tenants.write().unwrap();
         let mut usage = self.usage.write().unwrap();
 
@@ -489,7 +491,9 @@ impl TenantManager {
     /// Delete a tenant
     pub fn delete_tenant(&self, id: &str) -> TenantResult<()> {
         if id == "default" {
-            return Err(TenantError::PermissionDenied("Cannot delete default tenant".to_string()));
+            return Err(TenantError::PermissionDenied(
+                "Cannot delete default tenant".to_string(),
+            ));
         }
 
         let mut tenants = self.tenants.write().unwrap();
@@ -510,7 +514,8 @@ impl TenantManager {
     /// Get tenant information
     pub fn get_tenant(&self, id: &str) -> TenantResult<Tenant> {
         let tenants = self.tenants.read().unwrap();
-        tenants.get(id)
+        tenants
+            .get(id)
             .cloned()
             .ok_or_else(|| TenantError::NotFound(id.to_string()))
     }
@@ -536,9 +541,7 @@ impl TenantManager {
     /// Check if a tenant exists and is enabled
     pub fn is_tenant_enabled(&self, id: &str) -> bool {
         let tenants = self.tenants.read().unwrap();
-        tenants.get(id)
-            .map(|t| t.enabled)
-            .unwrap_or(false)
+        tenants.get(id).map(|t| t.enabled).unwrap_or(false)
     }
 
     /// Check and enforce resource quota
@@ -548,24 +551,31 @@ impl TenantManager {
         let tenants = self.tenants.read().unwrap();
         let usage = self.usage.read().unwrap();
 
-        let tenant = tenants.get(tenant_id)
+        let tenant = tenants
+            .get(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
 
         if !tenant.enabled {
-            return Err(TenantError::PermissionDenied(format!("Tenant {} is disabled", tenant_id)));
+            return Err(TenantError::PermissionDenied(format!(
+                "Tenant {} is disabled",
+                tenant_id
+            )));
         }
 
-        let current_usage = usage.get(tenant_id)
+        let current_usage = usage
+            .get(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
 
-        current_usage.check_quota(&tenant.quotas, resource)
+        current_usage
+            .check_quota(&tenant.quotas, resource)
             .map_err(|e| match e {
-                TenantError::QuotaExceeded { tenant: _, resource } => {
-                    TenantError::QuotaExceeded {
-                        tenant: tenant_id.to_string(),
-                        resource,
-                    }
-                }
+                TenantError::QuotaExceeded {
+                    tenant: _,
+                    resource,
+                } => TenantError::QuotaExceeded {
+                    tenant: tenant_id.to_string(),
+                    resource,
+                },
                 e => e,
             })
     }
@@ -638,10 +648,16 @@ impl TenantManager {
     }
 
     /// Increment resource usage
-    pub fn increment_usage(&self, tenant_id: &str, resource: &str, amount: usize) -> TenantResult<()> {
+    pub fn increment_usage(
+        &self,
+        tenant_id: &str,
+        resource: &str,
+        amount: usize,
+    ) -> TenantResult<()> {
         let mut usage = self.usage.write().unwrap();
 
-        let tenant_usage = usage.get_mut(tenant_id)
+        let tenant_usage = usage
+            .get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
 
         match resource {
@@ -653,7 +669,10 @@ impl TenantManager {
             _ => {}
         }
 
-        debug!("Incremented {} for tenant {} by {}", resource, tenant_id, amount);
+        debug!(
+            "Incremented {} for tenant {} by {}",
+            resource, tenant_id, amount
+        );
 
         Ok(())
     }
@@ -697,22 +716,38 @@ impl TenantManager {
     }
 
     /// Decrement resource usage
-    pub fn decrement_usage(&self, tenant_id: &str, resource: &str, amount: usize) -> TenantResult<()> {
+    pub fn decrement_usage(
+        &self,
+        tenant_id: &str,
+        resource: &str,
+        amount: usize,
+    ) -> TenantResult<()> {
         let mut usage = self.usage.write().unwrap();
 
-        let tenant_usage = usage.get_mut(tenant_id)
+        let tenant_usage = usage
+            .get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
 
         match resource {
             "nodes" => tenant_usage.node_count = tenant_usage.node_count.saturating_sub(amount),
             "edges" => tenant_usage.edge_count = tenant_usage.edge_count.saturating_sub(amount),
-            "memory" => tenant_usage.memory_bytes = tenant_usage.memory_bytes.saturating_sub(amount),
-            "storage" => tenant_usage.storage_bytes = tenant_usage.storage_bytes.saturating_sub(amount),
-            "connections" => tenant_usage.active_connections = tenant_usage.active_connections.saturating_sub(amount),
+            "memory" => {
+                tenant_usage.memory_bytes = tenant_usage.memory_bytes.saturating_sub(amount)
+            }
+            "storage" => {
+                tenant_usage.storage_bytes = tenant_usage.storage_bytes.saturating_sub(amount)
+            }
+            "connections" => {
+                tenant_usage.active_connections =
+                    tenant_usage.active_connections.saturating_sub(amount)
+            }
             _ => {}
         }
 
-        debug!("Decremented {} for tenant {} by {}", resource, tenant_id, amount);
+        debug!(
+            "Decremented {} for tenant {} by {}",
+            resource, tenant_id, amount
+        );
 
         Ok(())
     }
@@ -750,7 +785,8 @@ impl TenantManager {
     /// Get resource usage for a tenant
     pub fn get_usage(&self, tenant_id: &str) -> TenantResult<ResourceUsage> {
         let usage = self.usage.read().unwrap();
-        usage.get(tenant_id)
+        usage
+            .get(tenant_id)
             .cloned()
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))
     }
@@ -759,7 +795,8 @@ impl TenantManager {
     pub fn update_quotas(&self, tenant_id: &str, quotas: ResourceQuotas) -> TenantResult<()> {
         let mut tenants = self.tenants.write().unwrap();
 
-        let tenant = tenants.get_mut(tenant_id)
+        let tenant = tenants
+            .get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
 
         tenant.quotas = quotas;
@@ -770,10 +807,15 @@ impl TenantManager {
     }
 
     /// Update Auto-Embed configuration for a tenant
-    pub fn update_embed_config(&self, tenant_id: &str, config: Option<AutoEmbedConfig>) -> TenantResult<()> {
+    pub fn update_embed_config(
+        &self,
+        tenant_id: &str,
+        config: Option<AutoEmbedConfig>,
+    ) -> TenantResult<()> {
         let mut tenants = self.tenants.write().unwrap();
 
-        let tenant = tenants.get_mut(tenant_id)
+        let tenant = tenants
+            .get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
 
         // Reject a config that cannot work, rather than accepting it and dropping every
@@ -790,10 +832,15 @@ impl TenantManager {
     }
 
     /// Update NLQ configuration for a tenant
-    pub fn update_nlq_config(&self, tenant_id: &str, config: Option<NLQConfig>) -> TenantResult<()> {
+    pub fn update_nlq_config(
+        &self,
+        tenant_id: &str,
+        config: Option<NLQConfig>,
+    ) -> TenantResult<()> {
         let mut tenants = self.tenants.write().unwrap();
 
-        let tenant = tenants.get_mut(tenant_id)
+        let tenant = tenants
+            .get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
 
         tenant.nlq_config = config;
@@ -804,10 +851,15 @@ impl TenantManager {
     }
 
     /// Update Agent configuration for a tenant
-    pub fn update_agent_config(&self, tenant_id: &str, config: Option<AgentConfig>) -> TenantResult<()> {
+    pub fn update_agent_config(
+        &self,
+        tenant_id: &str,
+        config: Option<AgentConfig>,
+    ) -> TenantResult<()> {
         let mut tenants = self.tenants.write().unwrap();
 
-        let tenant = tenants.get_mut(tenant_id)
+        let tenant = tenants
+            .get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
 
         tenant.agent_config = config;
@@ -820,12 +872,15 @@ impl TenantManager {
     /// Enable/disable a tenant
     pub fn set_enabled(&self, tenant_id: &str, enabled: bool) -> TenantResult<()> {
         if tenant_id == "default" {
-            return Err(TenantError::PermissionDenied("Cannot disable default tenant".to_string()));
+            return Err(TenantError::PermissionDenied(
+                "Cannot disable default tenant".to_string(),
+            ));
         }
 
         let mut tenants = self.tenants.write().unwrap();
 
-        let tenant = tenants.get_mut(tenant_id)
+        let tenant = tenants
+            .get_mut(tenant_id)
             .ok_or_else(|| TenantError::NotFound(tenant_id.to_string()))?;
 
         tenant.enabled = enabled;
@@ -855,7 +910,9 @@ mod tests {
     #[test]
     fn test_create_tenant() {
         let manager = TenantManager::new();
-        manager.create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None).unwrap();
+        manager
+            .create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None)
+            .unwrap();
 
         let tenant = manager.get_tenant("tenant1").unwrap();
         assert_eq!(tenant.id, "tenant1");
@@ -866,9 +923,15 @@ mod tests {
     #[test]
     fn test_duplicate_tenant() {
         let manager = TenantManager::new();
-        manager.create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None).unwrap();
+        manager
+            .create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None)
+            .unwrap();
 
-        let result = manager.create_tenant("tenant1".to_string(), "Tenant 1 Duplicate".to_string(), None);
+        let result = manager.create_tenant(
+            "tenant1".to_string(),
+            "Tenant 1 Duplicate".to_string(),
+            None,
+        );
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TenantError::AlreadyExists(_)));
     }
@@ -876,7 +939,9 @@ mod tests {
     #[test]
     fn test_delete_tenant() {
         let manager = TenantManager::new();
-        manager.create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None).unwrap();
+        manager
+            .create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None)
+            .unwrap();
 
         manager.delete_tenant("tenant1").unwrap();
         assert!(manager.get_tenant("tenant1").is_err());
@@ -915,7 +980,9 @@ mod tests {
         let mut quotas = ResourceQuotas::default();
         quotas.max_nodes = Some(10);
 
-        manager.create_tenant("tenant1".to_string(), "Tenant 1".to_string(), Some(quotas)).unwrap();
+        manager
+            .create_tenant("tenant1".to_string(), "Tenant 1".to_string(), Some(quotas))
+            .unwrap();
 
         // Should succeed for first 10 nodes
         for _ in 0..10 {
@@ -926,13 +993,18 @@ mod tests {
         // 11th should fail
         let result = manager.check_quota("tenant1", "nodes");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TenantError::QuotaExceeded { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            TenantError::QuotaExceeded { .. }
+        ));
     }
 
     #[test]
     fn test_usage_tracking() {
         let manager = TenantManager::new();
-        manager.create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None).unwrap();
+        manager
+            .create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None)
+            .unwrap();
 
         manager.increment_usage("tenant1", "nodes", 5).unwrap();
         manager.increment_usage("tenant1", "edges", 10).unwrap();
@@ -949,8 +1021,12 @@ mod tests {
     #[test]
     fn test_list_tenants() {
         let manager = TenantManager::new();
-        manager.create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None).unwrap();
-        manager.create_tenant("tenant2".to_string(), "Tenant 2".to_string(), None).unwrap();
+        manager
+            .create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None)
+            .unwrap();
+        manager
+            .create_tenant("tenant2".to_string(), "Tenant 2".to_string(), None)
+            .unwrap();
 
         let tenants = manager.list_tenants();
         assert_eq!(tenants.len(), 3); // default + 2 new
@@ -959,20 +1035,27 @@ mod tests {
     #[test]
     fn test_disable_tenant() {
         let manager = TenantManager::new();
-        manager.create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None).unwrap();
+        manager
+            .create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None)
+            .unwrap();
 
         manager.set_enabled("tenant1", false).unwrap();
         assert!(!manager.is_tenant_enabled("tenant1"));
 
         let result = manager.check_quota("tenant1", "nodes");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TenantError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            TenantError::PermissionDenied(_)
+        ));
     }
 
     #[test]
     fn test_update_embed_config() {
         let manager = TenantManager::new();
-        manager.create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None).unwrap();
+        manager
+            .create_tenant("tenant1".to_string(), "Tenant 1".to_string(), None)
+            .unwrap();
 
         let embed_config = AutoEmbedConfig {
             provider: LLMProvider::OpenAI,
@@ -982,11 +1065,16 @@ mod tests {
             chunk_size: 512,
             chunk_overlap: 64,
             vector_dimension: 1536,
-            embedding_policies: HashMap::from([("Document".to_string(), vec!["content".to_string()])]),
+            embedding_policies: HashMap::from([(
+                "Document".to_string(),
+                vec!["content".to_string()],
+            )]),
             embedding_property: "embedding".to_string(),
         };
 
-        manager.update_embed_config("tenant1", Some(embed_config)).unwrap();
+        manager
+            .update_embed_config("tenant1", Some(embed_config))
+            .unwrap();
 
         let tenant = manager.get_tenant("tenant1").unwrap();
         assert!(tenant.embed_config.is_some());
@@ -1000,7 +1088,9 @@ mod tests {
     #[test]
     fn test_update_nlq_config() {
         let manager = TenantManager::new();
-        manager.create_tenant("tenant1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("tenant1".to_string(), "T1".to_string(), None)
+            .unwrap();
 
         let nlq_config = NLQConfig {
             enabled: true,
@@ -1011,7 +1101,9 @@ mod tests {
             system_prompt: Some("You are a Cypher expert.".to_string()),
         };
 
-        manager.update_nlq_config("tenant1", Some(nlq_config)).unwrap();
+        manager
+            .update_nlq_config("tenant1", Some(nlq_config))
+            .unwrap();
 
         let tenant = manager.get_tenant("tenant1").unwrap();
         assert!(tenant.nlq_config.is_some());
@@ -1023,7 +1115,9 @@ mod tests {
     #[test]
     fn test_update_agent_config() {
         let manager = TenantManager::new();
-        manager.create_tenant("tenant1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("tenant1".to_string(), "T1".to_string(), None)
+            .unwrap();
 
         let agent_config = AgentConfig {
             enabled: true,
@@ -1036,7 +1130,9 @@ mod tests {
             policies: HashMap::new(),
         };
 
-        manager.update_agent_config("tenant1", Some(agent_config)).unwrap();
+        manager
+            .update_agent_config("tenant1", Some(agent_config))
+            .unwrap();
 
         let tenant = manager.get_tenant("tenant1").unwrap();
         assert!(tenant.agent_config.is_some());
@@ -1138,7 +1234,10 @@ mod tests {
         let manager = TenantManager::new();
         let result = manager.set_enabled("default", false);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TenantError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            TenantError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -1152,7 +1251,9 @@ mod tests {
     #[test]
     fn test_set_enabled_reenable() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
 
         manager.set_enabled("t1", false).unwrap();
         assert!(!manager.is_tenant_enabled("t1"));
@@ -1164,7 +1265,9 @@ mod tests {
     #[test]
     fn test_update_quotas() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
 
         let new_quotas = ResourceQuotas {
             max_nodes: Some(500),
@@ -1193,12 +1296,17 @@ mod tests {
     #[test]
     fn test_check_quota_disabled_tenant() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
         manager.set_enabled("t1", false).unwrap();
 
         let result = manager.check_quota("t1", "nodes");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TenantError::PermissionDenied(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            TenantError::PermissionDenied(_)
+        ));
     }
 
     #[test]
@@ -1219,7 +1327,9 @@ mod tests {
             max_connections: None,
             max_query_time_ms: None,
         };
-        manager.create_tenant("t1".to_string(), "T1".to_string(), Some(quotas)).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), Some(quotas))
+            .unwrap();
 
         for _ in 0..5 {
             manager.check_quota("t1", "edges").unwrap();
@@ -1258,7 +1368,9 @@ mod tests {
             max_connections: None,
             max_query_time_ms: None,
         };
-        manager.create_tenant("t1".to_string(), "T1".to_string(), Some(quotas)).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), Some(quotas))
+            .unwrap();
 
         manager.increment_usage("t1", "memory", 1024).unwrap();
         let err = manager
@@ -1281,7 +1393,9 @@ mod tests {
             max_connections: Some(2),
             max_query_time_ms: None,
         };
-        manager.create_tenant("t1".to_string(), "T1".to_string(), Some(quotas)).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), Some(quotas))
+            .unwrap();
 
         manager.increment_usage("t1", "connections", 1).unwrap();
         manager
@@ -1318,7 +1432,13 @@ mod tests {
     #[test]
     fn test_quota_unlimited_allows_everything() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), Some(ResourceQuotas::unlimited())).unwrap();
+        manager
+            .create_tenant(
+                "t1".to_string(),
+                "T1".to_string(),
+                Some(ResourceQuotas::unlimited()),
+            )
+            .unwrap();
 
         manager.increment_usage("t1", "nodes", 999_999).unwrap();
         assert!(manager.check_quota("t1", "nodes").is_ok());
@@ -1330,16 +1450,24 @@ mod tests {
     #[test]
     fn test_increment_usage_unknown_resource() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
         // Unknown resource should not panic, just be a no-op
-        manager.increment_usage("t1", "unknown_resource", 100).unwrap();
+        manager
+            .increment_usage("t1", "unknown_resource", 100)
+            .unwrap();
     }
 
     #[test]
     fn test_decrement_usage_unknown_resource() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
-        manager.decrement_usage("t1", "unknown_resource", 100).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
+        manager
+            .decrement_usage("t1", "unknown_resource", 100)
+            .unwrap();
     }
 
     #[test]
@@ -1359,7 +1487,9 @@ mod tests {
     #[test]
     fn test_decrement_usage_saturating() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
 
         manager.increment_usage("t1", "nodes", 3).unwrap();
         // Decrement more than the current count: should saturate to 0
@@ -1372,7 +1502,9 @@ mod tests {
     #[test]
     fn test_decrement_all_resource_types() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
 
         manager.increment_usage("t1", "nodes", 10).unwrap();
         manager.increment_usage("t1", "edges", 20).unwrap();
@@ -1440,7 +1572,9 @@ mod tests {
     #[test]
     fn test_clear_embed_config() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
 
         let config = AutoEmbedConfig {
             provider: LLMProvider::OpenAI,
@@ -1464,7 +1598,9 @@ mod tests {
     #[test]
     fn test_clear_nlq_config() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
 
         let config = NLQConfig {
             enabled: true,
@@ -1484,7 +1620,9 @@ mod tests {
     #[test]
     fn test_clear_agent_config() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
 
         let config = AgentConfig {
             enabled: true,
@@ -1571,9 +1709,10 @@ mod tests {
             chunk_size: 512,
             chunk_overlap: 64,
             vector_dimension: 1536,
-            embedding_policies: HashMap::from([
-                ("Document".to_string(), vec!["content".to_string(), "title".to_string()]),
-            ]),
+            embedding_policies: HashMap::from([(
+                "Document".to_string(),
+                vec!["content".to_string(), "title".to_string()],
+            )]),
             embedding_property: "embedding".to_string(),
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -1592,17 +1731,13 @@ mod tests {
             api_key: Some("sk-ant-test".to_string()),
             api_base_url: None,
             system_prompt: Some("You are an agent.".to_string()),
-            tools: vec![
-                ToolConfig {
-                    name: "search".to_string(),
-                    description: "Search the graph".to_string(),
-                    parameters: serde_json::json!({"query": "string"}),
-                    enabled: true,
-                },
-            ],
-            policies: HashMap::from([
-                ("Person".to_string(), "Enrich person data".to_string()),
-            ]),
+            tools: vec![ToolConfig {
+                name: "search".to_string(),
+                description: "Search the graph".to_string(),
+                parameters: serde_json::json!({"query": "string"}),
+                enabled: true,
+            }],
+            policies: HashMap::from([("Person".to_string(), "Enrich person data".to_string())]),
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: AgentConfig = serde_json::from_str(&json).unwrap();
@@ -1648,7 +1783,9 @@ mod tests {
     #[test]
     fn test_increment_storage_usage() {
         let manager = TenantManager::new();
-        manager.create_tenant("t1".to_string(), "T1".to_string(), None).unwrap();
+        manager
+            .create_tenant("t1".to_string(), "T1".to_string(), None)
+            .unwrap();
 
         manager.increment_usage("t1", "storage", 5000).unwrap();
         let usage = manager.get_usage("t1").unwrap();
@@ -1709,7 +1846,10 @@ mod tests {
     #[test]
     fn test_auto_embed_config_construction() {
         let mut policies = HashMap::new();
-        policies.insert("Article".to_string(), vec!["title".to_string(), "body".to_string()]);
+        policies.insert(
+            "Article".to_string(),
+            vec!["title".to_string(), "body".to_string()],
+        );
         policies.insert("Comment".to_string(), vec!["text".to_string()]);
 
         let config = AutoEmbedConfig {
@@ -1767,7 +1907,10 @@ mod tests {
         };
 
         let mut policies = HashMap::new();
-        policies.insert("Person".to_string(), "Enrich person with external data".to_string());
+        policies.insert(
+            "Person".to_string(),
+            "Enrich person with external data".to_string(),
+        );
         policies.insert("Company".to_string(), "Validate company info".to_string());
 
         let config = AgentConfig {
@@ -1800,7 +1943,9 @@ mod tests {
             max_query_time_ms: Some(10_000),
         };
 
-        manager.create_tenant("custom_t".to_string(), "Custom".to_string(), Some(quotas)).unwrap();
+        manager
+            .create_tenant("custom_t".to_string(), "Custom".to_string(), Some(quotas))
+            .unwrap();
 
         let tenant = manager.get_tenant("custom_t").unwrap();
         assert_eq!(tenant.quotas.max_nodes, Some(100));
@@ -1817,7 +1962,9 @@ mod tests {
         manager.increment_usage("default", "edges", 20).unwrap();
         manager.increment_usage("default", "memory", 1000).unwrap();
         manager.increment_usage("default", "storage", 2000).unwrap();
-        manager.increment_usage("default", "connections", 5).unwrap();
+        manager
+            .increment_usage("default", "connections", 5)
+            .unwrap();
 
         let usage = manager.get_usage("default").unwrap();
         assert_eq!(usage.node_count, 10);
@@ -1831,7 +1978,9 @@ mod tests {
         manager.decrement_usage("default", "edges", 5).unwrap();
         manager.decrement_usage("default", "memory", 200).unwrap();
         manager.decrement_usage("default", "storage", 500).unwrap();
-        manager.decrement_usage("default", "connections", 2).unwrap();
+        manager
+            .decrement_usage("default", "connections", 2)
+            .unwrap();
 
         let usage = manager.get_usage("default").unwrap();
         assert_eq!(usage.node_count, 7);

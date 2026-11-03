@@ -44,8 +44,15 @@ fn rows(store: &GraphStore, cypher: &str) -> usize {
 #[test]
 fn limit_takes_an_expression() {
     let store = ten_nodes();
-    assert_eq!(rows(&store, "MATCH (n) RETURN n LIMIT 2"), 2, "the literal still works");
-    assert_eq!(rows(&store, "MATCH (n) RETURN n LIMIT toInteger(ceil(1.7))"), 2);
+    assert_eq!(
+        rows(&store, "MATCH (n) RETURN n LIMIT 2"),
+        2,
+        "the literal still works"
+    );
+    assert_eq!(
+        rows(&store, "MATCH (n) RETURN n LIMIT toInteger(ceil(1.7))"),
+        2
+    );
     assert_eq!(rows(&store, "MATCH (n) RETURN n LIMIT 1 + 1"), 2);
     assert_eq!(rows(&store, "MATCH (n) RETURN n LIMIT toInteger('3')"), 3);
 }
@@ -54,9 +61,15 @@ fn limit_takes_an_expression() {
 fn skip_takes_an_expression() {
     let store = ten_nodes();
     assert_eq!(rows(&store, "MATCH (n) RETURN n SKIP 8"), 2);
-    assert_eq!(rows(&store, "MATCH (n) RETURN n SKIP toInteger(ceil(7.2))"), 2);
+    assert_eq!(
+        rows(&store, "MATCH (n) RETURN n SKIP toInteger(ceil(7.2))"),
+        2
+    );
     assert_eq!(rows(&store, "MATCH (n) WITH n SKIP 4 RETURN n"), 6);
-    assert_eq!(rows(&store, "MATCH (n) WITH n SKIP toInteger(2 * 2) RETURN n"), 6);
+    assert_eq!(
+        rows(&store, "MATCH (n) WITH n SKIP toInteger(2 * 2) RETURN n"),
+        6
+    );
 }
 
 /// Evaluated once, not per row — so a random bound still trims to a single
@@ -65,8 +78,14 @@ fn skip_takes_an_expression() {
 fn a_random_bound_is_evaluated_once() {
     let store = ten_nodes();
     for _ in 0..8 {
-        let n = rows(&store, "MATCH (n) WITH n SKIP toInteger(rand() * 9) RETURN n");
-        assert!((1..=10).contains(&n), "got {n} rows, which is not a single consistent trim");
+        let n = rows(
+            &store,
+            "MATCH (n) WITH n SKIP toInteger(rand() * 9) RETURN n",
+        );
+        assert!(
+            (1..=10).contains(&n),
+            "got {n} rows, which is not a single consistent trim"
+        );
     }
 }
 

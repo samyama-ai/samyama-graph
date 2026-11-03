@@ -106,10 +106,7 @@ pub fn fast_non_dominated_sort(population: &mut [MultiObjectiveIndividual]) {
 
 /// Compute crowding distance for the subset `indices` (one rank).
 /// Mutates `population[*].crowding_distance` in place.
-pub fn crowding_distance(
-    population: &mut [MultiObjectiveIndividual],
-    indices: &[usize],
-) {
+pub fn crowding_distance(population: &mut [MultiObjectiveIndividual], indices: &[usize]) {
     if indices.is_empty() {
         return;
     }

@@ -10,14 +10,14 @@ use std::collections::HashMap;
 /// Header line (line 0) of a .sgsnap file
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotHeader {
-    pub format: String,           // Always "sgsnap"
-    pub version: u32,             // Format version: 1 (legacy), 2 (with CSR + ColumnStore)
-    pub tenant: String,           // Tenant ID that was exported
+    pub format: String, // Always "sgsnap"
+    pub version: u32,   // Format version: 1 (legacy), 2 (with CSR + ColumnStore)
+    pub tenant: String, // Tenant ID that was exported
     pub node_count: u64,
     pub edge_count: u64,
     pub labels: Vec<String>,
     pub edge_types: Vec<String>,
-    pub created_at: String,       // ISO 8601
+    pub created_at: String, // ISO 8601
     pub samyama_version: String,
     /// What this export did not carry (INT-06).
     ///
@@ -107,8 +107,8 @@ pub const SNAPSHOT_VERSION: u32 = 2;
 /// A node record in the snapshot
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotNode {
-    pub t: String,                // Always "n"
-    pub id: u64,                  // Original NodeId
+    pub t: String, // Always "n"
+    pub id: u64,   // Original NodeId
     pub labels: Vec<String>,
     pub props: HashMap<String, serde_json::Value>,
     /// Creation timestamp, milliseconds since the epoch (#1124).
@@ -136,10 +136,10 @@ fn is_zero(v: &i64) -> bool {
 /// An edge record in the snapshot
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotEdge {
-    pub t: String,                // Always "e"
-    pub id: u64,                  // Original EdgeId
-    pub src: u64,                 // Source NodeId
-    pub tgt: u64,                 // Target NodeId
+    pub t: String, // Always "e"
+    pub id: u64,   // Original EdgeId
+    pub src: u64,  // Source NodeId
+    pub tgt: u64,  // Target NodeId
     #[serde(rename = "type")]
     pub edge_type: String,
     pub props: HashMap<String, serde_json::Value>,
@@ -192,7 +192,7 @@ pub struct Dropped {
 /// on an older build — which is why the format version does not move.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotHierarchyIndex {
-    pub t: String,                        // Always "h"
+    pub t: String, // Always "h"
     pub name: String,
     pub edge_types: Vec<String>,
     #[serde(default)]

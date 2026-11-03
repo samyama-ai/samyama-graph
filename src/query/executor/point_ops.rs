@@ -15,31 +15,53 @@ pub struct PointIndexDdlOperator {
 
 impl PointIndexDdlOperator {
     pub fn new(ddl: crate::query::ast::PointIndexDdl) -> Self {
-        Self { ddl, executed: false }
+        Self {
+            ddl,
+            executed: false,
+        }
     }
 }
 
 impl PhysicalOperator for PointIndexDdlOperator {
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
-        Err(ExecutionError::RuntimeError("point index DDL is a write; it needs next_mut".to_string()))
+        Err(ExecutionError::RuntimeError(
+            "point index DDL is a write; it needs next_mut".to_string(),
+        ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        _tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         use crate::query::ast::PointIndexDdl;
         if self.executed {
             return Ok(None);
         }
         self.executed = true;
         match &self.ddl {
-            PointIndexDdl::Create { name, label, property } => {
+            PointIndexDdl::Create {
+                name,
+                label,
+                property,
+            } => {
                 store.create_point_index(name, label.as_str(), property);
             }
             PointIndexDdl::Drop { name } => {
                 if !store.drop_point_index(name) {
-                    let known: Vec<String> = store.point_index.listing().into_iter().map(|(n, ..)| n).collect();
+                    let known: Vec<String> = store
+                        .point_index
+                        .listing()
+                        .into_iter()
+                        .map(|(n, ..)| n)
+                        .collect();
                     return Err(ExecutionError::RuntimeError(format!(
                         "no point index named '{name}'. Known point indexes: {}",
-                        if known.is_empty() { "none".to_string() } else { known.join(", ") }
+                        if known.is_empty() {
+                            "none".to_string()
+                        } else {
+                            known.join(", ")
+                        }
                     )));
                 }
             }
@@ -58,12 +80,21 @@ impl PhysicalOperator for PointIndexDdlOperator {
     fn describe(&self) -> OperatorDescription {
         use crate::query::ast::PointIndexDdl;
         let (name, details) = match &self.ddl {
-            PointIndexDdl::Create { name, label, property } => {
-                ("CreatePointIndex", format!("{name} ON :{}({property})", label.as_str()))
-            }
+            PointIndexDdl::Create {
+                name,
+                label,
+                property,
+            } => (
+                "CreatePointIndex",
+                format!("{name} ON :{}({property})", label.as_str()),
+            ),
             PointIndexDdl::Drop { name } => ("DropPointIndex", name.clone()),
         };
-        OperatorDescription { name: name.to_string(), details, children: Vec::new() }
+        OperatorDescription {
+            name: name.to_string(),
+            details,
+            children: Vec::new(),
+        }
     }
 }
 
@@ -97,13 +128,17 @@ pub fn spatial_region(var: &str, pred: &Expression, store: &GraphStore) -> Optio
     };
     let property_of_var = |e: &Expression| -> Option<String> {
         match e {
-            Expression::Property { variable, property } if variable == var => Some(property.clone()),
+            Expression::Property { variable, property } if variable == var => {
+                Some(property.clone())
+            }
             _ => None,
         }
     };
     match pred {
         // point.withinBBox(n.p, lo, hi)
-        Expression::Function { name, args, .. } if name.eq_ignore_ascii_case("point.withinBBox") && args.len() == 3 => {
+        Expression::Function { name, args, .. }
+            if name.eq_ignore_ascii_case("point.withinBBox") && args.len() == 3 =>
+        {
             let prop = property_of_var(&args[0])?;
             let (lx, ly, lg) = constant_point(&args[1])?;
             let (hx, hy, hg) = constant_point(&args[2])?;
@@ -112,7 +147,15 @@ pub fn spatial_region(var: &str, pred: &Expression, store: &GraphStore) -> Optio
             if lg != hg || lx > hx || ly > hy {
                 return None;
             }
-            Some((prop, Rect { min_x: lx, min_y: ly, max_x: hx, max_y: hy }))
+            Some((
+                prop,
+                Rect {
+                    min_x: lx,
+                    min_y: ly,
+                    max_x: hx,
+                    max_y: hy,
+                },
+            ))
         }
         // point.distance(n.p, c) < r, <= r, and the mirrored r > / >= distance.
         Expression::Binary { left, op, right } => {
@@ -121,8 +164,13 @@ pub fn spatial_region(var: &str, pred: &Expression, store: &GraphStore) -> Optio
                 BinaryOp::Gt | BinaryOp::Ge => (right.as_ref(), left.as_ref()),
                 _ => return None,
             };
-            let Expression::Function { name, args, .. } = dist else { return None };
-            if !(name.eq_ignore_ascii_case("point.distance") || name.eq_ignore_ascii_case("distance")) || args.len() != 2 {
+            let Expression::Function { name, args, .. } = dist else {
+                return None;
+            };
+            if !(name.eq_ignore_ascii_case("point.distance")
+                || name.eq_ignore_ascii_case("distance"))
+                || args.len() != 2
+            {
                 return None;
             }
             let (prop, centre) = match (property_of_var(&args[0]), property_of_var(&args[1])) {
@@ -139,7 +187,12 @@ pub fn spatial_region(var: &str, pred: &Expression, store: &GraphStore) -> Optio
             let rect = if geographic {
                 geographic_box(cx, cy, r)
             } else {
-                Rect { min_x: cx - r, min_y: cy - r, max_x: cx + r, max_y: cy + r }
+                Rect {
+                    min_x: cx - r,
+                    min_y: cy - r,
+                    max_x: cx + r,
+                    max_y: cy + r,
+                }
             };
             Some((prop, rect))
         }
@@ -159,7 +212,13 @@ pub struct PointIndexScanOperator {
 
 impl PointIndexScanOperator {
     pub fn new(variable: String, label: Label, property: String, region: Rect) -> Self {
-        Self { variable, label, property, region, ids: None }
+        Self {
+            variable,
+            label,
+            property,
+            region,
+            ids: None,
+        }
     }
 }
 
@@ -168,7 +227,9 @@ impl PhysicalOperator for PointIndexScanOperator {
         if self.ids.is_none() {
             let mut ids = store
                 .point_index
-                .with(self.label.as_str(), &self.property, |i| i.within(&self.region))
+                .with(self.label.as_str(), &self.property, |i| {
+                    i.within(&self.region)
+                })
                 .unwrap_or_default();
             // Ascending, like every other scan: downstream code that assumes a
             // scan's order (#1364) should not learn otherwise from this one.
@@ -176,7 +237,10 @@ impl PhysicalOperator for PointIndexScanOperator {
             self.ids = Some(ids.into_iter());
         }
         for id in self.ids.as_mut().unwrap().by_ref() {
-            if store.get_node(id).is_some_and(|n| n.labels.contains(&self.label)) {
+            if store
+                .get_node(id)
+                .is_some_and(|n| n.labels.contains(&self.label))
+            {
                 let mut r = Record::new();
                 r.bind(self.variable.clone(), Value::NodeRef(id));
                 return Ok(Some(r));
@@ -204,7 +268,10 @@ impl PhysicalOperator for PointIndexScanOperator {
                 self.variable,
                 self.label.as_str(),
                 self.property,
-                r.min_x, r.min_y, r.max_x, r.max_y
+                r.min_x,
+                r.min_y,
+                r.max_x,
+                r.max_y
             ),
             children: Vec::new(),
         }
@@ -227,8 +294,23 @@ pub struct PointNearestOperator {
 }
 
 impl PointNearestOperator {
-    pub fn new(label: String, property: String, centre: PropertyValue, k: usize, node_var: String, distance_var: Option<String>) -> Self {
-        Self { label, property, centre, k, node_var, distance_var, results: None }
+    pub fn new(
+        label: String,
+        property: String,
+        centre: PropertyValue,
+        k: usize,
+        node_var: String,
+        distance_var: Option<String>,
+    ) -> Self {
+        Self {
+            label,
+            property,
+            centre,
+            k,
+            node_var,
+            distance_var,
+            results: None,
+        }
     }
 }
 
@@ -236,7 +318,9 @@ impl PhysicalOperator for PointNearestOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.results.is_none() {
             let (cx, cy, geographic) = point_coords(&self.centre).ok_or_else(|| {
-                ExecutionError::TypeError("db.index.point.nearest: the third argument must be a point".to_string())
+                ExecutionError::TypeError(
+                    "db.index.point.nearest: the third argument must be a point".to_string(),
+                )
             })?;
             let ranked = store
                 .point_index

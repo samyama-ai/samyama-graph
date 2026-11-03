@@ -35,16 +35,25 @@ fn rows(cypher: &str) -> usize {
 #[test]
 fn an_unwind_after_a_with_sees_the_projection() {
     // 2 leading rows x 2 unwound = 4.
-    assert_eq!(rows("UNWIND [1,2] AS a WITH [3,4] AS b UNWIND b AS c RETURN c"), 4);
+    assert_eq!(
+        rows("UNWIND [1,2] AS a WITH [3,4] AS b UNWIND b AS c RETURN c"),
+        4
+    );
     // The unwind's own variable was also missing, so this is the sharper case.
-    assert_eq!(rows("UNWIND [1,2] AS a WITH a AS b UNWIND [5] AS c RETURN c"), 2);
+    assert_eq!(
+        rows("UNWIND [1,2] AS a WITH a AS b UNWIND [5] AS c RETURN c"),
+        2
+    );
 }
 
 /// An aggregating `WITH` collapses first, and the unwind expands what survives.
 #[test]
 fn an_unwind_after_an_aggregating_with_expands_the_aggregate() {
     // collect() gives one row holding [1,2]; unwinding it gives two.
-    assert_eq!(rows("UNWIND [1,2] AS a WITH collect(a) AS xs UNWIND xs AS y RETURN y"), 2);
+    assert_eq!(
+        rows("UNWIND [1,2] AS a WITH collect(a) AS xs UNWIND xs AS y RETURN y"),
+        2
+    );
     assert_eq!(
         rows("UNWIND [1,2,3] AS a WITH collect(a) AS xs UNWIND xs AS y RETURN y"),
         3
@@ -102,5 +111,8 @@ fn the_shapes_that_worked_before_are_undisturbed() {
 /// error — the same as anywhere else.
 #[test]
 fn an_empty_list_after_a_with_yields_nothing() {
-    assert_eq!(rows("UNWIND [1,2] AS a WITH [] AS b UNWIND b AS c RETURN c"), 0);
+    assert_eq!(
+        rows("UNWIND [1,2] AS a WITH [] AS b UNWIND b AS c RETURN c"),
+        0
+    );
 }

@@ -25,8 +25,8 @@
 //! `TemporalPath` is in hand rather than rendered into a column.
 
 use samyama::graph::GraphStore;
-use samyama::query::executor::record::Value;
 use samyama::graph::PropertyValue;
+use samyama::query::executor::record::Value;
 use samyama::query::QueryEngine;
 
 /// A -> B -> D and A -> C -> D, where the two routes arrive at different
@@ -165,7 +165,10 @@ fn every_reachability_path_starts_at_the_source_and_ends_at_its_row() {
     assert!(rows.len() >= 3, "A reaches B, C and D: {rows:?}");
     for row in &rows {
         let ids = path_ids(column(row, "path"));
-        assert!(ids.len() >= 2, "a reached node needs at least one hop: {row:?}");
+        assert!(
+            ids.len() >= 2,
+            "a reached node needs at least one hop: {row:?}"
+        );
         assert_eq!(ids[0], a, "the walk must start at the source: {row:?}");
         assert_eq!(
             node_id(column(row, "node")),
@@ -283,7 +286,11 @@ fn the_times_come_back_beside_the_path() {
         .find(|r| node_id(column(r, "node")) == d)
         .expect("D");
     let times = path_ids(column(to_d, "times"));
-    assert_eq!(times, vec![10, 30], "the walk A -> B -> D fires at 10 then 30");
+    assert_eq!(
+        times,
+        vec![10, 30],
+        "the walk A -> B -> D fires at 10 then 30"
+    );
     assert_eq!(
         times.len() + 1,
         path_ids(column(to_d, "path")).len(),

@@ -61,10 +61,7 @@ pub fn is_degraded() -> bool {
 
 /// What went wrong the first time, if anything has.
 pub fn reason() -> Option<String> {
-    REASON
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+    REASON.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// The error a refused write gets.
@@ -111,7 +108,10 @@ mod tests {
         mark_degraded("No space left on device");
         let r = refusal();
         assert!(r.contains("No space left on device"), "{r}");
-        assert!(r.contains("restart"), "the operator needs to be told what to do: {r}");
+        assert!(
+            r.contains("restart"),
+            "the operator needs to be told what to do: {r}"
+        );
         assert!(r.contains("Reads still work"), "{r}");
         reset_for_test();
     }

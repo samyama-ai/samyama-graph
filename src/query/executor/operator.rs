@@ -64,19 +64,25 @@
 //! - `HashMap` — build phase of hash joins in `JoinOperator`
 //! - `BTreeSet` — sorted unique results where ordering matters
 
-use std::sync::Arc;
-use crate::query::executor::record::PropertyCursor;
-use crate::graph::{GraphStore, Label, NodeId, EdgeType};
-use crate::query::ast::{Expression, BinaryOp, UnaryOp, Direction, Pattern};
-use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value, RecordBatch};
 use crate::graph::PropertyValue;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use crate::graph::{EdgeType, GraphStore, Label, NodeId};
+use crate::query::ast::{BinaryOp, Direction, Expression, Pattern, UnaryOp};
+use crate::query::executor::record::PropertyCursor;
+use crate::query::executor::{ExecutionError, ExecutionResult, Record, RecordBatch, Value};
+use ndarray::Array1;
 use rayon::prelude::*;
+use samyama_optimization::algorithms::{
+    ABCSolver, BMRSolver, BMWRSolver, BWRSolver, BatSolver, CuckooSolver, DESolver, EHRJayaSolver,
+    FPASolver, FireflySolver, GASolver, GOTLBOSolver, GSASolver, GWOSolver, HSSolver, ITLBOSolver,
+    JayaSolver, LSHADESolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, MOTLBOSolver,
+    NSGA2Solver, PSOSolver, QOJayaSolver, QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver,
+    SAPHRSolver, SASolver, TLBOSolver,
+};
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
-use ndarray::Array1;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 /// A store error on a write path, classified for the caller (#1483).
 ///
@@ -155,7 +161,6 @@ fn node_id_of(v: &Value) -> Option<NodeId> {
     }
 }
 
-
 /// Cypher equality with three-valued logic, for values that may contain null.
 ///
 /// `None` means *unknown*. The rule is not "any null makes it null": a
@@ -191,7 +196,11 @@ fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
                     Some(true) => {}
                 }
             }
-            if unknown { None } else { Some(true) }
+            if unknown {
+                None
+            } else {
+                Some(true)
+            }
         }
         (Map(x), Map(y)) => {
             // Differing key sets are definitive, for the same reason.
@@ -206,7 +215,11 @@ fn cypher_equals(a: &PropertyValue, b: &PropertyValue) -> Option<bool> {
                     Some(true) => {}
                 }
             }
-            if unknown { None } else { Some(true) }
+            if unknown {
+                None
+            } else {
+                Some(true)
+            }
         }
         // **A number equals a number across the two representations.**
         // `1 = 1.0` is true in Cypher, and `PropertyValue`'s derived `PartialEq`
@@ -375,7 +388,8 @@ mod join_key_tests {
                     _ => false,
                 };
                 assert_eq!(
-                    same_key, equal,
+                    same_key,
+                    equal,
                     "key agreement broke for {a:?} vs {b:?}: \
                      cypher_equals={:?} keys={ka:?} / {kb:?}",
                     cypher_equals(a, b)
@@ -397,7 +411,11 @@ mod join_key_tests {
     #[test]
     fn nothing_unknown_carries_a_key() {
         assert_eq!(join_key_of(&P::Null), None, "null must not pair with null");
-        assert_eq!(join_key_of(&P::Float(f64::NAN)), None, "NaN cannot equal itself");
+        assert_eq!(
+            join_key_of(&P::Float(f64::NAN)),
+            None,
+            "NaN cannot equal itself"
+        );
         assert_eq!(
             join_key_of(&P::Array(vec![P::Integer(1), P::Null])),
             None,
@@ -405,7 +423,11 @@ mod join_key_tests {
         );
         let mut m = std::collections::HashMap::new();
         m.insert("k".to_string(), P::Null);
-        assert_eq!(join_key_of(&P::Map(m)), None, "a null inside a map likewise");
+        assert_eq!(
+            join_key_of(&P::Map(m)),
+            None,
+            "a null inside a map likewise"
+        );
     }
 
     /// Two maps written in different orders are one key.
@@ -533,7 +555,6 @@ pub(crate) mod statement_clock {
     }
 }
 
-
 /// Build a `Duration` with `nanos` carried into `seconds`.
 ///
 /// `nanos` is a sub-second remainder in `0..1_000_000_000`, and every producer
@@ -569,7 +590,6 @@ fn normalized_duration(months: i64, days: i64, seconds: i128, nanos: i128) -> Pr
         nanos: (total % 1_000_000_000) as i32,
     }
 }
-
 
 /// Whole-graph shape metrics. Separate from `Centrality` because two of them
 /// return a single scalar rather than a score per node.
@@ -639,19 +659,35 @@ pub(crate) fn java_double_string(f: f64) -> String {
         return "NaN".to_string();
     }
     if f.is_infinite() {
-        return if f > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+        return if f > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        };
     }
     if f == 0.0 {
-        return if f.is_sign_negative() { "-0.0".to_string() } else { "0.0".to_string() };
+        return if f.is_sign_negative() {
+            "-0.0".to_string()
+        } else {
+            "0.0".to_string()
+        };
     }
     let a = f.abs();
     if (1e-3..1e7).contains(&a) {
         let s = f.to_string();
-        if s.contains('.') { s } else { format!("{s}.0") }
+        if s.contains('.') {
+            s
+        } else {
+            format!("{s}.0")
+        }
     } else {
         let s = format!("{f:e}");
         let (mantissa, exp) = s.split_once('e').expect("`{:e}` always has an exponent");
-        let mantissa = if mantissa.contains('.') { mantissa.to_string() } else { format!("{mantissa}.0") };
+        let mantissa = if mantissa.contains('.') {
+            mantissa.to_string()
+        } else {
+            format!("{mantissa}.0")
+        };
         format!("{mantissa}E{exp}")
     }
 }
@@ -680,27 +716,55 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             // direction-insensitive rule would be inventing something it does
             // not test.
             (
-                Value::Path { nodes: n1, edges: e1 },
-                Value::Path { nodes: n2, edges: e2 },
+                Value::Path {
+                    nodes: n1,
+                    edges: e1,
+                },
+                Value::Path {
+                    nodes: n2,
+                    edges: e2,
+                },
             ) => Some(n1 == n2 && e1 == e2),
             // An entity is never equal to a non-entity, and that is `false`
             // rather than an error or a null: the two are comparable, they
             // simply differ.
-            (Value::NodeRef(_) | Value::Node(..) | Value::EdgeRef(..) | Value::Edge(..)
-                | Value::Path { .. }, other)
-            | (other, Value::NodeRef(_) | Value::Node(..) | Value::EdgeRef(..) | Value::Edge(..)
-                | Value::Path { .. })
-                if !matches!(other, Value::Property(PropertyValue::Null) | Value::Null) =>
-            {
+            (
+                Value::NodeRef(_)
+                | Value::Node(..)
+                | Value::EdgeRef(..)
+                | Value::Edge(..)
+                | Value::Path { .. },
+                other,
+            )
+            | (
+                other,
+                Value::NodeRef(_)
+                | Value::Node(..)
+                | Value::EdgeRef(..)
+                | Value::Edge(..)
+                | Value::Path { .. },
+            ) if !matches!(other, Value::Property(PropertyValue::Null) | Value::Null) => {
                 Some(false)
             }
             // ...and an entity against null is null, like any comparison with
             // null. It fell through to the narrowing below and raised a
             // TypeError instead (#1565).
-            (Value::NodeRef(_) | Value::Node(..) | Value::EdgeRef(..) | Value::Edge(..)
-                | Value::Path { .. }, _)
-            | (_, Value::NodeRef(_) | Value::Node(..) | Value::EdgeRef(..) | Value::Edge(..)
-                | Value::Path { .. }) => {
+            (
+                Value::NodeRef(_)
+                | Value::Node(..)
+                | Value::EdgeRef(..)
+                | Value::Edge(..)
+                | Value::Path { .. },
+                _,
+            )
+            | (
+                _,
+                Value::NodeRef(_)
+                | Value::Node(..)
+                | Value::EdgeRef(..)
+                | Value::Edge(..)
+                | Value::Path { .. },
+            ) => {
                 return Ok(Value::Property(PropertyValue::Null));
             }
             // A list that holds an entity cannot be narrowed to a property
@@ -709,7 +773,8 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             // the lists differ, otherwise a null pair makes the answer null.
             (Value::List(a), Value::List(_) | Value::Property(PropertyValue::Array(_)))
             | (Value::Property(PropertyValue::Array(_)), Value::List(a))
-                if a.iter().any(|v| !matches!(v, Value::Property(_) | Value::Null)) =>
+                if a.iter()
+                    .any(|v| !matches!(v, Value::Property(_) | Value::Null)) =>
             {
                 let items = |v: &Value| -> Vec<Value> {
                     match v {
@@ -749,7 +814,7 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         };
         if let Some(eq) = same {
             return Ok(Value::Property(PropertyValue::Boolean(
-                if matches!(op, BinaryOp::Eq) { eq } else { !eq }
+                if matches!(op, BinaryOp::Eq) { eq } else { !eq },
             )));
         }
     }
@@ -766,9 +831,11 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
     // Only the ordering operators. `=` and `<>` on two entities are identity
     // and are handled above; arithmetic on an entity stays an error, because
     // there `null` really would hide a mistake.
-    if matches!(op, BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge)
-        && (!matches!(left, Value::Property(_) | Value::Null)
-            || !matches!(right, Value::Property(_) | Value::Null))
+    if matches!(
+        op,
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    ) && (!matches!(left, Value::Property(_) | Value::Null)
+        || !matches!(right, Value::Property(_) | Value::Null))
     {
         return Ok(Value::Property(PropertyValue::Null));
     }
@@ -863,18 +930,22 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         // well as what. It is also what lets the span machinery find it in the
         // query text -- an error that names no token can only be pointed at by
         // guessing (LANG-12).
-        _ => return Err(ExecutionError::TypeError(format!(
-            "`{}` needs a value on the left, and got a node, relationship or path",
-            op.symbol()
-        ))),
+        _ => {
+            return Err(ExecutionError::TypeError(format!(
+                "`{}` needs a value on the left, and got a node, relationship or path",
+                op.symbol()
+            )))
+        }
     };
     let right_prop = match right {
         Value::Property(p) => p,
         Value::Null => PropertyValue::Null,
-        _ => return Err(ExecutionError::TypeError(format!(
-            "`{}` needs a value on the right, and got a node, relationship or path",
-            op.symbol()
-        ))),
+        _ => {
+            return Err(ExecutionError::TypeError(format!(
+                "`{}` needs a value on the right, and got a node, relationship or path",
+                op.symbol()
+            )))
+        }
     };
     // Cypher's three-valued logic: any comparison with a null operand is *unknown*, not
     // true or false, and a WHERE treats unknown as "exclude". Evaluating `null <> 1` as
@@ -924,14 +995,24 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                 };
                 match (numeric(&left_prop), numeric(&right_prop)) {
                     (Some(base), Some(exp)) => PropertyValue::Float(base.powf(exp)),
-                    _ => return Err(ExecutionError::TypeError("^ requires numeric operands".to_string())),
+                    _ => {
+                        return Err(ExecutionError::TypeError(
+                            "^ requires numeric operands".to_string(),
+                        ))
+                    }
                 }
             }
         },
         BinaryOp::Xor => match (&left_prop, &right_prop) {
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
-            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => PropertyValue::Boolean(l != r),
-            _ => return Err(ExecutionError::TypeError("XOR requires boolean operands".to_string())),
+            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => {
+                PropertyValue::Boolean(l != r)
+            }
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "XOR requires boolean operands".to_string(),
+                ))
+            }
         },
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
             // **NaN orders as false, not null.** `partial_cmp` returns `None`
@@ -958,38 +1039,75 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             let cmp = cypher_ordering(&left_prop, &right_prop);
             match (op, cmp) {
                 (BinaryOp::Lt, Some(std::cmp::Ordering::Less)) => PropertyValue::Boolean(true),
-                (BinaryOp::Le, Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)) => PropertyValue::Boolean(true),
+                (BinaryOp::Le, Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)) => {
+                    PropertyValue::Boolean(true)
+                }
                 (BinaryOp::Gt, Some(std::cmp::Ordering::Greater)) => PropertyValue::Boolean(true),
-                (BinaryOp::Ge, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)) => PropertyValue::Boolean(true),
+                (BinaryOp::Ge, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)) => {
+                    PropertyValue::Boolean(true)
+                }
                 (_, None) => PropertyValue::Null,
                 _ => PropertyValue::Boolean(false),
             }
         }
         // Cypher three-valued logic: false AND x → false, true AND null → null, etc.
         BinaryOp::And => match (&left_prop, &right_prop) {
-            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => PropertyValue::Boolean(*l && *r),
-            (PropertyValue::Boolean(false), _) | (_, PropertyValue::Boolean(false)) => PropertyValue::Boolean(false),
+            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => {
+                PropertyValue::Boolean(*l && *r)
+            }
+            (PropertyValue::Boolean(false), _) | (_, PropertyValue::Boolean(false)) => {
+                PropertyValue::Boolean(false)
+            }
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("AND requires booleans".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "AND requires booleans".to_string(),
+                ))
+            }
         },
         BinaryOp::Or => match (&left_prop, &right_prop) {
-            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => PropertyValue::Boolean(*l || *r),
-            (PropertyValue::Boolean(true), _) | (_, PropertyValue::Boolean(true)) => PropertyValue::Boolean(true),
+            (PropertyValue::Boolean(l), PropertyValue::Boolean(r)) => {
+                PropertyValue::Boolean(*l || *r)
+            }
+            (PropertyValue::Boolean(true), _) | (_, PropertyValue::Boolean(true)) => {
+                PropertyValue::Boolean(true)
+            }
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("OR requires booleans".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "OR requires booleans".to_string(),
+                ))
+            }
         },
         BinaryOp::Add => match (&left_prop, &right_prop) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_add(*r).ok_or_else(|| int_out_of_range(*l, "+", *r))?),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(
+                l.checked_add(*r)
+                    .ok_or_else(|| int_out_of_range(*l, "+", *r))?,
+            ),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l + r),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 + r),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l + *r as f64),
-            (PropertyValue::String(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{}", l, r)),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => {
+                PropertyValue::Float(*l as f64 + r)
+            }
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => {
+                PropertyValue::Float(l + *r as f64)
+            }
+            (PropertyValue::String(l), PropertyValue::String(r)) => {
+                PropertyValue::String(format!("{}{}", l, r))
+            }
             // A string and a number concatenate, the number written as Neo4j
             // writes it: `'a' + 1` is "a1", `'a' + 1.0` is "a1.0" (#1241).
-            (PropertyValue::String(l), PropertyValue::Integer(r)) => PropertyValue::String(format!("{l}{r}")),
-            (PropertyValue::Integer(l), PropertyValue::String(r)) => PropertyValue::String(format!("{l}{r}")),
-            (PropertyValue::String(l), PropertyValue::Float(r)) => PropertyValue::String(format!("{l}{}", java_double_string(*r))),
-            (PropertyValue::Float(l), PropertyValue::String(r)) => PropertyValue::String(format!("{}{r}", java_double_string(*l))),
+            (PropertyValue::String(l), PropertyValue::Integer(r)) => {
+                PropertyValue::String(format!("{l}{r}"))
+            }
+            (PropertyValue::Integer(l), PropertyValue::String(r)) => {
+                PropertyValue::String(format!("{l}{r}"))
+            }
+            (PropertyValue::String(l), PropertyValue::Float(r)) => {
+                PropertyValue::String(format!("{l}{}", java_double_string(*r)))
+            }
+            (PropertyValue::Float(l), PropertyValue::String(r)) => {
+                PropertyValue::String(format!("{}{r}", java_double_string(*l)))
+            }
             // List concatenation, and appending or prepending a scalar. Cypher
             // defines all three for `+`; none of them worked (#578).
             (PropertyValue::Array(l), PropertyValue::Array(r)) => {
@@ -1013,34 +1131,74 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                 PropertyValue::Array(out)
             }
             // DateTime + Duration
-            (PropertyValue::DateTime(dt), PropertyValue::Duration { months, days, seconds, .. }) |
-            (PropertyValue::Duration { months, days, seconds, .. }, PropertyValue::DateTime(dt)) => {
-                add_duration_to_datetime(*dt, *months, *days, *seconds)
-            }
+            (
+                PropertyValue::DateTime(dt),
+                PropertyValue::Duration {
+                    months,
+                    days,
+                    seconds,
+                    ..
+                },
+            )
+            | (
+                PropertyValue::Duration {
+                    months,
+                    days,
+                    seconds,
+                    ..
+                },
+                PropertyValue::DateTime(dt),
+            ) => add_duration_to_datetime(*dt, *months, *days, *seconds),
             // Any of the five temporal types + Duration (#689). Without these
             // arms, teaching the constructors to produce real types would have
             // silently removed `datetime(...) + duration(...)`, which Cypher
             // requires and which the suite already covered.
-            (t @ (PropertyValue::Date(_)
+            (
+                t @ (PropertyValue::Date(_)
                 | PropertyValue::LocalTime(_)
                 | PropertyValue::Time { .. }
                 | PropertyValue::LocalDateTime { .. }
                 | PropertyValue::ZonedDateTime { .. }),
-             PropertyValue::Duration { months, days, seconds, nanos })
-            | (PropertyValue::Duration { months, days, seconds, nanos },
-               t @ (PropertyValue::Date(_)
+                PropertyValue::Duration {
+                    months,
+                    days,
+                    seconds,
+                    nanos,
+                },
+            )
+            | (
+                PropertyValue::Duration {
+                    months,
+                    days,
+                    seconds,
+                    nanos,
+                },
+                t @ (PropertyValue::Date(_)
                 | PropertyValue::LocalTime(_)
                 | PropertyValue::Time { .. }
                 | PropertyValue::LocalDateTime { .. }
-                | PropertyValue::ZonedDateTime { .. })) => {
-                shift_temporal(t, *months, *days, *seconds, *nanos as i64)?
-            }
+                | PropertyValue::ZonedDateTime { .. }),
+            ) => shift_temporal(t, *months, *days, *seconds, *nanos as i64)?,
             // Duration + Duration
-            (PropertyValue::Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
-             PropertyValue::Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
-                normalized_duration(m1 + m2, d1 + d2, *s1 as i128 + *s2 as i128,
-                                    *n1 as i128 + *n2 as i128)
-            }
+            (
+                PropertyValue::Duration {
+                    months: m1,
+                    days: d1,
+                    seconds: s1,
+                    nanos: n1,
+                },
+                PropertyValue::Duration {
+                    months: m2,
+                    days: d2,
+                    seconds: s2,
+                    nanos: n2,
+                },
+            ) => normalized_duration(
+                m1 + m2,
+                d1 + d2,
+                *s1 as i128 + *s2 as i128,
+                *n1 as i128 + *n2 as i128,
+            ),
             // Cypher null propagation: any arithmetic with a null operand is null,
             // not an error. Without this, `p.a + p.missing` aborts the whole query --
             // and a property absent on some nodes is the ordinary state of a property
@@ -1057,54 +1215,107 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
             }
         },
         BinaryOp::Sub => match (&left_prop, &right_prop) {
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_sub(*r).ok_or_else(|| int_out_of_range(*l, "-", *r))?),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(
+                l.checked_sub(*r)
+                    .ok_or_else(|| int_out_of_range(*l, "-", *r))?,
+            ),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l - r),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 - r),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l - *r as f64),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => {
+                PropertyValue::Float(*l as f64 - r)
+            }
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => {
+                PropertyValue::Float(l - *r as f64)
+            }
             // DateTime - Duration
-            (PropertyValue::DateTime(dt), PropertyValue::Duration { months, days, seconds, .. }) => {
-                add_duration_to_datetime(*dt, -*months, -*days, -*seconds)
-            }
-            (t @ (PropertyValue::Date(_)
+            (
+                PropertyValue::DateTime(dt),
+                PropertyValue::Duration {
+                    months,
+                    days,
+                    seconds,
+                    ..
+                },
+            ) => add_duration_to_datetime(*dt, -*months, -*days, -*seconds),
+            (
+                t @ (PropertyValue::Date(_)
                 | PropertyValue::LocalTime(_)
                 | PropertyValue::Time { .. }
                 | PropertyValue::LocalDateTime { .. }
                 | PropertyValue::ZonedDateTime { .. }),
-             PropertyValue::Duration { months, days, seconds, nanos }) => {
-                shift_temporal(t, -*months, -*days, -*seconds, -(*nanos as i64))?
-            }
+                PropertyValue::Duration {
+                    months,
+                    days,
+                    seconds,
+                    nanos,
+                },
+            ) => shift_temporal(t, -*months, -*days, -*seconds, -(*nanos as i64))?,
             // Two temporals of the same kind subtract to a Duration.
-            (a @ (PropertyValue::Date(_)
+            (
+                a @ (PropertyValue::Date(_)
                 | PropertyValue::LocalTime(_)
                 | PropertyValue::Time { .. }
                 | PropertyValue::LocalDateTime { .. }
                 | PropertyValue::ZonedDateTime { .. }),
-             b @ (PropertyValue::Date(_)
+                b @ (PropertyValue::Date(_)
                 | PropertyValue::LocalTime(_)
                 | PropertyValue::Time { .. }
                 | PropertyValue::LocalDateTime { .. }
-                | PropertyValue::ZonedDateTime { .. })) => temporal_difference(a, b)?,
+                | PropertyValue::ZonedDateTime { .. }),
+            ) => temporal_difference(a, b)?,
             // DateTime - DateTime = Duration
             (PropertyValue::DateTime(a), PropertyValue::DateTime(b)) => {
                 let diff_ms = a - b;
                 let total_seconds = diff_ms / 1000;
-                PropertyValue::Duration { months: 0, days: total_seconds / 86400, seconds: total_seconds % 86400, nanos: ((diff_ms % 1000) * 1_000_000) as i32 }
+                PropertyValue::Duration {
+                    months: 0,
+                    days: total_seconds / 86400,
+                    seconds: total_seconds % 86400,
+                    nanos: ((diff_ms % 1000) * 1_000_000) as i32,
+                }
             }
             // Duration - Duration
-            (PropertyValue::Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
-             PropertyValue::Duration { months: m2, days: d2, seconds: s2, nanos: n2 }) => {
-                normalized_duration(m1 - m2, d1 - d2, *s1 as i128 - *s2 as i128,
-                                    *n1 as i128 - *n2 as i128)
-            }
+            (
+                PropertyValue::Duration {
+                    months: m1,
+                    days: d1,
+                    seconds: s1,
+                    nanos: n1,
+                },
+                PropertyValue::Duration {
+                    months: m2,
+                    days: d2,
+                    seconds: s2,
+                    nanos: n2,
+                },
+            ) => normalized_duration(
+                m1 - m2,
+                d1 - d2,
+                *s1 as i128 - *s2 as i128,
+                *n1 as i128 - *n2 as i128,
+            ),
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(operand_error("-", "numeric", &left_prop, &right_prop)),
         },
         BinaryOp::Mul => match (&left_prop, &right_prop) {
             // duration * number, either way round (#787).
-            (PropertyValue::Duration { months, days, seconds, nanos }, n)
-            | (n, PropertyValue::Duration { months, days, seconds, nanos })
-                if matches!(n, PropertyValue::Integer(_) | PropertyValue::Float(_)) =>
-            {
+            (
+                PropertyValue::Duration {
+                    months,
+                    days,
+                    seconds,
+                    nanos,
+                },
+                n,
+            )
+            | (
+                n,
+                PropertyValue::Duration {
+                    months,
+                    days,
+                    seconds,
+                    nanos,
+                },
+            ) if matches!(n, PropertyValue::Integer(_) | PropertyValue::Float(_)) => {
                 let f = match n {
                     PropertyValue::Integer(i) => *i as f64,
                     PropertyValue::Float(f) => *f,
@@ -1112,18 +1323,31 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                 };
                 scale_duration(*months, *days, *seconds, *nanos, f)?
             }
-            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(l.checked_mul(*r).ok_or_else(|| int_out_of_range(*l, "*", *r))?),
+            (PropertyValue::Integer(l), PropertyValue::Integer(r)) => PropertyValue::Integer(
+                l.checked_mul(*r)
+                    .ok_or_else(|| int_out_of_range(*l, "*", *r))?,
+            ),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l * r),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 * r),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l * *r as f64),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => {
+                PropertyValue::Float(*l as f64 * r)
+            }
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => {
+                PropertyValue::Float(l * *r as f64)
+            }
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(operand_error("*", "numeric", &left_prop, &right_prop)),
         },
         BinaryOp::Div => match (&left_prop, &right_prop) {
             // duration / number. Not commutative, so only this order.
-            (PropertyValue::Duration { months, days, seconds, nanos }, n)
-                if matches!(n, PropertyValue::Integer(_) | PropertyValue::Float(_)) =>
-            {
+            (
+                PropertyValue::Duration {
+                    months,
+                    days,
+                    seconds,
+                    nanos,
+                },
+                n,
+            ) if matches!(n, PropertyValue::Integer(_) | PropertyValue::Float(_)) => {
                 let f = match n {
                     PropertyValue::Integer(i) => *i as f64,
                     PropertyValue::Float(f) => *f,
@@ -1144,8 +1368,12 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                     .ok_or_else(|| int_out_of_range(*l, "/", *r))?,
             ),
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l / r),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 / r),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l / *r as f64),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => {
+                PropertyValue::Float(*l as f64 / r)
+            }
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => {
+                PropertyValue::Float(l / *r as f64)
+            }
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(operand_error("/", "numeric", &left_prop, &right_prop)),
         },
@@ -1157,25 +1385,44 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
                 PropertyValue::Integer(l.checked_rem(*r).unwrap_or(0))
             }
             (PropertyValue::Float(l), PropertyValue::Float(r)) => PropertyValue::Float(l % r),
-            (PropertyValue::Integer(l), PropertyValue::Float(r)) => PropertyValue::Float(*l as f64 % r),
-            (PropertyValue::Float(l), PropertyValue::Integer(r)) => PropertyValue::Float(l % *r as f64),
+            (PropertyValue::Integer(l), PropertyValue::Float(r)) => {
+                PropertyValue::Float(*l as f64 % r)
+            }
+            (PropertyValue::Float(l), PropertyValue::Integer(r)) => {
+                PropertyValue::Float(l % *r as f64)
+            }
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
             _ => return Err(operand_error("%", "numeric", &left_prop, &right_prop)),
         },
-        BinaryOp::StartsWith => string_position_op(StringPositionOp::StartsWith, &left_prop, &right_prop),
-        BinaryOp::EndsWith => string_position_op(StringPositionOp::EndsWith, &left_prop, &right_prop),
-        BinaryOp::Contains => string_position_op(StringPositionOp::Contains, &left_prop, &right_prop),
+        BinaryOp::StartsWith => {
+            string_position_op(StringPositionOp::StartsWith, &left_prop, &right_prop)
+        }
+        BinaryOp::EndsWith => {
+            string_position_op(StringPositionOp::EndsWith, &left_prop, &right_prop)
+        }
+        BinaryOp::Contains => {
+            string_position_op(StringPositionOp::Contains, &left_prop, &right_prop)
+        }
         BinaryOp::In => match eval_in_list(&left_prop, &right_prop) {
             Some(v) => v,
-            None => return Err(ExecutionError::TypeError("IN requires a list on the right".to_string())),
+            None => {
+                return Err(ExecutionError::TypeError(
+                    "IN requires a list on the right".to_string(),
+                ))
+            }
         },
         BinaryOp::RegexMatch => match (&left_prop, &right_prop) {
             (PropertyValue::String(text), PropertyValue::String(pattern)) => {
-                let re = regex::Regex::new(pattern).map_err(|e| ExecutionError::RuntimeError(format!("Invalid regex: {}", e)))?;
+                let re = regex::Regex::new(pattern)
+                    .map_err(|e| ExecutionError::RuntimeError(format!("Invalid regex: {}", e)))?;
                 PropertyValue::Boolean(re.is_match(text))
             }
             (PropertyValue::Null, _) | (_, PropertyValue::Null) => PropertyValue::Null,
-            _ => return Err(ExecutionError::TypeError("=~ requires string operands".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "=~ requires string operands".to_string(),
+                ))
+            }
         },
     };
     Ok(Value::Property(result))
@@ -1193,19 +1440,33 @@ fn eval_unary_op(op: &UnaryOp, val: Value) -> ExecutionResult<Value> {
             Ok(Value::Property(PropertyValue::Boolean(!is_null)))
         }
         UnaryOp::Not => match val {
-            Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::Boolean(!b))),
-            Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
-            _ => Err(ExecutionError::TypeError("NOT requires boolean".to_string())),
+            Value::Property(PropertyValue::Boolean(b)) => {
+                Ok(Value::Property(PropertyValue::Boolean(!b)))
+            }
+            Value::Null | Value::Property(PropertyValue::Null) => {
+                Ok(Value::Property(PropertyValue::Null))
+            }
+            _ => Err(ExecutionError::TypeError(
+                "NOT requires boolean".to_string(),
+            )),
         },
         UnaryOp::Minus => match val {
             Value::Property(PropertyValue::Integer(i)) => i
                 .checked_neg()
                 .map(|n| Value::Property(PropertyValue::Integer(n)))
-                .ok_or_else(|| ExecutionError::RuntimeError(format!("numeric value out of range: -({i})"))),
-            Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
+                .ok_or_else(|| {
+                    ExecutionError::RuntimeError(format!("numeric value out of range: -({i})"))
+                }),
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::Float(-f)))
+            }
             // -null is null, matching NOT above and the binary arithmetic ops (#457).
-            Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
-            _ => Err(ExecutionError::TypeError("Negation requires numeric type".to_string())),
+            Value::Null | Value::Property(PropertyValue::Null) => {
+                Ok(Value::Property(PropertyValue::Null))
+            }
+            _ => Err(ExecutionError::TypeError(
+                "Negation requires numeric type".to_string(),
+            )),
         },
     }
 }
@@ -1222,11 +1483,21 @@ fn eval_index(collection: Value, index: Value, store: &GraphStore) -> ExecutionR
             if p.as_list_items().is_some() =>
         {
             let arr = p.as_list_items().unwrap();
-            let idx = if *i < 0 { (arr.len() as i64 + *i) as usize } else { *i as usize };
-            Ok(arr.get(idx).map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+            let idx = if *i < 0 {
+                (arr.len() as i64 + *i) as usize
+            } else {
+                *i as usize
+            };
+            Ok(arr
+                .get(idx)
+                .map(|v| Value::Property(v.clone()))
+                .unwrap_or(Value::Null))
         }
         (Value::Property(PropertyValue::Map(map)), Value::Property(PropertyValue::String(key))) => {
-            Ok(map.get(key).map(|v| Value::Property(v.clone())).unwrap_or(Value::Null))
+            Ok(map
+                .get(key)
+                .map(|v| Value::Property(v.clone()))
+                .unwrap_or(Value::Null))
         }
         // A map holding entities — `{k: collect(a)}` (#670).
         (Value::Map(map), Value::Property(PropertyValue::String(key))) => {
@@ -1247,10 +1518,10 @@ fn eval_index(collection: Value, index: Value, store: &GraphStore) -> ExecutionR
         // `startNode(r).id` desugars to `startNode(r)["id"]`, and without this
         // it answered null — parsing was only half the work, and the half that
         // fails silently (#673).
-        (Value::Node(..) | Value::NodeRef(_) | Value::Edge(..) | Value::EdgeRef(..),
-         Value::Property(PropertyValue::String(key))) => {
-            Ok(Value::Property(collection.resolve_property(key, store)))
-        }
+        (
+            Value::Node(..) | Value::NodeRef(_) | Value::Edge(..) | Value::EdgeRef(..),
+            Value::Property(PropertyValue::String(key)),
+        ) => Ok(Value::Property(collection.resolve_property(key, store))),
 
         // Null in, null out — an unknown collection or index has an unknown
         // element, which is Cypher's answer and not an error.
@@ -1360,7 +1631,11 @@ fn type_name_of(v: &Value) -> &'static str {
     }
 }
 
-fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) -> ExecutionResult<Value> {
+fn eval_list_slice(
+    collection: Value,
+    start: Option<Value>,
+    end: Option<Value>,
+) -> ExecutionResult<Value> {
     // A bound that is present and **null** makes the whole slice null:
     // `[1,2,3][1..null]` is null, not `[2,3]` (#845).
     //
@@ -1370,7 +1645,10 @@ fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) 
     // silently read as an omitted one -- and the result is a perfectly good
     // list, which is why nothing downstream noticed.
     let is_null = |b: &Option<Value>| {
-        matches!(b, Some(Value::Property(PropertyValue::Null)) | Some(Value::Null))
+        matches!(
+            b,
+            Some(Value::Property(PropertyValue::Null)) | Some(Value::Null)
+        )
     };
     if is_null(&start) || is_null(&end) {
         return Ok(Value::Property(PropertyValue::Null));
@@ -1379,7 +1657,11 @@ fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) 
     let range = |len: usize| -> std::ops::Range<usize> {
         let n = len as i64;
         let resolve_idx = |idx: i64| -> usize {
-            let resolved = if idx < 0 { (n + idx).max(0) } else { idx.min(n) };
+            let resolved = if idx < 0 {
+                (n + idx).max(0)
+            } else {
+                idx.min(n)
+            };
             resolved as usize
         };
         let s = match start {
@@ -1390,12 +1672,16 @@ fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) 
             Some(Value::Property(PropertyValue::Integer(i))) => resolve_idx(i),
             _ => len,
         };
-        if s >= e || s >= len { 0..0 } else { s..e.min(len) }
+        if s >= e || s >= len {
+            0..0
+        } else {
+            s..e.min(len)
+        }
     };
     match collection {
-        Value::Property(PropertyValue::Array(arr)) => {
-            Ok(Value::Property(PropertyValue::Array(arr[range(arr.len())].to_vec())))
-        }
+        Value::Property(PropertyValue::Array(arr)) => Ok(Value::Property(PropertyValue::Array(
+            arr[range(arr.len())].to_vec(),
+        ))),
         // A list built from an expression (`[x, 5, 6]`, `collect(n)`) is a
         // `Value::List`, which fell through to null here (#1563). As with `+`,
         // the slice comes back as the narrower `Array` whenever it fits.
@@ -1411,7 +1697,6 @@ fn eval_list_slice(collection: Value, start: Option<Value>, end: Option<Value>) 
         _ => Ok(Value::Null),
     }
 }
-
 
 /// Read `<variable>.<property>` from a record.
 ///
@@ -1466,7 +1751,11 @@ fn str_comparison(op: &BinaryOp, l: &str, r: &str) -> Option<bool> {
 /// or relationship -- and the caller evaluates normally. A `Some` is the value
 /// `read_property` would have returned: every read path consults the column
 /// first, and a string column holds no nulls.
-fn borrowed_str<'a>(expr: &'a Expression, record: &'a Record, store: &'a GraphStore) -> Option<&'a str> {
+fn borrowed_str<'a>(
+    expr: &'a Expression,
+    record: &'a Record,
+    store: &'a GraphStore,
+) -> Option<&'a str> {
     match expr {
         Expression::Literal(PropertyValue::String(s)) => Some(s.as_str()),
         Expression::Property { variable, property } => match record.get(variable)? {
@@ -1479,7 +1768,9 @@ fn borrowed_str<'a>(expr: &'a Expression, record: &'a Record, store: &'a GraphSt
                 if !store.node_columns.is_str_column(column) {
                     return None;
                 }
-                store.node_columns.get_str_by_id(column, id.as_u64() as usize)
+                store
+                    .node_columns
+                    .get_str_by_id(column, id.as_u64() as usize)
             }
             Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
                 if !store.has_edge(*id) {
@@ -1489,7 +1780,9 @@ fn borrowed_str<'a>(expr: &'a Expression, record: &'a Record, store: &'a GraphSt
                 if !store.edge_columns.is_str_column(column) {
                     return None;
                 }
-                store.edge_columns.get_str_by_id(column, id.as_u64() as usize)
+                store
+                    .edge_columns
+                    .get_str_by_id(column, id.as_u64() as usize)
             }
             _ => None,
         },
@@ -1512,8 +1805,15 @@ fn borrowed_str_comparison(
 ) -> Option<bool> {
     if !matches!(
         op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-            | BinaryOp::StartsWith | BinaryOp::EndsWith | BinaryOp::Contains
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::StartsWith
+            | BinaryOp::EndsWith
+            | BinaryOp::Contains
     ) {
         return None;
     }
@@ -1521,7 +1821,10 @@ fn borrowed_str_comparison(
     // (`n.p > 500`, a parameter, a function) goes straight to the ordinary
     // path without touching a column.
     let borrowable = |e: &Expression| {
-        matches!(e, Expression::Literal(PropertyValue::String(_)) | Expression::Property { .. })
+        matches!(
+            e,
+            Expression::Literal(PropertyValue::String(_)) | Expression::Property { .. }
+        )
     };
     if !borrowable(left) || !borrowable(right) {
         return None;
@@ -1555,10 +1858,16 @@ fn read_property(
     // property, and reported success (#905).
     match val {
         Value::NodeRef(id) | Value::Node(id, _) if store.get_node(*id).is_none() => {
-            return Err(ExecutionError::EntityNotFound(format!("node {}", id.as_u64())));
+            return Err(ExecutionError::EntityNotFound(format!(
+                "node {}",
+                id.as_u64()
+            )));
         }
         Value::EdgeRef(id, ..) | Value::Edge(id, _) if !store.has_edge(*id) => {
-            return Err(ExecutionError::EntityNotFound(format!("relationship {}", id.as_u64())));
+            return Err(ExecutionError::EntityNotFound(format!(
+                "relationship {}",
+                id.as_u64()
+            )));
         }
         _ => {}
     }
@@ -1566,11 +1875,13 @@ fn read_property(
 }
 
 /// Standalone expression evaluator usable from any operator
-pub(crate) fn eval_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
+pub(crate) fn eval_expression(
+    expr: &Expression,
+    record: &Record,
+    store: &GraphStore,
+) -> ExecutionResult<Value> {
     match expr {
-        Expression::Variable(var) => {
-            record.get(var).cloned().ok_or_else(|| unbound(record, var))
-        }
+        Expression::Variable(var) => record.get(var).cloned().ok_or_else(|| unbound(record, var)),
         Expression::Property { variable, property } => {
             read_property(record, variable, property, store, false)
         }
@@ -1579,7 +1890,10 @@ pub(crate) fn eval_expression(expr: &Expression, record: &Record, store: &GraphS
         // `PropertyValue` first -- so this is only the case that could not be
         // expressed before (#654).
         Expression::ListExpr(items) => Ok(Value::List(
-            items.iter().map(|e| eval_expression(e, record, store)).collect::<ExecutionResult<Vec<_>>>()?,
+            items
+                .iter()
+                .map(|e| eval_expression(e, record, store))
+                .collect::<ExecutionResult<Vec<_>>>()?,
         )),
         Expression::MapExpr(entries) => {
             let mut out = std::collections::BTreeMap::new();
@@ -1602,47 +1916,97 @@ pub(crate) fn eval_expression(expr: &Expression, record: &Record, store: &GraphS
             eval_unary_op(op, val)
         }
         Expression::Function { name, args, .. } => {
-            let arg_vals: Vec<Value> = args.iter()
+            let arg_vals: Vec<Value> = args
+                .iter()
                 .map(|a| eval_expression(a, record, store))
                 .collect::<Result<_, _>>()?;
             eval_function(name, &arg_vals, Some(store))
         }
-        Expression::Case { operand, when_clauses, else_result } => {
-            eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| eval_expression(e, record, store))
-        }
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_result,
+        } => eval_case(
+            operand.as_deref(),
+            when_clauses,
+            else_result.as_deref(),
+            |e| eval_expression(e, record, store),
+        ),
         Expression::Index { expr: e, index } => {
             let collection = eval_expression(e, record, store)?;
             let idx = eval_expression(index, record, store)?;
             eval_index(collection, idx, store)
         }
-        Expression::ListSlice { expr: e, start, end } => {
+        Expression::ListSlice {
+            expr: e,
+            start,
+            end,
+        } => {
             let collection = eval_expression(e, record, store)?;
-            let s = match start { Some(s) => Some(eval_expression(s, record, store)?), None => None };
-            let en = match end { Some(e) => Some(eval_expression(e, record, store)?), None => None };
+            let s = match start {
+                Some(s) => Some(eval_expression(s, record, store)?),
+                None => None,
+            };
+            let en = match end {
+                Some(e) => Some(eval_expression(e, record, store)?),
+                None => None,
+            };
             eval_list_slice(collection, s, en)
         }
-        Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
-            eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
-        }
-        Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
-            eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
-        }
-        Expression::PredicateFunction { name, variable, list_expr, predicate } => {
-            eval_predicate_function(name, variable, list_expr, predicate, record, store)
-        }
-        Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
-            eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
-        }
-        Expression::PatternComprehension { pattern, filter, projection } => {
-            eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
-        }
+        Expression::ExistsSubquery {
+            pattern,
+            where_clause,
+            count,
+            ..
+        } => eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store),
+        Expression::ListComprehension {
+            variable,
+            list_expr,
+            filter,
+            map_expr,
+        } => eval_list_comprehension(
+            variable,
+            list_expr,
+            filter.as_deref(),
+            map_expr,
+            record,
+            store,
+        ),
+        Expression::PredicateFunction {
+            name,
+            variable,
+            list_expr,
+            predicate,
+        } => eval_predicate_function(name, variable, list_expr, predicate, record, store),
+        Expression::Reduce {
+            accumulator,
+            init,
+            variable,
+            list_expr,
+            expression,
+        } => eval_reduce(
+            accumulator,
+            init,
+            variable,
+            list_expr,
+            expression,
+            record,
+            store,
+        ),
+        Expression::PatternComprehension {
+            pattern,
+            filter,
+            projection,
+        } => eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store),
         Expression::PathVariable(var) => {
             record.get(var).cloned().ok_or_else(|| unbound(record, var))
         }
         Expression::Parameter(name) => {
             // Parameters are resolved by substituting them with bound variables prefixed with `$`
             // The executor is responsible for binding params to `$name` before execution
-            record.get(&format!("${}", name)).cloned()
+            record
+                .get(&format!("${}", name))
+                .cloned()
                 .ok_or_else(|| unresolved_parameter(name))
         }
     }
@@ -1722,10 +2086,24 @@ fn eval_exists_subquery(
     // stopping at the first.
     if count {
         let matches = std::cell::Cell::new(0i64);
-        exists_start_paths(&pattern.paths, record, &[], filter, &MatchSink::Count(&matches), store)?;
+        exists_start_paths(
+            &pattern.paths,
+            record,
+            &[],
+            filter,
+            &MatchSink::Count(&matches),
+            store,
+        )?;
         return Ok(Value::Property(PropertyValue::Integer(matches.get())));
     }
-    let found = exists_start_paths(&pattern.paths, record, &[], filter, &MatchSink::First, store)?;
+    let found = exists_start_paths(
+        &pattern.paths,
+        record,
+        &[],
+        filter,
+        &MatchSink::First,
+        store,
+    )?;
     Ok(Value::Property(PropertyValue::Boolean(found)))
 }
 
@@ -1780,16 +2158,21 @@ fn exists_start_paths(
     // Candidate start nodes: pinned when the start variable is already bound
     // (by the outer query or an earlier pattern), otherwise every node
     // carrying the required label.
-    let start_candidates: Vec<NodeId> = match path.start.variable.as_deref().and_then(|v| record.get(v)) {
-        Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => vec![*id],
-        // Bound to something that is not a node: this pattern, and so the
-        // whole match, cannot hold.
-        Some(_) => return Ok(false),
-        None => match path.start.labels.first() {
-            Some(label) => store.get_nodes_by_label(label).iter().map(|n| n.id).collect(),
-            None => store.all_nodes().iter().map(|n| n.id).collect(),
-        },
-    };
+    let start_candidates: Vec<NodeId> =
+        match path.start.variable.as_deref().and_then(|v| record.get(v)) {
+            Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => vec![*id],
+            // Bound to something that is not a node: this pattern, and so the
+            // whole match, cannot hold.
+            Some(_) => return Ok(false),
+            None => match path.start.labels.first() {
+                Some(label) => store
+                    .get_nodes_by_label(label)
+                    .iter()
+                    .map(|n| n.id)
+                    .collect(),
+                None => store.all_nodes().iter().map(|n| n.id).collect(),
+            },
+        };
     for start_id in start_candidates {
         if !exists_node_matches(store, start_id, &path.start) {
             continue;
@@ -1799,7 +2182,18 @@ fn exists_start_paths(
             bindings.bind(var.to_string(), Value::NodeRef(start_id));
         }
         let path_start = (start_id, visited_edges.len());
-        if exists_match_segment(path, 0, start_id, path_start, &bindings, visited_edges, filter, rest, sink, store)? {
+        if exists_match_segment(
+            path,
+            0,
+            start_id,
+            path_start,
+            &bindings,
+            visited_edges,
+            filter,
+            rest,
+            sink,
+            store,
+        )? {
             return Ok(true);
         }
     }
@@ -1826,12 +2220,13 @@ fn exists_node_matches(
         // nothing at all on imported data while the equivalent WHERE inside the subquery
         // worked (#346).
         let idx = id.as_u64() as usize;
-        let matches_all = props.iter().all(|(k, v)| {
-            match store.node_columns.get_property(idx, k) {
-                PropertyValue::Null => node.properties.get(k).is_some_and(|pv| pv == v),
-                col => &col == v,
-            }
-        });
+        let matches_all =
+            props
+                .iter()
+                .all(|(k, v)| match store.node_columns.get_property(idx, k) {
+                    PropertyValue::Null => node.properties.get(k).is_some_and(|pv| pv == v),
+                    col => &col == v,
+                });
         if !matches_all {
             return false;
         }
@@ -1901,7 +2296,10 @@ fn exists_for_each_neighbor(
 
     let mut stop = false;
     let mut err: Option<ExecutionError> = None;
-    let mut keep = |eid: crate::graph::EdgeId, other: NodeId, stop: &mut bool, err: &mut Option<ExecutionError>| {
+    let mut keep = |eid: crate::graph::EdgeId,
+                    other: NodeId,
+                    stop: &mut bool,
+                    err: &mut Option<ExecutionError>| {
         if *stop || err.is_some() {
             return;
         }
@@ -1915,7 +2313,9 @@ fn exists_for_each_neighbor(
         }
         if let Some(props) = edge_props {
             if !store.has_edge(eid)
-                || !props.iter().all(|(k, v)| store.edge_property(eid, k).as_ref() == Some(v))
+                || !props
+                    .iter()
+                    .all(|(k, v)| store.edge_property(eid, k).as_ref() == Some(v))
             {
                 return;
             }
@@ -1938,12 +2338,13 @@ fn exists_for_each_neighbor(
     // Direction is written relative to `node`, so an outgoing hop is looked up
     // from `node` and an incoming one from `target`.
     if let Some(target) = pinned_target.filter(|_| pinned_lookup_enabled()) {
-        let mut probe = |from: NodeId, to: NodeId, stop: &mut bool, err: &mut Option<ExecutionError>| {
-            store.for_each_edge_between_typed(from, to, type_filter, |eid| {
-                keep(eid, target, stop, err);
-                *stop || err.is_some()
-            });
-        };
+        let mut probe =
+            |from: NodeId, to: NodeId, stop: &mut bool, err: &mut Option<ExecutionError>| {
+                store.for_each_edge_between_typed(from, to, type_filter, |eid| {
+                    keep(eid, target, stop, err);
+                    *stop || err.is_some()
+                });
+            };
         if matches!(edge_pat.direction, Direction::Outgoing | Direction::Both) {
             probe(node, target, &mut stop, &mut err);
         }
@@ -2004,7 +2405,10 @@ fn exists_match_segment(
         // pattern, the WHERE or a projection reads it (#1243).
         if let Some(pv) = path.path_variable.as_deref() {
             let mut with_path = bindings.clone();
-            with_path.bind(pv.to_string(), walked_path(store, path_start, visited_edges));
+            with_path.bind(
+                pv.to_string(),
+                walked_path(store, path_start, visited_edges),
+            );
             return exists_start_paths(rest, &with_path, visited_edges, filter, sink, store);
         }
         return exists_start_paths(rest, bindings, visited_edges, filter, sink, store);
@@ -2020,7 +2424,19 @@ fn exists_match_segment(
     };
 
     exists_expand_hops(
-        path, seg_idx, current, path_start, 0, min_hops, max_hops, bindings, visited_edges, filter, rest, sink, store,
+        path,
+        seg_idx,
+        current,
+        path_start,
+        0,
+        min_hops,
+        max_hops,
+        bindings,
+        visited_edges,
+        filter,
+        rest,
+        sink,
+        store,
     )
 }
 
@@ -2048,7 +2464,12 @@ fn exists_expand_hops(
     if depth >= min_hops && exists_node_matches(store, current, &segment.node) {
         // If this segment's variable is already bound — by the outer query or by
         // an earlier segment — the position must be that exact node.
-        let pinned_ok = match segment.node.variable.as_deref().and_then(|v| bindings.get(v)) {
+        let pinned_ok = match segment
+            .node
+            .variable
+            .as_deref()
+            .and_then(|v| bindings.get(v))
+        {
             Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => *id == current,
             Some(_) => false,
             None => true,
@@ -2059,7 +2480,16 @@ fn exists_expand_hops(
                 next.bind(var.to_string(), Value::NodeRef(current));
             }
             if exists_match_segment(
-                path, seg_idx + 1, current, path_start, &next, visited_edges, filter, rest, sink, store,
+                path,
+                seg_idx + 1,
+                current,
+                path_start,
+                &next,
+                visited_edges,
+                filter,
+                rest,
+                sink,
+                store,
             )? {
                 return Ok(true);
             }
@@ -2084,7 +2514,12 @@ fn exists_expand_hops(
     // positions this loop is walking through, so filtering here would cut off
     // legitimate paths.
     let pinned_target: Option<NodeId> = if max_hops == 1 {
-        match segment.node.variable.as_deref().and_then(|v| bindings.get(v)) {
+        match segment
+            .node
+            .variable
+            .as_deref()
+            .and_then(|v| bindings.get(v))
+        {
             Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => Some(*id),
             _ => None,
         }
@@ -2137,7 +2572,11 @@ fn exists_expand_hops(
 /// The path a pattern walked: its start node, then each relationship in the
 /// order it was taken and the node it led to. The walk appends as it goes, so
 /// `visited_edges[from..]` are exactly this path's relationships (#1243).
-fn walked_path(store: &GraphStore, path_start: (NodeId, usize), visited_edges: &[crate::graph::EdgeId]) -> Value {
+fn walked_path(
+    store: &GraphStore,
+    path_start: (NodeId, usize),
+    visited_edges: &[crate::graph::EdgeId],
+) -> Value {
     let (start, from) = path_start;
     let edges: Vec<crate::graph::EdgeId> = visited_edges[from..].to_vec();
     let mut nodes = Vec::with_capacity(edges.len() + 1);
@@ -2382,7 +2821,17 @@ fn eval_pattern_comprehension(
     // `Vec<Value>`, not `Vec<PropertyValue>`: `[p = (n)-->() | p]` projects
     // *paths*, and a `PropertyValue` cannot hold one (#662).
     let out = std::cell::RefCell::new(Vec::new());
-    exists_start_paths(&pattern.paths, record, &[], filter, &MatchSink::Collect { projection, out: &out }, store)?;
+    exists_start_paths(
+        &pattern.paths,
+        record,
+        &[],
+        filter,
+        &MatchSink::Collect {
+            projection,
+            out: &out,
+        },
+        store,
+    )?;
     let results = out.into_inner();
 
     // Kept as a `PropertyValue::Array` when every element is a scalar, which
@@ -2403,11 +2852,17 @@ fn eval_pattern_comprehension(
 
 /// Evaluate a boolean predicate expression standalone (for parallel batch filtering).
 /// Creates a temporary FilterOperator per call — no shared mutable state.
-pub fn eval_predicate_standalone(predicate: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<bool> {
+pub fn eval_predicate_standalone(
+    predicate: &Expression,
+    record: &Record,
+    store: &GraphStore,
+) -> ExecutionResult<bool> {
     // NullScan: produces nothing, never called — just satisfies the OperatorBox type
     struct NullScan;
     impl PhysicalOperator for NullScan {
-        fn next(&mut self, _: &GraphStore) -> ExecutionResult<Option<Record>> { Ok(None) }
+        fn next(&mut self, _: &GraphStore) -> ExecutionResult<Option<Record>> {
+            Ok(None)
+        }
         fn reset(&mut self) {}
     }
     let evaluator = FilterOperator::new(Box::new(NullScan), predicate.clone());
@@ -2484,7 +2939,11 @@ fn eval_in_list(left: &PropertyValue, right: &PropertyValue) -> Option<PropertyV
                         Some(true) => {}
                     }
                 }
-                if unknown { None } else { Some(true) }
+                if unknown {
+                    None
+                } else {
+                    Some(true)
+                }
             }
             (PropertyValue::Map(x), PropertyValue::Map(y)) => {
                 if x.len() != y.len() || !x.keys().all(|k| y.contains_key(k)) {
@@ -2498,7 +2957,11 @@ fn eval_in_list(left: &PropertyValue, right: &PropertyValue) -> Option<PropertyV
                         Some(Some(true)) => {}
                     }
                 }
-                if unknown { None } else { Some(true) }
+                if unknown {
+                    None
+                } else {
+                    Some(true)
+                }
             }
             _ => {
                 if a == b {
@@ -2559,7 +3022,10 @@ fn eval_in_list(left: &PropertyValue, right: &PropertyValue) -> Option<PropertyV
 fn sorted_labels(node: &crate::graph::Node) -> Vec<PropertyValue> {
     let mut labels: Vec<&str> = node.labels.iter().map(|l| l.as_str()).collect();
     labels.sort_unstable();
-    labels.into_iter().map(|l| PropertyValue::String(l.to_string())).collect()
+    labels
+        .into_iter()
+        .map(|l| PropertyValue::String(l.to_string()))
+        .collect()
 }
 
 fn sorted_keys(mut keys: Vec<PropertyValue>) -> Vec<PropertyValue> {
@@ -2596,9 +3062,24 @@ fn cypher_ordering(left: &PropertyValue, right: &PropertyValue) -> Option<std::c
         // long-standing behaviour here and the two are the same quantity.
         (DateTime(l), Integer(r)) | (Integer(l), DateTime(r)) => Some(l.cmp(r)),
         (
-            Duration { months: m1, days: d1, seconds: s1, nanos: n1 },
-            Duration { months: m2, days: d2, seconds: s2, nanos: n2 },
-        ) => Some(m1.cmp(m2).then(d1.cmp(d2)).then(s1.cmp(s2)).then(n1.cmp(n2))),
+            Duration {
+                months: m1,
+                days: d1,
+                seconds: s1,
+                nanos: n1,
+            },
+            Duration {
+                months: m2,
+                days: d2,
+                seconds: s2,
+                nanos: n2,
+            },
+        ) => Some(
+            m1.cmp(m2)
+                .then(d1.cmp(d2))
+                .then(s1.cmp(s2))
+                .then(n1.cmp(n2)),
+        ),
 
         // The five temporal types compare within their own kind (#689).
         //
@@ -2633,17 +3114,36 @@ fn cypher_ordering(left: &PropertyValue, right: &PropertyValue) -> Option<std::c
         (Date(l), Date(r)) => Some(l.cmp(r)),
         (LocalTime(l), LocalTime(r)) => Some(l.cmp(r)),
         (
-            Time { nanos: n1, offset_seconds: o1 },
-            Time { nanos: n2, offset_seconds: o2 },
-        ) => Some(
-            (n1 - (*o1 as i64) * 1_000_000_000).cmp(&(n2 - (*o2 as i64) * 1_000_000_000)),
-        ),
-        (LocalDateTime { secs: s1, nanos: n1 }, LocalDateTime { secs: s2, nanos: n2 }) => {
-            Some(s1.cmp(s2).then(n1.cmp(n2)))
-        }
+            Time {
+                nanos: n1,
+                offset_seconds: o1,
+            },
+            Time {
+                nanos: n2,
+                offset_seconds: o2,
+            },
+        ) => Some((n1 - (*o1 as i64) * 1_000_000_000).cmp(&(n2 - (*o2 as i64) * 1_000_000_000))),
         (
-            ZonedDateTime { secs: s1, nanos: n1, .. },
-            ZonedDateTime { secs: s2, nanos: n2, .. },
+            LocalDateTime {
+                secs: s1,
+                nanos: n1,
+            },
+            LocalDateTime {
+                secs: s2,
+                nanos: n2,
+            },
+        ) => Some(s1.cmp(s2).then(n1.cmp(n2))),
+        (
+            ZonedDateTime {
+                secs: s1,
+                nanos: n1,
+                ..
+            },
+            ZonedDateTime {
+                secs: s2,
+                nanos: n2,
+                ..
+            },
         ) => Some(s1.cmp(s2).then(n1.cmp(n2))),
 
         // Cross-kind temporal comparison is null in Cypher, not an ordering:
@@ -2679,8 +3179,12 @@ fn temporal_arg_map(v: &Value) -> Option<std::collections::HashMap<String, Prope
             let mut out = std::collections::HashMap::new();
             for (k, val) in entries {
                 match val {
-                    Value::Property(p) => { out.insert(k.clone(), p.clone()); }
-                    Value::Null => { out.insert(k.clone(), PropertyValue::Null); }
+                    Value::Property(p) => {
+                        out.insert(k.clone(), p.clone());
+                    }
+                    Value::Null => {
+                        out.insert(k.clone(), PropertyValue::Null);
+                    }
                     // A node or a path inside a temporal map is not something
                     // to coerce; leave it out so the component reader reports
                     // the missing field rather than inventing a value.
@@ -2702,9 +3206,11 @@ fn date_part_of(v: &PropertyValue) -> Option<i32> {
     match v {
         PropertyValue::Date(d) => Some(*d),
         PropertyValue::LocalDateTime { secs, .. } => Some(secs.div_euclid(86_400) as i32),
-        PropertyValue::ZonedDateTime { secs, offset_seconds, .. } => {
-            Some((secs + *offset_seconds as i64).div_euclid(86_400) as i32)
-        }
+        PropertyValue::ZonedDateTime {
+            secs,
+            offset_seconds,
+            ..
+        } => Some((secs + *offset_seconds as i64).div_euclid(86_400) as i32),
         PropertyValue::DateTime(ms) => Some(ms.div_euclid(86_400_000) as i32),
         _ => None,
     }
@@ -2725,7 +3231,6 @@ fn day_and_nanos_to_secs(days: i32, nanos_of_day: i64) -> (i64, u32) {
     (secs, nanos_of_day.rem_euclid(1_000_000_000) as u32)
 }
 
-
 /// Apply a map's date components on top of an already-selected date.
 ///
 /// `{date: other, day: 28}` keeps `other`'s year and month and replaces the
@@ -2739,7 +3244,14 @@ fn apply_date_overrides(
 ) -> Result<i32, ExecutionError> {
     use chrono::Datelike;
     const KEYS: &[&str] = &[
-        "year", "month", "day", "ordinalDay", "week", "dayOfWeek", "quarter", "dayOfQuarter",
+        "year",
+        "month",
+        "day",
+        "ordinalDay",
+        "week",
+        "dayOfWeek",
+        "quarter",
+        "dayOfQuarter",
     ];
     if !KEYS.iter().any(|k| map.contains_key(*k)) {
         return Ok(base);
@@ -2766,8 +3278,9 @@ fn apply_date_overrides(
         let week_year = g("year").unwrap_or(cur.iso_week().year() as i64) as i32;
         let week = g("week").unwrap_or(cur.iso_week().week() as i64) as u32;
         let dow = g("dayOfWeek").unwrap_or(cur.weekday().number_from_monday() as i64) as u32;
-        chrono::NaiveDate::from_isoywd_opt(week_year, week, weekday_from_iso_num(dow))
-            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid week date {week_year}-W{week}-{dow}")))?
+        chrono::NaiveDate::from_isoywd_opt(week_year, week, weekday_from_iso_num(dow)).ok_or_else(
+            || ExecutionError::RuntimeError(format!("invalid week date {week_year}-W{week}-{dow}")),
+        )?
     } else if map.contains_key("quarter") || map.contains_key("dayOfQuarter") {
         let q = g("quarter").unwrap_or(((cur.month() - 1) / 3 + 1) as i64);
         // The day within the quarter defaults to the **current** one, exactly
@@ -2775,12 +3288,9 @@ fn apply_date_overrides(
         // `{date: <1984-11-11>, quarter: 3}` answer 1984-07-01 instead of
         // 1984-08-11: an override that names one component silently reset two
         // others, and the result is a perfectly ordinary date (#838).
-        let cur_quarter_start = chrono::NaiveDate::from_ymd_opt(
-            cur.year(),
-            ((cur.month() - 1) / 3) * 3 + 1,
-            1,
-        )
-        .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+        let cur_quarter_start =
+            chrono::NaiveDate::from_ymd_opt(cur.year(), ((cur.month() - 1) / 3) * 3 + 1, 1)
+                .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
         let cur_day_of_quarter = cur.signed_duration_since(cur_quarter_start).num_days() + 1;
         let d = g("dayOfQuarter").unwrap_or(cur_day_of_quarter);
         let start = chrono::NaiveDate::from_ymd_opt(year, ((q - 1) * 3 + 1) as u32, 1)
@@ -2791,8 +3301,9 @@ fn apply_date_overrides(
     } else {
         let month = g("month").unwrap_or(cur.month() as i64) as u32;
         let day = g("day").unwrap_or(cur.day() as i64) as u32;
-        chrono::NaiveDate::from_ymd_opt(year, month, day)
-            .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid date {year}-{month}-{day}")))?
+        chrono::NaiveDate::from_ymd_opt(year, month, day).ok_or_else(|| {
+            ExecutionError::RuntimeError(format!("invalid date {year}-{month}-{day}"))
+        })?
     };
     Ok(out.signed_duration_since(epoch).num_days() as i32)
 }
@@ -2804,19 +3315,25 @@ fn apply_date_overrides(
 /// with each other and together replace the selected fraction only if any is
 /// given — the same rule `compose_date_and_time` uses, kept in one place so
 /// the two cannot drift (#802).
-fn apply_time_overrides(
-    base: i64,
-    map: &std::collections::HashMap<String, PropertyValue>,
-) -> i64 {
+fn apply_time_overrides(base: i64, map: &std::collections::HashMap<String, PropertyValue>) -> i64 {
     let g = |k: &str| map.get(k).and_then(|v| v.as_integer());
     let mut hour = base / 3_600_000_000_000;
     let mut minute = base / 60_000_000_000 % 60;
     let mut second = base / 1_000_000_000 % 60;
     let mut sub = base % 1_000_000_000;
-    if let Some(v) = g("hour") { hour = v; }
-    if let Some(v) = g("minute") { minute = v; }
-    if let Some(v) = g("second") { second = v; }
-    if ["millisecond", "microsecond", "nanosecond"].iter().any(|k| map.contains_key(*k)) {
+    if let Some(v) = g("hour") {
+        hour = v;
+    }
+    if let Some(v) = g("minute") {
+        minute = v;
+    }
+    if let Some(v) = g("second") {
+        second = v;
+    }
+    if ["millisecond", "microsecond", "nanosecond"]
+        .iter()
+        .any(|k| map.contains_key(*k))
+    {
         sub = g("millisecond").unwrap_or(0) * 1_000_000
             + g("microsecond").unwrap_or(0) * 1_000
             + g("nanosecond").unwrap_or(0);
@@ -2824,12 +3341,18 @@ fn apply_time_overrides(
     (hour * 3600 + minute * 60 + second) * 1_000_000_000 + sub
 }
 
-
 fn weekday_from_iso_num(dow: u32) -> chrono::Weekday {
     use chrono::Weekday::*;
-    match dow { 1 => Mon, 2 => Tue, 3 => Wed, 4 => Thu, 5 => Fri, 6 => Sat, _ => Sun }
+    match dow {
+        1 => Mon,
+        2 => Tue,
+        3 => Wed,
+        4 => Thu,
+        5 => Fri,
+        6 => Sat,
+        _ => Sun,
+    }
 }
-
 
 /// Nanoseconds-since-midnight of any temporal value that has a time part.
 fn time_part_of(v: &PropertyValue) -> Option<i64> {
@@ -2839,7 +3362,12 @@ fn time_part_of(v: &PropertyValue) -> Option<i64> {
         PropertyValue::LocalDateTime { secs, nanos } => {
             Some(secs.rem_euclid(86_400) * 1_000_000_000 + *nanos as i64)
         }
-        PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, .. } => {
+        PropertyValue::ZonedDateTime {
+            secs,
+            nanos,
+            offset_seconds,
+            ..
+        } => {
             let local = secs + *offset_seconds as i64;
             Some(local.rem_euclid(86_400) * 1_000_000_000 + *nanos as i64)
         }
@@ -2864,8 +3392,14 @@ fn compose_date_and_time(
     // parts of it. `{date: d, time: t, second: 42}` keeps 12:31 from `t` and
     // replaces only the second -- reading the components as a whole clock
     // instead gives 00:00:42, which is a plausible-looking wrong answer.
-    let base_date = map.get("date").or_else(|| map.get("datetime")).and_then(date_part_of);
-    let base_time = map.get("time").or_else(|| map.get("datetime")).and_then(time_part_of);
+    let base_date = map
+        .get("date")
+        .or_else(|| map.get("datetime"))
+        .and_then(date_part_of);
+    let base_time = map
+        .get("time")
+        .or_else(|| map.get("datetime"))
+        .and_then(time_part_of);
 
     let mut days = match base_date {
         Some(d) => d,
@@ -2894,12 +3428,23 @@ fn compose_date_and_time(
         days = apply_date_overrides(days, map)?;
     }
 
-    let clock_keys = ["hour", "minute", "second", "millisecond", "microsecond", "nanosecond"];
+    let clock_keys = [
+        "hour",
+        "minute",
+        "second",
+        "millisecond",
+        "microsecond",
+        "nanosecond",
+    ];
     let has_clock = clock_keys.iter().any(|k| map.contains_key(*k));
     let nanos = match (base_time, has_clock) {
         // Nothing selected: read the components as a whole clock.
         (None, _) => {
-            if has_clock { tmp::time_of_day_nanos(map)? } else { 0 }
+            if has_clock {
+                tmp::time_of_day_nanos(map)?
+            } else {
+                0
+            }
         }
         (Some(t), false) => t,
         // Selected *and* overridden: replace only the fields named.
@@ -2908,15 +3453,33 @@ fn compose_date_and_time(
             let mut minute = t / 60_000_000_000 % 60;
             let mut second = t / 1_000_000_000 % 60;
             let mut sub = t % 1_000_000_000;
-            if let Some(v) = map.get("hour").and_then(|v| v.as_integer()) { hour = v; }
-            if let Some(v) = map.get("minute").and_then(|v| v.as_integer()) { minute = v; }
-            if let Some(v) = map.get("second").and_then(|v| v.as_integer()) { second = v; }
+            if let Some(v) = map.get("hour").and_then(|v| v.as_integer()) {
+                hour = v;
+            }
+            if let Some(v) = map.get("minute").and_then(|v| v.as_integer()) {
+                minute = v;
+            }
+            if let Some(v) = map.get("second").and_then(|v| v.as_integer()) {
+                second = v;
+            }
             // The three sub-second fields are additive with each other, and
             // together replace the selected fraction only if any is given.
-            if ["millisecond", "microsecond", "nanosecond"].iter().any(|k| map.contains_key(*k)) {
-                let ms = map.get("millisecond").and_then(|v| v.as_integer()).unwrap_or(0);
-                let us = map.get("microsecond").and_then(|v| v.as_integer()).unwrap_or(0);
-                let ns = map.get("nanosecond").and_then(|v| v.as_integer()).unwrap_or(0);
+            if ["millisecond", "microsecond", "nanosecond"]
+                .iter()
+                .any(|k| map.contains_key(*k))
+            {
+                let ms = map
+                    .get("millisecond")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(0);
+                let us = map
+                    .get("microsecond")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(0);
+                let ns = map
+                    .get("nanosecond")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(0);
                 sub = ms * 1_000_000 + us * 1_000 + ns;
             }
             (hour * 3600 + minute * 60 + second) * 1_000_000_000 + sub
@@ -3034,7 +3597,11 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
                 collect_expression_names(e, out);
             }
         }
-        Expression::Case { operand, when_clauses, else_result } => {
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_result,
+        } => {
             for e in operand.iter().chain(else_result.iter()) {
                 collect_expression_names(e, out);
             }
@@ -3074,22 +3641,108 @@ fn collect_expression_names(expr: &Expression, out: &mut HashSet<String>) {
 /// to prevent (#1456). The procedure surface does not need them:
 /// `is_known_function` lets every dotted name through.
 pub const KNOWN_FUNCTIONS: &[&str] = &[
-    "abs", "acos", "asin", "atan", "atan2", "ceil", "coalesce", "cos", "cosh", "cot",
-    "date", "date.truncate", "datetime", "datetime.fromepoch",
-    "datetime.fromepochmillis", "datetime.truncate", "degrees", "distance", "duration",
-    "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
-    "duration_between", "e", "elementid", "endnode", "exists", "exp", "floor",
-    "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id",
-    "isempty", "isnan", "keys", "labels", "last", "left", "length", "localdatetime",
-    "localdatetime.truncate", "localtime", "localtime.truncate", "log", "log10",
-    "ltrim", "nodes", "percentilecont", "percentiledisc", "pi", "point",
-    "point.distance", "point.withinbbox", "properties", "radians", "rand", "randomuuid",
-    "range", "relationships", "rels", "replace", "reverse", "right", "round", "rtrim",
-    "sign", "sin", "sinh", "size", "split", "sqrt", "startnode", "stdev", "stdevp",
-    "substring", "subsumes", "tail", "tan", "tanh", "time", "time.truncate",
-    "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint",
-    "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
-    "tostringornull", "toupper", "touppercase", "trim", "type", "valuetype",
+    "abs",
+    "acos",
+    "asin",
+    "atan",
+    "atan2",
+    "ceil",
+    "coalesce",
+    "cos",
+    "cosh",
+    "cot",
+    "date",
+    "date.truncate",
+    "datetime",
+    "datetime.fromepoch",
+    "datetime.fromepochmillis",
+    "datetime.truncate",
+    "degrees",
+    "distance",
+    "duration",
+    "duration.between",
+    "duration.indays",
+    "duration.inmonths",
+    "duration.inseconds",
+    "duration_between",
+    "e",
+    "elementid",
+    "endnode",
+    "exists",
+    "exp",
+    "floor",
+    "haslabels",
+    "haversin",
+    "head",
+    "hierarchy_lca",
+    "hierarchy_rollup",
+    "id",
+    "isempty",
+    "isnan",
+    "keys",
+    "labels",
+    "last",
+    "left",
+    "length",
+    "localdatetime",
+    "localdatetime.truncate",
+    "localtime",
+    "localtime.truncate",
+    "log",
+    "log10",
+    "ltrim",
+    "nodes",
+    "percentilecont",
+    "percentiledisc",
+    "pi",
+    "point",
+    "point.distance",
+    "point.withinbbox",
+    "properties",
+    "radians",
+    "rand",
+    "randomuuid",
+    "range",
+    "relationships",
+    "rels",
+    "replace",
+    "reverse",
+    "right",
+    "round",
+    "rtrim",
+    "sign",
+    "sin",
+    "sinh",
+    "size",
+    "split",
+    "sqrt",
+    "startnode",
+    "stdev",
+    "stdevp",
+    "substring",
+    "subsumes",
+    "tail",
+    "tan",
+    "tanh",
+    "time",
+    "time.truncate",
+    "timestamp",
+    "toboolean",
+    "tobooleanornull",
+    "tofloat",
+    "tofloatornull",
+    "toint",
+    "tointeger",
+    "tointegerornull",
+    "tolower",
+    "tolowercase",
+    "tostring",
+    "tostringornull",
+    "toupper",
+    "touppercase",
+    "trim",
+    "type",
+    "valuetype",
 ];
 
 /// Is `name` a function this engine implements?
@@ -3110,7 +3763,6 @@ pub fn is_known_function(name: &str) -> bool {
     lower.contains('.') || KNOWN_FUNCTIONS.contains(&lower.as_str())
 }
 
-
 /// Shared function evaluation for scalar functions (not aggregates)
 /// A point, as the geospatial functions see one (NDS-04).
 #[derive(Debug, Clone, Copy)]
@@ -3130,8 +3782,11 @@ struct Point {
 fn as_point(v: &Value, who: &str) -> ExecutionResult<Point> {
     let m = match v {
         Value::Property(PropertyValue::Map(m)) => m,
-        _ => return Err(ExecutionError::TypeError(format!(
-            "`{who}` takes points; got a value that is not one"))),
+        _ => {
+            return Err(ExecutionError::TypeError(format!(
+                "`{who}` takes points; got a value that is not one"
+            )))
+        }
     };
     let num = |k: &str| -> Option<f64> {
         m.get(k).and_then(|v| match v {
@@ -3153,16 +3808,25 @@ fn as_point(v: &Value, who: &str) -> ExecutionResult<Point> {
         },
     };
     let (x, y) = if geographic {
-        match (num("longitude").or_else(|| num("x")), num("latitude").or_else(|| num("y"))) {
+        match (
+            num("longitude").or_else(|| num("x")),
+            num("latitude").or_else(|| num("y")),
+        ) {
             (Some(x), Some(y)) => (x, y),
-            _ => return Err(ExecutionError::TypeError(format!(
-                "`{who}`: a geographic point needs `latitude` and `longitude`"))),
+            _ => {
+                return Err(ExecutionError::TypeError(format!(
+                    "`{who}`: a geographic point needs `latitude` and `longitude`"
+                )))
+            }
         }
     } else {
         match (num("x"), num("y")) {
             (Some(x), Some(y)) => (x, y),
-            _ => return Err(ExecutionError::TypeError(format!(
-                "`{who}`: a cartesian point needs `x` and `y`"))),
+            _ => {
+                return Err(ExecutionError::TypeError(format!(
+                    "`{who}`: a cartesian point needs `x` and `y`"
+                )))
+            }
         }
     };
     Ok(Point { x, y, geographic })
@@ -3182,7 +3846,9 @@ fn point_distance(a: &Point, b: &Point) -> ExecutionResult<f64> {
     if a.geographic != b.geographic {
         return Err(ExecutionError::TypeError(
             "`point.distance` needs both points in the same coordinate system; \
-             one is geographic and the other cartesian".to_string()));
+             one is geographic and the other cartesian"
+                .to_string(),
+        ));
     }
     if !a.geographic {
         return Ok(((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt());
@@ -3296,7 +3962,11 @@ fn min_arity(name: &str) -> Option<usize> {
 /// Argument names shown in an arity refusal's "call it as" example.
 const ARGUMENT_PLACEHOLDERS: [&str; 4] = ["a", "b", "c", "d"];
 
-pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> ExecutionResult<Value> {
+pub fn eval_function(
+    name: &str,
+    args: &[Value],
+    store: Option<&GraphStore>,
+) -> ExecutionResult<Value> {
     // Arity before dispatch. Every arm below is free to index `args` because
     // this ran first.
     if let Some(min) = min_arity(name) {
@@ -3317,7 +3987,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
     // `labels(null)` is the row where an OPTIONAL MATCH did not match, and
     // raising there aborts a query Cypher answers with a null column.
     if !NULL_TOLERANT_FUNCTIONS.contains(&lowered.as_str())
-        && args.iter().any(|a| matches!(a, Value::Null | Value::Property(PropertyValue::Null)))
+        && args
+            .iter()
+            .any(|a| matches!(a, Value::Null | Value::Property(PropertyValue::Null)))
     {
         return Ok(Value::Null);
     }
@@ -3332,16 +4004,24 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         //   hierarchy_rollup(root, 'sum')   -- index-resident fold under root
         //   hierarchy_rollup(root, 'sum', 'idx')
         "subsumes" => {
-            let store = store.ok_or_else(|| ExecutionError::RuntimeError(
-                "subsumes() requires graph context".to_string()))?;
+            let store = store.ok_or_else(|| {
+                ExecutionError::RuntimeError("subsumes() requires graph context".to_string())
+            })?;
             if args.len() < 2 {
                 return Err(ExecutionError::bad_argument(
-                    "subsumes(child, ancestor[, index]) takes 2 or 3 arguments".to_string()));
+                    "subsumes(child, ancestor[, index]) takes 2 or 3 arguments".to_string(),
+                ));
             }
-            let x = value_node_id(&args[0]).ok_or_else(|| ExecutionError::bad_argument(
-                "subsumes(): first argument must be a node".to_string()))?;
-            let y = value_node_id(&args[1]).ok_or_else(|| ExecutionError::bad_argument(
-                "subsumes(): second argument must be a node".to_string()))?;
+            let x = value_node_id(&args[0]).ok_or_else(|| {
+                ExecutionError::bad_argument(
+                    "subsumes(): first argument must be a node".to_string(),
+                )
+            })?;
+            let y = value_node_id(&args[1]).ok_or_else(|| {
+                ExecutionError::bad_argument(
+                    "subsumes(): second argument must be a node".to_string(),
+                )
+            })?;
             let entry = match args.get(2) {
                 Some(v) => {
                     let n = extract_string(v)?;
@@ -3370,14 +4050,21 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             Ok(Value::Property(PropertyValue::Boolean(answer)))
         }
         "hierarchy_rollup" => {
-            let store = store.ok_or_else(|| ExecutionError::RuntimeError(
-                "hierarchy_rollup() requires graph context".to_string()))?;
+            let store = store.ok_or_else(|| {
+                ExecutionError::RuntimeError(
+                    "hierarchy_rollup() requires graph context".to_string(),
+                )
+            })?;
             if args.len() < 2 {
                 return Err(ExecutionError::bad_argument(
-                    "hierarchy_rollup(root, op[, index]) takes 2 or 3 arguments".to_string()));
+                    "hierarchy_rollup(root, op[, index]) takes 2 or 3 arguments".to_string(),
+                ));
             }
-            let root = value_node_id(&args[0]).ok_or_else(|| ExecutionError::bad_argument(
-                "hierarchy_rollup(): first argument must be a node".to_string()))?;
+            let root = value_node_id(&args[0]).ok_or_else(|| {
+                ExecutionError::bad_argument(
+                    "hierarchy_rollup(): first argument must be a node".to_string(),
+                )
+            })?;
             let op_name = extract_string(&args[1])?;
             let op = crate::index::hierarchy::RollupOp::parse(&op_name).ok_or_else(|| {
                 ExecutionError::RuntimeError(format!(
@@ -3388,7 +4075,8 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     let n = extract_string(v)?;
                     store.hierarchy_index.usable_named(&n).ok_or_else(|| {
                         ExecutionError::RuntimeError(format!(
-                            "hierarchy_rollup(): no usable hierarchy index named '{n}'"))
+                            "hierarchy_rollup(): no usable hierarchy index named '{n}'"
+                        ))
                     })?
                 }
                 None => match store.hierarchy_index.usable_containing(&[root]) {
@@ -3412,22 +4100,31 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             ))
         }
         "hierarchy_lca" => {
-            let store = store.ok_or_else(|| ExecutionError::RuntimeError(
-                "hierarchy_lca() requires graph context".to_string()))?;
+            let store = store.ok_or_else(|| {
+                ExecutionError::RuntimeError("hierarchy_lca() requires graph context".to_string())
+            })?;
             if args.len() < 2 {
                 return Err(ExecutionError::bad_argument(
-                    "hierarchy_lca(a, b[, index]) takes 2 or 3 arguments".to_string()));
+                    "hierarchy_lca(a, b[, index]) takes 2 or 3 arguments".to_string(),
+                ));
             }
-            let a = value_node_id(&args[0]).ok_or_else(|| ExecutionError::bad_argument(
-                "hierarchy_lca(): first argument must be a node".to_string()))?;
-            let b = value_node_id(&args[1]).ok_or_else(|| ExecutionError::bad_argument(
-                "hierarchy_lca(): second argument must be a node".to_string()))?;
+            let a = value_node_id(&args[0]).ok_or_else(|| {
+                ExecutionError::bad_argument(
+                    "hierarchy_lca(): first argument must be a node".to_string(),
+                )
+            })?;
+            let b = value_node_id(&args[1]).ok_or_else(|| {
+                ExecutionError::bad_argument(
+                    "hierarchy_lca(): second argument must be a node".to_string(),
+                )
+            })?;
             let entry = match args.get(2) {
                 Some(v) => {
                     let n = extract_string(v)?;
                     store.hierarchy_index.usable_named(&n).ok_or_else(|| {
                         ExecutionError::RuntimeError(format!(
-                            "hierarchy_lca(): no usable hierarchy index named '{n}'"))
+                            "hierarchy_lca(): no usable hierarchy index named '{n}'"
+                        ))
                     })?
                 }
                 None => match store.hierarchy_index.usable_containing(&[a, b]) {
@@ -3478,7 +4175,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             // Cypher splits on an empty delimiter into single characters; Rust's
             // split("") would additionally yield empty strings at both ends.
             let parts: Vec<PropertyValue> = if delim.is_empty() {
-                s.chars().map(|c| PropertyValue::String(c.to_string())).collect()
+                s.chars()
+                    .map(|c| PropertyValue::String(c.to_string()))
+                    .collect()
             } else {
                 s.split(delim.as_str())
                     .map(|p| PropertyValue::String(p.to_string()))
@@ -3488,27 +4187,43 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         "ltrim" => {
             let s = extract_string(&args[0])?;
-            Ok(Value::Property(PropertyValue::String(s.trim_start().to_string())))
+            Ok(Value::Property(PropertyValue::String(
+                s.trim_start().to_string(),
+            )))
         }
         "rtrim" => {
             let s = extract_string(&args[0])?;
-            Ok(Value::Property(PropertyValue::String(s.trim_end().to_string())))
+            Ok(Value::Property(PropertyValue::String(
+                s.trim_end().to_string(),
+            )))
         }
         "replace" => {
-            if args.len() < 3 { return Err(ExecutionError::RuntimeError("replace() requires 3 arguments".to_string())); }
+            if args.len() < 3 {
+                return Err(ExecutionError::RuntimeError(
+                    "replace() requires 3 arguments".to_string(),
+                ));
+            }
             let s = extract_string(&args[0])?;
             let from = extract_string(&args[1])?;
             let to = extract_string(&args[2])?;
-            Ok(Value::Property(PropertyValue::String(s.replace(&from, &to))))
+            Ok(Value::Property(PropertyValue::String(
+                s.replace(&from, &to),
+            )))
         }
         "substring" => {
-            if args.len() < 2 { return Err(ExecutionError::bad_argument("substring() requires at least 2 arguments".to_string())); }
+            if args.len() < 2 {
+                return Err(ExecutionError::bad_argument(
+                    "substring() requires at least 2 arguments".to_string(),
+                ));
+            }
             let s = extract_string(&args[0])?;
             // A negative start or length is refused, as Neo4j does. Cast to
             // usize it wrapped: `substring('abc', -1)` answered "" (#1241).
             let start = extract_int(&args[1])?;
             if start < 0 {
-                return Err(ExecutionError::bad_argument(format!("substring() cannot handle a negative start index: {start}")));
+                return Err(ExecutionError::bad_argument(format!(
+                    "substring() cannot handle a negative start index: {start}"
+                )));
             }
             let start = start as usize;
             let chars: Vec<char> = s.chars().collect();
@@ -3518,10 +4233,14 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let result = if args.len() >= 3 {
                 let len = extract_int(&args[2])?;
                 if len < 0 {
-                    return Err(ExecutionError::bad_argument(format!("substring() cannot handle a negative length: {len}")));
+                    return Err(ExecutionError::bad_argument(format!(
+                        "substring() cannot handle a negative length: {len}"
+                    )));
                 }
                 let len = len as usize;
-                chars[start..std::cmp::min(start + len, chars.len())].iter().collect()
+                chars[start..std::cmp::min(start + len, chars.len())]
+                    .iter()
+                    .collect()
             } else {
                 chars[start..].iter().collect()
             };
@@ -3531,21 +4250,29 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let s = extract_string(&args[0])?;
             let n = extract_int(&args[1])?;
             if n < 0 {
-                return Err(ExecutionError::bad_argument(format!("left() cannot handle a negative length: {n}")));
+                return Err(ExecutionError::bad_argument(format!(
+                    "left() cannot handle a negative length: {n}"
+                )));
             }
             let n = n as usize;
-            Ok(Value::Property(PropertyValue::String(s.chars().take(n).collect())))
+            Ok(Value::Property(PropertyValue::String(
+                s.chars().take(n).collect(),
+            )))
         }
         "right" => {
             let s = extract_string(&args[0])?;
             let n = extract_int(&args[1])?;
             if n < 0 {
-                return Err(ExecutionError::bad_argument(format!("right() cannot handle a negative length: {n}")));
+                return Err(ExecutionError::bad_argument(format!(
+                    "right() cannot handle a negative length: {n}"
+                )));
             }
             let n = n as usize;
             let chars: Vec<char> = s.chars().collect();
             let start = chars.len().saturating_sub(n);
-            Ok(Value::Property(PropertyValue::String(chars[start..].iter().collect())))
+            Ok(Value::Property(PropertyValue::String(
+                chars[start..].iter().collect(),
+            )))
         }
         // Cypher's reverse() takes a list as well as a string, and this took
         // only a string -- `reverse([1,2,3])` answered
@@ -3561,7 +4288,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             }
             other => {
                 let text = extract_string(other)?;
-                Ok(Value::Property(PropertyValue::String(text.chars().rev().collect())))
+                Ok(Value::Property(PropertyValue::String(
+                    text.chars().rev().collect(),
+                )))
             }
         },
         "tostring" => {
@@ -3573,7 +4302,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 Value::Property(PropertyValue::Boolean(b)) => b.to_string(),
                 Value::Property(PropertyValue::DateTime(millis)) => {
                     use chrono::TimeZone;
-                    chrono::Utc.timestamp_millis_opt(*millis).single()
+                    chrono::Utc
+                        .timestamp_millis_opt(*millis)
+                        .single()
                         .map(|dt| dt.to_rfc3339())
                         .unwrap_or_else(|| format!("DateTime({})", millis))
                 }
@@ -3590,14 +4321,22 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 | Value::Property(p @ PropertyValue::LocalDateTime { .. })
                 | Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => p.to_cypher_string(),
                 Value::Null | Value::Property(PropertyValue::Null) => "null".to_string(),
-                _ => return Err(ExecutionError::TypeError("Cannot convert to string".to_string())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "Cannot convert to string".to_string(),
+                    ))
+                }
             };
             Ok(Value::Property(PropertyValue::String(s)))
         }
         "tointeger" | "toint" => {
             match &args[0] {
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(*f as i64))),
+                Value::Property(PropertyValue::Integer(i)) => {
+                    Ok(Value::Property(PropertyValue::Integer(*i)))
+                }
+                Value::Property(PropertyValue::Float(f)) => {
+                    Ok(Value::Property(PropertyValue::Integer(*f as i64)))
+                }
                 // Cypher yields null for a string it cannot parse, rather than
                 // failing the query. Erroring made `toInteger` unusable for the
                 // thing it is mostly used for -- checking whether input is a
@@ -3612,7 +4351,11 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         .parse::<i64>()
                         .ok()
                         .or_else(|| {
-                            s.trim().parse::<f64>().ok().filter(|f| f.is_finite()).map(|f| f as i64)
+                            s.trim()
+                                .parse::<f64>()
+                                .ok()
+                                .filter(|f| f.is_finite())
+                                .map(|f| f as i64)
                         })
                         .map(PropertyValue::Integer)
                         .unwrap_or(PropertyValue::Null),
@@ -3620,35 +4363,53 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 Value::Null | Value::Property(PropertyValue::Null) => {
                     Ok(Value::Property(PropertyValue::Null))
                 }
-                _ => Err(ExecutionError::TypeError("Cannot convert to integer".to_string())),
+                _ => Err(ExecutionError::TypeError(
+                    "Cannot convert to integer".to_string(),
+                )),
             }
         }
         "tofloat" => {
             match &args[0] {
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(*f))),
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float(*i as f64))),
+                Value::Property(PropertyValue::Float(f)) => {
+                    Ok(Value::Property(PropertyValue::Float(*f)))
+                }
+                Value::Property(PropertyValue::Integer(i)) => {
+                    Ok(Value::Property(PropertyValue::Float(*i as f64)))
+                }
                 // Null rather than an error, as with `toInteger` (#606).
                 Value::Property(PropertyValue::String(s)) => Ok(Value::Property(
-                    s.parse::<f64>().map(PropertyValue::Float).unwrap_or(PropertyValue::Null),
+                    s.parse::<f64>()
+                        .map(PropertyValue::Float)
+                        .unwrap_or(PropertyValue::Null),
                 )),
                 Value::Null | Value::Property(PropertyValue::Null) => {
                     Ok(Value::Property(PropertyValue::Null))
                 }
-                _ => Err(ExecutionError::TypeError("Cannot convert to float".to_string())),
+                _ => Err(ExecutionError::TypeError(
+                    "Cannot convert to float".to_string(),
+                )),
             }
         }
         // Size/length
         "size" | "length" => {
             match &args[0] {
-                Value::Property(PropertyValue::String(s)) => Ok(Value::Property(PropertyValue::Integer(s.len() as i64))),
-                Value::Path { edges, .. } => Ok(Value::Property(PropertyValue::Integer(edges.len() as i64))),
+                Value::Property(PropertyValue::String(s)) => {
+                    Ok(Value::Property(PropertyValue::Integer(s.len() as i64)))
+                }
+                Value::Path { edges, .. } => {
+                    Ok(Value::Property(PropertyValue::Integer(edges.len() as i64)))
+                }
                 // A list of entities -- what a variable-length relationship
                 // variable binds -- is a list, and `size()` counts it (#652).
-                Value::List(items) => Ok(Value::Property(PropertyValue::Integer(items.len() as i64))),
+                Value::List(items) => {
+                    Ok(Value::Property(PropertyValue::Integer(items.len() as i64)))
+                }
                 Value::Property(p) if p.as_list_items().is_some() => Ok(Value::Property(
                     PropertyValue::Integer(p.as_list_items().unwrap().len() as i64),
                 )),
-                _ => Err(ExecutionError::TypeError("size() requires string, list, or path".to_string())),
+                _ => Err(ExecutionError::TypeError(
+                    "size() requires string, list, or path".to_string(),
+                )),
             }
         }
         // Path functions.
@@ -3658,93 +4419,135 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         // cannot hold an entity -- so `nodes(p)` answered `[1, 2]` where
         // Cypher answers `[(:A), (:B)]`, and anything reading a property off
         // an element got nothing (#652).
-        "nodes" => {
-            match &args[0] {
-                Value::Path { nodes, .. } => Ok(Value::List(
-                    nodes.iter().map(|id| Value::NodeRef(*id)).collect(),
-                )),
-                _ => Err(ExecutionError::TypeError("nodes() requires a path".to_string())),
-            }
-        }
-        "relationships" | "rels" => {
-            match &args[0] {
-                Value::Path { edges, .. } => Ok(Value::List(
-                    edges
-                        .iter()
-                        .map(|id| match store.and_then(|s| s.get_edge(*id)) {
-                            Some(e) => Value::EdgeRef(*id, e.source, e.target, e.edge_type.clone()),
-                            None => Value::Null,
-                        })
-                        .collect(),
-                )),
-                _ => Err(ExecutionError::TypeError("relationships() requires a path".to_string())),
-            }
-        }
+        "nodes" => match &args[0] {
+            Value::Path { nodes, .. } => Ok(Value::List(
+                nodes.iter().map(|id| Value::NodeRef(*id)).collect(),
+            )),
+            _ => Err(ExecutionError::TypeError(
+                "nodes() requires a path".to_string(),
+            )),
+        },
+        "relationships" | "rels" => match &args[0] {
+            Value::Path { edges, .. } => Ok(Value::List(
+                edges
+                    .iter()
+                    .map(|id| match store.and_then(|s| s.get_edge(*id)) {
+                        Some(e) => Value::EdgeRef(*id, e.source, e.target, e.edge_type.clone()),
+                        None => Value::Null,
+                    })
+                    .collect(),
+            )),
+            _ => Err(ExecutionError::TypeError(
+                "relationships() requires a path".to_string(),
+            )),
+        },
         // Math functions
-        "abs" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(i.abs()))),
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(f.abs()))),
-                _ => Err(ExecutionError::TypeError("abs() requires numeric".to_string())),
+        "abs" => match &args[0] {
+            Value::Property(PropertyValue::Integer(i)) => {
+                Ok(Value::Property(PropertyValue::Integer(i.abs())))
             }
-        }
-        "ceil" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.ceil() as i64))),
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
-                _ => Err(ExecutionError::TypeError("ceil() requires numeric".to_string())),
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::Float(f.abs())))
             }
-        }
-        "floor" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.floor() as i64))),
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
-                _ => Err(ExecutionError::TypeError("floor() requires numeric".to_string())),
+            _ => Err(ExecutionError::TypeError(
+                "abs() requires numeric".to_string(),
+            )),
+        },
+        "ceil" => match &args[0] {
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::Integer(f.ceil() as i64)))
             }
-        }
+            Value::Property(PropertyValue::Integer(i)) => {
+                Ok(Value::Property(PropertyValue::Integer(*i)))
+            }
+            _ => Err(ExecutionError::TypeError(
+                "ceil() requires numeric".to_string(),
+            )),
+        },
+        "floor" => match &args[0] {
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::Integer(f.floor() as i64)))
+            }
+            Value::Property(PropertyValue::Integer(i)) => {
+                Ok(Value::Property(PropertyValue::Integer(*i)))
+            }
+            _ => Err(ExecutionError::TypeError(
+                "floor() requires numeric".to_string(),
+            )),
+        },
         "round" => {
             if args.len() >= 2 {
                 // CY-23: round(x, precision) — e.g. round(3.14159, 2) → 3.14
                 let v = extract_float(&args[0])?;
                 let precision = extract_float(&args[1])? as i32;
                 let factor = 10f64.powi(precision);
-                Ok(Value::Property(PropertyValue::Float((v * factor).round() / factor)))
+                Ok(Value::Property(PropertyValue::Float(
+                    (v * factor).round() / factor,
+                )))
             } else {
                 match &args[0] {
-                    Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(f.round() as i64))),
-                    Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
-                    _ => Err(ExecutionError::TypeError("round() requires numeric".to_string())),
+                    Value::Property(PropertyValue::Float(f)) => {
+                        Ok(Value::Property(PropertyValue::Integer(f.round() as i64)))
+                    }
+                    Value::Property(PropertyValue::Integer(i)) => {
+                        Ok(Value::Property(PropertyValue::Integer(*i)))
+                    }
+                    _ => Err(ExecutionError::TypeError(
+                        "round() requires numeric".to_string(),
+                    )),
                 }
             }
         }
-        "sqrt" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(f.sqrt()))),
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float((*i as f64).sqrt()))),
-                _ => Err(ExecutionError::TypeError("sqrt() requires numeric".to_string())),
+        "sqrt" => match &args[0] {
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::Float(f.sqrt())))
             }
-        }
-        "sign" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(i.signum()))),
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(if *f > 0.0 { 1 } else if *f < 0.0 { -1 } else { 0 }))),
-                _ => Err(ExecutionError::TypeError("sign() requires numeric".to_string())),
+            Value::Property(PropertyValue::Integer(i)) => {
+                Ok(Value::Property(PropertyValue::Float((*i as f64).sqrt())))
             }
-        }
-        "log" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(f.ln()))),
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float((*i as f64).ln()))),
-                _ => Err(ExecutionError::TypeError("log() requires numeric".to_string())),
+            _ => Err(ExecutionError::TypeError(
+                "sqrt() requires numeric".to_string(),
+            )),
+        },
+        "sign" => match &args[0] {
+            Value::Property(PropertyValue::Integer(i)) => {
+                Ok(Value::Property(PropertyValue::Integer(i.signum())))
             }
-        }
-        "exp" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(f.exp()))),
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float((*i as f64).exp()))),
-                _ => Err(ExecutionError::TypeError("exp() requires numeric".to_string())),
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::Integer(if *f > 0.0 {
+                    1
+                } else if *f < 0.0 {
+                    -1
+                } else {
+                    0
+                })))
             }
-        }
+            _ => Err(ExecutionError::TypeError(
+                "sign() requires numeric".to_string(),
+            )),
+        },
+        "log" => match &args[0] {
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::Float(f.ln())))
+            }
+            Value::Property(PropertyValue::Integer(i)) => {
+                Ok(Value::Property(PropertyValue::Float((*i as f64).ln())))
+            }
+            _ => Err(ExecutionError::TypeError(
+                "log() requires numeric".to_string(),
+            )),
+        },
+        "exp" => match &args[0] {
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::Float(f.exp())))
+            }
+            Value::Property(PropertyValue::Integer(i)) => {
+                Ok(Value::Property(PropertyValue::Float((*i as f64).exp())))
+            }
+            _ => Err(ExecutionError::TypeError(
+                "exp() requires numeric".to_string(),
+            )),
+        },
         "rand" => {
             use rand::Rng;
             let val = rand::thread_rng().gen::<f64>();
@@ -3758,7 +4561,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "coalesce" => {
             // Neo4j refuses `coalesce()` outright; answering null hid the typo (#1241).
             if args.is_empty() {
-                return Err(ExecutionError::bad_argument("coalesce() requires at least one argument".to_string()));
+                return Err(ExecutionError::bad_argument(
+                    "coalesce() requires at least one argument".to_string(),
+                ));
             }
             for arg in args {
                 if !matches!(arg, Value::Null | Value::Property(PropertyValue::Null)) {
@@ -3778,41 +4583,45 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 // A list that holds entities is a Value::List, not a
                 // PropertyValue list — see eval_index.
                 Value::List(items) => Ok(items.first().cloned().unwrap_or(Value::Null)),
-                _ => Err(ExecutionError::TypeError("head() requires list".to_string())),
+                _ => Err(ExecutionError::TypeError(
+                    "head() requires list".to_string(),
+                )),
             }
         }
-        "last" => {
-            match &args[0] {
-                Value::Property(p) if p.as_list_items().is_some() => Ok(p
-                    .as_list_items()
-                    .unwrap()
-                    .last()
-                    .map(|v| Value::Property(v.clone()))
-                    .unwrap_or(Value::Null)),
-                Value::List(items) => Ok(items.last().cloned().unwrap_or(Value::Null)),
-                _ => Err(ExecutionError::TypeError("last() requires list".to_string())),
+        "last" => match &args[0] {
+            Value::Property(p) if p.as_list_items().is_some() => Ok(p
+                .as_list_items()
+                .unwrap()
+                .last()
+                .map(|v| Value::Property(v.clone()))
+                .unwrap_or(Value::Null)),
+            Value::List(items) => Ok(items.last().cloned().unwrap_or(Value::Null)),
+            _ => Err(ExecutionError::TypeError(
+                "last() requires list".to_string(),
+            )),
+        },
+        "tail" => match &args[0] {
+            Value::Property(PropertyValue::Array(arr)) => {
+                let tail: Vec<PropertyValue> = arr.iter().skip(1).cloned().collect();
+                Ok(Value::Property(PropertyValue::Array(tail)))
             }
-        }
-        "tail" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Array(arr)) => {
-                    let tail: Vec<PropertyValue> = arr.iter().skip(1).cloned().collect();
-                    Ok(Value::Property(PropertyValue::Array(tail)))
-                }
-                Value::List(items) => {
-                    Ok(Value::List(items.iter().skip(1).cloned().collect()))
-                }
-                _ => Err(ExecutionError::TypeError("tail() requires list".to_string())),
-            }
-        }
+            Value::List(items) => Ok(Value::List(items.iter().skip(1).cloned().collect())),
+            _ => Err(ExecutionError::TypeError(
+                "tail() requires list".to_string(),
+            )),
+        },
         // Meta functions — work on nodes/edges
-        "id" => {
-            match &args[0] {
-                Value::NodeRef(id) | Value::Node(id, _) => Ok(Value::Property(PropertyValue::Integer(id.as_u64() as i64))),
-                Value::EdgeRef(id, ..) | Value::Edge(id, _) => Ok(Value::Property(PropertyValue::Integer(id.as_u64() as i64))),
-                _ => Err(ExecutionError::TypeError("id() requires node or edge".to_string())),
+        "id" => match &args[0] {
+            Value::NodeRef(id) | Value::Node(id, _) => {
+                Ok(Value::Property(PropertyValue::Integer(id.as_u64() as i64)))
             }
-        }
+            Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                Ok(Value::Property(PropertyValue::Integer(id.as_u64() as i64)))
+            }
+            _ => Err(ExecutionError::TypeError(
+                "id() requires node or edge".to_string(),
+            )),
+        },
         // `n:A:B` as a value, produced by the parser's postfix label check.
         // True when the node carries *every* named label; null when the
         // subject is null, following Cypher's three-valued logic. On a
@@ -3826,7 +4635,11 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         _ => None,
                     })
                     .collect(),
-                _ => return Err(ExecutionError::TypeError("hasLabels expects a label list".into())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "hasLabels expects a label list".into(),
+                    ))
+                }
             };
             // On a relationship, `r:T` is a **type** test, and Cypher allows
             // it: `MATCH ()-[r]->() RETURN r:T2` asks whether this
@@ -3870,30 +4683,32 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 .all(|w| node.labels.iter().any(|l| l.as_str() == w));
             Ok(Value::Property(PropertyValue::Boolean(has_all)))
         }
-        "labels" => {
-            match &args[0] {
-                Value::Node(_, node) => {
-                    Ok(Value::Property(PropertyValue::Array(sorted_labels(node))))
-                }
-                Value::NodeRef(id) => {
-                    let s = store.ok_or_else(|| ExecutionError::RuntimeError("labels() on NodeRef requires store".to_string()))?;
-                    let node = s.get_node(*id).ok_or_else(|| ExecutionError::RuntimeError(format!("Node {} not found", id.as_u64())))?;
-                    Ok(Value::Property(PropertyValue::Array(sorted_labels(node))))
-                }
-                _ => Err(ExecutionError::TypeError("labels() requires a node".to_string())),
+        "labels" => match &args[0] {
+            Value::Node(_, node) => Ok(Value::Property(PropertyValue::Array(sorted_labels(node)))),
+            Value::NodeRef(id) => {
+                let s = store.ok_or_else(|| {
+                    ExecutionError::RuntimeError("labels() on NodeRef requires store".to_string())
+                })?;
+                let node = s.get_node(*id).ok_or_else(|| {
+                    ExecutionError::RuntimeError(format!("Node {} not found", id.as_u64()))
+                })?;
+                Ok(Value::Property(PropertyValue::Array(sorted_labels(node))))
             }
-        }
-        "type" => {
-            match &args[0] {
-                Value::Edge(_, edge) => {
-                    Ok(Value::Property(PropertyValue::String(edge.edge_type.as_str().to_string())))
-                }
-                Value::EdgeRef(_, _, _, et) => {
-                    Ok(Value::Property(PropertyValue::String(et.as_str().to_string())))
-                }
-                _ => Err(ExecutionError::TypeError("type() requires an edge".to_string())),
-            }
-        }
+            _ => Err(ExecutionError::TypeError(
+                "labels() requires a node".to_string(),
+            )),
+        },
+        "type" => match &args[0] {
+            Value::Edge(_, edge) => Ok(Value::Property(PropertyValue::String(
+                edge.edge_type.as_str().to_string(),
+            ))),
+            Value::EdgeRef(_, _, _, et) => Ok(Value::Property(PropertyValue::String(
+                et.as_str().to_string(),
+            ))),
+            _ => Err(ExecutionError::TypeError(
+                "type() requires an edge".to_string(),
+            )),
+        },
         // Sorted, because the underlying maps are `HashMap`s and Rust seeds
         // their hasher randomly *per process* -- so this returned a different
         // order on every run of the same query over the same data. Cypher does
@@ -3923,9 +4738,14 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
                 }
                 Value::NodeRef(id) => {
-                    let s = store.ok_or_else(|| ExecutionError::RuntimeError("keys() on NodeRef requires store".to_string()))?;
+                    let s = store.ok_or_else(|| {
+                        ExecutionError::RuntimeError("keys() on NodeRef requires store".to_string())
+                    })?;
                     if s.get_node(*id).is_none() {
-                        return Err(ExecutionError::RuntimeError(format!("Node {} not found", id.as_u64())));
+                        return Err(ExecutionError::RuntimeError(format!(
+                            "Node {} not found",
+                            id.as_u64()
+                        )));
                     }
                     let keys: Vec<PropertyValue> = s
                         .node_properties_full(*id)
@@ -3935,15 +4755,23 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
                 }
                 Value::Edge(_, edge) => {
-                    let keys: Vec<PropertyValue> = edge.properties.keys()
+                    let keys: Vec<PropertyValue> = edge
+                        .properties
+                        .keys()
                         .map(|k| PropertyValue::String(k.clone()))
                         .collect();
                     Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
                 }
                 Value::EdgeRef(eid, _, _, _) => {
-                    let s = store.ok_or_else(|| ExecutionError::RuntimeError("keys() on EdgeRef requires store".to_string()))?;
-                    let edge = s.get_edge(*eid).ok_or_else(|| ExecutionError::RuntimeError(format!("Edge {} not found", eid.as_u64())))?;
-                    let keys: Vec<PropertyValue> = edge.properties.keys()
+                    let s = store.ok_or_else(|| {
+                        ExecutionError::RuntimeError("keys() on EdgeRef requires store".to_string())
+                    })?;
+                    let edge = s.get_edge(*eid).ok_or_else(|| {
+                        ExecutionError::RuntimeError(format!("Edge {} not found", eid.as_u64()))
+                    })?;
+                    let keys: Vec<PropertyValue> = edge
+                        .properties
+                        .keys()
                         .map(|k| PropertyValue::String(k.clone()))
                         .collect();
                     Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
@@ -3959,13 +4787,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 // well as nodes and edges, and without this a map property can
                 // be stored and read whole but never enumerated (#452).
                 Value::Property(PropertyValue::Map(m)) => {
-                    let keys: Vec<PropertyValue> = m
-                        .keys()
-                        .map(|k| PropertyValue::String(k.clone()))
-                        .collect();
+                    let keys: Vec<PropertyValue> =
+                        m.keys().map(|k| PropertyValue::String(k.clone())).collect();
                     Ok(Value::Property(PropertyValue::Array(sorted_keys(keys))))
                 }
-                _ => Err(ExecutionError::TypeError("keys() requires a node, edge, or map".to_string())),
+                _ => Err(ExecutionError::TypeError(
+                    "keys() requires a node, edge, or map".to_string(),
+                )),
             }
         }
         "exists" => {
@@ -3973,27 +4801,39 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             Ok(Value::Property(PropertyValue::Boolean(!is_null)))
         }
         // startNode/endNode — return source/target node of an edge
-        "startnode" => {
-            match &args[0] {
-                Value::Edge(_, edge) => Ok(Value::NodeRef(edge.source)),
-                Value::EdgeRef(_, src, _, _) => Ok(Value::NodeRef(*src)),
-                _ => Err(ExecutionError::TypeError("startNode() requires an edge".to_string())),
-            }
-        }
-        "endnode" => {
-            match &args[0] {
-                Value::Edge(_, edge) => Ok(Value::NodeRef(edge.target)),
-                Value::EdgeRef(_, _, tgt, _) => Ok(Value::NodeRef(*tgt)),
-                _ => Err(ExecutionError::TypeError("endNode() requires an edge".to_string())),
-            }
-        }
+        "startnode" => match &args[0] {
+            Value::Edge(_, edge) => Ok(Value::NodeRef(edge.source)),
+            Value::EdgeRef(_, src, _, _) => Ok(Value::NodeRef(*src)),
+            _ => Err(ExecutionError::TypeError(
+                "startNode() requires an edge".to_string(),
+            )),
+        },
+        "endnode" => match &args[0] {
+            Value::Edge(_, edge) => Ok(Value::NodeRef(edge.target)),
+            Value::EdgeRef(_, _, tgt, _) => Ok(Value::NodeRef(*tgt)),
+            _ => Err(ExecutionError::TypeError(
+                "endNode() requires an edge".to_string(),
+            )),
+        },
         // range() — generate integer list
         "range" => {
-            if args.len() < 2 { return Err(ExecutionError::bad_argument("range() requires at least 2 arguments".to_string())); }
+            if args.len() < 2 {
+                return Err(ExecutionError::bad_argument(
+                    "range() requires at least 2 arguments".to_string(),
+                ));
+            }
             let start = extract_int(&args[0])?;
             let end = extract_int(&args[1])?;
-            let step = if args.len() >= 3 { extract_int(&args[2])? } else { 1 };
-            if step == 0 { return Err(ExecutionError::bad_argument("range() step cannot be 0".to_string())); }
+            let step = if args.len() >= 3 {
+                extract_int(&args[2])?
+            } else {
+                1
+            };
+            if step == 0 {
+                return Err(ExecutionError::bad_argument(
+                    "range() step cannot be 0".to_string(),
+                ));
+            }
             let mut result = Vec::new();
             let mut i = start;
             if step > 0 {
@@ -4037,9 +4877,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     // has its own path and did not.
                     if let Some(src) = map.get("date").or_else(|| map.get("datetime")) {
                         if let Some(base) = date_part_of(src) {
-                            return Ok(Value::Property(PropertyValue::Date(
-                                apply_date_overrides(base, map)?,
-                            )));
+                            return Ok(Value::Property(PropertyValue::Date(apply_date_overrides(
+                                base, map,
+                            )?)));
                         }
                     }
                     Ok(Value::Property(PropertyValue::Date(tmp::date_days(map)?)))
@@ -4080,7 +4920,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                             )));
                         }
                     }
-                    Ok(Value::Property(PropertyValue::LocalTime(tmp::time_of_day_nanos(map)?)))
+                    Ok(Value::Property(PropertyValue::LocalTime(
+                        tmp::time_of_day_nanos(map)?,
+                    )))
                 }
                 Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
                 other => match value_as_property(other).and_then(|p| time_part_of(&p)) {
@@ -4097,7 +4939,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 let now = statement_clock::now();
                 let nanos = now.timestamp().rem_euclid(86_400) * 1_000_000_000
                     + now.timestamp_subsec_nanos() as i64;
-                return Ok(Value::Property(PropertyValue::Time { nanos, offset_seconds: 0 }));
+                return Ok(Value::Property(PropertyValue::Time {
+                    nanos,
+                    offset_seconds: 0,
+                }));
             }
             match &args[0] {
                 Value::Property(PropertyValue::String(s)) => {
@@ -4185,14 +5030,20 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             match &args[0] {
                 Value::Property(PropertyValue::String(s)) => {
                     let (secs, nanos) = parse_naive_date_time(s)?;
-                    Ok(Value::Property(PropertyValue::LocalDateTime { secs, nanos }))
+                    Ok(Value::Property(PropertyValue::LocalDateTime {
+                        secs,
+                        nanos,
+                    }))
                 }
                 Value::Map(_) | Value::Property(PropertyValue::Map(_)) => {
                     let map = &temporal_arg_map(&args[0]).expect("matched a map arm");
                     crate::query::executor::temporal::reject_unknown_map(map)?;
                     let (d, t) = compose_date_and_time(map)?;
                     let (secs, nanos) = day_and_nanos_to_secs(d, t);
-                    Ok(Value::Property(PropertyValue::LocalDateTime { secs, nanos }))
+                    Ok(Value::Property(PropertyValue::LocalDateTime {
+                        secs,
+                        nanos,
+                    }))
                 }
                 Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
                 // A bare temporal value: take its date and time parts.
@@ -4203,7 +5054,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     let d = date_part_of(p).unwrap_or(0);
                     let t = time_part_of(p).unwrap_or(0);
                     let (secs, nanos) = day_and_nanos_to_secs(d, t);
-                    Ok(Value::Property(PropertyValue::LocalDateTime { secs, nanos }))
+                    Ok(Value::Property(PropertyValue::LocalDateTime {
+                        secs,
+                        nanos,
+                    }))
                 }
                 _ => Err(ExecutionError::TypeError(
                     "localdatetime() requires a string, a map, or a temporal value".to_string(),
@@ -4247,9 +5101,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                             // A zone suffix wins over a written offset for the
                             // *rule*, but the written offset is authoritative
                             // for the instant it recorded -- keep it when given.
-                            let off = explicit_offset
-                                .map(Ok)
-                                .unwrap_or_else(|| tmp::resolve_offset(&spec, local_days, local_nanos))?;
+                            let off = explicit_offset.map(Ok).unwrap_or_else(|| {
+                                tmp::resolve_offset(&spec, local_days, local_nanos)
+                            })?;
                             (off, tmp::zone_name(&spec))
                         }
                         None => (explicit_offset.unwrap_or(0), None),
@@ -4299,10 +5153,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     // +01:00 in October and +02:00 in July -- so it is resolved
                     // against *this* local date, not at parse time (#767).
                     let (offset_seconds, zone) = match &spec {
-                        Some(sp) => (
-                            tmp::resolve_offset(sp, d as i64, t)?,
-                            tmp::zone_name(sp),
-                        ),
+                        Some(sp) => (tmp::resolve_offset(sp, d as i64, t)?, tmp::zone_name(sp)),
                         // No target zone given: a **zoned source keeps its
                         // own**. Defaulting to UTC re-labelled the value —
                         // `datetime({datetime: s})` turned `12:00+02:00` into
@@ -4310,7 +5161,11 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         // Found by a test written for the re-zoning case, which
                         // is the neighbouring behaviour (#809).
                         None => match map.get("datetime").or_else(|| map.get("time")) {
-                            Some(PropertyValue::ZonedDateTime { offset_seconds, zone, .. }) => {
+                            Some(PropertyValue::ZonedDateTime {
+                                offset_seconds,
+                                zone,
+                                ..
+                            }) => {
                                 // The *zone* is inherited; its **offset is not**.
                                 // A named zone has no single offset, and the
                                 // selection has just moved the date --
@@ -4329,7 +5184,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                                     None => (*offset_seconds, None),
                                 }
                             }
-                            Some(PropertyValue::Time { offset_seconds, .. }) => (*offset_seconds, None),
+                            Some(PropertyValue::Time { offset_seconds, .. }) => {
+                                (*offset_seconds, None)
+                            }
                             _ => (0, None),
                         },
                     };
@@ -4351,15 +5208,17 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     // October value while placing it on a March date undid the
                     // wrong hour and landed the instant one hour out (#1006).
                     let source_offset = match map.get("datetime").or_else(|| map.get("time")) {
-                        Some(PropertyValue::ZonedDateTime { offset_seconds, zone, .. }) => {
-                            match zone {
-                                Some(name) => {
-                                    let sp = tmp::parse_timezone_spec(name)?;
-                                    Some(tmp::resolve_offset(&sp, d as i64, t)?)
-                                }
-                                None => Some(*offset_seconds),
+                        Some(PropertyValue::ZonedDateTime {
+                            offset_seconds,
+                            zone,
+                            ..
+                        }) => match zone {
+                            Some(name) => {
+                                let sp = tmp::parse_timezone_spec(name)?;
+                                Some(tmp::resolve_offset(&sp, d as i64, t)?)
                             }
-                        }
+                            None => Some(*offset_seconds),
+                        },
                         Some(PropertyValue::Time { offset_seconds, .. }) => Some(*offset_seconds),
                         _ => None,
                     };
@@ -4407,12 +5266,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         "duration" => {
             if args.is_empty() {
-                return Err(ExecutionError::RuntimeError("duration() requires an argument".to_string()));
+                return Err(ExecutionError::RuntimeError(
+                    "duration() requires an argument".to_string(),
+                ));
             }
             match &args[0] {
-                Value::Property(PropertyValue::String(s)) => {
-                    parse_iso_duration(s)
-                }
+                Value::Property(PropertyValue::String(s)) => parse_iso_duration(s),
                 Value::Property(PropertyValue::Map(map)) => {
                     // Every component may be **fractional**, and the fraction
                     // carries into the next smaller unit (#829):
@@ -4492,7 +5351,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                         nanos: (total_nanos % 1_000_000_000) as i32,
                     }))
                 }
-                _ => Err(ExecutionError::TypeError("duration() requires string or map argument".to_string())),
+                _ => Err(ExecutionError::TypeError(
+                    "duration() requires string or map argument".to_string(),
+                )),
             }
         }
         // duration component accessors
@@ -4509,7 +5370,11 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         // 1970-01-05T19:46:19.999999999Z, which no millisecond-based
         // representation can express (#1003).
         "datetime.fromepoch" | "datetime.fromepochmillis" => {
-            let want = if lowered == "datetime.fromepoch" { 2 } else { 1 };
+            let want = if lowered == "datetime.fromepoch" {
+                2
+            } else {
+                1
+            };
             if args.len() != want {
                 return Err(ExecutionError::RuntimeError(format!(
                     "{name}() requires {want} argument(s)"
@@ -4522,7 +5387,10 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 // `div_euclid`, not `/`: a negative epoch millisecond is a real
                 // instant before 1970, and truncating toward zero would place
                 // it in the wrong second with a negative nanosecond remainder.
-                (millis.div_euclid(1_000), millis.rem_euclid(1_000) * 1_000_000)
+                (
+                    millis.div_euclid(1_000),
+                    millis.rem_euclid(1_000) * 1_000_000,
+                )
             };
             if !(0..1_000_000_000).contains(&nanos) {
                 return Err(ExecutionError::RuntimeError(
@@ -4536,25 +5404,34 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 zone: None,
             }))
         }
-        "date.truncate" | "time.truncate" | "localtime.truncate"
-        | "localdatetime.truncate" | "datetime.truncate" => {
+        "date.truncate"
+        | "time.truncate"
+        | "localtime.truncate"
+        | "localdatetime.truncate"
+        | "datetime.truncate" => {
             if args.len() < 2 {
-                return Err(ExecutionError::RuntimeError(format!("{lowered}() requires a unit and a temporal value")));
+                return Err(ExecutionError::RuntimeError(format!(
+                    "{lowered}() requires a unit and a temporal value"
+                )));
             }
             let unit = match &args[0] {
                 Value::Property(PropertyValue::String(u)) => u.clone(),
-                _ => return Err(ExecutionError::TypeError(
-                    "the first argument of truncate() is the unit, as a string".to_string(),
-                )),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "the first argument of truncate() is the unit, as a string".to_string(),
+                    ))
+                }
             };
             let value = match &args[1] {
                 Value::Property(PropertyValue::Null) | Value::Null => {
                     return Ok(Value::Property(PropertyValue::Null))
                 }
                 Value::Property(p) => p.clone(),
-                _ => return Err(ExecutionError::TypeError(
-                    "truncate() needs a temporal value".to_string(),
-                )),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "truncate() needs a temporal value".to_string(),
+                    ))
+                }
             };
             let empty = std::collections::HashMap::new();
             let overrides = match args.get(2) {
@@ -4572,15 +5449,21 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         // Cypher until the grammar learned to parse a dotted name.
         "duration.inseconds" | "duration.indays" | "duration.inmonths" => {
             if args.len() < 2 {
-                return Err(ExecutionError::RuntimeError(format!("{lowered}() requires 2 arguments")));
+                return Err(ExecutionError::RuntimeError(format!(
+                    "{lowered}() requires 2 arguments"
+                )));
             }
             let (a, b) = match (&args[0], &args[1]) {
-                (Value::Property(PropertyValue::Null), _) | (_, Value::Property(PropertyValue::Null))
-                | (Value::Null, _) | (_, Value::Null) => {
-                    return Ok(Value::Property(PropertyValue::Null))
-                }
+                (Value::Property(PropertyValue::Null), _)
+                | (_, Value::Property(PropertyValue::Null))
+                | (Value::Null, _)
+                | (_, Value::Null) => return Ok(Value::Property(PropertyValue::Null)),
                 (Value::Property(a), Value::Property(b)) => (a.clone(), b.clone()),
-                _ => return Err(ExecutionError::TypeError(format!("{lowered}() needs two temporal values"))),
+                _ => {
+                    return Err(ExecutionError::TypeError(format!(
+                        "{lowered}() needs two temporal values"
+                    )))
+                }
             };
             // `duration.inX(lhs, rhs)` is **rhs - lhs**, the same orientation
             // as `duration.between`: the duration you would add to `lhs` to
@@ -4600,7 +5483,12 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 temporal_difference(&b, &a)?
             };
             let (months, days, seconds, nanos) = match diff {
-                PropertyValue::Duration { months, days, seconds, nanos } => (months, days, seconds, nanos),
+                PropertyValue::Duration {
+                    months,
+                    days,
+                    seconds,
+                    nanos,
+                } => (months, days, seconds, nanos),
                 _ => (0, 0, 0, 0),
             };
             Ok(Value::Property(match lowered.as_str() {
@@ -4608,18 +5496,31 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 // remainder, rather than rounding it: `inDays` of 30 hours is
                 // one day, not one and a quarter.
                 "duration.inseconds" => PropertyValue::Duration {
-                    months: 0, days: 0, seconds: days * 86_400 + seconds, nanos,
+                    months: 0,
+                    days: 0,
+                    seconds: days * 86_400 + seconds,
+                    nanos,
                 },
                 "duration.indays" => PropertyValue::Duration {
-                    months: 0, days: days + seconds / 86_400, seconds: 0, nanos: 0,
+                    months: 0,
+                    days: days + seconds / 86_400,
+                    seconds: 0,
+                    nanos: 0,
                 },
                 _ => PropertyValue::Duration {
-                    months, days: 0, seconds: 0, nanos: 0,
+                    months,
+                    days: 0,
+                    seconds: 0,
+                    nanos: 0,
                 },
             }))
         }
         "duration_between" | "duration.between" => {
-            if args.len() < 2 { return Err(ExecutionError::RuntimeError("duration.between() requires 2 arguments".to_string())); }
+            if args.len() < 2 {
+                return Err(ExecutionError::RuntimeError(
+                    "duration.between() requires 2 arguments".to_string(),
+                ));
+            }
             // Accepts any two temporals, not only the legacy millisecond
             // `DateTime`. It matched that one variant alone, so the moment the
             // constructors started returning real types (#689) every
@@ -4629,14 +5530,16 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             //
             // Argument order is (from, to): `between(a, b)` is b - a.
             match (&args[0], &args[1]) {
-                (Value::Property(a), Value::Property(b)) => {
-                    Ok(Value::Property(temporal_difference_calendar(b, a).map_err(|_| {
+                (Value::Property(a), Value::Property(b)) => Ok(Value::Property(
+                    temporal_difference_calendar(b, a).map_err(|_| {
                         ExecutionError::TypeError(
                             "duration.between() requires two temporal arguments".to_string(),
                         )
-                    })?))
-                }
-                _ => Err(ExecutionError::TypeError("duration.between() requires two temporal arguments".to_string())),
+                    })?,
+                )),
+                _ => Err(ExecutionError::TypeError(
+                    "duration.between() requires two temporal arguments".to_string(),
+                )),
             }
         }
         // CY-20: properties() — return all properties as a map
@@ -4651,39 +5554,66 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     Ok(Value::Property(PropertyValue::Map(props)))
                 }
                 Value::NodeRef(id) => {
-                    let s = store.ok_or_else(|| ExecutionError::RuntimeError("properties() on NodeRef requires store".to_string()))?;
+                    let s = store.ok_or_else(|| {
+                        ExecutionError::RuntimeError(
+                            "properties() on NodeRef requires store".to_string(),
+                        )
+                    })?;
                     if s.get_node(*id).is_none() {
-                        return Err(ExecutionError::RuntimeError(format!("Node {} not found", id.as_u64())));
+                        return Err(ExecutionError::RuntimeError(format!(
+                            "Node {} not found",
+                            id.as_u64()
+                        )));
                     }
-                    Ok(Value::Property(PropertyValue::Map(s.node_properties_full(*id))))
+                    Ok(Value::Property(PropertyValue::Map(
+                        s.node_properties_full(*id),
+                    )))
                 }
                 Value::Edge(_, edge) => {
                     Ok(Value::Property(PropertyValue::Map(edge.properties.clone())))
                 }
                 Value::EdgeRef(eid, _, _, _) => {
-                    let s = store.ok_or_else(|| ExecutionError::RuntimeError("properties() on EdgeRef requires store".to_string()))?;
-                    let edge = s.get_edge(*eid).ok_or_else(|| ExecutionError::RuntimeError(format!("Edge {} not found", eid.as_u64())))?;
+                    let s = store.ok_or_else(|| {
+                        ExecutionError::RuntimeError(
+                            "properties() on EdgeRef requires store".to_string(),
+                        )
+                    })?;
+                    let edge = s.get_edge(*eid).ok_or_else(|| {
+                        ExecutionError::RuntimeError(format!("Edge {} not found", eid.as_u64()))
+                    })?;
                     Ok(Value::Property(PropertyValue::Map(edge.properties.clone())))
                 }
-                Value::Property(PropertyValue::Map(m)) => Ok(Value::Property(PropertyValue::Map(m.clone()))),
+                Value::Property(PropertyValue::Map(m)) => {
+                    Ok(Value::Property(PropertyValue::Map(m.clone())))
+                }
                 Value::Null => Ok(Value::Null),
-                _ => Err(ExecutionError::TypeError("properties() requires a node, edge, or map".to_string())),
+                _ => Err(ExecutionError::TypeError(
+                    "properties() requires a node, edge, or map".to_string(),
+                )),
             }
         }
         // CY-21: isEmpty() — check if collection/string/map is empty
-        "isempty" => {
-            match &args[0] {
-                Value::Property(PropertyValue::String(s)) => Ok(Value::Property(PropertyValue::Boolean(s.is_empty()))),
-                Value::Property(PropertyValue::Array(a)) => Ok(Value::Property(PropertyValue::Boolean(a.is_empty()))),
-                Value::Property(PropertyValue::Map(m)) => Ok(Value::Property(PropertyValue::Boolean(m.is_empty()))),
-                Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Null),
-                _ => Err(ExecutionError::TypeError("isEmpty() requires a string, list, or map".to_string())),
+        "isempty" => match &args[0] {
+            Value::Property(PropertyValue::String(s)) => {
+                Ok(Value::Property(PropertyValue::Boolean(s.is_empty())))
             }
-        }
+            Value::Property(PropertyValue::Array(a)) => {
+                Ok(Value::Property(PropertyValue::Boolean(a.is_empty())))
+            }
+            Value::Property(PropertyValue::Map(m)) => {
+                Ok(Value::Property(PropertyValue::Boolean(m.is_empty())))
+            }
+            Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Null),
+            _ => Err(ExecutionError::TypeError(
+                "isEmpty() requires a string, list, or map".to_string(),
+            )),
+        },
         // CY-18: percentileCont / percentileDisc
         "percentilecont" => {
             if args.len() < 2 {
-                return Err(ExecutionError::RuntimeError("percentileCont requires 2 arguments".to_string()));
+                return Err(ExecutionError::RuntimeError(
+                    "percentileCont requires 2 arguments".to_string(),
+                ));
             }
             // This is an aggregation function — handled in GroupByOperator, not here.
             // Scalar fallback for single-value case:
@@ -4691,7 +5621,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         }
         "percentiledisc" => {
             if args.len() < 2 {
-                return Err(ExecutionError::RuntimeError("percentileDisc requires 2 arguments".to_string()));
+                return Err(ExecutionError::RuntimeError(
+                    "percentileDisc requires 2 arguments".to_string(),
+                ));
             }
             Ok(args[0].clone())
         }
@@ -4702,25 +5634,64 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             Ok(Value::Property(PropertyValue::Float(0.0)))
         }
         // CY-17: Trigonometric functions
-        "sin" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.sin()))) }
-        "cos" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.cos()))) }
-        "tan" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.tan()))) }
-        "cot" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(1.0 / v.tan()))) }
-        "asin" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.asin()))) }
-        "acos" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.acos()))) }
-        "atan" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.atan()))) }
+        "sin" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.sin())))
+        }
+        "cos" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.cos())))
+        }
+        "tan" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.tan())))
+        }
+        "cot" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(1.0 / v.tan())))
+        }
+        "asin" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.asin())))
+        }
+        "acos" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.acos())))
+        }
+        "atan" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.atan())))
+        }
         "atan2" => {
             let y = extract_float(&args[0])?;
             let x = extract_float(&args[1])?;
             Ok(Value::Property(PropertyValue::Float(y.atan2(x))))
         }
-        "sinh" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.sinh()))) }
-        "cosh" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.cosh()))) }
-        "tanh" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.tanh()))) }
-        "degrees" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.to_degrees()))) }
-        "radians" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.to_radians()))) }
+        "sinh" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.sinh())))
+        }
+        "cosh" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.cosh())))
+        }
+        "tanh" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.tanh())))
+        }
+        "degrees" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.to_degrees())))
+        }
+        "radians" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.to_radians())))
+        }
         "pi" => Ok(Value::Property(PropertyValue::Float(std::f64::consts::PI))),
-        "haversin" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float((1.0 - v.cos()) / 2.0))) }
+        "haversin" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float((1.0 - v.cos()) / 2.0)))
+        }
 
         // --- Geospatial (NDS-04) ---------------------------------------
         //
@@ -4739,9 +5710,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "point" => {
             let m = match &args[0] {
                 Value::Property(PropertyValue::Map(m)) => m,
-                _ => return Err(ExecutionError::TypeError(
-                    "`point()` takes a map: point({latitude: 12.9, longitude: 77.6}) \
-                     or point({x: 1.0, y: 2.0})".to_string())),
+                _ => {
+                    return Err(ExecutionError::TypeError(
+                        "`point()` takes a map: point({latitude: 12.9, longitude: 77.6}) \
+                     or point({x: 1.0, y: 2.0})"
+                            .to_string(),
+                    ))
+                }
             };
             let num = |k: &str| -> Option<f64> {
                 m.get(k).and_then(|v| match v {
@@ -4754,11 +5729,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 (Some(lon), Some(lat)) => {
                     if !(-180.0..=180.0).contains(&lon) {
                         return Err(ExecutionError::TypeError(format!(
-                            "`longitude` must be between -180 and 180; got {lon}")));
+                            "`longitude` must be between -180 and 180; got {lon}"
+                        )));
                     }
                     if !(-90.0..=90.0).contains(&lat) {
                         return Err(ExecutionError::TypeError(format!(
-                            "`latitude` must be between -90 and 90; got {lat}")));
+                            "`latitude` must be between -90 and 90; got {lat}"
+                        )));
                     }
                     (lon, lat, true)
                 }
@@ -4766,9 +5743,13 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     (Some(x), Some(y)) => (x, y, false),
                     // Refused rather than defaulted. A point silently at the
                     // origin is a wrong answer that looks like a right one.
-                    _ => return Err(ExecutionError::TypeError(
-                        "`point()` needs either `latitude` and `longitude`, or `x` \
-                         and `y`".to_string())),
+                    _ => {
+                        return Err(ExecutionError::TypeError(
+                            "`point()` needs either `latitude` and `longitude`, or `x` \
+                         and `y`"
+                                .to_string(),
+                        ))
+                    }
                 },
             };
             let mut out = std::collections::HashMap::new();
@@ -4781,23 +5762,35 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 out.insert("longitude".to_string(), PropertyValue::Float(x));
                 out.insert("latitude".to_string(), PropertyValue::Float(y));
                 let three_d = out.contains_key("z");
-                out.insert("srid".to_string(),
-                           PropertyValue::Integer(if three_d { 4979 } else { 4326 }));
-                out.insert("crs".to_string(), PropertyValue::String(
-                    if three_d { "wgs-84-3d" } else { "wgs-84" }.to_string()));
+                out.insert(
+                    "srid".to_string(),
+                    PropertyValue::Integer(if three_d { 4979 } else { 4326 }),
+                );
+                out.insert(
+                    "crs".to_string(),
+                    PropertyValue::String(if three_d { "wgs-84-3d" } else { "wgs-84" }.to_string()),
+                );
             } else {
                 let three_d = out.contains_key("z");
-                out.insert("srid".to_string(),
-                           PropertyValue::Integer(if three_d { 9157 } else { 7203 }));
-                out.insert("crs".to_string(), PropertyValue::String(
-                    if three_d { "cartesian-3d" } else { "cartesian" }.to_string()));
+                out.insert(
+                    "srid".to_string(),
+                    PropertyValue::Integer(if three_d { 9157 } else { 7203 }),
+                );
+                out.insert(
+                    "crs".to_string(),
+                    PropertyValue::String(
+                        if three_d { "cartesian-3d" } else { "cartesian" }.to_string(),
+                    ),
+                );
             }
             Ok(Value::Property(PropertyValue::Map(out)))
         }
         "point.distance" | "distance" => {
             let a = as_point(&args[0], "point.distance")?;
             let b = as_point(&args[1], "point.distance")?;
-            Ok(Value::Property(PropertyValue::Float(point_distance(&a, &b)?)))
+            Ok(Value::Property(PropertyValue::Float(point_distance(
+                &a, &b,
+            )?)))
         }
         "point.withinbbox" => {
             let p = as_point(&args[0], "point.withinBBox")?;
@@ -4806,30 +5799,45 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             if p.geographic != ll.geographic || p.geographic != ur.geographic {
                 return Err(ExecutionError::TypeError(
                     "`point.withinBBox` needs three points in the same coordinate \
-                     system".to_string()));
+                     system"
+                        .to_string(),
+                ));
             }
             let inside = p.x >= ll.x && p.x <= ur.x && p.y >= ll.y && p.y <= ur.y;
             Ok(Value::Property(PropertyValue::Boolean(inside)))
         }
         // CY-22: Math constants & minor functions
         "e" => Ok(Value::Property(PropertyValue::Float(std::f64::consts::E))),
-        "log10" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.log10()))) }
-        "isnan" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Boolean(v.is_nan()))) }
-        // CY-24: elementId()
-        "elementid" => {
-            match &args[0] {
-                Value::NodeRef(id) | Value::Node(id, _) => Ok(Value::Property(PropertyValue::String(format!("node:{}", id.as_u64())))),
-                Value::EdgeRef(id, ..) | Value::Edge(id, _) => Ok(Value::Property(PropertyValue::String(format!("edge:{}", id.as_u64())))),
-                _ => Err(ExecutionError::TypeError("elementId() requires a node or edge".to_string())),
-            }
+        "log10" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Float(v.log10())))
         }
+        "isnan" => {
+            let v = extract_float(&args[0])?;
+            Ok(Value::Property(PropertyValue::Boolean(v.is_nan())))
+        }
+        // CY-24: elementId()
+        "elementid" => match &args[0] {
+            Value::NodeRef(id) | Value::Node(id, _) => Ok(Value::Property(PropertyValue::String(
+                format!("node:{}", id.as_u64()),
+            ))),
+            Value::EdgeRef(id, ..) | Value::Edge(id, _) => Ok(Value::Property(
+                PropertyValue::String(format!("edge:{}", id.as_u64())),
+            )),
+            _ => Err(ExecutionError::TypeError(
+                "elementId() requires a node or edge".to_string(),
+            )),
+        },
         // CY-25: randomUUID()
         "randomuuid" => {
             use std::time::{SystemTime, UNIX_EPOCH};
-            let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+            let t = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
             let seed = t.as_nanos();
             // Simple v4-like UUID (not cryptographically secure, but unique enough)
-            let uuid = format!("{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+            let uuid = format!(
+                "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
                 (seed & 0xFFFFFFFF) as u32,
                 ((seed >> 32) & 0xFFFF) as u16,
                 ((seed >> 48) & 0x0FFF) as u16,
@@ -4854,12 +5862,16 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 Value::Null => "NULL",
                 _ => "ANY",
             };
-            Ok(Value::Property(PropertyValue::String(type_name.to_string())))
+            Ok(Value::Property(PropertyValue::String(
+                type_name.to_string(),
+            )))
         }
         // CY-27: toBoolean and OrNull variants
         "toboolean" => {
             match &args[0] {
-                Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::Boolean(*b))),
+                Value::Property(PropertyValue::Boolean(b)) => {
+                    Ok(Value::Property(PropertyValue::Boolean(*b)))
+                }
                 Value::Property(PropertyValue::String(s)) => match s.to_lowercase().as_str() {
                     "true" => Ok(Value::Property(PropertyValue::Boolean(true))),
                     "false" => Ok(Value::Property(PropertyValue::Boolean(false))),
@@ -4871,47 +5883,67 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                     // nulls (#907).
                     _ => Ok(Value::Property(PropertyValue::Null)),
                 },
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Boolean(*i != 0))),
+                Value::Property(PropertyValue::Integer(i)) => {
+                    Ok(Value::Property(PropertyValue::Boolean(*i != 0)))
+                }
                 Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Null),
-                _ => Err(ExecutionError::TypeError("toBoolean() requires a boolean, string, or integer".to_string())),
+                _ => Err(ExecutionError::TypeError(
+                    "toBoolean() requires a boolean, string, or integer".to_string(),
+                )),
             }
         }
-        "tobooleanornull" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::Boolean(*b))),
-                Value::Property(PropertyValue::String(s)) => match s.to_lowercase().as_str() {
-                    "true" => Ok(Value::Property(PropertyValue::Boolean(true))),
-                    "false" => Ok(Value::Property(PropertyValue::Boolean(false))),
-                    _ => Ok(Value::Null),
-                },
+        "tobooleanornull" => match &args[0] {
+            Value::Property(PropertyValue::Boolean(b)) => {
+                Ok(Value::Property(PropertyValue::Boolean(*b)))
+            }
+            Value::Property(PropertyValue::String(s)) => match s.to_lowercase().as_str() {
+                "true" => Ok(Value::Property(PropertyValue::Boolean(true))),
+                "false" => Ok(Value::Property(PropertyValue::Boolean(false))),
                 _ => Ok(Value::Null),
+            },
+            _ => Ok(Value::Null),
+        },
+        "tointegerornull" => match &args[0] {
+            Value::Property(PropertyValue::Integer(i)) => {
+                Ok(Value::Property(PropertyValue::Integer(*i)))
             }
-        }
-        "tointegerornull" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Integer(*i))),
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Integer(*f as i64))),
-                Value::Property(PropertyValue::String(s)) => Ok(s.parse::<i64>().map(|i| Value::Property(PropertyValue::Integer(i))).unwrap_or(Value::Null)),
-                _ => Ok(Value::Null),
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::Integer(*f as i64)))
             }
-        }
-        "tofloatornull" => {
-            match &args[0] {
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(*f))),
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::Float(*i as f64))),
-                Value::Property(PropertyValue::String(s)) => Ok(s.parse::<f64>().map(|f| Value::Property(PropertyValue::Float(f))).unwrap_or(Value::Null)),
-                _ => Ok(Value::Null),
+            Value::Property(PropertyValue::String(s)) => Ok(s
+                .parse::<i64>()
+                .map(|i| Value::Property(PropertyValue::Integer(i)))
+                .unwrap_or(Value::Null)),
+            _ => Ok(Value::Null),
+        },
+        "tofloatornull" => match &args[0] {
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::Float(*f)))
             }
-        }
-        "tostringornull" => {
-            match &args[0] {
-                Value::Property(PropertyValue::String(s)) => Ok(Value::Property(PropertyValue::String(s.clone()))),
-                Value::Property(PropertyValue::Integer(i)) => Ok(Value::Property(PropertyValue::String(i.to_string()))),
-                Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::String(f.to_string()))),
-                Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::String(b.to_string()))),
-                _ => Ok(Value::Null),
+            Value::Property(PropertyValue::Integer(i)) => {
+                Ok(Value::Property(PropertyValue::Float(*i as f64)))
             }
-        }
+            Value::Property(PropertyValue::String(s)) => Ok(s
+                .parse::<f64>()
+                .map(|f| Value::Property(PropertyValue::Float(f)))
+                .unwrap_or(Value::Null)),
+            _ => Ok(Value::Null),
+        },
+        "tostringornull" => match &args[0] {
+            Value::Property(PropertyValue::String(s)) => {
+                Ok(Value::Property(PropertyValue::String(s.clone())))
+            }
+            Value::Property(PropertyValue::Integer(i)) => {
+                Ok(Value::Property(PropertyValue::String(i.to_string())))
+            }
+            Value::Property(PropertyValue::Float(f)) => {
+                Ok(Value::Property(PropertyValue::String(f.to_string())))
+            }
+            Value::Property(PropertyValue::Boolean(b)) => {
+                Ok(Value::Property(PropertyValue::String(b.to_string())))
+            }
+            _ => Ok(Value::Null),
+        },
         _ => Err(ExecutionError::RuntimeError(format!(
             "Unknown function: `{name}`.{}",
             crate::query::suggest::closest(name, KNOWN_FUNCTIONS.iter().copied())
@@ -4924,7 +5956,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
 fn extract_string(val: &Value) -> ExecutionResult<String> {
     match val {
         Value::Property(PropertyValue::String(s)) => Ok(s.clone()),
-        _ => Err(ExecutionError::TypeError("Expected string argument".to_string())),
+        _ => Err(ExecutionError::TypeError(
+            "Expected string argument".to_string(),
+        )),
     }
 }
 
@@ -4932,7 +5966,9 @@ fn extract_string(val: &Value) -> ExecutionResult<String> {
 fn extract_int(val: &Value) -> ExecutionResult<i64> {
     match val {
         Value::Property(PropertyValue::Integer(i)) => Ok(*i),
-        _ => Err(ExecutionError::TypeError("Expected integer argument".to_string())),
+        _ => Err(ExecutionError::TypeError(
+            "Expected integer argument".to_string(),
+        )),
     }
 }
 
@@ -4941,7 +5977,9 @@ fn extract_float(val: &Value) -> ExecutionResult<f64> {
     match val {
         Value::Property(PropertyValue::Float(f)) => Ok(*f),
         Value::Property(PropertyValue::Integer(i)) => Ok(*i as f64),
-        _ => Err(ExecutionError::TypeError("Expected numeric argument".to_string())),
+        _ => Err(ExecutionError::TypeError(
+            "Expected numeric argument".to_string(),
+        )),
     }
 }
 
@@ -5058,7 +6096,11 @@ fn offset_seconds_of(v: &PropertyValue) -> Option<i32> {
 fn zone_of(v: &PropertyValue) -> Option<crate::query::executor::temporal::TzSpec> {
     use crate::query::executor::temporal::{parse_timezone_spec, TzSpec};
     match v {
-        PropertyValue::ZonedDateTime { zone, offset_seconds, .. } => Some(
+        PropertyValue::ZonedDateTime {
+            zone,
+            offset_seconds,
+            ..
+        } => Some(
             zone.as_deref()
                 .and_then(|z| parse_timezone_spec(z).ok())
                 .unwrap_or(TzSpec::Offset(*offset_seconds)),
@@ -5125,14 +6167,11 @@ fn zone_aligned_instants(a: &PropertyValue, b: &PropertyValue) -> Option<(i128, 
         };
         // Seconds carry the day, so a far-off year cannot overflow the way a
         // nanosecond product does (#814).
-        let secs = day as i128 * 86_400 + nanos_of_day.div_euclid(1_000_000_000) as i128
-            - offset as i128;
+        let secs =
+            day as i128 * 86_400 + nanos_of_day.div_euclid(1_000_000_000) as i128 - offset as i128;
         Some(secs * 1_000_000_000 + nanos_of_day.rem_euclid(1_000_000_000) as i128)
     };
-    Some((
-        instant(&za, &zb, day_a, ta)?,
-        instant(&zb, &za, day_b, tb)?,
-    ))
+    Some((instant(&za, &zb, day_a, ta)?, instant(&zb, &za, day_b, tb)?))
 }
 
 /// A `Value` as something a property can hold, or `None` if it cannot.
@@ -5199,9 +6238,10 @@ fn temporal_epoch_nanos(v: &PropertyValue) -> Option<i128> {
     match v {
         PropertyValue::Date(d) => Some(*d as i128 * 86_400 * 1_000_000_000),
         PropertyValue::LocalTime(n) => Some(*n as i128),
-        PropertyValue::Time { nanos, offset_seconds } => {
-            Some(*nanos as i128 - *offset_seconds as i128 * 1_000_000_000)
-        }
+        PropertyValue::Time {
+            nanos,
+            offset_seconds,
+        } => Some(*nanos as i128 - *offset_seconds as i128 * 1_000_000_000),
         PropertyValue::LocalDateTime { secs, nanos } => {
             Some(*secs as i128 * 1_000_000_000 + *nanos as i128)
         }
@@ -5264,9 +6304,7 @@ fn shift_temporal(
     } else if drop_date_part {
         seconds as i128 * 1_000_000_000 + nanos as i128
     } else {
-        days as i128 * 86_400 * 1_000_000_000
-            + seconds as i128 * 1_000_000_000
-            + nanos as i128
+        days as i128 * 86_400 * 1_000_000_000 + seconds as i128 * 1_000_000_000 + nanos as i128
     };
     let months = if drop_date_part { 0 } else { months };
 
@@ -5277,13 +6315,17 @@ fn shift_temporal(
         let day0 = match v {
             PropertyValue::Date(d) => *d as i64,
             PropertyValue::LocalDateTime { secs, .. } => secs.div_euclid(86_400),
-            PropertyValue::ZonedDateTime { secs, offset_seconds, .. } => {
-                (secs + *offset_seconds as i64).div_euclid(86_400)
-            }
+            PropertyValue::ZonedDateTime {
+                secs,
+                offset_seconds,
+                ..
+            } => (secs + *offset_seconds as i64).div_euclid(86_400),
             // A time of day has no calendar to move.
-            _ => return Err(ExecutionError::TypeError(
-                "cannot add months to a value with no date part".to_string(),
-            )),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "cannot add months to a value with no date part".to_string(),
+                ))
+            }
         };
         let base = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
             .and_then(|e| e.checked_add_signed(chrono::Duration::days(day0)))
@@ -5293,8 +6335,9 @@ fn shift_temporal(
         // Clamp the day into the target month, which is what a calendar month
         // shift means: 31 Jan + 1 month is 28/29 Feb.
         let last = days_in_month(y as i32, m0 as u32 + 1);
-        let shifted = chrono::NaiveDate::from_ymd_opt(y as i32, m0 as u32 + 1, base.day().min(last))
-            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+        let shifted =
+            chrono::NaiveDate::from_ymd_opt(y as i32, m0 as u32 + 1, base.day().min(last))
+                .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
         (shifted.signed_duration_since(base).num_days() as i128) * 86_400 * 1_000_000_000
     };
 
@@ -5310,14 +6353,24 @@ fn shift_temporal(
     // Shifting the instant and keeping the old offset gave
     // 2017-10-30T00:00+02:00 -- an offset Stockholm does not have that day, so
     // the value read one instant by its zone name and another by its offset.
-    if let PropertyValue::ZonedDateTime { secs, nanos: sub, offset_seconds, zone: Some(name) } = v {
+    if let PropertyValue::ZonedDateTime {
+        secs,
+        nanos: sub,
+        offset_seconds,
+        zone: Some(name),
+    } = v
+    {
         if let Ok(crate::query::executor::temporal::TzSpec::Named(tz)) =
             crate::query::executor::temporal::parse_timezone_spec(name)
         {
             const NS: i128 = 1_000_000_000;
             const DAY: i128 = 86_400 * NS;
             let local = (*secs as i128 + *offset_seconds as i128) * NS + *sub as i128;
-            let calendar = if drop_date_part { 0 } else { days as i128 * DAY };
+            let calendar = if drop_date_part {
+                0
+            } else {
+                days as i128 * DAY
+            };
             let new_local = local + month_shift_nanos + calendar;
             let spec = crate::query::executor::temporal::TzSpec::Named(tz);
             let off = crate::query::executor::temporal::resolve_offset(
@@ -5351,7 +6404,11 @@ fn shift_temporal(
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
-    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
     let first = chrono::NaiveDate::from_ymd_opt(year, month, 1);
     let next = chrono::NaiveDate::from_ymd_opt(ny, nm, 1);
     match (first, next) {
@@ -5366,9 +6423,7 @@ fn rebuild_temporal_like(like: &PropertyValue, total_nanos: i128) -> PropertyVal
     const DAY: i128 = 86_400 * 1_000_000_000;
     match like {
         PropertyValue::Date(_) => PropertyValue::Date(total_nanos.div_euclid(DAY) as i32),
-        PropertyValue::LocalTime(_) => {
-            PropertyValue::LocalTime(total_nanos.rem_euclid(DAY) as i64)
-        }
+        PropertyValue::LocalTime(_) => PropertyValue::LocalTime(total_nanos.rem_euclid(DAY) as i64),
         PropertyValue::Time { offset_seconds, .. } => PropertyValue::Time {
             nanos: (total_nanos + *offset_seconds as i128 * 1_000_000_000).rem_euclid(DAY) as i64,
             offset_seconds: *offset_seconds,
@@ -5377,7 +6432,11 @@ fn rebuild_temporal_like(like: &PropertyValue, total_nanos: i128) -> PropertyVal
             secs: total_nanos.div_euclid(1_000_000_000) as i64,
             nanos: total_nanos.rem_euclid(1_000_000_000) as u32,
         },
-        PropertyValue::ZonedDateTime { offset_seconds, zone, .. } => PropertyValue::ZonedDateTime {
+        PropertyValue::ZonedDateTime {
+            offset_seconds,
+            zone,
+            ..
+        } => PropertyValue::ZonedDateTime {
             secs: total_nanos.div_euclid(1_000_000_000) as i64,
             nanos: total_nanos.rem_euclid(1_000_000_000) as u32,
             offset_seconds: *offset_seconds,
@@ -5454,17 +6513,15 @@ fn temporal_difference_calendar(
     // 1 Feb is one day apart and *does* cross a month.
     {
         let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
-        let same_month = |x: i32, y: i32| {
-            match (
-                epoch.checked_add_signed(chrono::Duration::days(x as i64)),
-                epoch.checked_add_signed(chrono::Duration::days(y as i64)),
-            ) {
-                (Some(p), Some(q)) => {
-                    use chrono::Datelike;
-                    p.year() == q.year() && p.month() == q.month()
-                }
-                _ => false,
+        let same_month = |x: i32, y: i32| match (
+            epoch.checked_add_signed(chrono::Duration::days(x as i64)),
+            epoch.checked_add_signed(chrono::Duration::days(y as i64)),
+        ) {
+            (Some(p), Some(q)) => {
+                use chrono::Datelike;
+                p.year() == q.year() && p.month() == q.month()
             }
+            _ => false,
         };
         if same_month(da, db) {
             return temporal_difference(a, b);
@@ -5486,7 +6543,10 @@ fn temporal_difference_calendar(
     // `P11M` where `P1Y` belongs (#812).
     let both_zoned = matches!(
         (a, b),
-        (PropertyValue::ZonedDateTime { .. }, PropertyValue::ZonedDateTime { .. })
+        (
+            PropertyValue::ZonedDateTime { .. },
+            PropertyValue::ZonedDateTime { .. }
+        )
     );
     let clock = |v: &PropertyValue| -> i64 {
         let local = time_part_of(v).unwrap_or(0);
@@ -5608,8 +6668,12 @@ fn named_zone_calendar_difference(
     let (Some(la), Some(lb)) = (as_local(local_a), as_local(local_b)) else {
         return Ok(None);
     };
-    let PropertyValue::Duration { months, days, seconds, nanos } =
-        temporal_difference_calendar(&la, &lb)?
+    let PropertyValue::Duration {
+        months,
+        days,
+        seconds,
+        nanos,
+    } = temporal_difference_calendar(&la, &lb)?
     else {
         return Ok(None);
     };
@@ -5698,10 +6762,7 @@ fn shared_component_difference(
     }
     // Neither side is zoned: compare the local readings. A date's clock is
     // midnight.
-    let (ta, tb) = (
-        time_part_of(a).unwrap_or(0),
-        time_part_of(b).unwrap_or(0),
-    );
+    let (ta, tb) = (time_part_of(a).unwrap_or(0), time_part_of(b).unwrap_or(0));
     let diff = ta - tb;
     Some(Ok(PropertyValue::Duration {
         months: 0,
@@ -5746,7 +6807,7 @@ fn temporal_difference(
 }
 
 fn add_duration_to_datetime(dt_millis: i64, months: i64, days: i64, seconds: i64) -> PropertyValue {
-    use chrono::{Datelike, Months, Duration, TimeZone};
+    use chrono::{Datelike, Duration, Months, TimeZone};
     let dt = chrono::Utc.timestamp_millis_opt(dt_millis).single();
     match dt {
         Some(mut datetime) => {
@@ -5797,7 +6858,11 @@ fn parse_extended_duration(date_part: &str, time_part: &str) -> Option<Value> {
             let (b, c) = b.split_at(widths[1]);
             vec![a, b, c]
         };
-        if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+        if parts.len() != 3
+            || parts
+                .iter()
+                .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+        {
             return None;
         }
         let mut out = [0i128; 3];
@@ -5831,7 +6896,9 @@ fn parse_extended_duration(date_part: &str, time_part: &str) -> Option<Value> {
         .chars()
         .chain(std::iter::repeat('0'))
         .take(9)
-        .fold(0i128, |acc, c| acc * 10 + c.to_digit(10).unwrap_or(0) as i128);
+        .fold(0i128, |acc, c| {
+            acc * 10 + c.to_digit(10).unwrap_or(0) as i128
+        });
     nanos += (hours * 3600 + minutes * 60 + seconds) * NPS;
 
     Some(Value::Property(PropertyValue::Duration {
@@ -5860,7 +6927,10 @@ fn parse_extended_duration(date_part: &str, time_part: &str) -> Option<Value> {
 fn parse_iso_duration(s: &str) -> ExecutionResult<Value> {
     let text = s.trim();
     if !text.starts_with('P') && !text.starts_with('p') {
-        return Err(ExecutionError::RuntimeError(format!("Invalid duration format: {}", s)));
+        return Err(ExecutionError::RuntimeError(format!(
+            "Invalid duration format: {}",
+            s
+        )));
     }
     let rest = &text[1..];
     let (date_part, time_part) = match rest.find(|c: char| c == 'T' || c == 't') {
@@ -5916,7 +6986,11 @@ fn parse_iso_duration(s: &str) -> ExecutionResult<Value> {
                 '+' if int_digits.is_empty() && frac_digits.is_empty() => sign = 1,
                 '.' | ',' => in_fraction = true,
                 c if c.is_ascii_digit() => {
-                    if in_fraction { frac_digits.push(c) } else { int_digits.push(c) }
+                    if in_fraction {
+                        frac_digits.push(c)
+                    } else {
+                        int_digits.push(c)
+                    }
                 }
                 unit => {
                     // Years, weeks and a fractional month or day contribute to
@@ -5929,8 +7003,7 @@ fn parse_iso_duration(s: &str) -> ExecutionResult<Value> {
                         // 12 hours, not 17 days. Scaling straight to whole days
                         // truncated the half away (#885).
                         'W' | 'w' => {
-                            let total =
-                                scaled(sign, &int_digits, &frac_digits, NPS * 86_400 * 7);
+                            let total = scaled(sign, &int_digits, &frac_digits, NPS * 86_400 * 7);
                             days += total / (NPS * 86_400);
                             time_nanos += total % (NPS * 86_400);
                         }
@@ -5946,8 +7019,12 @@ fn parse_iso_duration(s: &str) -> ExecutionResult<Value> {
                             days += rem / (NPS * 86_400);
                             time_nanos += rem % (NPS * 86_400);
                         }
-                        'H' | 'h' => time_nanos += scaled(sign, &int_digits, &frac_digits, NPS * 3600),
-                        'M' | 'm' => time_nanos += scaled(sign, &int_digits, &frac_digits, NPS * 60),
+                        'H' | 'h' => {
+                            time_nanos += scaled(sign, &int_digits, &frac_digits, NPS * 3600)
+                        }
+                        'M' | 'm' => {
+                            time_nanos += scaled(sign, &int_digits, &frac_digits, NPS * 60)
+                        }
                         'S' | 's' => time_nanos += scaled(sign, &int_digits, &frac_digits, NPS),
                         _ => {}
                     }
@@ -6032,7 +7109,7 @@ impl Problem for GraphOptimizationProblem {
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (
             Array1::from_elem(self.dim, self.lower),
-            Array1::from_elem(self.dim, self.upper)
+            Array1::from_elem(self.dim, self.upper),
         )
     }
 
@@ -6047,7 +7124,7 @@ impl Problem for GraphOptimizationProblem {
 
     fn penalty(&self, variables: &Array1<f64>) -> f64 {
         let mut penalty = 0.0;
-        
+
         // 1. Budget Constraint: sum(x * cost) <= budget
         if let Some(budget) = self.budget {
             let mut total_cost = 0.0;
@@ -6091,11 +7168,13 @@ impl MultiObjectiveProblem for GraphOptimizationProblem {
         results
     }
 
-    fn dim(&self) -> usize { self.dim }
+    fn dim(&self) -> usize {
+        self.dim
+    }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (
             Array1::from_elem(self.dim, self.lower),
-            Array1::from_elem(self.dim, self.upper)
+            Array1::from_elem(self.dim, self.upper),
         )
     }
 }
@@ -6189,7 +7268,11 @@ pub trait PhysicalOperator: Send {
 
     /// Get the next batch of records (Vectorized Execution)
     /// Defaults to accumulating records from next()
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let mut records = Vec::with_capacity(batch_size);
         for _ in 0..batch_size {
             match self.next(store)? {
@@ -6200,12 +7283,21 @@ pub trait PhysicalOperator: Send {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: Vec::new(), plan_hash: None }))
+            Ok(Some(RecordBatch {
+                records,
+                columns: Vec::new(),
+                plan_hash: None,
+            }))
         }
     }
 
     /// Get the next batch of records for mutating operations
-    fn next_batch_mut(&mut self, store: &mut GraphStore, tenant_id: &str, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let mut records = Vec::with_capacity(batch_size);
         for _ in 0..batch_size {
             match self.next_mut(store, tenant_id)? {
@@ -6216,12 +7308,20 @@ pub trait PhysicalOperator: Send {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: Vec::new(), plan_hash: None }))
+            Ok(Some(RecordBatch {
+                records,
+                columns: Vec::new(),
+                plan_hash: None,
+            }))
         }
     }
 
     /// Get the next record from this operator (write operations that mutate the store)
-    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        _tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         // Default implementation calls the read-only version
         self.next(store)
     }
@@ -6491,14 +7591,25 @@ fn format_expression(expr: &Expression) -> String {
         Expression::Literal(val) => format!("{:?}", val),
         Expression::Binary { left, op, right } => {
             let op_str = match op {
-                BinaryOp::Eq => "=", BinaryOp::Ne => "<>", BinaryOp::Lt => "<",
-                BinaryOp::Le => "<=", BinaryOp::Gt => ">", BinaryOp::Ge => ">=",
-                BinaryOp::And => "AND", BinaryOp::Or => "OR",
-                BinaryOp::Add => "+", BinaryOp::Sub => "-",
-                BinaryOp::Mul => "*", BinaryOp::Div => "/", BinaryOp::Mod => "%",
-                BinaryOp::Pow => "^", BinaryOp::Xor => "XOR",
-                BinaryOp::StartsWith => "STARTS WITH", BinaryOp::EndsWith => "ENDS WITH",
-                BinaryOp::Contains => "CONTAINS", BinaryOp::In => "IN",
+                BinaryOp::Eq => "=",
+                BinaryOp::Ne => "<>",
+                BinaryOp::Lt => "<",
+                BinaryOp::Le => "<=",
+                BinaryOp::Gt => ">",
+                BinaryOp::Ge => ">=",
+                BinaryOp::And => "AND",
+                BinaryOp::Or => "OR",
+                BinaryOp::Add => "+",
+                BinaryOp::Sub => "-",
+                BinaryOp::Mul => "*",
+                BinaryOp::Div => "/",
+                BinaryOp::Mod => "%",
+                BinaryOp::Pow => "^",
+                BinaryOp::Xor => "XOR",
+                BinaryOp::StartsWith => "STARTS WITH",
+                BinaryOp::EndsWith => "ENDS WITH",
+                BinaryOp::Contains => "CONTAINS",
+                BinaryOp::In => "IN",
                 BinaryOp::RegexMatch => "=~",
             };
             // Parenthesised where precedence would otherwise change the
@@ -6520,8 +7631,10 @@ fn format_expression(expr: &Expression) -> String {
         }
         Expression::Unary { op, expr } => {
             let op_str = match op {
-                UnaryOp::Not => "NOT", UnaryOp::Minus => "-",
-                UnaryOp::IsNull => "IS NULL", UnaryOp::IsNotNull => "IS NOT NULL",
+                UnaryOp::Not => "NOT",
+                UnaryOp::Minus => "-",
+                UnaryOp::IsNull => "IS NULL",
+                UnaryOp::IsNotNull => "IS NOT NULL",
             };
             // A unary operator binds tighter than every binary one, so a binary
             // operand always needs bracketing: `NOT (a AND b)` is not
@@ -6535,7 +7648,11 @@ fn format_expression(expr: &Expression) -> String {
                 _ => format!("{} {}", op_str, operand),
             }
         }
-        Expression::Function { name, args, distinct } => {
+        Expression::Function {
+            name,
+            args,
+            distinct,
+        } => {
             let arg_strs: Vec<String> = args.iter().map(format_expression).collect();
             if *distinct {
                 format!("{}(DISTINCT {})", name, arg_strs.join(", "))
@@ -6564,7 +7681,11 @@ fn format_properties(
         parts.extend(literals.iter().map(|(k, v)| format!("{}: {:?}", k, v)));
     }
     if let Some(expressions) = expressions {
-        parts.extend(expressions.iter().map(|(k, e)| format!("{}: {}", k, format_expression(e))));
+        parts.extend(
+            expressions
+                .iter()
+                .map(|(k, e)| format!("{}: {}", k, format_expression(e))),
+        );
     }
     parts.sort();
     if parts.is_empty() {
@@ -6619,7 +7740,14 @@ fn format_merge_sets(
 ) -> Option<String> {
     let mut sets: Vec<String> = writes.iter().map(format_set_write).collect();
     sets.extend(label_items.iter().map(|(v, labels)| {
-        format!("{}{}", v, labels.iter().map(|l| format!(":{}", l.as_str())).collect::<String>())
+        format!(
+            "{}{}",
+            v,
+            labels
+                .iter()
+                .map(|l| format!(":{}", l.as_str()))
+                .collect::<String>()
+        )
     }));
     if sets.is_empty() {
         None
@@ -6702,7 +7830,6 @@ pub fn undescribed_plan_lines(plan_text: &str) -> Vec<String> {
         .map(|line| line.to_string())
         .collect()
 }
-
 
 /// Type alias for boxed operators
 pub type OperatorBox = Box<dyn PhysicalOperator>;
@@ -7031,7 +8158,11 @@ impl PhysicalOperator for NodeScanOperator {
         true
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         self.initialize(store);
 
         if self.current >= self.node_ids.len() {
@@ -7041,7 +8172,9 @@ impl PhysicalOperator for NodeScanOperator {
         // Apply early limit to batch size
         let effective_batch = if let Some(limit) = self.early_limit {
             let remaining = limit.saturating_sub(self.produced);
-            if remaining == 0 { return Ok(None); }
+            if remaining == 0 {
+                return Ok(None);
+            }
             batch_size.min(remaining)
         } else {
             batch_size
@@ -7086,17 +8219,23 @@ impl PhysicalOperator for NodeScanOperator {
         // Parallel record construction for large batches
         let records: Vec<Record> = if slice.len() >= 1024 {
             let var = &self.variable;
-            slice.par_iter().map(|&node_id| {
-                let mut record = Record::new();
-                record.bind(var.clone(), Value::NodeRef(node_id));
-                record
-            }).collect()
+            slice
+                .par_iter()
+                .map(|&node_id| {
+                    let mut record = Record::new();
+                    record.bind(var.clone(), Value::NodeRef(node_id));
+                    record
+                })
+                .collect()
         } else {
-            slice.iter().map(|&node_id| {
-                let mut record = Record::new();
-                record.bind(self.variable.clone(), Value::NodeRef(node_id));
-                record
-            }).collect()
+            slice
+                .iter()
+                .map(|&node_id| {
+                    let mut record = Record::new();
+                    record.bind(self.variable.clone(), Value::NodeRef(node_id));
+                    record
+                })
+                .collect()
         };
         self.produced += records.len();
 
@@ -7117,7 +8256,11 @@ impl PhysicalOperator for NodeScanOperator {
         let mut details = if self.labels.is_empty() {
             format!("var={}, all labels", self.variable)
         } else {
-            format!("var={}, labels={:?}", self.variable, self.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>())
+            format!(
+                "var={}, labels={:?}",
+                self.variable,
+                self.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>()
+            )
         };
         // One operator, named for both halves so a reader of EXPLAIN still
         // finds the scan and the filter in it (#1615).
@@ -7191,7 +8334,11 @@ impl PhysicalOperator for LabelCountOperator {
         let label_str = if self.labels.is_empty() {
             "all".to_string()
         } else {
-            self.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(", ")
+            self.labels
+                .iter()
+                .map(|l| l.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         OperatorDescription {
             name: "LabelCount".to_string(),
@@ -7218,7 +8365,11 @@ pub struct EdgeCountOperator {
 
 impl EdgeCountOperator {
     pub fn new(edge_type: Option<String>, alias: String) -> Self {
-        Self { edge_type, alias, executed: false }
+        Self {
+            edge_type,
+            alias,
+            executed: false,
+        }
     }
 
     fn count(&self, store: &GraphStore) -> i64 {
@@ -7341,7 +8492,11 @@ impl PhysicalOperator for EdgeTypeCountOperator {
         Ok(self.results.next())
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
             // Same short-index hazard as `EdgeCountOperator::count`: a
             // stub-loaded graph omits whole types from `edge_type_counts`, so
@@ -7379,7 +8534,11 @@ impl PhysicalOperator for EdgeTypeCountOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
+            Ok(Some(RecordBatch {
+                records: batch,
+                columns: Vec::new(),
+                plan_hash: None,
+            }))
         }
     }
 
@@ -7391,7 +8550,10 @@ impl PhysicalOperator for EdgeTypeCountOperator {
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
             name: "EdgeTypeCount".to_string(),
-            details: format!("type_alias={}, count_alias={}", self.type_alias, self.count_alias),
+            details: format!(
+                "type_alias={}, count_alias={}",
+                self.type_alias, self.count_alias
+            ),
             children: Vec::new(),
         }
     }
@@ -7457,12 +8619,17 @@ fn predicate_cost(expr: &Expression) -> u32 {
         }
         Expression::Unary { expr, .. } => 1 + predicate_cost(expr),
         // A call allocates its result and usually its arguments.
-        Expression::Function { args, .. } => {
-            8 + args.iter().map(predicate_cost).sum::<u32>()
-        }
-        Expression::Case { operand, when_clauses, else_result } => {
+        Expression::Function { args, .. } => 8 + args.iter().map(predicate_cost).sum::<u32>(),
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_result,
+        } => {
             1 + operand.as_deref().map(predicate_cost).unwrap_or(0)
-                + when_clauses.iter().map(|(w, t)| predicate_cost(w) + predicate_cost(t)).sum::<u32>()
+                + when_clauses
+                    .iter()
+                    .map(|(w, t)| predicate_cost(w) + predicate_cost(t))
+                    .sum::<u32>()
                 + else_result.as_deref().map(predicate_cost).unwrap_or(0)
         }
         Expression::Index { expr, index } => 1 + predicate_cost(expr) + predicate_cost(index),
@@ -7474,17 +8641,27 @@ fn predicate_cost(expr: &Expression) -> u32 {
         // These run a query or a loop per row. Whatever the body costs, the
         // per-row work is large enough that coordination is worth paying.
         Expression::ExistsSubquery { .. } => 50,
-        Expression::ListComprehension { list_expr, filter, map_expr, .. } => {
+        Expression::ListComprehension {
+            list_expr,
+            filter,
+            map_expr,
+            ..
+        } => {
             20 + predicate_cost(list_expr)
                 + filter.as_deref().map(predicate_cost).unwrap_or(0)
                 + predicate_cost(map_expr)
         }
-        Expression::PredicateFunction { list_expr, predicate, .. } => {
-            20 + predicate_cost(list_expr) + predicate_cost(predicate)
-        }
-        Expression::Reduce { init, list_expr, expression, .. } => {
-            20 + predicate_cost(init) + predicate_cost(list_expr) + predicate_cost(expression)
-        }
+        Expression::PredicateFunction {
+            list_expr,
+            predicate,
+            ..
+        } => 20 + predicate_cost(list_expr) + predicate_cost(predicate),
+        Expression::Reduce {
+            init,
+            list_expr,
+            expression,
+            ..
+        } => 20 + predicate_cost(init) + predicate_cost(list_expr) + predicate_cost(expression),
         Expression::PatternComprehension { .. } => 50,
     }
 }
@@ -7539,11 +8716,18 @@ pub struct FilterOperator {
 fn filter_reads_property_directly(expr: &Expression, variable: &str, property: &str) -> bool {
     let reads = |e: &Expression| filter_reads_property_directly(e, variable, property);
     match expr {
-        Expression::Property { variable: v, property: p } => v == variable && p == property,
+        Expression::Property {
+            variable: v,
+            property: p,
+        } => v == variable && p == property,
         Expression::Binary { left, right, .. } => reads(left) || reads(right),
         Expression::Unary { expr, .. } => reads(expr),
         Expression::Function { args, .. } => args.iter().any(reads),
-        Expression::Case { operand, when_clauses, else_result } => {
+        Expression::Case {
+            operand,
+            when_clauses,
+            else_result,
+        } => {
             operand.as_deref().is_some_and(reads)
                 || when_clauses.iter().any(|(w, t)| reads(w) || reads(t))
                 || else_result.as_deref().is_some_and(reads)
@@ -7611,7 +8795,6 @@ impl FilterOperator {
         predicate_cost(predicate) >= threshold
     }
 
-
     /// Test one row the way `next_batch` does, with the value of the retained
     /// property when one is being kept (#593). For a scan the filter is fused
     /// into (#1615).
@@ -7634,11 +8817,18 @@ impl FilterOperator {
         match result {
             Value::Property(PropertyValue::Boolean(b)) => Ok(b),
             Value::Null | Value::Property(PropertyValue::Null) => Ok(false),
-            _ => Err(ExecutionError::TypeError("Predicate must evaluate to boolean".to_string())),
+            _ => Err(ExecutionError::TypeError(
+                "Predicate must evaluate to boolean".to_string(),
+            )),
         }
     }
 
-    fn evaluate_expression(&self, expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
+    fn evaluate_expression(
+        &self,
+        expr: &Expression,
+        record: &Record,
+        store: &GraphStore,
+    ) -> ExecutionResult<Value> {
         match expr {
             // Delegates rather than adding a sixth copy of this logic; the
             // standalone evaluator is the one implementation (#654).
@@ -7656,7 +8846,10 @@ impl FilterOperator {
                 if let (Some((v, p)), Value::Property(pv)) = (&self.retain, &value) {
                     if v == variable
                         && p == property
-                        && matches!(record.get(variable), Some(Value::NodeRef(_) | Value::EdgeRef(..)))
+                        && matches!(
+                            record.get(variable),
+                            Some(Value::NodeRef(_) | Value::EdgeRef(..))
+                        )
                     {
                         if let Some(copy) = retained_copy(pv) {
                             self.captured.set(Some(copy));
@@ -7670,7 +8863,9 @@ impl FilterOperator {
                 // Borrowed, unless a side is the property this filter keeps for
                 // its consumer (#593): that read has to produce the value.
                 let retained_side = |e: &Expression| match (&self.retain, e) {
-                    (Some((v, p)), Expression::Property { variable, property }) => v == variable && p == property,
+                    (Some((v, p)), Expression::Property { variable, property }) => {
+                        v == variable && p == property
+                    }
                     _ => false,
                 };
                 if !retained_side(left) && !retained_side(right) {
@@ -7683,7 +8878,8 @@ impl FilterOperator {
                 self.evaluate_binary_op(op, left_val, right_val)
             }
             Expression::Function { name, args, .. } => {
-                let arg_vals: Vec<Value> = args.iter()
+                let arg_vals: Vec<Value> = args
+                    .iter()
                     .map(|a| self.evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
 
@@ -7700,7 +8896,10 @@ impl FilterOperator {
                         .map(|v| value_node_id(v).map(|id| id.as_u64()))
                         .collect();
                     if let Some(key) = key {
-                        let mut slot = self.invariant_call.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut slot = self
+                            .invariant_call
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
                         if let Some((n, k, v)) = slot.as_ref() {
                             if n == name && k == &key {
                                 return Ok(v.clone());
@@ -7717,36 +8916,59 @@ impl FilterOperator {
                 let val = self.evaluate_expression(expr, record, store)?;
                 match op {
                     UnaryOp::IsNull => {
-                        let is_null = matches!(val, Value::Null | Value::Property(PropertyValue::Null));
+                        let is_null =
+                            matches!(val, Value::Null | Value::Property(PropertyValue::Null));
                         Ok(Value::Property(PropertyValue::Boolean(is_null)))
                     }
                     UnaryOp::IsNotNull => {
-                        let is_null = matches!(val, Value::Null | Value::Property(PropertyValue::Null));
+                        let is_null =
+                            matches!(val, Value::Null | Value::Property(PropertyValue::Null));
                         Ok(Value::Property(PropertyValue::Boolean(!is_null)))
                     }
-                    UnaryOp::Not => {
-                        match val {
-                            Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::Boolean(!b))),
-                            Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
-                            _ => return Err(ExecutionError::TypeError("NOT requires boolean".to_string())),
+                    UnaryOp::Not => match val {
+                        Value::Property(PropertyValue::Boolean(b)) => {
+                            Ok(Value::Property(PropertyValue::Boolean(!b)))
                         }
-                    }
-                    UnaryOp::Minus => {
-                        match val {
-                            Value::Property(PropertyValue::Integer(i)) => i
-                .checked_neg()
-                .map(|n| Value::Property(PropertyValue::Integer(n)))
-                .ok_or_else(|| ExecutionError::RuntimeError(format!("numeric value out of range: -({i})"))),
-                            Value::Property(PropertyValue::Float(f)) => Ok(Value::Property(PropertyValue::Float(-f))),
-                            Value::Null | Value::Property(PropertyValue::Null) => Ok(Value::Property(PropertyValue::Null)),
-                            _ => Err(ExecutionError::TypeError("Negation requires numeric type".to_string())),
+                        Value::Null | Value::Property(PropertyValue::Null) => {
+                            Ok(Value::Property(PropertyValue::Null))
                         }
-                    }
+                        _ => {
+                            return Err(ExecutionError::TypeError(
+                                "NOT requires boolean".to_string(),
+                            ))
+                        }
+                    },
+                    UnaryOp::Minus => match val {
+                        Value::Property(PropertyValue::Integer(i)) => i
+                            .checked_neg()
+                            .map(|n| Value::Property(PropertyValue::Integer(n)))
+                            .ok_or_else(|| {
+                                ExecutionError::RuntimeError(format!(
+                                    "numeric value out of range: -({i})"
+                                ))
+                            }),
+                        Value::Property(PropertyValue::Float(f)) => {
+                            Ok(Value::Property(PropertyValue::Float(-f)))
+                        }
+                        Value::Null | Value::Property(PropertyValue::Null) => {
+                            Ok(Value::Property(PropertyValue::Null))
+                        }
+                        _ => Err(ExecutionError::TypeError(
+                            "Negation requires numeric type".to_string(),
+                        )),
+                    },
                 }
             }
-            Expression::Case { operand, when_clauses, else_result } => {
-                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| self.evaluate_expression(e, record, store))
-            }
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => eval_case(
+                operand.as_deref(),
+                when_clauses,
+                else_result.as_deref(),
+                |e| self.evaluate_expression(e, record, store),
+            ),
             Expression::Index { expr, index } => {
                 let collection = self.evaluate_expression(expr, record, store)?;
                 let idx = self.evaluate_expression(index, record, store)?;
@@ -7754,25 +8976,61 @@ impl FilterOperator {
             }
             Expression::ListSlice { expr, start, end } => {
                 let collection = self.evaluate_expression(expr, record, store)?;
-                let s = match start { Some(s) => Some(self.evaluate_expression(s, record, store)?), None => None };
-                let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
+                let s = match start {
+                    Some(s) => Some(self.evaluate_expression(s, record, store)?),
+                    None => None,
+                };
+                let en = match end {
+                    Some(e) => Some(self.evaluate_expression(e, record, store)?),
+                    None => None,
+                };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
-            }
-            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
-                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
-            }
-            Expression::PredicateFunction { name, variable, list_expr, predicate } => {
-                eval_predicate_function(name, variable, list_expr, predicate, record, store)
-            }
-            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
-                eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
-            }
-            Expression::PatternComprehension { pattern, filter, projection } => {
-                eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
-            }
+            Expression::ExistsSubquery {
+                pattern,
+                where_clause,
+                count,
+                ..
+            } => eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store),
+            Expression::ListComprehension {
+                variable,
+                list_expr,
+                filter,
+                map_expr,
+            } => eval_list_comprehension(
+                variable,
+                list_expr,
+                filter.as_deref(),
+                map_expr,
+                record,
+                store,
+            ),
+            Expression::PredicateFunction {
+                name,
+                variable,
+                list_expr,
+                predicate,
+            } => eval_predicate_function(name, variable, list_expr, predicate, record, store),
+            Expression::Reduce {
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                expression,
+            } => eval_reduce(
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                expression,
+                record,
+                store,
+            ),
+            Expression::PatternComprehension {
+                pattern,
+                filter,
+                projection,
+            } => eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store),
             Expression::PathVariable(var) => {
                 record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
@@ -7808,7 +9066,12 @@ impl FilterOperator {
     /// `i.active = 'true'` match the boolean `true` -- and keeping them as dead
     /// code invites the next change to route through them again, which is how
     /// the two engines drifted apart in the first place.
-    fn evaluate_binary_op(&self, op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<Value> {
+    fn evaluate_binary_op(
+        &self,
+        op: &BinaryOp,
+        left: Value,
+        right: Value,
+    ) -> ExecutionResult<Value> {
         eval_binary_op(op, left, right)
     }
 
@@ -7875,7 +9138,11 @@ impl PhysicalOperator for FilterOperator {
     // with "requires mutable store access". Same defect class as #649, which
     // fixed it for SKIP and LIMIT and named them "the last two pass-through
     // operators that still had it"; SORT and FILTER also had it (#866).
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         while let Some(record) = self.input.next_mut(store, tenant_id)? {
             if self.evaluate_predicate(&record, store)? {
                 return Ok(Some(record));
@@ -7884,12 +9151,17 @@ impl PhysicalOperator for FilterOperator {
         Ok(None)
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let mut filtered_records = Vec::new();
         // The values the predicate read, one per surviving row, when asked to
         // keep them (#593). Dropped for the batch if any of it went through
         // the parallel path, which evaluates elsewhere and keeps nothing.
-        let mut retained: Option<Vec<Option<PropertyValue>>> = self.retain.as_ref().map(|_| Vec::new());
+        let mut retained: Option<Vec<Option<PropertyValue>>> =
+            self.retain.as_ref().map(|_| Vec::new());
         self.retained = None;
 
         while filtered_records.len() < batch_size {
@@ -7900,7 +9172,8 @@ impl PhysicalOperator for FilterOperator {
                 // still not worth splitting whatever the predicate costs.
                 if self.parallel && records.len() >= 256 {
                     let predicate = self.predicate.clone();
-                    let passed: Vec<Record> = records.into_par_iter()
+                    let passed: Vec<Record> = records
+                        .into_par_iter()
                         .filter(|record| {
                             eval_predicate_standalone(&predicate, record, store).unwrap_or(false)
                         })
@@ -8041,7 +9314,10 @@ struct CoCursor<'a> {
 
 impl<'a> CoCursor<'a> {
     fn new(lists: &'a [&'a [(NodeId, crate::graph::EdgeId)]]) -> Self {
-        Self { lists, pos: vec![0; lists.len()] }
+        Self {
+            lists,
+            pos: vec![0; lists.len()],
+        }
     }
 
     /// Begin a new sorted candidate list.
@@ -8356,8 +9632,13 @@ impl ExpandOperator {
     /// emits, instead of leaving it to a following expand and filter. Requires
     /// `with_co_neighbour` to have named the closing variable and direction.
     pub fn with_fused_close(mut self, edge_var: Option<String>) -> Self {
-        debug_assert!(self.co_neighbour_var.is_some(), "a fused close needs a closing variable");
-        self.fused_close = Some(FusedClose { edge_var: edge_var.map(Into::into) });
+        debug_assert!(
+            self.co_neighbour_var.is_some(),
+            "a fused close needs a closing variable"
+        );
+        self.fused_close = Some(FusedClose {
+            edge_var: edge_var.map(Into::into),
+        });
         self
     }
 
@@ -8455,7 +9736,10 @@ impl ExpandOperator {
         let extra = 1
             + self.edge_var.is_some() as usize
             + self.path_variable.is_some() as usize
-            + self.fused_close.as_ref().is_some_and(|f| f.edge_var.is_some()) as usize;
+            + self
+                .fused_close
+                .as_ref()
+                .is_some_and(|f| f.edge_var.is_some()) as usize;
         let mut new_record = base.clone_with_capacity(extra);
 
         let target_id = match self.direction {
@@ -8464,7 +9748,11 @@ impl ExpandOperator {
             Direction::Both => {
                 let source_val = new_record.get(&self.source_var).unwrap();
                 let source_id = source_val.node_id().unwrap();
-                if src == source_id { tgt } else { src }
+                if src == source_id {
+                    tgt
+                } else {
+                    src
+                }
             }
         };
 
@@ -8476,16 +9764,19 @@ impl ExpandOperator {
             let edge_type = store
                 .get_edge_type(edge_id)
                 .unwrap_or_else(|| EdgeType::new(""));
-            new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, edge_type));
+            new_record.bind(
+                edge_var.clone(),
+                Value::EdgeRef(edge_id, src, tgt, edge_type),
+            );
         }
 
         // CY-04: materialize a named path variable.
         if let Some(ref path_var) = self.path_variable {
-            let source_id = new_record.get(&self.source_var)
+            let source_id = new_record
+                .get(&self.source_var)
                 .and_then(|v| v.node_id())
                 .unwrap_or(src);
-            let extended =
-                extend_path(new_record.get(path_var), source_id, target_id, edge_id);
+            let extended = extend_path(new_record.get(path_var), source_id, target_id, edge_id);
             new_record.bind(path_var.clone(), extended);
         }
 
@@ -8514,7 +9805,11 @@ impl ExpandOperator {
                 );
             }
             if let Some(ref path_var) = self.path_variable {
-                let far = if close_src == target_id { close_tgt } else { close_src };
+                let far = if close_src == target_id {
+                    close_tgt
+                } else {
+                    close_src
+                };
                 let extended = extend_path(new_record.get(path_var), target_id, far, close_id);
                 new_record.bind(path_var.clone(), extended);
             }
@@ -8527,7 +9822,8 @@ impl ExpandOperator {
     }
 
     fn load_edges(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
-        let source_val = record.get(&self.source_var)
+        let source_val = record
+            .get(&self.source_var)
             .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.to_string()))?;
 
         // Expanding from null yields nothing; it is not an error. An
@@ -8535,14 +9831,17 @@ impl ExpandOperator {
         // `MATCH (a)-->(b)` on that row must simply produce no rows — Cypher
         // says so, and raising "a is not a node" fails the whole query over a
         // row that should quietly disappear (#671).
-        if matches!(source_val, Value::Null) || matches!(source_val.as_property(), Some(PropertyValue::Null)) {
+        if matches!(source_val, Value::Null)
+            || matches!(source_val.as_property(), Some(PropertyValue::Null))
+        {
             self.current_edges.clear();
             self.edge_index = 0;
             return Ok(());
         }
 
-        let node_id = source_val.node_id()
-            .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", self.source_var)))?;
+        let node_id = source_val.node_id().ok_or_else(|| {
+            ExecutionError::TypeError(format!("{} is not a node", self.source_var))
+        })?;
 
         // Filter on the interned edge-type id *during* the adjacency walk, and
         // resolve the `EdgeType` string only for the edges that survive.
@@ -8587,18 +9886,17 @@ impl ExpandOperator {
         // label. Measured, that grows 10.2 -> 36.7 ns per candidate edge as the
         // label goes from 300k to 1.2M nodes — 35% of the whole traversal —
         // while the storage walk under it stays flat (#730).
-        let label_sets: Option<Vec<std::sync::Arc<Vec<u64>>>> =
-            if self.target_labels.is_empty() {
-                None
-            } else {
-                Some(
-                    self.target_labels
-                        .iter()
-                        .map(|l| store.label_bitset(l))
-                        .collect::<Option<Vec<_>>>()
-                        .unwrap_or_default(),
-                )
-            };
+        let label_sets: Option<Vec<std::sync::Arc<Vec<u64>>>> = if self.target_labels.is_empty() {
+            None
+        } else {
+            Some(
+                self.target_labels
+                    .iter()
+                    .map(|l| store.label_bitset(l))
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default(),
+            )
+        };
         let target_props = &self.target_props;
         let target_ids = self.target_ids.as_ref();
         // Relationship isomorphism (#684): an edge this pattern already walked
@@ -8668,8 +9966,16 @@ impl ExpandOperator {
                 };
                 let want_out = !matches!(self.direction, Direction::Incoming) || close_out;
                 let want_in = !matches!(self.direction, Direction::Outgoing) || close_in;
-                let out = if want_out { store.type_adjacency(t, true) } else { None };
-                let inc = if want_in { store.type_adjacency(t, false) } else { None };
+                let out = if want_out {
+                    store.type_adjacency(t, true)
+                } else {
+                    None
+                };
+                let inc = if want_in {
+                    store.type_adjacency(t, false)
+                } else {
+                    None
+                };
                 // Usability is still judged on what the *walk* needs: the
                 // close is an optimisation and its absence costs rows, never
                 // answers, so a missing close-half must not disable the walk's
@@ -8701,11 +10007,23 @@ impl ExpandOperator {
         // input record pays for a copy of a neighbour list it visits once and
         // keeps at most one entry from.
         static EMPTY: [(NodeId, crate::graph::EdgeId); 0] = [];
-        fn out_of<'a>(p: &'a Option<TypeIndexPair>, n: NodeId) -> &'a [(NodeId, crate::graph::EdgeId)] {
-            match p { Some((Some(i), _)) => i.neighbors(n), _ => &EMPTY }
+        fn out_of<'a>(
+            p: &'a Option<TypeIndexPair>,
+            n: NodeId,
+        ) -> &'a [(NodeId, crate::graph::EdgeId)] {
+            match p {
+                Some((Some(i), _)) => i.neighbors(n),
+                _ => &EMPTY,
+            }
         }
-        fn in_of<'a>(p: &'a Option<TypeIndexPair>, n: NodeId) -> &'a [(NodeId, crate::graph::EdgeId)] {
-            match p { Some((_, Some(i))) => i.neighbors(n), _ => &EMPTY }
+        fn in_of<'a>(
+            p: &'a Option<TypeIndexPair>,
+            n: NodeId,
+        ) -> &'a [(NodeId, crate::graph::EdgeId)] {
+            match p {
+                Some((_, Some(i))) => i.neighbors(n),
+                _ => &EMPTY,
+            }
         }
 
         // Resolved once per input record: the node the pattern must close on.
@@ -8779,9 +10097,7 @@ impl ExpandOperator {
                 None => true,
                 // `Some(empty)` means a required label exists on no node.
                 Some(sets) if sets.len() < self.target_labels.len() => false,
-                Some(sets) => sets
-                    .iter()
-                    .all(|s| GraphStore::bitset_contains(s, target)),
+                Some(sets) => sets.iter().all(|s| GraphStore::bitset_contains(s, target)),
             };
             if !label_ok {
                 return false;
@@ -8847,39 +10163,40 @@ impl ExpandOperator {
             (matches!(close_dir, Direction::Incoming) || out.is_some())
                 && (matches!(close_dir, Direction::Outgoing) || inc.is_some())
         });
-        let closing_edges = |target: NodeId, eid: crate::graph::EdgeId, out: &mut Vec<crate::graph::EdgeId>| {
-            out.clear();
-            let Some(c) = co_node else { return };
-            if close_via_index {
-                for list in &co_lists {
-                    for &(_, e2) in pinned_run(list, target) {
+        let closing_edges =
+            |target: NodeId, eid: crate::graph::EdgeId, out: &mut Vec<crate::graph::EdgeId>| {
+                out.clear();
+                let Some(c) = co_node else { return };
+                if close_via_index {
+                    for list in &co_lists {
+                        for &(_, e2) in pinned_run(list, target) {
+                            if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
+                                out.push(e2);
+                            }
+                        }
+                    }
+                } else {
+                    let mut keep = |e2: crate::graph::EdgeId| {
                         if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
                             out.push(e2);
                         }
+                    };
+                    if !matches!(close_dir, Direction::Incoming) {
+                        store.for_each_outgoing_neighbor(target, type_filter, |t, e2| {
+                            if t == c {
+                                keep(e2);
+                            }
+                        });
+                    }
+                    if !matches!(close_dir, Direction::Outgoing) {
+                        store.for_each_incoming_neighbor(target, type_filter, |s, e2| {
+                            if s == c {
+                                keep(e2);
+                            }
+                        });
                     }
                 }
-            } else {
-                let mut keep = |e2: crate::graph::EdgeId| {
-                    if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
-                        out.push(e2);
-                    }
-                };
-                if !matches!(close_dir, Direction::Incoming) {
-                    store.for_each_outgoing_neighbor(target, type_filter, |t, e2| {
-                        if t == c {
-                            keep(e2);
-                        }
-                    });
-                }
-                if !matches!(close_dir, Direction::Outgoing) {
-                    store.for_each_incoming_neighbor(target, type_filter, |s, e2| {
-                        if s == c {
-                            keep(e2);
-                        }
-                    });
-                }
-            }
-        };
+            };
         let mut close_buf: Vec<crate::graph::EdgeId> = Vec::new();
         // Emit one entry per closing edge when fused, else the entry itself.
         macro_rules! emit {
@@ -9045,7 +10362,11 @@ impl PhysicalOperator for ExpandOperator {
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
     // of this operator's own logic -- see `drain_input_for_write` (#870).
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         drain_input_for_write(&mut self.input, store, tenant_id)?;
         self.next(store)
     }
@@ -9088,13 +10409,18 @@ impl PhysicalOperator for ExpandOperator {
         }
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let mut expanded_records = Vec::with_capacity(batch_size);
 
         while expanded_records.len() < batch_size {
             // If we have edges from current record, process them
             if self.edge_index < self.current_edges.len() {
-                let take = (batch_size - expanded_records.len()).min(self.current_edges.len() - self.edge_index);
+                let take = (batch_size - expanded_records.len())
+                    .min(self.current_edges.len() - self.edge_index);
 
                 for i in 0..take {
                     let (edge_id, src, tgt) = self.current_edges[self.edge_index + i];
@@ -9104,8 +10430,8 @@ impl PhysicalOperator for ExpandOperator {
                     // used to be written out again here, and the comments said
                     // why that was dangerous rather than removing the danger.
                     let base = self.current_record.as_ref().unwrap();
-                    expanded_records.push(
-                        self.expanded_record(base, edge_id, src, tgt, close, store));
+                    expanded_records
+                        .push(self.expanded_record(base, edge_id, src, tgt, close, store));
                 }
                 self.edge_index += take;
                 self.emitted_for_current = true;
@@ -9153,15 +10479,46 @@ impl PhysicalOperator for ExpandOperator {
 
     fn describe(&self) -> OperatorDescription {
         let dir_str = match self.direction {
-            Direction::Outgoing => format!("({})-[:{}]->({})", self.source_var, if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") }, self.target_var),
-            Direction::Incoming => format!("({})<-[:{}]-({})", self.source_var, if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") }, self.target_var),
-            Direction::Both => format!("({})--[:{}]--({})", self.source_var, if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") }, self.target_var),
+            Direction::Outgoing => format!(
+                "({})-[:{}]->({})",
+                self.source_var,
+                if self.edge_types.is_empty() {
+                    "*".to_string()
+                } else {
+                    self.edge_types.join("|")
+                },
+                self.target_var
+            ),
+            Direction::Incoming => format!(
+                "({})<-[:{}]-({})",
+                self.source_var,
+                if self.edge_types.is_empty() {
+                    "*".to_string()
+                } else {
+                    self.edge_types.join("|")
+                },
+                self.target_var
+            ),
+            Direction::Both => format!(
+                "({})--[:{}]--({})",
+                self.source_var,
+                if self.edge_types.is_empty() {
+                    "*".to_string()
+                } else {
+                    self.edge_types.join("|")
+                },
+                self.target_var
+            ),
         };
         if let (Some(fused), Some(close_var)) = (&self.fused_close, &self.co_neighbour_var) {
             // Two sorted adjacency lists walked with forward-only cursors is
             // the two-way case of a leapfrog trie join: the name says what the
             // operator computes, the details say over which lists.
-            let types = if self.edge_types.is_empty() { "*".to_string() } else { self.edge_types.join("|") };
+            let types = if self.edge_types.is_empty() {
+                "*".to_string()
+            } else {
+                self.edge_types.join("|")
+            };
             let own = match self.direction {
                 Direction::Outgoing => format!("N_out({})", self.source_var),
                 Direction::Incoming => format!("N_in({})", self.source_var),
@@ -9178,12 +10535,19 @@ impl PhysicalOperator for ExpandOperator {
                 (None, None) => String::new(),
                 (a, b) => format!(
                     " binds {}",
-                    [a, b].iter().filter_map(|v| v.as_ref().map(|v| v.to_string())).collect::<Vec<_>>().join(", ")
+                    [a, b]
+                        .iter()
+                        .filter_map(|v| v.as_ref().map(|v| v.to_string()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             };
             return OperatorDescription {
                 name: "TrieJoin".to_string(),
-                details: format!("{} ∈ {own}[:{types}] ∩ {close}[:{types}]{edges}", self.target_var),
+                details: format!(
+                    "{} ∈ {own}[:{types}] ∩ {close}[:{types}]{edges}",
+                    self.target_var
+                ),
                 children: vec![self.input.describe()],
             };
         }
@@ -9353,8 +10717,10 @@ pub struct VarLengthExpandOperator {
     target_ids: Option<std::collections::HashSet<NodeId>>,
     /// The per-type index each direction reads instead of the adjacency, with
     /// the store epoch it was taken at. See `type_index`.
-    out_index: std::cell::RefCell<Option<(u64, Option<std::sync::Arc<crate::graph::TypeAdjacency>>)>>,
-    in_index: std::cell::RefCell<Option<(u64, Option<std::sync::Arc<crate::graph::TypeAdjacency>>)>>,
+    out_index:
+        std::cell::RefCell<Option<(u64, Option<std::sync::Arc<crate::graph::TypeAdjacency>>)>>,
+    in_index:
+        std::cell::RefCell<Option<(u64, Option<std::sync::Arc<crate::graph::TypeAdjacency>>)>>,
     /// Neighbour walks so far, against `TYPE_INDEX_AFTER_WALKS`.
     type_walks: std::cell::Cell<usize>,
 }
@@ -9457,7 +10823,9 @@ impl VarLengthExpandOperator {
     /// relationship is a different question -- and an error the validator
     /// still rejects -- so this must not fire on one.
     fn walk_is_bound(&self, record: &Record) -> bool {
-        let Some(rv) = self.rel_variable.as_ref() else { return false };
+        let Some(rv) = self.rel_variable.as_ref() else {
+            return false;
+        };
         matches!(
             record.get(rv),
             Some(Value::List(_)) | Some(Value::Property(PropertyValue::Array(_)))
@@ -9473,7 +10841,9 @@ impl VarLengthExpandOperator {
     /// Leaving any of them out would make the bound form quietly more
     /// permissive than the searched form -- the same query, two answers.
     fn walk_bound_list(&mut self, record: &Record, store: &GraphStore) -> ExecutionResult<()> {
-        let Some(rv) = self.rel_variable.clone() else { return Ok(()) };
+        let Some(rv) = self.rel_variable.clone() else {
+            return Ok(());
+        };
         let source_val = record
             .get(&self.source_var)
             .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.clone()))?;
@@ -9524,7 +10894,10 @@ impl VarLengthExpandOperator {
                 return Ok(());
             };
             if !self.edge_types.is_empty()
-                && !self.edge_types.iter().any(|t| t.as_str() == edge_type.as_str())
+                && !self
+                    .edge_types
+                    .iter()
+                    .any(|t| t.as_str() == edge_type.as_str())
             {
                 return Ok(());
             }
@@ -9567,9 +10940,9 @@ impl VarLengthExpandOperator {
             }
         }
         if !self.target_labels.is_empty() {
-            let ok = store.get_node(at).is_some_and(|n| {
-                self.target_labels.iter().all(|l| n.labels.contains(l))
-            });
+            let ok = store
+                .get_node(at)
+                .is_some_and(|n| self.target_labels.iter().all(|l| n.labels.contains(l)));
             if !ok {
                 return Ok(());
             }
@@ -9746,7 +11119,11 @@ impl VarLengthExpandOperator {
         store: &GraphStore,
     ) -> Option<std::sync::Arc<crate::graph::TypeAdjacency>> {
         let [t] = type_ids? else { return None };
-        let slot = if outgoing { &self.out_index } else { &self.in_index };
+        let slot = if outgoing {
+            &self.out_index
+        } else {
+            &self.in_index
+        };
         let epoch = store.epoch();
         if let Some((at, index)) = &*slot.borrow() {
             if *at == epoch {
@@ -9913,20 +11290,31 @@ impl VarLengthExpandOperator {
                 depth += 1;
                 let mut next = Vec::new();
                 for &cur in &frontier {
-                    Self::neighbors_in(cur, type_filter, &reversed, out_index.as_deref(), in_index.as_deref(), &self.edge_properties, store, &mut |nb| {
-                        if visited.insert(nb) {
-                            next.push(nb);
-                            if depth >= self.min_hops {
-                                reach.insert(nb);
+                    Self::neighbors_in(
+                        cur,
+                        type_filter,
+                        &reversed,
+                        out_index.as_deref(),
+                        in_index.as_deref(),
+                        &self.edge_properties,
+                        store,
+                        &mut |nb| {
+                            if visited.insert(nb) {
+                                next.push(nb);
+                                if depth >= self.min_hops {
+                                    reach.insert(nb);
+                                }
                             }
-                        }
-                    });
+                        },
+                    );
                 }
                 frontier = next;
             }
             self.target_reach = Some(reach);
         }
-        self.target_reach.as_ref().is_some_and(|r| r.contains(&source))
+        self.target_reach
+            .as_ref()
+            .is_some_and(|r| r.contains(&source))
     }
 
     /// Enumerate every path from `source` of length `min_hops..=max_hops`
@@ -10002,7 +11390,8 @@ impl VarLengthExpandOperator {
         // which path mode they meant, so it is the only case where being told the
         // mode mattered is news. Computed once; the check inside the loop is a
         // single `&&` against a bool that is false for every explicit pattern.
-        let watch_mode = !reuse_edges && !self.restrictor_explicit
+        let watch_mode = !reuse_edges
+            && !self.restrictor_explicit
             && self.restrictor == crate::query::ast::PathRestrictor::Trail;
         let mut mode_mattered = false;
         macro_rules! collect {
@@ -10101,16 +11490,15 @@ impl VarLengthExpandOperator {
                 let mut trail_nodes = Vec::with_capacity(path.len() + 1);
                 trail_nodes.push(source_id);
                 trail_nodes.extend(path.iter().map(|(n, _)| *n));
-                let trail_edges: Vec<crate::graph::EdgeId> =
-                    path.iter().map(|(_, e)| *e).collect();
+                let trail_edges: Vec<crate::graph::EdgeId> = path.iter().map(|(_, e)| *e).collect();
                 self.buffer_trail(record, nb, trail_nodes, trail_edges, store);
             }
 
             // A `Simple` path that has returned to its source is complete: extending
             // it would put the source in the interior, which `Simple` forbids. So it
             // is emitted above and not descended from.
-            let simple_closed = self.restrictor == crate::query::ast::PathRestrictor::Simple
-                && nb == source_id;
+            let simple_closed =
+                self.restrictor == crate::query::ast::PathRestrictor::Simple && nb == source_id;
             if depth < self.max_hops && !simple_closed {
                 stack.push(collect!(nb, edges, depth));
             } else {
@@ -10123,13 +11511,12 @@ impl VarLengthExpandOperator {
                 code: notifications::PATH_MODE_AFFECTS_RESULT,
                 severity: "INFORMATION",
                 title: "The path mode changed this answer",
-                description:
-                    "A quantified pattern was evaluated under TRAIL, openCypher's \
+                description: "A quantified pattern was evaluated under TRAIL, openCypher's \
                      relationship uniqueness, because the query did not name a path \
                      mode. Under the unrestricted reading in ISO/IEC 39075:2024 \
                      (WALK) it matches additional paths. Write WALK or TRAIL to say \
                      which you mean."
-                        .to_string(),
+                    .to_string(),
             });
         }
         Ok(())
@@ -10164,7 +11551,9 @@ impl VarLengthExpandOperator {
         let mut best: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
         if self.selector.is_shortest() {
             for &(end, len) in self.pending_ends.iter().skip(from) {
-                best.entry(end).and_modify(|b| *b = (*b).min(len)).or_insert(len);
+                best.entry(end)
+                    .and_modify(|b| *b = (*b).min(len))
+                    .or_insert(len);
             }
         }
         let mut taken: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
@@ -10211,7 +11600,9 @@ impl VarLengthExpandOperator {
             .ok_or_else(|| ExecutionError::VariableNotFound(self.source_var.clone()))?;
         // See `ExpandOperator::load_edges`: a null source expands to nothing
         // rather than failing (#671).
-        if matches!(source_val, Value::Null) || matches!(source_val.as_property(), Some(PropertyValue::Null)) {
+        if matches!(source_val, Value::Null)
+            || matches!(source_val.as_property(), Some(PropertyValue::Null))
+        {
             self.pending.clear();
             return Ok(());
         }
@@ -10329,7 +11720,8 @@ impl VarLengthExpandOperator {
             }
             return self.expand_trails(record, source_id, store);
         }
-        if self.min_hops >= 2 || ((self.enumerate_trails || closes_on_source) && self.min_hops >= 1) {
+        if self.min_hops >= 2 || ((self.enumerate_trails || closes_on_source) && self.min_hops >= 1)
+        {
             return self.expand_trails(record, source_id, store);
         }
 
@@ -10517,7 +11909,10 @@ impl VarLengthExpandOperator {
                 // The incoming path ends where this walk begins, so its final
                 // node is dropped to avoid repeating the join node.
                 let (nodes, edges) = match base.get(pv) {
-                    Some(Value::Path { nodes: pn, edges: pe }) if !pn.is_empty() => {
+                    Some(Value::Path {
+                        nodes: pn,
+                        edges: pe,
+                    }) if !pn.is_empty() => {
                         let mut n = pn.clone();
                         n.pop();
                         n.extend(nodes);
@@ -10562,7 +11957,11 @@ impl PhysicalOperator for VarLengthExpandOperator {
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
     // of this operator's own logic -- see `drain_input_for_write` (#870).
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         drain_input_for_write(&mut self.input, store, tenant_id)?;
         self.next(store)
     }
@@ -10646,7 +12045,9 @@ impl PhysicalOperator for SeedOperator {
         let row = self
             .cell
             .lock()
-            .map_err(|_| ExecutionError::RuntimeError("a CALL { WITH ... } seed was poisoned".to_string()))?
+            .map_err(|_| {
+                ExecutionError::RuntimeError("a CALL { WITH ... } seed was poisoned".to_string())
+            })?
             .clone();
         Ok(row)
     }
@@ -10682,7 +12083,12 @@ impl CorrelatedCallOperator {
         body: OperatorBox,
         seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
     ) -> Self {
-        Self { outer, body, seed, current: None }
+        Self {
+            outer,
+            body,
+            seed,
+            current: None,
+        }
     }
 }
 
@@ -10700,11 +12106,9 @@ impl PhysicalOperator for CorrelatedCallOperator {
             let Some(outer_row) = self.outer.next(store)? else {
                 return Ok(None);
             };
-            *self
-                .seed
-                .lock()
-                .map_err(|_| ExecutionError::RuntimeError("a CALL { WITH ... } seed was poisoned".to_string()))? =
-                Some(outer_row.clone());
+            *self.seed.lock().map_err(|_| {
+                ExecutionError::RuntimeError("a CALL { WITH ... } seed was poisoned".to_string())
+            })? = Some(outer_row.clone());
             self.body.reset();
             self.current = Some(outer_row);
         }
@@ -10744,18 +12148,21 @@ impl SemiApplyOperator {
         seed: std::sync::Arc<std::sync::Mutex<Option<Record>>>,
         negated: bool,
     ) -> Self {
-        Self { outer, body, seed, negated }
+        Self {
+            outer,
+            body,
+            seed,
+            negated,
+        }
     }
 }
 
 impl PhysicalOperator for SemiApplyOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         while let Some(row) = self.outer.next(store)? {
-            *self
-                .seed
-                .lock()
-                .map_err(|_| ExecutionError::RuntimeError("an EXISTS { } seed was poisoned".to_string()))? =
-                Some(row.clone());
+            *self.seed.lock().map_err(|_| {
+                ExecutionError::RuntimeError("an EXISTS { } seed was poisoned".to_string())
+            })? = Some(row.clone());
             self.body.reset();
             let found = self.body.next(store)?.is_some();
             if found != self.negated {
@@ -10772,7 +12179,12 @@ impl PhysicalOperator for SemiApplyOperator {
 
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
-            name: if self.negated { "AntiSemiApply" } else { "SemiApply" }.to_string(),
+            name: if self.negated {
+                "AntiSemiApply"
+            } else {
+                "SemiApply"
+            }
+            .to_string(),
             details: "the EXISTS { } subquery runs once per outer row".to_string(),
             children: vec![self.outer.describe(), self.body.describe()],
         }
@@ -10802,7 +12214,12 @@ impl ProjectOperator {
         Self { input, projections }
     }
 
-    fn evaluate_expression(&self, expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
+    fn evaluate_expression(
+        &self,
+        expr: &Expression,
+        record: &Record,
+        store: &GraphStore,
+    ) -> ExecutionResult<Value> {
         match expr {
             // Delegates rather than adding a sixth copy of this logic; the
             // standalone evaluator is the one implementation (#654).
@@ -10810,7 +12227,10 @@ impl ProjectOperator {
                 eval_expression(expr, record, store)
             }
             Expression::Variable(var) => {
-                let val = record.get(var).cloned().ok_or_else(|| unbound(record, var))?;
+                let val = record
+                    .get(var)
+                    .cloned()
+                    .ok_or_else(|| unbound(record, var))?;
                 // Materialize refs at projection time (RETURN n)
                 // A reference the store can no longer resolve is kept as a
                 // reference rather than refused. It still carries the
@@ -10853,14 +12273,22 @@ impl ProjectOperator {
                 eval_unary_op(op, val)
             }
             Expression::Function { name, args, .. } => {
-                let arg_vals: Vec<Value> = args.iter()
+                let arg_vals: Vec<Value> = args
+                    .iter()
                     .map(|a| self.evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
                 eval_function(name, &arg_vals, Some(store))
             }
-            Expression::Case { operand, when_clauses, else_result } => {
-                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| self.evaluate_expression(e, record, store))
-            }
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => eval_case(
+                operand.as_deref(),
+                when_clauses,
+                else_result.as_deref(),
+                |e| self.evaluate_expression(e, record, store),
+            ),
             Expression::Index { expr, index } => {
                 let collection = self.evaluate_expression(expr, record, store)?;
                 let idx = self.evaluate_expression(index, record, store)?;
@@ -10868,25 +12296,61 @@ impl ProjectOperator {
             }
             Expression::ListSlice { expr, start, end } => {
                 let collection = self.evaluate_expression(expr, record, store)?;
-                let s = match start { Some(s) => Some(self.evaluate_expression(s, record, store)?), None => None };
-                let en = match end { Some(e) => Some(self.evaluate_expression(e, record, store)?), None => None };
+                let s = match start {
+                    Some(s) => Some(self.evaluate_expression(s, record, store)?),
+                    None => None,
+                };
+                let en = match end {
+                    Some(e) => Some(self.evaluate_expression(e, record, store)?),
+                    None => None,
+                };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
-            }
-            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
-                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
-            }
-            Expression::PredicateFunction { name, variable, list_expr, predicate } => {
-                eval_predicate_function(name, variable, list_expr, predicate, record, store)
-            }
-            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
-                eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
-            }
-            Expression::PatternComprehension { pattern, filter, projection } => {
-                eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
-            }
+            Expression::ExistsSubquery {
+                pattern,
+                where_clause,
+                count,
+                ..
+            } => eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store),
+            Expression::ListComprehension {
+                variable,
+                list_expr,
+                filter,
+                map_expr,
+            } => eval_list_comprehension(
+                variable,
+                list_expr,
+                filter.as_deref(),
+                map_expr,
+                record,
+                store,
+            ),
+            Expression::PredicateFunction {
+                name,
+                variable,
+                list_expr,
+                predicate,
+            } => eval_predicate_function(name, variable, list_expr, predicate, record, store),
+            Expression::Reduce {
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                expression,
+            } => eval_reduce(
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                expression,
+                record,
+                store,
+            ),
+            Expression::PatternComprehension {
+                pattern,
+                filter,
+                projection,
+            } => eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store),
             Expression::PathVariable(var) => {
                 record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
@@ -10931,10 +12395,18 @@ impl PhysicalOperator for ProjectOperator {
         self.input.hint_early_stop(n)
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         if let Some(batch) = self.input.next_batch(store, batch_size)? {
             let mut projected_records = Vec::with_capacity(batch.records.len());
-            let columns: Vec<String> = self.projections.iter().map(|(_, a)| a.to_string()).collect();
+            let columns: Vec<String> = self
+                .projections
+                .iter()
+                .map(|(_, a)| a.to_string())
+                .collect();
 
             for record in batch.records {
                 let mut new_record = Record::new();
@@ -10955,7 +12427,11 @@ impl PhysicalOperator for ProjectOperator {
         }
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if let Some(record) = self.input.next_mut(store, tenant_id)? {
             let mut new_record = Record::new();
             for (expr, alias) in &self.projections {
@@ -10973,10 +12449,18 @@ impl PhysicalOperator for ProjectOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
-        let cols: Vec<String> = self.projections.iter().map(|(e, a)| {
-            let expr_str = format_expression(e);
-            if expr_str == **a { a.to_string() } else { format!("{} AS {}", expr_str, a) }
-        }).collect();
+        let cols: Vec<String> = self
+            .projections
+            .iter()
+            .map(|(e, a)| {
+                let expr_str = format_expression(e);
+                if expr_str == **a {
+                    a.to_string()
+                } else {
+                    format!("{} AS {}", expr_str, a)
+                }
+            })
+            .collect();
         OperatorDescription {
             name: "Project".to_string(),
             details: cols.join(", "),
@@ -11036,8 +12520,15 @@ enum AggregatorState {
     /// This preserves type fidelity for `SUM(integer_column)` which is the
     /// expected outcome of merging integer counts (e.g. ADR-017's
     /// per-node count post-aggregation).
-    Sum { int_acc: i64, float_acc: f64, int_only: bool },
-    Avg { sum: f64, count: i64 },
+    Sum {
+        int_acc: i64,
+        float_acc: f64,
+        int_only: bool,
+    },
+    Avg {
+        sum: f64,
+        count: i64,
+    },
     Min(Option<PropertyValue>),
     Max(Option<PropertyValue>),
     /// `Vec<Value>`, not `Vec<PropertyValue>`: `collect(n)` over nodes is one
@@ -11047,15 +12538,25 @@ enum AggregatorState {
     /// **empty list** — no error, just nothing (#669).
     Collect(Vec<Value>),
     CollectDistinct(BTreeSet<PropertyValue>),
-    Percentile { values: Vec<f64>, pct: f64, cont: bool },
+    Percentile {
+        values: Vec<f64>,
+        pct: f64,
+        cont: bool,
+    },
     /// Bounded-memory distinct count. The register array is the whole state,
     /// which is what makes it mergeable.
     ApproxDistinct(crate::index::sketch::HyperLogLog),
     /// Bounded-memory quantiles. `pct` is set from the call's second argument
     /// by the same path `percentileCont` uses -- one place that can drop it is
     /// enough (#871).
-    ApproxPercentile { digest: crate::index::sketch::TDigest, pct: f64 },
-    StDev { values: Vec<f64>, population: bool },
+    ApproxPercentile {
+        digest: crate::index::sketch::TDigest,
+        pct: f64,
+    },
+    StDev {
+        values: Vec<f64>,
+        population: bool,
+    },
 }
 
 /// Backing storage for COUNT DISTINCT. Starts empty, picks the appropriate
@@ -11152,20 +12653,41 @@ impl AggregatorState {
         match (func, distinct) {
             (AggregateType::Count, true) => AggregatorState::CountDistinct(CountDistinctSet::new()),
             (AggregateType::Count, false) => AggregatorState::Count(0),
-            (AggregateType::Sum, _) => AggregatorState::Sum { int_acc: 0, float_acc: 0.0, int_only: true },
+            (AggregateType::Sum, _) => AggregatorState::Sum {
+                int_acc: 0,
+                float_acc: 0.0,
+                int_only: true,
+            },
             (AggregateType::Avg, _) => AggregatorState::Avg { sum: 0.0, count: 0 },
             (AggregateType::Min, _) => AggregatorState::Min(None),
             (AggregateType::Max, _) => AggregatorState::Max(None),
             (AggregateType::Collect, true) => AggregatorState::CollectDistinct(BTreeSet::new()),
             (AggregateType::Collect, false) => AggregatorState::Collect(Vec::new()),
-            (AggregateType::PercentileCont, _) => AggregatorState::Percentile { values: Vec::new(), pct: 0.5, cont: true },
-            (AggregateType::PercentileDisc, _) => AggregatorState::Percentile { values: Vec::new(), pct: 0.5, cont: false },
-            (AggregateType::ApproxCountDistinct, _) =>
-                AggregatorState::ApproxDistinct(Default::default()),
-            (AggregateType::ApproxPercentile, _) =>
-                AggregatorState::ApproxPercentile { digest: Default::default(), pct: 0.5 },
-            (AggregateType::StDev, _) => AggregatorState::StDev { values: Vec::new(), population: false },
-            (AggregateType::StDevP, _) => AggregatorState::StDev { values: Vec::new(), population: true },
+            (AggregateType::PercentileCont, _) => AggregatorState::Percentile {
+                values: Vec::new(),
+                pct: 0.5,
+                cont: true,
+            },
+            (AggregateType::PercentileDisc, _) => AggregatorState::Percentile {
+                values: Vec::new(),
+                pct: 0.5,
+                cont: false,
+            },
+            (AggregateType::ApproxCountDistinct, _) => {
+                AggregatorState::ApproxDistinct(Default::default())
+            }
+            (AggregateType::ApproxPercentile, _) => AggregatorState::ApproxPercentile {
+                digest: Default::default(),
+                pct: 0.5,
+            },
+            (AggregateType::StDev, _) => AggregatorState::StDev {
+                values: Vec::new(),
+                population: false,
+            },
+            (AggregateType::StDevP, _) => AggregatorState::StDev {
+                values: Vec::new(),
+                population: true,
+            },
         }
     }
 
@@ -11218,7 +12740,9 @@ impl AggregatorState {
                 match value {
                     // A list is distinguished by its rendering, which is the
                     // cheapest total order available over mixed element types.
-                    Value::List(items) => set.insert_prop(PropertyValue::String(format!("{items:?}"))),
+                    Value::List(items) => {
+                        set.insert_prop(PropertyValue::String(format!("{items:?}")))
+                    }
                     Value::Map(entries) => {
                         set.insert_prop(PropertyValue::String(format!("{entries:?}")))
                     }
@@ -11239,7 +12763,11 @@ impl AggregatorState {
                     Value::Null => {}
                 }
             }
-            AggregatorState::Sum { int_acc, float_acc, int_only } => {
+            AggregatorState::Sum {
+                int_acc,
+                float_acc,
+                int_only,
+            } => {
                 if let Some(prop) = value.as_property() {
                     // Try integer path first to preserve type. If we ever see
                     // a non-integer numeric value, flip int_only false and
@@ -11264,8 +12792,13 @@ impl AggregatorState {
             }
             AggregatorState::Avg { sum, count } => {
                 if let Some(prop) = value.as_property() {
-                    if let Some(f) = prop.as_float() { *sum += f; *count += 1; }
-                    else if let Some(i) = prop.as_integer() { *sum += i as f64; *count += 1; }
+                    if let Some(f) = prop.as_float() {
+                        *sum += f;
+                        *count += 1;
+                    } else if let Some(i) = prop.as_integer() {
+                        *sum += i as f64;
+                        *count += 1;
+                    }
                 }
             }
             // Aggregates ignore nulls — Cypher's rule, and the reason min/max must SKIP a
@@ -11293,8 +12826,7 @@ impl AggregatorState {
                         return;
                     }
                     let smaller = curr.as_ref().is_none_or(|c| {
-                        crate::graph::property::cypher_order(prop, c)
-                            == std::cmp::Ordering::Less
+                        crate::graph::property::cypher_order(prop, c) == std::cmp::Ordering::Less
                     });
                     if smaller {
                         *curr = Some(prop.clone());
@@ -11307,8 +12839,7 @@ impl AggregatorState {
                         return;
                     }
                     let larger = curr.as_ref().is_none_or(|c| {
-                        crate::graph::property::cypher_order(prop, c)
-                            == std::cmp::Ordering::Greater
+                        crate::graph::property::cypher_order(prop, c) == std::cmp::Ordering::Greater
                     });
                     if larger {
                         *curr = Some(prop.clone());
@@ -11325,7 +12856,10 @@ impl AggregatorState {
                 }
             }
             AggregatorState::CollectDistinct(set) => {
-                if let Some(prop) = value.as_property().filter(|p| !matches!(p, PropertyValue::Null)) {
+                if let Some(prop) = value
+                    .as_property()
+                    .filter(|p| !matches!(p, PropertyValue::Null))
+                {
                     if !prop.is_null() {
                         set.insert(prop.clone());
                     }
@@ -11333,14 +12867,20 @@ impl AggregatorState {
             }
             AggregatorState::Percentile { values, .. } => {
                 if let Some(prop) = value.as_property() {
-                    if let Some(f) = prop.as_float() { values.push(f); }
-                    else if let Some(i) = prop.as_integer() { values.push(i as f64); }
+                    if let Some(f) = prop.as_float() {
+                        values.push(f);
+                    } else if let Some(i) = prop.as_integer() {
+                        values.push(i as f64);
+                    }
                 }
             }
             AggregatorState::StDev { values, .. } => {
                 if let Some(prop) = value.as_property() {
-                    if let Some(f) = prop.as_float() { values.push(f); }
-                    else if let Some(i) = prop.as_integer() { values.push(i as f64); }
+                    if let Some(f) = prop.as_float() {
+                        values.push(f);
+                    } else if let Some(i) = prop.as_integer() {
+                        values.push(i as f64);
+                    }
                 }
             }
             AggregatorState::ApproxDistinct(hll) => {
@@ -11350,8 +12890,11 @@ impl AggregatorState {
             }
             AggregatorState::ApproxPercentile { digest, .. } => {
                 if let Some(prop) = value.as_property() {
-                    if let Some(f) = prop.as_float() { digest.add(f); }
-                    else if let Some(i) = prop.as_integer() { digest.add(i as f64); }
+                    if let Some(f) = prop.as_float() {
+                        digest.add(f);
+                    } else if let Some(i) = prop.as_integer() {
+                        digest.add(i as f64);
+                    }
                 }
             }
         }
@@ -11370,8 +12913,16 @@ impl AggregatorState {
             (AggregatorState::Count(a), AggregatorState::Count(b)) => *a += b,
             (AggregatorState::CountDistinct(a), AggregatorState::CountDistinct(b)) => a.merge(b),
             (
-                AggregatorState::Sum { int_acc, float_acc, int_only },
-                AggregatorState::Sum { int_acc: bi, float_acc: bf, int_only: bint },
+                AggregatorState::Sum {
+                    int_acc,
+                    float_acc,
+                    int_only,
+                },
+                AggregatorState::Sum {
+                    int_acc: bi,
+                    float_acc: bf,
+                    int_only: bint,
+                },
             ) => {
                 if *int_only && bint {
                     *int_acc += bi;
@@ -11394,8 +12945,7 @@ impl AggregatorState {
             (AggregatorState::Min(a), AggregatorState::Min(b)) => {
                 if let Some(b) = b {
                     let smaller = a.as_ref().is_none_or(|c| {
-                        crate::graph::property::cypher_order(&b, c)
-                            == std::cmp::Ordering::Less
+                        crate::graph::property::cypher_order(&b, c) == std::cmp::Ordering::Less
                     });
                     if smaller {
                         *a = Some(b);
@@ -11405,8 +12955,7 @@ impl AggregatorState {
             (AggregatorState::Max(a), AggregatorState::Max(b)) => {
                 if let Some(b) = b {
                     let larger = a.as_ref().is_none_or(|c| {
-                        crate::graph::property::cypher_order(&b, c)
-                            == std::cmp::Ordering::Greater
+                        crate::graph::property::cypher_order(&b, c) == std::cmp::Ordering::Greater
                     });
                     if larger {
                         *a = Some(b);
@@ -11414,10 +12963,13 @@ impl AggregatorState {
                 }
             }
             (AggregatorState::Collect(a), AggregatorState::Collect(b)) => a.extend(b.clone()),
-            (AggregatorState::CollectDistinct(a), AggregatorState::CollectDistinct(b)) => a.extend(b),
-            (AggregatorState::Percentile { values, .. }, AggregatorState::Percentile { values: b, .. }) => {
-                values.extend(b)
+            (AggregatorState::CollectDistinct(a), AggregatorState::CollectDistinct(b)) => {
+                a.extend(b)
             }
+            (
+                AggregatorState::Percentile { values, .. },
+                AggregatorState::Percentile { values: b, .. },
+            ) => values.extend(b),
             (AggregatorState::StDev { values, .. }, AggregatorState::StDev { values: b, .. }) => {
                 values.extend(b)
             }
@@ -11449,8 +13001,14 @@ impl AggregatorState {
     fn result(&self) -> Value {
         match self {
             AggregatorState::Count(c) => Value::Property(PropertyValue::Integer(*c)),
-            AggregatorState::CountDistinct(set) => Value::Property(PropertyValue::Integer(set.len() as i64)),
-            AggregatorState::Sum { int_acc, float_acc, int_only } => {
+            AggregatorState::CountDistinct(set) => {
+                Value::Property(PropertyValue::Integer(set.len() as i64))
+            }
+            AggregatorState::Sum {
+                int_acc,
+                float_acc,
+                int_only,
+            } => {
                 if *int_only {
                     Value::Property(PropertyValue::Integer(*int_acc))
                 } else {
@@ -11458,13 +13016,17 @@ impl AggregatorState {
                 }
             }
             AggregatorState::Avg { sum, count } => {
-                if *count == 0 { Value::Null }
-                else { Value::Property(PropertyValue::Float(*sum / *count as f64)) }
+                if *count == 0 {
+                    Value::Null
+                } else {
+                    Value::Property(PropertyValue::Float(*sum / *count as f64))
+                }
             }
             AggregatorState::Min(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
             AggregatorState::Max(val) => val.clone().map(Value::Property).unwrap_or(Value::Null),
-            AggregatorState::ApproxDistinct(hll) =>
-                Value::Property(PropertyValue::Integer(hll.estimate() as i64)),
+            AggregatorState::ApproxDistinct(hll) => {
+                Value::Property(PropertyValue::Integer(hll.estimate() as i64))
+            }
             AggregatorState::ApproxPercentile { digest, pct } => {
                 // `result` takes `&self`, and computing a quantile has to fold
                 // the pending buffer into the centroids. Cloning the digest
@@ -11499,9 +13061,13 @@ impl AggregatorState {
                     Value::List(items.clone())
                 }
             }
-            AggregatorState::CollectDistinct(set) => Value::Property(PropertyValue::Array(set.iter().cloned().collect())),
+            AggregatorState::CollectDistinct(set) => {
+                Value::Property(PropertyValue::Array(set.iter().cloned().collect()))
+            }
             AggregatorState::Percentile { values, pct, cont } => {
-                if values.is_empty() { return Value::Null; }
+                if values.is_empty() {
+                    return Value::Null;
+                }
                 let mut sorted = values.clone();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let n = sorted.len();
@@ -11516,11 +13082,15 @@ impl AggregatorState {
                 } else {
                     // Nearest rank
                     let idx = (pct * n as f64).ceil() as usize;
-                    Value::Property(PropertyValue::Float(sorted[idx.saturating_sub(1).min(n - 1)]))
+                    Value::Property(PropertyValue::Float(
+                        sorted[idx.saturating_sub(1).min(n - 1)],
+                    ))
                 }
             }
             AggregatorState::StDev { values, population } => {
-                if values.is_empty() { return Value::Null; }
+                if values.is_empty() {
+                    return Value::Null;
+                }
                 let n = values.len() as f64;
                 let mean = values.iter().sum::<f64>() / n;
                 let variance: f64 = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
@@ -11549,10 +13119,16 @@ impl AggregateOperator {
     pub fn new(
         input: OperatorBox,
         group_by: Vec<(Expression, String)>,
-        aggregates: Vec<AggregateFunction>
+        aggregates: Vec<AggregateFunction>,
     ) -> Self {
-        let group_names = group_by.iter().map(|(_, a)| std::sync::Arc::from(a.as_str())).collect();
-        let agg_names = aggregates.iter().map(|a| std::sync::Arc::from(a.alias.as_str())).collect();
+        let group_names = group_by
+            .iter()
+            .map(|(_, a)| std::sync::Arc::from(a.as_str()))
+            .collect();
+        let agg_names = aggregates
+            .iter()
+            .map(|a| std::sync::Arc::from(a.alias.as_str()))
+            .collect();
         Self {
             input,
             group_by,
@@ -11564,17 +13140,18 @@ impl AggregateOperator {
         }
     }
 
-
-    fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
+    fn evaluate_expression(
+        expr: &Expression,
+        record: &Record,
+        store: &GraphStore,
+    ) -> ExecutionResult<Value> {
         match expr {
             // Delegates rather than adding a sixth copy of this logic; the
             // standalone evaluator is the one implementation (#654).
             Expression::ListExpr(_) | Expression::MapExpr(_) => {
                 eval_expression(expr, record, store)
             }
-            Expression::Variable(var) => {
-                Ok(record.get(var).cloned().unwrap_or(Value::Null))
-            }
+            Expression::Variable(var) => Ok(record.get(var).cloned().unwrap_or(Value::Null)),
             Expression::Property { variable, property } => {
                 read_property(record, variable, property, store, true)
             }
@@ -11592,14 +13169,22 @@ impl AggregateOperator {
                 eval_unary_op(op, val)
             }
             Expression::Function { name, args, .. } => {
-                let arg_vals: Vec<Value> = args.iter()
+                let arg_vals: Vec<Value> = args
+                    .iter()
                     .map(|a| Self::evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
                 eval_function(name, &arg_vals, Some(store))
             }
-            Expression::Case { operand, when_clauses, else_result } => {
-                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| Self::evaluate_expression(e, record, store))
-            }
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => eval_case(
+                operand.as_deref(),
+                when_clauses,
+                else_result.as_deref(),
+                |e| Self::evaluate_expression(e, record, store),
+            ),
             Expression::Index { expr, index } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
                 let idx = Self::evaluate_expression(index, record, store)?;
@@ -11607,25 +13192,61 @@ impl AggregateOperator {
             }
             Expression::ListSlice { expr, start, end } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
-                let s = match start { Some(s) => Some(Self::evaluate_expression(s, record, store)?), None => None };
-                let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
+                let s = match start {
+                    Some(s) => Some(Self::evaluate_expression(s, record, store)?),
+                    None => None,
+                };
+                let en = match end {
+                    Some(e) => Some(Self::evaluate_expression(e, record, store)?),
+                    None => None,
+                };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
-            }
-            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
-                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
-            }
-            Expression::PredicateFunction { name, variable, list_expr, predicate } => {
-                eval_predicate_function(name, variable, list_expr, predicate, record, store)
-            }
-            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
-                eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
-            }
-            Expression::PatternComprehension { pattern, filter, projection } => {
-                eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
-            }
+            Expression::ExistsSubquery {
+                pattern,
+                where_clause,
+                count,
+                ..
+            } => eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store),
+            Expression::ListComprehension {
+                variable,
+                list_expr,
+                filter,
+                map_expr,
+            } => eval_list_comprehension(
+                variable,
+                list_expr,
+                filter.as_deref(),
+                map_expr,
+                record,
+                store,
+            ),
+            Expression::PredicateFunction {
+                name,
+                variable,
+                list_expr,
+                predicate,
+            } => eval_predicate_function(name, variable, list_expr, predicate, record, store),
+            Expression::Reduce {
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                expression,
+            } => eval_reduce(
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                expression,
+                record,
+                store,
+            ),
+            Expression::PatternComprehension {
+                pattern,
+                filter,
+                projection,
+            } => eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store),
             Expression::PathVariable(var) => {
                 record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
@@ -11674,7 +13295,11 @@ impl PhysicalOperator for AggregateOperator {
     /// helpers: the barrier is the most intricate operator here, and this
     /// leaves its aggregation untouched. A barrier already materialises its
     /// whole input, so nothing is buffered that would not have been.
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             let mut rows = Vec::new();
             while let Some(batch) = self.input.next_batch_mut(store, tenant_id, 65536)? {
@@ -11702,11 +13327,19 @@ impl PhysicalOperator for AggregateOperator {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None }))
+            Ok(Some(RecordBatch {
+                records,
+                columns: vec![],
+                plan_hash: None,
+            }))
         }
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
             self.execute_all(store)?;
         }
@@ -11723,7 +13356,11 @@ impl PhysicalOperator for AggregateOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
+            Ok(Some(RecordBatch {
+                records: batch,
+                columns: Vec::new(),
+                plan_hash: None,
+            }))
         }
     }
 
@@ -11734,12 +13371,27 @@ impl PhysicalOperator for AggregateOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
-        let agg_strs: Vec<String> = self.aggregates.iter().map(|a| {
-            format!("{}({}) AS {}", format!("{:?}", a.func).to_lowercase(), format_expression(&a.expr), a.alias)
-        }).collect();
-        let group_strs: Vec<String> = self.group_by.iter().map(|(e, a)| format!("{} AS {}", format_expression(e), a)).collect();
+        let agg_strs: Vec<String> = self
+            .aggregates
+            .iter()
+            .map(|a| {
+                format!(
+                    "{}({}) AS {}",
+                    format!("{:?}", a.func).to_lowercase(),
+                    format_expression(&a.expr),
+                    a.alias
+                )
+            })
+            .collect();
+        let group_strs: Vec<String> = self
+            .group_by
+            .iter()
+            .map(|(e, a)| format!("{} AS {}", format_expression(e), a))
+            .collect();
         let mut details = Vec::new();
-        if !group_strs.is_empty() { details.push(format!("group_by=[{}]", group_strs.join(", "))); }
+        if !group_strs.is_empty() {
+            details.push(format!("group_by=[{}]", group_strs.join(", ")));
+        }
         details.push(format!("aggs=[{}]", agg_strs.join(", ")));
         OperatorDescription {
             name: "Aggregate".to_string(),
@@ -11748,7 +13400,6 @@ impl PhysicalOperator for AggregateOperator {
         }
     }
 }
-
 
 /// Per-row evaluation of one expression, specialised where it is a plain
 /// `x.prop`.
@@ -11903,8 +13554,11 @@ impl AggregateOperator {
     /// and without the merge they would come out as two.
     fn execute_all_by_identity(&mut self, var: &str, store: &GraphStore) -> ExecutionResult<()> {
         let all_simple_count = Self::all_simple_count(&self.aggregates);
-        let mut readers: Vec<RowReader> =
-            self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
+        let mut readers: Vec<RowReader> = self
+            .aggregates
+            .iter()
+            .map(|a| RowReader::for_expression(&a.expr))
+            .collect();
 
         // Keyed on identity alone. Phase 2 rebuilds what it needs to resolve
         // properties against from the key itself, so no `Value` is stored per
@@ -12010,10 +13664,16 @@ impl AggregateOperator {
         let mut groups: rustc_hash::FxHashMap<Vec<Value>, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::default();
         let all_simple_count = Self::all_simple_count(&self.aggregates);
-        let mut key_readers: Vec<RowReader> =
-            self.group_by.iter().map(|(e, _)| RowReader::for_expression(e)).collect();
-        let mut readers: Vec<RowReader> =
-            self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
+        let mut key_readers: Vec<RowReader> = self
+            .group_by
+            .iter()
+            .map(|(e, _)| RowReader::for_expression(e))
+            .collect();
+        let mut readers: Vec<RowReader> = self
+            .aggregates
+            .iter()
+            .map(|a| RowReader::for_expression(&a.expr))
+            .collect();
 
         // Reused across rows. `entry` needs an owned key, so building the tuple
         // straight into the map allocated a `Vec` per input row and freed it
@@ -12025,7 +13685,9 @@ impl AggregateOperator {
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
-            if batch_count % 10 == 0 { check_deadline()?; }
+            if batch_count % 10 == 0 {
+                check_deadline()?;
+            }
             for record in batch.records {
                 scratch.clear();
                 for reader in key_readers.iter_mut() {
@@ -12035,7 +13697,10 @@ impl AggregateOperator {
                 let states = match groups.get_mut(&scratch) {
                     Some(states) => states,
                     None => groups.entry(scratch.clone()).or_insert_with(|| {
-                        self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect()
+                        self.aggregates
+                            .iter()
+                            .map(|agg| AggregatorState::new(&agg.func, agg.distinct))
+                            .collect()
                     }),
                 };
 
@@ -12079,8 +13744,11 @@ impl AggregateOperator {
         let mut groups: rustc_hash::FxHashMap<Value, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::default();
         let mut key_reader = RowReader::for_expression(&self.group_by[0].0);
-        let mut readers: Vec<RowReader> =
-            self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
+        let mut readers: Vec<RowReader> = self
+            .aggregates
+            .iter()
+            .map(|a| RowReader::for_expression(&a.expr))
+            .collect();
 
         let all_simple_count = Self::all_simple_count(&self.aggregates);
 
@@ -12088,12 +13756,17 @@ impl AggregateOperator {
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
-            if batch_count % 10 == 0 { check_deadline()?; }
+            if batch_count % 10 == 0 {
+                check_deadline()?;
+            }
             for record in batch.records {
                 let key = key_reader.read(&record, store)?;
 
                 let states = groups.entry(key).or_insert_with(|| {
-                    self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect()
+                    self.aggregates
+                        .iter()
+                        .map(|agg| AggregatorState::new(&agg.func, agg.distinct))
+                        .collect()
                 });
 
                 if all_simple_count {
@@ -12133,19 +13806,26 @@ impl AggregateOperator {
 
     /// Optimized path for no group-by: single global aggregate, no HashMap needed
     fn execute_all_no_group(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        let mut states: Vec<AggregatorState> = self.aggregates.iter()
+        let mut states: Vec<AggregatorState> = self
+            .aggregates
+            .iter()
             .map(|agg| AggregatorState::new(&agg.func, agg.distinct))
             .collect();
 
         let all_simple_count = Self::all_simple_count(&self.aggregates);
-        let mut readers: Vec<RowReader> =
-            self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
+        let mut readers: Vec<RowReader> = self
+            .aggregates
+            .iter()
+            .map(|a| RowReader::for_expression(&a.expr))
+            .collect();
 
         let batch_size = 65536;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
-            if batch_count % 10 == 0 { check_deadline()?; }
+            if batch_count % 10 == 0 {
+                check_deadline()?;
+            }
 
             if all_simple_count {
                 // Ultra-fast: just count rows
@@ -12435,7 +14115,12 @@ impl AdjacencyCountAggregateOperator {
     /// Exact, not approximate: every group is still counted, and the heap holds
     /// the best k seen so far. What is skipped is building a `Record` for a
     /// group that cannot survive.
-    fn build_top_k(&mut self, store: &GraphStore, k: usize, descending: bool) -> ExecutionResult<()> {
+    fn build_top_k(
+        &mut self,
+        store: &GraphStore,
+        k: usize,
+        descending: bool,
+    ) -> ExecutionResult<()> {
         let mut heap = TopKHeap::new(descending);
         let mut seq = 0u64;
         if !self.group_by_props.is_empty() || self.count_distinct {
@@ -12703,8 +14388,7 @@ impl AdjacencyCountAggregateOperator {
             // the graph. A node can then appear in more than one map, so the
             // sum has to be accumulated.
             several => {
-                let mut acc: rustc_hash::FxHashMap<NodeId, i64> =
-                    rustc_hash::FxHashMap::default();
+                let mut acc: rustc_hash::FxHashMap<NodeId, i64> = rustc_hash::FxHashMap::default();
                 for degrees in several {
                     for (node, degree) in *degrees {
                         if *degree > 0 {
@@ -12809,7 +14493,11 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
     // of this operator's own logic -- see `drain_input_for_write` (#870).
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         drain_input_for_write(&mut self.input, store, tenant_id)?;
         self.next(store)
     }
@@ -12825,11 +14513,7 @@ impl PhysicalOperator for AdjacencyCountAggregateOperator {
             if self.top_k_rows.is_none() {
                 self.build_top_k(store, k, descending)?;
             }
-            let next = self
-                .top_k_rows
-                .as_mut()
-                .expect("built just above")
-                .next();
+            let next = self.top_k_rows.as_mut().expect("built just above").next();
             let grouped_key = std::sync::Arc::clone(&self.grouped_key);
             let count_key = std::sync::Arc::clone(&self.count_key);
             return Ok(next.map(|(node_id, count)| {
@@ -12999,7 +14683,14 @@ impl EagerOperator {
     /// so a lazy barrier beneath it is never reached and the write never runs.
     /// Being outermost is what makes the write happen.
     pub fn new(input: OperatorBox, skip: usize, limit: Option<usize>) -> Self {
-        Self { input, skip, limit, buffered: Vec::new(), idx: 0, drained: false }
+        Self {
+            input,
+            skip,
+            limit,
+            buffered: Vec::new(),
+            idx: 0,
+            drained: false,
+        }
     }
 
     fn emit(&mut self) -> Option<Record> {
@@ -13036,7 +14727,11 @@ impl PhysicalOperator for EagerOperator {
         Ok(self.emit())
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if !self.drained {
             while let Some(r) = self.input.next_mut(store, tenant_id)? {
                 self.buffered.push(r);
@@ -13094,8 +14789,10 @@ impl BindPathOperator {
 
     fn bind(&self, mut record: Record) -> Record {
         for (path_var, node_vars, edge_vars) in &self.paths {
-            let nodes: Vec<NodeId> =
-                node_vars.iter().filter_map(|v| record.get(v).and_then(|x| x.node_id())).collect();
+            let nodes: Vec<NodeId> = node_vars
+                .iter()
+                .filter_map(|v| record.get(v).and_then(|x| x.node_id()))
+                .collect();
             // A path whose nodes are not all bound is not a path; leaving the
             // variable unbound gives the caller the same "not found" it had
             // before, rather than a plausible shorter path.
@@ -13131,7 +14828,11 @@ impl PhysicalOperator for BindPathOperator {
         Ok(self.input.next(store)?.map(|r| self.bind(r)))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         Ok(self.input.next_mut(store, tenant_id)?.map(|r| self.bind(r)))
     }
 
@@ -13142,7 +14843,12 @@ impl PhysicalOperator for BindPathOperator {
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
             name: "BindPath".to_string(),
-            details: self.paths.iter().map(|(p, _, _)| p.clone()).collect::<Vec<_>>().join(", "),
+            details: self
+                .paths
+                .iter()
+                .map(|(p, _, _)| p.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
             children: vec![self.input.describe()],
         }
     }
@@ -13160,7 +14866,11 @@ pub struct LimitOperator {
 impl LimitOperator {
     /// Create a new limit operator
     pub fn new(input: OperatorBox, limit: usize) -> Self {
-        Self { input, limit, count: 0 }
+        Self {
+            input,
+            limit,
+            count: 0,
+        }
     }
 }
 
@@ -13192,7 +14902,11 @@ impl PhysicalOperator for LimitOperator {
     // LIMIT 2` failed with "requires mutable store access". Same defect class
     // as the barriers in #622 and the joins in #624, in the last two
     // pass-through operators that still had it (#649).
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if self.count >= self.limit {
             return Ok(None);
         }
@@ -13217,7 +14931,11 @@ impl PhysicalOperator for LimitOperator {
         self.input.hint_early_stop(self.limit.min(n))
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         if self.count >= self.limit {
             return Ok(None);
         }
@@ -13350,7 +15068,11 @@ impl SortOperator {
     ) -> ExecutionResult<SortKey<'s>> {
         let n = sort_items.len();
         let mut inline = [KeyPart::Value(Value::Null), KeyPart::Value(Value::Null)];
-        let mut heap = if n > 2 { Vec::with_capacity(n) } else { Vec::new() };
+        let mut heap = if n > 2 {
+            Vec::with_capacity(n)
+        } else {
+            Vec::new()
+        };
         let mut cursor = readers.iter_mut();
         let mut known = known;
         for (i, (expr, _)) in sort_items.iter().enumerate() {
@@ -13407,7 +15129,9 @@ impl SortOperator {
                 KeyPart::Value(Value::Property(PropertyValue::Integer(a))),
                 KeyPart::Value(Value::Property(PropertyValue::Integer(b))),
             ) => a.cmp(b),
-            (KeyPart::Value(a), KeyPart::Value(b)) => crate::query::executor::record::cypher_order_value(a, b),
+            (KeyPart::Value(a), KeyPart::Value(b)) => {
+                crate::query::executor::record::cypher_order_value(a, b)
+            }
             (KeyPart::Str(a), KeyPart::Str(b)) => a.cmp(b),
             (KeyPart::Str(a), KeyPart::Value(b)) => Self::cmp_str_value(a, b),
             (KeyPart::Value(a), KeyPart::Str(b)) => Self::cmp_str_value(b, a).reverse(),
@@ -13429,12 +15153,19 @@ impl SortOperator {
             Value::Property(PropertyValue::String(t)) => s.cmp(t.as_str()),
             // Nothing else shares the string rank today; if something ever
             // does, compare the owned form rather than guess.
-            other => cypher_order_value(&Value::Property(PropertyValue::String(s.to_string())), other),
+            other => cypher_order_value(
+                &Value::Property(PropertyValue::String(s.to_string())),
+                other,
+            ),
         }
     }
 
     /// Compare two precomputed keys under the per-column sort directions.
-    fn cmp_keys(a: &[KeyPart<'_>], b: &[KeyPart<'_>], items: &[(Expression, bool)]) -> std::cmp::Ordering {
+    fn cmp_keys(
+        a: &[KeyPart<'_>],
+        b: &[KeyPart<'_>],
+        items: &[(Expression, bool)],
+    ) -> std::cmp::Ordering {
         #[cfg(test)]
         SORT_COMPARISONS.with(|c| c.set(c.get() + 1));
         for (i, (_, ascending)) in items.iter().enumerate() {
@@ -13473,7 +15204,9 @@ impl SortOperator {
         if keyed.len() <= k {
             return;
         }
-        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items));
+        keyed.select_nth_unstable_by(k - 1, |a, b| {
+            Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items)
+        });
         keyed.truncate(k);
     }
 
@@ -13654,7 +15387,11 @@ impl SortOperator {
         Some(pairs.into_iter().map(|(_, i)| i).collect())
     }
 
-    fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
+    fn evaluate_expression(
+        expr: &Expression,
+        record: &Record,
+        store: &GraphStore,
+    ) -> ExecutionResult<Value> {
         match expr {
             // Delegates rather than adding a sixth copy of this logic; the
             // standalone evaluator is the one implementation (#654).
@@ -13683,14 +15420,22 @@ impl SortOperator {
                 eval_unary_op(op, val)
             }
             Expression::Function { name, args, .. } => {
-                let arg_vals: Vec<Value> = args.iter()
+                let arg_vals: Vec<Value> = args
+                    .iter()
                     .map(|a| Self::evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
                 eval_function(name, &arg_vals, Some(store))
             }
-            Expression::Case { operand, when_clauses, else_result } => {
-                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| Self::evaluate_expression(e, record, store))
-            }
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => eval_case(
+                operand.as_deref(),
+                when_clauses,
+                else_result.as_deref(),
+                |e| Self::evaluate_expression(e, record, store),
+            ),
             Expression::Index { expr, index } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
                 let idx = Self::evaluate_expression(index, record, store)?;
@@ -13698,25 +15443,61 @@ impl SortOperator {
             }
             Expression::ListSlice { expr, start, end } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
-                let s = match start { Some(s) => Some(Self::evaluate_expression(s, record, store)?), None => None };
-                let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
+                let s = match start {
+                    Some(s) => Some(Self::evaluate_expression(s, record, store)?),
+                    None => None,
+                };
+                let en = match end {
+                    Some(e) => Some(Self::evaluate_expression(e, record, store)?),
+                    None => None,
+                };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
-            }
-            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
-                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
-            }
-            Expression::PredicateFunction { name, variable, list_expr, predicate } => {
-                eval_predicate_function(name, variable, list_expr, predicate, record, store)
-            }
-            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
-                eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
-            }
-            Expression::PatternComprehension { pattern, filter, projection } => {
-                eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
-            }
+            Expression::ExistsSubquery {
+                pattern,
+                where_clause,
+                count,
+                ..
+            } => eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store),
+            Expression::ListComprehension {
+                variable,
+                list_expr,
+                filter,
+                map_expr,
+            } => eval_list_comprehension(
+                variable,
+                list_expr,
+                filter.as_deref(),
+                map_expr,
+                record,
+                store,
+            ),
+            Expression::PredicateFunction {
+                name,
+                variable,
+                list_expr,
+                predicate,
+            } => eval_predicate_function(name, variable, list_expr, predicate, record, store),
+            Expression::Reduce {
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                expression,
+            } => eval_reduce(
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                expression,
+                record,
+                store,
+            ),
+            Expression::PatternComprehension {
+                pattern,
+                filter,
+                projection,
+            } => eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store),
             Expression::PathVariable(var) => {
                 record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
@@ -13790,7 +15571,11 @@ impl PhysicalOperator for SortOperator {
     // decorate-sort-undecorate path -- with its limit hint and its amortised
     // trimming -- would be a second implementation of the one thing this
     // operator does.
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             let mut rows = Vec::new();
             while let Some(r) = self.input.next_mut(store, tenant_id)? {
@@ -13815,7 +15600,11 @@ impl PhysicalOperator for SortOperator {
         Ok(Some(record))
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
             self.execute_all(store)?;
         }
@@ -13828,10 +15617,17 @@ impl PhysicalOperator for SortOperator {
             self.sort_tail(store)?;
         }
         let end = (self.current + batch_size).min(self.records.len());
-        let batch: Vec<Record> = self.records[self.current..end].iter_mut().map(std::mem::take).collect();
+        let batch: Vec<Record> = self.records[self.current..end]
+            .iter_mut()
+            .map(std::mem::take)
+            .collect();
         self.current = end;
 
-        Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
+        Ok(Some(RecordBatch {
+            records: batch,
+            columns: Vec::new(),
+            plan_hash: None,
+        }))
     }
 
     fn reset(&mut self) {
@@ -13846,9 +15642,17 @@ impl PhysicalOperator for SortOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
-        let items: Vec<String> = self.sort_items.iter().map(|(e, asc)| {
-            format!("{} {}", format_expression(e), if *asc { "ASC" } else { "DESC" })
-        }).collect();
+        let items: Vec<String> = self
+            .sort_items
+            .iter()
+            .map(|(e, asc)| {
+                format!(
+                    "{} {}",
+                    format_expression(e),
+                    if *asc { "ASC" } else { "DESC" }
+                )
+            })
+            .collect();
         OperatorDescription {
             name: "Sort".to_string(),
             details: items.join(", "),
@@ -13891,19 +15695,23 @@ impl SortOperator {
         // and batches it kept nothing for, are read here as before.
         let retained_key: Option<usize> = {
             let input = &mut self.input;
-            self.sort_items.iter().enumerate().find_map(|(i, (expr, _))| match expr {
-                Expression::Property { variable, property } => {
-                    input.retain_property_reads(variable, property).then_some(i)
+            self.sort_items
+                .iter()
+                .enumerate()
+                .find_map(|(i, (expr, _))| match expr {
+                    Expression::Property { variable, property } => {
+                        input.retain_property_reads(variable, property).then_some(i)
+                    }
+                    _ => None,
+                })
+        };
+        let known_values =
+            |input: &mut OperatorBox, rows: usize| -> std::vec::IntoIter<Option<PropertyValue>> {
+                match (retained_key, input.take_retained_reads()) {
+                    (Some(_), Some(values)) if values.len() == rows => values.into_iter(),
+                    _ => Vec::new().into_iter(),
                 }
-                _ => None,
-            })
-        };
-        let known_values = |input: &mut OperatorBox, rows: usize| -> std::vec::IntoIter<Option<PropertyValue>> {
-            match (retained_key, input.take_retained_reads()) {
-                (Some(_), Some(values)) if values.len() == rows => values.into_iter(),
-                _ => Vec::new().into_iter(),
-            }
-        };
+            };
 
         // Without a LIMIT reaching this operator, every row is sorted. The rows
         // and their keys stay where they are and only 4-byte row indices are
@@ -13921,7 +15729,13 @@ impl SortOperator {
                 let mut known = known_values(&mut self.input, batch.records.len());
                 for record in batch.records {
                     let k = retained_key.zip(known.next().flatten());
-                    keys.push(Self::key_of_cached(&mut readers, &self.sort_items, &record, store, k)?);
+                    keys.push(Self::key_of_cached(
+                        &mut readers,
+                        &self.sort_items,
+                        &record,
+                        store,
+                        k,
+                    )?);
                     rows.push(record);
                 }
             }
@@ -13964,7 +15778,10 @@ impl SortOperator {
                     order
                 }
             };
-            self.records = order.iter().map(|&i| std::mem::take(&mut rows[i as usize])).collect();
+            self.records = order
+                .iter()
+                .map(|&i| std::mem::take(&mut rows[i as usize]))
+                .collect();
             self.sorted_upto = head.unwrap_or(self.records.len());
             self.executed = true;
             return Ok(());
@@ -14057,8 +15874,21 @@ pub struct CorrelatedIndexLookupOperator {
 }
 
 impl CorrelatedIndexLookupOperator {
-    pub fn new(input: OperatorBox, variable: String, label: Label, property: String, key: Expression) -> Self {
-        Self { input, variable, label, property, key, pending: None }
+    pub fn new(
+        input: OperatorBox,
+        variable: String,
+        label: Label,
+        property: String,
+        key: Expression,
+    ) -> Self {
+        Self {
+            input,
+            variable,
+            label,
+            property,
+            key,
+            pending: None,
+        }
     }
 
     /// The next output row from the pending input row, if it has one left.
@@ -14080,7 +15910,8 @@ impl CorrelatedIndexLookupOperator {
     fn probe(&self, row: &Record, store: &GraphStore) -> ExecutionResult<Vec<NodeId>> {
         Ok(match eval_expression(&self.key, row, store)? {
             Value::Property(PropertyValue::Null) | Value::Null => Vec::new(),
-            Value::Property(v) => match store.property_index.get_index(&self.label, &self.property) {
+            Value::Property(v) => match store.property_index.get_index(&self.label, &self.property)
+            {
                 Some(index) => index.read().unwrap().get(&v),
                 None => Vec::new(),
             },
@@ -14101,18 +15932,26 @@ impl PhysicalOperator for CorrelatedIndexLookupOperator {
             if let Some(out) = self.drain_pending(store) {
                 return Ok(Some(out));
             }
-            let Some(row) = self.input.next(store)? else { return Ok(None) };
+            let Some(row) = self.input.next(store)? else {
+                return Ok(None);
+            };
             let ids = self.probe(&row, store)?;
             self.pending = Some((row, ids, 0));
         }
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         loop {
             if let Some(out) = self.drain_pending(store) {
                 return Ok(Some(out));
             }
-            let Some(row) = self.input.next_mut(store, tenant_id)? else { return Ok(None) };
+            let Some(row) = self.input.next_mut(store, tenant_id)? else {
+                return Ok(None);
+            };
             let ids = self.probe(&row, store)?;
             self.pending = Some((row, ids, 0));
         }
@@ -14126,7 +15965,10 @@ impl PhysicalOperator for CorrelatedIndexLookupOperator {
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
             name: "CorrelatedIndexLookup".to_string(),
-            details: format!("{}:{:?}.{} = <per row>", self.variable, self.label, self.property),
+            details: format!(
+                "{}:{:?}.{} = <per row>",
+                self.variable, self.label, self.property
+            ),
             children: vec![self.input.describe()],
         }
     }
@@ -14222,7 +16064,13 @@ impl IndexScanOperator {
         self
     }
 
-    pub fn new(variable: String, label: Label, property: String, op: BinaryOp, value: PropertyValue) -> Self {
+    pub fn new(
+        variable: String,
+        label: Label,
+        property: String,
+        op: BinaryOp,
+        value: PropertyValue,
+    ) -> Self {
         // Built to match what the parser produces for `var.prop = literal`, so
         // the planner's structural comparison against the WHERE conjunct finds
         // it. The reversed spelling `30 = p.age` does not match and simply
@@ -14274,13 +16122,21 @@ impl IndexScanOperator {
                     self.node_ids = index.get(&self.value);
                     return;
                 }
-                (BinaryOp::Gt, Some(OtherEnd::AtMost(hi))) => (own_low(Excluded(v)), Included(hi.clone())),
+                (BinaryOp::Gt, Some(OtherEnd::AtMost(hi))) => {
+                    (own_low(Excluded(v)), Included(hi.clone()))
+                }
                 (BinaryOp::Gt, _) => (own_low(Excluded(v)), Unbounded),
-                (BinaryOp::Ge, Some(OtherEnd::AtMost(hi))) => (own_low(Included(v)), Included(hi.clone())),
+                (BinaryOp::Ge, Some(OtherEnd::AtMost(hi))) => {
+                    (own_low(Included(v)), Included(hi.clone()))
+                }
                 (BinaryOp::Ge, _) => (own_low(Included(v)), Unbounded),
-                (BinaryOp::Lt, Some(OtherEnd::AtLeast(lo))) => (Included(lo.clone()), own_high(Excluded(v))),
+                (BinaryOp::Lt, Some(OtherEnd::AtLeast(lo))) => {
+                    (Included(lo.clone()), own_high(Excluded(v)))
+                }
                 (BinaryOp::Lt, _) => (Unbounded, own_high(Excluded(v))),
-                (BinaryOp::Le, Some(OtherEnd::AtLeast(lo))) => (Included(lo.clone()), own_high(Included(v))),
+                (BinaryOp::Le, Some(OtherEnd::AtLeast(lo))) => {
+                    (Included(lo.clone()), own_high(Included(v)))
+                }
                 (BinaryOp::Le, _) => (Unbounded, own_high(Included(v))),
                 _ => {
                     self.node_ids = Vec::new();
@@ -14291,11 +16147,17 @@ impl IndexScanOperator {
             // `p.id > 100 AND p.id < 50` asks for. That range is empty.
             let inverted = match (&lower, &upper) {
                 (Included(a) | Excluded(a), Included(b) | Excluded(b)) => {
-                    a > b || (a == b && !(matches!(lower, Included(_)) && matches!(upper, Included(_))))
+                    a > b
+                        || (a == b
+                            && !(matches!(lower, Included(_)) && matches!(upper, Included(_))))
                 }
                 _ => false,
             };
-            self.node_ids = if inverted { Vec::new() } else { index.range((lower, upper)) };
+            self.node_ids = if inverted {
+                Vec::new()
+            } else {
+                index.range((lower, upper))
+            };
         }
     }
 }
@@ -14353,7 +16215,11 @@ impl PhysicalOperator for IndexScanOperator {
         Ok(None)
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         self.initialize(store);
 
         if self.current >= self.node_ids.len() {
@@ -14375,7 +16241,11 @@ impl PhysicalOperator for IndexScanOperator {
         if records.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()], plan_hash: None }))
+            Ok(Some(RecordBatch {
+                records,
+                columns: vec![self.variable.clone()],
+                plan_hash: None,
+            }))
         }
     }
 
@@ -14385,8 +16255,12 @@ impl PhysicalOperator for IndexScanOperator {
 
     fn describe(&self) -> OperatorDescription {
         let op_str = match self.op {
-            BinaryOp::Eq => "=", BinaryOp::Gt => ">", BinaryOp::Ge => ">=",
-            BinaryOp::Lt => "<", BinaryOp::Le => "<=", _ => "?",
+            BinaryOp::Eq => "=",
+            BinaryOp::Gt => ">",
+            BinaryOp::Ge => ">=",
+            BinaryOp::Lt => "<",
+            BinaryOp::Le => "<=",
+            _ => "?",
         };
         let other_end = match &self.other_end {
             Some(OtherEnd::AtMost(hi)) if matches!(self.op, BinaryOp::Gt | BinaryOp::Ge) => {
@@ -14399,7 +16273,10 @@ impl PhysicalOperator for IndexScanOperator {
         };
         OperatorDescription {
             name: "IndexScan".to_string(),
-            details: format!("var={}, {}.{} {} {:?}{other_end}", self.variable, self.label, self.property, op_str, self.value),
+            details: format!(
+                "var={}, {}.{} {} {:?}{other_end}",
+                self.variable, self.label, self.property, op_str, self.value
+            ),
             children: Vec::new(),
         }
     }
@@ -14451,12 +16328,9 @@ impl VectorSearchOperator {
             return Ok(());
         }
 
-        self.results = store.vector_search(
-            &self.label,
-            &self.property_key,
-            &self.query_vector,
-            self.k,
-        ).map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+        self.results = store
+            .vector_search(&self.label, &self.property_key, &self.query_vector, self.k)
+            .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
         Ok(())
     }
@@ -14477,7 +16351,10 @@ impl PhysicalOperator for VectorSearchOperator {
         record.bind(self.node_var.clone(), Value::NodeRef(*node_id));
 
         if let Some(score_var) = &self.score_var {
-            record.bind(score_var.clone(), Value::Property(PropertyValue::Float(*score as f64)));
+            record.bind(
+                score_var.clone(),
+                Value::Property(PropertyValue::Float(*score as f64)),
+            );
         }
 
         Ok(Some(record))
@@ -14540,7 +16417,9 @@ impl CartesianProductOperator {
         while let Some(record) = self.left.next(store)? {
             self.left_records.push(record);
             count += 1;
-            if count % 10000 == 0 { check_deadline()?; }
+            if count % 10000 == 0 {
+                check_deadline()?;
+            }
         }
         self.left_materialized = true;
         Ok(())
@@ -14587,7 +16466,11 @@ impl PhysicalOperator for CartesianProductOperator {
         }
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         self.materialize_left(store)?;
         if self.left_records.is_empty() {
             return Ok(None);
@@ -14624,10 +16507,13 @@ impl PhysicalOperator for CartesianProductOperator {
         if results.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: results, columns: Vec::new(), plan_hash: None }))
+            Ok(Some(RecordBatch {
+                records: results,
+                columns: Vec::new(),
+                plan_hash: None,
+            }))
         }
     }
-
 
     // A clause pipeline can put writes on the left of a join: `CREATE (n:C)
     // WITH n MATCH (a:A) RETURN a, n` plans the CREATE below this operator.
@@ -14635,7 +16521,11 @@ impl PhysicalOperator for CartesianProductOperator {
     // refuse — they cannot reach a mutable store — so the left input is drained
     // once with `next_mut` and replaced by its own rows. Everything below has
     // then already run, and the read-only path is correct for the rest.
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if !self.left_drained_mut {
             let mut rows = Vec::new();
             let mut count = 0u64;
@@ -14753,21 +16643,34 @@ impl JoinOperator {
     }
 
     /// Property-expression keys use Cypher equality rather than Value hashing.
-    pub fn on_expressions(left: OperatorBox, right: OperatorBox, keys: Vec<(Expression, Expression)>) -> Self {
+    pub fn on_expressions(
+        left: OperatorBox,
+        right: OperatorBox,
+        keys: Vec<(Expression, Expression)>,
+    ) -> Self {
         let mut join = Self::new(left, right, Vec::new());
         join.expression_keys = keys;
         join
     }
 
-    fn hash_key(&self, record: &Record, right: bool, store: &GraphStore) -> ExecutionResult<Option<HashJoinKey>> {
+    fn hash_key(
+        &self,
+        record: &Record,
+        right: bool,
+        store: &GraphStore,
+    ) -> ExecutionResult<Option<HashJoinKey>> {
         if self.expression_keys.is_empty() {
             return Ok(Self::key_of(record, &self.join_vars).map(HashJoinKey::Identity));
         }
         let mut parts = Vec::with_capacity(self.expression_keys.len());
         for (left_expr, right_expr) in &self.expression_keys {
             let value = eval_expression(if right { right_expr } else { left_expr }, record, store)?;
-            let Value::Property(property) = value else { return Ok(None) };
-            let Some(key) = join_key_of(&property) else { return Ok(None) };
+            let Value::Property(property) = value else {
+                return Ok(None);
+            };
+            let Some(key) = join_key_of(&property) else {
+                return Ok(None);
+            };
             parts.push(key);
         }
         Ok(Some(HashJoinKey::Expression(parts)))
@@ -14785,7 +16688,9 @@ impl JoinOperator {
                 self.left_records.entry(key).or_default().push(record);
             }
             count += 1;
-            if count % 10000 == 0 { check_deadline()?; }
+            if count % 10000 == 0 {
+                check_deadline()?;
+            }
         }
 
         // Materialize right into a list
@@ -14793,7 +16698,9 @@ impl JoinOperator {
         while let Some(record) = self.right.next(store)? {
             self.right_records.push(record);
             count += 1;
-            if count % 10000 == 0 { check_deadline()?; }
+            if count % 10000 == 0 {
+                check_deadline()?;
+            }
         }
 
         self.materialized = true;
@@ -14835,7 +16742,7 @@ impl PhysicalOperator for JoinOperator {
                     }
                 }
             }
-            
+
             // Move to next right record
             self.current_right_index += 1;
             self.current_left_list_index = 0;
@@ -14844,7 +16751,11 @@ impl PhysicalOperator for JoinOperator {
         Ok(None)
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         self.materialize(store)?;
         let mut results = Vec::with_capacity(batch_size);
 
@@ -14852,8 +16763,9 @@ impl PhysicalOperator for JoinOperator {
             let right_record = &self.right_records[self.current_right_index];
             if let Some(join_key) = self.hash_key(right_record, true, store)? {
                 if let Some(left_list) = self.left_records.get(&join_key) {
-                    let take = (batch_size - results.len()).min(left_list.len() - self.current_left_list_index);
-                    
+                    let take = (batch_size - results.len())
+                        .min(left_list.len() - self.current_left_list_index);
+
                     for i in 0..take {
                         let left_record = &left_list[self.current_left_list_index + i];
                         let mut merged = left_record.clone();
@@ -14862,7 +16774,7 @@ impl PhysicalOperator for JoinOperator {
                         }
                         results.push(merged);
                     }
-                    
+
                     self.current_left_list_index += take;
                     if self.current_left_list_index >= left_list.len() {
                         self.current_right_index += 1;
@@ -14881,10 +16793,13 @@ impl PhysicalOperator for JoinOperator {
         if results.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: results, columns: Vec::new(), plan_hash: None }))
+            Ok(Some(RecordBatch {
+                records: results,
+                columns: Vec::new(),
+                plan_hash: None,
+            }))
         }
     }
-
 
     // A clause pipeline can put writes on the left of a join: `CREATE (n:C)
     // WITH n MATCH (a:A) RETURN a, n` plans the CREATE below this operator.
@@ -14892,7 +16807,11 @@ impl PhysicalOperator for JoinOperator {
     // refuse — they cannot reach a mutable store — so the left input is drained
     // once with `next_mut` and replaced by its own rows. Everything below has
     // then already run, and the read-only path is correct for the rest.
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if !self.left_drained_mut {
             let mut rows = Vec::new();
             let mut count = 0u64;
@@ -14936,8 +16855,17 @@ impl PhysicalOperator for JoinOperator {
 
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
-            name: if self.expression_keys.is_empty() { "HashJoin" } else { "ExpressionHashJoin" }.to_string(),
-            details: if self.expression_keys.is_empty() { format!("on={}", self.join_vars.join(",")) } else { format!("on={:?}", self.expression_keys) },
+            name: if self.expression_keys.is_empty() {
+                "HashJoin"
+            } else {
+                "ExpressionHashJoin"
+            }
+            .to_string(),
+            details: if self.expression_keys.is_empty() {
+                format!("on={}", self.join_vars.join(","))
+            } else {
+                format!("on={:?}", self.expression_keys)
+            },
             children: vec![self.left.describe(), self.right.describe()],
         }
     }
@@ -15031,7 +16959,9 @@ impl LeftOuterJoinOperator {
         while let Some(record) = self.left.next(store)? {
             self.left_records.push(record);
             count += 1;
-            if count % 10000 == 0 { check_deadline()?; }
+            if count % 10000 == 0 {
+                check_deadline()?;
+            }
         }
 
         // Materialize right into a hash map by join variable
@@ -15041,7 +16971,9 @@ impl LeftOuterJoinOperator {
                 self.right_hash.entry(val.clone()).or_default().push(record);
             }
             count += 1;
-            if count % 10000 == 0 { check_deadline()?; }
+            if count % 10000 == 0 {
+                check_deadline()?;
+            }
         }
 
         self.materialized = true;
@@ -15127,7 +17059,11 @@ impl PhysicalOperator for LeftOuterJoinOperator {
         Ok(None)
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let mut results = Vec::with_capacity(batch_size);
         while results.len() < batch_size {
             match self.next(store)? {
@@ -15138,10 +17074,13 @@ impl PhysicalOperator for LeftOuterJoinOperator {
         if results.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: results, columns: Vec::new(), plan_hash: None }))
+            Ok(Some(RecordBatch {
+                records: results,
+                columns: Vec::new(),
+                plan_hash: None,
+            }))
         }
     }
-
 
     // A clause pipeline can put writes on the left of a join: `CREATE (n:C)
     // WITH n MATCH (a:A) RETURN a, n` plans the CREATE below this operator.
@@ -15149,7 +17088,11 @@ impl PhysicalOperator for LeftOuterJoinOperator {
     // refuse — they cannot reach a mutable store — so the left input is drained
     // once with `next_mut` and replaced by its own rows. Everything below has
     // then already run, and the read-only path is correct for the rest.
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if !self.left_drained_mut {
             let mut rows = Vec::new();
             let mut count = 0u64;
@@ -15204,7 +17147,12 @@ impl PhysicalOperator for LeftOuterJoinOperator {
 /// Create node operator: CREATE (n:Person {name: "Alice"})
 pub struct CreateNodeOperator {
     /// Nodes to create (label, properties, variable)
-    nodes_to_create: Vec<(Vec<Label>, HashMap<String, PropertyValue>, Option<String>, Option<HashMap<String, Expression>>)>,
+    nodes_to_create: Vec<(
+        Vec<Label>,
+        HashMap<String, PropertyValue>,
+        Option<String>,
+        Option<HashMap<String, Expression>>,
+    )>,
     /// Created node IDs (for returning)
     created_nodes: Vec<(NodeId, Option<String>)>,
     /// Current index for iteration
@@ -15236,11 +17184,15 @@ impl PhysicalOperator for CreateNodeOperator {
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         // Read-only version cannot create nodes
         Err(ExecutionError::RuntimeError(
-            "CreateNodeOperator requires mutable store access. Use next_mut instead.".to_string()
+            "CreateNodeOperator requires mutable store access. Use next_mut instead.".to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         // First call: create all nodes
         if !self.executed {
             // The nodes this CREATE has made so far, by variable. A later element may
@@ -15264,7 +17216,11 @@ impl PhysicalOperator for CreateNodeOperator {
                 let mut evaluated: HashMap<String, PropertyValue> = HashMap::new();
                 if let Some(exprs) = property_exprs {
                     for (key, expr) in exprs {
-                        match eval_expression(expr, &scope, store).ok().as_ref().and_then(storable_property) {
+                        match eval_expression(expr, &scope, store)
+                            .ok()
+                            .as_ref()
+                            .and_then(storable_property)
+                        {
                             Some(p) => {
                                 evaluated.insert(key.clone(), p);
                             }
@@ -15280,7 +17236,8 @@ impl PhysicalOperator for CreateNodeOperator {
 
                 // Set properties using store.set_node_property to trigger indexing
                 for (key, value) in properties.iter().chain(evaluated.iter()) {
-                    if let Err(e) = store.set_node_property(tenant_id, node_id, key.clone(), value.clone())
+                    if let Err(e) =
+                        store.set_node_property(tenant_id, node_id, key.clone(), value.clone())
                     {
                         // A rejected property must not leave a half-built node behind.
                         let _ = store.delete_node(tenant_id, node_id);
@@ -15364,18 +17321,26 @@ pub struct CreateIndexOperator {
 
 impl CreateIndexOperator {
     pub fn new(label: Label, property: String) -> Self {
-        Self { label, property, executed: false }
+        Self {
+            label,
+            property,
+            executed: false,
+        }
     }
 }
 
 impl PhysicalOperator for CreateIndexOperator {
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
-            "CreateIndexOperator requires mutable store access. Use next_mut instead.".to_string()
+            "CreateIndexOperator requires mutable store access. Use next_mut instead.".to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        _tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
         }
@@ -15450,11 +17415,16 @@ impl CreateVectorIndexOperator {
 impl PhysicalOperator for CreateVectorIndexOperator {
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
-            "CreateVectorIndexOperator requires mutable store access. Use next_mut instead.".to_string()
+            "CreateVectorIndexOperator requires mutable store access. Use next_mut instead."
+                .to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        _tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
         }
@@ -15463,12 +17433,23 @@ impl PhysicalOperator for CreateVectorIndexOperator {
             "cosine" => crate::vector::DistanceMetric::Cosine,
             "l2" | "euclidean" => crate::vector::DistanceMetric::L2,
             "inner_product" | "dot" => crate::vector::DistanceMetric::InnerProduct,
-            _ => return Err(ExecutionError::RuntimeError(format!("Unsupported similarity metric: {}", self.similarity))),
+            _ => {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "Unsupported similarity metric: {}",
+                    self.similarity
+                )))
+            }
         };
 
-        store.create_vector_index_named(self.name.as_deref(), self.label.as_str(),
-                                        &self.property_key, self.dimensions, metric,
-                                        self.quantization)
+        store
+            .create_vector_index_named(
+                self.name.as_deref(),
+                self.label.as_str(),
+                &self.property_key,
+                self.dimensions,
+                metric,
+                self.quantization,
+            )
             .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
         // Backfill nodes that already carry the embedding. Registering the index without
@@ -15479,7 +17460,7 @@ impl PhysicalOperator for CreateVectorIndexOperator {
         store.rebuild_vector_index();
 
         self.executed = true;
-        
+
         // Return an empty record or a success record
         Ok(Some(Record::new()))
     }
@@ -15518,7 +17499,12 @@ pub struct CreateFullTextIndexOperator {
 
 impl CreateFullTextIndexOperator {
     pub fn new(name: String, label: Label, property_keys: Vec<String>) -> Self {
-        Self { name, label, property_keys, executed: false }
+        Self {
+            name,
+            label,
+            property_keys,
+            executed: false,
+        }
     }
 }
 
@@ -15529,7 +17515,11 @@ impl PhysicalOperator for CreateFullTextIndexOperator {
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        _tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
         }
@@ -15551,14 +17541,22 @@ impl PhysicalOperator for CreateFullTextIndexOperator {
         Ok(Some(Record::new()))
     }
 
-    fn reset(&mut self) { self.executed = false; }
-    fn is_mutating(&self) -> bool { true }
+    fn reset(&mut self) {
+        self.executed = false;
+    }
+    fn is_mutating(&self) -> bool {
+        true
+    }
 
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
             name: "CreateFullTextIndex".to_string(),
-            details: format!("{} ON :{}({})", self.name, self.label.as_str(),
-                             self.property_keys.join(", ")),
+            details: format!(
+                "{} ON :{}({})",
+                self.name,
+                self.label.as_str(),
+                self.property_keys.join(", ")
+            ),
             children: Vec::new(),
         }
     }
@@ -15572,7 +17570,10 @@ pub struct DropFullTextIndexOperator {
 
 impl DropFullTextIndexOperator {
     pub fn new(name: String) -> Self {
-        Self { name, executed: false }
+        Self {
+            name,
+            executed: false,
+        }
     }
 }
 
@@ -15583,7 +17584,11 @@ impl PhysicalOperator for DropFullTextIndexOperator {
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        _tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
         }
@@ -15606,8 +17611,12 @@ impl PhysicalOperator for DropFullTextIndexOperator {
         Ok(Some(Record::new()))
     }
 
-    fn reset(&mut self) { self.executed = false; }
-    fn is_mutating(&self) -> bool { true }
+    fn reset(&mut self) {
+        self.executed = false;
+    }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
             name: "DropFullTextIndex".to_string(),
@@ -15628,16 +17637,30 @@ pub struct FullTextSearchOperator {
 }
 
 impl FullTextSearchOperator {
-    pub fn new(index_name: String, query: String, limit: usize,
-               node_alias: String, score_alias: String) -> Self {
-        Self { index_name, query, limit, node_alias, score_alias, results: None }
+    pub fn new(
+        index_name: String,
+        query: String,
+        limit: usize,
+        node_alias: String,
+        score_alias: String,
+    ) -> Self {
+        Self {
+            index_name,
+            query,
+            limit,
+            node_alias,
+            score_alias,
+            results: None,
+        }
     }
 }
 
 impl PhysicalOperator for FullTextSearchOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.results.is_none() {
-            let hits = store.fulltext.search(&self.index_name, &self.query, self.limit)
+            let hits = store
+                .fulltext
+                .search(&self.index_name, &self.query, self.limit)
                 .ok_or_else(|| {
                     let known = store.fulltext.names();
                     ExecutionError::RuntimeError(format!(
@@ -15645,7 +17668,8 @@ impl PhysicalOperator for FullTextSearchOperator {
                         self.index_name,
                         if known.is_empty() {
                             "None has been created; CREATE FULLTEXT INDEX <name> FOR \
-                             (n:Label) ON (n.property) makes one.".to_string()
+                             (n:Label) ON (n.property) makes one."
+                                .to_string()
                         } else {
                             format!("Known: {}", known.join(", "))
                         }
@@ -15656,12 +17680,17 @@ impl PhysicalOperator for FullTextSearchOperator {
         Ok(self.results.as_mut().unwrap().next().map(|hit| {
             let mut r = Record::new();
             r.bind(self.node_alias.clone(), Value::NodeRef(hit.node));
-            r.bind(self.score_alias.clone(), Value::Property(PropertyValue::Float(hit.score)));
+            r.bind(
+                self.score_alias.clone(),
+                Value::Property(PropertyValue::Float(hit.score)),
+            );
             r
         }))
     }
 
-    fn reset(&mut self) { self.results = None; }
+    fn reset(&mut self) {
+        self.results = None;
+    }
 
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
@@ -15681,18 +17710,26 @@ pub struct CompositeCreateIndexOperator {
 
 impl CompositeCreateIndexOperator {
     pub fn new(label: Label, properties: Vec<String>) -> Self {
-        Self { label, properties, executed: false }
+        Self {
+            label,
+            properties,
+            executed: false,
+        }
     }
 }
 
 impl PhysicalOperator for CompositeCreateIndexOperator {
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
-            "CompositeCreateIndexOperator requires mutable store access.".to_string()
+            "CompositeCreateIndexOperator requires mutable store access.".to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        _tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
         }
@@ -15734,18 +17771,26 @@ pub struct CreateConstraintOperator {
 
 impl CreateConstraintOperator {
     pub fn new(label: Label, property: String) -> Self {
-        Self { label, property, executed: false }
+        Self {
+            label,
+            property,
+            executed: false,
+        }
     }
 }
 
 impl PhysicalOperator for CreateConstraintOperator {
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
-            "CreateConstraintOperator requires mutable store access.".to_string()
+            "CreateConstraintOperator requires mutable store access.".to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        _tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
         }
@@ -15788,18 +17833,26 @@ pub struct DropIndexOperator {
 
 impl DropIndexOperator {
     pub fn new(label: Label, property: String) -> Self {
-        Self { label, property, executed: false }
+        Self {
+            label,
+            property,
+            executed: false,
+        }
     }
 }
 
 impl PhysicalOperator for DropIndexOperator {
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
-            "DropIndexOperator requires mutable store access. Use next_mut instead.".to_string()
+            "DropIndexOperator requires mutable store access. Use next_mut instead.".to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        _tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if self.executed {
             return Ok(None);
         }
@@ -15890,7 +17943,11 @@ impl PhysicalOperator for DistinctOperator {
         Ok(None)
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         while let Some(record) = self.input.next_mut(store, tenant_id)? {
             if self.seen.insert(Self::key(&record)) {
                 return Ok(Some(record));
@@ -15952,7 +18009,9 @@ impl PhysicalOperator for ShowIndexesOperator {
                 .property_index
                 .list_indexes()
                 .into_iter()
-                .map(|(label, property)| (label.as_str().to_string(), property, "BTREE".to_string()))
+                .map(|(label, property)| {
+                    (label.as_str().to_string(), property, "BTREE".to_string())
+                })
                 .collect();
             rows.extend(
                 store
@@ -15970,9 +18029,7 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .fulltext
                     .listing()
                     .into_iter()
-                    .map(|(name, label, property)| {
-                        (label, property, format!("FULLTEXT[{name}]"))
-                    }),
+                    .map(|(name, label, property)| (label, property, format!("FULLTEXT[{name}]"))),
             );
             rows.extend(
                 store
@@ -15988,9 +18045,18 @@ impl PhysicalOperator for ShowIndexesOperator {
             let mut records = Vec::new();
             for (label, property, kind) in rows {
                 let mut record = Record::new();
-                record.bind("label".to_string(), Value::Property(PropertyValue::String(label)));
-                record.bind("property".to_string(), Value::Property(PropertyValue::String(property)));
-                record.bind("type".to_string(), Value::Property(PropertyValue::String(kind)));
+                record.bind(
+                    "label".to_string(),
+                    Value::Property(PropertyValue::String(label)),
+                );
+                record.bind(
+                    "property".to_string(),
+                    Value::Property(PropertyValue::String(property)),
+                );
+                record.bind(
+                    "type".to_string(),
+                    Value::Property(PropertyValue::String(kind)),
+                );
                 records.push(record);
             }
             self.results = Some(records.into_iter());
@@ -16030,9 +18096,18 @@ impl PhysicalOperator for ShowConstraintsOperator {
             let mut records = Vec::new();
             for (label, property) in constraints {
                 let mut record = Record::new();
-                record.bind("label".to_string(), Value::Property(PropertyValue::String(label.as_str().to_string())));
-                record.bind("property".to_string(), Value::Property(PropertyValue::String(property)));
-                record.bind("type".to_string(), Value::Property(PropertyValue::String("UNIQUE".to_string())));
+                record.bind(
+                    "label".to_string(),
+                    Value::Property(PropertyValue::String(label.as_str().to_string())),
+                );
+                record.bind(
+                    "property".to_string(),
+                    Value::Property(PropertyValue::String(property)),
+                );
+                record.bind(
+                    "type".to_string(),
+                    Value::Property(PropertyValue::String("UNIQUE".to_string())),
+                );
                 records.push(record);
             }
             self.results = Some(records.into_iter());
@@ -16142,12 +18217,19 @@ impl ShowLabelsOperator {
 impl PhysicalOperator for ShowLabelsOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.results.is_none() {
-            let mut labels: Vec<String> = store.all_labels().iter().map(|l| l.as_str().to_string()).collect();
+            let mut labels: Vec<String> = store
+                .all_labels()
+                .iter()
+                .map(|l| l.as_str().to_string())
+                .collect();
             labels.sort();
             let mut records = Vec::new();
             for label in labels {
                 let mut record = Record::new();
-                record.bind("label".to_string(), Value::Property(PropertyValue::String(label)));
+                record.bind(
+                    "label".to_string(),
+                    Value::Property(PropertyValue::String(label)),
+                );
                 records.push(record);
             }
             self.results = Some(records.into_iter());
@@ -16182,12 +18264,19 @@ impl ShowRelationshipTypesOperator {
 impl PhysicalOperator for ShowRelationshipTypesOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if self.results.is_none() {
-            let mut types: Vec<String> = store.all_edge_types().iter().map(|t| t.as_str().to_string()).collect();
+            let mut types: Vec<String> = store
+                .all_edge_types()
+                .iter()
+                .map(|t| t.as_str().to_string())
+                .collect();
             types.sort();
             let mut records = Vec::new();
             for edge_type in types {
                 let mut record = Record::new();
-                record.bind("relationshipType".to_string(), Value::Property(PropertyValue::String(edge_type)));
+                record.bind(
+                    "relationshipType".to_string(),
+                    Value::Property(PropertyValue::String(edge_type)),
+                );
                 records.push(record);
             }
             self.results = Some(records.into_iter());
@@ -16242,7 +18331,10 @@ impl PhysicalOperator for ShowPropertyKeysOperator {
             let mut records = Vec::new();
             for key in keys {
                 let mut record = Record::new();
-                record.bind("propertyKey".to_string(), Value::Property(PropertyValue::String(key)));
+                record.bind(
+                    "propertyKey".to_string(),
+                    Value::Property(PropertyValue::String(key)),
+                );
                 records.push(record);
             }
             self.results = Some(records.into_iter());
@@ -16285,15 +18377,37 @@ impl PhysicalOperator for SchemaVisualizationOperator {
                 // an LLM is handed, so a (Label)-[T]->(Label) triple dropped by
                 // the cap is a relationship the model is told does not exist.
                 for edge in edges.iter() {
-                    if let (Some(src_node), Some(tgt_node)) = (store.get_node(edge.source), store.get_node(edge.target)) {
+                    if let (Some(src_node), Some(tgt_node)) =
+                        (store.get_node(edge.source), store.get_node(edge.target))
+                    {
                         for src_label in &src_node.labels {
                             for tgt_label in &tgt_node.labels {
-                                let key = format!("{}|{}|{}", src_label.as_str(), edge_type.as_str(), tgt_label.as_str());
+                                let key = format!(
+                                    "{}|{}|{}",
+                                    src_label.as_str(),
+                                    edge_type.as_str(),
+                                    tgt_label.as_str()
+                                );
                                 if seen.insert(key) {
                                     let mut record = Record::new();
-                                    record.bind("source_label".to_string(), Value::Property(PropertyValue::String(src_label.as_str().to_string())));
-                                    record.bind("relationship_type".to_string(), Value::Property(PropertyValue::String(edge_type.as_str().to_string())));
-                                    record.bind("target_label".to_string(), Value::Property(PropertyValue::String(tgt_label.as_str().to_string())));
+                                    record.bind(
+                                        "source_label".to_string(),
+                                        Value::Property(PropertyValue::String(
+                                            src_label.as_str().to_string(),
+                                        )),
+                                    );
+                                    record.bind(
+                                        "relationship_type".to_string(),
+                                        Value::Property(PropertyValue::String(
+                                            edge_type.as_str().to_string(),
+                                        )),
+                                    );
+                                    record.bind(
+                                        "target_label".to_string(),
+                                        Value::Property(PropertyValue::String(
+                                            tgt_label.as_str().to_string(),
+                                        )),
+                                    );
                                     records.push(record);
                                 }
                             }
@@ -16371,7 +18485,10 @@ impl SchemaForLlmOperator {
     pub const MIN_BUDGET: usize = 50;
 
     pub fn new(token_budget: usize) -> Self {
-        Self { token_budget, emitted: false }
+        Self {
+            token_budget,
+            emitted: false,
+        }
     }
 
     /// Tokens, approximated as bytes / 4.
@@ -16392,7 +18509,8 @@ impl SchemaForLlmOperator {
             std::collections::HashMap::new();
         for edge_type in store.all_edge_types() {
             for edge in store.get_edges_by_type(edge_type).iter() {
-                let (Some(src), Some(tgt)) = (store.get_node(edge.source), store.get_node(edge.target))
+                let (Some(src), Some(tgt)) =
+                    (store.get_node(edge.source), store.get_node(edge.target))
                 else {
                     continue;
                 };
@@ -16480,7 +18598,9 @@ impl SchemaForLlmOperator {
         let mut props_total = 0usize;
         let mut truncated = false;
 
-        let mut section = String::from("\nlabels (count, then properties as name:Type null=fraction distinct=n samples):\n");
+        let mut section = String::from(
+            "\nlabels (count, then properties as name:Type null=fraction distinct=n samples):\n",
+        );
         for (label, count) in &labels {
             let mut block = format!("  (:{}) {}\n", label.as_str(), count);
             let mut props: Vec<_> = stats
@@ -16496,8 +18616,12 @@ impl SchemaForLlmOperator {
                     .first()
                     .map(|(v, _)| Self::type_name(v))
                     .unwrap_or("Unknown");
-                let samples: Vec<String> =
-                    ps.most_common.iter().take(2).map(|(v, _)| Self::sample(v)).collect();
+                let samples: Vec<String> = ps
+                    .most_common
+                    .iter()
+                    .take(2)
+                    .map(|(v, _)| Self::sample(v))
+                    .collect();
                 block.push_str(&format!(
                     "    {name}:{ty} null={:.2} distinct={}{}\n",
                     ps.null_fraction,
@@ -16536,7 +18660,8 @@ impl SchemaForLlmOperator {
         // syntactically valid example against *this* graph rather than a
         // remembered one from some other dialect.
         if let Some(((s, t, d), _)) = triples.first() {
-            let example = format!("\nexample:\n  MATCH (a:{s})-[:{t}]->(b:{d}) RETURN a, b LIMIT 10\n");
+            let example =
+                format!("\nexample:\n  MATCH (a:{s})-[:{t}]->(b:{d}) RETURN a, b LIMIT 10\n");
             if Self::tokens(&out) + Self::tokens(&example) <= budget {
                 out.push_str(&example);
             } else {
@@ -16603,7 +18728,13 @@ pub struct CreateEdgeOperator {
     /// Input operator (provides source/target nodes from MATCH)
     input: Option<OperatorBox>,
     /// Edge pattern to create: (source_var, target_var, edge_type, properties, edge_var)
-    edge_pattern: (String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>),
+    edge_pattern: (
+        String,
+        String,
+        EdgeType,
+        HashMap<String, PropertyValue>,
+        Option<String>,
+    ),
     /// Created edges
     created_edges: Vec<(crate::graph::EdgeId, Option<String>)>,
     /// Current index
@@ -16639,11 +18770,15 @@ impl PhysicalOperator for CreateEdgeOperator {
 
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
-            "CreateEdgeOperator requires mutable store access. Use next_mut instead.".to_string()
+            "CreateEdgeOperator requires mutable store access. Use next_mut instead.".to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         let (source_var, target_var, edge_type, properties, edge_var) = &self.edge_pattern;
 
         // Process input records and create edges
@@ -16651,17 +18786,22 @@ impl PhysicalOperator for CreateEdgeOperator {
             if let Some(ref mut input) = self.input {
                 // Create edge for each input record
                 while let Some(record) = input.next_mut(store, tenant_id)? {
-                    let source_val = record.get(source_var)
+                    let source_val = record
+                        .get(source_var)
                         .ok_or_else(|| ExecutionError::VariableNotFound(source_var.clone()))?;
-                    let target_val = record.get(target_var)
+                    let target_val = record
+                        .get(target_var)
                         .ok_or_else(|| ExecutionError::VariableNotFound(target_var.clone()))?;
 
-                    let source_id = source_val.node_id()
-                        .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", source_var)))?;
-                    let target_id = target_val.node_id()
-                        .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", target_var)))?;
+                    let source_id = source_val.node_id().ok_or_else(|| {
+                        ExecutionError::TypeError(format!("{} is not a node", source_var))
+                    })?;
+                    let target_id = target_val.node_id().ok_or_else(|| {
+                        ExecutionError::TypeError(format!("{} is not a node", target_var))
+                    })?;
 
-                    let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
+                    let edge_id = store
+                        .create_edge(source_id, target_id, edge_type.clone())
                         .map_err(write_error)?;
 
                     // Set properties on edge via DS-07c sparse map
@@ -16683,8 +18823,9 @@ impl PhysicalOperator for CreateEdgeOperator {
         let (edge_id, variable) = &self.created_edges[self.current];
         self.current += 1;
 
-        let edge = store.get_edge(*edge_id)
-            .ok_or_else(|| ExecutionError::RuntimeError(format!("Created edge {:?} not found", edge_id)))?;
+        let edge = store.get_edge(*edge_id).ok_or_else(|| {
+            ExecutionError::RuntimeError(format!("Created edge {:?} not found", edge_id))
+        })?;
 
         let mut record = Record::new();
         // Always bind created edge — use variable name if provided, otherwise
@@ -16757,10 +18898,7 @@ pub struct CreateNodesAndEdgesOperator {
 
 impl CreateNodesAndEdgesOperator {
     /// Create a new CreateNodesAndEdgesOperator
-    pub fn new(
-        node_operator: OperatorBox,
-        edges_to_create: Vec<EdgeToCreate>,
-    ) -> Self {
+    pub fn new(node_operator: OperatorBox, edges_to_create: Vec<EdgeToCreate>) -> Self {
         Self {
             node_operator,
             edges_to_create,
@@ -16780,11 +18918,16 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
 
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
-            "CreateNodesAndEdgesOperator requires mutable store access. Use next_mut instead.".to_string()
+            "CreateNodesAndEdgesOperator requires mutable store access. Use next_mut instead."
+                .to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         // Phase 0: Create all nodes and collect their IDs
         if self.phase == 0 {
             while let Some(record) = self.node_operator.next_mut(store, tenant_id)? {
@@ -16792,7 +18935,8 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                 for (var, value) in record.bindings().iter() {
                     if let Value::Node(node_id, node) = value {
                         self.var_to_node_id.insert(var.to_string(), *node_id);
-                        self.results.push((Some(var.to_string()), Value::Node(*node_id, node.clone())));
+                        self.results
+                            .push((Some(var.to_string()), Value::Node(*node_id, node.clone())));
                     }
                 }
             }
@@ -16804,9 +18948,13 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
             for (source_var, target_var, edge_type, properties, edge_var, exprs) in
                 &self.edges_to_create
             {
-                let source_id = self.var_to_node_id.get(source_var)
+                let source_id = self
+                    .var_to_node_id
+                    .get(source_var)
                     .ok_or_else(|| ExecutionError::VariableNotFound(source_var.clone()))?;
-                let target_id = self.var_to_node_id.get(target_var)
+                let target_id = self
+                    .var_to_node_id
+                    .get(target_var)
                     .ok_or_else(|| ExecutionError::VariableNotFound(target_var.clone()))?;
 
                 // Non-literal property values, evaluated before the edge is
@@ -16827,15 +18975,15 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
                         scope.bind(var.clone(), Value::NodeRef(*id));
                     }
                     for (key, expr) in exprs {
-                        if let Some(pv) =
-                            storable_property(&eval_expression(expr, &scope, store)?)
+                        if let Some(pv) = storable_property(&eval_expression(expr, &scope, store)?)
                         {
                             evaluated.push((key.clone(), pv));
                         }
                     }
                 }
 
-                let edge_id = store.create_edge(*source_id, *target_id, edge_type.clone())
+                let edge_id = store
+                    .create_edge(*source_id, *target_id, edge_type.clone())
                     .map_err(write_error)?;
 
                 // Set properties on edge via DS-07c sparse map. The evaluated
@@ -16849,8 +18997,11 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
 
                 // Always track created edges for persistence (even without variable names)
                 if let Some(edge) = store.get_edge(edge_id) {
-                    let var_name = edge_var.clone().or_else(|| Some(format!("__created_edge_{}", self.created_edges.len())));
-                    self.results.push((var_name, Value::Edge(edge_id, Box::new(edge.clone()))));
+                    let var_name = edge_var
+                        .clone()
+                        .or_else(|| Some(format!("__created_edge_{}", self.created_edges.len())));
+                    self.results
+                        .push((var_name, Value::Edge(edge_id, Box::new(edge.clone()))));
                     self.created_edges.push((edge_id, edge, edge_var.clone()));
                 }
             }
@@ -16890,7 +19041,11 @@ impl PhysicalOperator for CreateNodesAndEdgesOperator {
         true
     }
     fn describe(&self) -> OperatorDescription {
-        let edges: Vec<String> = self.edges_to_create.iter().map(format_edge_to_create).collect();
+        let edges: Vec<String> = self
+            .edges_to_create
+            .iter()
+            .map(format_edge_to_create)
+            .collect();
         OperatorDescription {
             name: "CreateNodesAndEdges".to_string(),
             details: edges.join(", "),
@@ -16920,7 +19075,12 @@ pub struct MatchCreateEdgeOperator {
     /// created fresh for every matched row: (handle, labels, properties). Previously these
     /// were ignored entirely, so `MATCH (p) CREATE (p)-[:R]->(c:C {..})` created neither
     /// the node nor the edge and reported success.
-    nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>, Option<HashMap<String, Expression>>)>,
+    nodes_to_create: Vec<(
+        String,
+        Vec<Label>,
+        HashMap<String, PropertyValue>,
+        Option<HashMap<String, Expression>>,
+    )>,
     /// Edges to create: (source_var, target_var, edge_type, literal properties,
     /// edge_var, property expressions).
     ///
@@ -16939,10 +19099,7 @@ pub struct MatchCreateEdgeOperator {
 
 impl MatchCreateEdgeOperator {
     /// Create a new MatchCreateEdgeOperator
-    pub fn new(
-        input: OperatorBox,
-        edges_to_create: Vec<EdgeToCreate>,
-    ) -> Self {
+    pub fn new(input: OperatorBox, edges_to_create: Vec<EdgeToCreate>) -> Self {
         Self::with_nodes(input, Vec::new(), edges_to_create)
     }
 
@@ -16951,7 +19108,12 @@ impl MatchCreateEdgeOperator {
     /// reference them exactly like a matched variable.
     pub fn with_nodes(
         input: OperatorBox,
-        nodes_to_create: Vec<(String, Vec<Label>, HashMap<String, PropertyValue>, Option<HashMap<String, Expression>>)>,
+        nodes_to_create: Vec<(
+            String,
+            Vec<Label>,
+            HashMap<String, PropertyValue>,
+            Option<HashMap<String, Expression>>,
+        )>,
         edges_to_create: Vec<EdgeToCreate>,
     ) -> Self {
         Self {
@@ -16972,11 +19134,16 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
 
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
-            "MatchCreateEdgeOperator requires mutable store access. Use next_mut instead.".to_string()
+            "MatchCreateEdgeOperator requires mutable store access. Use next_mut instead."
+                .to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         // First pass: process all matched records and create edges
         if !self.done {
             while let Some(record) = self.input.next_mut(store, tenant_id)? {
@@ -17011,7 +19178,8 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                         }
                     }
                     for (key, value) in properties.iter().chain(evaluated.iter()) {
-                        if let Err(e) = store.set_node_property(tenant_id, node_id, key.clone(), value.clone())
+                        if let Err(e) =
+                            store.set_node_property(tenant_id, node_id, key.clone(), value.clone())
                         {
                             // A rejected property must not leave a half-built node behind.
                             let _ = store.delete_node(tenant_id, node_id);
@@ -17040,7 +19208,8 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                     };
 
                     // Create the edge
-                    let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
+                    let edge_id = store
+                        .create_edge(source_id, target_id, edge_type.clone())
                         .map_err(write_error)?;
 
                     // Set properties on edge via DS-07c sparse map
@@ -17158,7 +19327,14 @@ pub struct MatchMergeEdgeOperator {
     /// round. It used to be dropped, so this operator looked only for
     /// `source -> target` and MERGE created a duplicate beside an existing
     /// `target -> source` (#938).
-    edges_to_merge: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>, bool)>,
+    edges_to_merge: Vec<(
+        String,
+        String,
+        EdgeType,
+        HashMap<String, PropertyValue>,
+        Option<String>,
+        bool,
+    )>,
     /// The non-literal half of each relationship's property map, by position
     /// in `edges_to_merge`: `{id: r.id}` from an UNWIND, `{k: a.name}` from a
     /// bound node. `edges_to_merge` carries only the literals, and these were
@@ -17179,12 +19355,22 @@ pub struct MatchMergeEdgeOperator {
 impl MatchMergeEdgeOperator {
     pub fn new(
         input: OperatorBox,
-        edges_to_merge: Vec<(String, String, EdgeType, HashMap<String, PropertyValue>, Option<String>, bool)>,
+        edges_to_merge: Vec<(
+            String,
+            String,
+            EdgeType,
+            HashMap<String, PropertyValue>,
+            Option<String>,
+            bool,
+        )>,
         on_create_set: Vec<(String, String, Expression)>,
         on_match_set: Vec<(String, String, Expression)>,
     ) -> Self {
         let writes = |items: Vec<(String, String, Expression)>| {
-            items.into_iter().map(|(v, p, e)| SetWrite::Property(v, p, e)).collect()
+            items
+                .into_iter()
+                .map(|(v, p, e)| SetWrite::Property(v, p, e))
+                .collect()
         };
         Self {
             input,
@@ -17206,10 +19392,16 @@ impl MatchMergeEdgeOperator {
         on_create: Vec<(String, bool, Expression)>,
         on_match: Vec<(String, bool, Expression)>,
     ) -> Self {
-        self.on_create_writes
-            .extend(on_create.into_iter().map(|(v, m, e)| SetWrite::Entity(v, m, e)));
-        self.on_match_writes
-            .extend(on_match.into_iter().map(|(v, m, e)| SetWrite::Entity(v, m, e)));
+        self.on_create_writes.extend(
+            on_create
+                .into_iter()
+                .map(|(v, m, e)| SetWrite::Entity(v, m, e)),
+        );
+        self.on_match_writes.extend(
+            on_match
+                .into_iter()
+                .map(|(v, m, e)| SetWrite::Entity(v, m, e)),
+        );
         self
     }
 
@@ -17239,7 +19431,9 @@ impl MatchMergeEdgeOperator {
         store: &mut GraphStore,
         tenant_id: &str,
     ) -> ExecutionResult<()> {
-        let Value::EdgeRef(edge_id, ..) = target else { return Ok(()) };
+        let Value::EdgeRef(edge_id, ..) = target else {
+            return Ok(());
+        };
         let names_edge = |var: &str| edge_var == Some(var) || var == "_edge";
         for write in writes {
             match write {
@@ -17275,14 +19469,22 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
     }
 
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
-        Err(ExecutionError::RuntimeError("MatchMergeEdgeOperator requires mutable store access".to_string()))
+        Err(ExecutionError::RuntimeError(
+            "MatchMergeEdgeOperator requires mutable store access".to_string(),
+        ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if !self.done {
             while let Some(record) = self.input.next_mut(store, tenant_id)? {
-                for (i, (source_var, target_var, edge_type, literal_properties, edge_var, undirected)) in
-                    self.edges_to_merge.iter().enumerate()
+                for (
+                    i,
+                    (source_var, target_var, edge_type, literal_properties, edge_var, undirected),
+                ) in self.edges_to_merge.iter().enumerate()
                 {
                     // Resolved against this row, and the one map used both to
                     // match and to create -- the property #642 holds to for
@@ -17319,8 +19521,11 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                     let mut existing_all =
                         store.edges_between(source_id, target_id, Some(edge_type));
                     if *undirected {
-                        existing_all
-                            .extend(store.edges_between(target_id, source_id, Some(edge_type)));
+                        existing_all.extend(store.edges_between(
+                            target_id,
+                            source_id,
+                            Some(edge_type),
+                        ));
                     }
                     // The pattern's inline properties narrow what counts as a
                     // match. `edges_between` knows only the endpoints and the
@@ -17340,34 +19545,34 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
                         let edge_id = *edge_id;
                         let mut result_record = record.clone();
                         {
-                        // Edge exists — apply ON MATCH SET, in the order written.
-                        let matched_target = Value::EdgeRef(
-                            edge_id,
-                            source_id,
-                            target_id,
-                            edge_type.clone(),
-                        );
-                        Self::apply_writes(
-                            &self.on_match_writes,
-                            edge_var.as_deref(),
-                            &matched_target,
-                            &result_record,
-                            store,
-                            tenant_id,
-                        )?;
-                        if let Some(ref ev) = edge_var {
-                            if let Some(edge) = store.get_edge(edge_id) {
-                                result_record.bind(ev.clone(), Value::Edge(edge_id, Box::new(edge.clone())));
+                            // Edge exists — apply ON MATCH SET, in the order written.
+                            let matched_target =
+                                Value::EdgeRef(edge_id, source_id, target_id, edge_type.clone());
+                            Self::apply_writes(
+                                &self.on_match_writes,
+                                edge_var.as_deref(),
+                                &matched_target,
+                                &result_record,
+                                store,
+                                tenant_id,
+                            )?;
+                            if let Some(ref ev) = edge_var {
+                                if let Some(edge) = store.get_edge(edge_id) {
+                                    result_record.bind(
+                                        ev.clone(),
+                                        Value::Edge(edge_id, Box::new(edge.clone())),
+                                    );
+                                }
                             }
                         }
-                        }
-                            self.results.push(result_record);
+                        self.results.push(result_record);
                     }
 
                     let mut result_record = record.clone();
                     if existing_all.is_empty() {
                         // Nothing matched — create it + apply ON CREATE SET
-                        let edge_id = store.create_edge(source_id, target_id, edge_type.clone())
+                        let edge_id = store
+                            .create_edge(source_id, target_id, edge_type.clone())
                             .map_err(write_error)?;
 
                         for (key, value) in properties {
@@ -17378,12 +19583,8 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
 
                         // ON CREATE SET, `r = a` / `r += {…}` included (#874), in
                         // the order written (#1919).
-                        let target = Value::EdgeRef(
-                            edge_id,
-                            source_id,
-                            target_id,
-                            edge_type.clone(),
-                        );
+                        let target =
+                            Value::EdgeRef(edge_id, source_id, target_id, edge_type.clone());
                         Self::apply_writes(
                             &self.on_create_writes,
                             edge_var.as_deref(),
@@ -17395,7 +19596,8 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
 
                         if let Some(ref ev) = edge_var {
                             if let Some(edge) = store.get_edge(edge_id) {
-                                result_record.bind(ev.clone(), Value::Edge(edge_id, Box::new(edge.clone())));
+                                result_record
+                                    .bind(ev.clone(), Value::Edge(edge_id, Box::new(edge.clone())));
                             }
                         }
                         // Inside the branch. Left outside, a pattern that
@@ -17424,31 +19626,43 @@ impl PhysicalOperator for MatchMergeEdgeOperator {
         self.result_index = 0;
     }
 
-    fn is_mutating(&self) -> bool { true }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn describe(&self) -> OperatorDescription {
         let mut parts: Vec<String> = self
             .edges_to_merge
             .iter()
             .enumerate()
-            .map(|(i, (source, target, edge_type, properties, edge_var, undirected))| {
-                let edge = format!(
-                    "[{}:{}{}]",
-                    edge_var.as_deref().unwrap_or(""),
-                    edge_type.as_str(),
-                    format_properties(
-                        Some(properties),
-                        self.property_exprs.get(i).and_then(|e| e.as_ref())
-                    )
-                );
-                if *undirected {
-                    format!("({})-{}-({})", source, edge, target)
-                } else {
-                    format!("({})-{}->({})", source, edge, target)
-                }
-            })
+            .map(
+                |(i, (source, target, edge_type, properties, edge_var, undirected))| {
+                    let edge = format!(
+                        "[{}:{}{}]",
+                        edge_var.as_deref().unwrap_or(""),
+                        edge_type.as_str(),
+                        format_properties(
+                            Some(properties),
+                            self.property_exprs.get(i).and_then(|e| e.as_ref())
+                        )
+                    );
+                    if *undirected {
+                        format!("({})-{}-({})", source, edge, target)
+                    } else {
+                        format!("({})-{}->({})", source, edge, target)
+                    }
+                },
+            )
             .collect();
-        parts.extend(format_merge_sets("ON CREATE SET", &self.on_create_writes, &[]));
-        parts.extend(format_merge_sets("ON MATCH SET", &self.on_match_writes, &[]));
+        parts.extend(format_merge_sets(
+            "ON CREATE SET",
+            &self.on_create_writes,
+            &[],
+        ));
+        parts.extend(format_merge_sets(
+            "ON MATCH SET",
+            &self.on_match_writes,
+            &[],
+        ));
         OperatorDescription {
             name: "MatchMergeEdge".to_string(),
             details: parts.join(" "),
@@ -17463,7 +19677,9 @@ pub struct SingleRowOperator {
 }
 
 impl SingleRowOperator {
-    pub fn new() -> Self { Self { emitted: false } }
+    pub fn new() -> Self {
+        Self { emitted: false }
+    }
 }
 
 impl PhysicalOperator for SingleRowOperator {
@@ -17480,10 +19696,16 @@ impl PhysicalOperator for SingleRowOperator {
         }
     }
 
-    fn reset(&mut self) { self.emitted = false; }
+    fn reset(&mut self) {
+        self.emitted = false;
+    }
 
     fn describe(&self) -> OperatorDescription {
-        OperatorDescription { name: "SingleRow".to_string(), details: String::new(), children: Vec::new() }
+        OperatorDescription {
+            name: "SingleRow".to_string(),
+            details: String::new(),
+            children: Vec::new(),
+        }
     }
 }
 
@@ -17518,7 +19740,9 @@ impl PhysicalOperator for MaterializedOperator {
         }
     }
 
-    fn reset(&mut self) { self.idx = 0; }
+    fn reset(&mut self) {
+        self.idx = 0;
+    }
 
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
@@ -17616,8 +19840,15 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     }
 
     pub fn new(name: String, args: Vec<crate::query::ast::Expression>) -> Self {
-        Self { name, args, results: Vec::new(), current: 0, executed: false,
-               aliases: Vec::new(), projection_used: std::cell::Cell::new(false) }
+        Self {
+            name,
+            args,
+            results: Vec::new(),
+            current: 0,
+            executed: false,
+            aliases: Vec::new(),
+            projection_used: std::cell::Cell::new(false),
+        }
     }
 
     /// Record the `YIELD` aliases so the produced records carry them.
@@ -17649,7 +19880,6 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         }
     }
 
-
     /// Refuse a config key the algorithm does not read.
     ///
     /// Every algorithm's config parser asks the map for the keys it knows and
@@ -17673,12 +19903,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// by a `match`, so the refusal message and the dispatch cannot drift
     /// apart (#1341).
     const SOLVERS: &'static [&'static str] = &[
-        "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "MOTLBO",
-        "Jaya", "QOJaya", "SAMPJaya", "EHRJaya",
-        "BMR", "BWR", "BMWR", "MOBMWR",
-        "PSO", "DE", "LSHADE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
-        "Firefly", "Cuckoo", "GWO", "Bat",
-        "NSGA2", "MORaoDE", "SAPHR",
+        "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "MOTLBO", "Jaya", "QOJaya",
+        "SAMPJaya", "EHRJaya", "BMR", "BWR", "BMWR", "MOBMWR", "PSO", "DE", "LSHADE", "GA", "SA",
+        "ABC", "GSA", "HS", "FPA", "Firefly", "Cuckoo", "GWO", "Bat", "NSGA2", "MORaoDE", "SAPHR",
     ];
 
     /// The subset of `SOLVERS` that optimise more than one objective.
@@ -17745,12 +19972,30 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// topology and one weight; these read more of the graph than that, or no
     /// graph view at all. Matched on the canonical name.
     const NOT_ON_A_PROJECTION: &'static [(&'static str, &'static str)] = &[
-        ("temporalreachability", "it reads each relationship's time, which a projection does not keep"),
-        ("propagationranking", "it reads each relationship's time, which a projection does not keep"),
-        ("temporalshortestpath", "it reads each relationship's time, which a projection does not keep"),
-        ("symptomexplanation", "it reads each relationship's time, which a projection does not keep"),
-        ("pca", "it reads node properties, which a projection does not keep"),
-        ("or.solve", "it optimises over node properties, not over a graph view"),
+        (
+            "temporalreachability",
+            "it reads each relationship's time, which a projection does not keep",
+        ),
+        (
+            "propagationranking",
+            "it reads each relationship's time, which a projection does not keep",
+        ),
+        (
+            "temporalshortestpath",
+            "it reads each relationship's time, which a projection does not keep",
+        ),
+        (
+            "symptomexplanation",
+            "it reads each relationship's time, which a projection does not keep",
+        ),
+        (
+            "pca",
+            "it reads node properties, which a projection does not keep",
+        ),
+        (
+            "or.solve",
+            "it optimises over node properties, not over a graph view",
+        ),
     ];
 
     /// The projection `graph` names, or `None` when the call names none.
@@ -17763,7 +20008,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
                 match m.get(Self::GRAPH_KEY) {
                     None => {}
-                    Some(PropertyValue::String(n)) if !n.trim().is_empty() => name = Some(n.clone()),
+                    Some(PropertyValue::String(n)) if !n.trim().is_empty() => {
+                        name = Some(n.clone())
+                    }
                     Some(other) => {
                         return Err(ExecutionError::bad_argument(format!(
                             "{}: `{}` must be a graph projection's name, got {other:?}",
@@ -17794,7 +20041,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             return Ok(());
         }
         let canonical = Self::canonical_name(&self.name);
-        match Self::NOT_ON_A_PROJECTION.iter().find(|(name, _)| *name == canonical) {
+        match Self::NOT_ON_A_PROJECTION
+            .iter()
+            .find(|(name, _)| *name == canonical)
+        {
             Some((_, why)) => Err(ExecutionError::bad_argument(format!(
                 "{} cannot run on a graph projection: {why}",
                 self.name
@@ -17832,17 +20082,29 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         weight_property: Option<&str>,
     ) -> ExecutionResult<AlgoView> {
         let Some(projection) = self.requested_projection(store)? else {
-            let view = crate::algo::build_view_with(store, label, edge_type, weight_property, &DeadlineProgress)
-                .map_err(|stopped| ExecutionError::RuntimeError(format!(
+            let view = crate::algo::build_view_with(
+                store,
+                label,
+                edge_type,
+                weight_property,
+                &DeadlineProgress,
+            )
+            .map_err(|stopped| {
+                ExecutionError::RuntimeError(format!(
                     "Query timed out: {} stopped building its graph view after {} of {} nodes",
                     self.name, stopped.done, stopped.total
-                )))?;
+                ))
+            })?;
             return Ok(AlgoView::Built(view));
         };
-        let given: Vec<&str> = [("a label", label), ("a relationship type", edge_type), ("a weight", weight_property)]
-            .into_iter()
-            .filter_map(|(what, value)| value.map(|_| what))
-            .collect();
+        let given: Vec<&str> = [
+            ("a label", label),
+            ("a relationship type", edge_type),
+            ("a weight", weight_property),
+        ]
+        .into_iter()
+        .filter_map(|(what, value)| value.map(|_| what))
+        .collect();
         if !given.is_empty() {
             return Err(ExecutionError::bad_argument(format!(
                 "{}: the graph projection `{}` already decides the nodes, relationships and weight \
@@ -17875,9 +20137,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// Config is read from literal maps only, everywhere in this operator, so
     /// this sees exactly what the algorithm will see.
     fn config_has_key(args: &[Expression], key: &str) -> bool {
-        args.iter().any(|arg| {
-            matches!(arg, Expression::Literal(PropertyValue::Map(m)) if m.contains_key(key))
-        })
+        args.iter().any(
+            |arg| matches!(arg, Expression::Literal(PropertyValue::Map(m)) if m.contains_key(key)),
+        )
     }
 
     /// Every algorithm that returns exactly one value per node, by canonical
@@ -17899,7 +20161,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         (&["harmonic", "harmoniccentrality"], "score"),
         (&["eigenvector", "eigenvectorcentrality"], "score"),
         (&["kcore", "corenumber"], "score"),
-        (&["averageneighbordegree", "averageneighbourdegree"], "score"),
+        (
+            &["averageneighbordegree", "averageneighbourdegree"],
+            "score",
+        ),
         (&["wcc"], "componentId"),
         (&["scc"], "componentId"),
         (&["cdlp", "labelpropagation"], "communityId"),
@@ -18091,9 +20356,15 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                          Keys it does not read were previously accepted and ignored, so a \
                          request like `iteratons` looked like it worked.{}",
                         if unknown.len() > 1 {
-                            format!(" (and {} more: {})", unknown.len() - 1,
-                                    unknown[1..].iter().map(|k| k.as_str())
-                                        .collect::<Vec<_>>().join(", "))
+                            format!(
+                                " (and {} more: {})",
+                                unknown.len() - 1,
+                                unknown[1..]
+                                    .iter()
+                                    .map(|k| k.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
                         } else {
                             String::new()
                         },
@@ -18130,7 +20401,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 edge_type = Some(s.clone());
             }
         }
-        
+
         // Parse optional config map
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -18157,16 +20428,20 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let node_id = NodeId::new(algo_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(node_id) {
-                record.bind("node".to_string(), Value::Node(node_id, Box::new(node.clone())));
-                record.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
+                record.bind(
+                    "node".to_string(),
+                    Value::Node(node_id, Box::new(node.clone())),
+                );
+                record.bind(
+                    "score".to_string(),
+                    Value::Property(PropertyValue::Float(score)),
+                );
                 self.results.push(record);
             }
         }
-        
+
         // Score descending, then node id -- see `sort_results_deterministically`.
-        self.sort_results_deterministically(|r| {
-            std::cmp::Reverse(ordered_float(r, "score"))
-        });
+        self.sort_results_deterministically(|r| std::cmp::Reverse(ordered_float(r, "score")));
 
         Ok(())
     }
@@ -18174,17 +20449,27 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     fn execute_shortest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (source_node, target_node, config?)
         if self.args.len() < 2 {
-            return Err(ExecutionError::RuntimeError("shortestPath requires source and target".to_string()));
+            return Err(ExecutionError::RuntimeError(
+                "shortestPath requires source and target".to_string(),
+            ));
         }
 
         let source_id = match &self.args[0] {
             Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
-            _ => return Err(ExecutionError::TypeError("Source must be integer ID".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "Source must be integer ID".to_string(),
+                ))
+            }
         };
 
         let target_id = match &self.args[1] {
             Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
-            _ => return Err(ExecutionError::TypeError("Target must be integer ID".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "Target must be integer ID".to_string(),
+                ))
+            }
         };
 
         let mut weight_prop = None;
@@ -18195,10 +20480,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 }
             }
         }
-        
+
         // Build view
         let view = self.view(store, None, None, weight_prop.as_deref())?;
-        
+
         // Run Algorithm
         let result = if let Some(prop) = weight_prop.as_deref() {
             Self::refuse_negative_weights(&view, "shortestPath", prop)?;
@@ -18211,17 +20496,23 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         };
 
         if let Some(result) = result {
-             let mut record = Record::new();
-             record.bind("cost".to_string(), Value::Property(PropertyValue::Float(result.cost)));
-             
-             // Construct path list
-             let mut path_nodes = Vec::new();
-             for nid_u64 in result.path {
-                 path_nodes.push(PropertyValue::Integer(nid_u64 as i64));
-             }
-             record.bind("path".to_string(), Value::Property(PropertyValue::Array(path_nodes)));
-             
-             self.results.push(record);
+            let mut record = Record::new();
+            record.bind(
+                "cost".to_string(),
+                Value::Property(PropertyValue::Float(result.cost)),
+            );
+
+            // Construct path list
+            let mut path_nodes = Vec::new();
+            for nid_u64 in result.path {
+                path_nodes.push(PropertyValue::Integer(nid_u64 as i64));
+            }
+            record.bind(
+                "path".to_string(),
+                Value::Property(PropertyValue::Array(path_nodes)),
+            );
+
+            self.results.push(record);
         }
 
         Ok(())
@@ -18270,14 +20561,19 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let mut record = Record::new();
             if let Some(node) = store.get_node(nid) {
                 record.bind("node".to_string(), Value::Node(nid, Box::new(node.clone())));
-                record.bind("componentId".to_string(), Value::Property(PropertyValue::Integer(component_id as i64)));
+                record.bind(
+                    "componentId".to_string(),
+                    Value::Property(PropertyValue::Integer(component_id as i64)),
+                );
                 self.results.push(record);
             }
         }
-        
+
         // Component id, then node id.
         self.sort_results_deterministically(|r| {
-            r.get("componentId").and_then(|v| v.as_property()).and_then(|p| p.as_integer())
+            r.get("componentId")
+                .and_then(|v| v.as_property())
+                .and_then(|p| p.as_integer())
                 .unwrap_or(i64::MAX)
         });
 
@@ -18313,7 +20609,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             }
         }
         let (view, times) = crate::algo::build_temporal_view(
-            store, label.as_deref(), edge_type.as_deref(), time_prop.as_deref(),
+            store,
+            label.as_deref(),
+            edge_type.as_deref(),
+            time_prop.as_deref(),
         );
         let edges = crate::algo::TemporalEdges::new(&view, times)
             .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
@@ -18377,10 +20676,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     ) -> ExecutionResult<()> {
         let (view, times) = self.temporal_setup(store)?;
         let source = self.temporal_node_arg(&view, 0, "a source")?;
-        let reached = crate::algo::temporal_reachability(
-            &view, &times, &[source], self.temporal_start(),
-        )
-        .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
+        let reached =
+            crate::algo::temporal_reachability(&view, &times, &[source], self.temporal_start())
+                .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
 
         for (rank, r) in reached.into_iter().enumerate() {
             let mut record = Record::new();
@@ -18389,7 +20687,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 Some(n) => record.bind("node".to_string(), Value::Node(nid, Box::new(n.clone()))),
                 None => record.bind("node".to_string(), Value::NodeRef(nid)),
             }
-            record.bind("time".to_string(), Value::Property(PropertyValue::Integer(r.arrival)));
+            record.bind(
+                "time".to_string(),
+                Value::Property(PropertyValue::Integer(r.arrival)),
+            );
             // The walk that got there that early. `node` and `time` say a
             // service broke and when; `path` is the only column that says why,
             // which is what ALGO-15 asks of a causal primitive.
@@ -18417,7 +20718,11 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         let source = self.temporal_node_arg(&view, 0, "a source")?;
         let target = self.temporal_node_arg(&view, 1, "a target")?;
         let found = crate::algo::temporal_shortest_path(
-            &view, &times, source, target, self.temporal_start(),
+            &view,
+            &times,
+            source,
+            target,
+            self.temporal_start(),
         )
         .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
 
@@ -18437,10 +20742,16 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             record.bind(
                 "times".to_string(),
                 Value::Property(PropertyValue::Array(
-                    path.edge_times.iter().map(|t| PropertyValue::Integer(*t)).collect(),
+                    path.edge_times
+                        .iter()
+                        .map(|t| PropertyValue::Integer(*t))
+                        .collect(),
                 )),
             );
-            record.bind("arrival".to_string(), Value::Property(PropertyValue::Integer(path.arrival)));
+            record.bind(
+                "arrival".to_string(),
+                Value::Property(PropertyValue::Integer(path.arrival)),
+            );
             self.results.push(record);
         }
         Ok(())
@@ -18475,11 +20786,15 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     "each symptom must be a [nodeId, seenAt] pair of integers".to_string(),
                 ));
             };
-            let idx = view.node_to_index.get(&(*id as u64)).copied().ok_or_else(|| {
-                ExecutionError::RuntimeError(format!(
-                    "symptom node {id} is not in the projected graph"
-                ))
-            })?;
+            let idx = view
+                .node_to_index
+                .get(&(*id as u64))
+                .copied()
+                .ok_or_else(|| {
+                    ExecutionError::RuntimeError(format!(
+                        "symptom node {id} is not in the projected graph"
+                    ))
+                })?;
             symptoms.push((idx, *at));
         }
 
@@ -18540,7 +20855,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     {
         self.results.sort_by(|a, b| {
             let node = |r: &Record| -> u64 {
-                r.get("node").and_then(|v| v.node_id()).map(|n| n.as_u64()).unwrap_or(0)
+                r.get("node")
+                    .and_then(|v| v.node_id())
+                    .map(|n| n.as_u64())
+                    .unwrap_or(0)
             };
             key(a)
                 .partial_cmp(&key(b))
@@ -18552,12 +20870,12 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// Which centrality to compute. One dispatch, three algorithms, because
     /// they differ only in the scoring function and sharing the projection
     /// keeps them from disagreeing about what the graph is.
-    fn execute_centrality(
-        &mut self,
-        store: &GraphStore,
-        which: Centrality,
-    ) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "undirected"])?;
+    fn execute_centrality(&mut self, store: &GraphStore, which: Centrality) -> ExecutionResult<()> {
+        Self::reject_unknown_config_keys(
+            &self.args,
+            &self.name,
+            &["edgeType", "label", "undirected"],
+        )?;
         let (mut label, mut edge_type, mut undirected) = (None, None, None);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -18590,9 +20908,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             Centrality::Closeness => crate::algo::closeness_centrality(&view, und),
             Centrality::Betweenness => crate::algo::betweenness_centrality(&view, und),
             Centrality::Harmonic => crate::algo::harmonic_centrality(&view, und),
-            Centrality::CoreNumber => {
-                crate::algo::core_number(&view, und).iter().map(|&c| c as f64).collect()
-            }
+            Centrality::CoreNumber => crate::algo::core_number(&view, und)
+                .iter()
+                .map(|&c| c as f64)
+                .collect(),
             Centrality::Eigenvector => {
                 // No convergence is an error, not a plausible vector. A
                 // non-converged iterate is still normalised and the right
@@ -18616,7 +20935,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 Some(n) => record.bind("node".to_string(), Value::Node(nid, Box::new(n.clone()))),
                 None => record.bind("node".to_string(), Value::NodeRef(nid)),
             }
-            record.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
+            record.bind(
+                "score".to_string(),
+                Value::Property(PropertyValue::Float(score)),
+            );
             self.results.push(record);
         }
         Ok(())
@@ -18689,7 +21011,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let mut rec = Record::new();
             bind(&mut rec, "node1", ids[0]);
             bind(&mut rec, "node2", ids[1]);
-            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
+            rec.bind(
+                "score".to_string(),
+                Value::Property(PropertyValue::Float(score)),
+            );
             self.results.push(rec);
             return Ok(());
         }
@@ -18698,7 +21023,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let mut rec = Record::new();
             bind(&mut rec, "node1", p.a);
             bind(&mut rec, "node2", p.b);
-            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(p.score)));
+            rec.bind(
+                "score".to_string(),
+                Value::Property(PropertyValue::Float(p.score)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -18790,7 +21118,11 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// The single points of failure in a topology, from an edge and from a
     /// node. Both are defined on the undirected graph: what breaks if this
     /// fails does not care which way the dependency was written down.
-    fn execute_structural(&mut self, store: &GraphStore, want_bridges: bool) -> ExecutionResult<()> {
+    fn execute_structural(
+        &mut self,
+        store: &GraphStore,
+        want_bridges: bool,
+    ) -> ExecutionResult<()> {
         let view = self.structural_view(store)?;
         if want_bridges {
             for (a, b) in crate::algo::bridges(&view) {
@@ -18820,7 +21152,11 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// smaller number indistinguishable from a real one, and a caller sizing a
     /// traversal budget from it would under-provision.
     fn execute_metric(&mut self, store: &GraphStore, which: Metric) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "undirected"])?;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            &self.name,
+            &["edgeType", "label", "undirected"],
+        )?;
         let view = self.structural_view(store)?;
         // Undirected by default, as every one of these is a statement about
         // graph shape rather than about flow.
@@ -18834,12 +21170,13 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         }
 
         let scalar = |v: Option<i64>, what: &str| -> ExecutionResult<Value> {
-            v.map(|x| Value::Property(PropertyValue::Integer(x))).ok_or_else(|| {
-                ExecutionError::RuntimeError(format!(
-                    "the graph is not connected, so it has no {what}. Use \
+            v.map(|x| Value::Property(PropertyValue::Integer(x)))
+                .ok_or_else(|| {
+                    ExecutionError::RuntimeError(format!(
+                        "the graph is not connected, so it has no {what}. Use \
                      algo.wcc() to find the components, then ask about one."
-                ))
-            })
+                    ))
+                })
         };
 
         match which {
@@ -18865,11 +21202,16 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     )
                 })?;
                 let mut rec = Record::new();
-                rec.bind("assortativity".to_string(), Value::Property(PropertyValue::Float(r)));
+                rec.bind(
+                    "assortativity".to_string(),
+                    Value::Property(PropertyValue::Float(r)),
+                );
                 self.results.push(rec);
             }
             Metric::Eccentricity => {
-                for (id, e) in crate::algo::ranked_opt(&view, &crate::algo::eccentricity(&view, und)) {
+                for (id, e) in
+                    crate::algo::ranked_opt(&view, &crate::algo::eccentricity(&view, und))
+                {
                     let mut rec = Record::new();
                     self.bind_node(store, &mut rec, "node", id);
                     // Null, not omitted: a node that cannot reach the whole
@@ -18890,7 +21232,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 for (id, s) in crate::algo::ranked(&view, &scores) {
                     let mut rec = Record::new();
                     self.bind_node(store, &mut rec, "node", id);
-                    rec.bind("score".to_string(), Value::Property(PropertyValue::Float(s)));
+                    rec.bind(
+                        "score".to_string(),
+                        Value::Property(PropertyValue::Float(s)),
+                    );
                     self.results.push(rec);
                 }
             }
@@ -18912,7 +21257,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             // `communityId`, matching `cdlp` and GDS. Two community algorithms
             // yielding differently-named columns for the same concept makes a
             // caller rewrite the query to switch between them.
-            rec.bind("communityId".to_string(), Value::Property(PropertyValue::Integer(c as i64)));
+            rec.bind(
+                "communityId".to_string(),
+                Value::Property(PropertyValue::Integer(c as i64)),
+            );
             rec.bind(
                 "modularity".to_string(),
                 match q {
@@ -18960,9 +21308,13 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     "each entry must be a [nodeId, community] pair of integers".to_string(),
                 ));
             };
-            let idx = view.node_to_index.get(&(*id as u64)).copied().ok_or_else(|| {
-                ExecutionError::RuntimeError(format!("node {id} is not in the projected graph"))
-            })?;
+            let idx = view
+                .node_to_index
+                .get(&(*id as u64))
+                .copied()
+                .ok_or_else(|| {
+                    ExecutionError::RuntimeError(format!("node {id} is not in the projected graph"))
+                })?;
             comms[idx] = *c as usize;
         }
         if let Some(missing) = comms.iter().position(|&c| c == usize::MAX) {
@@ -18981,7 +21333,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             )
         })?;
         let mut rec = Record::new();
-        rec.bind("modularity".to_string(), Value::Property(PropertyValue::Float(q)));
+        rec.bind(
+            "modularity".to_string(),
+            Value::Property(PropertyValue::Float(q)),
+        );
         self.results.push(rec);
         Ok(())
     }
@@ -19015,35 +21370,69 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// forty look identical through `shortestPath`, and in a resilience review
     /// they are not.
     fn execute_path_enum(&mut self, store: &GraphStore, kind: PathKind) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "heuristicProperty", "k", "label", "limit", "weightProperty"])?;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            &self.name,
+            &[
+                "edgeType",
+                "heuristicProperty",
+                "k",
+                "label",
+                "limit",
+                "weightProperty",
+            ],
+        )?;
         let (mut label, mut edge_type, mut weight, mut heuristic) = (None, None, None, None);
         let mut k = 3usize;
         let mut limit = 1000usize;
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
-                if let Some(PropertyValue::String(v)) = m.get("label") { label = Some(v.clone()); }
-                if let Some(PropertyValue::String(v)) = m.get("edgeType") { edge_type = Some(v.clone()); }
-                if let Some(PropertyValue::String(v)) = m.get("weightProperty") { weight = Some(v.clone()); }
-                if let Some(PropertyValue::String(v)) = m.get("heuristicProperty") { heuristic = Some(v.clone()); }
-                if let Some(PropertyValue::Integer(v)) = m.get("k") { k = (*v).max(1) as usize; }
-                if let Some(PropertyValue::Integer(v)) = m.get("limit") { limit = (*v).max(1) as usize; }
+                if let Some(PropertyValue::String(v)) = m.get("label") {
+                    label = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("edgeType") {
+                    edge_type = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("weightProperty") {
+                    weight = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("heuristicProperty") {
+                    heuristic = Some(v.clone());
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("k") {
+                    k = (*v).max(1) as usize;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("limit") {
+                    limit = (*v).max(1) as usize;
+                }
             }
         }
         let view = self.view(
-            store, label.as_deref(), edge_type.as_deref(), weight.as_deref())?;
-        let ids: Vec<u64> = self.args.iter().filter_map(|a| match a {
-            Expression::Literal(PropertyValue::Integer(n)) => Some(*n as u64),
-            _ => None,
-        }).collect();
+            store,
+            label.as_deref(),
+            edge_type.as_deref(),
+            weight.as_deref(),
+        )?;
+        let ids: Vec<u64> = self
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                Expression::Literal(PropertyValue::Integer(n)) => Some(*n as u64),
+                _ => None,
+            })
+            .collect();
         if ids.len() < 2 {
             return Err(ExecutionError::bad_argument(format!(
-                "{}() requires a source and a target node id", self.name)));
+                "{}() requires a source and a target node id",
+                self.name
+            )));
         }
         let idx = |raw: u64| -> ExecutionResult<usize> {
             view.node_to_index.get(&raw).copied().ok_or_else(|| {
                 ExecutionError::RuntimeError(format!(
                     "node {raw} is not in the projected graph -- check the `label` \
-                     and `edgeType` filters"))
+                     and `edgeType` filters"
+                ))
             })
         };
         let (s, t) = (idx(ids[0])?, idx(ids[1])?);
@@ -19056,44 +21445,70 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         }
         // A third positional integer is `k`, so `algo.yens(a, b, 5)` reads the
         // way a user writes it rather than forcing a config map.
-        if ids.len() >= 3 { k = (ids[2] as usize).max(1); }
+        if ids.len() >= 3 {
+            k = (ids[2] as usize).max(1);
+        }
 
         let paths: Vec<(Vec<u64>, Option<f64>)> = match kind {
             PathKind::All => crate::algo::all_shortest_paths(&view, s, t, limit)
-                .into_iter().map(|p| (p, None)).collect(),
+                .into_iter()
+                .map(|p| (p, None))
+                .collect(),
             PathKind::Yens => crate::algo::yens_k_shortest(&view, s, t, k)
                 .map_err(|e| ExecutionError::RuntimeError(format!("yens: {e}")))?
-                .into_iter().map(|(p, c)| (p, Some(c))).collect(),
+                .into_iter()
+                .map(|(p, c)| (p, Some(c)))
+                .collect(),
             PathKind::AStar => {
                 // An absent heuristic is all zeros, which makes this exactly
                 // Dijkstra. Stated in the docs rather than hidden: A* without
                 // an estimate *is* Dijkstra, and a name is not an algorithm.
-                let h: Vec<f64> = (0..view.node_count).map(|i| {
-                    heuristic.as_deref().and_then(|prop| {
-                        store.node_property(NodeId::new(view.index_to_node[i]), prop)
-                            .and_then(|v| match v {
-                                PropertyValue::Integer(x) => Some(x as f64),
-                                PropertyValue::Float(x) => Some(x),
-                                _ => None,
+                let h: Vec<f64> = (0..view.node_count)
+                    .map(|i| {
+                        heuristic
+                            .as_deref()
+                            .and_then(|prop| {
+                                store
+                                    .node_property(NodeId::new(view.index_to_node[i]), prop)
+                                    .and_then(|v| match v {
+                                        PropertyValue::Integer(x) => Some(x as f64),
+                                        PropertyValue::Float(x) => Some(x),
+                                        _ => None,
+                                    })
                             })
-                    }).unwrap_or(0.0)
-                }).collect();
+                            .unwrap_or(0.0)
+                    })
+                    .collect();
                 crate::algo::a_star(&view, s, t, &h)
                     .map_err(|e| ExecutionError::RuntimeError(format!("aStar: {e}")))?
-                    .map(|(p, c)| vec![(p, Some(c))]).unwrap_or_default()
+                    .map(|(p, c)| vec![(p, Some(c))])
+                    .unwrap_or_default()
             }
         };
 
         for (i, (path, cost)) in paths.into_iter().enumerate() {
             let mut rec = Record::new();
-            rec.bind("path".to_string(), Value::Property(PropertyValue::Array(
-                path.iter().map(|n| PropertyValue::Integer(*n as i64)).collect())));
-            rec.bind("rank".to_string(), Value::Property(PropertyValue::Integer(i as i64 + 1)));
-            rec.bind("cost".to_string(), match cost {
-                Some(c) => Value::Property(PropertyValue::Float(c)),
-                None => Value::Property(PropertyValue::Integer(
-                    path.len().saturating_sub(1) as i64)),
-            });
+            rec.bind(
+                "path".to_string(),
+                Value::Property(PropertyValue::Array(
+                    path.iter()
+                        .map(|n| PropertyValue::Integer(*n as i64))
+                        .collect(),
+                )),
+            );
+            rec.bind(
+                "rank".to_string(),
+                Value::Property(PropertyValue::Integer(i as i64 + 1)),
+            );
+            rec.bind(
+                "cost".to_string(),
+                match cost {
+                    Some(c) => Value::Property(PropertyValue::Float(c)),
+                    None => {
+                        Value::Property(PropertyValue::Integer(path.len().saturating_sub(1) as i64))
+                    }
+                },
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19105,27 +21520,45 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// reproduce is not a result: someone who sees something surprising in a
     /// walk has to be able to get the same walk back.
     fn execute_random_walk(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "randomWalk", &["edgeType", "label", "seed", "steps"])?;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "randomWalk",
+            &["edgeType", "label", "seed", "steps"],
+        )?;
         let (mut steps, mut seed) = (10usize, 42u64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
-                if let Some(PropertyValue::Integer(v)) = m.get("steps") { steps = (*v).max(0) as usize; }
-                if let Some(PropertyValue::Integer(v)) = m.get("seed") { seed = *v as u64; }
+                if let Some(PropertyValue::Integer(v)) = m.get("steps") {
+                    steps = (*v).max(0) as usize;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("seed") {
+                    seed = *v as u64;
+                }
             }
         }
         let view = self.structural_view(store)?;
         let src = match self.args.first() {
             Some(Expression::Literal(PropertyValue::Integer(n))) => *n as u64,
-            _ => return Err(ExecutionError::bad_argument(format!(
-                "{}() requires a source node id", self.name))),
+            _ => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{}() requires a source node id",
+                    self.name
+                )))
+            }
         };
         let s = view.node_to_index.get(&src).copied().ok_or_else(|| {
             ExecutionError::RuntimeError(format!("node {src} is not in the projected graph"))
         })?;
-        for (i, id) in crate::algo::random_walk(&view, s, steps, seed).into_iter().enumerate() {
+        for (i, id) in crate::algo::random_walk(&view, s, steps, seed)
+            .into_iter()
+            .enumerate()
+        {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", id);
-            rec.bind("step".to_string(), Value::Property(PropertyValue::Integer(i as i64)));
+            rec.bind(
+                "step".to_string(),
+                Value::Property(PropertyValue::Integer(i as i64)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19133,12 +21566,20 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.articleRank()` -- PageRank that discounts prolific linkers.
     fn execute_article_rank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "articleRank", &["dampingFactor", "edgeType", "iterations", "label"])?;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "articleRank",
+            &["dampingFactor", "edgeType", "iterations", "label"],
+        )?;
         let (mut damping, mut iters) = (0.85f64, 20usize);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
-                if let Some(PropertyValue::Float(v)) = m.get("dampingFactor") { damping = *v; }
-                if let Some(PropertyValue::Integer(v)) = m.get("iterations") { iters = (*v).max(1) as usize; }
+                if let Some(PropertyValue::Float(v)) = m.get("dampingFactor") {
+                    damping = *v;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("iterations") {
+                    iters = (*v).max(1) as usize;
+                }
             }
         }
         let view = self.structural_view(store)?;
@@ -19146,7 +21587,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         for (id, s) in crate::algo::ranked(&view, &scores) {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", id);
-            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(s)));
+            rec.bind(
+                "score".to_string(),
+                Value::Property(PropertyValue::Float(s)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19154,14 +21598,33 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.katz({alpha, beta, iterations, tolerance})`.
     fn execute_katz(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "katz", &["alpha", "beta", "edgeType", "iterations", "label", "tolerance"])?;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "katz",
+            &[
+                "alpha",
+                "beta",
+                "edgeType",
+                "iterations",
+                "label",
+                "tolerance",
+            ],
+        )?;
         let (mut alpha, mut beta, mut iters, mut tol) = (0.1f64, 1.0f64, 1000usize, 1e-6f64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
-                if let Some(PropertyValue::Float(v)) = m.get("alpha") { alpha = *v; }
-                if let Some(PropertyValue::Float(v)) = m.get("beta") { beta = *v; }
-                if let Some(PropertyValue::Integer(v)) = m.get("iterations") { iters = (*v).max(1) as usize; }
-                if let Some(PropertyValue::Float(v)) = m.get("tolerance") { tol = *v; }
+                if let Some(PropertyValue::Float(v)) = m.get("alpha") {
+                    alpha = *v;
+                }
+                if let Some(PropertyValue::Float(v)) = m.get("beta") {
+                    beta = *v;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("iterations") {
+                    iters = (*v).max(1) as usize;
+                }
+                if let Some(PropertyValue::Float(v)) = m.get("tolerance") {
+                    tol = *v;
+                }
             }
         }
         let view = self.structural_view(store)?;
@@ -19178,7 +21641,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         for (id, sc) in crate::algo::ranked_scores(&view, &scores) {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", id);
-            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(sc)));
+            rec.bind(
+                "score".to_string(),
+                Value::Property(PropertyValue::Float(sc)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19191,12 +21657,20 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// procedures would run the same fixed point twice and invite a caller to
     /// compare hubs from one run with authorities from another.
     fn execute_hits(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "hits", &["edgeType", "iterations", "label", "tolerance"])?;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "hits",
+            &["edgeType", "iterations", "label", "tolerance"],
+        )?;
         let (mut iters, mut tol) = (500usize, 1e-8f64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
-                if let Some(PropertyValue::Integer(v)) = m.get("iterations") { iters = (*v).max(1) as usize; }
-                if let Some(PropertyValue::Float(v)) = m.get("tolerance") { tol = *v; }
+                if let Some(PropertyValue::Integer(v)) = m.get("iterations") {
+                    iters = (*v).max(1) as usize;
+                }
+                if let Some(PropertyValue::Float(v)) = m.get("tolerance") {
+                    tol = *v;
+                }
             }
         }
         let view = self.structural_view(store)?;
@@ -19207,14 +21681,22 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         };
         let mut order: Vec<usize> = (0..view.node_count).collect();
         order.sort_by(|&a, &b| {
-            auth[b].partial_cmp(&auth[a]).unwrap_or(std::cmp::Ordering::Equal)
+            auth[b]
+                .partial_cmp(&auth[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then(view.index_to_node[a].cmp(&view.index_to_node[b]))
         });
         for i in order {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", view.index_to_node[i]);
-            rec.bind("hub".to_string(), Value::Property(PropertyValue::Float(hubs[i])));
-            rec.bind("authority".to_string(), Value::Property(PropertyValue::Float(auth[i])));
+            rec.bind(
+                "hub".to_string(),
+                Value::Property(PropertyValue::Float(hubs[i])),
+            );
+            rec.bind(
+                "authority".to_string(),
+                Value::Property(PropertyValue::Float(auth[i])),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19242,8 +21724,12 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     }
                 }
                 Expression::Literal(PropertyValue::Map(m)) => {
-                    if let Some(PropertyValue::Float(v)) = m.get("dampingFactor") { damping = *v; }
-                    if let Some(PropertyValue::Integer(v)) = m.get("iterations") { iters = (*v).max(1) as usize; }
+                    if let Some(PropertyValue::Float(v)) = m.get("dampingFactor") {
+                        damping = *v;
+                    }
+                    if let Some(PropertyValue::Integer(v)) = m.get("iterations") {
+                        iters = (*v).max(1) as usize;
+                    }
                 }
                 _ => {}
             }
@@ -19252,7 +21738,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         for (id, sc) in crate::algo::ranked_scores(&view, &scores) {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", id);
-            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(sc)));
+            rec.bind(
+                "score".to_string(),
+                Value::Property(PropertyValue::Float(sc)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19265,7 +21754,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             match arg {
                 Expression::Literal(PropertyValue::Integer(v)) => k = (*v).max(0) as usize,
                 Expression::Literal(PropertyValue::Map(m)) => {
-                    if let Some(PropertyValue::Integer(v)) = m.get("k") { k = (*v).max(0) as usize; }
+                    if let Some(PropertyValue::Integer(v)) = m.get("k") {
+                        k = (*v).max(0) as usize;
+                    }
                 }
                 _ => {}
             }
@@ -19278,7 +21769,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         for (rank, ix) in crate::algo::vote_rank(&view, k).into_iter().enumerate() {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", view.index_to_node[ix]);
-            rec.bind("rank".to_string(), Value::Property(PropertyValue::Integer(rank as i64 + 1)));
+            rec.bind(
+                "rank".to_string(),
+                Value::Property(PropertyValue::Integer(rank as i64 + 1)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19328,7 +21822,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let Some(d) = d else { continue };
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", view.index_to_node[i]);
-            rec.bind("distance".to_string(), Value::Property(PropertyValue::Float(*d)));
+            rec.bind(
+                "distance".to_string(),
+                Value::Property(PropertyValue::Float(*d)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19344,7 +21841,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "source", view.index_to_node[a]);
             self.bind_node(store, &mut rec, "target", view.index_to_node[b]);
-            rec.bind("hops".to_string(), Value::Property(PropertyValue::Integer(d as i64)));
+            rec.bind(
+                "hops".to_string(),
+                Value::Property(PropertyValue::Integer(d as i64)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19362,7 +21862,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             ));
         };
         let mut rec = Record::new();
-        rec.bind("wienerIndex".to_string(), Value::Property(PropertyValue::Float(w)));
+        rec.bind(
+            "wienerIndex".to_string(),
+            Value::Property(PropertyValue::Float(w)),
+        );
         self.results.push(rec);
         Ok(())
     }
@@ -19381,7 +21884,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         for (i, ix) in path.iter().enumerate() {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", view.index_to_node[*ix]);
-            rec.bind("position".to_string(), Value::Property(PropertyValue::Integer(i as i64)));
+            rec.bind(
+                "position".to_string(),
+                Value::Property(PropertyValue::Integer(i as i64)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19413,7 +21919,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             for ix in group {
                 let mut rec = Record::new();
                 self.bind_node(store, &mut rec, "node", view.index_to_node[ix]);
-                rec.bind("side".to_string(), Value::Property(PropertyValue::Integer(side)));
+                rec.bind(
+                    "side".to_string(),
+                    Value::Property(PropertyValue::Integer(side)),
+                );
                 self.results.push(rec);
             }
         }
@@ -19439,7 +21948,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         for (i, c) in colours.iter().enumerate() {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", view.index_to_node[i]);
-            rec.bind("colour".to_string(), Value::Property(PropertyValue::Integer(*c as i64)));
+            rec.bind(
+                "colour".to_string(),
+                Value::Property(PropertyValue::Integer(*c as i64)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19480,7 +21992,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             ));
         };
         let mut rec = Record::new();
-        rec.bind("transitivity".to_string(), Value::Property(PropertyValue::Float(t)));
+        rec.bind(
+            "transitivity".to_string(),
+            Value::Property(PropertyValue::Float(t)),
+        );
         self.results.push(rec);
         Ok(())
     }
@@ -19495,7 +22010,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             ));
         };
         let mut rec = Record::new();
-        rec.bind("efficiency".to_string(), Value::Property(PropertyValue::Float(e)));
+        rec.bind(
+            "efficiency".to_string(),
+            Value::Property(PropertyValue::Float(e)),
+        );
         self.results.push(rec);
         Ok(())
     }
@@ -19509,7 +22027,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             };
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", view.index_to_node[i]);
-            rec.bind("coefficient".to_string(), Value::Property(PropertyValue::Float(sc)));
+            rec.bind(
+                "coefficient".to_string(),
+                Value::Property(PropertyValue::Float(sc)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19522,12 +22043,17 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         let Some(c) = crate::algo::rich_club_coefficient(&view, k, Self::COLLAPSE) else {
             return Err(ExecutionError::coded(
                 crate::query::error_code::BAD_ARGUMENT,
-                format!("algo.richClub(): fewer than two nodes have degree above {k}, \
-                         and fewer than two members is not a club"),
+                format!(
+                    "algo.richClub(): fewer than two nodes have degree above {k}, \
+                         and fewer than two members is not a club"
+                ),
             ));
         };
         let mut rec = Record::new();
-        rec.bind("coefficient".to_string(), Value::Property(PropertyValue::Float(c)));
+        rec.bind(
+            "coefficient".to_string(),
+            Value::Property(PropertyValue::Float(c)),
+        );
         self.results.push(rec);
         Ok(())
     }
@@ -19536,13 +22062,16 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     fn execute_biconnected(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         let view = self.structural_view(store)?;
         for (cid, comp) in crate::algo::biconnected_components(&view, Self::COLLAPSE)
-            .into_iter().enumerate()
+            .into_iter()
+            .enumerate()
         {
             for ix in comp {
                 let mut rec = Record::new();
                 self.bind_node(store, &mut rec, "node", view.index_to_node[ix]);
-                rec.bind("componentId".to_string(),
-                         Value::Property(PropertyValue::Integer(cid as i64)));
+                rec.bind(
+                    "componentId".to_string(),
+                    Value::Property(PropertyValue::Integer(cid as i64)),
+                );
                 self.results.push(rec);
             }
         }
@@ -19551,12 +22080,18 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.nodeSimilarity({topK, cutoff})`.
     fn execute_node_similarity(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "nodeSimilarity", &["cutoff", "edgeType", "label", "topK"])?;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "nodeSimilarity",
+            &["cutoff", "edgeType", "label", "topK"],
+        )?;
         let k = self.usize_arg("topK", 10);
         let mut cutoff = 0.0f64;
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
-                if let Some(PropertyValue::Float(v)) = m.get("cutoff") { cutoff = *v; }
+                if let Some(PropertyValue::Float(v)) = m.get("cutoff") {
+                    cutoff = *v;
+                }
             }
         }
         let view = self.structural_view(store)?;
@@ -19564,16 +22099,21 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", view.index_to_node[a]);
             self.bind_node(store, &mut rec, "other", view.index_to_node[b]);
-            rec.bind("similarity".to_string(), Value::Property(PropertyValue::Float(s)));
+            rec.bind(
+                "similarity".to_string(),
+                Value::Property(PropertyValue::Float(s)),
+            );
             self.results.push(rec);
         }
         Ok(())
     }
 
     /// `algo.overlap()` / `algo.cosine()` over every pair that has one.
-    fn execute_pair_similarity(&mut self, store: &GraphStore, overlap: bool)
-        -> ExecutionResult<()>
-    {
+    fn execute_pair_similarity(
+        &mut self,
+        store: &GraphStore,
+        overlap: bool,
+    ) -> ExecutionResult<()> {
         let view = self.structural_view(store)?;
         for a in 0..view.node_count {
             for b in (a + 1)..view.node_count {
@@ -19586,7 +22126,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 let mut rec = Record::new();
                 self.bind_node(store, &mut rec, "node", view.index_to_node[a]);
                 self.bind_node(store, &mut rec, "other", view.index_to_node[b]);
-                rec.bind("similarity".to_string(), Value::Property(PropertyValue::Float(s)));
+                rec.bind(
+                    "similarity".to_string(),
+                    Value::Property(PropertyValue::Float(s)),
+                );
                 self.results.push(rec);
             }
         }
@@ -19594,9 +22137,11 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     }
 
     /// `algo.effectiveSize()` / `algo.constraint()` — Burt's structural holes.
-    fn execute_structural_holes(&mut self, store: &GraphStore, effective: bool)
-        -> ExecutionResult<()>
-    {
+    fn execute_structural_holes(
+        &mut self,
+        store: &GraphStore,
+        effective: bool,
+    ) -> ExecutionResult<()> {
         let view = self.structural_view(store)?;
         for i in 0..view.node_count {
             let v = if effective {
@@ -19607,7 +22152,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let Some(v) = v else { continue }; // isolated: nothing to broker
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", view.index_to_node[i]);
-            rec.bind("value".to_string(), Value::Property(PropertyValue::Float(v)));
+            rec.bind(
+                "value".to_string(),
+                Value::Property(PropertyValue::Float(v)),
+            );
             self.results.push(rec);
         }
         Ok(())
@@ -19624,7 +22172,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             ));
         };
         let mut rec = Record::new();
-        rec.bind("reciprocity".to_string(), Value::Property(PropertyValue::Float(r)));
+        rec.bind(
+            "reciprocity".to_string(),
+            Value::Property(PropertyValue::Float(r)),
+        );
         self.results.push(rec);
         Ok(())
     }
@@ -19682,7 +22233,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         // compared against each other, because a single run always looks
         // sorted (#1019).
         self.sort_results_deterministically(|r| {
-            r.get("communityId").and_then(|v| v.as_property()).and_then(|p| p.as_integer())
+            r.get("communityId")
+                .and_then(|v| v.as_property())
+                .and_then(|p| p.as_integer())
                 .unwrap_or(i64::MAX)
         });
 
@@ -19726,9 +22279,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         }
 
         // Coefficient descending, then node id.
-        self.sort_results_deterministically(|r| {
-            std::cmp::Reverse(ordered_float(r, "coefficient"))
-        });
+        self.sort_results_deterministically(|r| std::cmp::Reverse(ordered_float(r, "coefficient")));
 
         Ok(())
     }
@@ -19746,10 +22297,19 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// remain unbuilt, but ML-06 specifically asks this algorithm to persist
     /// its own result.
     fn execute_fastrp(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "fastRP", &[
-            "label", "edgeType", "embeddingDimension", "iterationWeights", "seed",
-            "normalize", "writeProperty",
-        ])?;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "fastRP",
+            &[
+                "label",
+                "edgeType",
+                "embeddingDimension",
+                "iterationWeights",
+                "seed",
+                "normalize",
+                "writeProperty",
+            ],
+        )?;
         let view = self.structural_view(store)?;
         let mut config = crate::algo::FastRpConfig::default();
         let mut write_property = "embedding".to_string();
@@ -19769,9 +22329,11 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                         match item {
                             PropertyValue::Float(f) => weights.push(*f),
                             PropertyValue::Integer(i) => weights.push(*i as f64),
-                            other => return Err(ExecutionError::TypeError(format!(
-                                "algo.fastRP: iterationWeights must be numbers, got {other:?}"
-                            ))),
+                            other => {
+                                return Err(ExecutionError::TypeError(format!(
+                                    "algo.fastRP: iterationWeights must be numbers, got {other:?}"
+                                )))
+                            }
                         }
                     }
                     if weights.is_empty() {
@@ -19781,21 +22343,35 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     }
                     config.iteration_weights = weights;
                 }
-                if let Some(PropertyValue::Integer(v)) = m.get("seed") { config.seed = *v as u64; }
-                if let Some(PropertyValue::Boolean(b)) = m.get("normalize") { config.normalize = *b; }
-                if let Some(PropertyValue::String(s)) = m.get("writeProperty") { write_property = s.clone(); }
+                if let Some(PropertyValue::Integer(v)) = m.get("seed") {
+                    config.seed = *v as u64;
+                }
+                if let Some(PropertyValue::Boolean(b)) = m.get("normalize") {
+                    config.normalize = *b;
+                }
+                if let Some(PropertyValue::String(s)) = m.get("writeProperty") {
+                    write_property = s.clone();
+                }
             }
         }
 
         let embeddings = crate::algo::fastrp(&view, &config);
         for (idx, embedding) in embeddings.into_iter().enumerate() {
             let id = NodeId::new(view.index_to_node[idx]);
-            let values: Vec<PropertyValue> = embedding.into_iter().map(PropertyValue::Float).collect();
+            let values: Vec<PropertyValue> =
+                embedding.into_iter().map(PropertyValue::Float).collect();
             store
-                .set_node_property(tenant_id, id, write_property.clone(), PropertyValue::Array(values.clone()))
-                .map_err(|e| ExecutionError::RuntimeError(format!(
-                    "algo.fastRP: failed to write `{write_property}`: {e}"
-                )))?;
+                .set_node_property(
+                    tenant_id,
+                    id,
+                    write_property.clone(),
+                    PropertyValue::Array(values.clone()),
+                )
+                .map_err(|e| {
+                    ExecutionError::RuntimeError(format!(
+                        "algo.fastRP: failed to write `{write_property}`: {e}"
+                    ))
+                })?;
             if let Some(node) = store.get_node(id) {
                 let mut record = Record::new();
                 record.bind("node".to_string(), Value::Node(id, Box::new(node.clone())));
@@ -19823,10 +22399,22 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     ///
     /// Requires write access for the same reason `algo.fastRP` does above.
     fn execute_node2vec(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "node2vec", &[
-            "label", "edgeType", "embeddingDimension", "walkLength", "walksPerNode",
-            "returnFactor", "inOutFactor", "windowSize", "seed", "writeProperty",
-        ])?;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "node2vec",
+            &[
+                "label",
+                "edgeType",
+                "embeddingDimension",
+                "walkLength",
+                "walksPerNode",
+                "returnFactor",
+                "inOutFactor",
+                "windowSize",
+                "seed",
+                "writeProperty",
+            ],
+        )?;
         let view = self.structural_view(store)?;
         let mut config = crate::algo::Node2VecConfig::default();
         let mut write_property = "embedding".to_string();
@@ -19860,18 +22448,22 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     config.return_factor = match v {
                         PropertyValue::Float(f) => *f,
                         PropertyValue::Integer(i) => *i as f64,
-                        other => return Err(ExecutionError::TypeError(format!(
-                            "algo.node2vec: returnFactor must be a number, got {other:?}"
-                        ))),
+                        other => {
+                            return Err(ExecutionError::TypeError(format!(
+                                "algo.node2vec: returnFactor must be a number, got {other:?}"
+                            )))
+                        }
                     };
                 }
                 if let Some(v) = m.get("inOutFactor") {
                     config.in_out_factor = match v {
                         PropertyValue::Float(f) => *f,
                         PropertyValue::Integer(i) => *i as f64,
-                        other => return Err(ExecutionError::TypeError(format!(
-                            "algo.node2vec: inOutFactor must be a number, got {other:?}"
-                        ))),
+                        other => {
+                            return Err(ExecutionError::TypeError(format!(
+                                "algo.node2vec: inOutFactor must be a number, got {other:?}"
+                            )))
+                        }
                     };
                 }
                 if let Some(PropertyValue::Integer(v)) = m.get("windowSize") {
@@ -19882,20 +22474,32 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     }
                     config.window_size = *v as usize;
                 }
-                if let Some(PropertyValue::Integer(v)) = m.get("seed") { config.seed = *v as u64; }
-                if let Some(PropertyValue::String(s)) = m.get("writeProperty") { write_property = s.clone(); }
+                if let Some(PropertyValue::Integer(v)) = m.get("seed") {
+                    config.seed = *v as u64;
+                }
+                if let Some(PropertyValue::String(s)) = m.get("writeProperty") {
+                    write_property = s.clone();
+                }
             }
         }
 
         let embeddings = crate::algo::node2vec(&view, &config);
         for (idx, embedding) in embeddings.into_iter().enumerate() {
             let id = NodeId::new(view.index_to_node[idx]);
-            let values: Vec<PropertyValue> = embedding.into_iter().map(PropertyValue::Float).collect();
+            let values: Vec<PropertyValue> =
+                embedding.into_iter().map(PropertyValue::Float).collect();
             store
-                .set_node_property(tenant_id, id, write_property.clone(), PropertyValue::Array(values.clone()))
-                .map_err(|e| ExecutionError::RuntimeError(format!(
-                    "algo.node2vec: failed to write `{write_property}`: {e}"
-                )))?;
+                .set_node_property(
+                    tenant_id,
+                    id,
+                    write_property.clone(),
+                    PropertyValue::Array(values.clone()),
+                )
+                .map_err(|e| {
+                    ExecutionError::RuntimeError(format!(
+                        "algo.node2vec: failed to write `{write_property}`: {e}"
+                    ))
+                })?;
             if let Some(node) = store.get_node(id) {
                 let mut record = Record::new();
                 record.bind("node".to_string(), Value::Node(id, Box::new(node.clone())));
@@ -19946,17 +22550,18 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             }
         };
         let properties: Vec<String> = match arg(1)? {
-            Some(Value::List(items)) => items.into_iter().map(name_of).collect::<ExecutionResult<_>>()?,
+            Some(Value::List(items)) => items
+                .into_iter()
+                .map(name_of)
+                .collect::<ExecutionResult<_>>()?,
             Some(Value::Property(PropertyValue::Array(items))) => items
                 .into_iter()
                 .map(|p| name_of(Value::Property(p)))
                 .collect::<ExecutionResult<_>>()?,
-            _ => {
-                return Err(ExecutionError::RuntimeError(
-                    "algo.pca requires a list of property names: CALL algo.pca('Label', ['a', 'b'], 2)"
-                        .to_string(),
-                ))
-            }
+            _ => return Err(ExecutionError::RuntimeError(
+                "algo.pca requires a list of property names: CALL algo.pca('Label', ['a', 'b'], 2)"
+                    .to_string(),
+            )),
         };
         if properties.is_empty() {
             return Err(ExecutionError::RuntimeError(
@@ -19966,7 +22571,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         let mut config = crate::algo::PcaConfig::default();
         match arg(2)? {
             None | Some(Value::Null) | Some(Value::Property(PropertyValue::Null)) => {}
-            Some(Value::Property(PropertyValue::Integer(k))) if k >= 1 => config.n_components = k as usize,
+            Some(Value::Property(PropertyValue::Integer(k))) if k >= 1 => {
+                config.n_components = k as usize
+            }
             Some(other) => {
                 return Err(ExecutionError::TypeError(format!(
                     "algo.pca: nComponents must be a positive integer, got {other:?}"
@@ -19975,7 +22582,11 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         }
 
         let mut ids: Vec<NodeId> = match &label {
-            Some(l) => store.get_nodes_by_label(&Label::new(l.as_str())).into_iter().map(|n| n.id).collect(),
+            Some(l) => store
+                .get_nodes_by_label(&Label::new(l.as_str()))
+                .into_iter()
+                .map(|n| n.id)
+                .collect(),
             None => store.all_nodes().into_iter().map(|n| n.id).collect(),
         };
         ids.sort_unstable_by_key(|id| id.as_u64());
@@ -20003,7 +22614,12 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 record.bind("node".to_string(), Value::Node(*id, Box::new(node.clone())));
                 record.bind(
                     "projection".to_string(),
-                    Value::List(projection.into_iter().map(|x| Value::Property(PropertyValue::Float(x))).collect()),
+                    Value::List(
+                        projection
+                            .into_iter()
+                            .map(|x| Value::Property(PropertyValue::Float(x)))
+                            .collect(),
+                    ),
                 );
                 self.results.push(record);
             }
@@ -20014,22 +22630,36 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     fn execute_weighted_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (source_node_id, target_node_id, weight_property)
         if self.args.len() < 3 {
-            return Err(ExecutionError::RuntimeError("weightedPath requires source, target, and weight property".to_string()));
+            return Err(ExecutionError::RuntimeError(
+                "weightedPath requires source, target, and weight property".to_string(),
+            ));
         }
 
         let source_id = match &self.args[0] {
             Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
-            _ => return Err(ExecutionError::TypeError("Source must be integer ID".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "Source must be integer ID".to_string(),
+                ))
+            }
         };
 
         let target_id = match &self.args[1] {
             Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
-            _ => return Err(ExecutionError::TypeError("Target must be integer ID".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "Target must be integer ID".to_string(),
+                ))
+            }
         };
-        
+
         let weight_prop = match &self.args[2] {
             Expression::Literal(PropertyValue::String(s)) => s.clone(),
-            _ => return Err(ExecutionError::TypeError("Weight property must be a string".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "Weight property must be a string".to_string(),
+                ))
+            }
         };
 
         // Build view with weights
@@ -20039,19 +22669,25 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         let shortest = crate::algo::dijkstra(&view, source_id, target_id)
             .map_err(|e| ExecutionError::RuntimeError(format!("weightedPath: {e}")))?;
         if let Some(result) = shortest {
-             let mut record = Record::new();
-             record.bind("cost".to_string(), Value::Property(PropertyValue::Float(result.cost)));
-             
-             // Construct path list
-             let mut path_nodes = Vec::new();
-             for nid_u64 in result.path {
-                 let nid = NodeId::new(nid_u64);
-                 // We add just IDs for now, or could fetch full nodes if needed
-                 path_nodes.push(PropertyValue::Integer(nid.as_u64() as i64));
-             }
-             record.bind("path".to_string(), Value::Property(PropertyValue::Array(path_nodes)));
-             
-             self.results.push(record);
+            let mut record = Record::new();
+            record.bind(
+                "cost".to_string(),
+                Value::Property(PropertyValue::Float(result.cost)),
+            );
+
+            // Construct path list
+            let mut path_nodes = Vec::new();
+            for nid_u64 in result.path {
+                let nid = NodeId::new(nid_u64);
+                // We add just IDs for now, or could fetch full nodes if needed
+                path_nodes.push(PropertyValue::Integer(nid.as_u64() as i64));
+            }
+            record.bind(
+                "path".to_string(),
+                Value::Property(PropertyValue::Array(path_nodes)),
+            );
+
+            self.results.push(record);
         }
 
         Ok(())
@@ -20065,7 +22701,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// -- a string, a list, a NaN or an infinity -- is refused rather than
     /// dropped: a dropped key would report `gap: null` exactly as an absent one
     /// does, and the caller could not tell the two apart (#1341).
-    fn or_solve_best_known(config: &HashMap<String, PropertyValue>) -> ExecutionResult<Option<f64>> {
+    fn or_solve_best_known(
+        config: &HashMap<String, PropertyValue>,
+    ) -> ExecutionResult<Option<f64>> {
         let Some(value) = config.get("bestKnown").or_else(|| config.get("best_known")) else {
             return Ok(None);
         };
@@ -20107,17 +22745,26 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         record.bind("objective".to_string(), objective);
         record.bind("feasible".to_string(), feasible);
         record.bind("gap".to_string(), gap);
-        record.bind("total_time_ms".to_string(), Value::Property(PropertyValue::Float(total_time_ms)));
+        record.bind(
+            "total_time_ms".to_string(),
+            Value::Property(PropertyValue::Float(total_time_ms)),
+        );
     }
 
     fn execute_or_solve(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
         if self.args.is_empty() {
-             return Err(ExecutionError::bad_argument("algo.or.solve requires a config map".to_string()));
+            return Err(ExecutionError::bad_argument(
+                "algo.or.solve requires a config map".to_string(),
+            ));
         }
 
         let config_map = match &self.args[0] {
             Expression::Literal(PropertyValue::Map(m)) => m,
-            _ => return Err(ExecutionError::TypeError("First argument must be a map".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "First argument must be a map".to_string(),
+                ))
+            }
         };
 
         // Extract parameters
@@ -20125,14 +22772,36 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         // snake_case, so `{maxIterations: 5}` ran a hundred iterations and
         // reported success. Both spellings are accepted now, and anything else
         // is refused (#1341).
-        Self::reject_unknown_config_keys(&self.args, "or.solve", &[
-            "algorithm", "bestKnown", "best_known", "budget", "costProperties", "costProperty",
-            "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
-            "max_iterations",
-            "minTotal", "min", "min_total", "populationSize", "population_size",
-            "property", "upperBound",
-        ])?;
-        let algorithm = config_map.get("algorithm").and_then(|v| v.as_string()).unwrap_or("Jaya");
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "or.solve",
+            &[
+                "algorithm",
+                "bestKnown",
+                "best_known",
+                "budget",
+                "costProperties",
+                "costProperty",
+                "cost_properties",
+                "cost_property",
+                "label",
+                "lowerBound",
+                "max",
+                "maxIterations",
+                "max_iterations",
+                "minTotal",
+                "min",
+                "min_total",
+                "populationSize",
+                "population_size",
+                "property",
+                "upperBound",
+            ],
+        )?;
+        let algorithm = config_map
+            .get("algorithm")
+            .and_then(|v| v.as_string())
+            .unwrap_or("Jaya");
         if !Self::is_known_solver(algorithm) {
             // The old `_ =>` arm ran Jaya for any name and bound the *requested*
             // name into the result, so three runs of Jaya came back labelled
@@ -20143,16 +22812,28 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 Self::SOLVERS.join(", ")
             )));
         }
-        let label_str = config_map.get("label").and_then(|v| v.as_string())
+        let label_str = config_map
+            .get("label")
+            .and_then(|v| v.as_string())
             .ok_or_else(|| ExecutionError::RuntimeError("Missing 'label' in config".to_string()))?;
-        let property = config_map.get("property").and_then(|v| v.as_string())
-            .ok_or_else(|| ExecutionError::RuntimeError("Missing 'property' in config".to_string()))?;
-        
+        let property = config_map
+            .get("property")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| {
+                ExecutionError::RuntimeError("Missing 'property' in config".to_string())
+            })?;
+
         let cfg_f = |a: &str, b: &str| {
-            config_map.get(a).or_else(|| config_map.get(b)).and_then(|v| v.as_float())
+            config_map
+                .get(a)
+                .or_else(|| config_map.get(b))
+                .and_then(|v| v.as_float())
         };
         let cfg_i = |a: &str, b: &str| {
-            config_map.get(a).or_else(|| config_map.get(b)).and_then(|v| v.as_integer())
+            config_map
+                .get(a)
+                .or_else(|| config_map.get(b))
+                .and_then(|v| v.as_integer())
         };
         let min_val = cfg_f("lowerBound", "min").unwrap_or(0.0);
         let max_val = cfg_f("upperBound", "max").unwrap_or(100.0);
@@ -20168,19 +22849,23 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         }
 
         // Objective: minimize sum(variable * cost_property)
-        let cost_prop = config_map.get("costProperty")
+        let cost_prop = config_map
+            .get("costProperty")
             .or_else(|| config_map.get("cost_property"))
             .and_then(|v| v.as_string());
-        
+
         // Support multiple objectives
         let mut cost_props: Vec<String> = Vec::new();
         if let Some(cp) = cost_prop {
             cost_props.push(cp.to_string());
-        } else if let Some(PropertyValue::Array(arr)) =
-            config_map.get("costProperties").or_else(|| config_map.get("cost_properties"))
+        } else if let Some(PropertyValue::Array(arr)) = config_map
+            .get("costProperties")
+            .or_else(|| config_map.get("cost_properties"))
         {
             for v in arr {
-                if let Some(s) = v.as_string() { cost_props.push(s.to_string()); }
+                if let Some(s) = v.as_string() {
+                    cost_props.push(s.to_string());
+                }
             }
         }
 
@@ -20207,16 +22892,16 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
         // 1. Gather nodes and costs
         let label = Label::new(label_str);
-        
+
         let mut node_ids = Vec::new();
         let mut single_costs = Vec::new();
         let mut multi_costs = vec![Vec::new(); cost_props.len()];
-        
+
         {
             let nodes = store.get_nodes_by_label(&label);
             for node in nodes {
                 node_ids.push(node.id);
-                
+
                 // Both shapes, always (#1499). `multi_costs` is allocated with
                 // one row per cost property; it used to be filled only when
                 // there was more than one, so a single `cost_property` left one
@@ -20231,10 +22916,16 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 if cost_props.is_empty() {
                     single_costs.push(1.0);
                 } else {
-                    let first = store.node_property(node.id, &cost_props[0]).and_then(|v| v.as_float()).unwrap_or(1.0);
+                    let first = store
+                        .node_property(node.id, &cost_props[0])
+                        .and_then(|v| v.as_float())
+                        .unwrap_or(1.0);
                     single_costs.push(first);
                     for (i, cp) in cost_props.iter().enumerate() {
-                        let cost = store.node_property(node.id, cp).and_then(|v| v.as_float()).unwrap_or(1.0);
+                        let cost = store
+                            .node_property(node.id, cp)
+                            .and_then(|v| v.as_float())
+                            .unwrap_or(1.0);
                         multi_costs[i].push(cost);
                     }
                 }
@@ -20242,7 +22933,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         }
 
         if node_ids.is_empty() {
-             return Ok(());
+            return Ok(());
         }
 
         // 2. Setup Problem
@@ -20295,11 +22986,24 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
             let mut record = Record::new();
             if let Some(best) = res.pareto_front.first() {
-                let fitness_props: Vec<PropertyValue> = best.fitness.iter().map(|&f| PropertyValue::Float(f)).collect();
-                record.bind("fitness".to_string(), Value::Property(PropertyValue::Array(fitness_props)));
+                let fitness_props: Vec<PropertyValue> = best
+                    .fitness
+                    .iter()
+                    .map(|&f| PropertyValue::Float(f))
+                    .collect();
+                record.bind(
+                    "fitness".to_string(),
+                    Value::Property(PropertyValue::Array(fitness_props)),
+                );
             }
-            record.bind("algorithm".to_string(), Value::Property(PropertyValue::String(algorithm.to_string())));
-            record.bind("front_size".to_string(), Value::Property(PropertyValue::Integer(res.pareto_front.len() as i64)));
+            record.bind(
+                "algorithm".to_string(),
+                Value::Property(PropertyValue::String(algorithm.to_string())),
+            );
+            record.bind(
+                "front_size".to_string(),
+                Value::Property(PropertyValue::Integer(res.pareto_front.len() as i64)),
+            );
             // The result envelope (OPT-09, #1776), for the point written back.
             // Feasibility is read from `Problem::penalty`, not from the front's
             // `constraint_violation`: this problem gives the multi-objective
@@ -20310,7 +23014,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let (objective, feasible) = match res.pareto_front.first() {
                 Some(best) => (
                     Value::Property(PropertyValue::Array(
-                        best.fitness.iter().map(|&f| PropertyValue::Float(f)).collect(),
+                        best.fitness
+                            .iter()
+                            .map(|&f| PropertyValue::Float(f))
+                            .collect(),
                     )),
                     Value::Property(PropertyValue::Boolean(is_feasible(Problem::penalty(
                         &problem,
@@ -20319,9 +23026,14 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 ),
                 None => (Value::Null, Value::Null),
             };
-            Self::bind_result_envelope(&mut record, objective, feasible, Value::Null, total_time_ms);
+            Self::bind_result_envelope(
+                &mut record,
+                objective,
+                feasible,
+                Value::Null,
+                total_time_ms,
+            );
             self.results.push(record);
-
         } else {
             let started = std::time::Instant::now();
             let result = match algorithm {
@@ -20388,8 +23100,14 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
             // 5. Return result record
             let mut record = Record::new();
-            record.bind("fitness".to_string(), Value::Property(PropertyValue::Float(result.best_fitness)));
-            record.bind("algorithm".to_string(), Value::Property(PropertyValue::String(algorithm.to_string())));
+            record.bind(
+                "fitness".to_string(),
+                Value::Property(PropertyValue::Float(result.best_fitness)),
+            );
+            record.bind(
+                "algorithm".to_string(),
+                Value::Property(PropertyValue::String(algorithm.to_string())),
+            );
             // The iterations the solver *ran*, not the cap it was given (#1443).
             // This used to bind `max_iter`, so `YIELD iterations` echoed the
             // request: ask for 50 and you got 50 whether the solver ran 50 or
@@ -20404,14 +23122,27 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             // `/optimize/solve` has always reported over SSE. The two surfaces
             // disagreed; this one was the wrong one.
             let iterations_run = result.history.len();
-            record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(iterations_run as i64)));
+            record.bind(
+                "iterations".to_string(),
+                Value::Property(PropertyValue::Integer(iterations_run as i64)),
+            );
             // The cap, as a separate column. Overloading one name would leave a
             // caller unable to tell "ran 50 of 50" from "ran 50 of 200".
-            record.bind("max_iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
+            record.bind(
+                "max_iterations".to_string(),
+                Value::Property(PropertyValue::Integer(max_iter as i64)),
+            );
 
             // Yield history as an array for plotting
-            let history_props: Vec<PropertyValue> = result.history.into_iter().map(PropertyValue::Float).collect();
-            record.bind("history".to_string(), Value::Property(PropertyValue::Array(history_props)));
+            let history_props: Vec<PropertyValue> = result
+                .history
+                .into_iter()
+                .map(PropertyValue::Float)
+                .collect();
+            record.bind(
+                "history".to_string(),
+                Value::Property(PropertyValue::Array(history_props)),
+            );
 
             // The result envelope (OPT-09, #1776). `fitness` is objective plus
             // penalty, so on its own it cannot say whether the answer obeys the
@@ -20419,7 +23150,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let objective = problem.objective(&result.best_variables);
             let feasible = is_feasible(problem.penalty(&result.best_variables));
             let gap = match best_known {
-                Some(best) => Value::Property(PropertyValue::Float(gap_to_best_known(objective, best))),
+                Some(best) => {
+                    Value::Property(PropertyValue::Float(gap_to_best_known(objective, best)))
+                }
                 None => Value::Null,
             };
             Self::bind_result_envelope(
@@ -20439,17 +23172,27 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     fn execute_max_flow(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (source, sink, capacity_property?)
         if self.args.len() < 2 {
-            return Err(ExecutionError::RuntimeError("maxFlow requires source and sink".to_string()));
+            return Err(ExecutionError::RuntimeError(
+                "maxFlow requires source and sink".to_string(),
+            ));
         }
 
         let source_id = match &self.args[0] {
             Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
-            _ => return Err(ExecutionError::TypeError("Source must be integer ID".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "Source must be integer ID".to_string(),
+                ))
+            }
         };
 
         let target_id = match &self.args[1] {
             Expression::Literal(PropertyValue::Integer(id)) => *id as u64,
-            _ => return Err(ExecutionError::TypeError("Sink must be integer ID".to_string())),
+            _ => {
+                return Err(ExecutionError::TypeError(
+                    "Sink must be integer ID".to_string(),
+                ))
+            }
         };
 
         let cap_prop = if self.args.len() > 2 {
@@ -20470,7 +23213,8 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         if source_id == target_id {
             return Err(ExecutionError::RuntimeError(
                 "maxFlow: source and sink are the same node; the flow from a node to \
-                 itself is unbounded".to_string(),
+                 itself is unbounded"
+                    .to_string(),
             ));
         }
 
@@ -20481,13 +23225,20 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         match crate::algo::edmonds_karp(&view, source_id, target_id) {
             Some(result) => {
                 let mut record = Record::new();
-                record.bind("max_flow".to_string(), Value::Property(PropertyValue::Float(result.max_flow)));
+                record.bind(
+                    "max_flow".to_string(),
+                    Value::Property(PropertyValue::Float(result.max_flow)),
+                );
                 self.results.push(record);
             }
             None => {
                 return Err(ExecutionError::RuntimeError(format!(
                     "maxFlow: no node {} in the graph",
-                    if view.node_to_index.contains_key(&source_id) { target_id } else { source_id },
+                    if view.node_to_index.contains_key(&source_id) {
+                        target_id
+                    } else {
+                        source_id
+                    },
                 )));
             }
         }
@@ -20511,26 +23262,41 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
         // Return total weight
         let mut summary = Record::new();
-        summary.bind("total_weight".to_string(), Value::Property(PropertyValue::Float(result.total_weight)));
+        summary.bind(
+            "total_weight".to_string(),
+            Value::Property(PropertyValue::Float(result.total_weight)),
+        );
         // A disconnected graph has no spanning tree, only a spanning forest, and
         // the two are told apart by this number alone: the edge rows look the
         // same either way (#1302).
-        summary.bind("components".to_string(), Value::Property(PropertyValue::Integer(result.components as i64)));
+        summary.bind(
+            "components".to_string(),
+            Value::Property(PropertyValue::Integer(result.components as i64)),
+        );
         self.results.push(summary);
 
         // Return edges
         for (u_u64, v_u64, w) in result.edges {
             let u = NodeId::new(u_u64);
             let v = NodeId::new(v_u64);
-            
+
             let mut record = Record::new();
             if let Some(node_u) = store.get_node(u) {
-                record.bind("source".to_string(), Value::Node(u, Box::new(node_u.clone())));
+                record.bind(
+                    "source".to_string(),
+                    Value::Node(u, Box::new(node_u.clone())),
+                );
             }
             if let Some(node_v) = store.get_node(v) {
-                record.bind("target".to_string(), Value::Node(v, Box::new(node_v.clone())));
+                record.bind(
+                    "target".to_string(),
+                    Value::Node(v, Box::new(node_v.clone())),
+                );
             }
-            record.bind("weight".to_string(), Value::Property(PropertyValue::Float(w)));
+            record.bind(
+                "weight".to_string(),
+                Value::Property(PropertyValue::Float(w)),
+            );
             self.results.push(record);
         }
 
@@ -20543,7 +23309,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         let count = crate::algo::count_triangles(&view);
 
         let mut record = Record::new();
-        record.bind("triangles".to_string(), Value::Property(PropertyValue::Integer(count as i64)));
+        record.bind(
+            "triangles".to_string(),
+            Value::Property(PropertyValue::Integer(count as i64)),
+        );
         self.results.push(record);
 
         Ok(())
@@ -20560,14 +23329,19 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let mut record = Record::new();
             if let Some(node) = store.get_node(nid) {
                 record.bind("node".to_string(), Value::Node(nid, Box::new(node.clone())));
-                record.bind("componentId".to_string(), Value::Property(PropertyValue::Integer(component_id as i64)));
+                record.bind(
+                    "componentId".to_string(),
+                    Value::Property(PropertyValue::Integer(component_id as i64)),
+                );
                 self.results.push(record);
             }
         }
-        
+
         // Component id, then node id.
         self.sort_results_deterministically(|r| {
-            r.get("componentId").and_then(|v| v.as_property()).and_then(|p| p.as_integer())
+            r.get("componentId")
+                .and_then(|v| v.as_property())
+                .and_then(|p| p.as_integer())
                 .unwrap_or(i64::MAX)
         });
 
@@ -20850,15 +23624,31 @@ impl PhysicalOperator for AlgorithmOperator {
                 "propagationranking" => self.execute_temporal_reachability(store, true)?,
                 "temporalshortestpath" => self.execute_temporal_shortest_path(store)?,
                 "symptomexplanation" => self.execute_symptom_explanation(store)?,
-                "degree" | "degreecentrality" => self.execute_centrality(store, Centrality::Degree)?,
-                "closeness" | "closenesscentrality" => self.execute_centrality(store, Centrality::Closeness)?,
-                "betweenness" | "betweennesscentrality" => self.execute_centrality(store, Centrality::Betweenness)?,
-                "harmonic" | "harmoniccentrality" => self.execute_centrality(store, Centrality::Harmonic)?,
-                "eigenvector" | "eigenvectorcentrality" => self.execute_centrality(store, Centrality::Eigenvector)?,
+                "degree" | "degreecentrality" => {
+                    self.execute_centrality(store, Centrality::Degree)?
+                }
+                "closeness" | "closenesscentrality" => {
+                    self.execute_centrality(store, Centrality::Closeness)?
+                }
+                "betweenness" | "betweennesscentrality" => {
+                    self.execute_centrality(store, Centrality::Betweenness)?
+                }
+                "harmonic" | "harmoniccentrality" => {
+                    self.execute_centrality(store, Centrality::Harmonic)?
+                }
+                "eigenvector" | "eigenvectorcentrality" => {
+                    self.execute_centrality(store, Centrality::Eigenvector)?
+                }
                 "kcore" | "corenumber" => self.execute_centrality(store, Centrality::CoreNumber)?,
-                "commonneighbors" | "commonneighbours" => self.execute_link_prediction(store, crate::algo::LinkScore::CommonNeighbours)?,
-                "jaccard" => self.execute_link_prediction(store, crate::algo::LinkScore::Jaccard)?,
-                "adamicadar" => self.execute_link_prediction(store, crate::algo::LinkScore::AdamicAdar)?,
+                "commonneighbors" | "commonneighbours" => {
+                    self.execute_link_prediction(store, crate::algo::LinkScore::CommonNeighbours)?
+                }
+                "jaccard" => {
+                    self.execute_link_prediction(store, crate::algo::LinkScore::Jaccard)?
+                }
+                "adamicadar" => {
+                    self.execute_link_prediction(store, crate::algo::LinkScore::AdamicAdar)?
+                }
                 "topologicalsort" | "toposort" => self.execute_topological_sort(store)?,
                 "cycledetection" | "findcycle" => self.execute_find_cycle(store)?,
                 "bridges" => self.execute_structural(store, true)?,
@@ -20866,7 +23656,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "eccentricity" => self.execute_metric(store, Metric::Eccentricity)?,
                 "diameter" => self.execute_metric(store, Metric::Diameter)?,
                 "radius" => self.execute_metric(store, Metric::Radius)?,
-                "averageneighbordegree" | "averageneighbourdegree" => self.execute_metric(store, Metric::AvgNeighbourDegree)?,
+                "averageneighbordegree" | "averageneighbourdegree" => {
+                    self.execute_metric(store, Metric::AvgNeighbourDegree)?
+                }
                 "degreeassortativity" => self.execute_metric(store, Metric::Assortativity)?,
                 "louvain" => self.execute_louvain(store)?,
                 "modularity" => self.execute_modularity(store)?,
@@ -20878,7 +23670,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,
-                "personalizedpagerank" | "personalisedpagerank" => self.execute_personalised_page_rank(store)?,
+                "personalizedpagerank" | "personalisedpagerank" => {
+                    self.execute_personalised_page_rank(store)?
+                }
                 "voterank" => self.execute_vote_rank(store)?,
                 "bellmanford" => self.execute_bellman_ford(store)?,
                 "allpairsshortestpath" | "allpairs" => self.execute_all_pairs(store)?,
@@ -20920,8 +23714,12 @@ impl PhysicalOperator for AlgorithmOperator {
         Ok(Some(record))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
-         if !self.executed {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
+        if !self.executed {
             // Refused before the algorithm runs, so a request that cannot be
             // honoured costs nothing.
             let write_back = self.write_back_plan()?;
@@ -20953,15 +23751,31 @@ impl PhysicalOperator for AlgorithmOperator {
                 "propagationranking" => self.execute_temporal_reachability(store, true)?,
                 "temporalshortestpath" => self.execute_temporal_shortest_path(store)?,
                 "symptomexplanation" => self.execute_symptom_explanation(store)?,
-                "degree" | "degreecentrality" => self.execute_centrality(store, Centrality::Degree)?,
-                "closeness" | "closenesscentrality" => self.execute_centrality(store, Centrality::Closeness)?,
-                "betweenness" | "betweennesscentrality" => self.execute_centrality(store, Centrality::Betweenness)?,
-                "harmonic" | "harmoniccentrality" => self.execute_centrality(store, Centrality::Harmonic)?,
-                "eigenvector" | "eigenvectorcentrality" => self.execute_centrality(store, Centrality::Eigenvector)?,
+                "degree" | "degreecentrality" => {
+                    self.execute_centrality(store, Centrality::Degree)?
+                }
+                "closeness" | "closenesscentrality" => {
+                    self.execute_centrality(store, Centrality::Closeness)?
+                }
+                "betweenness" | "betweennesscentrality" => {
+                    self.execute_centrality(store, Centrality::Betweenness)?
+                }
+                "harmonic" | "harmoniccentrality" => {
+                    self.execute_centrality(store, Centrality::Harmonic)?
+                }
+                "eigenvector" | "eigenvectorcentrality" => {
+                    self.execute_centrality(store, Centrality::Eigenvector)?
+                }
                 "kcore" | "corenumber" => self.execute_centrality(store, Centrality::CoreNumber)?,
-                "commonneighbors" | "commonneighbours" => self.execute_link_prediction(store, crate::algo::LinkScore::CommonNeighbours)?,
-                "jaccard" => self.execute_link_prediction(store, crate::algo::LinkScore::Jaccard)?,
-                "adamicadar" => self.execute_link_prediction(store, crate::algo::LinkScore::AdamicAdar)?,
+                "commonneighbors" | "commonneighbours" => {
+                    self.execute_link_prediction(store, crate::algo::LinkScore::CommonNeighbours)?
+                }
+                "jaccard" => {
+                    self.execute_link_prediction(store, crate::algo::LinkScore::Jaccard)?
+                }
+                "adamicadar" => {
+                    self.execute_link_prediction(store, crate::algo::LinkScore::AdamicAdar)?
+                }
                 "topologicalsort" | "toposort" => self.execute_topological_sort(store)?,
                 "cycledetection" | "findcycle" => self.execute_find_cycle(store)?,
                 "bridges" => self.execute_structural(store, true)?,
@@ -20969,7 +23783,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "eccentricity" => self.execute_metric(store, Metric::Eccentricity)?,
                 "diameter" => self.execute_metric(store, Metric::Diameter)?,
                 "radius" => self.execute_metric(store, Metric::Radius)?,
-                "averageneighbordegree" | "averageneighbourdegree" => self.execute_metric(store, Metric::AvgNeighbourDegree)?,
+                "averageneighbordegree" | "averageneighbourdegree" => {
+                    self.execute_metric(store, Metric::AvgNeighbourDegree)?
+                }
                 "degreeassortativity" => self.execute_metric(store, Metric::Assortativity)?,
                 "louvain" => self.execute_louvain(store)?,
                 "modularity" => self.execute_modularity(store)?,
@@ -20981,7 +23797,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,
-                "personalizedpagerank" | "personalisedpagerank" => self.execute_personalised_page_rank(store)?,
+                "personalizedpagerank" | "personalisedpagerank" => {
+                    self.execute_personalised_page_rank(store)?
+                }
                 "voterank" => self.execute_vote_rank(store)?,
                 "bellmanford" => self.execute_bellman_ford(store)?,
                 "allpairsshortestpath" | "allpairs" => self.execute_all_pairs(store)?,
@@ -21042,7 +23860,11 @@ impl PhysicalOperator for AlgorithmOperator {
                 .aliases
                 .iter()
                 .map(|(column, alias)| {
-                    if column == alias { column.clone() } else { format!("{} AS {}", column, alias) }
+                    if column == alias {
+                        column.clone()
+                    } else {
+                        format!("{} AS {}", column, alias)
+                    }
                 })
                 .collect();
             details.push_str(&format!(" YIELD {}", yielded.join(", ")));
@@ -21064,7 +23886,11 @@ pub struct SkipOperator {
 
 impl SkipOperator {
     pub fn new(input: OperatorBox, skip: usize) -> Self {
-        Self { input, skip, skipped: 0 }
+        Self {
+            input,
+            skip,
+            skipped: 0,
+        }
     }
 }
 
@@ -21107,7 +23933,11 @@ impl PhysicalOperator for SkipOperator {
 
     // See `LimitOperator::next_mut`: skipping a row still has to *produce* it,
     // and producing it may be a write (#649).
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         while self.skipped < self.skip {
             if self.input.next_mut(store, tenant_id)?.is_some() {
                 self.skipped += 1;
@@ -21118,7 +23948,11 @@ impl PhysicalOperator for SkipOperator {
         self.input.next_mut(store, tenant_id)
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         // Return the *remainder* of the batch the skip lands in.
         //
         // The previous version consumed a whole batch to count off `skip`
@@ -21150,7 +23984,11 @@ impl PhysicalOperator for SkipOperator {
             if records.is_empty() {
                 continue;
             }
-            return Ok(Some(RecordBatch { records, columns: batch.columns, plan_hash: None }));
+            return Ok(Some(RecordBatch {
+                records,
+                columns: batch.columns,
+                plan_hash: None,
+            }));
         }
     }
 
@@ -21183,7 +24021,11 @@ pub struct DeleteOperator {
 
 impl DeleteOperator {
     pub fn new(input: OperatorBox, targets: Vec<Expression>, detach: bool) -> Self {
-        Self { input, targets, detach }
+        Self {
+            input,
+            targets,
+            detach,
+        }
     }
 
     /// Entities reachable from a `DELETE` target, in the order they are found.
@@ -21191,11 +24033,18 @@ impl DeleteOperator {
     /// A path or a list is a container of entities, and Cypher deletes what is
     /// inside it. Nested containers recurse; anything that is not an entity is
     /// ignored here -- `validate_delete_targets` is what refuses those (#887).
-    fn collect_entities(value: &Value, nodes: &mut Vec<crate::graph::types::NodeId>, edges: &mut Vec<crate::graph::types::EdgeId>) {
+    fn collect_entities(
+        value: &Value,
+        nodes: &mut Vec<crate::graph::types::NodeId>,
+        edges: &mut Vec<crate::graph::types::EdgeId>,
+    ) {
         match value {
             Value::Node(id, _) | Value::NodeRef(id) => nodes.push(*id),
             Value::Edge(id, _) | Value::EdgeRef(id, ..) => edges.push(*id),
-            Value::Path { nodes: path_nodes, edges: path_edges } => {
+            Value::Path {
+                nodes: path_nodes,
+                edges: path_edges,
+            } => {
                 edges.extend(path_edges.iter().copied());
                 nodes.extend(path_nodes.iter().copied());
             }
@@ -21223,7 +24072,11 @@ impl PhysicalOperator for DeleteOperator {
         self.input.next(store)
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if let Some(record) = self.input.next_mut(store, tenant_id)? {
             let mut nodes: Vec<crate::graph::types::NodeId> = Vec::new();
             let mut edges: Vec<crate::graph::types::EdgeId> = Vec::new();
@@ -21241,8 +24094,16 @@ impl PhysicalOperator for DeleteOperator {
             }
             for node_id in nodes {
                 if self.detach {
-                    let out_edges: Vec<_> = store.get_outgoing_edges(node_id).iter().map(|e| e.id).collect();
-                    let in_edges: Vec<_> = store.get_incoming_edges(node_id).iter().map(|e| e.id).collect();
+                    let out_edges: Vec<_> = store
+                        .get_outgoing_edges(node_id)
+                        .iter()
+                        .map(|e| e.id)
+                        .collect();
+                    let in_edges: Vec<_> = store
+                        .get_incoming_edges(node_id)
+                        .iter()
+                        .map(|e| e.id)
+                        .collect();
                     for eid in out_edges.into_iter().chain(in_edges) {
                         let _ = store.delete_edge(eid);
                     }
@@ -21281,7 +24142,11 @@ impl PhysicalOperator for DeleteOperator {
         }
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         self.input.next_batch(store, batch_size)
     }
 
@@ -21301,13 +24166,20 @@ impl PhysicalOperator for DeleteOperator {
             .collect::<Vec<_>>()
             .join(", ");
         OperatorDescription {
-            name: if self.detach { "DetachDelete" } else { "Delete" }.to_string(),
+            name: if self.detach {
+                "DetachDelete"
+            } else {
+                "Delete"
+            }
+            .to_string(),
             details: vars,
             children: vec![self.input.describe()],
         }
     }
 
-    fn is_mutating(&self) -> bool { true }
+    fn is_mutating(&self) -> bool {
+        true
+    }
 }
 
 /// Set property operator: SET n.name = "Alice"
@@ -21359,7 +24231,12 @@ fn apply_entity_assignment(
         Value::NodeRef(id) | Value::Node(id, _) => {
             let id = *id;
             if !merge {
-                for key in store.node_properties_full(id).keys().cloned().collect::<Vec<_>>() {
+                for key in store
+                    .node_properties_full(id)
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                {
                     if !incoming.contains_key(&key) {
                         store.remove_node_property(id, &key);
                     }
@@ -21398,7 +24275,12 @@ fn format_set_write(w: &SetWrite) -> String {
     match w {
         SetWrite::Property(v, p, e) => format!("{}.{} = {}", v, p, format_expression(e)),
         SetWrite::Entity(v, merge, e) => {
-            format!("{} {} {}", v, if *merge { "+=" } else { "=" }, format_expression(e))
+            format!(
+                "{} {} {}",
+                v,
+                if *merge { "+=" } else { "=" },
+                format_expression(e)
+            )
         }
     }
 }
@@ -21426,7 +24308,10 @@ pub struct SetPropertyOperator {
 
 impl SetPropertyOperator {
     pub fn new(input: OperatorBox, items: Vec<(String, String, Expression)>) -> Self {
-        let writes = items.into_iter().map(|(v, p, e)| SetWrite::Property(v, p, e)).collect();
+        let writes = items
+            .into_iter()
+            .map(|(v, p, e)| SetWrite::Property(v, p, e))
+            .collect();
         Self { input, writes }
     }
 
@@ -21438,9 +24323,15 @@ impl SetPropertyOperator {
         items: Vec<(String, String, Expression)>,
         entity_items: Vec<(String, bool, Expression)>,
     ) -> Self {
-        let mut writes: Vec<SetWrite> =
-            items.into_iter().map(|(v, p, e)| SetWrite::Property(v, p, e)).collect();
-        writes.extend(entity_items.into_iter().map(|(v, m, e)| SetWrite::Entity(v, m, e)));
+        let mut writes: Vec<SetWrite> = items
+            .into_iter()
+            .map(|(v, p, e)| SetWrite::Property(v, p, e))
+            .collect();
+        writes.extend(
+            entity_items
+                .into_iter()
+                .map(|(v, m, e)| SetWrite::Entity(v, m, e)),
+        );
         Self { input, writes }
     }
 
@@ -21512,7 +24403,11 @@ impl PhysicalOperator for SetPropertyOperator {
         self.input.next(store)
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if let Some(record) = self.input.next_mut(store, tenant_id)? {
             // Evaluate every property write's value first, before anything is
             // written, so `SET a.x = a.y, a.y = a.x` swaps. A whole-entity
@@ -21521,59 +24416,65 @@ impl PhysicalOperator for SetPropertyOperator {
             // An evaluation error is the statement's error. It used to become
             // `Null`, and a null SET *removes* the property: a call that failed
             // reported success and deleted what was there (#1897).
-            let evaluated: Vec<Option<PropertyValue>> = self.writes.iter().map(|w| {
-                let SetWrite::Property(_, _, expr) = w else { return Ok(None) };
-                let val = match eval_expression(expr, &record, store) {
-                    Ok(v) => match v {
-                        Value::Property(pv) => pv,
-                        Value::Null => PropertyValue::Null,
-                        // Degrades to ids, as the node and edge arms below do:
-                        // a `PropertyValue` cannot hold an entity.
-                        Value::Map(entries) => PropertyValue::Map(
-                            entries
-                                .iter()
-                                .map(|(k, v)| {
-                                    (
-                                        k.clone(),
-                                        match v {
-                                            Value::Property(p) => p.clone(),
-                                            Value::NodeRef(id) | Value::Node(id, _) => {
-                                                PropertyValue::Integer(id.as_u64() as i64)
-                                            }
-                                            Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                                                PropertyValue::Integer(id.as_u64() as i64)
-                                            }
-                                            _ => PropertyValue::Null,
-                                        },
-                                    )
-                                })
-                                .collect(),
-                        ),
-                        Value::List(items) => PropertyValue::Array(
-                            items
-                                .iter()
-                                .map(|i| match i {
-                                    Value::Property(p) => p.clone(),
-                                    Value::NodeRef(id) | Value::Node(id, _) => {
-                                        PropertyValue::Integer(id.as_u64() as i64)
-                                    }
-                                    Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
-                                        PropertyValue::Integer(id.as_u64() as i64)
-                                    }
-                                    _ => PropertyValue::Null,
-                                })
-                                .collect(),
-                        ),
-                        Value::NodeRef(id) => PropertyValue::Integer(id.as_u64() as i64),
-                        Value::Node(id, _) => PropertyValue::Integer(id.as_u64() as i64),
-                        Value::EdgeRef(id, ..) => PropertyValue::Integer(id.as_u64() as i64),
-                        Value::Edge(id, _) => PropertyValue::Integer(id.as_u64() as i64),
-                        Value::Path { .. } => PropertyValue::Null,
-                    },
-                    Err(e) => return Err(e),
-                };
-                Ok(Some(val))
-            }).collect::<ExecutionResult<_>>()?;
+            let evaluated: Vec<Option<PropertyValue>> = self
+                .writes
+                .iter()
+                .map(|w| {
+                    let SetWrite::Property(_, _, expr) = w else {
+                        return Ok(None);
+                    };
+                    let val = match eval_expression(expr, &record, store) {
+                        Ok(v) => match v {
+                            Value::Property(pv) => pv,
+                            Value::Null => PropertyValue::Null,
+                            // Degrades to ids, as the node and edge arms below do:
+                            // a `PropertyValue` cannot hold an entity.
+                            Value::Map(entries) => PropertyValue::Map(
+                                entries
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        (
+                                            k.clone(),
+                                            match v {
+                                                Value::Property(p) => p.clone(),
+                                                Value::NodeRef(id) | Value::Node(id, _) => {
+                                                    PropertyValue::Integer(id.as_u64() as i64)
+                                                }
+                                                Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                                                    PropertyValue::Integer(id.as_u64() as i64)
+                                                }
+                                                _ => PropertyValue::Null,
+                                            },
+                                        )
+                                    })
+                                    .collect(),
+                            ),
+                            Value::List(items) => PropertyValue::Array(
+                                items
+                                    .iter()
+                                    .map(|i| match i {
+                                        Value::Property(p) => p.clone(),
+                                        Value::NodeRef(id) | Value::Node(id, _) => {
+                                            PropertyValue::Integer(id.as_u64() as i64)
+                                        }
+                                        Value::EdgeRef(id, ..) | Value::Edge(id, _) => {
+                                            PropertyValue::Integer(id.as_u64() as i64)
+                                        }
+                                        _ => PropertyValue::Null,
+                                    })
+                                    .collect(),
+                            ),
+                            Value::NodeRef(id) => PropertyValue::Integer(id.as_u64() as i64),
+                            Value::Node(id, _) => PropertyValue::Integer(id.as_u64() as i64),
+                            Value::EdgeRef(id, ..) => PropertyValue::Integer(id.as_u64() as i64),
+                            Value::Edge(id, _) => PropertyValue::Integer(id.as_u64() as i64),
+                            Value::Path { .. } => PropertyValue::Null,
+                        },
+                        Err(e) => return Err(e),
+                    };
+                    Ok(Some(val))
+                })
+                .collect::<ExecutionResult<_>>()?;
 
             // A property is a scalar or a list of scalars. `SET a.maplist =
             // [{num: 1}]` stored an `Array([Map(..)])` -- something
@@ -21583,7 +24484,9 @@ impl PhysicalOperator for SetPropertyOperator {
             // is applied to the result instead, which covers whichever
             // converter produced it.
             for (w, val) in self.writes.iter().zip(&evaluated) {
-                let (SetWrite::Property(_, prop, _), Some(val)) = (w, val) else { continue };
+                let (SetWrite::Property(_, prop, _), Some(val)) = (w, val) else {
+                    continue;
+                };
                 if !property_is_storable(val) {
                     return Err(ExecutionError::TypeError(format!(
                         "InvalidPropertyType: `{prop}` cannot hold a map inside a list. \
@@ -21598,7 +24501,9 @@ impl PhysicalOperator for SetPropertyOperator {
                 let (var, prop, val) = match (w, val) {
                     (SetWrite::Property(var, prop, _), Some(val)) => (var, prop, val),
                     (SetWrite::Entity(var, merge, expr), _) => {
-                        let Some(target) = record.get(var).cloned() else { continue };
+                        let Some(target) = record.get(var).cloned() else {
+                            continue;
+                        };
                         let value = eval_expression(expr, &record, store)?;
                         apply_entity_assignment(&target, &value, *merge, store, tenant_id)?;
                         continue;
@@ -21618,7 +24523,8 @@ impl PhysicalOperator for SetPropertyOperator {
                             if remove {
                                 store.remove_node_property(*id, prop);
                             } else {
-                                store.set_node_property(tenant_id, *id, prop.clone(), val.clone())
+                                store
+                                    .set_node_property(tenant_id, *id, prop.clone(), val.clone())
                                     .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
                             }
                         }
@@ -21636,14 +24542,17 @@ impl PhysicalOperator for SetPropertyOperator {
                 }
             }
 
-
             Ok(Some(record))
         } else {
             Ok(None)
         }
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         self.input.next_batch(store, batch_size)
     }
 
@@ -21660,7 +24569,9 @@ impl PhysicalOperator for SetPropertyOperator {
         }
     }
 
-    fn is_mutating(&self) -> bool { true }
+    fn is_mutating(&self) -> bool {
+        true
+    }
 }
 
 /// Remove property operator: REMOVE n.name
@@ -21684,7 +24595,11 @@ pub struct LabelMutationOperator {
 }
 
 impl LabelMutationOperator {
-    pub fn new(input: OperatorBox, add: Vec<(String, Label)>, remove: Vec<(String, Label)>) -> Self {
+    pub fn new(
+        input: OperatorBox,
+        add: Vec<(String, Label)>,
+        remove: Vec<(String, Label)>,
+    ) -> Self {
         Self { input, add, remove }
     }
 }
@@ -21698,7 +24613,11 @@ impl PhysicalOperator for LabelMutationOperator {
         self.input.next(store)
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if let Some(record) = self.input.next_mut(store, tenant_id)? {
             for (var, label) in &self.add {
                 if let Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) = record.get(var) {
@@ -21724,7 +24643,11 @@ impl PhysicalOperator for LabelMutationOperator {
         }
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         self.input.next_batch(store, batch_size)
     }
 
@@ -21738,7 +24661,11 @@ impl PhysicalOperator for LabelMutationOperator {
             .iter()
             .map(|(v, l)| format!("+{}:{}", v, l.as_str()))
             .collect();
-        parts.extend(self.remove.iter().map(|(v, l)| format!("-{}:{}", v, l.as_str())));
+        parts.extend(
+            self.remove
+                .iter()
+                .map(|(v, l)| format!("-{}:{}", v, l.as_str())),
+        );
         OperatorDescription {
             name: "LabelMutation".to_string(),
             details: parts.join(", "),
@@ -21767,7 +24694,11 @@ impl PhysicalOperator for RemovePropertyOperator {
         self.input.next(store)
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if let Some(record) = self.input.next_mut(store, tenant_id)? {
             for (var, prop) in &self.items {
                 if let Some(node_val) = record.get(var) {
@@ -21795,7 +24726,11 @@ impl PhysicalOperator for RemovePropertyOperator {
         }
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         self.input.next_batch(store, batch_size)
     }
 
@@ -21804,7 +24739,11 @@ impl PhysicalOperator for RemovePropertyOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
-        let removes: Vec<String> = self.items.iter().map(|(v, p)| format!("{}.{}", v, p)).collect();
+        let removes: Vec<String> = self
+            .items
+            .iter()
+            .map(|(v, p)| format!("{}.{}", v, p))
+            .collect();
         OperatorDescription {
             name: "RemoveProperty".to_string(),
             details: removes.join(", "),
@@ -21812,7 +24751,9 @@ impl PhysicalOperator for RemovePropertyOperator {
         }
     }
 
-    fn is_mutating(&self) -> bool { true }
+    fn is_mutating(&self) -> bool {
+        true
+    }
 }
 
 /// UNWIND operator - expands a list expression into individual rows
@@ -21826,7 +24767,13 @@ pub struct UnwindOperator {
 
 impl UnwindOperator {
     pub fn new(input: OperatorBox, expression: Expression, variable: String) -> Self {
-        Self { input, expression, variable, buffer: Vec::new(), buffer_idx: 0 }
+        Self {
+            input,
+            expression,
+            variable,
+            buffer: Vec::new(),
+            buffer_idx: 0,
+        }
     }
 }
 
@@ -21835,7 +24782,11 @@ impl PhysicalOperator for UnwindOperator {
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
     // of this operator's own logic -- see `drain_input_for_write` (#870).
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         drain_input_for_write(&mut self.input, store, tenant_id)?;
         self.next(store)
     }
@@ -21875,9 +24826,10 @@ impl PhysicalOperator for UnwindOperator {
             }
             let items = match list_val {
                 Value::Property(PropertyValue::Array(arr)) => arr,
-                Value::Property(PropertyValue::Vector(vec)) => {
-                    vec.into_iter().map(|f| PropertyValue::Float(f as f64)).collect()
-                }
+                Value::Property(PropertyValue::Vector(vec)) => vec
+                    .into_iter()
+                    .map(|f| PropertyValue::Float(f as f64))
+                    .collect(),
                 _ => vec![],
             };
 
@@ -21891,7 +24843,11 @@ impl PhysicalOperator for UnwindOperator {
         }
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let mut records = Vec::new();
         for _ in 0..batch_size {
             match self.next(store)? {
@@ -21899,7 +24855,15 @@ impl PhysicalOperator for UnwindOperator {
                 None => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![self.variable.clone()], plan_hash: None })) }
+        if records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch {
+                records,
+                columns: vec![self.variable.clone()],
+                plan_hash: None,
+            }))
+        }
     }
 
     fn reset(&mut self) {
@@ -21911,7 +24875,11 @@ impl PhysicalOperator for UnwindOperator {
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
             name: "Unwind".to_string(),
-            details: format!("{} AS {}", format_expression(&self.expression), self.variable),
+            details: format!(
+                "{} AS {}",
+                format_expression(&self.expression),
+                self.variable
+            ),
             children: vec![self.input.describe()],
         }
     }
@@ -21963,8 +24931,9 @@ impl LoadCsvOperator {
         };
         let path = crate::query::csv_source::resolve(&source)
             .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
-        let file = std::fs::File::open(&path)
-            .map_err(|e| ExecutionError::RuntimeError(format!("LOAD CSV cannot open '{}': {e}", path.display())))?;
+        let file = std::fs::File::open(&path).map_err(|e| {
+            ExecutionError::RuntimeError(format!("LOAD CSV cannot open '{}': {e}", path.display()))
+        })?;
 
         let mut reader = csv::ReaderBuilder::new()
             .delimiter(self.clause.field_terminator.unwrap_or(',') as u8)
@@ -21977,7 +24946,11 @@ impl LoadCsvOperator {
         self.headers = if self.clause.with_headers {
             reader
                 .headers()
-                .map_err(|e| ExecutionError::RuntimeError(format!("LOAD CSV cannot read the header row: {e}")))?
+                .map_err(|e| {
+                    ExecutionError::RuntimeError(format!(
+                        "LOAD CSV cannot read the header row: {e}"
+                    ))
+                })?
                 .iter()
                 .map(|h| h.trim().to_string())
                 .collect()
@@ -21998,7 +24971,11 @@ impl LoadCsvOperator {
 }
 
 impl PhysicalOperator for LoadCsvOperator {
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         drain_input_for_write(&mut self.input, store, tenant_id)?;
         self.next(store)
     }
@@ -22067,7 +25044,11 @@ impl PhysicalOperator for LoadCsvOperator {
                 "{} AS {}{}",
                 format_expression(&self.clause.source),
                 self.clause.variable,
-                if self.clause.with_headers { " (with headers)" } else { "" }
+                if self.clause.with_headers {
+                    " (with headers)"
+                } else {
+                    ""
+                }
             ),
             children: vec![self.input.describe()],
         }
@@ -22315,10 +25296,16 @@ impl MergeOperator {
         on_create: Vec<(String, bool, Expression)>,
         on_match: Vec<(String, bool, Expression)>,
     ) -> Self {
-        self.on_create_writes
-            .extend(on_create.into_iter().map(|(v, m, e)| SetWrite::Entity(v, m, e)));
-        self.on_match_writes
-            .extend(on_match.into_iter().map(|(v, m, e)| SetWrite::Entity(v, m, e)));
+        self.on_create_writes.extend(
+            on_create
+                .into_iter()
+                .map(|(v, m, e)| SetWrite::Entity(v, m, e)),
+        );
+        self.on_match_writes.extend(
+            on_match
+                .into_iter()
+                .map(|(v, m, e)| SetWrite::Entity(v, m, e)),
+        );
         self
     }
 
@@ -22339,7 +25326,10 @@ impl MergeOperator {
         on_match_labels: Vec<(String, Vec<Label>)>,
     ) -> Self {
         let writes = |items: Vec<(String, String, Expression)>| {
-            items.into_iter().map(|(v, p, e)| SetWrite::Property(v, p, e)).collect()
+            items
+                .into_iter()
+                .map(|(v, p, e)| SetWrite::Property(v, p, e))
+                .collect()
         };
         Self {
             input: None,
@@ -22457,10 +25447,12 @@ impl MergeOperator {
         match props {
             Some(required) => {
                 let idx = node.id.as_u64() as usize;
-                required.iter().all(|(k, v)| match store.node_columns.get_property(idx, k) {
-                    PropertyValue::Null => node.properties.get(k).is_some_and(|pv| pv == v),
-                    col => &col == v,
-                })
+                required
+                    .iter()
+                    .all(|(k, v)| match store.node_columns.get_property(idx, k) {
+                        PropertyValue::Null => node.properties.get(k).is_some_and(|pv| pv == v),
+                        col => &col == v,
+                    })
             }
             None => true,
         }
@@ -22495,7 +25487,6 @@ impl MergeOperator {
         }
         None
     }
-
 
     /// MERGE over a pattern that contains relationships: find the whole pattern or create
     /// the whole pattern.
@@ -22533,7 +25524,14 @@ impl MergeOperator {
         // into `Outgoing` here, so `MERGE (a)-[r:KNOWS]-(b)` only ever looked
         // for `a -> b`. An existing `b -> a` did not match and MERGE created a
         // second relationship beside it (#938).
-        let mut pattern_rels: Vec<(usize, usize, EdgeType, HashMap<String, PropertyValue>, Option<String>, bool)> = Vec::new();
+        let mut pattern_rels: Vec<(
+            usize,
+            usize,
+            EdgeType,
+            HashMap<String, PropertyValue>,
+            Option<String>,
+            bool,
+        )> = Vec::new();
         for segment in &path.segments {
             pattern_nodes.push(&segment.node);
             let to = pattern_nodes.len() - 1;
@@ -22559,7 +25557,14 @@ impl MergeOperator {
             // orientation above is still (from, to) for `Both`. Only matching
             // has to look both ways.
             let undirected = matches!(segment.edge.direction, Direction::Both);
-            pattern_rels.push((a, b, edge_type, props, segment.edge.variable.clone(), undirected));
+            pattern_rels.push((
+                a,
+                b,
+                edge_type,
+                props,
+                segment.edge.variable.clone(),
+                undirected,
+            ));
         }
 
         // Candidate node ids per pattern position.
@@ -22653,11 +25658,17 @@ impl MergeOperator {
             // pattern gave them. Only the nodes were bound, so `MERGE
             // (a)-[r:R]->(b) RETURN r` failed with VariableNotFound and a named
             // path had nothing to build from (#903).
-            let mut matched_edges: Vec<crate::graph::types::EdgeId> = Vec::with_capacity(pattern_rels.len());
+            let mut matched_edges: Vec<crate::graph::types::EdgeId> =
+                Vec::with_capacity(pattern_rels.len());
             for (from, to, ty, props, var, undirected) in &pattern_rels {
-                let Some(edge_id) =
-                    Self::merge_edge_match(store, assignment[*from], assignment[*to], ty, props, *undirected)
-                else {
+                let Some(edge_id) = Self::merge_edge_match(
+                    store,
+                    assignment[*from],
+                    assignment[*to],
+                    ty,
+                    props,
+                    *undirected,
+                ) else {
                     continue;
                 };
                 matched_edges.push(edge_id);
@@ -22671,7 +25682,10 @@ impl MergeOperator {
             if let Some(path_var) = &path.path_variable {
                 record.bind(
                     path_var.clone(),
-                    Value::Path { nodes: assignment.clone(), edges: matched_edges },
+                    Value::Path {
+                        nodes: assignment.clone(),
+                        edges: matched_edges,
+                    },
                 );
             }
             let writes = self.on_match_writes.clone();
@@ -22698,7 +25712,8 @@ impl MergeOperator {
             let node_id = store.create_node_with_labels(np.labels.iter().cloned());
             if let Some(required) = node_props[i].as_ref() {
                 for (k, v) in required {
-                    if let Err(e) = store.set_node_property(tenant_id, node_id, k.clone(), v.clone())
+                    if let Err(e) =
+                        store.set_node_property(tenant_id, node_id, k.clone(), v.clone())
                     {
                         // A rejected property must not leave a half-built node behind.
                         let _ = store.delete_node(tenant_id, node_id);
@@ -22711,7 +25726,8 @@ impl MergeOperator {
             }
             created.push(node_id);
         }
-        let mut created_edges: Vec<crate::graph::types::EdgeId> = Vec::with_capacity(pattern_rels.len());
+        let mut created_edges: Vec<crate::graph::types::EdgeId> =
+            Vec::with_capacity(pattern_rels.len());
         for (from, to, edge_type, props, var, _undirected) in &pattern_rels {
             let edge_id = store
                 .create_edge(created[*from], created[*to], edge_type.clone())
@@ -22730,7 +25746,10 @@ impl MergeOperator {
         if let Some(path_var) = &path.path_variable {
             record.bind(
                 path_var.clone(),
-                Value::Path { nodes: created.clone(), edges: created_edges },
+                Value::Path {
+                    nodes: created.clone(),
+                    edges: created_edges,
+                },
             );
         }
 
@@ -22792,7 +25811,14 @@ impl MergeOperator {
 
     fn search(
         candidates: &[Vec<NodeId>],
-        rels: &[(usize, usize, EdgeType, HashMap<String, PropertyValue>, Option<String>, bool)],
+        rels: &[(
+            usize,
+            usize,
+            EdgeType,
+            HashMap<String, PropertyValue>,
+            Option<String>,
+            bool,
+        )],
         store: &GraphStore,
         assignment: &mut Vec<NodeId>,
     ) -> Option<Vec<NodeId>> {
@@ -22811,8 +25837,15 @@ impl MergeOperator {
                 if *from > i || *to > i {
                     return true;
                 }
-                Self::merge_edge_match(store, assignment[*from], assignment[*to], ty, props, *undirected)
-                    .is_some()
+                Self::merge_edge_match(
+                    store,
+                    assignment[*from],
+                    assignment[*to],
+                    ty,
+                    props,
+                    *undirected,
+                )
+                .is_some()
             });
             if ok {
                 if let Some(found) = Self::search(candidates, rels, store, assignment) {
@@ -22859,7 +25892,9 @@ impl MergeOperator {
                 }
                 // `ON CREATE SET n = {…}` / `n += {…}` (#874).
                 SetWrite::Entity(var, merge, expr) => {
-                    let Some(target) = record.get(var).cloned() else { continue };
+                    let Some(target) = record.get(var).cloned() else {
+                        continue;
+                    };
                     let value = eval_expression(expr, record, store)?;
                     apply_entity_assignment(&target, &value, *merge, store, tenant_id)?;
                 }
@@ -22872,11 +25907,15 @@ impl MergeOperator {
 impl PhysicalOperator for MergeOperator {
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
-            "MergeOperator requires mutable store access. Use next_mut instead.".to_string()
+            "MergeOperator requires mutable store access. Use next_mut instead.".to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         // With an upstream, the clause runs once per incoming row and each row
         // seeds the merge; without one it is a leaf that runs exactly once.
         // Taking the input out first keeps the borrow checker happy while the
@@ -22905,8 +25944,9 @@ impl PhysicalOperator for MergeOperator {
             }
         };
 
-        let path = self.pattern.paths.first()
-            .ok_or_else(|| ExecutionError::PlanningError("MERGE pattern has no paths".to_string()))?;
+        let path = self.pattern.paths.first().ok_or_else(|| {
+            ExecutionError::PlanningError("MERGE pattern has no paths".to_string())
+        })?;
 
         // A MERGE pattern containing relationships is match-or-create over the *whole*
         // pattern, per openCypher: if the entire pattern does not already exist, the
@@ -22956,13 +25996,17 @@ impl PhysicalOperator for MergeOperator {
             // node.
             Some(id) => vec![id],
             None => {
-                let candidates: Vec<&crate::graph::Node> = match Self::index_candidates(store, labels, props) {
-                    Some(hits) => hits.into_iter().filter_map(|id| store.get_node(id)).collect(),
-                    None => match labels.first() {
-                        Some(first_label) => store.get_nodes_by_label(first_label),
-                        None => store.all_nodes(),
-                    },
-                };
+                let candidates: Vec<&crate::graph::Node> =
+                    match Self::index_candidates(store, labels, props) {
+                        Some(hits) => hits
+                            .into_iter()
+                            .filter_map(|id| store.get_node(id))
+                            .collect(),
+                        None => match labels.first() {
+                            Some(first_label) => store.get_nodes_by_label(first_label),
+                            None => store.all_nodes(),
+                        },
+                    };
                 candidates
                     .into_iter()
                     .filter(|node| Self::node_matches(store, node, labels, props))
@@ -23003,7 +26047,8 @@ impl PhysicalOperator for MergeOperator {
 
             if let Some(required_props) = props {
                 for (k, v) in required_props {
-                    if let Err(e) = store.set_node_property(tenant_id, node_id, k.clone(), v.clone())
+                    if let Err(e) =
+                        store.set_node_property(tenant_id, node_id, k.clone(), v.clone())
                     {
                         // A rejected property must not leave a half-built node behind.
                         let _ = store.delete_node(tenant_id, node_id);
@@ -23022,7 +26067,11 @@ impl PhysicalOperator for MergeOperator {
         Ok(Some(record))
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let mut records = Vec::new();
         for _ in 0..batch_size {
             match self.next(store) {
@@ -23030,7 +26079,15 @@ impl PhysicalOperator for MergeOperator {
                 _ => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None })) }
+        if records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch {
+                records,
+                columns: vec![],
+                plan_hash: None,
+            }))
+        }
     }
 
     fn reset(&mut self) {
@@ -23084,7 +26141,12 @@ impl ForeachOperator {
         list_expr: Expression,
         body: Vec<crate::query::ast::ForeachBody>,
     ) -> Self {
-        Self { input, variable, list_expr, body }
+        Self {
+            input,
+            variable,
+            list_expr,
+            body,
+        }
     }
 }
 
@@ -23095,17 +26157,23 @@ impl PhysicalOperator for ForeachOperator {
 
     fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
         Err(ExecutionError::RuntimeError(
-            "ForeachOperator requires mutable store access. Use next_mut instead.".to_string()
+            "ForeachOperator requires mutable store access. Use next_mut instead.".to_string(),
         ))
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         let Some(record) = self.input.next_mut(store, tenant_id)? else {
             return Ok(None);
         };
         let items: Vec<Value> = match eval_expression(&self.list_expr, &record, store)? {
             Value::List(items) => items,
-            Value::Property(PropertyValue::Array(arr)) => arr.into_iter().map(Value::Property).collect(),
+            Value::Property(PropertyValue::Array(arr)) => {
+                arr.into_iter().map(Value::Property).collect()
+            }
             // A null list is an empty one, as it is for UNWIND.
             Value::Null | Value::Property(PropertyValue::Null) => Vec::new(),
             other => {
@@ -23117,8 +26185,11 @@ impl PhysicalOperator for ForeachOperator {
         for item in items {
             let mut inner = record.clone();
             inner.bind(self.variable.clone(), item);
-            let bound: std::collections::HashSet<String> =
-                inner.bindings().iter().map(|(name, _)| name.to_string()).collect();
+            let bound: std::collections::HashSet<String> = inner
+                .bindings()
+                .iter()
+                .map(|(name, _)| name.to_string())
+                .collect();
             let mut body = crate::query::executor::planner::QueryPlanner::plan_foreach_body(
                 Box::new(MaterializedOperator::new(vec![inner])),
                 &self.body,
@@ -23129,7 +26200,11 @@ impl PhysicalOperator for ForeachOperator {
         Ok(Some(record))
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let mut records = Vec::new();
         for _ in 0..batch_size {
             match self.next(store) {
@@ -23137,7 +26212,15 @@ impl PhysicalOperator for ForeachOperator {
                 _ => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None })) }
+        if records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch {
+                records,
+                columns: vec![],
+                plan_hash: None,
+            }))
+        }
     }
 
     fn reset(&mut self) {
@@ -23177,7 +26260,7 @@ pub struct ShortestPathOperator {
     path_var: Option<String>,
     edge_types: Vec<String>,
     direction: Direction,
-    all_paths: bool,  // false = shortestPath, true = allShortestPaths
+    all_paths: bool, // false = shortestPath, true = allShortestPaths
     results: std::vec::IntoIter<Record>,
     executed: bool,
     /// `edge_types` resolved to interned ids, cached after the first use.
@@ -23261,12 +26344,18 @@ impl ShortestPathOperator {
             if is_null(&self.source_var) || is_null(&self.target_var) {
                 continue;
             }
-            let source_id = record.get(&self.source_var)
+            let source_id = record
+                .get(&self.source_var)
                 .and_then(|v| v.node_id())
-                .ok_or_else(|| ExecutionError::RuntimeError("shortestPath source not a node".to_string()))?;
-            let target_id = record.get(&self.target_var)
+                .ok_or_else(|| {
+                    ExecutionError::RuntimeError("shortestPath source not a node".to_string())
+                })?;
+            let target_id = record
+                .get(&self.target_var)
                 .and_then(|v| v.node_id())
-                .ok_or_else(|| ExecutionError::RuntimeError("shortestPath target not a node".to_string()))?;
+                .ok_or_else(|| {
+                    ExecutionError::RuntimeError("shortestPath target not a node".to_string())
+                })?;
 
             // BFS to find shortest path(s)
             let paths = self.bfs_shortest(store, source_id, target_id, type_filter);
@@ -23275,20 +26364,26 @@ impl ShortestPathOperator {
                 for path in paths {
                     let mut new_record = record.clone();
                     if let Some(ref pv) = self.path_var {
-                        new_record.bind(pv.clone(), Value::Path {
-                            nodes: path.0,
-                            edges: path.1,
-                        });
+                        new_record.bind(
+                            pv.clone(),
+                            Value::Path {
+                                nodes: path.0,
+                                edges: path.1,
+                            },
+                        );
                     }
                     all_results.push(new_record);
                 }
             } else if let Some(path) = paths.into_iter().next() {
                 let mut new_record = record.clone();
                 if let Some(ref pv) = self.path_var {
-                    new_record.bind(pv.clone(), Value::Path {
-                        nodes: path.0,
-                        edges: path.1,
-                    });
+                    new_record.bind(
+                        pv.clone(),
+                        Value::Path {
+                            nodes: path.0,
+                            edges: path.1,
+                        },
+                    );
                 }
                 all_results.push(new_record);
             }
@@ -23595,7 +26690,11 @@ impl PhysicalOperator for ShortestPathOperator {
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
     // of this operator's own logic -- see `drain_input_for_write` (#870).
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         drain_input_for_write(&mut self.input, store, tenant_id)?;
         self.next(store)
     }
@@ -23608,7 +26707,11 @@ impl PhysicalOperator for ShortestPathOperator {
     /// `Unknown` — the operator inherited the trait's default. A plan nobody
     /// can read is a plan nobody profiles, which is how #516 went unexamined.
     fn describe(&self) -> OperatorDescription {
-        let kind = if self.all_paths { "AllShortestPaths" } else { "ShortestPath" };
+        let kind = if self.all_paths {
+            "AllShortestPaths"
+        } else {
+            "ShortestPath"
+        };
         let types = if self.edge_types.is_empty() {
             String::new()
         } else {
@@ -23631,7 +26734,11 @@ impl PhysicalOperator for ShortestPathOperator {
         Ok(self.results.next())
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
             self.execute_all(store)?;
         }
@@ -23642,7 +26749,15 @@ impl PhysicalOperator for ShortestPathOperator {
                 None => break,
             }
         }
-        if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: vec![], plan_hash: None })) }
+        if records.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(RecordBatch {
+                records,
+                columns: vec![],
+                plan_hash: None,
+            }))
+        }
     }
 
     fn reset(&mut self) {
@@ -23747,7 +26862,6 @@ impl WithBarrierOperator {
         }
     }
 
-
     /// Evaluate an ORDER BY or WHERE expression against a projected row,
     /// widened with the pre-projection bindings `carry_sort_scope` copied in.
     ///
@@ -23762,7 +26876,11 @@ impl WithBarrierOperator {
     /// An evaluation error is returned, as in `SortOperator::key_of_cached`:
     /// folded to `Null`, a failing key sorted by nothing and a failing WHERE
     /// dropped every row, both silently (#987).
-    fn eval_sort_key(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
+    fn eval_sort_key(
+        expr: &Expression,
+        record: &Record,
+        store: &GraphStore,
+    ) -> ExecutionResult<Value> {
         let mut names = HashSet::new();
         collect_expression_names(expr, &mut names);
         let mut widened: Option<Record> = None;
@@ -23776,16 +26894,18 @@ impl WithBarrierOperator {
         Self::evaluate_expression(expr, target, store)
     }
 
-    fn evaluate_expression(expr: &Expression, record: &Record, store: &GraphStore) -> ExecutionResult<Value> {
+    fn evaluate_expression(
+        expr: &Expression,
+        record: &Record,
+        store: &GraphStore,
+    ) -> ExecutionResult<Value> {
         match expr {
             // Delegates rather than adding a sixth copy of this logic; the
             // standalone evaluator is the one implementation (#654).
             Expression::ListExpr(_) | Expression::MapExpr(_) => {
                 eval_expression(expr, record, store)
             }
-            Expression::Variable(var) => {
-                Ok(record.get(var).cloned().unwrap_or(Value::Null))
-            }
+            Expression::Variable(var) => Ok(record.get(var).cloned().unwrap_or(Value::Null)),
             Expression::Property { variable, property } => {
                 read_property(record, variable, property, store, true)
             }
@@ -23803,14 +26923,22 @@ impl WithBarrierOperator {
                 eval_unary_op(op, val)
             }
             Expression::Function { name, args, .. } => {
-                let arg_vals: Vec<Value> = args.iter()
+                let arg_vals: Vec<Value> = args
+                    .iter()
                     .map(|a| Self::evaluate_expression(a, record, store))
                     .collect::<ExecutionResult<Vec<_>>>()?;
                 eval_function(name, &arg_vals, Some(store))
             }
-            Expression::Case { operand, when_clauses, else_result } => {
-                eval_case(operand.as_deref(), when_clauses, else_result.as_deref(), |e| Self::evaluate_expression(e, record, store))
-            }
+            Expression::Case {
+                operand,
+                when_clauses,
+                else_result,
+            } => eval_case(
+                operand.as_deref(),
+                when_clauses,
+                else_result.as_deref(),
+                |e| Self::evaluate_expression(e, record, store),
+            ),
             Expression::Index { expr, index } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
                 let idx = Self::evaluate_expression(index, record, store)?;
@@ -23818,25 +26946,61 @@ impl WithBarrierOperator {
             }
             Expression::ListSlice { expr, start, end } => {
                 let collection = Self::evaluate_expression(expr, record, store)?;
-                let s = match start { Some(s) => Some(Self::evaluate_expression(s, record, store)?), None => None };
-                let en = match end { Some(e) => Some(Self::evaluate_expression(e, record, store)?), None => None };
+                let s = match start {
+                    Some(s) => Some(Self::evaluate_expression(s, record, store)?),
+                    None => None,
+                };
+                let en = match end {
+                    Some(e) => Some(Self::evaluate_expression(e, record, store)?),
+                    None => None,
+                };
                 eval_list_slice(collection, s, en)
             }
-            Expression::ExistsSubquery { pattern, where_clause, count, .. } => {
-                eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store)
-            }
-            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
-                eval_list_comprehension(variable, list_expr, filter.as_deref(), map_expr, record, store)
-            }
-            Expression::PredicateFunction { name, variable, list_expr, predicate } => {
-                eval_predicate_function(name, variable, list_expr, predicate, record, store)
-            }
-            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
-                eval_reduce(accumulator, init, variable, list_expr, expression, record, store)
-            }
-            Expression::PatternComprehension { pattern, filter, projection } => {
-                eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store)
-            }
+            Expression::ExistsSubquery {
+                pattern,
+                where_clause,
+                count,
+                ..
+            } => eval_exists_subquery(pattern, where_clause.as_deref(), *count, record, store),
+            Expression::ListComprehension {
+                variable,
+                list_expr,
+                filter,
+                map_expr,
+            } => eval_list_comprehension(
+                variable,
+                list_expr,
+                filter.as_deref(),
+                map_expr,
+                record,
+                store,
+            ),
+            Expression::PredicateFunction {
+                name,
+                variable,
+                list_expr,
+                predicate,
+            } => eval_predicate_function(name, variable, list_expr, predicate, record, store),
+            Expression::Reduce {
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                expression,
+            } => eval_reduce(
+                accumulator,
+                init,
+                variable,
+                list_expr,
+                expression,
+                record,
+                store,
+            ),
+            Expression::PatternComprehension {
+                pattern,
+                filter,
+                projection,
+            } => eval_pattern_comprehension(pattern, filter.as_deref(), projection, record, store),
             Expression::PathVariable(var) => {
                 record.get(var).cloned().ok_or_else(|| unbound(record, var))
             }
@@ -23861,7 +27025,10 @@ impl WithBarrierOperator {
                     }
 
                     let states = groups.entry(key).or_insert_with(|| {
-                        self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect()
+                        self.aggregates
+                            .iter()
+                            .map(|agg| AggregatorState::new(&agg.func, agg.distinct))
+                            .collect()
                     });
 
                     for (i, agg) in self.aggregates.iter().enumerate() {
@@ -23889,7 +27056,10 @@ impl WithBarrierOperator {
             if groups.is_empty() && self.group_by.is_empty() {
                 groups.insert(
                     Vec::new(),
-                    self.aggregates.iter().map(|agg| AggregatorState::new(&agg.func, agg.distinct)).collect(),
+                    self.aggregates
+                        .iter()
+                        .map(|agg| AggregatorState::new(&agg.func, agg.distinct))
+                        .collect(),
                 );
             }
 
@@ -23976,8 +27146,7 @@ impl WithBarrierOperator {
         if self.distinct {
             let mut seen: HashSet<Vec<Value>> = HashSet::new();
             output_records.retain(|record| {
-                let vals: Vec<Value> =
-                    record.dedup_key().into_iter().map(|(_, v)| v).collect();
+                let vals: Vec<Value> = record.dedup_key().into_iter().map(|(_, v)| v).collect();
                 seen.insert(vals)
             });
         }
@@ -24071,7 +27240,11 @@ impl PhysicalOperator for WithBarrierOperator {
     /// helpers, which are the most intricate code in this file. A barrier
     /// materialises its whole input anyway, so nothing is buffered that would
     /// not have been.
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             let mut rows = Vec::new();
             while let Some(batch) = self.input.next_batch_mut(store, tenant_id, 65536)? {
@@ -24089,7 +27262,11 @@ impl PhysicalOperator for WithBarrierOperator {
         Ok(self.results.next())
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
             self.execute_all(store)?;
         }
@@ -24106,7 +27283,11 @@ impl PhysicalOperator for WithBarrierOperator {
         if batch.is_empty() {
             Ok(None)
         } else {
-            Ok(Some(RecordBatch { records: batch, columns: Vec::new(), plan_hash: None }))
+            Ok(Some(RecordBatch {
+                records: batch,
+                columns: Vec::new(),
+                plan_hash: None,
+            }))
         }
     }
 
@@ -24117,14 +27298,24 @@ impl PhysicalOperator for WithBarrierOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
-        let item_strs: Vec<String> = self.items.iter().map(|(e, a)| {
-            format!("{} AS {}", format_expression(e), a)
-        }).collect();
+        let item_strs: Vec<String> = self
+            .items
+            .iter()
+            .map(|(e, a)| format!("{} AS {}", format_expression(e), a))
+            .collect();
         let mut details = format!("items=[{}]", item_strs.join(", "));
-        if self.distinct { details.push_str(", DISTINCT"); }
-        if !self.sort_items.is_empty() { details.push_str(", ORDER BY"); }
-        if self.skip.is_some() { details.push_str(&format!(", SKIP {}", self.skip.unwrap())); }
-        if self.limit.is_some() { details.push_str(&format!(", LIMIT {}", self.limit.unwrap())); }
+        if self.distinct {
+            details.push_str(", DISTINCT");
+        }
+        if !self.sort_items.is_empty() {
+            details.push_str(", ORDER BY");
+        }
+        if self.skip.is_some() {
+            details.push_str(&format!(", SKIP {}", self.skip.unwrap()));
+        }
+        if self.limit.is_some() {
+            details.push_str(&format!(", LIMIT {}", self.limit.unwrap()));
+        }
         OperatorDescription {
             name: "WithBarrier".to_string(),
             details,
@@ -24177,7 +27368,11 @@ impl PhysicalOperator for ExpandIntoOperator {
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
     // of this operator's own logic -- see `drain_input_for_write` (#870).
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         drain_input_for_write(&mut self.input, store, tenant_id)?;
         self.next(store)
     }
@@ -24196,7 +27391,12 @@ impl PhysicalOperator for ExpandIntoOperator {
                         if let Some(edge) = store.get_edge(edge_id) {
                             new_record.bind(
                                 edge_var.clone(),
-                                Value::EdgeRef(edge_id, edge.source, edge.target, edge.edge_type.clone()),
+                                Value::EdgeRef(
+                                    edge_id,
+                                    edge.source,
+                                    edge.target,
+                                    edge.edge_type.clone(),
+                                ),
                             );
                         } else if let Some(edge_type) = store.get_edge_type(edge_id) {
                             let (s, t) = (
@@ -24204,7 +27404,10 @@ impl PhysicalOperator for ExpandIntoOperator {
                                 record.get(&self.target_binding).and_then(|v| v.node_id()),
                             );
                             if let (Some(s), Some(t)) = (s, t) {
-                                new_record.bind(edge_var.clone(), Value::EdgeRef(edge_id, s, t, edge_type));
+                                new_record.bind(
+                                    edge_var.clone(),
+                                    Value::EdgeRef(edge_id, s, t, edge_type),
+                                );
                             }
                         }
                     }
@@ -24218,11 +27421,13 @@ impl PhysicalOperator for ExpandIntoOperator {
                 None => return Ok(None),
             };
 
-            let source_id = record.get(&self.source_binding)
+            let source_id = record
+                .get(&self.source_binding)
                 .and_then(|v| v.node_id())
                 .ok_or_else(|| ExecutionError::VariableNotFound(self.source_binding.clone()))?;
 
-            let target_id = record.get(&self.target_binding)
+            let target_id = record
+                .get(&self.target_binding)
                 .and_then(|v| v.node_id())
                 .ok_or_else(|| ExecutionError::VariableNotFound(self.target_binding.clone()))?;
 
@@ -24235,7 +27440,11 @@ impl PhysicalOperator for ExpandIntoOperator {
         }
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let mut records = Vec::new();
         for _ in 0..batch_size {
             match self.next(store)? {
@@ -24263,7 +27472,10 @@ impl PhysicalOperator for ExpandIntoOperator {
         let type_str = self.edge_type.as_deref().unwrap_or("*");
         OperatorDescription {
             name: "ExpandInto".to_string(),
-            details: format!("({})--[:{}]-->({})", self.source_binding, type_str, self.target_binding),
+            details: format!(
+                "({})--[:{}]-->({})",
+                self.source_binding, type_str, self.target_binding
+            ),
             children: vec![self.input.describe()],
         }
     }
@@ -24326,7 +27538,11 @@ impl PhysicalOperator for NodeByIdOperator {
         Ok(None)
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let mut records = Vec::new();
         for _ in 0..batch_size {
             match self.next(store)? {
@@ -24352,7 +27568,14 @@ impl PhysicalOperator for NodeByIdOperator {
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
             name: "NodeById".to_string(),
-            details: format!("var={}, ids={:?}", self.variable, self.node_ids.iter().map(|id| id.as_u64()).collect::<Vec<_>>()),
+            details: format!(
+                "var={}, ids={:?}",
+                self.variable,
+                self.node_ids
+                    .iter()
+                    .map(|id| id.as_u64())
+                    .collect::<Vec<_>>()
+            ),
             children: Vec::new(),
         }
     }
@@ -24401,8 +27624,8 @@ mod tests {
         for _ in 0..1000 {
             store.create_node("Person");
         }
-        let mut op = NodeScanOperator::new("n".to_string(), vec![Label::new("Person")])
-            .with_early_limit(7);
+        let mut op =
+            NodeScanOperator::new("n".to_string(), vec![Label::new("Person")]).with_early_limit(7);
         let mut count = 0;
         while let Ok(Some(_)) = op.next(&store) {
             count += 1;
@@ -24421,7 +27644,10 @@ mod tests {
         );
         let mut limit = LimitOperator::new(Box::new(project), 5);
 
-        assert!(limit.try_push_limit(5), "LimitOperator should forward to child");
+        assert!(
+            limit.try_push_limit(5),
+            "LimitOperator should forward to child"
+        );
         // After push, scan should have early_limit=5. We can't inspect through
         // the box, but we verify behaviorally on a 100-node store.
         let mut store = GraphStore::new();
@@ -24489,7 +27715,10 @@ mod tests {
             Box::new(MaterializedOperator::new(x_rows(values))),
             vec![(Expression::Variable("x".to_string()), false)],
         );
-        let mut all = drain_x(&mut DistinctOperator::new(Box::new(sort)), &GraphStore::new());
+        let mut all = drain_x(
+            &mut DistinctOperator::new(Box::new(sort)),
+            &GraphStore::new(),
+        );
         all.truncate(k);
         all
     }
@@ -24574,7 +27803,9 @@ mod tests {
     fn the_typed_integer_order_matches_a_plain_i64_sort_on_random_inputs() {
         let mut seed: u64 = 0xc0ffee;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as i64 - (1 << 30)
         };
         for n in [0usize, 1, 2, 3, 17, 1_000, 5_000] {
@@ -24608,7 +27839,10 @@ mod tests {
                     None => PropertyValue::Null,
                 };
                 r.bind("x".to_string(), Value::Property(xv));
-                r.bind("y".to_string(), Value::Property(PropertyValue::String(y.to_string())));
+                r.bind(
+                    "y".to_string(),
+                    Value::Property(PropertyValue::String(y.to_string())),
+                );
                 r
             })
             .collect()
@@ -24652,7 +27886,10 @@ mod tests {
             (Some("Ali"), "Bo"),
         ];
         SORT_TYPED_ROWS.with(|c| c.set(0));
-        let got = drain_xy(&mut xy_sort(xy_rows(&input), true, true), &GraphStore::new());
+        let got = drain_xy(
+            &mut xy_sort(xy_rows(&input), true, true),
+            &GraphStore::new(),
+        );
         assert_eq!(
             SORT_TYPED_ROWS.with(|c| c.get()),
             input.len() as u64,
@@ -24661,7 +27898,13 @@ mod tests {
         let s = |a: &str, b: &str| (a.to_string(), b.to_string());
         assert_eq!(
             got,
-            vec![s("", "x"), s("Ali", "Bo"), s("Ali", "Zed"), s("Smith", "Al"), s("Smith", "Ann")]
+            vec![
+                s("", "x"),
+                s("Ali", "Bo"),
+                s("Ali", "Zed"),
+                s("Smith", "Al"),
+                s("Smith", "Ann")
+            ]
         );
     }
 
@@ -24670,8 +27913,15 @@ mod tests {
         let input = [(Some("b"), "1"), (None, "2"), (Some("a"), "3")];
         SORT_TYPED_ROWS.with(|c| c.set(0));
         SORT_COMPARISONS.with(|c| c.set(0));
-        let got = drain_xy(&mut xy_sort(xy_rows(&input), true, true), &GraphStore::new());
-        assert_eq!(SORT_TYPED_ROWS.with(|c| c.get()), 0, "a null must send the key to the generic path");
+        let got = drain_xy(
+            &mut xy_sort(xy_rows(&input), true, true),
+            &GraphStore::new(),
+        );
+        assert_eq!(
+            SORT_TYPED_ROWS.with(|c| c.get()),
+            0,
+            "a null must send the key to the generic path"
+        );
         assert!(SORT_COMPARISONS.with(|c| c.get()) > 0);
         // Null sorts last ascending, as openCypher orders it.
         let s = |a: &str, b: &str| (a.to_string(), b.to_string());
@@ -24682,7 +27932,9 @@ mod tests {
     fn the_typed_string_order_matches_a_plain_str_sort_on_random_inputs() {
         let mut seed: u64 = 0x5eed;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as usize
         };
         // Few distinct values, so ties on the first part are common and the
@@ -24691,11 +27943,19 @@ mod tests {
         let words = ["", "a", "ab", "b", "B", "\u{e9}", "zz"];
         for n in [0usize, 1, 2, 17, 1_000, 3_000] {
             let input: Vec<(Option<&str>, &str)> = (0..n)
-                .map(|_| (Some(words[next() % words.len()]), words[next() % words.len()]))
+                .map(|_| {
+                    (
+                        Some(words[next() % words.len()]),
+                        words[next() % words.len()],
+                    )
+                })
                 .collect();
             for (x_asc, y_asc) in [(true, true), (true, false), (false, true), (false, false)] {
                 SORT_TYPED_ROWS.with(|c| c.set(0));
-                let got = drain_xy(&mut xy_sort(xy_rows(&input), x_asc, y_asc), &GraphStore::new());
+                let got = drain_xy(
+                    &mut xy_sort(xy_rows(&input), x_asc, y_asc),
+                    &GraphStore::new(),
+                );
                 let mut expected: Vec<(usize, (String, String))> = input
                     .iter()
                     .map(|(x, y)| (x.unwrap().to_string(), y.to_string()))
@@ -24706,7 +27966,8 @@ mod tests {
                     let oy = if y_asc { a.1.cmp(&b.1) } else { b.1.cmp(&a.1) };
                     ox.then(oy).then(ia.cmp(ib))
                 });
-                let expected: Vec<(String, String)> = expected.into_iter().map(|(_, p)| p).collect();
+                let expected: Vec<(String, String)> =
+                    expected.into_iter().map(|(_, p)| p).collect();
                 assert_eq!(got, expected, "n = {n}, directions = ({x_asc}, {y_asc})");
                 assert_eq!(
                     SORT_TYPED_ROWS.with(|c| c.get()),
@@ -24744,7 +28005,11 @@ mod tests {
         values.extend((0..2_000).map(|i| (i * 37 % 5_000) as i64));
         for k in [1usize, 10, 100, 4_000] {
             let mut plan = distinct_limit_plan(&values, k);
-            assert_eq!(drain_x(&mut plan, &GraphStore::new()), full_sort_then_k(&values, k), "k = {k}");
+            assert_eq!(
+                drain_x(&mut plan, &GraphStore::new()),
+                full_sort_then_k(&values, k),
+                "k = {k}"
+            );
         }
     }
 
@@ -24752,7 +28017,9 @@ mod tests {
     fn distinct_limit_matches_a_full_sort_on_random_inputs() {
         let mut seed: u64 = 0x5eed;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as i64
         };
         for (n, range) in [(1usize, 5i64), (50, 10), (2_000, 100), (10_000, 50_000)] {
@@ -24893,21 +28160,23 @@ mod tests {
         let mut store = GraphStore::new();
         for i in 0..10 {
             let id = store.create_node("Person");
-            store.set_node_property("default", id, "id", i as i64).unwrap();
+            store
+                .set_node_property("default", id, "id", i as i64)
+                .unwrap();
         }
 
         let mut op = NodeScanOperator::new("n".to_string(), vec![Label::new("Person")]);
-        
+
         // Request batch size 4
         let batch1 = op.next_batch(&store, 4).unwrap().unwrap();
         assert_eq!(batch1.len(), 4);
-        
+
         let batch2 = op.next_batch(&store, 4).unwrap().unwrap();
         assert_eq!(batch2.len(), 4);
-        
+
         let batch3 = op.next_batch(&store, 4).unwrap().unwrap();
         assert_eq!(batch3.len(), 2); // Remaining
-        
+
         let batch4 = op.next_batch(&store, 4).unwrap();
         assert!(batch4.is_none());
     }
@@ -24919,13 +28188,26 @@ mod tests {
         store.set_node_property("default", id, "age", 30).unwrap();
 
         let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("Person")]);
-        let mut project = ProjectOperator::new(Box::new(scan), vec![
-            (Expression::Property { variable: "n".to_string(), property: "age".to_string() }, "age".to_string())
-        ]);
+        let mut project = ProjectOperator::new(
+            Box::new(scan),
+            vec![(
+                Expression::Property {
+                    variable: "n".to_string(),
+                    property: "age".to_string(),
+                },
+                "age".to_string(),
+            )],
+        );
 
         let batch = project.next_batch(&store, 10).unwrap().unwrap();
         assert_eq!(batch.len(), 1);
-        let age = batch.records[0].get("age").unwrap().as_property().unwrap().as_integer().unwrap();
+        let age = batch.records[0]
+            .get("age")
+            .unwrap()
+            .as_property()
+            .unwrap()
+            .as_integer()
+            .unwrap();
         assert_eq!(age, 30);
     }
 
@@ -24934,13 +28216,18 @@ mod tests {
         let mut store = GraphStore::new();
         for i in 0..10 {
             let id = store.create_node("Person");
-            store.set_node_property("default", id, "val", i as i64).unwrap();
+            store
+                .set_node_property("default", id, "val", i as i64)
+                .unwrap();
         }
 
         let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("Person")]);
         // Filter val >= 5
         let predicate = Expression::Binary {
-            left: Box::new(Expression::Property { variable: "n".to_string(), property: "val".to_string() }),
+            left: Box::new(Expression::Property {
+                variable: "n".to_string(),
+                property: "val".to_string(),
+            }),
             op: BinaryOp::Ge,
             right: Box::new(Expression::Literal(PropertyValue::Integer(5))),
         };
@@ -24952,7 +28239,12 @@ mod tests {
         let batch = filter.next_batch(&store, 10).unwrap().unwrap();
         assert_eq!(batch.len(), 5);
         for r in batch.records {
-            let val = r.get("n").unwrap().resolve_property("val", &store).as_integer().unwrap();
+            let val = r
+                .get("n")
+                .unwrap()
+                .resolve_property("val", &store)
+                .as_integer()
+                .unwrap();
             assert!(val >= 5);
         }
     }
@@ -24963,37 +28255,60 @@ mod tests {
         // 3 items group A, 2 items group B
         for _ in 0..3 {
             let id = store.create_node("Item");
-            store.set_node_property("default", id, "group", "A").unwrap();
+            store
+                .set_node_property("default", id, "group", "A")
+                .unwrap();
         }
         for _ in 0..2 {
             let id = store.create_node("Item");
-            store.set_node_property("default", id, "group", "B").unwrap();
+            store
+                .set_node_property("default", id, "group", "B")
+                .unwrap();
         }
 
         let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("Item")]);
         let mut agg = AggregateOperator::new(
             Box::new(scan),
-            vec![(Expression::Property { variable: "n".to_string(), property: "group".to_string() }, "group".to_string())],
+            vec![(
+                Expression::Property {
+                    variable: "n".to_string(),
+                    property: "group".to_string(),
+                },
+                "group".to_string(),
+            )],
             vec![AggregateFunction {
                 func: AggregateType::Count,
                 expr: Expression::Variable("n".to_string()),
                 alias: "count".to_string(),
                 distinct: false,
                 percentile: None,
-            }]
+            }],
         );
 
         let batch = agg.next_batch(&store, 10).unwrap().unwrap();
         assert_eq!(batch.len(), 2); // 2 groups
-        
+
         // Check results
         let mut counts = HashMap::new();
         for r in batch.records {
-            let g = r.get("group").unwrap().as_property().unwrap().as_string().unwrap().to_string();
-            let c = r.get("count").unwrap().as_property().unwrap().as_integer().unwrap();
+            let g = r
+                .get("group")
+                .unwrap()
+                .as_property()
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_string();
+            let c = r
+                .get("count")
+                .unwrap()
+                .as_property()
+                .unwrap()
+                .as_integer()
+                .unwrap();
             counts.insert(g, c);
         }
-        
+
         assert_eq!(counts.get("A"), Some(&3));
         assert_eq!(counts.get("B"), Some(&2));
     }
@@ -25010,14 +28325,28 @@ mod tests {
         let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("Num")]);
         let mut sort = SortOperator::new(
             Box::new(scan),
-            vec![(Expression::Property { variable: "n".to_string(), property: "val".to_string() }, true)] // Ascending
+            vec![(
+                Expression::Property {
+                    variable: "n".to_string(),
+                    property: "val".to_string(),
+                },
+                true,
+            )], // Ascending
         );
 
         let batch = sort.next_batch(&store, 10).unwrap().unwrap();
         assert_eq!(batch.len(), 5);
 
-        let sorted_vals: Vec<i64> = batch.records.iter()
-            .map(|r| r.get("n").unwrap().resolve_property("val", &store).as_integer().unwrap())
+        let sorted_vals: Vec<i64> = batch
+            .records
+            .iter()
+            .map(|r| {
+                r.get("n")
+                    .unwrap()
+                    .resolve_property("val", &store)
+                    .as_integer()
+                    .unwrap()
+            })
             .collect();
 
         assert_eq!(sorted_vals, vec![1, 2, 3, 4, 5]);
@@ -25041,7 +28370,14 @@ mod tests {
 
     #[test]
     fn test_eval_function_date_string() {
-        let result = eval_function("date", &[Value::Property(PropertyValue::String("2024-01-15".to_string()))], None).unwrap();
+        let result = eval_function(
+            "date",
+            &[Value::Property(PropertyValue::String(
+                "2024-01-15".to_string(),
+            ))],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(p @ PropertyValue::Date(_)) => {
                 assert_eq!(p.to_cypher_string(), "2024-01-15");
@@ -25056,7 +28392,8 @@ mod tests {
         map.insert("year".to_string(), PropertyValue::Integer(2024));
         map.insert("month".to_string(), PropertyValue::Integer(6));
         map.insert("day".to_string(), PropertyValue::Integer(15));
-        let result = eval_function("date", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
+        let result =
+            eval_function("date", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
         match result {
             Value::Property(p @ PropertyValue::Date(_)) => {
                 assert_eq!(p.to_cypher_string(), "2024-06-15");
@@ -25067,7 +28404,13 @@ mod tests {
 
     #[test]
     fn test_eval_function_date_invalid_string() {
-        let result = eval_function("date", &[Value::Property(PropertyValue::String("not-a-date".to_string()))], None);
+        let result = eval_function(
+            "date",
+            &[Value::Property(PropertyValue::String(
+                "not-a-date".to_string(),
+            ))],
+            None,
+        );
         assert!(result.is_err());
     }
 
@@ -25098,7 +28441,14 @@ mod tests {
 
     #[test]
     fn test_eval_function_datetime_rfc3339() {
-        let result = eval_function("datetime", &[Value::Property(PropertyValue::String("2024-01-15T10:30:00Z".to_string()))], None).unwrap();
+        let result = eval_function(
+            "datetime",
+            &[Value::Property(PropertyValue::String(
+                "2024-01-15T10:30:00Z".to_string(),
+            ))],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => {
                 assert_eq!(p.to_cypher_string(), "2024-01-15T10:30Z");
@@ -25109,7 +28459,14 @@ mod tests {
 
     #[test]
     fn test_eval_function_datetime_naive() {
-        let result = eval_function("datetime", &[Value::Property(PropertyValue::String("2024-01-15T10:30:00".to_string()))], None).unwrap();
+        let result = eval_function(
+            "datetime",
+            &[Value::Property(PropertyValue::String(
+                "2024-01-15T10:30:00".to_string(),
+            ))],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => {
                 assert_eq!(p.to_cypher_string(), "2024-01-15T10:30Z");
@@ -25127,12 +28484,20 @@ mod tests {
         map.insert("hour".to_string(), PropertyValue::Integer(10));
         map.insert("minute".to_string(), PropertyValue::Integer(30));
         map.insert("second".to_string(), PropertyValue::Integer(45));
-        let result = eval_function("datetime", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
+        let result = eval_function(
+            "datetime",
+            &[Value::Property(PropertyValue::Map(map))],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(p @ PropertyValue::ZonedDateTime { .. }) => {
                 assert_eq!(p.to_cypher_string(), "2024-03-15T10:30:45Z");
                 use chrono::TimeZone;
-                let expected = chrono::Utc.with_ymd_and_hms(2024, 3, 15, 10, 30, 45).unwrap().timestamp_millis();
+                let expected = chrono::Utc
+                    .with_ymd_and_hms(2024, 3, 15, 10, 30, 45)
+                    .unwrap()
+                    .timestamp_millis();
                 let ts = p.as_epoch_millis().unwrap();
                 assert_eq!(ts, expected);
             }
@@ -25142,21 +28507,43 @@ mod tests {
 
     #[test]
     fn test_eval_function_datetime_invalid_string() {
-        let result = eval_function("datetime", &[Value::Property(PropertyValue::String("garbage".to_string()))], None);
+        let result = eval_function(
+            "datetime",
+            &[Value::Property(PropertyValue::String(
+                "garbage".to_string(),
+            ))],
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_eval_function_datetime_type_error() {
-        let result = eval_function("datetime", &[Value::Property(PropertyValue::Boolean(true))], None);
+        let result = eval_function(
+            "datetime",
+            &[Value::Property(PropertyValue::Boolean(true))],
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_eval_function_duration_iso_string() {
-        let result = eval_function("duration", &[Value::Property(PropertyValue::String("P1Y2M3D".to_string()))], None).unwrap();
+        let result = eval_function(
+            "duration",
+            &[Value::Property(PropertyValue::String(
+                "P1Y2M3D".to_string(),
+            ))],
+            None,
+        )
+        .unwrap();
         match result {
-            Value::Property(PropertyValue::Duration { months, days, seconds, .. }) => {
+            Value::Property(PropertyValue::Duration {
+                months,
+                days,
+                seconds,
+                ..
+            }) => {
                 assert_eq!(months, 14); // 1Y = 12M + 2M
                 assert_eq!(days, 3);
                 assert_eq!(seconds, 0);
@@ -25167,9 +28554,21 @@ mod tests {
 
     #[test]
     fn test_eval_function_duration_with_time() {
-        let result = eval_function("duration", &[Value::Property(PropertyValue::String("P1DT2H30M".to_string()))], None).unwrap();
+        let result = eval_function(
+            "duration",
+            &[Value::Property(PropertyValue::String(
+                "P1DT2H30M".to_string(),
+            ))],
+            None,
+        )
+        .unwrap();
         match result {
-            Value::Property(PropertyValue::Duration { months, days, seconds, .. }) => {
+            Value::Property(PropertyValue::Duration {
+                months,
+                days,
+                seconds,
+                ..
+            }) => {
                 assert_eq!(months, 0);
                 assert_eq!(days, 1);
                 assert_eq!(seconds, 2 * 3600 + 30 * 60);
@@ -25184,9 +28583,19 @@ mod tests {
         map.insert("months".to_string(), PropertyValue::Integer(3));
         map.insert("days".to_string(), PropertyValue::Integer(5));
         map.insert("hours".to_string(), PropertyValue::Integer(2));
-        let result = eval_function("duration", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
+        let result = eval_function(
+            "duration",
+            &[Value::Property(PropertyValue::Map(map))],
+            None,
+        )
+        .unwrap();
         match result {
-            Value::Property(PropertyValue::Duration { months, days, seconds, .. }) => {
+            Value::Property(PropertyValue::Duration {
+                months,
+                days,
+                seconds,
+                ..
+            }) => {
                 assert_eq!(months, 3);
                 assert_eq!(days, 5);
                 assert_eq!(seconds, 7200);
@@ -25200,7 +28609,12 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("years".to_string(), PropertyValue::Integer(2));
         map.insert("months".to_string(), PropertyValue::Integer(6));
-        let result = eval_function("duration", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
+        let result = eval_function(
+            "duration",
+            &[Value::Property(PropertyValue::Map(map))],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Duration { months, .. }) => {
                 assert_eq!(months, 30); // 2*12 + 6
@@ -25217,13 +28631,23 @@ mod tests {
 
     #[test]
     fn test_eval_function_duration_invalid_string() {
-        let result = eval_function("duration", &[Value::Property(PropertyValue::String("not-a-duration".to_string()))], None);
+        let result = eval_function(
+            "duration",
+            &[Value::Property(PropertyValue::String(
+                "not-a-duration".to_string(),
+            ))],
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_eval_function_duration_type_error() {
-        let result = eval_function("duration", &[Value::Property(PropertyValue::Integer(42))], None);
+        let result = eval_function(
+            "duration",
+            &[Value::Property(PropertyValue::Integer(42))],
+            None,
+        );
         assert!(result.is_err());
     }
 
@@ -25251,16 +28675,24 @@ mod tests {
 
     #[test]
     fn test_eval_function_duration_between_type_error() {
-        let result = eval_function("duration_between", &[
-            Value::Property(PropertyValue::String("a".to_string())),
-            Value::Property(PropertyValue::DateTime(0)),
-        ], None);
+        let result = eval_function(
+            "duration_between",
+            &[
+                Value::Property(PropertyValue::String("a".to_string())),
+                Value::Property(PropertyValue::DateTime(0)),
+            ],
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_eval_function_duration_between_too_few_args() {
-        let result = eval_function("duration_between", &[Value::Property(PropertyValue::DateTime(0))], None);
+        let result = eval_function(
+            "duration_between",
+            &[Value::Property(PropertyValue::DateTime(0))],
+            None,
+        );
         assert!(result.is_err());
     }
 
@@ -25268,7 +28700,8 @@ mod tests {
 
     #[test]
     fn test_eval_function_log_float() {
-        let result = eval_function("log", &[Value::Property(PropertyValue::Float(1.0))], None).unwrap();
+        let result =
+            eval_function("log", &[Value::Property(PropertyValue::Float(1.0))], None).unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 0.0).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25277,7 +28710,8 @@ mod tests {
 
     #[test]
     fn test_eval_function_log_integer() {
-        let result = eval_function("log", &[Value::Property(PropertyValue::Integer(1))], None).unwrap();
+        let result =
+            eval_function("log", &[Value::Property(PropertyValue::Integer(1))], None).unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 0.0).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25286,22 +28720,30 @@ mod tests {
 
     #[test]
     fn test_eval_function_log_type_error() {
-        let result = eval_function("log", &[Value::Property(PropertyValue::String("x".to_string()))], None);
+        let result = eval_function(
+            "log",
+            &[Value::Property(PropertyValue::String("x".to_string()))],
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_eval_function_exp_float() {
-        let result = eval_function("exp", &[Value::Property(PropertyValue::Float(1.0))], None).unwrap();
+        let result =
+            eval_function("exp", &[Value::Property(PropertyValue::Float(1.0))], None).unwrap();
         match result {
-            Value::Property(PropertyValue::Float(f)) => assert!((f - std::f64::consts::E).abs() < 1e-10),
+            Value::Property(PropertyValue::Float(f)) => {
+                assert!((f - std::f64::consts::E).abs() < 1e-10)
+            }
             _ => panic!("Expected Float"),
         }
     }
 
     #[test]
     fn test_eval_function_exp_zero() {
-        let result = eval_function("exp", &[Value::Property(PropertyValue::Integer(0))], None).unwrap();
+        let result =
+            eval_function("exp", &[Value::Property(PropertyValue::Integer(0))], None).unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 1.0).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25310,7 +28752,11 @@ mod tests {
 
     #[test]
     fn test_eval_function_exp_type_error() {
-        let result = eval_function("exp", &[Value::Property(PropertyValue::Boolean(true))], None);
+        let result = eval_function(
+            "exp",
+            &[Value::Property(PropertyValue::Boolean(true))],
+            None,
+        );
         assert!(result.is_err());
     }
 
@@ -25327,13 +28773,15 @@ mod tests {
 
     #[test]
     fn test_eval_function_abs_int() {
-        let result = eval_function("abs", &[Value::Property(PropertyValue::Integer(-42))], None).unwrap();
+        let result =
+            eval_function("abs", &[Value::Property(PropertyValue::Integer(-42))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(42)));
     }
 
     #[test]
     fn test_eval_function_abs_float() {
-        let result = eval_function("abs", &[Value::Property(PropertyValue::Float(-3.14))], None).unwrap();
+        let result =
+            eval_function("abs", &[Value::Property(PropertyValue::Float(-3.14))], None).unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 3.14).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25342,49 +28790,60 @@ mod tests {
 
     #[test]
     fn test_eval_function_abs_type_error() {
-        let result = eval_function("abs", &[Value::Property(PropertyValue::String("x".to_string()))], None);
+        let result = eval_function(
+            "abs",
+            &[Value::Property(PropertyValue::String("x".to_string()))],
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_eval_function_ceil_float() {
-        let result = eval_function("ceil", &[Value::Property(PropertyValue::Float(3.2))], None).unwrap();
+        let result =
+            eval_function("ceil", &[Value::Property(PropertyValue::Float(3.2))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(4)));
     }
 
     #[test]
     fn test_eval_function_ceil_int() {
-        let result = eval_function("ceil", &[Value::Property(PropertyValue::Integer(3))], None).unwrap();
+        let result =
+            eval_function("ceil", &[Value::Property(PropertyValue::Integer(3))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(3)));
     }
 
     #[test]
     fn test_eval_function_floor_float() {
-        let result = eval_function("floor", &[Value::Property(PropertyValue::Float(3.9))], None).unwrap();
+        let result =
+            eval_function("floor", &[Value::Property(PropertyValue::Float(3.9))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(3)));
     }
 
     #[test]
     fn test_eval_function_floor_int() {
-        let result = eval_function("floor", &[Value::Property(PropertyValue::Integer(5))], None).unwrap();
+        let result =
+            eval_function("floor", &[Value::Property(PropertyValue::Integer(5))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(5)));
     }
 
     #[test]
     fn test_eval_function_round_float() {
-        let result = eval_function("round", &[Value::Property(PropertyValue::Float(3.5))], None).unwrap();
+        let result =
+            eval_function("round", &[Value::Property(PropertyValue::Float(3.5))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(4)));
     }
 
     #[test]
     fn test_eval_function_round_int() {
-        let result = eval_function("round", &[Value::Property(PropertyValue::Integer(7))], None).unwrap();
+        let result =
+            eval_function("round", &[Value::Property(PropertyValue::Integer(7))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(7)));
     }
 
     #[test]
     fn test_eval_function_sqrt_float() {
-        let result = eval_function("sqrt", &[Value::Property(PropertyValue::Float(16.0))], None).unwrap();
+        let result =
+            eval_function("sqrt", &[Value::Property(PropertyValue::Float(16.0))], None).unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 4.0).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25393,7 +28852,8 @@ mod tests {
 
     #[test]
     fn test_eval_function_sqrt_int() {
-        let result = eval_function("sqrt", &[Value::Property(PropertyValue::Integer(9))], None).unwrap();
+        let result =
+            eval_function("sqrt", &[Value::Property(PropertyValue::Integer(9))], None).unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 3.0).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25402,31 +28862,36 @@ mod tests {
 
     #[test]
     fn test_eval_function_sign_positive() {
-        let result = eval_function("sign", &[Value::Property(PropertyValue::Integer(42))], None).unwrap();
+        let result =
+            eval_function("sign", &[Value::Property(PropertyValue::Integer(42))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(1)));
     }
 
     #[test]
     fn test_eval_function_sign_negative() {
-        let result = eval_function("sign", &[Value::Property(PropertyValue::Integer(-5))], None).unwrap();
+        let result =
+            eval_function("sign", &[Value::Property(PropertyValue::Integer(-5))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(-1)));
     }
 
     #[test]
     fn test_eval_function_sign_zero() {
-        let result = eval_function("sign", &[Value::Property(PropertyValue::Integer(0))], None).unwrap();
+        let result =
+            eval_function("sign", &[Value::Property(PropertyValue::Integer(0))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(0)));
     }
 
     #[test]
     fn test_eval_function_sign_float() {
-        let result = eval_function("sign", &[Value::Property(PropertyValue::Float(-2.5))], None).unwrap();
+        let result =
+            eval_function("sign", &[Value::Property(PropertyValue::Float(-2.5))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(-1)));
     }
 
     #[test]
     fn test_eval_function_sign_float_zero() {
-        let result = eval_function("sign", &[Value::Property(PropertyValue::Float(0.0))], None).unwrap();
+        let result =
+            eval_function("sign", &[Value::Property(PropertyValue::Float(0.0))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(0)));
     }
 
@@ -25434,37 +28899,88 @@ mod tests {
 
     #[test]
     fn test_eval_function_ltrim() {
-        let result = eval_function("ltrim", &[Value::Property(PropertyValue::String("  hello  ".to_string()))], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("hello  ".to_string())));
+        let result = eval_function(
+            "ltrim",
+            &[Value::Property(PropertyValue::String(
+                "  hello  ".to_string(),
+            ))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("hello  ".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_rtrim() {
-        let result = eval_function("rtrim", &[Value::Property(PropertyValue::String("  hello  ".to_string()))], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("  hello".to_string())));
+        let result = eval_function(
+            "rtrim",
+            &[Value::Property(PropertyValue::String(
+                "  hello  ".to_string(),
+            ))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("  hello".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_trim() {
-        let result = eval_function("trim", &[Value::Property(PropertyValue::String("  hello  ".to_string()))], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("hello".to_string())));
+        let result = eval_function(
+            "trim",
+            &[Value::Property(PropertyValue::String(
+                "  hello  ".to_string(),
+            ))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("hello".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_tostring_integer() {
-        let result = eval_function("tostring", &[Value::Property(PropertyValue::Integer(42))], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("42".to_string())));
+        let result = eval_function(
+            "tostring",
+            &[Value::Property(PropertyValue::Integer(42))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("42".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_tostring_boolean() {
-        let result = eval_function("tostring", &[Value::Property(PropertyValue::Boolean(true))], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("true".to_string())));
+        let result = eval_function(
+            "tostring",
+            &[Value::Property(PropertyValue::Boolean(true))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("true".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_tostring_float() {
-        let result = eval_function("tostring", &[Value::Property(PropertyValue::Float(3.14))], None).unwrap();
+        let result = eval_function(
+            "tostring",
+            &[Value::Property(PropertyValue::Float(3.14))],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::String(s)) => assert!(s.starts_with("3.14")),
             _ => panic!("Expected String"),
@@ -25484,44 +29000,80 @@ mod tests {
 
     #[test]
     fn test_eval_function_tostring_string() {
-        let result = eval_function("tostring", &[Value::Property(PropertyValue::String("hello".to_string()))], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("hello".to_string())));
+        let result = eval_function(
+            "tostring",
+            &[Value::Property(PropertyValue::String("hello".to_string()))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("hello".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_tointeger_string() {
-        let result = eval_function("tointeger", &[Value::Property(PropertyValue::String("42".to_string()))], None).unwrap();
+        let result = eval_function(
+            "tointeger",
+            &[Value::Property(PropertyValue::String("42".to_string()))],
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(42)));
     }
 
     #[test]
     fn test_eval_function_tointeger_bad_string() {
         // Null rather than an error, matching Cypher (#606).
-        let result = eval_function("tointeger", &[Value::Property(PropertyValue::String("bad".to_string()))], None);
+        let result = eval_function(
+            "tointeger",
+            &[Value::Property(PropertyValue::String("bad".to_string()))],
+            None,
+        );
         assert_eq!(result.unwrap(), Value::Property(PropertyValue::Null));
     }
 
     #[test]
     fn test_eval_function_tointeger_float() {
-        let result = eval_function("tointeger", &[Value::Property(PropertyValue::Float(3.9))], None).unwrap();
+        let result = eval_function(
+            "tointeger",
+            &[Value::Property(PropertyValue::Float(3.9))],
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(3)));
     }
 
     #[test]
     fn test_eval_function_tointeger_integer() {
-        let result = eval_function("tointeger", &[Value::Property(PropertyValue::Integer(7))], None).unwrap();
+        let result = eval_function(
+            "tointeger",
+            &[Value::Property(PropertyValue::Integer(7))],
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(7)));
     }
 
     #[test]
     fn test_eval_function_tointeger_type_error() {
-        let result = eval_function("tointeger", &[Value::Property(PropertyValue::Boolean(true))], None);
+        let result = eval_function(
+            "tointeger",
+            &[Value::Property(PropertyValue::Boolean(true))],
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_eval_function_tofloat_string() {
-        let result = eval_function("tofloat", &[Value::Property(PropertyValue::String("3.14".to_string()))], None).unwrap();
+        let result = eval_function(
+            "tofloat",
+            &[Value::Property(PropertyValue::String("3.14".to_string()))],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 3.14).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25531,13 +29083,22 @@ mod tests {
     #[test]
     fn test_eval_function_tofloat_bad_string() {
         // Null rather than an error, matching Cypher (#606).
-        let result = eval_function("tofloat", &[Value::Property(PropertyValue::String("bad".to_string()))], None);
+        let result = eval_function(
+            "tofloat",
+            &[Value::Property(PropertyValue::String("bad".to_string()))],
+            None,
+        );
         assert_eq!(result.unwrap(), Value::Property(PropertyValue::Null));
     }
 
     #[test]
     fn test_eval_function_tofloat_integer() {
-        let result = eval_function("tofloat", &[Value::Property(PropertyValue::Integer(5))], None).unwrap();
+        let result = eval_function(
+            "tofloat",
+            &[Value::Property(PropertyValue::Integer(5))],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 5.0).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25546,7 +29107,12 @@ mod tests {
 
     #[test]
     fn test_eval_function_tofloat_float() {
-        let result = eval_function("tofloat", &[Value::Property(PropertyValue::Float(2.5))], None).unwrap();
+        let result = eval_function(
+            "tofloat",
+            &[Value::Property(PropertyValue::Float(2.5))],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 2.5).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25555,7 +29121,11 @@ mod tests {
 
     #[test]
     fn test_eval_function_tofloat_type_error() {
-        let result = eval_function("tofloat", &[Value::Property(PropertyValue::Boolean(false))], None);
+        let result = eval_function(
+            "tofloat",
+            &[Value::Property(PropertyValue::Boolean(false))],
+            None,
+        );
         assert!(result.is_err());
     }
 
@@ -25563,112 +29133,198 @@ mod tests {
 
     #[test]
     fn test_eval_function_toupper() {
-        let result = eval_function("toupper", &[Value::Property(PropertyValue::String("hello".to_string()))], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("HELLO".to_string())));
+        let result = eval_function(
+            "toupper",
+            &[Value::Property(PropertyValue::String("hello".to_string()))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("HELLO".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_tolower() {
-        let result = eval_function("tolower", &[Value::Property(PropertyValue::String("HELLO".to_string()))], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("hello".to_string())));
+        let result = eval_function(
+            "tolower",
+            &[Value::Property(PropertyValue::String("HELLO".to_string()))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("hello".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_replace() {
-        let result = eval_function("replace", &[
-            Value::Property(PropertyValue::String("hello world".to_string())),
-            Value::Property(PropertyValue::String("world".to_string())),
-            Value::Property(PropertyValue::String("rust".to_string())),
-        ], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("hello rust".to_string())));
+        let result = eval_function(
+            "replace",
+            &[
+                Value::Property(PropertyValue::String("hello world".to_string())),
+                Value::Property(PropertyValue::String("world".to_string())),
+                Value::Property(PropertyValue::String("rust".to_string())),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("hello rust".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_replace_too_few_args() {
-        let result = eval_function("replace", &[
-            Value::Property(PropertyValue::String("hello".to_string())),
-        ], None);
+        let result = eval_function(
+            "replace",
+            &[Value::Property(PropertyValue::String("hello".to_string()))],
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_eval_function_substring() {
-        let result = eval_function("substring", &[
-            Value::Property(PropertyValue::String("hello world".to_string())),
-            Value::Property(PropertyValue::Integer(6)),
-        ], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("world".to_string())));
+        let result = eval_function(
+            "substring",
+            &[
+                Value::Property(PropertyValue::String("hello world".to_string())),
+                Value::Property(PropertyValue::Integer(6)),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("world".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_substring_with_length() {
-        let result = eval_function("substring", &[
-            Value::Property(PropertyValue::String("hello world".to_string())),
-            Value::Property(PropertyValue::Integer(0)),
-            Value::Property(PropertyValue::Integer(5)),
-        ], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("hello".to_string())));
+        let result = eval_function(
+            "substring",
+            &[
+                Value::Property(PropertyValue::String("hello world".to_string())),
+                Value::Property(PropertyValue::Integer(0)),
+                Value::Property(PropertyValue::Integer(5)),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("hello".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_substring_beyond_end() {
-        let result = eval_function("substring", &[
-            Value::Property(PropertyValue::String("hi".to_string())),
-            Value::Property(PropertyValue::Integer(100)),
-        ], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("".to_string())));
+        let result = eval_function(
+            "substring",
+            &[
+                Value::Property(PropertyValue::String("hi".to_string())),
+                Value::Property(PropertyValue::Integer(100)),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_substring_too_few_args() {
-        let result = eval_function("substring", &[
-            Value::Property(PropertyValue::String("hello".to_string())),
-        ], None);
+        let result = eval_function(
+            "substring",
+            &[Value::Property(PropertyValue::String("hello".to_string()))],
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_eval_function_left() {
-        let result = eval_function("left", &[
-            Value::Property(PropertyValue::String("hello".to_string())),
-            Value::Property(PropertyValue::Integer(3)),
-        ], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("hel".to_string())));
+        let result = eval_function(
+            "left",
+            &[
+                Value::Property(PropertyValue::String("hello".to_string())),
+                Value::Property(PropertyValue::Integer(3)),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("hel".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_right() {
-        let result = eval_function("right", &[
-            Value::Property(PropertyValue::String("hello".to_string())),
-            Value::Property(PropertyValue::Integer(3)),
-        ], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("llo".to_string())));
+        let result = eval_function(
+            "right",
+            &[
+                Value::Property(PropertyValue::String("hello".to_string())),
+                Value::Property(PropertyValue::Integer(3)),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("llo".to_string()))
+        );
     }
 
     #[test]
     fn test_eval_function_reverse() {
-        let result = eval_function("reverse", &[Value::Property(PropertyValue::String("abc".to_string()))], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("cba".to_string())));
+        let result = eval_function(
+            "reverse",
+            &[Value::Property(PropertyValue::String("abc".to_string()))],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("cba".to_string()))
+        );
     }
 
     // -- Size/length --
 
     #[test]
     fn test_eval_function_size_string() {
-        let result = eval_function("size", &[Value::Property(PropertyValue::String("hello".to_string()))], None).unwrap();
+        let result = eval_function(
+            "size",
+            &[Value::Property(PropertyValue::String("hello".to_string()))],
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(5)));
     }
 
     #[test]
     fn test_eval_function_size_array() {
-        let arr = vec![PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3)];
-        let result = eval_function("size", &[Value::Property(PropertyValue::Array(arr))], None).unwrap();
+        let arr = vec![
+            PropertyValue::Integer(1),
+            PropertyValue::Integer(2),
+            PropertyValue::Integer(3),
+        ];
+        let result =
+            eval_function("size", &[Value::Property(PropertyValue::Array(arr))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(3)));
     }
 
     #[test]
     fn test_eval_function_length_path() {
-        use crate::graph::types::{NodeId, EdgeId};
+        use crate::graph::types::{EdgeId, NodeId};
         let path = Value::Path {
             nodes: vec![NodeId::new(1), NodeId::new(2), NodeId::new(3)],
             edges: vec![EdgeId::new(1), EdgeId::new(2)],
@@ -25687,7 +29343,7 @@ mod tests {
 
     #[test]
     fn test_eval_function_nodes() {
-        use crate::graph::types::{NodeId, EdgeId};
+        use crate::graph::types::{EdgeId, NodeId};
         let path = Value::Path {
             nodes: vec![NodeId::new(1), NodeId::new(2)],
             edges: vec![EdgeId::new(10)],
@@ -25716,7 +29372,7 @@ mod tests {
 
     #[test]
     fn test_eval_function_relationships() {
-        use crate::graph::types::{NodeId, EdgeId};
+        use crate::graph::types::{EdgeId, NodeId};
         let path = Value::Path {
             nodes: vec![NodeId::new(1), NodeId::new(2)],
             edges: vec![EdgeId::new(10)],
@@ -25733,7 +29389,11 @@ mod tests {
 
     #[test]
     fn test_eval_function_relationships_type_error() {
-        let result = eval_function("relationships", &[Value::Property(PropertyValue::String("x".to_string()))], None);
+        let result = eval_function(
+            "relationships",
+            &[Value::Property(PropertyValue::String("x".to_string()))],
+            None,
+        );
         assert!(result.is_err());
     }
 
@@ -25741,29 +29401,47 @@ mod tests {
 
     #[test]
     fn test_eval_function_startnode_edgeref() {
-        use crate::graph::types::{NodeId, EdgeId, EdgeType};
-        let edge = Value::EdgeRef(EdgeId::new(1), NodeId::new(10), NodeId::new(20), EdgeType::new("KNOWS"));
+        use crate::graph::types::{EdgeId, EdgeType, NodeId};
+        let edge = Value::EdgeRef(
+            EdgeId::new(1),
+            NodeId::new(10),
+            NodeId::new(20),
+            EdgeType::new("KNOWS"),
+        );
         let result = eval_function("startnode", &[edge], None).unwrap();
         assert_eq!(result, Value::NodeRef(NodeId::new(10)));
     }
 
     #[test]
     fn test_eval_function_endnode_edgeref() {
-        use crate::graph::types::{NodeId, EdgeId, EdgeType};
-        let edge = Value::EdgeRef(EdgeId::new(1), NodeId::new(10), NodeId::new(20), EdgeType::new("KNOWS"));
+        use crate::graph::types::{EdgeId, EdgeType, NodeId};
+        let edge = Value::EdgeRef(
+            EdgeId::new(1),
+            NodeId::new(10),
+            NodeId::new(20),
+            EdgeType::new("KNOWS"),
+        );
         let result = eval_function("endnode", &[edge], None).unwrap();
         assert_eq!(result, Value::NodeRef(NodeId::new(20)));
     }
 
     #[test]
     fn test_eval_function_startnode_type_error() {
-        let result = eval_function("startnode", &[Value::Property(PropertyValue::Integer(1))], None);
+        let result = eval_function(
+            "startnode",
+            &[Value::Property(PropertyValue::Integer(1))],
+            None,
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_eval_function_endnode_type_error() {
-        let result = eval_function("endnode", &[Value::Property(PropertyValue::Integer(1))], None);
+        let result = eval_function(
+            "endnode",
+            &[Value::Property(PropertyValue::Integer(1))],
+            None,
+        );
         assert!(result.is_err());
     }
 
@@ -25771,10 +29449,15 @@ mod tests {
 
     #[test]
     fn test_eval_function_range_ascending() {
-        let result = eval_function("range", &[
-            Value::Property(PropertyValue::Integer(1)),
-            Value::Property(PropertyValue::Integer(5)),
-        ], None).unwrap();
+        let result = eval_function(
+            "range",
+            &[
+                Value::Property(PropertyValue::Integer(1)),
+                Value::Property(PropertyValue::Integer(5)),
+            ],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Array(arr)) => {
                 let vals: Vec<i64> = arr.iter().map(|v| v.as_integer().unwrap()).collect();
@@ -25786,11 +29469,16 @@ mod tests {
 
     #[test]
     fn test_eval_function_range_descending() {
-        let result = eval_function("range", &[
-            Value::Property(PropertyValue::Integer(5)),
-            Value::Property(PropertyValue::Integer(1)),
-            Value::Property(PropertyValue::Integer(-1)),
-        ], None).unwrap();
+        let result = eval_function(
+            "range",
+            &[
+                Value::Property(PropertyValue::Integer(5)),
+                Value::Property(PropertyValue::Integer(1)),
+                Value::Property(PropertyValue::Integer(-1)),
+            ],
+            None,
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Array(arr)) => {
                 let vals: Vec<i64> = arr.iter().map(|v| v.as_integer().unwrap()).collect();
@@ -25802,11 +29490,15 @@ mod tests {
 
     #[test]
     fn test_eval_function_range_zero_step() {
-        let result = eval_function("range", &[
-            Value::Property(PropertyValue::Integer(0)),
-            Value::Property(PropertyValue::Integer(10)),
-            Value::Property(PropertyValue::Integer(0)),
-        ], None);
+        let result = eval_function(
+            "range",
+            &[
+                Value::Property(PropertyValue::Integer(0)),
+                Value::Property(PropertyValue::Integer(10)),
+                Value::Property(PropertyValue::Integer(0)),
+            ],
+            None,
+        );
         assert!(result.is_err());
     }
 
@@ -25820,31 +29512,47 @@ mod tests {
 
     #[test]
     fn test_eval_function_coalesce_first_non_null() {
-        let result = eval_function("coalesce", &[
-            Value::Null,
-            Value::Property(PropertyValue::Null),
-            Value::Property(PropertyValue::Integer(42)),
-            Value::Property(PropertyValue::Integer(99)),
-        ], None).unwrap();
+        let result = eval_function(
+            "coalesce",
+            &[
+                Value::Null,
+                Value::Property(PropertyValue::Null),
+                Value::Property(PropertyValue::Integer(42)),
+                Value::Property(PropertyValue::Integer(99)),
+            ],
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(42)));
     }
 
     #[test]
     fn test_eval_function_coalesce_all_null() {
-        let result = eval_function("coalesce", &[Value::Null, Value::Property(PropertyValue::Null)], None).unwrap();
+        let result = eval_function(
+            "coalesce",
+            &[Value::Null, Value::Property(PropertyValue::Null)],
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Value::Null);
     }
 
     #[test]
     fn test_eval_function_head() {
         let arr = vec![PropertyValue::Integer(10), PropertyValue::Integer(20)];
-        let result = eval_function("head", &[Value::Property(PropertyValue::Array(arr))], None).unwrap();
+        let result =
+            eval_function("head", &[Value::Property(PropertyValue::Array(arr))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(10)));
     }
 
     #[test]
     fn test_eval_function_head_empty() {
-        let result = eval_function("head", &[Value::Property(PropertyValue::Array(vec![]))], None).unwrap();
+        let result = eval_function(
+            "head",
+            &[Value::Property(PropertyValue::Array(vec![]))],
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Value::Null);
     }
 
@@ -25857,20 +29565,31 @@ mod tests {
     #[test]
     fn test_eval_function_last() {
         let arr = vec![PropertyValue::Integer(10), PropertyValue::Integer(20)];
-        let result = eval_function("last", &[Value::Property(PropertyValue::Array(arr))], None).unwrap();
+        let result =
+            eval_function("last", &[Value::Property(PropertyValue::Array(arr))], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(20)));
     }
 
     #[test]
     fn test_eval_function_last_empty() {
-        let result = eval_function("last", &[Value::Property(PropertyValue::Array(vec![]))], None).unwrap();
+        let result = eval_function(
+            "last",
+            &[Value::Property(PropertyValue::Array(vec![]))],
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Value::Null);
     }
 
     #[test]
     fn test_eval_function_tail() {
-        let arr = vec![PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3)];
-        let result = eval_function("tail", &[Value::Property(PropertyValue::Array(arr))], None).unwrap();
+        let arr = vec![
+            PropertyValue::Integer(1),
+            PropertyValue::Integer(2),
+            PropertyValue::Integer(3),
+        ];
+        let result =
+            eval_function("tail", &[Value::Property(PropertyValue::Array(arr))], None).unwrap();
         match result {
             Value::Property(PropertyValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
@@ -25889,7 +29608,12 @@ mod tests {
 
     #[test]
     fn test_eval_function_exists_non_null() {
-        let result = eval_function("exists", &[Value::Property(PropertyValue::Integer(42))], None).unwrap();
+        let result = eval_function(
+            "exists",
+            &[Value::Property(PropertyValue::Integer(42))],
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
@@ -25901,7 +29625,8 @@ mod tests {
 
     #[test]
     fn test_eval_function_exists_property_null() {
-        let result = eval_function("exists", &[Value::Property(PropertyValue::Null)], None).unwrap();
+        let result =
+            eval_function("exists", &[Value::Property(PropertyValue::Null)], None).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
@@ -25915,19 +29640,23 @@ mod tests {
 
     #[test]
     fn test_binary_op_mod_int() {
-        let result = eval_binary_op(&BinaryOp::Mod,
+        let result = eval_binary_op(
+            &BinaryOp::Mod,
             Value::Property(PropertyValue::Integer(10)),
             Value::Property(PropertyValue::Integer(3)),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(1)));
     }
 
     #[test]
     fn test_binary_op_mod_float() {
-        let result = eval_binary_op(&BinaryOp::Mod,
+        let result = eval_binary_op(
+            &BinaryOp::Mod,
             Value::Property(PropertyValue::Float(10.5)),
             Value::Property(PropertyValue::Float(3.0)),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 1.5).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25936,10 +29665,12 @@ mod tests {
 
     #[test]
     fn test_binary_op_mod_int_float() {
-        let result = eval_binary_op(&BinaryOp::Mod,
+        let result = eval_binary_op(
+            &BinaryOp::Mod,
             Value::Property(PropertyValue::Integer(10)),
             Value::Property(PropertyValue::Float(3.0)),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 1.0).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25948,10 +29679,12 @@ mod tests {
 
     #[test]
     fn test_binary_op_mod_float_int() {
-        let result = eval_binary_op(&BinaryOp::Mod,
+        let result = eval_binary_op(
+            &BinaryOp::Mod,
             Value::Property(PropertyValue::Float(10.0)),
             Value::Property(PropertyValue::Integer(3)),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 1.0).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -25960,7 +29693,8 @@ mod tests {
 
     #[test]
     fn test_binary_op_mod_zero() {
-        let result = eval_binary_op(&BinaryOp::Mod,
+        let result = eval_binary_op(
+            &BinaryOp::Mod,
             Value::Property(PropertyValue::Integer(10)),
             Value::Property(PropertyValue::Integer(0)),
         );
@@ -25969,7 +29703,8 @@ mod tests {
 
     #[test]
     fn test_binary_op_mod_type_error() {
-        let result = eval_binary_op(&BinaryOp::Mod,
+        let result = eval_binary_op(
+            &BinaryOp::Mod,
             Value::Property(PropertyValue::String("a".to_string())),
             Value::Property(PropertyValue::Integer(1)),
         );
@@ -25978,19 +29713,23 @@ mod tests {
 
     #[test]
     fn test_binary_op_starts_with() {
-        let result = eval_binary_op(&BinaryOp::StartsWith,
+        let result = eval_binary_op(
+            &BinaryOp::StartsWith,
             Value::Property(PropertyValue::String("hello world".to_string())),
             Value::Property(PropertyValue::String("hello".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_starts_with_false() {
-        let result = eval_binary_op(&BinaryOp::StartsWith,
+        let result = eval_binary_op(
+            &BinaryOp::StartsWith,
             Value::Property(PropertyValue::String("hello world".to_string())),
             Value::Property(PropertyValue::String("world".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
@@ -26001,7 +29740,8 @@ mod tests {
         // `[1, 3.14, true, [], {}, null]` and expects null for every one, and
         // Neo4j 5 agrees (`(1 STARTS WITH 'x') IS NULL` -> true). This test
         // previously asserted the refusal the engine happened to implement.
-        let result = eval_binary_op(&BinaryOp::StartsWith,
+        let result = eval_binary_op(
+            &BinaryOp::StartsWith,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::String("x".to_string())),
         );
@@ -26010,19 +29750,23 @@ mod tests {
 
     #[test]
     fn test_binary_op_ends_with() {
-        let result = eval_binary_op(&BinaryOp::EndsWith,
+        let result = eval_binary_op(
+            &BinaryOp::EndsWith,
             Value::Property(PropertyValue::String("hello world".to_string())),
             Value::Property(PropertyValue::String("world".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_ends_with_false() {
-        let result = eval_binary_op(&BinaryOp::EndsWith,
+        let result = eval_binary_op(
+            &BinaryOp::EndsWith,
             Value::Property(PropertyValue::String("hello world".to_string())),
             Value::Property(PropertyValue::String("hello".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
@@ -26033,7 +29777,8 @@ mod tests {
         // `[1, 3.14, true, [], {}, null]` and expects null for every one, and
         // Neo4j 5 agrees (`(1 ENDS WITH 'x') IS NULL` -> true). This test
         // previously asserted the refusal the engine happened to implement.
-        let result = eval_binary_op(&BinaryOp::EndsWith,
+        let result = eval_binary_op(
+            &BinaryOp::EndsWith,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::String("x".to_string())),
         );
@@ -26042,19 +29787,23 @@ mod tests {
 
     #[test]
     fn test_binary_op_contains() {
-        let result = eval_binary_op(&BinaryOp::Contains,
+        let result = eval_binary_op(
+            &BinaryOp::Contains,
             Value::Property(PropertyValue::String("hello world".to_string())),
             Value::Property(PropertyValue::String("lo wo".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_contains_false() {
-        let result = eval_binary_op(&BinaryOp::Contains,
+        let result = eval_binary_op(
+            &BinaryOp::Contains,
             Value::Property(PropertyValue::String("hello".to_string())),
             Value::Property(PropertyValue::String("xyz".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
@@ -26065,7 +29814,8 @@ mod tests {
         // `[1, 3.14, true, [], {}, null]` and expects null for every one, and
         // Neo4j 5 agrees (`(1 CONTAINS 'x') IS NULL` -> true). This test
         // previously asserted the refusal the engine happened to implement.
-        let result = eval_binary_op(&BinaryOp::Contains,
+        let result = eval_binary_op(
+            &BinaryOp::Contains,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::String("x".to_string())),
         );
@@ -26074,64 +29824,78 @@ mod tests {
 
     #[test]
     fn test_starts_with_null_left() {
-        let result = eval_binary_op(&BinaryOp::StartsWith,
+        let result = eval_binary_op(
+            &BinaryOp::StartsWith,
             Value::Property(PropertyValue::Null),
             Value::Property(PropertyValue::String("x".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Null));
     }
 
     #[test]
     fn test_starts_with_null_right() {
-        let result = eval_binary_op(&BinaryOp::StartsWith,
+        let result = eval_binary_op(
+            &BinaryOp::StartsWith,
             Value::Property(PropertyValue::String("hello".to_string())),
             Value::Property(PropertyValue::Null),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Null));
     }
 
     #[test]
     fn test_ends_with_null() {
-        let result = eval_binary_op(&BinaryOp::EndsWith,
+        let result = eval_binary_op(
+            &BinaryOp::EndsWith,
             Value::Property(PropertyValue::Null),
             Value::Property(PropertyValue::String("x".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Null));
     }
 
     #[test]
     fn test_contains_null_left() {
-        let result = eval_binary_op(&BinaryOp::Contains,
+        let result = eval_binary_op(
+            &BinaryOp::Contains,
             Value::Property(PropertyValue::Null),
             Value::Property(PropertyValue::String("x".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Null));
     }
 
     #[test]
     fn test_contains_null_right() {
-        let result = eval_binary_op(&BinaryOp::Contains,
+        let result = eval_binary_op(
+            &BinaryOp::Contains,
             Value::Property(PropertyValue::String("hello".to_string())),
             Value::Property(PropertyValue::Null),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Null));
     }
 
     #[test]
     fn test_contains_both_null() {
-        let result = eval_binary_op(&BinaryOp::Contains,
+        let result = eval_binary_op(
+            &BinaryOp::Contains,
             Value::Property(PropertyValue::Null),
             Value::Property(PropertyValue::Null),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Null));
     }
 
     #[test]
     fn test_regex_match_null() {
-        let result = eval_binary_op(&BinaryOp::RegexMatch,
+        let result = eval_binary_op(
+            &BinaryOp::RegexMatch,
             Value::Property(PropertyValue::Null),
             Value::Property(PropertyValue::String(".*".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Null));
     }
 
@@ -26142,29 +29906,31 @@ mod tests {
             PropertyValue::Integer(2),
             PropertyValue::Integer(3),
         ]);
-        let result = eval_binary_op(&BinaryOp::In,
+        let result = eval_binary_op(
+            &BinaryOp::In,
             Value::Property(PropertyValue::Integer(2)),
             Value::Property(arr),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_in_list_false() {
-        let arr = PropertyValue::Array(vec![
-            PropertyValue::Integer(1),
-            PropertyValue::Integer(2),
-        ]);
-        let result = eval_binary_op(&BinaryOp::In,
+        let arr = PropertyValue::Array(vec![PropertyValue::Integer(1), PropertyValue::Integer(2)]);
+        let result = eval_binary_op(
+            &BinaryOp::In,
             Value::Property(PropertyValue::Integer(5)),
             Value::Property(arr),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
     #[test]
     fn test_binary_op_in_type_error() {
-        let result = eval_binary_op(&BinaryOp::In,
+        let result = eval_binary_op(
+            &BinaryOp::In,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::Integer(2)),
         );
@@ -26173,25 +29939,30 @@ mod tests {
 
     #[test]
     fn test_binary_op_regex_match() {
-        let result = eval_binary_op(&BinaryOp::RegexMatch,
+        let result = eval_binary_op(
+            &BinaryOp::RegexMatch,
             Value::Property(PropertyValue::String("hello123".to_string())),
             Value::Property(PropertyValue::String("^hello\\d+$".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_regex_match_false() {
-        let result = eval_binary_op(&BinaryOp::RegexMatch,
+        let result = eval_binary_op(
+            &BinaryOp::RegexMatch,
             Value::Property(PropertyValue::String("hello".to_string())),
             Value::Property(PropertyValue::String("^\\d+$".to_string())),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
     #[test]
     fn test_binary_op_regex_invalid() {
-        let result = eval_binary_op(&BinaryOp::RegexMatch,
+        let result = eval_binary_op(
+            &BinaryOp::RegexMatch,
             Value::Property(PropertyValue::String("hello".to_string())),
             Value::Property(PropertyValue::String("[invalid".to_string())),
         );
@@ -26200,7 +29971,8 @@ mod tests {
 
     #[test]
     fn test_binary_op_regex_type_error() {
-        let result = eval_binary_op(&BinaryOp::RegexMatch,
+        let result = eval_binary_op(
+            &BinaryOp::RegexMatch,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::String(".*".to_string())),
         );
@@ -26212,11 +29984,14 @@ mod tests {
     #[test]
     fn test_binary_op_add_datetime_duration() {
         let dt = PropertyValue::DateTime(0); // epoch
-        let dur = PropertyValue::Duration { months: 0, days: 1, seconds: 3600, nanos: 0 };
-        let result = eval_binary_op(&BinaryOp::Add,
-            Value::Property(dt),
-            Value::Property(dur),
-        ).unwrap();
+        let dur = PropertyValue::Duration {
+            months: 0,
+            days: 1,
+            seconds: 3600,
+            nanos: 0,
+        };
+        let result =
+            eval_binary_op(&BinaryOp::Add, Value::Property(dt), Value::Property(dur)).unwrap();
         match result {
             Value::Property(PropertyValue::DateTime(ts)) => {
                 // 1 day + 1 hour = 90000 seconds = 90000000 ms
@@ -26228,14 +30003,27 @@ mod tests {
 
     #[test]
     fn test_binary_op_add_duration_duration() {
-        let d1 = PropertyValue::Duration { months: 1, days: 2, seconds: 3, nanos: 4 };
-        let d2 = PropertyValue::Duration { months: 10, days: 20, seconds: 30, nanos: 40 };
-        let result = eval_binary_op(&BinaryOp::Add,
-            Value::Property(d1),
-            Value::Property(d2),
-        ).unwrap();
+        let d1 = PropertyValue::Duration {
+            months: 1,
+            days: 2,
+            seconds: 3,
+            nanos: 4,
+        };
+        let d2 = PropertyValue::Duration {
+            months: 10,
+            days: 20,
+            seconds: 30,
+            nanos: 40,
+        };
+        let result =
+            eval_binary_op(&BinaryOp::Add, Value::Property(d1), Value::Property(d2)).unwrap();
         match result {
-            Value::Property(PropertyValue::Duration { months, days, seconds, nanos }) => {
+            Value::Property(PropertyValue::Duration {
+                months,
+                days,
+                seconds,
+                nanos,
+            }) => {
                 assert_eq!(months, 11);
                 assert_eq!(days, 22);
                 assert_eq!(seconds, 33);
@@ -26249,11 +30037,14 @@ mod tests {
     fn test_binary_op_sub_datetime_duration() {
         // Start at 1 day from epoch
         let dt = PropertyValue::DateTime(86_400_000);
-        let dur = PropertyValue::Duration { months: 0, days: 1, seconds: 0, nanos: 0 };
-        let result = eval_binary_op(&BinaryOp::Sub,
-            Value::Property(dt),
-            Value::Property(dur),
-        ).unwrap();
+        let dur = PropertyValue::Duration {
+            months: 0,
+            days: 1,
+            seconds: 0,
+            nanos: 0,
+        };
+        let result =
+            eval_binary_op(&BinaryOp::Sub, Value::Property(dt), Value::Property(dur)).unwrap();
         match result {
             Value::Property(PropertyValue::DateTime(ts)) => {
                 assert_eq!(ts, 0); // back to epoch
@@ -26266,10 +30057,8 @@ mod tests {
     fn test_binary_op_sub_datetime_datetime() {
         let dt1 = PropertyValue::DateTime(10_000_000);
         let dt2 = PropertyValue::DateTime(5_000_000);
-        let result = eval_binary_op(&BinaryOp::Sub,
-            Value::Property(dt1),
-            Value::Property(dt2),
-        ).unwrap();
+        let result =
+            eval_binary_op(&BinaryOp::Sub, Value::Property(dt1), Value::Property(dt2)).unwrap();
         match result {
             Value::Property(PropertyValue::Duration { seconds, .. }) => {
                 assert_eq!(seconds, 5000 % 86400); // 5000s total
@@ -26280,14 +30069,27 @@ mod tests {
 
     #[test]
     fn test_binary_op_sub_duration_duration() {
-        let d1 = PropertyValue::Duration { months: 10, days: 20, seconds: 30, nanos: 40 };
-        let d2 = PropertyValue::Duration { months: 1, days: 2, seconds: 3, nanos: 4 };
-        let result = eval_binary_op(&BinaryOp::Sub,
-            Value::Property(d1),
-            Value::Property(d2),
-        ).unwrap();
+        let d1 = PropertyValue::Duration {
+            months: 10,
+            days: 20,
+            seconds: 30,
+            nanos: 40,
+        };
+        let d2 = PropertyValue::Duration {
+            months: 1,
+            days: 2,
+            seconds: 3,
+            nanos: 4,
+        };
+        let result =
+            eval_binary_op(&BinaryOp::Sub, Value::Property(d1), Value::Property(d2)).unwrap();
         match result {
-            Value::Property(PropertyValue::Duration { months, days, seconds, nanos }) => {
+            Value::Property(PropertyValue::Duration {
+                months,
+                days,
+                seconds,
+                nanos,
+            }) => {
                 assert_eq!(months, 9);
                 assert_eq!(days, 18);
                 assert_eq!(seconds, 27);
@@ -26301,21 +30103,28 @@ mod tests {
 
     #[test]
     fn test_binary_op_add_strings() {
-        let result = eval_binary_op(&BinaryOp::Add,
+        let result = eval_binary_op(
+            &BinaryOp::Add,
             Value::Property(PropertyValue::String("hello ".to_string())),
             Value::Property(PropertyValue::String("world".to_string())),
-        ).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("hello world".to_string())));
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("hello world".to_string()))
+        );
     }
 
     // -- Numeric cross-type operations --
 
     #[test]
     fn test_binary_op_add_int_float() {
-        let result = eval_binary_op(&BinaryOp::Add,
+        let result = eval_binary_op(
+            &BinaryOp::Add,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::Float(2.5)),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 3.5).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -26324,10 +30133,12 @@ mod tests {
 
     #[test]
     fn test_binary_op_sub_float_int() {
-        let result = eval_binary_op(&BinaryOp::Sub,
+        let result = eval_binary_op(
+            &BinaryOp::Sub,
             Value::Property(PropertyValue::Float(5.0)),
             Value::Property(PropertyValue::Integer(2)),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 3.0).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -26336,10 +30147,12 @@ mod tests {
 
     #[test]
     fn test_binary_op_mul_int_float() {
-        let result = eval_binary_op(&BinaryOp::Mul,
+        let result = eval_binary_op(
+            &BinaryOp::Mul,
             Value::Property(PropertyValue::Integer(3)),
             Value::Property(PropertyValue::Float(2.0)),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 6.0).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -26348,7 +30161,8 @@ mod tests {
 
     #[test]
     fn test_binary_op_div_int_zero() {
-        let result = eval_binary_op(&BinaryOp::Div,
+        let result = eval_binary_op(
+            &BinaryOp::Div,
             Value::Property(PropertyValue::Integer(10)),
             Value::Property(PropertyValue::Integer(0)),
         );
@@ -26357,10 +30171,12 @@ mod tests {
 
     #[test]
     fn test_binary_op_div_int_float() {
-        let result = eval_binary_op(&BinaryOp::Div,
+        let result = eval_binary_op(
+            &BinaryOp::Div,
             Value::Property(PropertyValue::Integer(10)),
             Value::Property(PropertyValue::Float(4.0)),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - 2.5).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -26371,10 +30187,12 @@ mod tests {
 
     #[test]
     fn test_binary_op_eq_null() {
-        let result = eval_binary_op(&BinaryOp::Eq,
+        let result = eval_binary_op(
+            &BinaryOp::Eq,
             Value::Property(PropertyValue::Null),
             Value::Property(PropertyValue::Null),
-        ).unwrap();
+        )
+        .unwrap();
         // Cypher: null = null is *unknown*, not true. This is why `IS NULL` exists as a
         // separate operator -- equality can never confirm nullness.
         assert_eq!(result, Value::Property(PropertyValue::Null));
@@ -26382,10 +30200,12 @@ mod tests {
 
     #[test]
     fn test_binary_op_ne_null_vs_int() {
-        let result = eval_binary_op(&BinaryOp::Ne,
+        let result = eval_binary_op(
+            &BinaryOp::Ne,
             Value::Property(PropertyValue::Null),
             Value::Property(PropertyValue::Integer(1)),
-        ).unwrap();
+        )
+        .unwrap();
         // Unknown, not true -- a WHERE must exclude the row rather than keep it.
         assert_eq!(result, Value::Property(PropertyValue::Null));
     }
@@ -26394,7 +30214,8 @@ mod tests {
 
     #[test]
     fn test_binary_op_and_type_error() {
-        let result = eval_binary_op(&BinaryOp::And,
+        let result = eval_binary_op(
+            &BinaryOp::And,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::Boolean(true)),
         );
@@ -26403,7 +30224,8 @@ mod tests {
 
     #[test]
     fn test_binary_op_or_type_error() {
-        let result = eval_binary_op(&BinaryOp::Or,
+        let result = eval_binary_op(
+            &BinaryOp::Or,
             Value::Property(PropertyValue::String("a".to_string())),
             Value::Property(PropertyValue::Boolean(false)),
         );
@@ -26414,37 +30236,45 @@ mod tests {
 
     #[test]
     fn test_binary_op_and_true() {
-        let result = eval_binary_op(&BinaryOp::And,
+        let result = eval_binary_op(
+            &BinaryOp::And,
             Value::Property(PropertyValue::Boolean(true)),
             Value::Property(PropertyValue::Boolean(true)),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_and_false() {
-        let result = eval_binary_op(&BinaryOp::And,
+        let result = eval_binary_op(
+            &BinaryOp::And,
             Value::Property(PropertyValue::Boolean(true)),
             Value::Property(PropertyValue::Boolean(false)),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
     #[test]
     fn test_binary_op_or_true() {
-        let result = eval_binary_op(&BinaryOp::Or,
+        let result = eval_binary_op(
+            &BinaryOp::Or,
             Value::Property(PropertyValue::Boolean(false)),
             Value::Property(PropertyValue::Boolean(true)),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_or_false() {
-        let result = eval_binary_op(&BinaryOp::Or,
+        let result = eval_binary_op(
+            &BinaryOp::Or,
             Value::Property(PropertyValue::Boolean(false)),
             Value::Property(PropertyValue::Boolean(false)),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
@@ -26452,7 +30282,8 @@ mod tests {
 
     #[test]
     fn test_binary_op_add_type_error() {
-        let result = eval_binary_op(&BinaryOp::Add,
+        let result = eval_binary_op(
+            &BinaryOp::Add,
             Value::Property(PropertyValue::Boolean(true)),
             Value::Property(PropertyValue::Integer(1)),
         );
@@ -26461,7 +30292,8 @@ mod tests {
 
     #[test]
     fn test_binary_op_sub_type_error() {
-        let result = eval_binary_op(&BinaryOp::Sub,
+        let result = eval_binary_op(
+            &BinaryOp::Sub,
             Value::Property(PropertyValue::String("a".to_string())),
             Value::Property(PropertyValue::Integer(1)),
         );
@@ -26470,7 +30302,8 @@ mod tests {
 
     #[test]
     fn test_binary_op_mul_type_error() {
-        let result = eval_binary_op(&BinaryOp::Mul,
+        let result = eval_binary_op(
+            &BinaryOp::Mul,
             Value::Property(PropertyValue::String("a".to_string())),
             Value::Property(PropertyValue::Integer(1)),
         );
@@ -26479,7 +30312,8 @@ mod tests {
 
     #[test]
     fn test_binary_op_div_type_error() {
-        let result = eval_binary_op(&BinaryOp::Div,
+        let result = eval_binary_op(
+            &BinaryOp::Div,
             Value::Property(PropertyValue::Boolean(true)),
             Value::Property(PropertyValue::Integer(1)),
         );
@@ -26491,7 +30325,8 @@ mod tests {
     #[test]
     fn test_binary_op_non_property_left() {
         use crate::graph::types::NodeId;
-        let result = eval_binary_op(&BinaryOp::Add,
+        let result = eval_binary_op(
+            &BinaryOp::Add,
             Value::NodeRef(NodeId::new(1)),
             Value::Property(PropertyValue::Integer(1)),
         );
@@ -26501,7 +30336,8 @@ mod tests {
     #[test]
     fn test_binary_op_non_property_right() {
         use crate::graph::types::NodeId;
-        let result = eval_binary_op(&BinaryOp::Add,
+        let result = eval_binary_op(
+            &BinaryOp::Add,
             Value::Property(PropertyValue::Integer(1)),
             Value::NodeRef(NodeId::new(1)),
         );
@@ -26512,10 +30348,12 @@ mod tests {
 
     #[test]
     fn test_binary_op_null_value_left() {
-        let result = eval_binary_op(&BinaryOp::Eq,
+        let result = eval_binary_op(
+            &BinaryOp::Eq,
             Value::Null,
             Value::Property(PropertyValue::Integer(1)),
-        ).unwrap();
+        )
+        .unwrap();
         // Unknown. Filters coerce this to "exclude", so the observable WHERE behaviour is
         // unchanged from the old `false`, but NOT(unknown) is unknown -- not true.
         assert_eq!(result, Value::Property(PropertyValue::Null));
@@ -26525,46 +30363,56 @@ mod tests {
 
     #[test]
     fn test_binary_op_lt() {
-        let result = eval_binary_op(&BinaryOp::Lt,
+        let result = eval_binary_op(
+            &BinaryOp::Lt,
             Value::Property(PropertyValue::Integer(1)),
             Value::Property(PropertyValue::Integer(2)),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_le_equal() {
-        let result = eval_binary_op(&BinaryOp::Le,
+        let result = eval_binary_op(
+            &BinaryOp::Le,
             Value::Property(PropertyValue::Integer(2)),
             Value::Property(PropertyValue::Integer(2)),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_gt() {
-        let result = eval_binary_op(&BinaryOp::Gt,
+        let result = eval_binary_op(
+            &BinaryOp::Gt,
             Value::Property(PropertyValue::Integer(3)),
             Value::Property(PropertyValue::Integer(2)),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_ge_equal() {
-        let result = eval_binary_op(&BinaryOp::Ge,
+        let result = eval_binary_op(
+            &BinaryOp::Ge,
             Value::Property(PropertyValue::Integer(2)),
             Value::Property(PropertyValue::Integer(2)),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_binary_op_lt_false() {
-        let result = eval_binary_op(&BinaryOp::Lt,
+        let result = eval_binary_op(
+            &BinaryOp::Lt,
             Value::Property(PropertyValue::Integer(5)),
             Value::Property(PropertyValue::Integer(2)),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
@@ -26584,13 +30432,18 @@ mod tests {
 
     #[test]
     fn test_unary_op_is_null_false() {
-        let result = eval_unary_op(&UnaryOp::IsNull, Value::Property(PropertyValue::Integer(1))).unwrap();
+        let result =
+            eval_unary_op(&UnaryOp::IsNull, Value::Property(PropertyValue::Integer(1))).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
     #[test]
     fn test_unary_op_is_not_null_true() {
-        let result = eval_unary_op(&UnaryOp::IsNotNull, Value::Property(PropertyValue::Integer(1))).unwrap();
+        let result = eval_unary_op(
+            &UnaryOp::IsNotNull,
+            Value::Property(PropertyValue::Integer(1)),
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
@@ -26602,13 +30455,18 @@ mod tests {
 
     #[test]
     fn test_unary_op_not_true() {
-        let result = eval_unary_op(&UnaryOp::Not, Value::Property(PropertyValue::Boolean(true))).unwrap();
+        let result =
+            eval_unary_op(&UnaryOp::Not, Value::Property(PropertyValue::Boolean(true))).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(false)));
     }
 
     #[test]
     fn test_unary_op_not_false() {
-        let result = eval_unary_op(&UnaryOp::Not, Value::Property(PropertyValue::Boolean(false))).unwrap();
+        let result = eval_unary_op(
+            &UnaryOp::Not,
+            Value::Property(PropertyValue::Boolean(false)),
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Boolean(true)));
     }
 
@@ -26632,13 +30490,15 @@ mod tests {
 
     #[test]
     fn test_unary_op_minus_int() {
-        let result = eval_unary_op(&UnaryOp::Minus, Value::Property(PropertyValue::Integer(42))).unwrap();
+        let result =
+            eval_unary_op(&UnaryOp::Minus, Value::Property(PropertyValue::Integer(42))).unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(-42)));
     }
 
     #[test]
     fn test_unary_op_minus_float() {
-        let result = eval_unary_op(&UnaryOp::Minus, Value::Property(PropertyValue::Float(3.14))).unwrap();
+        let result =
+            eval_unary_op(&UnaryOp::Minus, Value::Property(PropertyValue::Float(3.14))).unwrap();
         match result {
             Value::Property(PropertyValue::Float(f)) => assert!((f - (-3.14)).abs() < 1e-10),
             _ => panic!("Expected Float"),
@@ -26647,7 +30507,10 @@ mod tests {
 
     #[test]
     fn test_unary_op_minus_type_error() {
-        let result = eval_unary_op(&UnaryOp::Minus, Value::Property(PropertyValue::String("x".to_string())));
+        let result = eval_unary_op(
+            &UnaryOp::Minus,
+            Value::Property(PropertyValue::String("x".to_string())),
+        );
         assert!(result.is_err());
     }
 
@@ -26660,7 +30523,12 @@ mod tests {
             PropertyValue::Integer(20),
             PropertyValue::Integer(30),
         ]));
-        let result = eval_index(arr, Value::Property(PropertyValue::Integer(1)), &GraphStore::new()).unwrap();
+        let result = eval_index(
+            arr,
+            Value::Property(PropertyValue::Integer(1)),
+            &GraphStore::new(),
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(20)));
     }
 
@@ -26671,14 +30539,24 @@ mod tests {
             PropertyValue::Integer(20),
             PropertyValue::Integer(30),
         ]));
-        let result = eval_index(arr, Value::Property(PropertyValue::Integer(-1)), &GraphStore::new()).unwrap();
+        let result = eval_index(
+            arr,
+            Value::Property(PropertyValue::Integer(-1)),
+            &GraphStore::new(),
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(30)));
     }
 
     #[test]
     fn test_eval_index_array_out_of_bounds() {
         let arr = Value::Property(PropertyValue::Array(vec![PropertyValue::Integer(10)]));
-        let result = eval_index(arr, Value::Property(PropertyValue::Integer(5)), &GraphStore::new()).unwrap();
+        let result = eval_index(
+            arr,
+            Value::Property(PropertyValue::Integer(5)),
+            &GraphStore::new(),
+        )
+        .unwrap();
         assert_eq!(result, Value::Null);
     }
 
@@ -26690,7 +30568,8 @@ mod tests {
             Value::Property(PropertyValue::Map(map)),
             Value::Property(PropertyValue::String("key".to_string())),
             &GraphStore::new(),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(42)));
     }
 
@@ -26702,7 +30581,8 @@ mod tests {
             Value::Property(PropertyValue::Map(map)),
             Value::Property(PropertyValue::String("missing".to_string())),
             &GraphStore::new(),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, Value::Null);
     }
 
@@ -26744,7 +30624,8 @@ mod tests {
             arr,
             Some(Value::Property(PropertyValue::Integer(1))),
             Some(Value::Property(PropertyValue::Integer(3))),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
@@ -26762,11 +30643,8 @@ mod tests {
             PropertyValue::Integer(20),
             PropertyValue::Integer(30),
         ]));
-        let result = eval_list_slice(
-            arr,
-            Some(Value::Property(PropertyValue::Integer(-2))),
-            None,
-        ).unwrap();
+        let result =
+            eval_list_slice(arr, Some(Value::Property(PropertyValue::Integer(-2))), None).unwrap();
         match result {
             Value::Property(PropertyValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
@@ -26784,11 +30662,8 @@ mod tests {
             PropertyValue::Integer(20),
             PropertyValue::Integer(30),
         ]));
-        let result = eval_list_slice(
-            arr,
-            None,
-            Some(Value::Property(PropertyValue::Integer(2))),
-        ).unwrap();
+        let result =
+            eval_list_slice(arr, None, Some(Value::Property(PropertyValue::Integer(2)))).unwrap();
         match result {
             Value::Property(PropertyValue::Array(arr)) => {
                 assert_eq!(arr.len(), 2);
@@ -26801,14 +30676,13 @@ mod tests {
 
     #[test]
     fn test_eval_list_slice_empty_result() {
-        let arr = Value::Property(PropertyValue::Array(vec![
-            PropertyValue::Integer(10),
-        ]));
+        let arr = Value::Property(PropertyValue::Array(vec![PropertyValue::Integer(10)]));
         let result = eval_list_slice(
             arr,
             Some(Value::Property(PropertyValue::Integer(3))),
             Some(Value::Property(PropertyValue::Integer(5))),
-        ).unwrap();
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Array(arr)) => assert!(arr.is_empty()),
             _ => panic!("Expected Array"),
@@ -26817,11 +30691,8 @@ mod tests {
 
     #[test]
     fn test_eval_list_slice_non_array() {
-        let result = eval_list_slice(
-            Value::Property(PropertyValue::Integer(1)),
-            None,
-            None,
-        ).unwrap();
+        let result =
+            eval_list_slice(Value::Property(PropertyValue::Integer(1)), None, None).unwrap();
         assert_eq!(result, Value::Null);
     }
 
@@ -26836,8 +30707,18 @@ mod tests {
 
     #[test]
     fn test_eval_function_id_edgeref() {
-        use crate::graph::types::{NodeId, EdgeId, EdgeType};
-        let result = eval_function("id", &[Value::EdgeRef(EdgeId::new(7), NodeId::new(1), NodeId::new(2), EdgeType::new("R"))], None).unwrap();
+        use crate::graph::types::{EdgeId, EdgeType, NodeId};
+        let result = eval_function(
+            "id",
+            &[Value::EdgeRef(
+                EdgeId::new(7),
+                NodeId::new(1),
+                NodeId::new(2),
+                EdgeType::new("R"),
+            )],
+            None,
+        )
+        .unwrap();
         assert_eq!(result, Value::Property(PropertyValue::Integer(7)));
     }
 
@@ -26853,12 +30734,18 @@ mod tests {
 
         let mut store = GraphStore::new();
         let nid = store.create_node("Person");
-        store.get_node_mut(nid).unwrap().add_label(crate::graph::types::Label::new("Employee"));
+        store
+            .get_node_mut(nid)
+            .unwrap()
+            .add_label(crate::graph::types::Label::new("Employee"));
 
         let result = eval_function("labels", &[Value::NodeRef(nid)], Some(&store)).unwrap();
         match result {
             Value::Property(PropertyValue::Array(arr)) => {
-                let labels: Vec<String> = arr.iter().map(|v| v.as_string().unwrap().to_string()).collect();
+                let labels: Vec<String> = arr
+                    .iter()
+                    .map(|v| v.as_string().unwrap().to_string())
+                    .collect();
                 assert!(labels.contains(&"Person".to_string()));
                 assert!(labels.contains(&"Employee".to_string()));
             }
@@ -26868,12 +30755,23 @@ mod tests {
 
     #[test]
     fn test_type_with_edgeref() {
-        use crate::graph::types::{NodeId, EdgeId, EdgeType};
+        use crate::graph::types::{EdgeId, EdgeType, NodeId};
 
-        let result = eval_function("type", &[
-            Value::EdgeRef(EdgeId::new(1), NodeId::new(10), NodeId::new(20), EdgeType::new("KNOWS"))
-        ], None).unwrap();
-        assert_eq!(result, Value::Property(PropertyValue::String("KNOWS".to_string())));
+        let result = eval_function(
+            "type",
+            &[Value::EdgeRef(
+                EdgeId::new(1),
+                NodeId::new(10),
+                NodeId::new(20),
+                EdgeType::new("KNOWS"),
+            )],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::Property(PropertyValue::String("KNOWS".to_string()))
+        );
     }
 
     #[test]
@@ -26882,13 +30780,19 @@ mod tests {
 
         let mut store = GraphStore::new();
         let nid = store.create_node("Person");
-        store.get_node_mut(nid).unwrap().set_property("name", "Alice");
+        store
+            .get_node_mut(nid)
+            .unwrap()
+            .set_property("name", "Alice");
         store.get_node_mut(nid).unwrap().set_property("age", 30i64);
 
         let result = eval_function("keys", &[Value::NodeRef(nid)], Some(&store)).unwrap();
         match result {
             Value::Property(PropertyValue::Array(arr)) => {
-                let keys: Vec<String> = arr.iter().map(|v| v.as_string().unwrap().to_string()).collect();
+                let keys: Vec<String> = arr
+                    .iter()
+                    .map(|v| v.as_string().unwrap().to_string())
+                    .collect();
                 assert!(keys.contains(&"name".to_string()));
                 assert!(keys.contains(&"age".to_string()));
             }
@@ -26898,7 +30802,7 @@ mod tests {
 
     #[test]
     fn test_keys_with_edgeref() {
-        use crate::graph::types::{NodeId, EdgeId, EdgeType};
+        use crate::graph::types::{EdgeId, EdgeType, NodeId};
 
         let mut store = GraphStore::new();
         let n1 = store.create_node("A");
@@ -26907,12 +30811,23 @@ mod tests {
         store.set_edge_property_sparse(eid, "weight", PropertyValue::Float(1.5));
 
         let edge = store.get_edge(eid).unwrap();
-        let result = eval_function("keys", &[
-            Value::EdgeRef(eid, edge.source, edge.target, edge.edge_type.clone())
-        ], Some(&store)).unwrap();
+        let result = eval_function(
+            "keys",
+            &[Value::EdgeRef(
+                eid,
+                edge.source,
+                edge.target,
+                edge.edge_type.clone(),
+            )],
+            Some(&store),
+        )
+        .unwrap();
         match result {
             Value::Property(PropertyValue::Array(arr)) => {
-                let keys: Vec<String> = arr.iter().map(|v| v.as_string().unwrap().to_string()).collect();
+                let keys: Vec<String> = arr
+                    .iter()
+                    .map(|v| v.as_string().unwrap().to_string())
+                    .collect();
                 assert!(keys.contains(&"weight".to_string()));
             }
             _ => panic!("Expected array from keys()"),
@@ -27026,8 +30941,17 @@ mod tests {
         let mut r = Record::new();
         r.bind("a".to_string(), Value::NodeRef(n1));
         r.bind("b".to_string(), Value::NodeRef(n2));
-        let input = Box::new(StaticInputOperator { records: vec![r], index: 0 });
-        let mut op = ExpandIntoOperator::new(input, "a".to_string(), "b".to_string(), Some("KNOWS".to_string()), Some("r".to_string()));
+        let input = Box::new(StaticInputOperator {
+            records: vec![r],
+            index: 0,
+        });
+        let mut op = ExpandIntoOperator::new(
+            input,
+            "a".to_string(),
+            "b".to_string(),
+            Some("KNOWS".to_string()),
+            Some("r".to_string()),
+        );
 
         let mut got = Vec::new();
         while let Some(rec) = op.next(&store).unwrap() {
@@ -27041,7 +30965,10 @@ mod tests {
 
     #[test]
     fn test_expand_into_describe() {
-        let input = Box::new(StaticInputOperator { records: Vec::new(), index: 0 });
+        let input = Box::new(StaticInputOperator {
+            records: Vec::new(),
+            index: 0,
+        });
         let op = ExpandIntoOperator::new(
             input,
             "a".to_string(),
@@ -27123,7 +31050,11 @@ mod tests {
             }
         }
 
-        fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+        fn next_batch(
+            &mut self,
+            store: &GraphStore,
+            batch_size: usize,
+        ) -> ExecutionResult<Option<RecordBatch>> {
             let mut records = Vec::new();
             for _ in 0..batch_size {
                 match self.next(store)? {
@@ -27131,7 +31062,15 @@ mod tests {
                     None => break,
                 }
             }
-            if records.is_empty() { Ok(None) } else { Ok(Some(RecordBatch { records, columns: Vec::new(), plan_hash: None })) }
+            if records.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(RecordBatch {
+                    records,
+                    columns: Vec::new(),
+                    plan_hash: None,
+                }))
+            }
         }
 
         fn reset(&mut self) {
@@ -27149,44 +31088,91 @@ mod tests {
 
     // ========== Three-valued logic tests (Cypher AND/OR with nulls) ==========
 
-    fn prop(v: PropertyValue) -> Value { Value::Property(v) }
+    fn prop(v: PropertyValue) -> Value {
+        Value::Property(v)
+    }
 
     #[test]
     fn test_and_false_short_circuits_null() {
         // false AND null → false (short-circuit). Previously errored with "AND requires booleans".
-        let r = eval_binary_op(&BinaryOp::And, prop(PropertyValue::Boolean(false)), prop(PropertyValue::Null)).unwrap();
+        let r = eval_binary_op(
+            &BinaryOp::And,
+            prop(PropertyValue::Boolean(false)),
+            prop(PropertyValue::Null),
+        )
+        .unwrap();
         assert_eq!(r, prop(PropertyValue::Boolean(false)));
-        let r = eval_binary_op(&BinaryOp::And, prop(PropertyValue::Null), prop(PropertyValue::Boolean(false))).unwrap();
+        let r = eval_binary_op(
+            &BinaryOp::And,
+            prop(PropertyValue::Null),
+            prop(PropertyValue::Boolean(false)),
+        )
+        .unwrap();
         assert_eq!(r, prop(PropertyValue::Boolean(false)));
     }
 
     #[test]
     fn test_and_true_with_null_is_null() {
-        let r = eval_binary_op(&BinaryOp::And, prop(PropertyValue::Boolean(true)), prop(PropertyValue::Null)).unwrap();
+        let r = eval_binary_op(
+            &BinaryOp::And,
+            prop(PropertyValue::Boolean(true)),
+            prop(PropertyValue::Null),
+        )
+        .unwrap();
         assert_eq!(r, prop(PropertyValue::Null));
-        let r = eval_binary_op(&BinaryOp::And, prop(PropertyValue::Null), prop(PropertyValue::Boolean(true))).unwrap();
+        let r = eval_binary_op(
+            &BinaryOp::And,
+            prop(PropertyValue::Null),
+            prop(PropertyValue::Boolean(true)),
+        )
+        .unwrap();
         assert_eq!(r, prop(PropertyValue::Null));
     }
 
     #[test]
     fn test_and_null_null_is_null() {
-        let r = eval_binary_op(&BinaryOp::And, prop(PropertyValue::Null), prop(PropertyValue::Null)).unwrap();
+        let r = eval_binary_op(
+            &BinaryOp::And,
+            prop(PropertyValue::Null),
+            prop(PropertyValue::Null),
+        )
+        .unwrap();
         assert_eq!(r, prop(PropertyValue::Null));
     }
 
     #[test]
     fn test_or_true_short_circuits_null() {
-        let r = eval_binary_op(&BinaryOp::Or, prop(PropertyValue::Boolean(true)), prop(PropertyValue::Null)).unwrap();
+        let r = eval_binary_op(
+            &BinaryOp::Or,
+            prop(PropertyValue::Boolean(true)),
+            prop(PropertyValue::Null),
+        )
+        .unwrap();
         assert_eq!(r, prop(PropertyValue::Boolean(true)));
-        let r = eval_binary_op(&BinaryOp::Or, prop(PropertyValue::Null), prop(PropertyValue::Boolean(true))).unwrap();
+        let r = eval_binary_op(
+            &BinaryOp::Or,
+            prop(PropertyValue::Null),
+            prop(PropertyValue::Boolean(true)),
+        )
+        .unwrap();
         assert_eq!(r, prop(PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_or_false_with_null_is_null() {
-        let r = eval_binary_op(&BinaryOp::Or, prop(PropertyValue::Boolean(false)), prop(PropertyValue::Null)).unwrap();
+        let r = eval_binary_op(
+            &BinaryOp::Or,
+            prop(PropertyValue::Boolean(false)),
+            prop(PropertyValue::Null),
+        )
+        .unwrap();
         assert_eq!(r, prop(PropertyValue::Null));
-        let r = eval_binary_op(&BinaryOp::Or, prop(PropertyValue::Null), prop(PropertyValue::Boolean(false))).unwrap();
+        let r = eval_binary_op(
+            &BinaryOp::Or,
+            prop(PropertyValue::Null),
+            prop(PropertyValue::Boolean(false)),
+        )
+        .unwrap();
         assert_eq!(r, prop(PropertyValue::Null));
     }
 
@@ -27225,9 +31211,13 @@ mod filter_sort_single_read {
         for i in 0..N {
             let n = store.create_node("L");
             if i % 7 != 0 {
-                store.set_node_property("default", n, "p", ((i * 7919) % N) as i64).unwrap();
+                store
+                    .set_node_property("default", n, "p", ((i * 7919) % N) as i64)
+                    .unwrap();
             }
-            store.set_node_property("default", n, "q", (i % 13) as i64).unwrap();
+            store
+                .set_node_property("default", n, "q", (i % 13) as i64)
+                .unwrap();
         }
         store
     }
@@ -27241,7 +31231,11 @@ mod filter_sort_single_read {
         let ids = out
             .records
             .iter()
-            .map(|r| value_node_id(r.get("n").expect("n")).expect("n is a node").as_u64())
+            .map(|r| {
+                value_node_id(r.get("n").expect("n"))
+                    .expect("n is a node")
+                    .as_u64()
+            })
             .collect();
         (ids, n)
     }
@@ -27292,13 +31286,21 @@ mod filter_sort_single_read {
                 4 => Some(PropertyValue::String(format!("s{:03}", k % 40))),
                 5 => Some(PropertyValue::Boolean(k % 2 == 0)),
                 6 => Some(PropertyValue::Date(k as i32 % 30)),
-                7 => Some(PropertyValue::Array(vec![PropertyValue::Integer(k as i64 % 4)])),
-                _ => Some(if k % 4 == 0 { PropertyValue::Float(f64::NAN) } else { PropertyValue::Integer(3) }),
+                7 => Some(PropertyValue::Array(vec![PropertyValue::Integer(
+                    k as i64 % 4,
+                )])),
+                _ => Some(if k % 4 == 0 {
+                    PropertyValue::Float(f64::NAN)
+                } else {
+                    PropertyValue::Integer(3)
+                }),
             };
             if let Some(p) = p {
                 store.set_node_property("default", n, "p", p).unwrap();
             }
-            store.set_node_property("default", n, "q", (k % 11) as i64).unwrap();
+            store
+                .set_node_property("default", n, "q", (k % 11) as i64)
+                .unwrap();
             let mut r = Record::new();
             r.bind("n", Value::NodeRef(n));
             rows.push(r);
@@ -27323,7 +31325,13 @@ mod filter_sort_single_read {
 
     fn cypher_expr(text: &str) -> Expression {
         let q = parse_query(&format!("MATCH (n), (m) RETURN {text} AS x")).unwrap();
-        q.return_clause.expect("RETURN").items.into_iter().next().unwrap().expression
+        q.return_clause
+            .expect("RETURN")
+            .items
+            .into_iter()
+            .next()
+            .unwrap()
+            .expression
     }
 
     #[test]
@@ -27348,16 +31356,24 @@ mod filter_sort_single_read {
         ];
         for pred in predicates {
             for order in &orders {
-                let items: Vec<(Expression, bool)> =
-                    order.iter().map(|(e, asc)| (cypher_expr(e), *asc)).collect();
+                let items: Vec<(Expression, bool)> = order
+                    .iter()
+                    .map(|(e, asc)| (cypher_expr(e), *asc))
+                    .collect();
                 for limit in [None, Some(7)] {
                     let filter = || {
-                        FilterOperator::new(Box::new(MaterializedOperator::new(rows.clone())), cypher_expr(pred))
+                        FilterOperator::new(
+                            Box::new(MaterializedOperator::new(rows.clone())),
+                            cypher_expr(pred),
+                        )
                     };
                     // The old path: the sort cannot see the filter, and reads
                     // every key itself.
                     let filtered = drain(&mut filter(), &store);
-                    let mut old = SortOperator::new(Box::new(MaterializedOperator::new(filtered)), items.clone());
+                    let mut old = SortOperator::new(
+                        Box::new(MaterializedOperator::new(filtered)),
+                        items.clone(),
+                    );
                     let mut new = SortOperator::new(Box::new(filter()), items.clone());
                     if let Some(k) = limit {
                         old.try_push_limit(k);
@@ -27374,12 +31390,20 @@ mod filter_sort_single_read {
     #[test]
     fn the_filter_keeps_only_what_its_predicate_reads() {
         let input = || Box::new(MaterializedOperator::new(Vec::new())) as OperatorBox;
-        assert!(FilterOperator::new(input(), cypher_expr("n.p > 1")).retain_property_reads("n", "p"));
-        assert!(!FilterOperator::new(input(), cypher_expr("n.q > 1")).retain_property_reads("n", "p"));
-        assert!(!FilterOperator::new(input(), cypher_expr("m.p > 1")).retain_property_reads("n", "p"));
+        assert!(
+            FilterOperator::new(input(), cypher_expr("n.p > 1")).retain_property_reads("n", "p")
+        );
+        assert!(
+            !FilterOperator::new(input(), cypher_expr("n.q > 1")).retain_property_reads("n", "p")
+        );
+        assert!(
+            !FilterOperator::new(input(), cypher_expr("m.p > 1")).retain_property_reads("n", "p")
+        );
         // Read inside a comprehension, where `n` may be bound to something else.
-        assert!(!FilterOperator::new(input(), cypher_expr("any(n IN [1] WHERE n.p > 1)"))
-            .retain_property_reads("n", "p"));
+        assert!(
+            !FilterOperator::new(input(), cypher_expr("any(n IN [1] WHERE n.p > 1)"))
+                .retain_property_reads("n", "p")
+        );
     }
 }
 

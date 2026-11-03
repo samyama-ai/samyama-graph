@@ -1,12 +1,12 @@
 //! N-Triples format implementation
 
+use super::{ParseError, ParseResult, SerializeError, SerializeResult};
 use crate::rdf::{
-    Triple, RdfStore, NamedNode, BlankNode, Literal, RdfSubject, RdfPredicate, RdfObject
+    BlankNode, Literal, NamedNode, RdfObject, RdfPredicate, RdfStore, RdfSubject, Triple,
 };
-use super::{ParseResult, SerializeResult, ParseError, SerializeError};
-use rio_api::parser::TriplesParser;
 use rio_api::formatter::TriplesFormatter;
-use rio_turtle::{NTriplesParser, NTriplesFormatter};
+use rio_api::parser::TriplesParser;
+use rio_turtle::{NTriplesFormatter, NTriplesParser};
 use std::io::{BufReader, Cursor};
 
 /// N-Triples parser
@@ -18,14 +18,17 @@ impl NTriplesParserWrapper {
         let cursor = Cursor::new(input);
         let mut reader = BufReader::new(cursor);
         let mut parser = NTriplesParser::new(&mut reader);
-        
+
         let mut triples = Vec::new();
-        
+
         let res: Result<(), rio_turtle::TurtleError> = parser.parse_all(&mut |t| {
-            let subject = convert_subject(t.subject).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            let predicate = convert_predicate(t.predicate).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            let object = convert_object(t.object).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            
+            let subject = convert_subject(t.subject)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            let predicate = convert_predicate(t.predicate)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            let object = convert_object(t.object)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+
             triples.push(Triple::new(subject, predicate, object));
             Ok(())
         });
@@ -60,8 +63,10 @@ impl NTriplesSerializerWrapper {
                 }
             };
 
-            let p_node = rio_api::model::NamedNode { iri: triple.predicate.as_named_node().as_str() };
-            
+            let p_node = rio_api::model::NamedNode {
+                iri: triple.predicate.as_named_node().as_str(),
+            };
+
             let o_node;
             let o_blank;
             let o_dt_node;
@@ -69,49 +74,54 @@ impl NTriplesSerializerWrapper {
                 RdfObject::NamedNode(n) => {
                     o_node = rio_api::model::NamedNode { iri: n.as_str() };
                     rio_api::model::Term::NamedNode(o_node)
-                },
+                }
                 RdfObject::BlankNode(b) => {
                     o_blank = rio_api::model::BlankNode { id: b.as_str() };
                     rio_api::model::Term::BlankNode(o_blank)
-                },
+                }
                 RdfObject::Literal(l) => {
                     if let Some(lang) = l.language() {
-                        rio_api::model::Term::Literal(rio_api::model::Literal::LanguageTaggedString { 
-                            value: l.value(), 
-                            language: lang 
-                        })
+                        rio_api::model::Term::Literal(
+                            rio_api::model::Literal::LanguageTaggedString {
+                                value: l.value(),
+                                language: lang,
+                            },
+                        )
                     } else {
                         let datatype_iri = l.datatype();
                         if datatype_iri.as_str() == "http://www.w3.org/2001/XMLSchema#string" {
-                             rio_api::model::Term::Literal(rio_api::model::Literal::Simple { 
-                                value: l.value()
+                            rio_api::model::Term::Literal(rio_api::model::Literal::Simple {
+                                value: l.value(),
                             })
                         } else {
                             o_dt_node = datatype_iri;
-                            rio_api::model::Term::Literal(rio_api::model::Literal::Typed { 
-                                value: l.value(), 
-                                datatype: rio_api::model::NamedNode { iri: o_dt_node.as_str() } 
+                            rio_api::model::Term::Literal(rio_api::model::Literal::Typed {
+                                value: l.value(),
+                                datatype: rio_api::model::NamedNode {
+                                    iri: o_dt_node.as_str(),
+                                },
                             })
                         }
                     }
-                },
+                }
             };
-            
+
             let rio_triple = rio_api::model::Triple {
                 subject,
                 predicate: p_node,
                 object,
             };
-            
-            formatter.format(&rio_triple)
+
+            formatter
+                .format(&rio_triple)
                 .map_err(|e| SerializeError::Serialize(e.to_string()))?;
         }
-        
-        formatter.finish()
+
+        formatter
+            .finish()
             .map_err(|e| SerializeError::Serialize(e.to_string()))?;
-            
-        String::from_utf8(output)
-            .map_err(|e| SerializeError::Serialize(e.to_string()))
+
+        String::from_utf8(output).map_err(|e| SerializeError::Serialize(e.to_string()))
     }
 }
 
@@ -119,12 +129,12 @@ impl NTriplesSerializerWrapper {
 
 fn convert_subject(s: rio_api::model::Subject) -> Result<RdfSubject, ParseError> {
     match s {
-        rio_api::model::Subject::NamedNode(n) => {
-            Ok(RdfSubject::NamedNode(NamedNode::new(n.iri).map_err(|e| ParseError::Parse(e.to_string()))?))
-        },
-        rio_api::model::Subject::BlankNode(b) => {
-            Ok(RdfSubject::BlankNode(BlankNode::from_str(b.id).map_err(|e| ParseError::Parse(e.to_string()))?))
-        },
+        rio_api::model::Subject::NamedNode(n) => Ok(RdfSubject::NamedNode(
+            NamedNode::new(n.iri).map_err(|e| ParseError::Parse(e.to_string()))?,
+        )),
+        rio_api::model::Subject::BlankNode(b) => Ok(RdfSubject::BlankNode(
+            BlankNode::from_str(b.id).map_err(|e| ParseError::Parse(e.to_string()))?,
+        )),
         _ => Err(ParseError::Parse("Unsupported subject type".to_string())),
     }
 }
@@ -135,28 +145,26 @@ fn convert_predicate(p: rio_api::model::NamedNode) -> Result<RdfPredicate, Parse
 
 fn convert_object(o: rio_api::model::Term) -> Result<RdfObject, ParseError> {
     match o {
-        rio_api::model::Term::NamedNode(n) => {
-            Ok(RdfObject::NamedNode(NamedNode::new(n.iri).map_err(|e| ParseError::Parse(e.to_string()))?))
-        },
-        rio_api::model::Term::BlankNode(b) => {
-            Ok(RdfObject::BlankNode(BlankNode::from_str(b.id).map_err(|e| ParseError::Parse(e.to_string()))?))
-        },
-        rio_api::model::Term::Literal(l) => {
-            match l {
-                rio_api::model::Literal::Simple { value } => {
-                    Ok(RdfObject::Literal(Literal::new_simple_literal(value)))
-                },
-                rio_api::model::Literal::LanguageTaggedString { value, language } => {
-                    Ok(RdfObject::Literal(
-                        Literal::new_language_tagged_literal(value, language)
-                            .map_err(|e| ParseError::Parse(e.to_string()))?
-                    ))
-                },
-                rio_api::model::Literal::Typed { value, datatype } => {
-                    let dt = NamedNode::new(datatype.iri)
-                        .map_err(|e| ParseError::Parse(e.to_string()))?;
-                    Ok(RdfObject::Literal(Literal::new_typed_literal(value, dt)))
-                }
+        rio_api::model::Term::NamedNode(n) => Ok(RdfObject::NamedNode(
+            NamedNode::new(n.iri).map_err(|e| ParseError::Parse(e.to_string()))?,
+        )),
+        rio_api::model::Term::BlankNode(b) => Ok(RdfObject::BlankNode(
+            BlankNode::from_str(b.id).map_err(|e| ParseError::Parse(e.to_string()))?,
+        )),
+        rio_api::model::Term::Literal(l) => match l {
+            rio_api::model::Literal::Simple { value } => {
+                Ok(RdfObject::Literal(Literal::new_simple_literal(value)))
+            }
+            rio_api::model::Literal::LanguageTaggedString { value, language } => {
+                Ok(RdfObject::Literal(
+                    Literal::new_language_tagged_literal(value, language)
+                        .map_err(|e| ParseError::Parse(e.to_string()))?,
+                ))
+            }
+            rio_api::model::Literal::Typed { value, datatype } => {
+                let dt =
+                    NamedNode::new(datatype.iri).map_err(|e| ParseError::Parse(e.to_string()))?;
+                Ok(RdfObject::Literal(Literal::new_typed_literal(value, dt)))
             }
         },
         _ => Err(ParseError::Parse("Unsupported object type".to_string())),
@@ -226,7 +234,8 @@ mod tests {
 
     #[test]
     fn test_ntriples_parse_named_node_object() {
-        let input = "<http://example.org/alice> <http://example.org/knows> <http://example.org/bob> .\n";
+        let input =
+            "<http://example.org/alice> <http://example.org/knows> <http://example.org/bob> .\n";
         let triples = NTriplesParserWrapper::parse(input).unwrap();
         assert_eq!(triples.len(), 1);
 
@@ -245,7 +254,10 @@ mod tests {
         match &triples[0].object {
             RdfObject::Literal(l) => {
                 assert_eq!(l.value(), "30");
-                assert_eq!(l.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#integer");
+                assert_eq!(
+                    l.datatype().as_str(),
+                    "http://www.w3.org/2001/XMLSchema#integer"
+                );
             }
             _ => panic!("Expected Literal object"),
         }
@@ -319,9 +331,8 @@ mod tests {
     fn test_ntriples_serialize_language_tagged() {
         let subject = RdfSubject::NamedNode(NamedNode::new("http://example.org/alice").unwrap());
         let predicate = RdfPredicate::new("http://example.org/name").unwrap();
-        let object = RdfObject::Literal(
-            Literal::new_language_tagged_literal("Alice", "en").unwrap()
-        );
+        let object =
+            RdfObject::Literal(Literal::new_language_tagged_literal("Alice", "en").unwrap());
 
         let triples = vec![Triple::new(subject, predicate, object)];
         let output = NTriplesSerializerWrapper::serialize(&triples).unwrap();
@@ -361,7 +372,10 @@ mod tests {
         match &reparsed[0].object {
             RdfObject::Literal(l) => {
                 assert_eq!(l.value(), "30");
-                assert_eq!(l.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#integer");
+                assert_eq!(
+                    l.datatype().as_str(),
+                    "http://www.w3.org/2001/XMLSchema#integer"
+                );
             }
             _ => panic!("Expected Literal object after roundtrip"),
         }
@@ -401,7 +415,8 @@ mod tests {
 
     #[test]
     fn test_ntriples_roundtrip_named_node_object() {
-        let input = "<http://example.org/alice> <http://example.org/knows> <http://example.org/bob> .\n";
+        let input =
+            "<http://example.org/alice> <http://example.org/knows> <http://example.org/bob> .\n";
         let triples = NTriplesParserWrapper::parse(input).unwrap();
         let output = NTriplesSerializerWrapper::serialize(&triples).unwrap();
         let reparsed = NTriplesParserWrapper::parse(&output).unwrap();
@@ -418,9 +433,7 @@ mod tests {
         let mut triples = Vec::new();
         for i in 0..10 {
             let iri = format!("http://example.org/node{}", i);
-            let subject = RdfSubject::NamedNode(
-                NamedNode::new(&iri).unwrap()
-            );
+            let subject = RdfSubject::NamedNode(NamedNode::new(&iri).unwrap());
             let predicate = RdfPredicate::new("http://example.org/value").unwrap();
             let object = RdfObject::Literal(Literal::new_simple_literal(format!("val{}", i)));
             triples.push(Triple::new(subject, predicate, object));
@@ -441,7 +454,10 @@ mod tests {
             RdfObject::Literal(l) => {
                 assert_eq!(l.value(), "simple string");
                 // Simple literals have xsd:string datatype
-                assert_eq!(l.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#string");
+                assert_eq!(
+                    l.datatype().as_str(),
+                    "http://www.w3.org/2001/XMLSchema#string"
+                );
                 assert!(l.language().is_none());
             }
             _ => panic!("Expected Literal object"),
@@ -520,7 +536,10 @@ mod tests {
         match &triples[0].object {
             RdfObject::Literal(l) => {
                 assert_eq!(l.value(), "true");
-                assert_eq!(l.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#boolean");
+                assert_eq!(
+                    l.datatype().as_str(),
+                    "http://www.w3.org/2001/XMLSchema#boolean"
+                );
             }
             _ => panic!("Expected typed literal"),
         }
@@ -535,7 +554,10 @@ mod tests {
         match &triples[0].object {
             RdfObject::Literal(l) => {
                 assert_eq!(l.value(), "3.14");
-                assert_eq!(l.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#double");
+                assert_eq!(
+                    l.datatype().as_str(),
+                    "http://www.w3.org/2001/XMLSchema#double"
+                );
             }
             _ => panic!("Expected typed literal"),
         }
@@ -574,12 +596,13 @@ mod tests {
         let triples = NTriplesParserWrapper::parse(input).unwrap();
         assert_eq!(triples.len(), 3);
 
-        let languages: Vec<&str> = triples.iter().map(|t| {
-            match &t.object {
+        let languages: Vec<&str> = triples
+            .iter()
+            .map(|t| match &t.object {
                 RdfObject::Literal(l) => l.language().unwrap(),
                 _ => panic!("Expected literal"),
-            }
-        }).collect();
+            })
+            .collect();
 
         assert!(languages.contains(&"en"));
         assert!(languages.contains(&"fr"));

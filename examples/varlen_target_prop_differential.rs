@@ -64,14 +64,19 @@ fn main() {
                 labels.push(Label::new("M"));
             }
             let id = s.create_node_with_labels(labels);
-            s.set_node_property("default", id, "k",
-                PropertyValue::Integer((i % 4) as i64)).unwrap();
+            s.set_node_property("default", id, "k", PropertyValue::Integer((i % 4) as i64))
+                .unwrap();
             // A third of the nodes lack the property entirely: a node without
             // it must not match, and that is exactly where an `is_some_and`
             // and a `map_or(true, ..)` differ.
             if i % 3 != 1 {
-                s.set_node_property("default", id, "name",
-                    PropertyValue::String(format!("v{}", i % 3))).unwrap();
+                s.set_node_property(
+                    "default",
+                    id,
+                    "name",
+                    PropertyValue::String(format!("v{}", i % 3)),
+                )
+                .unwrap();
             }
             ids.push(id);
         }
@@ -86,7 +91,9 @@ fn main() {
         if graph_n % 2 == 0 {
             for stmt in ["CREATE INDEX ON :N(name)", "CREATE INDEX ON :N(k)"] {
                 let q = parse_query(stmt).unwrap();
-                MutQueryExecutor::new(&mut s, "default".to_string()).execute(&q).unwrap();
+                MutQueryExecutor::new(&mut s, "default".to_string())
+                    .execute(&q)
+                    .unwrap();
             }
         }
 
@@ -95,8 +102,14 @@ fn main() {
                 continue;
             }
             let a_k = anchor % 4;
-            for (bounds, dir) in [("*1..2", "-"), ("*1..3", "-"), ("*1..2", "->"),
-                                  ("*2..3", "-"), ("*0..2", "-"), ("*1..1", "->")] {
+            for (bounds, dir) in [
+                ("*1..2", "-"),
+                ("*1..3", "-"),
+                ("*1..2", "->"),
+                ("*2..3", "-"),
+                ("*0..2", "-"),
+                ("*1..1", "->"),
+            ] {
                 // An **unlabelled** target is essential, not extra coverage:
                 // `resolve_target_ids` declines without a label, so it is the
                 // only shape that reaches the `target_props` property compare.
@@ -156,9 +169,11 @@ fn main() {
     println!("{disagreements} disagreements");
     // An all-empty run would agree trivially and prove nothing — the trap this
     // repo has hit three times.
-    assert!(non_empty > checked / 10,
+    assert!(
+        non_empty > checked / 10,
         "only {non_empty} of {checked} comparisons returned any rows; this run \
-         would agree trivially and cannot detect a dropped row");
+         would agree trivially and cannot detect a dropped row"
+    );
     assert_eq!(disagreements, 0, "pruning the target changed the answer");
     println!("\nthe operator's pruning and the filter above agree everywhere");
 }

@@ -45,7 +45,10 @@ fn a_value_stays_under_the_ceiling_it_was_brought_to() {
 fn boxing_did_not_change_what_a_node_value_holds() {
     // The representation changed; the behaviour must not. A materialised node
     // still answers for its id, its labels and its properties.
-    let mut node = Node::new(samyama::graph::NodeId::new(7), samyama::graph::Label::new("Person"));
+    let mut node = Node::new(
+        samyama::graph::NodeId::new(7),
+        samyama::graph::Label::new("Person"),
+    );
     node.set_property("name", PropertyValue::String("Ada".into()));
 
     let value = Value::Node(samyama::graph::NodeId::new(7), Box::new(node));

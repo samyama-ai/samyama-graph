@@ -113,7 +113,11 @@ fn field(s: &std::collections::HashMap<String, i64>, k: &str) -> i64 {
 #[test]
 fn the_demo_detects_gaps_and_fills_them_without_executing_model_cypher() {
     let s = summary();
-    assert_eq!(field(&s, "gaps"), 3, "two scalar gaps and one relationship gap");
+    assert_eq!(
+        field(&s, "gaps"),
+        3,
+        "two scalar gaps and one relationship gap"
+    );
     assert_eq!(
         field(&s, "filled"),
         3,
@@ -143,7 +147,11 @@ fn everything_the_model_wrote_is_marked() {
     // created whole. The condition that was already in the graph is *not*
     // marked -- it is named by the model, not made by it.
     assert_eq!(field(&s, "marked"), 2);
-    assert_eq!(field(&s, "edges"), 2, "both relationship targets materialized");
+    assert_eq!(
+        field(&s, "edges"),
+        2,
+        "both relationship targets materialized"
+    );
 }
 
 #[test]
@@ -151,7 +159,11 @@ fn a_retraction_puts_the_graph_back_and_spares_ingested_data() {
     let s = summary();
     assert_eq!(field(&s, "props_removed"), 1);
     assert_eq!(field(&s, "edges_removed"), 2);
-    assert_eq!(field(&s, "nodes_removed"), 1, "only the node the model created");
+    assert_eq!(
+        field(&s, "nodes_removed"),
+        1,
+        "only the node the model created"
+    );
     assert_eq!(
         field(&s, "nodes_after_retract"),
         field(&s, "nodes_before_retract") - 1

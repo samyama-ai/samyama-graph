@@ -50,18 +50,27 @@ fn build() -> GraphStore {
     s
 }
 
-fn run(engine: &QueryEngine, store: &GraphStore, q: &str, limit: Option<Duration>) -> Result<usize, String> {
+fn run(
+    engine: &QueryEngine,
+    store: &GraphStore,
+    q: &str,
+    limit: Option<Duration>,
+) -> Result<usize, String> {
     engine
         .execute_with_params_within(q, store, &BoundParams::new(), limit)
         .map(|b| b.records.len())
         .map_err(|e| e.to_string())
 }
 
-const PAGE_RANK: &str = "CALL algo.pageRank('P', 'L', {iterations: 50}) YIELD node, score RETURN node, score";
+const PAGE_RANK: &str =
+    "CALL algo.pageRank('P', 'L', {iterations: 50}) YIELD node, score RETURN node, score";
 
 /// `<what> stopped ... after <done> of <total> <unit>`, as numbers.
 fn stopped_at(msg: &str) -> (usize, usize) {
-    let after = msg.split(" after ").nth(1).unwrap_or_else(|| panic!("no 'after' in: {msg}"));
+    let after = msg
+        .split(" after ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no 'after' in: {msg}"));
     let mut words = after.split_whitespace();
     let done = words.next().unwrap().parse().unwrap();
     assert_eq!(words.next(), Some("of"), "{msg}");
@@ -77,12 +86,19 @@ fn a_page_rank_out_of_time_before_it_starts_does_no_work() {
     let store = graph();
     let engine = QueryEngine::new();
     let err = run(&engine, store, PAGE_RANK, Some(Duration::ZERO)).unwrap_err();
-    assert!(err.contains("Query timed out: algo.pageRank stopped building its graph view"), "{err}");
+    assert!(
+        err.contains("Query timed out: algo.pageRank stopped building its graph view"),
+        "{err}"
+    );
     assert_eq!(stopped_at(&err), (0, NODES as usize));
 
     // The deadline is the query's, not a latch on the engine.
     assert_eq!(run(&engine, store, "RETURN 1 AS one", None), Ok(1));
-    assert_eq!(run(&engine, store, PAGE_RANK, None), Ok(NODES as usize), "the same call, with time, answers");
+    assert_eq!(
+        run(&engine, store, PAGE_RANK, None),
+        Ok(NODES as usize),
+        "the same call, with time, answers"
+    );
 }
 
 /// A deadline that falls part-way through. It is set to a quarter of the time
@@ -103,7 +119,10 @@ fn a_page_rank_that_runs_out_of_time_part_way_stops_there() {
         "the run was not stopped part-way (the full run took {full:?}): {err}"
     );
     let (done, total) = stopped_at(&err);
-    assert!(done < total, "stopped after {done} of {total}: that is the end, not part-way");
+    assert!(
+        done < total,
+        "stopped after {done} of {total}: that is the end, not part-way"
+    );
 }
 
 /// Every algorithm builds its view through the same place, so the deadline
@@ -116,14 +135,26 @@ fn other_algorithms_stop_building_their_view_at_the_deadline() {
     let store = graph();
     let engine = QueryEngine::new();
     for (call, q) in [
-        ("algo.wcc", "CALL algo.wcc() YIELD node, componentId RETURN count(*) AS n"),
-        ("algo.cdlp", "CALL algo.cdlp({maxIterations: 5}) YIELD node RETURN count(*) AS n"),
+        (
+            "algo.wcc",
+            "CALL algo.wcc() YIELD node, componentId RETURN count(*) AS n",
+        ),
+        (
+            "algo.cdlp",
+            "CALL algo.cdlp({maxIterations: 5}) YIELD node RETURN count(*) AS n",
+        ),
     ] {
         let err = run(&engine, store, q, Some(Duration::ZERO)).unwrap_err();
         assert!(
-            err.contains(&format!("Query timed out: {call} stopped building its graph view")),
+            err.contains(&format!(
+                "Query timed out: {call} stopped building its graph view"
+            )),
             "{call}: {err}"
         );
-        assert_eq!(run(&engine, store, q, None), Ok(1), "{call} with time answers");
+        assert_eq!(
+            run(&engine, store, q, None),
+            Ok(1),
+            "{call} with time answers"
+        );
     }
 }

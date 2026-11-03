@@ -31,8 +31,14 @@ fn graph() -> GraphStore {
     let mut store = GraphStore::new();
     for (num, num2) in [(1i64, 4i64), (5, 2), (9, 0), (3, 3), (7, 1)] {
         let n = store.create_node_with_labels([Label::new("A")]);
-        let _ = store.set_node_property("default", n, "num".to_string(), PropertyValue::Integer(num));
-        let _ = store.set_node_property("default", n, "num2".to_string(), PropertyValue::Integer(num2));
+        let _ =
+            store.set_node_property("default", n, "num".to_string(), PropertyValue::Integer(num));
+        let _ = store.set_node_property(
+            "default",
+            n,
+            "num2".to_string(),
+            PropertyValue::Integer(num2),
+        );
     }
     store
 }
@@ -114,11 +120,19 @@ fn the_carried_bindings_do_not_re_enter_scope() {
 fn an_ordinary_order_by_on_a_projected_value_is_unchanged() {
     let store = graph();
     assert_eq!(
-        column(&store, "MATCH (a:A) WITH a.num AS n ORDER BY n RETURN n", "n"),
+        column(
+            &store,
+            "MATCH (a:A) WITH a.num AS n ORDER BY n RETURN n",
+            "n"
+        ),
         vec![1, 3, 5, 7, 9]
     );
     assert_eq!(
-        column(&store, "MATCH (a:A) WITH a.num AS n ORDER BY n DESC RETURN n", "n"),
+        column(
+            &store,
+            "MATCH (a:A) WITH a.num AS n ORDER BY n DESC RETURN n",
+            "n"
+        ),
         vec![9, 7, 5, 3, 1]
     );
 }
@@ -127,7 +141,11 @@ fn an_ordinary_order_by_on_a_projected_value_is_unchanged() {
 fn order_by_a_property_of_a_projected_node_still_works() {
     let store = graph();
     assert_eq!(
-        column(&store, "MATCH (a:A) WITH a ORDER BY a.num LIMIT 2 RETURN a.num AS n", "n"),
+        column(
+            &store,
+            "MATCH (a:A) WITH a ORDER BY a.num LIMIT 2 RETURN a.num AS n",
+            "n"
+        ),
         vec![1, 3]
     );
 }
@@ -147,7 +165,11 @@ fn named() -> GraphStore {
     for v in ["A", "B", "C"] {
         let n = store.create_node("");
         let _ = store.set_node_property(
-            "default", n, "name2".to_string(), PropertyValue::String(v.into()));
+            "default",
+            n,
+            "name2".to_string(),
+            PropertyValue::String(v.into()),
+        );
     }
     store
 }
@@ -185,7 +207,11 @@ fn a_with_where_sees_both_scopes() {
 fn a_with_where_on_the_alias_alone_is_unchanged() {
     let store = named();
     assert_eq!(
-        strings(&store, "MATCH (a) WITH a.name2 AS name WHERE name = \"B\" RETURN *", "name"),
+        strings(
+            &store,
+            "MATCH (a) WITH a.name2 AS name WHERE name = \"B\" RETURN *",
+            "name"
+        ),
         vec!["B"]
     );
 }
@@ -196,7 +222,14 @@ fn a_with_where_that_matches_nothing_still_returns_nothing() {
     // is legitimately false everywhere must stay false.
     let store = named();
     let q = parse_query("MATCH (a) WITH a.name2 AS name WHERE name = \"Z\" RETURN *").unwrap();
-    assert_eq!(QueryExecutor::new(&store).execute(&q).unwrap().records.len(), 0);
+    assert_eq!(
+        QueryExecutor::new(&store)
+            .execute(&q)
+            .unwrap()
+            .records
+            .len(),
+        0
+    );
 }
 
 #[test]

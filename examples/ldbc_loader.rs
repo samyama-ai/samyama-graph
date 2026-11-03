@@ -34,7 +34,10 @@ async fn main() -> Result<(), Error> {
 
     let default_dir = "data/ldbc-sf1/social_network-sf1-CsvBasic-LongDateFormatter";
     let data_dir = if let Some(pos) = args.iter().position(|a| a == "--data-dir") {
-        PathBuf::from(args.get(pos + 1).expect("--data-dir requires a path argument"))
+        PathBuf::from(
+            args.get(pos + 1)
+                .expect("--data-dir requires a path argument"),
+        )
     } else {
         PathBuf::from(default_dir)
     };
@@ -63,7 +66,11 @@ async fn main() -> Result<(), Error> {
     eprintln!();
     eprintln!("========================================");
     eprintln!("Total load time: {}", format_duration(total_elapsed));
-    eprintln!("Graph ready. Nodes: {}, Edges: {}", format_num(result.total_nodes), format_num(result.total_edges));
+    eprintln!(
+        "Graph ready. Nodes: {}, Edges: {}",
+        format_num(result.total_nodes),
+        format_num(result.total_edges)
+    );
     eprintln!("========================================");
 
     // ========================================================================
@@ -80,10 +87,16 @@ async fn main() -> Result<(), Error> {
             io::stderr().flush()?;
 
             let mut input = String::new();
-            if stdin.lock().read_line(&mut input)? == 0 { break; }
+            if stdin.lock().read_line(&mut input)? == 0 {
+                break;
+            }
             let query = input.trim();
-            if query.is_empty() { continue; }
-            if query == "quit" || query == "exit" { break; }
+            if query.is_empty() {
+                continue;
+            }
+            if query == "quit" || query == "exit" {
+                break;
+            }
 
             match client.query("default", query).await {
                 Ok(result) => {
@@ -95,9 +108,7 @@ async fn main() -> Result<(), Error> {
                         eprintln!("{}", "-".repeat(result.columns.len() * 20));
                         // Print rows
                         for row in &result.records {
-                            let vals: Vec<String> = row.iter()
-                                .map(|v| format!("{}", v))
-                                .collect();
+                            let vals: Vec<String> = row.iter().map(|v| format!("{}", v)).collect();
                             eprintln!("{}", vals.join(" | "));
                         }
                         eprintln!("({} rows)", result.records.len());

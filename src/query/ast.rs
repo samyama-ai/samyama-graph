@@ -217,7 +217,12 @@ pub struct Query {
     pub post_with_where_clause: Option<WhereClause>,
     /// Additional WITH stages (for multi-WITH queries like WITH ... MATCH ... WITH ... RETURN)
     /// Each stage: (with_clause, unwind_clause, post_match_clauses, post_where_clause)
-    pub extra_with_stages: Vec<(WithClause, Option<UnwindClause>, Vec<MatchClause>, Option<WhereClause>)>,
+    pub extra_with_stages: Vec<(
+        WithClause,
+        Option<UnwindClause>,
+        Vec<MatchClause>,
+        Option<WhereClause>,
+    )>,
     /// The conjuncts of every WHERE written straight after an OPTIONAL MATCH,
     /// each with that clause's pattern (#1231).
     ///
@@ -245,8 +250,14 @@ pub struct CreateFullTextIndexClause {
 /// `CREATE POINT INDEX` / `DROP POINT INDEX` (#1618).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PointIndexDdl {
-    Create { name: String, label: Label, property: String },
-    Drop { name: String },
+    Create {
+        name: String,
+        label: Label,
+        property: String,
+    },
+    Drop {
+        name: String,
+    },
 }
 
 /// The named graph projection statements (ALGO-05, #1681). See
@@ -373,7 +384,11 @@ pub struct YieldItem {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanHint {
     /// `USING INDEX n:Label(prop)` -- start from `n`, through that index.
-    Index { variable: String, label: Label, properties: Vec<String> },
+    Index {
+        variable: String,
+        label: Label,
+        properties: Vec<String>,
+    },
     /// `USING SCAN n:Label` -- start from `n`, by a label scan, using no index.
     Scan { variable: String, label: Label },
     /// `USING JOIN ON n` -- accepted; this planner joins comma-separated
@@ -1319,9 +1334,18 @@ impl Query {
             || self.deferred_limit.is_some()
             || self.with_clause.as_ref().is_some_and(with)
             || self.extra_with_stages.iter().any(|(w, ..)| with(w))
-            || self.clauses.iter().any(|c| matches!(c, Clause::With(w) if with(w)))
-            || self.call_subquery.as_deref().is_some_and(Query::has_deferred_row_counts)
-            || self.union_queries.iter().any(|(u, _)| u.has_deferred_row_counts())
+            || self
+                .clauses
+                .iter()
+                .any(|c| matches!(c, Clause::With(w) if with(w)))
+            || self
+                .call_subquery
+                .as_deref()
+                .is_some_and(Query::has_deferred_row_counts)
+            || self
+                .union_queries
+                .iter()
+                .any(|(u, _)| u.has_deferred_row_counts())
     }
 
     /// Create a new empty query
@@ -1397,7 +1421,10 @@ impl Query {
             || self.create_hierarchy_index_clause.is_some()
             || self.drop_hierarchy_index.is_some()
             || self.rebuild_hierarchy_index.is_some()
-            || self.graph_projection_ddl.as_ref().is_some_and(GraphProjectionDdl::is_write)
+            || self
+                .graph_projection_ddl
+                .as_ref()
+                .is_some_and(GraphProjectionDdl::is_write)
         {
             return true;
         }
@@ -1441,7 +1468,9 @@ impl Query {
             return true;
         }
         self.clauses.iter().any(|c| match c {
-            Clause::Call(call) => AlgorithmOperator::call_writes(&call.procedure_name, &call.arguments),
+            Clause::Call(call) => {
+                AlgorithmOperator::call_writes(&call.procedure_name, &call.arguments)
+            }
             _ => false,
         })
     }

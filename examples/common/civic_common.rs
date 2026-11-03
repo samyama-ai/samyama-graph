@@ -377,13 +377,20 @@ mod tests {
 
     fn tempdir() -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("civic_test_{}_{}", std::process::id(), rand_suffix()));
+        p.push(format!(
+            "civic_test_{}_{}",
+            std::process::id(),
+            rand_suffix()
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
     fn rand_suffix() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
         format!("{}", nanos)
     }
 }

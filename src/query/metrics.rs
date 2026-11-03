@@ -204,7 +204,10 @@ mod tests {
         for (i, upper) in BUCKETS.iter().enumerate() {
             let got = h.buckets[i].load(Ordering::Relaxed);
             let expected = u64::from(0.001 <= *upper);
-            assert_eq!(got, expected, "bucket le={upper} holds {got}, expected {expected}");
+            assert_eq!(
+                got, expected,
+                "bucket le={upper} holds {got}, expected {expected}"
+            );
         }
         assert_eq!(h.count.load(Ordering::Relaxed), 1);
         assert_eq!(h.sum_micros.load(Ordering::Relaxed), 1000);

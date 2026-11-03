@@ -29,7 +29,10 @@ const PROVENANCE_FIELDS: [&str; 3] = ["engine_version", "snapshot_hash", "plan_h
 /// the headline number cannot be improved by renaming a field.
 const PROVENANCE_PROXIES: [(&str, &str); 1] = [("snapshot_hash", "snapshot_version")];
 
-async fn post_query(server: &HttpServer, cypher: &str) -> (axum::http::HeaderMap, serde_json::Value) {
+async fn post_query(
+    server: &HttpServer,
+    cypher: &str,
+) -> (axum::http::HeaderMap, serde_json::Value) {
     let req = Request::builder()
         .method("POST")
         .uri("/api/query")
@@ -54,7 +57,8 @@ async fn main() {
         // stream; a one-row answer cannot distinguish streamed from buffered.
         for i in 0..2_000i64 {
             let n = s.create_node_with_labels([Label::new("Row")]);
-            s.set_node_property("default", n, "i", PropertyValue::Integer(i)).unwrap();
+            s.set_node_property("default", n, "i", PropertyValue::Integer(i))
+                .unwrap();
         }
     }
     let server = HttpServer::new(Arc::clone(&store), 0);
@@ -62,7 +66,10 @@ async fn main() {
     let (headers, body) = post_query(&server, "MATCH (n:Row) RETURN n.i").await;
 
     // TRUST-06 -- provenance on the result.
-    let top: Vec<String> = body.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    let top: Vec<String> = body
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
     let serialized = body.to_string();
     let present: Vec<&str> = PROVENANCE_FIELDS
         .iter()
@@ -71,7 +78,10 @@ async fn main() {
         // under a `meta` object still satisfies the requirement.
         .filter(|f| serialized.contains(&format!("\"{f}\"")))
         .collect();
-    println!("TRUST-06 provenance fields present: {}/3 {present:?}", present.len());
+    println!(
+        "TRUST-06 provenance fields present: {}/3 {present:?}",
+        present.len()
+    );
     let proxies: Vec<String> = PROVENANCE_PROXIES
         .iter()
         .filter(|(named, _)| !present.contains(named))
@@ -91,8 +101,15 @@ async fn main() {
     // "buffered" -- it kept reading buffered after #1554 shipped a stream. What
     // the router does show is the body itself: a buffered body is one frame with
     // a Content-Length, a streamed one arrives as several frames with none.
-    let len = headers.get("content-length").and_then(|v| v.to_str().ok()).map(str::to_string);
-    let rows = body.get("records").and_then(|r| r.as_array()).map(|a| a.len()).unwrap_or(0);
+    let len = headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let rows = body
+        .get("records")
+        .and_then(|r| r.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
     println!(
         "API-07 default rows={rows} content-length={}",
         len.clone().unwrap_or_else(|| "-".into())
@@ -123,7 +140,11 @@ async fn main() {
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
     let nd_rows = lines.iter().filter(|v| v.get("row").is_some()).count();
-    let done = lines.last().and_then(|v| v.get("done")).and_then(|v| v.as_bool()) == Some(true);
+    let done = lines
+        .last()
+        .and_then(|v| v.get("done"))
+        .and_then(|v| v.as_bool())
+        == Some(true);
     println!(
         "API-07 ndjson frames={frames} content-length={} rows={nd_rows} trailer_done={done}",
         if nd_len { "present" } else { "-" }
@@ -132,5 +153,8 @@ async fn main() {
     // buffered body in a different format, a missing trailer is a truncated
     // stream, a short row count is a stream that lost rows.
     let streamed = frames > 1 && !nd_len && nd_rows == 2_000 && done;
-    println!("  verdict: {}", if streamed { "streamed" } else { "buffered" });
+    println!(
+        "  verdict: {}",
+        if streamed { "streamed" } else { "buffered" }
+    );
 }

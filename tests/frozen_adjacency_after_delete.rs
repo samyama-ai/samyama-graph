@@ -26,7 +26,10 @@ fn a_deleted_edge_is_invisible_while_its_id_is_unused() {
 
     let mut seen = Vec::new();
     store.for_each_outgoing_neighbor(a, None, |t, _| seen.push(t));
-    assert!(seen.is_empty(), "a-[:R]->b was deleted, yet a still has {seen:?}");
+    assert!(
+        seen.is_empty(),
+        "a-[:R]->b was deleted, yet a still has {seen:?}"
+    );
 }
 
 /// The defect: creating any edge afterwards reuses the id and un-hides it.
@@ -63,9 +66,14 @@ fn a_deleted_edge_does_not_reappear_when_its_id_is_reused() {
 
     // And the other way round: the new edge must not be reachable from `a`.
     let mut typed = Vec::new();
-    let r = store.edge_type_id(&samyama::graph::EdgeType::new("R")).expect("type");
+    let r = store
+        .edge_type_id(&samyama::graph::EdgeType::new("R"))
+        .expect("type");
     store.for_each_outgoing_neighbor(a, Some(&[r]), |t, _| typed.push(t));
-    assert!(typed.is_empty(), "typed walk from `a` also sees the stale entry: {typed:?}");
+    assert!(
+        typed.is_empty(),
+        "typed walk from `a` also sees the stale entry: {typed:?}"
+    );
 }
 
 /// Merging releases the ids that #739 had to retire.
@@ -91,18 +99,27 @@ fn merging_frozen_segments_makes_a_retired_id_reusable() {
 
     // Before the merge: retired, exactly as #739 requires.
     let fresh = store.create_edge(c, d, "R").expect("edge");
-    assert_ne!(fresh, e, "a frozen id must stay retired until the segment is rebuilt");
+    assert_ne!(
+        fresh, e,
+        "a frozen id must stay retired until the segment is rebuilt"
+    );
 
     store.merge_frozen_segments();
 
     // After: the stale entry is gone, so the id is safe to hand out again.
     let recycled = store.create_edge(c, d, "R2").expect("edge");
-    assert_eq!(recycled, e, "merging should release the id it had to retire");
+    assert_eq!(
+        recycled, e,
+        "merging should release the id it had to retire"
+    );
 
     // And the point of all of it — `a` still has no edges.
     let mut seen = Vec::new();
     store.for_each_outgoing_neighbor(a, None, |t, _| seen.push(t));
-    assert!(seen.is_empty(), "the deleted edge must not reappear after a merge: {seen:?}");
+    assert!(
+        seen.is_empty(),
+        "the deleted edge must not reappear after a merge: {seen:?}"
+    );
 }
 
 /// A merge must not change any answer.

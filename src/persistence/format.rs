@@ -77,13 +77,18 @@ pub enum Found {
 }
 
 fn io(path: &Path, source: std::io::Error) -> FormatError {
-    FormatError::Io { path: path.to_path_buf(), source }
+    FormatError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 /// Parse `format = N` out of the file's text.
 fn parse(text: &str) -> Result<u32, String> {
     for line in text.lines() {
-        let Some((key, value)) = line.split_once('=') else { continue };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         if key.trim() == "format" {
             return value
                 .trim()
@@ -182,7 +187,10 @@ mod tests {
         stamp(dir.path(), Found::Fresh).unwrap();
         assert_eq!(check(dir.path()).unwrap(), Found::Versioned(FORMAT_VERSION));
         let text = std::fs::read_to_string(dir.path().join(FORMAT_FILE)).unwrap();
-        assert!(text.contains(&format!("written_by = {}", env!("CARGO_PKG_VERSION"))), "{text}");
+        assert!(
+            text.contains(&format!("written_by = {}", env!("CARGO_PKG_VERSION"))),
+            "{text}"
+        );
         assert!(!dir.path().join(format!("{FORMAT_FILE}.tmp")).exists());
     }
 

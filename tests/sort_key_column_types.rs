@@ -12,12 +12,16 @@ use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
 use samyama::query::parser::parse_query;
 
 fn write(s: &mut GraphStore, q: &str) {
-    MutQueryExecutor::new(s, "default".into()).execute(&parse_query(q).unwrap()).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    MutQueryExecutor::new(s, "default".into())
+        .execute(&parse_query(q).unwrap())
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
 }
 
 fn col(s: &GraphStore, q: &str) -> Vec<String> {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(s)
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     out.records
         .iter()
         .map(|r| match r.get("c") {
@@ -31,31 +35,52 @@ fn col(s: &GraphStore, q: &str) -> Vec<String> {
 #[test]
 fn a_string_key() {
     let mut s = GraphStore::new();
-    write(&mut s, "CREATE (:N {k: 'pear', i: 1}), (:N {k: 'apple', i: 2}), (:N {k: 'fig', i: 3})");
-    assert_eq!(col(&s, "MATCH (n:N) RETURN n.k AS c ORDER BY n.k"), vec!["apple", "fig", "pear"]);
-    assert_eq!(col(&s, "MATCH (n:N) RETURN n.i AS c ORDER BY n.k DESC"), vec!["1", "3", "2"]);
+    write(
+        &mut s,
+        "CREATE (:N {k: 'pear', i: 1}), (:N {k: 'apple', i: 2}), (:N {k: 'fig', i: 3})",
+    );
+    assert_eq!(
+        col(&s, "MATCH (n:N) RETURN n.k AS c ORDER BY n.k"),
+        vec!["apple", "fig", "pear"]
+    );
+    assert_eq!(
+        col(&s, "MATCH (n:N) RETURN n.i AS c ORDER BY n.k DESC"),
+        vec!["1", "3", "2"]
+    );
 }
 
 #[test]
 fn a_date_key() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:M {d: datetime('2020-03-01T00:00Z'), i: 1}), (:M {d: datetime('2019-01-01T00:00Z'), i: 2}), (:M {d: datetime('2021-07-04T00:00Z'), i: 3})");
-    assert_eq!(col(&s, "MATCH (m:M) RETURN m.i AS c ORDER BY m.d DESC"), vec!["3", "1", "2"]);
+    assert_eq!(
+        col(&s, "MATCH (m:M) RETURN m.i AS c ORDER BY m.d DESC"),
+        vec!["3", "1", "2"]
+    );
 }
 
 #[test]
 fn a_number_key() {
     let mut s = GraphStore::new();
     write(&mut s, "UNWIND [5, 2, 9, 1] AS v CREATE (:P {v: v})");
-    assert_eq!(col(&s, "MATCH (p:P) RETURN p.v AS c ORDER BY p.v"), vec!["1", "2", "5", "9"]);
+    assert_eq!(
+        col(&s, "MATCH (p:P) RETURN p.v AS c ORDER BY p.v"),
+        vec!["1", "2", "5", "9"]
+    );
 }
 
 /// Strings sort before numbers in Cypher's ORDER BY.
 #[test]
 fn a_column_holding_strings_and_numbers() {
     let mut s = GraphStore::new();
-    write(&mut s, "CREATE (:Q {v: 'b', i: 1}), (:Q {v: 3, i: 2}), (:Q {v: 'a', i: 3}), (:Q {v: 1, i: 4})");
-    assert_eq!(col(&s, "MATCH (q:Q) RETURN q.i AS c ORDER BY q.v"), vec!["3", "1", "4", "2"]);
+    write(
+        &mut s,
+        "CREATE (:Q {v: 'b', i: 1}), (:Q {v: 3, i: 2}), (:Q {v: 'a', i: 3}), (:Q {v: 1, i: 4})",
+    );
+    assert_eq!(
+        col(&s, "MATCH (q:Q) RETURN q.i AS c ORDER BY q.v"),
+        vec!["3", "1", "4", "2"]
+    );
 }
 
 /// The empty string and non-ASCII values order as their owned form does.
@@ -79,16 +104,25 @@ fn an_empty_and_non_ascii_string_key() {
     // key uses, and the one an owned `String` key used before it.
     let mut expected: Vec<&str> = values.to_vec();
     expected.sort();
-    assert_eq!(col(&s, "MATCH (n:S) RETURN n.k AS c ORDER BY n.k"), expected);
+    assert_eq!(
+        col(&s, "MATCH (n:S) RETURN n.k AS c ORDER BY n.k"),
+        expected
+    );
 
     // Descending is the same order reversed, and the empty string is a row at
     // the other end rather than a dropped one.
     expected.reverse();
-    assert_eq!(col(&s, "MATCH (n:S) RETURN n.k AS c ORDER BY n.k DESC"), expected);
+    assert_eq!(
+        col(&s, "MATCH (n:S) RETURN n.k AS c ORDER BY n.k DESC"),
+        expected
+    );
 
     // The projected value is the value, not a prefix or a copy that lost its
     // multi-byte characters.
-    assert_eq!(col(&s, "MATCH (n:S) WHERE n.i = 4 RETURN n.k AS c"), vec!["日本"]);
+    assert_eq!(
+        col(&s, "MATCH (n:S) WHERE n.i = 4 RETURN n.k AS c"),
+        vec!["日本"]
+    );
 }
 
 /// An absent string property is null, and null sorts after every string --
@@ -96,8 +130,14 @@ fn an_empty_and_non_ascii_string_key() {
 #[test]
 fn an_absent_string_key_is_not_the_empty_string() {
     let mut s = GraphStore::new();
-    write(&mut s, "CREATE (:T {k: '', i: 1}), (:T {i: 2}), (:T {k: 'a', i: 3})");
-    assert_eq!(col(&s, "MATCH (n:T) RETURN n.i AS c ORDER BY n.k"), vec!["1", "3", "2"]);
+    write(
+        &mut s,
+        "CREATE (:T {k: '', i: 1}), (:T {i: 2}), (:T {k: 'a', i: 3})",
+    );
+    assert_eq!(
+        col(&s, "MATCH (n:T) RETURN n.i AS c ORDER BY n.k"),
+        vec!["1", "3", "2"]
+    );
 }
 
 /// A relationship property reaches the cursor's edge branch, which caches

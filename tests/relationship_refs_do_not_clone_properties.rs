@@ -115,7 +115,10 @@ fn a_relationship_reference_costs_the_same_however_many_properties_it_has() {
         cost(&store, &wide_q);
         let (narrow, narrow_rows) = cost(&store, &narrow_q);
         let (wide, wide_rows) = cost(&store, &wide_q);
-        assert_eq!(narrow_rows, wide_rows, "`{shape}`: the two types should match the same rows");
+        assert_eq!(
+            narrow_rows, wide_rows,
+            "`{shape}`: the two types should match the same rows"
+        );
         assert!(narrow_rows > 0, "`{shape}` matched nothing");
         let ratio = wide as f64 / narrow as f64;
         eprintln!("{shape}: {narrow_rows} rows, allocator calls narrow {narrow}, wide {wide}, ratio {ratio:.2}");

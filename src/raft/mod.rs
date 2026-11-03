@@ -41,17 +41,17 @@
 //! consistency (may read slightly stale data) or only to the leader for strong consistency.
 //! This module uses the `openraft` crate, a Rust implementation of the Raft protocol.
 
-pub mod node;
+pub mod cluster;
 pub mod network;
+pub mod node;
 pub mod state_machine;
 pub mod storage;
-pub mod cluster;
 
-pub use node::{NodeId, RaftNode};
+pub use cluster::{ClusterConfig, ClusterManager};
 pub use network::RaftNetwork;
+pub use node::{NodeId, RaftNode};
 pub use state_machine::{GraphStateMachine, Request, Response};
 pub use storage::RaftStorage;
-pub use cluster::{ClusterConfig, ClusterManager};
 
 use openraft::Config;
 // Arc removed - was unused import causing compiler warning

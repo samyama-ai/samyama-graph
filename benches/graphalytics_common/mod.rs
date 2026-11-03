@@ -96,11 +96,7 @@ pub fn parse_properties(path: &Path) -> DatasetProperties {
 
 /// Load expected validation output for an algorithm.
 /// Returns a map from vertex ID to the expected value string.
-pub fn load_validation(
-    data_dir: &Path,
-    dataset: &str,
-    algo: &str,
-) -> Option<HashMap<u64, String>> {
+pub fn load_validation(data_dir: &Path, dataset: &str, algo: &str) -> Option<HashMap<u64, String>> {
     // Try: <data_dir>/<dataset>/<dataset>-<ALGO>
     let dataset_dir = data_dir.join(dataset);
     let path = dataset_dir.join(format!("{}-{}", dataset, algo));
@@ -130,7 +126,11 @@ pub fn load_validation(
         }
     }
 
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Load a Graphalytics dataset from vertex and edge files.
@@ -157,9 +157,9 @@ pub fn load_graphalytics_dataset(
             if line.is_empty() || line.starts_with('#') || line.starts_with('%') {
                 continue;
             }
-            let id: u64 = line.parse().map_err(|e| {
-                format!("Failed to parse vertex ID '{}': {}", line, e)
-            })?;
+            let id: u64 = line
+                .parse()
+                .map_err(|e| format!("Failed to parse vertex ID '{}': {}", line, e))?;
             node_ids.push(id);
         }
     }
@@ -195,12 +195,12 @@ pub fn load_graphalytics_dataset(
                 continue;
             }
 
-            let source: u64 = parts[0].parse().map_err(|e| {
-                format!("Failed to parse source ID '{}': {}", parts[0], e)
-            })?;
-            let target: u64 = parts[1].parse().map_err(|e| {
-                format!("Failed to parse target ID '{}': {}", parts[1], e)
-            })?;
+            let source: u64 = parts[0]
+                .parse()
+                .map_err(|e| format!("Failed to parse source ID '{}': {}", parts[0], e))?;
+            let target: u64 = parts[1]
+                .parse()
+                .map_err(|e| format!("Failed to parse target ID '{}': {}", parts[1], e))?;
 
             let weight = if parts.len() >= 3 {
                 has_weights = true;
@@ -209,7 +209,11 @@ pub fn load_graphalytics_dataset(
                 1.0
             };
 
-            raw_edges.push(RawEdge { source, target, weight });
+            raw_edges.push(RawEdge {
+                source,
+                target,
+                weight,
+            });
         }
     }
 
@@ -247,8 +251,12 @@ pub fn load_graphalytics_dataset(
     let mut edge_count = 0usize;
 
     for e in &raw_edges {
-        let Some(&src_idx) = node_to_index.get(&e.source) else { continue };
-        let Some(&tgt_idx) = node_to_index.get(&e.target) else { continue };
+        let Some(&src_idx) = node_to_index.get(&e.source) else {
+            continue;
+        };
+        let Some(&tgt_idx) = node_to_index.get(&e.target) else {
+            continue;
+        };
 
         outgoing[src_idx].push(tgt_idx);
         incoming[tgt_idx].push(src_idx);
@@ -301,12 +309,10 @@ pub fn is_directed(dataset_name: &str) -> bool {
     } else {
         // Known S-size datasets from LDBC Graphalytics
         match dataset_name {
-            "datagen-7_5-fb" | "datagen-7_6-fb" | "datagen-8_0-fb"
-            | "datagen-8_1-fb" | "datagen-8_4-fb" | "datagen-8_5-fb"
-            | "datagen-8_9-fb" | "datagen-9_0-fb" | "datagen-9_1-fb"
-            | "datagen-9_4-fb" | "dota-league"
-            | "graph500-22" | "graph500-23" | "graph500-24"
-            | "graph500-25" | "graph500-26" => false,
+            "datagen-7_5-fb" | "datagen-7_6-fb" | "datagen-8_0-fb" | "datagen-8_1-fb"
+            | "datagen-8_4-fb" | "datagen-8_5-fb" | "datagen-8_9-fb" | "datagen-9_0-fb"
+            | "datagen-9_1-fb" | "datagen-9_4-fb" | "dota-league" | "graph500-22"
+            | "graph500-23" | "graph500-24" | "graph500-25" | "graph500-26" => false,
             // wiki-Talk, cit-Patents, twitter-*, kgs, etc. are directed
             _ => true,
         }
@@ -377,7 +383,9 @@ pub fn find_dataset_files(
 /// Find the properties file for a dataset (if it exists).
 pub fn find_properties_file(data_dir: &Path, dataset: &str) -> Option<std::path::PathBuf> {
     let candidates = [
-        data_dir.join(dataset).join(format!("{}.properties", dataset)),
+        data_dir
+            .join(dataset)
+            .join(format!("{}.properties", dataset)),
         data_dir.join(format!("{}.properties", dataset)),
     ];
     candidates.iter().find(|p| p.exists()).cloned()

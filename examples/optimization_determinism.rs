@@ -18,10 +18,10 @@
 
 use ndarray::Array1;
 use samyama_optimization::algorithms::{
-    ABCSolver, BMRSolver, BMWRSolver, BWRSolver, BatSolver, CuckooSolver, DESolver,
-    EHRJayaSolver, FPASolver, FireflySolver, GASolver, GOTLBOSolver, GSASolver, GWOSolver,
-    HSSolver, ITLBOSolver, JayaSolver, PSOSolver, QOJayaSolver, QORaoSolver, RaoSolver,
-    RaoVariant, SAMPJayaSolver, SAPHRSolver, SASolver, TLBOSolver,
+    ABCSolver, BMRSolver, BMWRSolver, BWRSolver, BatSolver, CuckooSolver, DESolver, EHRJayaSolver,
+    FPASolver, FireflySolver, GASolver, GOTLBOSolver, GSASolver, GWOSolver, HSSolver, ITLBOSolver,
+    JayaSolver, PSOSolver, QOJayaSolver, QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver,
+    SAPHRSolver, SASolver, TLBOSolver,
 };
 use samyama_optimization::common::{OptimizationResult, Problem, SolverConfig};
 
@@ -48,7 +48,10 @@ impl Problem for Sphere {
         self.dim
     }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
-        (Array1::from_elem(self.dim, -5.12), Array1::from_elem(self.dim, 5.12))
+        (
+            Array1::from_elem(self.dim, -5.12),
+            Array1::from_elem(self.dim, 5.12),
+        )
     }
 }
 
@@ -63,9 +66,15 @@ fn same(a: &OptimizationResult, b: &OptimizationResult) -> bool {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let json_out = args.iter().position(|a| a == "--json").map(|i| args[i + 1].clone());
+    let json_out = args
+        .iter()
+        .position(|a| a == "--json")
+        .map(|i| args[i + 1].clone());
 
-    let cfg = SolverConfig { population_size: 30, max_iterations: 40 };
+    let cfg = SolverConfig {
+        population_size: 30,
+        max_iterations: 40,
+    };
     let problem = Sphere { dim: 10 };
     const SEED: u64 = 42;
     const OTHER: u64 = 43;
@@ -77,40 +86,97 @@ fn main() {
     macro_rules! add {
         ($name:literal, $ctor:expr) => {{
             let cfg = cfg.clone();
-            solvers.push(($name, Box::new(move |s: u64| {
-                let mk = $ctor;
-                mk(cfg.clone(), s)
-            })));
+            solvers.push((
+                $name,
+                Box::new(move |s: u64| {
+                    let mk = $ctor;
+                    mk(cfg.clone(), s)
+                }),
+            ));
         }};
     }
 
-    add!("jaya", |c, s| JayaSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("tlbo", |c, s| TLBOSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("bmr", |c, s| BMRSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("bwr", |c, s| BWRSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("bmwr", |c, s| BMWRSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("qojaya", |c, s| QOJayaSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("itlbo", |c, s| ITLBOSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("gotlbo", |c, s| GOTLBOSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("samp_jaya", |c, s| SAMPJayaSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("ehrjaya", |c, s| EHRJayaSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("saphr", |c, s| SAPHRSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("pso", |c, s| PSOSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("de", |c, s| DESolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("ga", |c, s| GASolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("sa", |c, s| SASolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("firefly", |c, s| FireflySolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("cuckoo", |c, s| CuckooSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("gwo", |c, s| GWOSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("bat", |c, s| BatSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("abc", |c, s| ABCSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("gsa", |c, s| GSASolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("hs", |c, s| HSSolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("fpa", |c, s| FPASolver::new(c).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("rao1", |c, s| RaoSolver::new(c, RaoVariant::Rao1).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("rao2", |c, s| RaoSolver::new(c, RaoVariant::Rao2).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("rao3", |c, s| RaoSolver::new(c, RaoVariant::Rao3).with_seed(s).solve(&Sphere { dim: 10 }));
-    add!("qo_rao", |c, s| QORaoSolver::new(c, RaoVariant::Rao1).with_seed(s).solve(&Sphere { dim: 10 }));
+    add!("jaya", |c, s| JayaSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("tlbo", |c, s| TLBOSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("bmr", |c, s| BMRSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("bwr", |c, s| BWRSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("bmwr", |c, s| BMWRSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("qojaya", |c, s| QOJayaSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("itlbo", |c, s| ITLBOSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("gotlbo", |c, s| GOTLBOSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("samp_jaya", |c, s| SAMPJayaSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("ehrjaya", |c, s| EHRJayaSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("saphr", |c, s| SAPHRSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("pso", |c, s| PSOSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("de", |c, s| DESolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("ga", |c, s| GASolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("sa", |c, s| SASolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("firefly", |c, s| FireflySolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("cuckoo", |c, s| CuckooSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("gwo", |c, s| GWOSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("bat", |c, s| BatSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("abc", |c, s| ABCSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("gsa", |c, s| GSASolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("hs", |c, s| HSSolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("fpa", |c, s| FPASolver::new(c)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("rao1", |c, s| RaoSolver::new(c, RaoVariant::Rao1)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("rao2", |c, s| RaoSolver::new(c, RaoVariant::Rao2)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("rao3", |c, s| RaoSolver::new(c, RaoVariant::Rao3)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
+    add!("qo_rao", |c, s| QORaoSolver::new(c, RaoVariant::Rao1)
+        .with_seed(s)
+        .solve(&Sphere { dim: 10 }));
 
     let _ = &problem;
     let mut rows = Vec::new();
@@ -148,7 +214,9 @@ fn main() {
             "{{\"problem\":\"sphere-10d\",\"population\":{},\"iterations\":{},\
              \"seeds\":[{SEED},{OTHER}],\"solvers\":{n},\"repeatable\":{repeatable},\
              \"seed_sensitive\":{seed_sensitive},\"rows\":[{}]}}",
-            cfg.population_size, cfg.max_iterations, rows.join(",")
+            cfg.population_size,
+            cfg.max_iterations,
+            rows.join(",")
         );
         std::fs::write(&path, body).expect("write json");
         println!("wrote {path}");

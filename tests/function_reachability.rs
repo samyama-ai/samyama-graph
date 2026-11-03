@@ -86,14 +86,18 @@ fn implemented_function_names(src: &str) -> Vec<String> {
         pattern.push_str(t);
         pattern.push(' ');
         // An arm looks like: "a" | "b" => {   — quoted, lowercase, then `=>`.
-        let Some(arrow) = pattern.find("=>") else { continue };
+        let Some(arrow) = pattern.find("=>") else {
+            continue;
+        };
         let head = std::mem::take(&mut pattern)[..arrow].to_string();
         for piece in head.split('|') {
             let p = piece.trim();
             if p.len() >= 2 && p.starts_with('"') && p.ends_with('"') {
                 let n = &p[1..p.len() - 1];
                 if !n.is_empty()
-                    && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
+                    && n.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.'
+                    })
                 {
                     names.push(n.to_string());
                 }
@@ -152,7 +156,11 @@ fn known_functions_is_exactly_the_dispatcher() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/query/executor/operator.rs");
     let src = std::fs::read_to_string(&path).expect("read the dispatcher");
     let dispatched: BTreeSet<String> = implemented_function_names(&src).into_iter().collect();
-    assert!(dispatched.len() > 50, "extracted only {} names", dispatched.len());
+    assert!(
+        dispatched.len() > 50,
+        "extracted only {} names",
+        dispatched.len()
+    );
     let listed: BTreeSet<String> = KNOWN_FUNCTIONS.iter().map(|s| s.to_string()).collect();
 
     let not_dispatched: Vec<_> = listed.difference(&dispatched).collect();
@@ -192,7 +200,16 @@ fn the_extractor_actually_extracts() {
     assert!(got.contains(&"abs".to_string()), "{got:?}");
     assert!(got.contains(&"duration.between".to_string()), "{got:?}");
     assert!(got.contains(&"duration_between".to_string()), "{got:?}");
-    assert!(!got.contains(&"other".to_string()), "bare identifiers are not names: {got:?}");
-    assert!(got.contains(&"time.truncate".to_string()), "multi-line arm: {got:?}");
-    assert!(!got.contains(&"nested".to_string()), "a nested match's arms are not functions: {got:?}");
+    assert!(
+        !got.contains(&"other".to_string()),
+        "bare identifiers are not names: {got:?}"
+    );
+    assert!(
+        got.contains(&"time.truncate".to_string()),
+        "multi-line arm: {got:?}"
+    );
+    assert!(
+        !got.contains(&"nested".to_string()),
+        "a nested match's arms are not functions: {got:?}"
+    );
 }

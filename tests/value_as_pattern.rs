@@ -70,7 +70,9 @@ fn the_original_collection_case_still_holds() {
 /// **A name re-bound to something that could be an entity is fine.**
 #[test]
 fn a_rebound_name_is_free_again() {
-    assert!(accepted("MATCH (x) WITH 1 AS n WITH x AS n MATCH (n)-->(m) RETURN m"));
+    assert!(accepted(
+        "MATCH (x) WITH 1 AS n WITH x AS n MATCH (n)-->(m) RETURN m"
+    ));
 }
 
 /// Ordinary queries are undisturbed. This is where a widened type check does

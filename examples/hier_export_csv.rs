@@ -52,11 +52,18 @@ fn main() {
     let mut nodes = std::io::BufWriter::new(
         std::fs::File::create(format!("{out}/nodes.csv")).expect("nodes.csv"),
     );
-    writeln!(nodes, "id:ID,code,units:long,level:long,y:long,co:long,:LABEL").unwrap();
+    writeln!(
+        nodes,
+        "id:ID,code,units:long,level:long,y:long,co:long,:LABEL"
+    )
+    .unwrap();
     let mut node_count = 0usize;
     for node in store.all_nodes() {
         let id = node.id;
-        let code = match store.node_columns.get_property(id.as_u64() as usize, "code") {
+        let code = match store
+            .node_columns
+            .get_property(id.as_u64() as usize, "code")
+        {
             PropertyValue::String(s) => s,
             _ => String::new(),
         };
@@ -100,5 +107,8 @@ fn main() {
     println!("wrote {out}/rels.csv   ({rel_count} relationships)");
     assert_eq!(node_count, data.nodes, "exported every node");
     assert_eq!(rel_count, data.edges, "exported every relationship");
-    println!("counts match the generator: {} nodes, {} edges", data.nodes, data.edges);
+    println!(
+        "counts match the generator: {} nodes, {} edges",
+        data.nodes, data.edges
+    );
 }

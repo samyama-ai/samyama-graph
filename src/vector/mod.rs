@@ -48,5 +48,5 @@
 pub mod index;
 pub mod manager;
 
-pub use index::{VectorIndex, DistanceMetric, VectorError, VectorResult};
-pub use manager::{VectorIndexManager, IndexKey};
+pub use index::{DistanceMetric, VectorError, VectorIndex, VectorResult};
+pub use manager::{IndexKey, VectorIndexManager};

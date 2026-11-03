@@ -1518,7 +1518,9 @@ fn repeated_sigkills_always_recover_a_prefix_of_the_acknowledged_writes() {
     // Every statement whose SET was acknowledged, across rounds. Not "every
     // multiple of three up to the last acknowledged statement": a statement
     // in flight at a kill can survive without its SET ever being sent.
-    let acked_sets = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::<i64>::new()));
+    let acked_sets = Arc::new(std::sync::Mutex::new(
+        std::collections::BTreeSet::<i64>::new(),
+    ));
     for round in 0..kills {
         let spawned = Instant::now();
         let mut server = spawn_server(data, port);
@@ -1580,8 +1582,16 @@ fn repeated_sigkills_always_recover_a_prefix_of_the_acknowledged_writes() {
         server.kill().unwrap();
         let status = server.wait().unwrap();
         let refusal = writer.join().unwrap();
-        assert!(refusal.is_empty(), "round {round}: {refusal}\n{}", server_output(data));
-        assert_eq!(status.signal(), Some(9), "round {round}: not killed: {status}");
+        assert!(
+            refusal.is_empty(),
+            "round {round}: {refusal}\n{}",
+            server_output(data)
+        );
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "round {round}: not killed: {status}"
+        );
         let acked = acked.load(Ordering::SeqCst);
         let issued = issued.load(Ordering::SeqCst);
 
@@ -1590,7 +1600,10 @@ fn repeated_sigkills_always_recover_a_prefix_of_the_acknowledged_writes() {
         let mut conn = wait_until_serving(&mut server, port, data);
         let ints = |reply: std::io::Result<Reply>| -> Vec<Vec<Option<i64>>> {
             let Ok(Reply::Array(rows)) = reply else {
-                panic!("round {round}: no answer: {reply:?}\n{}", server_output(data))
+                panic!(
+                    "round {round}: no answer: {reply:?}\n{}",
+                    server_output(data)
+                )
             };
             rows.iter()
                 .skip(1)
@@ -1616,7 +1629,9 @@ fn repeated_sigkills_always_recover_a_prefix_of_the_acknowledged_writes() {
 
         let seqs: Vec<i64> = heads.iter().map(|r| r[0].expect("seq")).collect();
         let k = seqs.last().copied().unwrap_or(0);
-        let ctx = format!("round {round} (seed {seed}): acked {acked}, issued {issued}, recovered 1..={k}");
+        let ctx = format!(
+            "round {round} (seed {seed}): acked {acked}, issued {issued}, recovered 1..={k}"
+        );
         // RPO = 0 for what was acknowledged.
         assert!(k >= acked, "{ctx}: acknowledged statements lost");
         // Nothing beyond the one in flight.
@@ -1626,13 +1641,21 @@ fn repeated_sigkills_always_recover_a_prefix_of_the_acknowledged_writes() {
         // Atomic: every head with its edge and tail, and no stray tail.
         let sets = acked_sets.lock().unwrap().clone();
         for r in &heads {
-            assert_eq!((r[1], r[2]), (r[0], r[0]), "{ctx}: a statement half-recovered: {r:?}");
+            assert_eq!(
+                (r[1], r[2]),
+                (r[0], r[0]),
+                "{ctx}: a statement half-recovered: {r:?}"
+            );
             let seq = r[0].unwrap();
             if sets.contains(&seq) {
                 assert_eq!(r[3], Some(seq), "{ctx}: acknowledged SET on {seq} lost");
             }
         }
-        assert_eq!(tails[0][0], Some(k), "{ctx}: tail count differs from head count");
+        assert_eq!(
+            tails[0][0],
+            Some(k),
+            "{ctx}: tail count differs from head count"
+        );
 
         println!("{ctx}");
         recovered = k;

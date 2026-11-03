@@ -13,10 +13,20 @@ use samyama::query::parser::parse_query;
 
 fn store() -> GraphStore {
     let mut s = GraphStore::new();
-    for (i, body) in ["graph engines index data", "vectors and text"].iter().enumerate() {
+    for (i, body) in ["graph engines index data", "vectors and text"]
+        .iter()
+        .enumerate()
+    {
         let n = s.create_node_with_labels([Label::new("N")]);
-        s.set_node_property("default", n, "x", PropertyValue::Integer(i as i64)).unwrap();
-        s.set_node_property("default", n, "body", PropertyValue::String(body.to_string())).unwrap();
+        s.set_node_property("default", n, "x", PropertyValue::Integer(i as i64))
+            .unwrap();
+        s.set_node_property(
+            "default",
+            n,
+            "body",
+            PropertyValue::String(body.to_string()),
+        )
+        .unwrap();
     }
     s
 }
@@ -30,7 +40,9 @@ fn run(s: &mut GraphStore, q: &str) -> Result<(), String> {
 }
 
 fn show(s: &GraphStore) -> Vec<String> {
-    let batch = QueryExecutor::new(s).execute(&parse_query("SHOW INDEXES").unwrap()).unwrap();
+    let batch = QueryExecutor::new(s)
+        .execute(&parse_query("SHOW INDEXES").unwrap())
+        .unwrap();
     batch
         .records
         .iter()
@@ -54,15 +66,30 @@ fn every_kind_accepts_both_spellings() {
         ("CREATE INDEX FOR (n:N) ON (n.x)", "N|x|BTREE"),
         ("CREATE INDEX nx FOR (n:N) ON (n.x)", "N|x|BTREE"),
         ("CREATE RANGE INDEX FOR (n:N) ON (n.x)", "N|x|BTREE"),
-        ("CREATE TEXT INDEX ON :N(body)", "N|body|FULLTEXT[text_N_body]"),
-        ("CREATE TEXT INDEX tb FOR (n:N) ON (n.body)", "N|body|FULLTEXT[tb]"),
-        ("CREATE FULLTEXT INDEX ON :N(body)", "N|body|FULLTEXT[fulltext_N_body]"),
-        ("CREATE FULLTEXT INDEX fb FOR (n:N) ON (n.body)", "N|body|FULLTEXT[fb]"),
+        (
+            "CREATE TEXT INDEX ON :N(body)",
+            "N|body|FULLTEXT[text_N_body]",
+        ),
+        (
+            "CREATE TEXT INDEX tb FOR (n:N) ON (n.body)",
+            "N|body|FULLTEXT[tb]",
+        ),
+        (
+            "CREATE FULLTEXT INDEX ON :N(body)",
+            "N|body|FULLTEXT[fulltext_N_body]",
+        ),
+        (
+            "CREATE FULLTEXT INDEX fb FOR (n:N) ON (n.body)",
+            "N|body|FULLTEXT[fb]",
+        ),
     ] {
         let mut s = store();
         run(&mut s, q).unwrap_or_else(|e| panic!("{q}: {e}"));
         let rows = show(&s);
-        assert!(rows.iter().any(|r| r == expect), "{q}: SHOW INDEXES {rows:?}, wanted {expect}");
+        assert!(
+            rows.iter().any(|r| r == expect),
+            "{q}: SHOW INDEXES {rows:?}, wanted {expect}"
+        );
     }
 }
 
@@ -79,7 +106,10 @@ fn an_unnamed_text_index_is_queryable_by_its_derived_name() {
         )
         .unwrap();
     assert_eq!(batch.records.len(), 1);
-    assert_eq!(batch.records[0].get("x"), Some(&Value::Property(PropertyValue::Integer(1))));
+    assert_eq!(
+        batch.records[0].get("x"),
+        Some(&Value::Property(PropertyValue::Integer(1)))
+    );
 }
 
 #[test]
@@ -98,11 +128,17 @@ fn a_point_index_takes_both_spellings_too() {
     // Refused with a pointer to #1618 until the R-tree existed; it does now.
     for (q, expect) in [
         ("CREATE POINT INDEX ON :N(loc)", "N|loc|POINT[point_N_loc]"),
-        ("CREATE POINT INDEX pl FOR (n:N) ON (n.loc)", "N|loc|POINT[pl]"),
+        (
+            "CREATE POINT INDEX pl FOR (n:N) ON (n.loc)",
+            "N|loc|POINT[pl]",
+        ),
     ] {
         let mut s = store();
         run(&mut s, q).unwrap_or_else(|e| panic!("{q}: {e}"));
         let rows = show(&s);
-        assert!(rows.iter().any(|r| r == expect), "{q}: SHOW INDEXES {rows:?}, wanted {expect}");
+        assert!(
+            rows.iter().any(|r| r == expect),
+            "{q}: SHOW INDEXES {rows:?}, wanted {expect}"
+        );
     }
 }

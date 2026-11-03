@@ -82,7 +82,10 @@ fn pruning_and_not_pruning_agree() {
         "MATCH (a:N)-[:R]-(b:N)-[:R]-(c:N) WITH a, b, c MATCH (c)-[:R]-(a) RETURN count(a) AS n",
     );
     assert_eq!(pruned, unpruned, "the prune changed the answer");
-    assert!(pruned > 0, "the fixture produced no triangles, so neither plan was tested");
+    assert!(
+        pruned > 0,
+        "the fixture produced no triangles, so neither plan was tested"
+    );
 }
 
 /// A graph with no triangles at all must answer zero, not "whatever survived".
@@ -97,7 +100,9 @@ fn a_triangle_free_graph_answers_zero() {
     let mut store = GraphStore::new();
     let ns: Vec<NodeId> = (0..800).map(|_| store.create_node("N")).collect();
     for i in 0..ns.len() {
-        store.create_edge(ns[i], ns[(i + 1) % ns.len()], "R").unwrap();
+        store
+            .create_edge(ns[i], ns[(i + 1) % ns.len()], "R")
+            .unwrap();
     }
     assert_eq!(count(&store, TRI), 0);
     // ...and the two-hop prefix is not empty, so the query really did walk.
@@ -197,13 +202,19 @@ fn a_directed_close_searches_the_incoming_list_not_the_outgoing_one() {
         "MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N) WITH a, b, c MATCH (c)-[:R]->(a) RETURN count(a) AS n",
     );
     assert_eq!(pruned, unpruned, "the directed prune lost answers");
-    assert!(pruned > 0, "no directed triangle matched, so nothing was tested");
+    assert!(
+        pruned > 0,
+        "no directed triangle matched, so nothing was tested"
+    );
     // And the graph really is asymmetric, or searching either list would do.
     let reversed = count(
         &store,
         "MATCH (a:N)<-[:R]-(b:N)<-[:R]-(c:N)<-[:R]-(a) RETURN count(a) AS n",
     );
-    assert_eq!(reversed, pruned, "the reversed pattern is the same cycle read backwards");
+    assert_eq!(
+        reversed, pruned,
+        "the reversed pattern is the same cycle read backwards"
+    );
 }
 
 /// Relationship isomorphism still holds: the three hops must be three edges.
@@ -219,13 +230,18 @@ fn the_three_hops_must_be_three_distinct_edges() {
     let ns: Vec<NodeId> = (0..700).map(|_| store.create_node("N")).collect();
     // A ring, so the type index builds, plus one isolated pair.
     for i in 0..ns.len() {
-        store.create_edge(ns[i], ns[(i + 1) % ns.len()], "R").unwrap();
+        store
+            .create_edge(ns[i], ns[(i + 1) % ns.len()], "R")
+            .unwrap();
     }
     let x = store.create_node("X");
     let y = store.create_node("X");
     store.create_edge(x, y, "R").unwrap();
     assert_eq!(
-        count(&store, "MATCH (a:X)-[:R]-(b:X)-[:R]-(c:X)-[:R]-(a) RETURN count(a) AS n"),
+        count(
+            &store,
+            "MATCH (a:X)-[:R]-(b:X)-[:R]-(c:X)-[:R]-(a) RETURN count(a) AS n"
+        ),
         0,
         "one edge cannot be walked three times"
     );
@@ -266,7 +282,11 @@ fn parallel_edges_between_the_same_pair_are_all_found() {
         // lose every match through the second.
         store.create_edge(ns[i], ns[(i + 2) % n], "R").unwrap();
     }
-    assert_eq!(count(&store, TRI), unpruned(&store), "parallel edges lost matches");
+    assert_eq!(
+        count(&store, TRI),
+        unpruned(&store),
+        "parallel edges lost matches"
+    );
     assert!(count(&store, TRI) > 0, "the fixture produced no triangles");
 }
 
@@ -295,7 +315,11 @@ fn self_loops_do_not_move_the_cursor_past_a_real_neighbour() {
         store
     };
     let with_loops = count(&ring_with(true), TRI);
-    assert_eq!(with_loops, count(&ring_with(false), TRI), "self-loops changed the answer");
+    assert_eq!(
+        with_loops,
+        count(&ring_with(false), TRI),
+        "self-loops changed the answer"
+    );
     assert!(with_loops > 0, "the fixture produced no triangles");
 }
 
@@ -316,7 +340,11 @@ fn a_close_over_both_directions_consults_both_lists() {
             store.create_edge(ns[i], ns[(i + 2) % n], "R").unwrap();
         }
     }
-    assert_eq!(count(&store, TRI), unpruned(&store), "a close over both lists lost matches");
+    assert_eq!(
+        count(&store, TRI),
+        unpruned(&store),
+        "a close over both lists lost matches"
+    );
     assert!(count(&store, TRI) > 0, "the fixture produced no triangles");
 }
 

@@ -27,7 +27,8 @@ fn prop(store: &GraphStore, idx: usize, key: &str) -> PropertyValue {
 fn properties_survive_one_round_trip() {
     let mut src = GraphStore::new();
     let n = src.create_node("Person");
-    src.set_node_property("default", n, "name", "Alice").unwrap();
+    src.set_node_property("default", n, "name", "Alice")
+        .unwrap();
     src.set_node_property("default", n, "age", 30i64).unwrap();
 
     let mut buf = Vec::new();
@@ -37,7 +38,10 @@ fn properties_survive_one_round_trip() {
 
     let idx = n.as_u64() as usize;
     assert_eq!(dst.node_count(), 1);
-    assert_eq!(prop(&dst, idx, "name"), PropertyValue::String("Alice".into()));
+    assert_eq!(
+        prop(&dst, idx, "name"),
+        PropertyValue::String("Alice".into())
+    );
     assert_eq!(prop(&dst, idx, "age"), PropertyValue::Integer(30));
 }
 
@@ -47,7 +51,8 @@ fn properties_survive_a_second_round_trip_from_an_imported_store() {
     // actually performs, and the one where the row copy is already empty.
     let mut src = GraphStore::new();
     let n = src.create_node("Person");
-    src.set_node_property("default", n, "name", "Alice").unwrap();
+    src.set_node_property("default", n, "name", "Alice")
+        .unwrap();
 
     let mut buf1 = Vec::new();
     export_tenant(&src, &mut buf1).expect("export 1");
@@ -56,7 +61,9 @@ fn properties_survive_a_second_round_trip_from_an_imported_store() {
 
     let idx = n.as_u64() as usize;
     assert!(
-        mid.get_node(n).map(|x| x.properties.is_empty()).unwrap_or(true),
+        mid.get_node(n)
+            .map(|x| x.properties.is_empty())
+            .unwrap_or(true),
         "precondition: after an import the row copy is empty and the column holds the value"
     );
 
@@ -80,9 +87,15 @@ fn non_scalar_properties_survive_a_round_trip() {
     let mut src = GraphStore::new();
     let n = src.create_node("Thing");
     src.set_node_property(
-        "default", n, "tags",
-        PropertyValue::Array(vec![PropertyValue::String("a".into()), PropertyValue::Integer(2)]),
-    ).unwrap();
+        "default",
+        n,
+        "tags",
+        PropertyValue::Array(vec![
+            PropertyValue::String("a".into()),
+            PropertyValue::Integer(2),
+        ]),
+    )
+    .unwrap();
 
     let mut buf = Vec::new();
     export_tenant(&src, &mut buf).expect("export");

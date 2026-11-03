@@ -422,9 +422,21 @@ fn every_single_objective_solver_runs_on_every_single_objective_benchmark() {
 #[test]
 fn every_single_objective_benchmark_reports_feasibility_and_its_gap() {
     for bench in ["sphere", "rastrigin", "ackley", "rosenbrock"] {
-        let out =
-            run_solver("jaya", false, bench, 1, CATALOG_DIM, cfg(), Some(ENVELOPE_SEED)).unwrap();
-        assert_eq!(out.feasible, Some(true), "{bench} has bounds only, no constraints");
+        let out = run_solver(
+            "jaya",
+            false,
+            bench,
+            1,
+            CATALOG_DIM,
+            cfg(),
+            Some(ENVELOPE_SEED),
+        )
+        .unwrap();
+        assert_eq!(
+            out.feasible,
+            Some(true),
+            "{bench} has bounds only, no constraints"
+        );
         let optimum = optimum_of(bench).unwrap_or_else(|| panic!("{bench} has an optimum"));
         // These problems add no penalty, so the objective is the fitness.
         assert_eq!(out.gap, Some(out.final_fitness - optimum), "{bench}");
@@ -441,14 +453,26 @@ fn a_multi_objective_result_reports_feasibility_and_no_gap() {
     // UC2's front is feasible or says it is not (#1795). None of them has a
     // single optimum to report a gap against.
     for bench in ["zdt1", "dtlz1", "uc2_dosing"] {
-        let out =
-            run_solver("nsga2", true, bench, 2, CATALOG_DIM, cfg(), Some(ENVELOPE_SEED)).unwrap();
+        let out = run_solver(
+            "nsga2",
+            true,
+            bench,
+            2,
+            CATALOG_DIM,
+            cfg(),
+            Some(ENVELOPE_SEED),
+        )
+        .unwrap();
         if bench != "uc2_dosing" {
             assert_eq!(out.feasible, Some(true), "{bench}");
         }
         assert!(out.feasible.is_some(), "{bench}: a non-empty front says");
         assert_eq!(out.gap, None, "{bench}");
-        assert_eq!(optimum_of(bench), None, "{bench}: the catalog lists no optimum");
+        assert_eq!(
+            optimum_of(bench),
+            None,
+            "{bench}: the catalog lists no optimum"
+        );
     }
 }
 

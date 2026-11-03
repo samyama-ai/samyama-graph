@@ -221,8 +221,11 @@ impl GpuVectorIndex {
 
         // Reused output buffer.
         let distances_init: Vec<f32> = vec![0.0; candidate_count];
-        let distances_buf =
-            create_storage_buffer_rw(ctx, "distances_resident", bytemuck::cast_slice(&distances_init));
+        let distances_buf = create_storage_buffer_rw(
+            ctx,
+            "distances_resident",
+            bytemuck::cast_slice(&distances_init),
+        );
 
         let params = VectorParams {
             dimensions: dimensions as u32,
@@ -284,8 +287,7 @@ impl GpuVectorIndex {
         ctx.queue
             .write_buffer(&self.query_buf, 0, bytemuck::cast_slice(query));
 
-        let workgroup_count =
-            (self.candidate_count as u32 + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+        let workgroup_count = (self.candidate_count as u32 + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
         dispatch_compute(ctx, &self.pipeline, &self.bind_group, workgroup_count);
 
         download_f32(ctx, &self.distances_buf, self.candidate_count)
@@ -381,7 +383,11 @@ mod tests {
         // A second probe must reflect the new query, not a stale corpus upload.
         let q2 = vec![0.0f32, 1.0, 0.0];
         let d2 = index.query(&ctx, &q2).unwrap();
-        assert!(d2[1].abs() < 0.01, "query aligned with candidate 1, got {}", d2[1]);
+        assert!(
+            d2[1].abs() < 0.01,
+            "query aligned with candidate 1, got {}",
+            d2[1]
+        );
 
         // Dimension mismatch is rejected.
         assert!(index.query(&ctx, &[1.0, 0.0]).is_err());

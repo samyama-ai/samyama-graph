@@ -71,30 +71,34 @@
 
 pub mod ast;
 pub mod bind;
+pub mod csv_source;
 pub mod dialect;
 pub mod error_code;
-pub mod parser;
-pub mod star;
-pub mod validate;
 pub mod executor;
-pub mod csv_source;
-pub mod span;
-pub mod suggest;
 pub mod metrics;
+pub mod parser;
+pub mod span;
+pub mod star;
+pub mod suggest;
+pub mod validate;
 
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
 use lru::LruCache;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 // Re-export main types
 pub use ast::{Dialect, Query};
-pub use parser::{parse_query, ParseError, ParseResult};
 pub use executor::{
-    QueryExecutor, ExecutionError, ExecutionResult,
-    Record, RecordBatch, Value,
-    MutQueryExecutor,  // Added for CREATE/DELETE/SET support
+    ExecutionError,
+    ExecutionResult,
+    MutQueryExecutor, // Added for CREATE/DELETE/SET support
+    QueryExecutor,
+    Record,
+    RecordBatch,
+    Value,
 };
+pub use parser::{parse_query, ParseError, ParseResult};
 
 /// Parameter values a caller supplied for one statement (#1463).
 ///
@@ -224,13 +228,19 @@ struct ResultKey {
 /// A `HashMap` iterates in an arbitrary order that changes per process, so
 /// formatting it directly would give the same parameters two different keys
 /// and silently halve the hit rate.
-fn canonical_params(params: &std::collections::HashMap<String, crate::graph::PropertyValue>) -> String {
+fn canonical_params(
+    params: &std::collections::HashMap<String, crate::graph::PropertyValue>,
+) -> String {
     if params.is_empty() {
         return String::new();
     }
     let mut pairs: Vec<(&String, &crate::graph::PropertyValue)> = params.iter().collect();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
-    pairs.iter().map(|(k, v)| format!("{k}={v:?}")).collect::<Vec<_>>().join("\u{1f}")
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{k}={v:?}"))
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
 }
 
 /// A query slower than this is logged at `warn`. Overridable with
@@ -266,14 +276,19 @@ impl QueryEngine {
             ast_cache: Mutex::new(LruCache::new(cap)),
             stats: CacheStats::new(),
             query_timeout_secs: std::env::var("SAMYAMA_QUERY_TIMEOUT")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(120),
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(120),
             slow_query_ms: std::env::var("SLOW_QUERY_MS")
-                .ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_SLOW_QUERY_MS),
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_SLOW_QUERY_MS),
             row_budget: executor::budget::configured_budget(),
             result_cache: Mutex::new(LruCache::new(cap)),
             result_cache_bytes: Mutex::new(0),
             result_cache_budget: std::env::var("SAMYAMA_RESULT_CACHE_BYTES")
-                .ok().and_then(|v| v.parse().ok())
+                .ok()
+                .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_RESULT_CACHE_BYTES),
             result_stats: CacheStats::new(),
             plan_hash: false,
@@ -391,8 +406,12 @@ impl QueryEngine {
         // so half the errors a user sees never reach the executor and a hook
         // on execution alone missed exactly those. `pest`'s own grammar errors
         // already carry a caret and are left alone.
-        let query = Arc::new(parse_query(query_str).map_err(|e| with_span(Box::new(e), query_str))?);
-        self.ast_cache.lock().unwrap().put(normalized, Arc::clone(&query));
+        let query =
+            Arc::new(parse_query(query_str).map_err(|e| with_span(Box::new(e), query_str))?);
+        self.ast_cache
+            .lock()
+            .unwrap()
+            .put(normalized, Arc::clone(&query));
         Ok(query)
     }
 
@@ -405,10 +424,7 @@ impl QueryEngine {
     ///
     /// A statement that does not parse is not classified here. The caller gets the
     /// parse error, which is the same error it would have got a beat later.
-    pub fn statement_is_write(
-        &self,
-        query_str: &str,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+    pub fn statement_is_write(&self, query_str: &str) -> Result<bool, Box<dyn std::error::Error>> {
         Ok(self.cached_parse(query_str)?.is_write())
     }
 
@@ -462,7 +478,12 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         self.execute_within_with_dialect(
-            query_str, store, params, time_limit, crate::query::ast::Dialect::Cypher)
+            query_str,
+            store,
+            params,
+            time_limit,
+            crate::query::ast::Dialect::Cypher,
+        )
     }
 
     /// `execute_with_params`, under a chosen dialect (#1642, #1644).
@@ -508,9 +529,13 @@ impl QueryEngine {
         }
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
-            QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
-                executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
-            ))
+            QueryExecutor::with_planner(
+                store,
+                executor::planner::QueryPlanner::with_config(executor::planner::PlannerConfig {
+                    graph_native: true,
+                    max_candidate_plans: 64,
+                }),
+            )
         } else {
             QueryExecutor::new(store)
         };
@@ -576,9 +601,13 @@ impl QueryEngine {
         let query = self.cached_parse(query_str)?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
-            QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
-                executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
-            ))
+            QueryExecutor::with_planner(
+                store,
+                executor::planner::QueryPlanner::with_config(executor::planner::PlannerConfig {
+                    graph_native: true,
+                    max_candidate_plans: 64,
+                }),
+            )
         } else {
             QueryExecutor::new(store)
         };
@@ -598,7 +627,11 @@ impl QueryEngine {
         });
         self.log_if_slow(query_str, started.elapsed(), rows, outcome.is_ok());
         let (columns, plan_hash) = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
-        Ok(StreamedResult { columns, rows, plan_hash })
+        Ok(StreamedResult {
+            columns,
+            rows,
+            plan_hash,
+        })
     }
 
     /// Result-cache statistics, separate from the AST cache's.
@@ -880,10 +913,7 @@ impl std::error::Error for SpannedError {}
 /// error; giving one to an error that names nothing would satisfy the count
 /// and help nobody, so the ones that cannot be located stay as they are and
 /// the measurement stays honest about them.
-fn with_span(
-    e: Box<dyn std::error::Error>,
-    query_str: &str,
-) -> Box<dyn std::error::Error> {
+fn with_span(e: Box<dyn std::error::Error>, query_str: &str) -> Box<dyn std::error::Error> {
     match span::annotate(&e.to_string(), query_str) {
         Some(message) => Box::new(SpannedError { message, source: e }),
         None => e,
@@ -995,10 +1025,7 @@ mod tests {
         store.create_edge(alice, bob, "KNOWS").unwrap();
 
         let engine = QueryEngine::new();
-        let result = engine.execute(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b",
-            &store
-        );
+        let result = engine.execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b", &store);
 
         assert!(result.is_ok());
         let batch = result.unwrap();
@@ -1057,10 +1084,13 @@ mod tests {
         let result = engine.execute_mut(
             r#"CREATE (n:Person {name: "Alice", age: 30})"#,
             &mut store,
-            "default"
+            "default",
         );
 
-        assert!(result.is_ok(), "CREATE query with properties should succeed");
+        assert!(
+            result.is_ok(),
+            "CREATE query with properties should succeed"
+        );
 
         // Verify node was created with correct properties
         let query_result = engine.execute("MATCH (n:Person) RETURN n.name, n.age", &store);
@@ -1076,11 +1106,16 @@ mod tests {
         let engine = QueryEngine::new();
 
         // Create first node
-        let result1 = engine.execute_mut(r#"CREATE (a:Person {name: "Alice"})"#, &mut store, "default");
+        let result1 = engine.execute_mut(
+            r#"CREATE (a:Person {name: "Alice"})"#,
+            &mut store,
+            "default",
+        );
         assert!(result1.is_ok());
 
         // Create second node
-        let result2 = engine.execute_mut(r#"CREATE (b:Person {name: "Bob"})"#, &mut store, "default");
+        let result2 =
+            engine.execute_mut(r#"CREATE (b:Person {name: "Bob"})"#, &mut store, "default");
         assert!(result2.is_ok());
 
         // Verify both nodes exist
@@ -1099,7 +1134,10 @@ mod tests {
         // Try to execute CREATE with read-only execute() - should fail
         let result = engine.execute(r#"CREATE (n:Person)"#, &store);
 
-        assert!(result.is_err(), "CREATE should fail with read-only executor");
+        assert!(
+            result.is_err(),
+            "CREATE should fail with read-only executor"
+        );
     }
 
     // ==================== CREATE EDGE TESTS ====================
@@ -1114,10 +1152,14 @@ mod tests {
         let result = engine.execute_mut(
             r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
             &mut store,
-            "default"
+            "default",
         );
 
-        assert!(result.is_ok(), "CREATE with edge should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "CREATE with edge should succeed: {:?}",
+            result.err()
+        );
 
         // Verify nodes were created
         let query_result = engine.execute("MATCH (n:Person) RETURN n", &store);
@@ -1126,10 +1168,8 @@ mod tests {
         assert_eq!(batch.len(), 2, "Should have created 2 Person nodes");
 
         // Verify edge was created by querying the relationship
-        let edge_result = engine.execute(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b",
-            &store
-        );
+        let edge_result =
+            engine.execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b", &store);
         assert!(edge_result.is_ok(), "Edge query should succeed");
         let edge_batch = edge_result.unwrap();
         assert_eq!(edge_batch.len(), 1, "Should have 1 KNOWS relationship");
@@ -1148,12 +1188,16 @@ mod tests {
             "default"
         );
 
-        assert!(result.is_ok(), "CREATE with edge properties should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "CREATE with edge properties should succeed: {:?}",
+            result.err()
+        );
 
         // Verify edge was created
         let edge_result = engine.execute(
             "MATCH (a:Person)-[r:FRIENDS]->(b:Person) RETURN a, r, b",
-            &store
+            &store,
         );
         assert!(edge_result.is_ok(), "Edge query should succeed");
         let edge_batch = edge_result.unwrap();
@@ -1173,31 +1217,43 @@ mod tests {
             "default"
         );
 
-        assert!(result.is_ok(), "CREATE chain should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "CREATE chain should succeed: {:?}",
+            result.err()
+        );
 
         // Verify 2 Person nodes and 1 Movie node created
         let person_result = engine.execute("MATCH (n:Person) RETURN n", &store);
         assert!(person_result.is_ok());
-        assert_eq!(person_result.unwrap().len(), 2, "Should have 2 Person nodes");
+        assert_eq!(
+            person_result.unwrap().len(),
+            2,
+            "Should have 2 Person nodes"
+        );
 
         let movie_result = engine.execute("MATCH (n:Movie) RETURN n", &store);
         assert!(movie_result.is_ok());
         assert_eq!(movie_result.unwrap().len(), 1, "Should have 1 Movie node");
 
         // Verify both edges were created
-        let knows_result = engine.execute(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b",
-            &store
-        );
+        let knows_result =
+            engine.execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b", &store);
         assert!(knows_result.is_ok());
-        assert_eq!(knows_result.unwrap().len(), 1, "Should have 1 KNOWS relationship");
-
-        let likes_result = engine.execute(
-            "MATCH (a:Person)-[:LIKES]->(b:Movie) RETURN a, b",
-            &store
+        assert_eq!(
+            knows_result.unwrap().len(),
+            1,
+            "Should have 1 KNOWS relationship"
         );
+
+        let likes_result =
+            engine.execute("MATCH (a:Person)-[:LIKES]->(b:Movie) RETURN a, b", &store);
         assert!(likes_result.is_ok());
-        assert_eq!(likes_result.unwrap().len(), 1, "Should have 1 LIKES relationship");
+        assert_eq!(
+            likes_result.unwrap().len(),
+            1,
+            "Should have 1 LIKES relationship"
+        );
     }
 
     #[test]

@@ -212,7 +212,9 @@ fn every_query_answers_the_same_after_a_persistence_restart() {
 
     let dir = tempfile::tempdir().unwrap();
     let pm = PersistenceManager::new(dir.path()).unwrap();
-    pm.tenants().create_tenant(T.to_string(), T.to_string(), None).ok();
+    pm.tenants()
+        .create_tenant(T.to_string(), T.to_string(), None)
+        .ok();
 
     // Persisted the way the servers persist, through the mutation journal.
     let mut live = GraphStore::new();
@@ -304,7 +306,9 @@ fn every_query_answers_the_same_after_a_snapshot_round_trip() {
         let before = answer(&engine, &built, q);
         let after = answer(&engine, &imported, q);
         if before != after {
-            diffs.push(format!("--- {q}\n  built:    {before}\n  imported: {after}"));
+            diffs.push(format!(
+                "--- {q}\n  built:    {before}\n  imported: {after}"
+            ));
         }
     }
 

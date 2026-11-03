@@ -26,10 +26,10 @@
 //!   cargo run --release --example import_invariants -- --json out.json
 
 use samyama::graph::{GraphStore, PropertyValue};
+use samyama::persistence::PersistenceManager;
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
 use samyama::query::parser::parse_query;
 use samyama::snapshot::{export_tenant, import_tenant};
-use samyama::persistence::PersistenceManager;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -54,7 +54,9 @@ fn write(store: &mut GraphStore, cypher: &str) {
 /// compared as text without depending on row order.
 fn rows(store: &GraphStore, cypher: &str) -> Vec<String> {
     let q = parse_query(cypher).expect("probe should parse");
-    let batch = QueryExecutor::new(store).execute(&q).expect("probe should run");
+    let batch = QueryExecutor::new(store)
+        .execute(&q)
+        .expect("probe should run");
     let mut out: Vec<String> = batch
         .records
         .iter()
@@ -130,7 +132,9 @@ struct Built {
 fn main() {
     let json_path = {
         let args: Vec<String> = std::env::args().collect();
-        args.iter().position(|a| a == "--json").and_then(|i| args.get(i + 1).cloned())
+        args.iter()
+            .position(|a| a == "--json")
+            .and_then(|i| args.get(i + 1).cloned())
     };
 
     // ---- Path 1: written by Cypher.
@@ -149,22 +153,52 @@ fn main() {
         let s = &mut api_store;
         let a = s.create_node("Person");
         let _ = s.add_label_to_node("default", a, "Employee");
-        let _ = s.set_node_property("default", a, "name".to_string(), PropertyValue::String("Alice".into()));
+        let _ = s.set_node_property(
+            "default",
+            a,
+            "name".to_string(),
+            PropertyValue::String("Alice".into()),
+        );
         let _ = s.set_node_property("default", a, "age".to_string(), PropertyValue::Integer(30));
         let _ = s.set_node_property("default", a, "score".to_string(), PropertyValue::Float(0.5));
-        let _ = s.set_node_property("default", a, "active".to_string(), PropertyValue::Boolean(true));
-        let _ = s.set_node_property("default", a, "tags".to_string(), PropertyValue::Array(vec![
-            PropertyValue::String("x".into()),
-            PropertyValue::String("y".into()),
-        ]));
+        let _ = s.set_node_property(
+            "default",
+            a,
+            "active".to_string(),
+            PropertyValue::Boolean(true),
+        );
+        let _ = s.set_node_property(
+            "default",
+            a,
+            "tags".to_string(),
+            PropertyValue::Array(vec![
+                PropertyValue::String("x".into()),
+                PropertyValue::String("y".into()),
+            ]),
+        );
 
         let b = s.create_node("Person");
-        let _ = s.set_node_property("default", b, "name".to_string(), PropertyValue::String("Bob".into()));
+        let _ = s.set_node_property(
+            "default",
+            b,
+            "name".to_string(),
+            PropertyValue::String("Bob".into()),
+        );
         let _ = s.set_node_property("default", b, "age".to_string(), PropertyValue::Integer(0));
-        let _ = s.set_node_property("default", b, "note".to_string(), PropertyValue::String(String::new()));
+        let _ = s.set_node_property(
+            "default",
+            b,
+            "note".to_string(),
+            PropertyValue::String(String::new()),
+        );
 
         let c = s.create_node("Company");
-        let _ = s.set_node_property("default", c, "name".to_string(), PropertyValue::String("Acme".into()));
+        let _ = s.set_node_property(
+            "default",
+            c,
+            "name".to_string(),
+            PropertyValue::String("Acme".into()),
+        );
 
         let e1 = s.create_edge(a, c, "WORKS_AT").unwrap();
         let _ = s.set_edge_property(e1, "since", PropertyValue::Integer(2019));
@@ -194,10 +228,15 @@ fn main() {
         // One statement at a time, as a client issues them: a per-statement
         // journal that only works when the whole build arrives at once would
         // pass here and fail for every real caller.
-        for stmt in CYPHER_BUILD.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        for stmt in CYPHER_BUILD
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             write(&mut live, stmt);
             let muts = live.take_write_log();
-            pm.apply_mutations("default", &live, &muts).expect("persist");
+            pm.apply_mutations("default", &live, &muts)
+                .expect("persist");
         }
         pm.checkpoint().expect("checkpoint");
 
@@ -206,15 +245,29 @@ fn main() {
             restart_store.insert_recovered_node(node);
         }
         for edge in edges {
-            restart_store.insert_recovered_edge(edge).expect("recovered edge");
+            restart_store
+                .insert_recovered_edge(edge)
+                .expect("recovered edge");
         }
     }
 
     let built = vec![
-        Built { name: "cypher", store: cypher_store },
-        Built { name: "snapshot", store: snapshot_store },
-        Built { name: "store_api", store: api_store },
-        Built { name: "restart", store: restart_store },
+        Built {
+            name: "cypher",
+            store: cypher_store,
+        },
+        Built {
+            name: "snapshot",
+            store: snapshot_store,
+        },
+        Built {
+            name: "store_api",
+            store: api_store,
+        },
+        Built {
+            name: "restart",
+            store: restart_store,
+        },
     ];
 
     // The Cypher-built graph is the reference: it is the path a user exercises
@@ -248,7 +301,10 @@ fn main() {
     write(&mut canary_store, CYPHER_BUILD);
     // One property differs by one, on one node. Nothing else changes: same
     // counts, same labels, same edges.
-    write(&mut canary_store, "MATCH (n {name: 'Alice'}) SET n.age = 31");
+    write(
+        &mut canary_store,
+        "MATCH (n {name: 'Alice'}) SET n.age = 31",
+    );
     let canary_detected = probes()
         .iter()
         .any(|(_, cypher)| rows(&canary_store, cypher) != rows(&reference.store, *cypher));
@@ -262,7 +318,12 @@ fn main() {
     println!("{:<26} {:<12} {}", "probe", "path", "agrees");
     println!("{}", "-".repeat(78));
     for (probe, path, agrees, expected, got) in &results {
-        println!("{:<26} {:<12} {}", probe, path, if *agrees { "yes" } else { "NO" });
+        println!(
+            "{:<26} {:<12} {}",
+            probe,
+            path,
+            if *agrees { "yes" } else { "NO" }
+        );
         if !agrees {
             println!("    reference: {}", truncate(expected));
             println!("    {:<9}: {}", path, truncate(got));
@@ -272,7 +333,11 @@ fn main() {
     println!("{agreed}/{total} invariants agree across paths");
     println!(
         "canary (one property changed by one): {}",
-        if canary_detected { "detected — the probes can fail" } else { "NOT DETECTED — the probes are vacuous" }
+        if canary_detected {
+            "detected — the probes can fail"
+        } else {
+            "NOT DETECTED — the probes are vacuous"
+        }
     );
 
     if let Some(path) = json_path {

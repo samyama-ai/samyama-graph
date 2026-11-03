@@ -453,7 +453,11 @@ impl HierarchyIndexManager {
     /// the engine cannot answer, and answering `false` to it is a guess that
     /// looks like a result (#721).
     pub fn any_usable(&self) -> bool {
-        self.entries.read().unwrap().values().any(|e| e.read().unwrap().usable())
+        self.entries
+            .read()
+            .unwrap()
+            .values()
+            .any(|e| e.read().unwrap().usable())
     }
 
     /// All registered indexes, name-sorted.

@@ -26,10 +26,20 @@ fn barbell() -> GraphStore {
     let mut ids = Vec::new();
     for i in 0..7 {
         let n = s.create_node_with_labels([Label::new("N")]);
-        s.set_node_property("default", n, "name", PropertyValue::String(format!("n{i}"))).unwrap();
+        s.set_node_property("default", n, "name", PropertyValue::String(format!("n{i}")))
+            .unwrap();
         ids.push(n);
     }
-    for (a, b) in [(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 5), (5, 6), (6, 4)] {
+    for (a, b) in [
+        (0, 1),
+        (1, 2),
+        (2, 0),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 6),
+        (6, 4),
+    ] {
         s.create_edge(ids[a], ids[b], "R").unwrap();
     }
     s
@@ -40,18 +50,21 @@ fn scores(store: &GraphStore, cypher: &str) -> Vec<(String, f64)> {
     let r = QueryExecutor::new(store)
         .execute(&q)
         .unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
-    r.records.iter().map(|rec| {
-        let name = match rec.get("name") {
-            Some(Value::Property(PropertyValue::String(s))) => s.clone(),
-            other => format!("{other:?}"),
-        };
-        let sc = match rec.get("score") {
-            Some(Value::Property(PropertyValue::Float(f))) => *f,
-            Some(Value::Property(PropertyValue::Integer(i))) => *i as f64,
-            other => panic!("score was {other:?}"),
-        };
-        (name, sc)
-    }).collect()
+    r.records
+        .iter()
+        .map(|rec| {
+            let name = match rec.get("name") {
+                Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                other => format!("{other:?}"),
+            };
+            let sc = match rec.get("score") {
+                Some(Value::Property(PropertyValue::Float(f))) => *f,
+                Some(Value::Property(PropertyValue::Integer(i))) => *i as f64,
+                other => panic!("score was {other:?}"),
+            };
+            (name, sc)
+        })
+        .collect()
 }
 
 const Q: &str = "CALL algo.%(  ) YIELD node, score RETURN node.name AS name, score";
@@ -64,16 +77,24 @@ fn run(store: &GraphStore, algo: &str) -> Vec<(String, f64)> {
 fn betweenness_finds_the_bridge_that_degree_ranks_last() {
     let s = barbell();
     let bt = run(&s, "betweenness");
-    assert_eq!(bt[0].0, "n3", "the bridge must rank first for betweenness: {bt:?}");
+    assert_eq!(
+        bt[0].0, "n3",
+        "the bridge must rank first for betweenness: {bt:?}"
+    );
 
     let dg = run(&s, "degree");
     // n3's degree is 2 -- tied with four others rather than uniquely lowest,
     // which is why the assertion is about the *contrast* and not about last
     // place. It is strictly below the top, while being top for betweenness.
     let n3_degree = dg.iter().find(|(n, _)| n == "n3").unwrap().1;
-    assert!(n3_degree < dg[0].1,
-            "n3 should not be the most connected: {dg:?}");
-    assert!(dg[0].0 != "n3", "degree must not agree with betweenness here: {dg:?}");
+    assert!(
+        n3_degree < dg[0].1,
+        "n3 should not be the most connected: {dg:?}"
+    );
+    assert!(
+        dg[0].0 != "n3",
+        "degree must not agree with betweenness here: {dg:?}"
+    );
 }
 
 #[test]
@@ -113,7 +134,10 @@ fn scores_come_back_ranked_highest_first() {
     let s = barbell();
     for algo in ["degree", "closeness", "betweenness"] {
         let v = run(&s, algo);
-        assert!(v.windows(2).all(|w| w[0].1 >= w[1].1), "{algo} not sorted: {v:?}");
+        assert!(
+            v.windows(2).all(|w| w[0].1 >= w[1].1),
+            "{algo} not sorted: {v:?}"
+        );
     }
 }
 
@@ -126,7 +150,11 @@ fn an_isolated_node_scores_zero_rather_than_being_omitted() {
     for algo in ["degree", "closeness", "betweenness"] {
         let v = run(&s, algo);
         assert_eq!(v.len(), 8, "{algo}: {v:?}");
-        assert_eq!(v.last().unwrap().1, 0.0, "{algo}: isolated node should score 0: {v:?}");
+        assert_eq!(
+            v.last().unwrap().1,
+            0.0,
+            "{algo}: isolated node should score 0: {v:?}"
+        );
     }
 }
 
@@ -140,8 +168,10 @@ fn harmonic_survives_a_disconnected_graph_where_closeness_needs_a_convention() {
     let mut s = barbell();
     let a = s.create_node_with_labels([Label::new("N")]);
     let b = s.create_node_with_labels([Label::new("N")]);
-    s.set_node_property("default", a, "name", PropertyValue::String("x1".into())).unwrap();
-    s.set_node_property("default", b, "name", PropertyValue::String("x2".into())).unwrap();
+    s.set_node_property("default", a, "name", PropertyValue::String("x1".into()))
+        .unwrap();
+    s.set_node_property("default", b, "name", PropertyValue::String("x2".into()))
+        .unwrap();
     s.create_edge(a, b, "R").unwrap();
 
     let h = run(&s, "harmonic");
@@ -168,7 +198,13 @@ fn core_number_separates_a_pendant_from_the_core() {
     // A pendant leaf can: it has degree 1 and is peeled first.
     let mut s = barbell();
     let leaf = s.create_node_with_labels([Label::new("N")]);
-    s.set_node_property("default", leaf, "name", PropertyValue::String("leaf".into())).unwrap();
+    s.set_node_property(
+        "default",
+        leaf,
+        "name",
+        PropertyValue::String("leaf".into()),
+    )
+    .unwrap();
     let n0 = s.all_nodes()[0].id;
     s.create_edge(n0, leaf, "R").unwrap();
 
@@ -187,7 +223,8 @@ fn eigenvector_refuses_rather_than_returning_a_meaningless_vector() {
     let mut s = GraphStore::new();
     for i in 0..3 {
         let n = s.create_node_with_labels([Label::new("N")]);
-        s.set_node_property("default", n, "name", PropertyValue::String(format!("z{i}"))).unwrap();
+        s.set_node_property("default", n, "name", PropertyValue::String(format!("z{i}")))
+            .unwrap();
     }
     let q = parse_query(&Q.replace('%', "eigenvector")).unwrap();
     let e = QueryExecutor::new(&s).execute(&q).unwrap_err();

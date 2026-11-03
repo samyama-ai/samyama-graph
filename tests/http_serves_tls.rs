@@ -40,7 +40,10 @@ fn certificates() -> (String, String, String) {
         .distinguished_name
         .push(rcgen::DnType::CommonName, "samyama test root");
     let ca_key = rcgen::KeyPair::generate().expect("ca key");
-    let ca = ca_params.clone().self_signed(&ca_key).expect("self-signed ca");
+    let ca = ca_params
+        .clone()
+        .self_signed(&ca_key)
+        .expect("self-signed ca");
     let issuer = rcgen::Issuer::new(ca_params, ca_key);
 
     let leaf_params =
@@ -70,7 +73,10 @@ async fn serve(cert: String, key: String) -> u16 {
     // Wait for the port to accept rather than sleeping a fixed amount, which
     // is the flake this kind of test usually ships with.
     for _ in 0..200 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return port;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -98,8 +104,8 @@ async fn get_over_tls(port: u16, roots_pem: &str) -> Result<String, String> {
     let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .map_err(|e| format!("connect: {e}"))?;
-    let domain = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost")
-        .expect("server name");
+    let domain =
+        tokio_rustls::rustls::pki_types::ServerName::try_from("localhost").expect("server name");
     let mut tls = connector
         .connect(domain, stream)
         .await
@@ -205,7 +211,8 @@ async fn an_unusable_certificate_stops_the_server_rather_than_serving_plaintext(
         .await
         .expect_err("a server given an unusable certificate must not start");
     assert!(
-        err.to_string().contains("TLS certificate or key is unusable"),
+        err.to_string()
+            .contains("TLS certificate or key is unusable"),
         "the error should name the cause, got: {err}"
     );
 }

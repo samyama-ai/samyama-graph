@@ -7,8 +7,10 @@ fn test_property_index_usage() {
     let engine = QueryEngine::new();
 
     // Create index first
-    store.property_index.create_index(Label::new("Person"), "id".to_string());
-    
+    store
+        .property_index
+        .create_index(Label::new("Person"), "id".to_string());
+
     // Create nodes
     for i in 0..100 {
         let mut props = std::collections::HashMap::new();
@@ -20,7 +22,7 @@ fn test_property_index_usage() {
     // MATCH (n:Person) WHERE n.id = 50 RETURN n
     let query = "MATCH (n:Person) WHERE n.id = 50 RETURN n";
     let result = engine.execute(query, &store).unwrap();
-    
+
     assert_eq!(result.records.len(), 1);
     let node_val = result.records[0].get("n").unwrap();
     let (_, node) = node_val.as_node().unwrap();
@@ -32,8 +34,10 @@ fn test_property_index_range() {
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
 
-    store.property_index.create_index(Label::new("Product"), "price".to_string());
-    
+    store
+        .property_index
+        .create_index(Label::new("Product"), "price".to_string());
+
     for i in 0..10 {
         let mut props = std::collections::HashMap::new();
         props.insert("price".to_string(), PropertyValue::Integer(i * 10));
@@ -43,7 +47,7 @@ fn test_property_index_range() {
     // MATCH (n:Product) WHERE n.price > 50 RETURN n
     let query = "MATCH (n:Product) WHERE n.price > 50 RETURN n";
     let result = engine.execute(query, &store).unwrap();
-    
+
     // Should return 60, 70, 80, 90 (4 items)
     assert_eq!(result.records.len(), 4);
 }
@@ -70,7 +74,7 @@ fn test_create_index_ddl() {
     // 4. Query using index
     let query = "MATCH (n:User) WHERE n.id = 5 RETURN n";
     let result = engine.execute(query, &store).unwrap();
-    
+
     assert_eq!(result.records.len(), 1);
     let (_, node) = result.records[0].get("n").unwrap().as_node().unwrap();
     assert_eq!(node.get_property("id").unwrap().as_integer(), Some(5));

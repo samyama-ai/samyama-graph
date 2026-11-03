@@ -19,7 +19,7 @@ pub struct GraphView {
     pub index_to_node: Vec<NodeId>,
     /// Mapping from NodeId to dense index
     pub node_to_index: HashMap<NodeId, usize>,
-    
+
     /// Outgoing edges CSR structure
     /// Offsets into `out_targets`. Size = node_count + 1
     pub out_offsets: Vec<usize>,
@@ -132,13 +132,17 @@ impl GraphView {
         let mut out_targets = Vec::new();
         let mut in_offsets = Vec::with_capacity(node_count + 1);
         let mut in_sources = Vec::new();
-        let mut flat_weights = if weights.is_some() { Some(Vec::new()) } else { None };
+        let mut flat_weights = if weights.is_some() {
+            Some(Vec::new())
+        } else {
+            None
+        };
 
         out_offsets.push(0);
         for (i, neighbors) in outgoing.into_iter().enumerate() {
             out_targets.extend(neighbors);
             out_offsets.push(out_targets.len());
-            
+
             if let Some(ref mut w_flat) = flat_weights {
                 if let Some(w_row) = weights.as_ref().map(|w| &w[i]) {
                     w_flat.extend(w_row.iter());
@@ -196,7 +200,11 @@ mod heap_tests {
             * size_of::<usize>()
             + view.index_to_node.len() * size_of::<NodeId>()
             + view.node_count * (size_of::<NodeId>() + size_of::<usize>());
-        assert!(view.heap_bytes() >= floor, "{} < {floor}", view.heap_bytes());
+        assert!(
+            view.heap_bytes() >= floor,
+            "{} < {floor}",
+            view.heap_bytes()
+        );
     }
 
     #[test]
@@ -213,7 +221,10 @@ mod heap_tests {
     fn an_empty_view_holds_almost_nothing() {
         let view = GraphView::from_adjacency_list(0, vec![], HashMap::new(), vec![], vec![], None);
         // Only the one-element offset arrays CSR always carries.
-        assert!(view.heap_bytes() <= 4 * std::mem::size_of::<usize>(), "{}", view.heap_bytes());
+        assert!(
+            view.heap_bytes() <= 4 * std::mem::size_of::<usize>(),
+            "{}",
+            view.heap_bytes()
+        );
     }
 }
-

@@ -13,12 +13,17 @@ use samyama::query::parser::parse_query;
 
 fn write(s: &mut GraphStore, q: &str) -> Result<(), String> {
     let p = parse_query(q).map_err(|e| e.to_string())?;
-    MutQueryExecutor::new(s, "default".into()).execute(&p).map(|_| ()).map_err(|e| e.to_string())
+    MutQueryExecutor::new(s, "default".into())
+        .execute(&p)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn int(s: &GraphStore, q: &str) -> i64 {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(s)
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     match out.records[0].get("c") {
         Some(Value::Property(PropertyValue::Integer(i))) => *i,
         other => panic!("`{q}` gave {other:?}"),
@@ -29,7 +34,11 @@ fn int(s: &GraphStore, q: &str) -> i64 {
 #[test]
 fn a_later_node_reads_an_earlier_one() {
     let mut s = GraphStore::new();
-    write(&mut s, "CREATE (a:End {num: 42, id: 0}), (:End {num: 3}), (:Begin {num: a.id})").unwrap();
+    write(
+        &mut s,
+        "CREATE (a:End {num: 42, id: 0}), (:End {num: 3}), (:Begin {num: a.id})",
+    )
+    .unwrap();
     assert_eq!(int(&s, "MATCH (b:Begin) RETURN b.num AS c"), 0);
     assert_eq!(int(&s, "MATCH (n) RETURN count(n) AS c"), 3);
 }
@@ -37,7 +46,11 @@ fn a_later_node_reads_an_earlier_one() {
 #[test]
 fn a_chain_of_references() {
     let mut s = GraphStore::new();
-    write(&mut s, "CREATE (a:V {v: 1}), (b:V {v: a.v + 1}), (:V {v: b.v + 1})").unwrap();
+    write(
+        &mut s,
+        "CREATE (a:V {v: 1}), (b:V {v: a.v + 1}), (:V {v: b.v + 1})",
+    )
+    .unwrap();
     assert_eq!(int(&s, "MATCH (n:V) RETURN sum(n.v) AS c"), 6);
 }
 

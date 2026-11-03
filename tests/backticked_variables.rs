@@ -109,7 +109,10 @@ fn a_backticked_variable_survives_every_clause_that_reads_one() {
     ));
     assert_eq!(got, vec![2], "WITH, and an aliased backticked name");
 
-    let got = int_col(&run(&[], "UNWIND [3, 1, 2] AS `the value` RETURN `the value` AS r"));
+    let got = int_col(&run(
+        &[],
+        "UNWIND [3, 1, 2] AS `the value` RETURN `the value` AS r",
+    ));
     assert_eq!(got, vec![3, 1, 2], "UNWIND");
 
     let got = int_col(&run(

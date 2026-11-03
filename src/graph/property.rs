@@ -105,10 +105,16 @@ pub enum PropertyValue {
     /// value is destroyed at construction rather than merely displayed wrongly.
     LocalTime(i64),
     /// A time of day with a UTC offset. `nanos` is the *local* time of day.
-    Time { nanos: i64, offset_seconds: i32 },
+    Time {
+        nanos: i64,
+        offset_seconds: i32,
+    },
     /// A date and time with no zone: seconds since 1970-01-01T00:00:00 read as
     /// a wall clock, plus nanoseconds `0..1_000_000_000`.
-    LocalDateTime { secs: i64, nanos: u32 },
+    LocalDateTime {
+        secs: i64,
+        nanos: u32,
+    },
     /// A date and time with a zone. `secs`/`nanos` are the instant in UTC;
     /// `offset_seconds` and the optional IANA `zone` say how to render it.
     ///
@@ -133,7 +139,6 @@ pub enum PropertyValue {
     },
     Null,
 }
-
 
 /// Cypher's orderability, for `ORDER BY` — **not** the same order as
 /// [`PropertyValue`]'s `Ord`.
@@ -170,11 +175,7 @@ pub fn cypher_order(a: &PropertyValue, b: &PropertyValue) -> Ordering {
             String(_) => 2,
             Boolean(_) => 3,
             Integer(_) | Float(_) | DateTime(_) | Duration { .. } => 4,
-            Date(_)
-            | LocalTime(_)
-            | Time { .. }
-            | LocalDateTime { .. }
-            | ZonedDateTime { .. } => 4,
+            Date(_) | LocalTime(_) | Time { .. } | LocalDateTime { .. } | ZonedDateTime { .. } => 4,
             Null => 5,
         }
     }
@@ -196,14 +197,12 @@ pub fn cypher_order(a: &PropertyValue, b: &PropertyValue) -> Ordering {
             x.len().cmp(&y.len())
         }
         // NaN sorts after every other number, before null.
-        (Float(x), Float(y)) if x.is_nan() || y.is_nan() => {
-            match (x.is_nan(), y.is_nan()) {
-                (true, true) => Ordering::Equal,
-                (true, false) => Ordering::Greater,
-                (false, true) => Ordering::Less,
-                _ => unreachable!(),
-            }
-        }
+        (Float(x), Float(y)) if x.is_nan() || y.is_nan() => match (x.is_nan(), y.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            _ => unreachable!(),
+        },
         // Within a rank the index order already does the right thing, and for
         // numbers it is the thing that makes 999999 > 6.9 across variants.
         _ => a.cmp(b),
@@ -287,12 +286,24 @@ impl Ord for PropertyValue {
             // sorts before 12:00Z. Comparing the local reading would order two
             // times by how they are written rather than by when they are.
             (
-                Time { nanos: n1, offset_seconds: o1 },
-                Time { nanos: n2, offset_seconds: o2 },
+                Time {
+                    nanos: n1,
+                    offset_seconds: o1,
+                },
+                Time {
+                    nanos: n2,
+                    offset_seconds: o2,
+                },
             ) => (n1 - (*o1 as i64) * 1_000_000_000).cmp(&(n2 - (*o2 as i64) * 1_000_000_000)),
             (
-                LocalDateTime { secs: s1, nanos: n1 },
-                LocalDateTime { secs: s2, nanos: n2 },
+                LocalDateTime {
+                    secs: s1,
+                    nanos: n1,
+                },
+                LocalDateTime {
+                    secs: s2,
+                    nanos: n2,
+                },
             ) => s1.cmp(s2).then(n1.cmp(n2)),
             // `secs`/`nanos` are already the UTC instant, so the offset and
             // zone do not participate: two ways of writing the same moment
@@ -300,8 +311,18 @@ impl Ord for PropertyValue {
             // the order stays strict (`Ord`/`Eq` contract -- `PartialEq` is
             // derived and would call them different).
             (
-                ZonedDateTime { secs: s1, nanos: n1, offset_seconds: o1, zone: z1 },
-                ZonedDateTime { secs: s2, nanos: n2, offset_seconds: o2, zone: z2 },
+                ZonedDateTime {
+                    secs: s1,
+                    nanos: n1,
+                    offset_seconds: o1,
+                    zone: z1,
+                },
+                ZonedDateTime {
+                    secs: s2,
+                    nanos: n2,
+                    offset_seconds: o2,
+                    zone: z2,
+                },
             ) => s1
                 .cmp(s2)
                 .then(n1.cmp(n2))
@@ -373,17 +394,38 @@ impl std::hash::Hash for PropertyValue {
         match self {
             // Discriminants 10.. so the pre-#689 variants keep their tags and
             // an existing hash index is not silently reshuffled.
-            PropertyValue::Date(d) => { 10.hash(state); d.hash(state); }
-            PropertyValue::LocalTime(n) => { 11.hash(state); n.hash(state); }
-            PropertyValue::Time { nanos, offset_seconds } => {
-                12.hash(state); nanos.hash(state); offset_seconds.hash(state);
+            PropertyValue::Date(d) => {
+                10.hash(state);
+                d.hash(state);
+            }
+            PropertyValue::LocalTime(n) => {
+                11.hash(state);
+                n.hash(state);
+            }
+            PropertyValue::Time {
+                nanos,
+                offset_seconds,
+            } => {
+                12.hash(state);
+                nanos.hash(state);
+                offset_seconds.hash(state);
             }
             PropertyValue::LocalDateTime { secs, nanos } => {
-                13.hash(state); secs.hash(state); nanos.hash(state);
+                13.hash(state);
+                secs.hash(state);
+                nanos.hash(state);
             }
-            PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
-                14.hash(state); secs.hash(state); nanos.hash(state);
-                offset_seconds.hash(state); zone.hash(state);
+            PropertyValue::ZonedDateTime {
+                secs,
+                nanos,
+                offset_seconds,
+                zone,
+            } => {
+                14.hash(state);
+                secs.hash(state);
+                nanos.hash(state);
+                offset_seconds.hash(state);
+                zone.hash(state);
             }
             PropertyValue::String(s) => {
                 0.hash(state);
@@ -461,9 +503,7 @@ impl PropertyValue {
             PropertyValue::Map(m) => m
                 .iter()
                 .map(|(k, v)| {
-                    k.capacity()
-                        + std::mem::size_of::<PropertyValue>()
-                        + v.approx_heap_bytes()
+                    k.capacity() + std::mem::size_of::<PropertyValue>() + v.approx_heap_bytes()
                 })
                 .sum(),
             PropertyValue::Vector(v) => v.capacity() * std::mem::size_of::<f32>(),
@@ -522,9 +562,12 @@ impl PropertyValue {
     pub fn as_list_items(&self) -> Option<Vec<PropertyValue>> {
         match self {
             PropertyValue::Array(items) => Some(items.clone()),
-            PropertyValue::Vector(floats) => {
-                Some(floats.iter().map(|f| PropertyValue::Float(*f as f64)).collect())
-            }
+            PropertyValue::Vector(floats) => Some(
+                floats
+                    .iter()
+                    .map(|f| PropertyValue::Float(*f as f64))
+                    .collect(),
+            ),
             _ => None,
         }
     }
@@ -657,7 +700,6 @@ impl PropertyValue {
     }
 }
 
-
 /// A time of day as openCypher renders it: `10:35`, `12:31:14`,
 /// `12:31:14.645876123`.
 ///
@@ -668,7 +710,11 @@ impl PropertyValue {
 pub(crate) fn fmt_time_of_day(total_nanos: i64) -> String {
     let secs_of_day = total_nanos.div_euclid(1_000_000_000);
     let nanos = total_nanos.rem_euclid(1_000_000_000) as u32;
-    let (h, m, sec) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+    let (h, m, sec) = (
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+    );
     let mut out = format!("{h:02}:{m:02}");
     if sec != 0 || nanos != 0 {
         out.push_str(&format!(":{sec:02}"));
@@ -703,7 +749,9 @@ pub fn fmt_offset(offset_seconds: i32) -> String {
 
 /// A date as `2015-07-21`, from days since the Unix epoch.
 pub(crate) fn fmt_date(days: i32) -> String {
-    match chrono::NaiveDate::from_ymd_opt(1970, 1, 1).and_then(|d| d.checked_add_signed(chrono::Duration::days(days as i64))) {
+    match chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+        .and_then(|d| d.checked_add_signed(chrono::Duration::days(days as i64)))
+    {
         Some(d) => d.format("%Y-%m-%d").to_string(),
         // Outside chrono's range. Reported rather than silently clamped: a
         // wrong date that looks like a date is worse than an obvious marker.
@@ -728,8 +776,6 @@ pub(crate) fn fmt_local_date_time(secs: i64, nanos: u32) -> String {
     }
 }
 
-
-
 /// A duration as openCypher writes it: `PT6H`, `P1Y2M3DT4H5M6.5S`, `PT0S`.
 ///
 /// Zero components are omitted, and an all-zero duration is `PT0S` rather than
@@ -742,28 +788,48 @@ pub(crate) fn fmt_duration(months: i64, days: i64, seconds: i64, nanos: i32) -> 
     let (minutes, secs) = (rem / 60, rem % 60);
 
     let mut out = String::from("P");
-    if years != 0 { out.push_str(&format!("{years}Y")); }
-    if rem_months != 0 { out.push_str(&format!("{rem_months}M")); }
-    if days != 0 { out.push_str(&format!("{days}D")); }
+    if years != 0 {
+        out.push_str(&format!("{years}Y"));
+    }
+    if rem_months != 0 {
+        out.push_str(&format!("{rem_months}M"));
+    }
+    if days != 0 {
+        out.push_str(&format!("{days}D"));
+    }
 
     let has_time = hours != 0 || minutes != 0 || secs != 0 || nanos != 0;
     if has_time {
         out.push('T');
-        if hours != 0 { out.push_str(&format!("{hours}H")); }
-        if minutes != 0 { out.push_str(&format!("{minutes}M")); }
+        if hours != 0 {
+            out.push_str(&format!("{hours}H"));
+        }
+        if minutes != 0 {
+            out.push_str(&format!("{minutes}M"));
+        }
         if secs != 0 || nanos != 0 {
             if nanos == 0 {
                 out.push_str(&format!("{secs}S"));
             } else {
                 // The fraction belongs to the seconds and carries the sign with
                 // them: -1.5s is `-1.5S`, not `-1.-5S`.
-                let sign = if secs < 0 || (secs == 0 && nanos < 0) { "-" } else { "" };
+                let sign = if secs < 0 || (secs == 0 && nanos < 0) {
+                    "-"
+                } else {
+                    ""
+                };
                 let frac = format!("{:09}", nanos.abs());
-                out.push_str(&format!("{sign}{}.{}S", secs.abs(), frac.trim_end_matches('0')));
+                out.push_str(&format!(
+                    "{sign}{}.{}S",
+                    secs.abs(),
+                    frac.trim_end_matches('0')
+                ));
             }
         }
     }
-    if out == "P" { out.push_str("T0S"); }
+    if out == "P" {
+        out.push_str("T0S");
+    }
     out
 }
 
@@ -780,14 +846,25 @@ impl PropertyValue {
         match self {
             PropertyValue::Date(d) => fmt_date(*d),
             PropertyValue::LocalTime(n) => fmt_time_of_day(*n),
-            PropertyValue::Time { nanos, offset_seconds } => {
+            PropertyValue::Time {
+                nanos,
+                offset_seconds,
+            } => {
                 format!("{}{}", fmt_time_of_day(*nanos), fmt_offset(*offset_seconds))
             }
             PropertyValue::LocalDateTime { secs, nanos } => fmt_local_date_time(*secs, *nanos),
-            PropertyValue::Duration { months, days, seconds, nanos } => {
-                fmt_duration(*months, *days, *seconds, *nanos)
-            }
-            PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
+            PropertyValue::Duration {
+                months,
+                days,
+                seconds,
+                nanos,
+            } => fmt_duration(*months, *days, *seconds, *nanos),
+            PropertyValue::ZonedDateTime {
+                secs,
+                nanos,
+                offset_seconds,
+                zone,
+            } => {
                 // `secs` is the UTC instant; render it in the stored offset.
                 let local = fmt_local_date_time(secs + *offset_seconds as i64, *nanos);
                 let base = format!("{local}{}", fmt_offset(*offset_seconds));
@@ -811,9 +888,10 @@ impl PropertyValue {
             PropertyValue::DateTime(ms) => Some(*ms),
             PropertyValue::Date(d) => Some(*d as i64 * 86_400_000),
             PropertyValue::LocalTime(n) => Some(n / 1_000_000),
-            PropertyValue::Time { nanos, offset_seconds } => {
-                Some((nanos - (*offset_seconds as i64) * 1_000_000_000) / 1_000_000)
-            }
+            PropertyValue::Time {
+                nanos,
+                offset_seconds,
+            } => Some((nanos - (*offset_seconds as i64) * 1_000_000_000) / 1_000_000),
             PropertyValue::LocalDateTime { secs, nanos } => {
                 Some(secs * 1000 + (*nanos as i64) / 1_000_000)
             }

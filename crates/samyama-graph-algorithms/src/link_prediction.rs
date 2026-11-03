@@ -95,17 +95,21 @@ fn score_pair(sets: &[HashSet<usize>], u: usize, v: usize, which: LinkScore) -> 
             let mut shared: Vec<usize> = a.intersection(b).copied().collect();
             shared.sort_unstable();
             shared
-            .into_iter()
-            .map(|w| {
-                let d = sets[w].len() as f64;
-                // A degree-1 shared neighbour gives ln(1) = 0 and would
-                // divide by zero. NetworkX's convention is to skip it, and
-                // skipping is right: a neighbour with one edge cannot be
-                // *shared*, so it never actually reaches here on a consistent
-                // graph -- but a self-loop or a stale index could.
-                if d > 1.0 { 1.0 / d.ln() } else { 0.0 }
-            })
-            .sum()
+                .into_iter()
+                .map(|w| {
+                    let d = sets[w].len() as f64;
+                    // A degree-1 shared neighbour gives ln(1) = 0 and would
+                    // divide by zero. NetworkX's convention is to skip it, and
+                    // skipping is right: a neighbour with one edge cannot be
+                    // *shared*, so it never actually reaches here on a consistent
+                    // graph -- but a self-loop or a stale index could.
+                    if d > 1.0 {
+                        1.0 / d.ln()
+                    } else {
+                        0.0
+                    }
+                })
+                .sum()
         }
     }
 }
@@ -118,11 +122,7 @@ fn score_pair(sets: &[HashSet<usize>], u: usize, v: usize, which: LinkScore) -> 
 ///
 /// Returns the top `limit` by score, highest first, ties broken by node id so
 /// two runs agree.
-pub fn predict_links(
-    view: &GraphView,
-    which: LinkScore,
-    limit: usize,
-) -> Vec<PairScore> {
+pub fn predict_links(view: &GraphView, which: LinkScore, limit: usize) -> Vec<PairScore> {
     let sets = neighbour_sets(view);
     let n = view.node_count;
     let mut out: Vec<PairScore> = Vec::new();
@@ -157,12 +157,7 @@ pub fn predict_links(
 /// The pairwise question rather than the ranking one: *how similar are these
 /// two?* A caller asking about a specific pair usually knows they are not
 /// joined, and may legitimately ask about one that is.
-pub fn score_one(
-    view: &GraphView,
-    which: LinkScore,
-    u: usize,
-    v: usize,
-) -> Option<f64> {
+pub fn score_one(view: &GraphView, which: LinkScore, u: usize, v: usize) -> Option<f64> {
     if u >= view.node_count || v >= view.node_count {
         return None;
     }

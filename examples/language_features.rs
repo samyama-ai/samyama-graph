@@ -38,78 +38,185 @@ const PROBES: &[(&str, &str, &str, usize)] = &[
     // the configured import root before the probe runs. A literal path here
     // would need the import root to be a fixed directory, and the root is
     // canonicalized, so a symlinked /tmp would refuse the file it was handed.
-    ("LANG-09", "LOAD CSV from a file URL",
-     "LOAD CSV FROM \"{CSV}\" AS row RETURN row", 1),
-    ("LANG-09", "LOAD CSV WITH HEADERS",
-     "LOAD CSV WITH HEADERS FROM \"{CSV}\" AS row RETURN row.a", 1),
-    ("LANG-09", "LOAD CSV with a field terminator",
-     "LOAD CSV FROM \"{CSV_SEMI}\" AS row FIELDTERMINATOR \";\" RETURN row", 1),
+    (
+        "LANG-09",
+        "LOAD CSV from a file URL",
+        "LOAD CSV FROM \"{CSV}\" AS row RETURN row",
+        1,
+    ),
+    (
+        "LANG-09",
+        "LOAD CSV WITH HEADERS",
+        "LOAD CSV WITH HEADERS FROM \"{CSV}\" AS row RETURN row.a",
+        1,
+    ),
+    (
+        "LANG-09",
+        "LOAD CSV with a field terminator",
+        "LOAD CSV FROM \"{CSV_SEMI}\" AS row FIELDTERMINATOR \";\" RETURN row",
+        1,
+    ),
     // `{PARQUET}` is a file this engine's own exporter wrote (#1098).
-    ("LANG-09", "LOAD PARQUET",
-     "LOAD PARQUET FROM \"{PARQUET}\" AS row RETURN row.a", 1),
-
+    (
+        "LANG-09",
+        "LOAD PARQUET",
+        "LOAD PARQUET FROM \"{PARQUET}\" AS row RETURN row.a",
+        1,
+    ),
     // LANG-11 — CALL … YIELD composed inside a larger query.
-    ("LANG-11", "CALL after MATCH, yielding into the same scope",
-     "MATCH (n:N) CALL algo.pageRank() YIELD node, score RETURN n.x, score LIMIT 1", 0),
-    ("LANG-11", "CALL then WITH then filter",
-     "CALL algo.pageRank() YIELD node, score WITH node, score WHERE score > 0.0 \
-      RETURN count(*)", 0),
-    ("LANG-11", "CALL feeding an aggregation",
-     "CALL algo.pageRank() YIELD node, score RETURN sum(score) AS total", 0),
-
+    (
+        "LANG-11",
+        "CALL after MATCH, yielding into the same scope",
+        "MATCH (n:N) CALL algo.pageRank() YIELD node, score RETURN n.x, score LIMIT 1",
+        0,
+    ),
+    (
+        "LANG-11",
+        "CALL then WITH then filter",
+        "CALL algo.pageRank() YIELD node, score WITH node, score WHERE score > 0.0 \
+      RETURN count(*)",
+        0,
+    ),
+    (
+        "LANG-11",
+        "CALL feeding an aggregation",
+        "CALL algo.pageRank() YIELD node, score RETURN sum(score) AS total",
+        0,
+    ),
     // LANG-13 — ANALYZE and query hints.
     ("LANG-13", "ANALYZE to refresh statistics", "ANALYZE", 0),
     // Creates the index and gives it a predicate, as the DROP probe below
     // sets up its own precondition: a hint is mandatory, so `USING INDEX`
     // with no such index or nothing for it to answer is refused -- in Neo4j
     // and here (#1675) -- and a probe without them measured its own setup.
-    ("LANG-13", "USING INDEX hint",
-     "CREATE INDEX ON :N(x); MATCH (n:N) USING INDEX n:N(x) WHERE n.x = 1 RETURN n", 1),
-    ("LANG-13", "USING SCAN hint", "MATCH (n:N) USING SCAN n:N RETURN n", 1),
-
+    (
+        "LANG-13",
+        "USING INDEX hint",
+        "CREATE INDEX ON :N(x); MATCH (n:N) USING INDEX n:N(x) WHERE n.x = 1 RETURN n",
+        1,
+    ),
+    (
+        "LANG-13",
+        "USING SCAN hint",
+        "MATCH (n:N) USING SCAN n:N RETURN n",
+        1,
+    ),
     // LANG-16 — temporal semantics: types, arithmetic, comparison, indexing.
-    ("LANG-16", "date literal", "RETURN date(\"2024-01-01\") AS d", 0),
-    ("LANG-16", "datetime literal", "RETURN datetime(\"2024-01-01T00:00:00Z\") AS d", 0),
-    ("LANG-16", "duration literal", "RETURN duration({days: 1}) AS d", 0),
-    ("LANG-16", "datetime + duration arithmetic",
-     "RETURN datetime(\"2024-01-01T00:00:00Z\") + duration({days: 1}) AS d", 0),
-    ("LANG-16", "date comparison",
-     "RETURN date(\"2024-01-02\") > date(\"2024-01-01\") AS later", 0),
-    ("LANG-16", "duration between two datetimes",
-     "RETURN duration.between(date(\"2024-01-01\"), date(\"2024-03-01\")) AS gap", 0),
-    ("LANG-16", "temporal component access",
-     "RETURN date(\"2024-05-06\").year AS y", 0),
-    ("LANG-16", "temporal truncation",
-     "RETURN date.truncate(\"month\", date(\"2024-05-06\")) AS m", 0),
-    ("LANG-16", "localtime type", "RETURN localtime(\"12:00:00\") AS t", 0),
-
+    (
+        "LANG-16",
+        "date literal",
+        "RETURN date(\"2024-01-01\") AS d",
+        0,
+    ),
+    (
+        "LANG-16",
+        "datetime literal",
+        "RETURN datetime(\"2024-01-01T00:00:00Z\") AS d",
+        0,
+    ),
+    (
+        "LANG-16",
+        "duration literal",
+        "RETURN duration({days: 1}) AS d",
+        0,
+    ),
+    (
+        "LANG-16",
+        "datetime + duration arithmetic",
+        "RETURN datetime(\"2024-01-01T00:00:00Z\") + duration({days: 1}) AS d",
+        0,
+    ),
+    (
+        "LANG-16",
+        "date comparison",
+        "RETURN date(\"2024-01-02\") > date(\"2024-01-01\") AS later",
+        0,
+    ),
+    (
+        "LANG-16",
+        "duration between two datetimes",
+        "RETURN duration.between(date(\"2024-01-01\"), date(\"2024-03-01\")) AS gap",
+        0,
+    ),
+    (
+        "LANG-16",
+        "temporal component access",
+        "RETURN date(\"2024-05-06\").year AS y",
+        0,
+    ),
+    (
+        "LANG-16",
+        "temporal truncation",
+        "RETURN date.truncate(\"month\", date(\"2024-05-06\")) AS m",
+        0,
+    ),
+    (
+        "LANG-16",
+        "localtime type",
+        "RETURN localtime(\"12:00:00\") AS t",
+        0,
+    ),
     // NDS-11 — declarative DDL for every index kind, and SHOW INDEXES.
     ("NDS-11", "SHOW INDEXES", "SHOW INDEXES", 0),
-    ("NDS-11", "CREATE INDEX (range/btree)", "CREATE INDEX ON :N(x)", 0),
-    ("NDS-11", "CREATE TEXT INDEX", "CREATE TEXT INDEX ON :N(x)", 0),
-    ("NDS-11", "CREATE FULLTEXT INDEX", "CREATE FULLTEXT INDEX ON :N(x)", 0),
+    (
+        "NDS-11",
+        "CREATE INDEX (range/btree)",
+        "CREATE INDEX ON :N(x)",
+        0,
+    ),
+    (
+        "NDS-11",
+        "CREATE TEXT INDEX",
+        "CREATE TEXT INDEX ON :N(x)",
+        0,
+    ),
+    (
+        "NDS-11",
+        "CREATE FULLTEXT INDEX",
+        "CREATE FULLTEXT INDEX ON :N(x)",
+        0,
+    ),
     // The vector form is Neo4j's `FOR (n:L) ON (n.prop)`, not the `ON :L(prop)`
     // shape the plain index uses. Probed in the grammar's own spelling: a probe
     // that guesses a syntax reports the guess, not the engine. NDS-11 asks for
     // *uniform* DDL across kinds, and the two spellings diverging is itself
     // part of what it is asking about -- recorded below as its own probe.
-    ("NDS-11", "CREATE VECTOR INDEX (FOR … ON … form)",
-     "CREATE VECTOR INDEX vidx FOR (n:N) ON (n.embedding) OPTIONS {dimensions: 3}", 0),
-    ("NDS-11", "CREATE VECTOR INDEX in the plain `ON :L(prop)` form",
-     "CREATE VECTOR INDEX ON :N(embedding)", 0),
-    ("NDS-11", "CREATE POINT INDEX", "CREATE POINT INDEX ON :N(x)", 0),
+    (
+        "NDS-11",
+        "CREATE VECTOR INDEX (FOR … ON … form)",
+        "CREATE VECTOR INDEX vidx FOR (n:N) ON (n.embedding) OPTIONS {dimensions: 3}",
+        0,
+    ),
+    (
+        "NDS-11",
+        "CREATE VECTOR INDEX in the plain `ON :L(prop)` form",
+        "CREATE VECTOR INDEX ON :N(embedding)",
+        0,
+    ),
+    (
+        "NDS-11",
+        "CREATE POINT INDEX",
+        "CREATE POINT INDEX ON :N(x)",
+        0,
+    ),
     // Creates the index first: `DROP` on a fresh store is refused for the
     // absence of the index, not for the absence of the feature, and the
     // per-probe isolation that keeps `CREATE` honest makes `DROP` a false
     // negative unless it sets up its own precondition.
-    ("NDS-11", "DROP INDEX", "CREATE INDEX ON :N(x); DROP INDEX ON :N(x)", 0),
+    (
+        "NDS-11",
+        "DROP INDEX",
+        "CREATE INDEX ON :N(x); DROP INDEX ON :N(x)",
+        0,
+    ),
 ];
 
 /// One labelled node with an indexable property.
 fn fixture() -> GraphStore {
     let mut s = GraphStore::new();
     let n = s.create_node_with_labels([Label::new("N")]);
-    s.set_node_property("default", n, "x", PropertyValue::Integer(1)).unwrap();
+    s.set_node_property("default", n, "x", PropertyValue::Integer(1))
+        .unwrap();
     s
 }
 
@@ -185,8 +292,7 @@ fn main() {
         std::process::exit(1);
     }
     let csv_url = format!("file://{}", csv_path.display());
-    let csv_url_semicolon =
-        format!("file://{}", csv_dir.join("probe-semicolon.csv").display());
+    let csv_url_semicolon = format!("file://{}", csv_dir.join("probe-semicolon.csv").display());
     let parquet_path = csv_dir.join("probe.parquet");
     let parquet_rows = QueryExecutor::new(&GraphStore::new())
         .execute(&parse_query("RETURN 1 AS a, 2 AS b").expect("probe fixture parses"))
@@ -228,7 +334,9 @@ fn main() {
                     Err(e) => format!("exec: {}", e.to_string().lines().next().unwrap_or("")),
                 },
             };
-            if !outcome.is_empty() { break; }
+            if !outcome.is_empty() {
+                break;
+            }
         }
         let works = outcome.is_empty();
         rows.push(serde_json::json!({
@@ -245,7 +353,11 @@ fn main() {
     for (i, (req, what, _, _)) in PROBES.iter().enumerate() {
         let e = by_req.entry(req).or_insert((0, 0, Vec::new()));
         e.1 += 1;
-        if rows[i]["works"] == true { e.0 += 1 } else { e.2.push(what) }
+        if rows[i]["works"] == true {
+            e.0 += 1
+        } else {
+            e.2.push(what)
+        }
     }
 
     let json = serde_json::json!({
@@ -260,16 +372,23 @@ fn main() {
     });
     let args: Vec<String> = std::env::args().collect();
     let text = serde_json::to_string_pretty(&json).unwrap();
-    match args.iter().position(|a| a == "--json").and_then(|i| args.get(i + 1)) {
+    match args
+        .iter()
+        .position(|a| a == "--json")
+        .and_then(|i| args.get(i + 1))
+    {
         Some(p) => std::fs::write(p, &text).unwrap(),
         None => println!("{text}"),
     }
     for (req, (ok, total, missing)) in &by_req {
-        eprintln!("{req}: {ok}/{total}{}", if missing.is_empty() {
-            String::new()
-        } else {
-            format!("  missing: {}", missing.join(", "))
-        });
+        eprintln!(
+            "{req}: {ok}/{total}{}",
+            if missing.is_empty() {
+                String::new()
+            } else {
+                format!("  missing: {}", missing.join(", "))
+            }
+        );
     }
     // Silence the unused-import warning when the read executor is not used.
     let _ = QueryExecutor::new(&store);

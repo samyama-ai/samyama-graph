@@ -30,7 +30,15 @@ use std::process::Command;
 /// covers and would have passed throughout the bug.
 fn export(path: &str) -> String {
     let out = Command::new(env!("CARGO"))
-        .args(["run", "--release", "--quiet", "--example", "algo_parity_export", "--", path])
+        .args([
+            "run",
+            "--release",
+            "--quiet",
+            "--example",
+            "algo_parity_export",
+            "--",
+            path,
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("algo_parity_export runs");
@@ -56,7 +64,10 @@ fn two_processes_produce_byte_identical_output() {
         let va: serde_json::Value = serde_json::from_str(&a).unwrap();
         let vb: serde_json::Value = serde_json::from_str(&b).unwrap();
         let mut differing: Vec<String> = Vec::new();
-        for (ga, gb) in va["graphs"].as_array().unwrap().iter()
+        for (ga, gb) in va["graphs"]
+            .as_array()
+            .unwrap()
+            .iter()
             .zip(vb["graphs"].as_array().unwrap())
         {
             let name = ga["name"].as_str().unwrap_or("?");

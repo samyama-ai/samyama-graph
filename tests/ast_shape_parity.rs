@@ -93,8 +93,14 @@ fn rows(cypher: &str) -> Result<usize, String> {
 fn the_two_representations_are_both_reachable() {
     let pipeline = shape("MATCH (n) CREATE (m) WITH m MATCH (o) RETURN o");
     let by_kind = shape("MATCH (n) WITH n RETURN n");
-    assert_eq!(pipeline, "pipeline", "the pipeline sample no longer reaches the pipeline");
-    assert_eq!(by_kind, "by-kind", "the by-kind sample no longer reaches the by-kind fields");
+    assert_eq!(
+        pipeline, "pipeline",
+        "the pipeline sample no longer reaches the pipeline"
+    );
+    assert_eq!(
+        by_kind, "by-kind",
+        "the by-kind sample no longer reaches the by-kind fields"
+    );
     assert!(
         pipeline != by_kind,
         "both samples parsed as `{pipeline}` — this file is testing one shape twice"
@@ -277,14 +283,20 @@ fn expression_join_answers_agree_before_and_after_a_write_barrier() {
         let mut store = GraphStore::new();
         for label in ["A", "B"] {
             for _ in 0..2 {
-                let n=store.create_node(label);
-                let value=if label=="A" { PropertyValue::Integer(5) } else { PropertyValue::Float(5.0) };
-                store.get_node_mut(n).unwrap().set_property("k",value);
+                let n = store.create_node(label);
+                let value = if label == "A" {
+                    PropertyValue::Integer(5)
+                } else {
+                    PropertyValue::Float(5.0)
+                };
+                store.get_node_mut(n).unwrap().set_property("k", value);
             }
             store.create_node(label); // missing keys must not pair
         }
-        let q=parse_query(query).unwrap();
-        let batch=MutQueryExecutor::new(&mut store,"default".to_string()).execute(&q).unwrap();
-        assert_eq!(batch.records.len(),4,"{query}");
+        let q = parse_query(query).unwrap();
+        let batch = MutQueryExecutor::new(&mut store, "default".to_string())
+            .execute(&q)
+            .unwrap();
+        assert_eq!(batch.records.len(), 4, "{query}");
     }
 }

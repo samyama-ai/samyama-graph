@@ -51,7 +51,10 @@ fn a_date_component_reads_off_the_constructor() {
 fn every_date_component_agrees_between_the_two_spellings() {
     for component in ["year", "month", "day"] {
         let (direct, bound) = both_ways("date('2024-05-06')", component);
-        assert_eq!(direct, bound, "date().{component} disagrees with d.{component}");
+        assert_eq!(
+            direct, bound,
+            "date().{component} disagrees with d.{component}"
+        );
     }
 }
 
@@ -90,13 +93,19 @@ fn a_value_with_no_components_is_still_refused() {
         "an integer should not have components: {e}"
     );
     let e = scalar("RETURN 'abc'.year AS v").unwrap_err();
-    assert!(e.contains("cannot index"), "a string should not either: {e}");
+    assert!(
+        e.contains("cannot index"),
+        "a string should not either: {e}"
+    );
 }
 
 #[test]
 fn a_list_still_indexes_by_position() {
     // The path this shares with lists and maps must not have moved.
-    assert_eq!(scalar("RETURN [10, 20, 30][1] AS v").expect("list"), PropertyValue::Integer(20));
+    assert_eq!(
+        scalar("RETURN [10, 20, 30][1] AS v").expect("list"),
+        PropertyValue::Integer(20)
+    );
 }
 
 #[test]

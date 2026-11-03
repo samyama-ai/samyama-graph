@@ -165,17 +165,18 @@ fn the_current_version_has_release_notes() {
     // Read from `Cargo.toml` rather than from `git tag`: CI checks out shallow and
     // without tags, so a git-based version of this check could not fail there --
     // and a check that cannot fail in the place it runs is not a check.
-    let manifest = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
-    )
-    .expect("cannot read Cargo.toml");
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .expect("cannot read Cargo.toml");
     let version = manifest
         .lines()
         .find_map(|l| l.strip_prefix("version = "))
         .map(|v| v.trim().trim_matches('"').to_string())
         .expect("Cargo.toml has no top-level version");
 
-    let notes = docs_dir().join("release-notes").join(format!("{version}.md"));
+    let notes = docs_dir()
+        .join("release-notes")
+        .join(format!("{version}.md"));
     assert!(
         notes.exists(),
         "the engine is version {version} and docs/release-notes/{version}.md does not exist.\n\n\

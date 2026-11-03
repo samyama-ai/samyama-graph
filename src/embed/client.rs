@@ -1,9 +1,9 @@
 //! Embedding client for various LLM providers
 
-use crate::persistence::tenant::{AutoEmbedConfig, LLMProvider};
 use crate::embed::{EmbedError, EmbedResult};
-use serde::{Deserialize, Serialize};
+use crate::persistence::tenant::{AutoEmbedConfig, LLMProvider};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Client for interacting with LLM APIs to generate embeddings
@@ -28,7 +28,9 @@ impl EmbeddingClient {
             match config.provider {
                 LLMProvider::OpenAI => "https://api.openai.com/v1".to_string(),
                 LLMProvider::Ollama => "http://localhost:11434".to_string(),
-                LLMProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta".to_string(),
+                LLMProvider::Gemini => {
+                    "https://generativelanguage.googleapis.com/v1beta".to_string()
+                }
                 LLMProvider::AzureOpenAI => String::new(), // Must be provided
                 LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
                 LLMProvider::ClaudeCode => String::new(),
@@ -36,13 +38,22 @@ impl EmbeddingClient {
             }
         });
 
-        if (config.provider == LLMProvider::AzureOpenAI || config.provider == LLMProvider::Ollama) && config.api_base_url.is_none() && config.provider == LLMProvider::AzureOpenAI {
-             return Err(EmbedError::ConfigError("AzureOpenAI requires api_base_url".to_string()));
+        if (config.provider == LLMProvider::AzureOpenAI || config.provider == LLMProvider::Ollama)
+            && config.api_base_url.is_none()
+            && config.provider == LLMProvider::AzureOpenAI
+        {
+            return Err(EmbedError::ConfigError(
+                "AzureOpenAI requires api_base_url".to_string(),
+            ));
         }
 
         // Only pass dimensions when not using the model's native default (1536 for text-embedding-3-small).
         // OpenAI ignores the field for models that don't support it (e.g. ada-002).
-        let dimensions = if config.vector_dimension > 0 { Some(config.vector_dimension) } else { None };
+        let dimensions = if config.vector_dimension > 0 {
+            Some(config.vector_dimension)
+        } else {
+            None
+        };
 
         Ok(Self {
             client,
@@ -62,20 +73,26 @@ impl EmbeddingClient {
             LLMProvider::Gemini => self.gemini_embeddings(texts).await,
             LLMProvider::Mock => {
                 // Return deterministic dummy embeddings based on text length and first chars
-                Ok(texts.iter().map(|t| {
-                    let mut vec = vec![0.1; 64];
-                    if !t.is_empty() {
-                        // Vary the first few elements based on string properties
-                        vec[0] = (t.len() as f32 % 100.0) / 100.0;
-                        vec[1] = (t.as_bytes()[0] as f32 % 100.0) / 100.0;
-                        if t.len() > 1 {
-                            vec[2] = (t.as_bytes()[1] as f32 % 100.0) / 100.0;
+                Ok(texts
+                    .iter()
+                    .map(|t| {
+                        let mut vec = vec![0.1; 64];
+                        if !t.is_empty() {
+                            // Vary the first few elements based on string properties
+                            vec[0] = (t.len() as f32 % 100.0) / 100.0;
+                            vec[1] = (t.as_bytes()[0] as f32 % 100.0) / 100.0;
+                            if t.len() > 1 {
+                                vec[2] = (t.as_bytes()[1] as f32 % 100.0) / 100.0;
+                            }
                         }
-                    }
-                    vec
-                }).collect())
+                        vec
+                    })
+                    .collect())
             }
-            _ => Err(EmbedError::ConfigError(format!("Provider {:?} not yet implemented", self.provider))),
+            _ => Err(EmbedError::ConfigError(format!(
+                "Provider {:?} not yet implemented",
+                self.provider
+            ))),
         }
     }
 
@@ -98,10 +115,15 @@ impl EmbeddingClient {
             embedding: Vec<f32>,
         }
 
-        let api_key = self.api_key.as_ref().ok_or_else(|| EmbedError::ConfigError("OpenAI requires API key".to_string()))?;
-        
+        let api_key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| EmbedError::ConfigError("OpenAI requires API key".to_string()))?;
+
         let url = format!("{}/embeddings", self.api_base_url);
-        let resp = self.client.post(&url)
+        let resp = self
+            .client
+            .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&OpenAIRequest {
                 input: texts,
@@ -114,10 +136,16 @@ impl EmbeddingClient {
 
         if !resp.status().is_success() {
             let error_text = resp.text().await.unwrap_or_default();
-            return Err(EmbedError::ApiError(format!("OpenAI returned error: {}", error_text)));
+            return Err(EmbedError::ApiError(format!(
+                "OpenAI returned error: {}",
+                error_text
+            )));
         }
 
-        let result: OpenAIResponse = resp.json().await.map_err(|e| EmbedError::SerializationError(e.to_string()))?;
+        let result: OpenAIResponse = resp
+            .json()
+            .await
+            .map_err(|e| EmbedError::SerializationError(e.to_string()))?;
         Ok(result.data.into_iter().map(|d| d.embedding).collect())
     }
 
@@ -136,7 +164,9 @@ impl EmbeddingClient {
         let mut results = Vec::new();
         for text in texts {
             let url = format!("{}/api/embeddings", self.api_base_url);
-            let resp = self.client.post(&url)
+            let resp = self
+                .client
+                .post(&url)
                 .json(&OllamaRequest {
                     model: &self.model,
                     prompt: text,
@@ -147,13 +177,19 @@ impl EmbeddingClient {
 
             if !resp.status().is_success() {
                 let error_text = resp.text().await.unwrap_or_default();
-                return Err(EmbedError::ApiError(format!("Ollama returned error: {}", error_text)));
+                return Err(EmbedError::ApiError(format!(
+                    "Ollama returned error: {}",
+                    error_text
+                )));
             }
 
-            let result: OllamaResponse = resp.json().await.map_err(|e| EmbedError::SerializationError(e.to_string()))?;
+            let result: OllamaResponse = resp
+                .json()
+                .await
+                .map_err(|e| EmbedError::SerializationError(e.to_string()))?;
             results.push(result.embedding);
         }
-        
+
         Ok(results)
     }
 
@@ -189,18 +225,29 @@ impl EmbeddingClient {
             values: Vec<f32>,
         }
 
-        let api_key = self.api_key.as_ref().ok_or_else(|| EmbedError::ConfigError("Gemini requires API key".to_string()))?;
-        
-        let url = format!("{}/models/{}:batchEmbedContents?key={}", self.api_base_url, self.model, api_key);
-        
-        let requests = texts.iter().map(|t| GeminiRequest {
-            model: format!("models/{}", self.model),
-            content: GeminiContent {
-                parts: vec![GeminiPart { text: t }],
-            },
-        }).collect();
+        let api_key = self
+            .api_key
+            .as_ref()
+            .ok_or_else(|| EmbedError::ConfigError("Gemini requires API key".to_string()))?;
 
-        let resp = self.client.post(&url)
+        let url = format!(
+            "{}/models/{}:batchEmbedContents?key={}",
+            self.api_base_url, self.model, api_key
+        );
+
+        let requests = texts
+            .iter()
+            .map(|t| GeminiRequest {
+                model: format!("models/{}", self.model),
+                content: GeminiContent {
+                    parts: vec![GeminiPart { text: t }],
+                },
+            })
+            .collect();
+
+        let resp = self
+            .client
+            .post(&url)
             .json(&GeminiBatchRequest { requests })
             .send()
             .await
@@ -208,15 +255,23 @@ impl EmbeddingClient {
 
         if !resp.status().is_success() {
             let error_text = resp.text().await.unwrap_or_default();
-            return Err(EmbedError::ApiError(format!("Gemini returned error: {}", error_text)));
+            return Err(EmbedError::ApiError(format!(
+                "Gemini returned error: {}",
+                error_text
+            )));
         }
 
-        let result: GeminiBatchResponse = resp.json().await.map_err(|e| EmbedError::SerializationError(e.to_string()))?;
+        let result: GeminiBatchResponse = resp
+            .json()
+            .await
+            .map_err(|e| EmbedError::SerializationError(e.to_string()))?;
         Ok(result.embeddings.into_iter().map(|e| e.values).collect())
     }
 }
 
-#[cfg(test)] #[path = "client_cov_tests.rs"] mod cov_tests;
+#[cfg(test)]
+#[path = "client_cov_tests.rs"]
+mod cov_tests;
 
 #[cfg(test)]
 mod tests {
@@ -254,7 +309,7 @@ mod tests {
         let embeddings = result.unwrap();
         assert_eq!(embeddings.len(), 2);
         assert_eq!(embeddings[0].len(), 64); // Mock returns 64-dim vectors
-        // Verify deterministic: different texts produce different first elements
+                                             // Verify deterministic: different texts produce different first elements
         assert_ne!(embeddings[0][0], embeddings[1][0]);
     }
 
@@ -571,7 +626,10 @@ mod tests {
             embedding_property: "embedding".to_string(),
         };
         let client_gemini = EmbeddingClient::new(&config_gemini).unwrap();
-        assert_eq!(client_gemini.api_base_url, "https://generativelanguage.googleapis.com/v1beta");
+        assert_eq!(
+            client_gemini.api_base_url,
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
 
         // Anthropic
         let config_anthropic = AutoEmbedConfig {
@@ -586,7 +644,10 @@ mod tests {
             embedding_property: "embedding".to_string(),
         };
         let client_anthropic = EmbeddingClient::new(&config_anthropic).unwrap();
-        assert_eq!(client_anthropic.api_base_url, "https://api.anthropic.com/v1");
+        assert_eq!(
+            client_anthropic.api_base_url,
+            "https://api.anthropic.com/v1"
+        );
 
         // ClaudeCode
         let config_cc = AutoEmbedConfig {

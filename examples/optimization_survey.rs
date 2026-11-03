@@ -37,12 +37,9 @@ use samyama_optimization::stats::{friedman, holm_adjust, wilcoxon_signed_rank, W
 /// report full coverage of whatever it already does, which is how fourteen
 /// unreachable solvers went unnoticed.
 const ASKED: &[&str] = &[
-    "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO",
-    "Jaya", "QOJaya", "SAMPJaya", "EHRJaya",
-    "BMR", "BWR", "BMWR",
-    "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
-    "Firefly", "Cuckoo", "GWO", "Bat",
-    // Multi-objective; reached with two cost properties.
+    "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "Jaya", "QOJaya", "SAMPJaya",
+    "EHRJaya", "BMR", "BWR", "BMWR", "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS", "FPA", "Firefly",
+    "Cuckoo", "GWO", "Bat", // Multi-objective; reached with two cost properties.
     "NSGA2", "MOTLBO", "MOBMWR", "MORaoDE", "SAPHR",
 ];
 
@@ -121,22 +118,41 @@ macro_rules! run_solver {
 fn one_run(name: &str, seed: u64, spec_idx: usize) -> Option<f64> {
     let spec = &so_suite(DIM)[spec_idx];
     let problem = spec.to_problem();
-    let cfg = SolverConfig { population_size: POP, max_iterations: ITERS };
+    let cfg = SolverConfig {
+        population_size: POP,
+        max_iterations: ITERS,
+    };
     // Rao takes its variant as an argument rather than having three types, so
     // it sits outside the macro rather than being left out of the survey --
     // which is what "not in the list" quietly means.
-    let rao = |v| RaoSolver::new(SolverConfig { population_size: POP, max_iterations: ITERS }, v)
-        .with_seed(seed).solve(&problem).best_fitness;
+    let rao = |v| {
+        RaoSolver::new(
+            SolverConfig {
+                population_size: POP,
+                max_iterations: ITERS,
+            },
+            v,
+        )
+        .with_seed(seed)
+        .solve(&problem)
+        .best_fitness
+    };
     match name {
         "Rao1" => return Some(rao(RaoVariant::Rao1)),
         "Rao2" => return Some(rao(RaoVariant::Rao2)),
         "Rao3" => return Some(rao(RaoVariant::Rao3)),
         "QORao" => {
             return Some(
-                QORaoSolver::new(SolverConfig { population_size: POP, max_iterations: ITERS }, RaoVariant::Rao1)
-                    .with_seed(seed)
-                    .solve(&problem)
-                    .best_fitness,
+                QORaoSolver::new(
+                    SolverConfig {
+                        population_size: POP,
+                        max_iterations: ITERS,
+                    },
+                    RaoVariant::Rao1,
+                )
+                .with_seed(seed)
+                .solve(&problem)
+                .best_fitness,
             )
         }
         _ => {}
@@ -354,10 +370,7 @@ fn main() {
         f64::NAN
     };
     let holm_first_threshold = 0.05 / m;
-    let exactly_scored = pairwise
-        .iter()
-        .filter(|e| e["method"] == "exact")
-        .count();
+    let exactly_scored = pairwise.iter().filter(|e| e["method"] == "exact").count();
     let power_json = serde_json::json!({
         "alpha": 0.05,
         "comparisons": pairwise.len(),

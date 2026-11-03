@@ -20,7 +20,10 @@ pub struct RaoSolver {
 impl RaoSolver {
     pub fn new(config: SolverConfig, variant: RaoVariant) -> Self {
         Self {
-            seed: None, config, variant }
+            seed: None,
+            config,
+            variant,
+        }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -53,7 +56,10 @@ impl RaoSolver {
                 break;
             }
             if iter % 10 == 0 {
-                println!("Rao Solver: Iteration {}/{}", iter, self.config.max_iterations);
+                println!(
+                    "Rao Solver: Iteration {}/{}",
+                    iter, self.config.max_iterations
+                );
             }
             let (best_idx, worst_idx) = self.find_best_worst(&population);
             let best_vars = population[best_idx].variables.clone();
@@ -84,19 +90,18 @@ impl RaoSolver {
                     }
                     // We assume fitness of random point is worse? Or compare?
                     // Standard Rao compares fitness. We'll compute it if needed.
-                    let rand_fitness = if matches!(self.variant, RaoVariant::Rao2 | RaoVariant::Rao3) {
-                        crate::common::evaluate(problem, &rand_vars)
-                    } else {
-                        0.0
-                    };
+                    let rand_fitness =
+                        if matches!(self.variant, RaoVariant::Rao2 | RaoVariant::Rao3) {
+                            crate::common::evaluate(problem, &rand_vars)
+                        } else {
+                            0.0
+                        };
 
                     for j in 0..dim {
                         let term1 = best_vars[j] - worst_vars[j];
-                        
+
                         let delta = match self.variant {
-                            RaoVariant::Rao1 => {
-                                r1 * term1
-                            },
+                            RaoVariant::Rao1 => r1 * term1,
                             RaoVariant::Rao2 => {
                                 let term2 = if ind.fitness < rand_fitness {
                                     ind.variables[j] - rand_vars[j]
@@ -104,7 +109,7 @@ impl RaoSolver {
                                     rand_vars[j] - ind.variables[j]
                                 };
                                 r1 * term1 + r2 * term2
-                            },
+                            }
                             RaoVariant::Rao3 => {
                                 // Rao-3 often uses |worst| and |best|
                                 let term1_abs = best_vars[j] - worst_vars[j].abs();

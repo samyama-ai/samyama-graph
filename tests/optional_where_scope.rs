@@ -14,7 +14,9 @@ use samyama::query::parser::parse_query;
 
 fn write(s: &mut GraphStore, q: &str) {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    MutQueryExecutor::new(s, "default".into()).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    MutQueryExecutor::new(s, "default".into())
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
 }
 
 fn cell(v: Option<&Value>) -> String {
@@ -28,7 +30,10 @@ fn cell(v: Option<&Value>) -> String {
 /// `:X {v: 1..3}`, `:Y {w: 10}`, `(:X {v: 2})-[:E]->(:Z {z: 7})`.
 fn graph() -> GraphStore {
     let mut s = GraphStore::new();
-    write(&mut s, "CREATE (:X {v: 1}), (:X {v: 2}), (:X {v: 3}), (:Y {w: 10})");
+    write(
+        &mut s,
+        "CREATE (:X {v: 1}), (:X {v: 2}), (:X {v: 3}), (:Y {w: 10})",
+    );
     write(&mut s, "MATCH (x:X {v: 2}) CREATE (x)-[:E]->(:Z {z: 7})");
     s
 }
@@ -37,11 +42,19 @@ fn graph() -> GraphStore {
 fn check(q: &str, expected: &[&str]) {
     let s = graph();
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(&s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(&s)
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let mut got: Vec<String> = out
         .records
         .iter()
-        .map(|r| out.columns.iter().map(|c| cell(r.get(c))).collect::<Vec<_>>().join("|"))
+        .map(|r| {
+            out.columns
+                .iter()
+                .map(|c| cell(r.get(c)))
+                .collect::<Vec<_>>()
+                .join("|")
+        })
         .collect();
     got.sort();
     assert_eq!(got, expected, "{q}");
@@ -49,12 +62,18 @@ fn check(q: &str, expected: &[&str]) {
 
 #[test]
 fn a_where_naming_only_the_outer_match() {
-    check("MATCH (x:X) OPTIONAL MATCH (y:Y) WHERE x.v > 1 RETURN x.v, y.w", &["1|null", "2|10", "3|10"]);
+    check(
+        "MATCH (x:X) OPTIONAL MATCH (y:Y) WHERE x.v > 1 RETURN x.v, y.w",
+        &["1|null", "2|10", "3|10"],
+    );
 }
 
 #[test]
 fn a_where_naming_only_an_unwound_variable() {
-    check("UNWIND [1, 2, 3] AS i OPTIONAL MATCH (y:Y) WHERE i > 1 RETURN i, y.w", &["1|null", "2|10", "3|10"]);
+    check(
+        "UNWIND [1, 2, 3] AS i OPTIONAL MATCH (y:Y) WHERE i > 1 RETURN i, y.w",
+        &["1|null", "2|10", "3|10"],
+    );
     check(
         "UNWIND [1, 2, 3] AS i OPTIONAL MATCH (y:Y) WHERE i > 1 WITH i, y RETURN i, y.w",
         &["1|null", "2|10", "3|10"],
@@ -63,17 +82,26 @@ fn a_where_naming_only_an_unwound_variable() {
 
 #[test]
 fn a_where_naming_only_the_shared_variable_of_a_hop() {
-    check("MATCH (x:X) OPTIONAL MATCH (x)-[:E]->(z) WHERE x.v > 1 RETURN x.v, z.z", &["1|null", "2|7", "3|null"]);
+    check(
+        "MATCH (x:X) OPTIONAL MATCH (x)-[:E]->(z) WHERE x.v > 1 RETURN x.v, z.z",
+        &["1|null", "2|7", "3|null"],
+    );
 }
 
 #[test]
 fn a_constant_where() {
-    check("MATCH (x:X) OPTIONAL MATCH (y:Y) WHERE false RETURN x.v, y.w", &["1|null", "2|null", "3|null"]);
+    check(
+        "MATCH (x:X) OPTIONAL MATCH (y:Y) WHERE false RETURN x.v, y.w",
+        &["1|null", "2|null", "3|null"],
+    );
 }
 
 #[test]
 fn after_a_with() {
-    check("MATCH (x:X) WITH x OPTIONAL MATCH (y:Y) WHERE x.v > 1 RETURN x.v, y.w", &["1|null", "2|10", "3|10"]);
+    check(
+        "MATCH (x:X) WITH x OPTIONAL MATCH (y:Y) WHERE x.v > 1 RETURN x.v, y.w",
+        &["1|null", "2|10", "3|10"],
+    );
 }
 
 #[test]
@@ -98,11 +126,20 @@ fn two_optional_matches_each_with_its_own_where() {
 /// filters inside it.
 #[test]
 fn controls() {
-    check("MATCH (x:X) WHERE x.v > 1 OPTIONAL MATCH (y:Y) RETURN x.v, y.w", &["2|10", "3|10"]);
+    check(
+        "MATCH (x:X) WHERE x.v > 1 OPTIONAL MATCH (y:Y) RETURN x.v, y.w",
+        &["2|10", "3|10"],
+    );
     check(
         "MATCH (x:X) WHERE x.v > 1 OPTIONAL MATCH (y:Y) WHERE x.v > 1 RETURN x.v, y.w",
         &["2|10", "3|10"],
     );
-    check("MATCH (x:X) OPTIONAL MATCH (y:Y) WHERE y.w = x.v * 5 RETURN x.v, y.w", &["1|null", "2|10", "3|null"]);
-    check("MATCH (x:X) OPTIONAL MATCH (x)-[:E]->(z) WHERE z.z > 5 RETURN x.v, z.z", &["1|null", "2|7", "3|null"]);
+    check(
+        "MATCH (x:X) OPTIONAL MATCH (y:Y) WHERE y.w = x.v * 5 RETURN x.v, y.w",
+        &["1|null", "2|10", "3|null"],
+    );
+    check(
+        "MATCH (x:X) OPTIONAL MATCH (x)-[:E]->(z) WHERE z.z > 5 RETURN x.v, z.z",
+        &["1|null", "2|7", "3|null"],
+    );
 }

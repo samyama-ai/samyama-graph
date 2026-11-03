@@ -48,8 +48,12 @@ fn build() -> GraphStore {
     let hub = store.create_node("Hub");
     for i in 0..ROWS {
         let p = store.create_node("P");
-        store.set_node_property("default", p, "i", i as i64).unwrap();
-        store.set_node_property("default", p, "j", (i % 13) as i64).unwrap();
+        store
+            .set_node_property("default", p, "i", i as i64)
+            .unwrap();
+        store
+            .set_node_property("default", p, "j", (i % 13) as i64)
+            .unwrap();
         store.create_edge(hub, p, "KNOWS").unwrap();
     }
     store
@@ -96,13 +100,19 @@ fn an_output_column_name_costs_no_allocation_per_row() {
 
     // Projection: one integer column, then three.
     let one = calls_per_row(&store, &format!("{MATCH} RETURN p.i AS a"));
-    let three = calls_per_row(&store, &format!("{MATCH} RETURN p.i AS a, p.j AS b, p.i AS c"));
+    let three = calls_per_row(
+        &store,
+        &format!("{MATCH} RETURN p.i AS a, p.j AS b, p.i AS c"),
+    );
     let per_projected = (three - one) / 2.0;
 
     // Aggregation with one group per row (`p.i` is unique), so a per-group cost
     // is a per-row cost. One aggregate column, then three; the projection that
     // follows the aggregate rebinds them all, so this covers both operators.
-    let agg_one = calls_per_row(&store, &format!("{AGG_MATCH} RETURN p.i AS g, count(*) AS n"));
+    let agg_one = calls_per_row(
+        &store,
+        &format!("{AGG_MATCH} RETURN p.i AS g, count(*) AS n"),
+    );
     let agg_three = calls_per_row(
         &store,
         &format!("{AGG_MATCH} RETURN p.i AS g, count(*) AS n, count(*) AS m, count(*) AS o"),
@@ -113,6 +123,12 @@ fn an_output_column_name_costs_no_allocation_per_row() {
         "calls/row -- project: 1 col {one:.2}, 3 cols {three:.2} ({per_projected:.2} per extra column); \
          aggregate: 1 col {agg_one:.2}, 3 cols {agg_three:.2} ({per_aggregate:.2} per extra column)"
     );
-    assert!(per_projected < 0.1, "each extra projected column costs {per_projected:.2} allocator calls per row");
-    assert!(per_aggregate < 0.1, "each extra aggregate column costs {per_aggregate:.2} allocator calls per row");
+    assert!(
+        per_projected < 0.1,
+        "each extra projected column costs {per_projected:.2} allocator calls per row"
+    );
+    assert!(
+        per_aggregate < 0.1,
+        "each extra aggregate column costs {per_aggregate:.2} allocator calls per row"
+    );
 }

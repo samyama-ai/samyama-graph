@@ -60,12 +60,12 @@
 use crate::graph::{EdgeType, Label, PropertyValue};
 use crate::query::ast::*;
 use crate::vector::index::Quantization;
+use pest::pratt_parser::{Assoc, Op, PrattParser};
 use pest::Parser;
-use pest::pratt_parser::{PrattParser, Op, Assoc};
 use pest_derive::Parser;
 use std::collections::HashMap;
-use thiserror::Error;
 use std::sync::LazyLock;
+use thiserror::Error;
 
 #[derive(Parser)]
 #[grammar = "query/cypher.pest"]
@@ -209,7 +209,9 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                                 query.clauses.push(Clause::Unwind(parse_unwind_clause(c)?));
                             }
                             Rule::load_csv_clause => {
-                                query.clauses.push(Clause::LoadCsv(parse_load_csv_clause(c)?));
+                                query
+                                    .clauses
+                                    .push(Clause::LoadCsv(parse_load_csv_clause(c)?));
                             }
                             Rule::load_parquet_clause => {
                                 query
@@ -294,16 +296,25 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
     }
 
     if query.clauses.is_empty() {
-        return Err(ParseError::SemanticError("empty clause sequence".to_string()));
+        return Err(ParseError::SemanticError(
+            "empty clause sequence".to_string(),
+        ));
     }
     // The RETURN is mirrored into the legacy field so `validate` and the
     // star expansion, which both read it, keep working unchanged.
-    if let Some(Clause::Return(rc)) = query.clauses.iter().rev().find(|c| matches!(c, Clause::Return(_))) {
+    if let Some(Clause::Return(rc)) = query
+        .clauses
+        .iter()
+        .rev()
+        .find(|c| matches!(c, Clause::Return(_)))
+    {
         query.return_clause = Some(rc.clone());
     }
     crate::query::star::expand_stars(&mut query);
-    crate::query::validate::validate(&query)
-        .map_err(|e| ParseError::Coded { code: e.code(), message: e.to_string() })?;
+    crate::query::validate::validate(&query).map_err(|e| ParseError::Coded {
+        code: e.code(),
+        message: e.to_string(),
+    })?;
     Ok(query)
 }
 
@@ -320,9 +331,15 @@ fn parse_integer_literal(text: &str) -> ParseResult<i64> {
         Some(rest) => (true, rest),
         None => (false, text),
     };
-    let (radix, digits) = if let Some(rest) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+    let (radix, digits) = if let Some(rest) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
         (16, rest)
-    } else if let Some(rest) = digits.strip_prefix("0o").or_else(|| digits.strip_prefix("0O")) {
+    } else if let Some(rest) = digits
+        .strip_prefix("0o")
+        .or_else(|| digits.strip_prefix("0O"))
+    {
         (8, rest)
     } else {
         (10, digits)
@@ -331,18 +348,14 @@ fn parse_integer_literal(text: &str) -> ParseResult<i64> {
     // Parsed as i128 so the magnitude of i64::MIN -- which is one larger than
     // i64::MAX -- can be represented before the sign is applied. Without this,
     // `-9223372036854775808` has no valid intermediate form.
-    let magnitude = i128::from_str_radix(digits, radix).map_err(|_| {
-        ParseError::Coded {
-            code: crate::query::error_code::INVALID_LITERAL,
-            message: format!("integer literal out of range: `{text}`"),
-        }
+    let magnitude = i128::from_str_radix(digits, radix).map_err(|_| ParseError::Coded {
+        code: crate::query::error_code::INVALID_LITERAL,
+        message: format!("integer literal out of range: `{text}`"),
     })?;
     let value = if negative { -magnitude } else { magnitude };
-    i64::try_from(value).map_err(|_| {
-        ParseError::Coded {
-            code: crate::query::error_code::INVALID_LITERAL,
-            message: format!("integer literal out of range: `{text}`"),
-        }
+    i64::try_from(value).map_err(|_| ParseError::Coded {
+        code: crate::query::error_code::INVALID_LITERAL,
+        message: format!("integer literal out of range: `{text}`"),
     })
 }
 
@@ -350,8 +363,9 @@ fn parse_integer_literal(text: &str) -> ParseResult<i64> {
 /// `LIMIT 99999999999999999999` panicked rather than being refused.
 fn parse_count_literal(text: &str) -> ParseResult<usize> {
     let value = parse_integer_literal(text)?;
-    usize::try_from(value)
-        .map_err(|_| ParseError::SemanticError(format!("SKIP/LIMIT must not be negative: `{text}`")))
+    usize::try_from(value).map_err(|_| {
+        ParseError::SemanticError(format!("SKIP/LIMIT must not be negative: `{text}`"))
+    })
 }
 
 /// The row count a `SKIP` or `LIMIT` names.
@@ -376,7 +390,11 @@ fn parse_count_literal(text: &str) -> ParseResult<usize> {
 fn parse_row_count(
     pair: pest::iterators::Pair<Rule>,
 ) -> ParseResult<(Option<usize>, Option<Expression>)> {
-    if let Some(e) = pair.clone().into_inner().find(|p| p.as_rule() == Rule::expression) {
+    if let Some(e) = pair
+        .clone()
+        .into_inner()
+        .find(|p| p.as_rule() == Rule::expression)
+    {
         let expr = parse_expression(e)?;
         if contains_parameter(&expr) {
             return Ok((None, Some(expr)));
@@ -430,7 +448,6 @@ fn parse_row_count_fixed(pair: pest::iterators::Pair<Rule>) -> ParseResult<Optio
     }
     Ok(None)
 }
-
 
 /// How deeply a query may nest brackets before it is refused.
 ///
@@ -576,7 +593,9 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
                 let mut first = true;
                 for inner in pair.into_inner() {
                     match inner.as_rule() {
-                        Rule::cypher_options => parse_cypher_options(inner, &mut query.plan_options)?,
+                        Rule::cypher_options => {
+                            parse_cypher_options(inner, &mut query.plan_options)?
+                        }
                         Rule::explain_clause => {
                             let text = inner.as_str().to_uppercase();
                             if text.starts_with("PROFILE") {
@@ -620,8 +639,10 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
     // arity, CREATE over an already-bound variable. Reported as a parse
     // failure because that is what they are to a caller: the query was never
     // well-formed, and running it would answer a question nobody asked.
-    crate::query::validate::validate(&query)
-        .map_err(|e| ParseError::Coded { code: e.code(), message: e.to_string() })?;
+    crate::query::validate::validate(&query).map_err(|e| ParseError::Coded {
+        code: e.code(),
+        message: e.to_string(),
+    })?;
 
     Ok(query)
 }
@@ -650,7 +671,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                 });
             }
             Rule::drop_graph_projection_stmt => {
-                let if_exists = inner.clone().into_inner().any(|p| p.as_rule() == Rule::if_exists);
+                let if_exists = inner
+                    .clone()
+                    .into_inner()
+                    .any(|p| p.as_rule() == Rule::if_exists);
                 query.graph_projection_ddl = Some(GraphProjectionDdl::Drop {
                     name: projection_name(inner),
                     if_exists,
@@ -707,7 +731,8 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                 let Some(label) = label else {
                     return Err(ParseError::SemanticError(
                         "CREATE FULLTEXT INDEX needs a label: \
-                         CREATE FULLTEXT INDEX [name] FOR (n:Label) ON (n.property)".to_string(),
+                         CREATE FULLTEXT INDEX [name] FOR (n:Label) ON (n.property)"
+                            .to_string(),
                     ));
                 };
                 if keys.is_empty() {
@@ -715,9 +740,8 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                         "CREATE FULLTEXT INDEX names no property".to_string(),
                     ));
                 }
-                let index_name = name.unwrap_or_else(|| {
-                    format!("{kind}_{}_{}", label.as_str(), keys.join("_"))
-                });
+                let index_name =
+                    name.unwrap_or_else(|| format!("{kind}_{}_{}", label.as_str(), keys.join("_")));
                 query.create_fulltext_index_clause = Some(CreateFullTextIndexClause {
                     index_name,
                     label,
@@ -756,18 +780,25 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
                 let (Some(label), Some(property)) = (label, property) else {
                     return Err(ParseError::SemanticError(
                         "CREATE POINT INDEX needs a label and a property: \
-                         CREATE POINT INDEX [name] FOR (n:Label) ON (n.property)".to_string(),
+                         CREATE POINT INDEX [name] FOR (n:Label) ON (n.property)"
+                            .to_string(),
                     ));
                 };
                 let name = name.unwrap_or_else(|| format!("point_{}_{}", label.as_str(), property));
-                query.point_index_ddl = Some(PointIndexDdl::Create { name, label, property });
+                query.point_index_ddl = Some(PointIndexDdl::Create {
+                    name,
+                    label,
+                    property,
+                });
             }
             Rule::drop_point_index_stmt => {
                 let name = inner
                     .into_inner()
                     .find(|p| p.as_rule() == Rule::index_name)
                     .map(|p| p.as_str().to_string())
-                    .ok_or_else(|| ParseError::SemanticError("DROP POINT INDEX needs a name".to_string()))?;
+                    .ok_or_else(|| {
+                        ParseError::SemanticError("DROP POINT INDEX needs a name".to_string())
+                    })?;
                 query.point_index_ddl = Some(PointIndexDdl::Drop { name });
             }
             Rule::call_stmt => {
@@ -853,17 +884,32 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
 /// `CYPHER key=value …` (LANG-06, #1616). Every key and value is checked
 /// here: one this engine does not have is refused by name, because an option
 /// accepted and ignored reads exactly like one that took effect.
-fn parse_cypher_options(pair: pest::iterators::Pair<Rule>, options: &mut crate::query::ast::PlanOptions) -> ParseResult<()> {
+fn parse_cypher_options(
+    pair: pest::iterators::Pair<Rule>,
+    options: &mut crate::query::ast::PlanOptions,
+) -> ParseResult<()> {
     use crate::query::ast::PlannerChoice;
     use crate::query::error_code as c;
     let mut seen = std::collections::HashSet::new();
-    for opt in pair.into_inner().filter(|p| p.as_rule() == Rule::cypher_option) {
+    for opt in pair
+        .into_inner()
+        .filter(|p| p.as_rule() == Rule::cypher_option)
+    {
         let mut kv = opt.into_inner();
-        let key = kv.next().map(|p| p.as_str().to_string()).unwrap_or_default();
-        let value = kv.next().map(|p| p.as_str().to_string()).unwrap_or_default();
+        let key = kv
+            .next()
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_default();
+        let value = kv
+            .next()
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_default();
         let lower = key.to_ascii_lowercase();
         if !seen.insert(lower.clone()) {
-            return Err(ParseError::Coded { code: c::BAD_ARGUMENT, message: format!("CYPHER option `{key}` is given twice") });
+            return Err(ParseError::Coded {
+                code: c::BAD_ARGUMENT,
+                message: format!("CYPHER option `{key}` is given twice"),
+            });
         }
         match lower.as_str() {
             "planner" => {
@@ -896,7 +942,10 @@ fn parse_cypher_options(pair: pest::iterators::Pair<Rule>, options: &mut crate::
             "runtime" => {
                 // One runtime exists, the Volcano iterator (ADR-007). Naming
                 // it is honoured; naming another is refused, not ignored.
-                if !matches!(value.to_ascii_lowercase().as_str(), "volcano" | "interpreted") {
+                if !matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "volcano" | "interpreted"
+                ) {
                     return Err(ParseError::Coded {
                         code: c::UNSUPPORTED,
                         message: format!(
@@ -909,7 +958,9 @@ fn parse_cypher_options(pair: pest::iterators::Pair<Rule>, options: &mut crate::
             _ => {
                 return Err(ParseError::Coded {
                     code: c::UNSUPPORTED,
-                    message: format!("unknown CYPHER option `{key}`; the options are planner, plan and runtime"),
+                    message: format!(
+                        "unknown CYPHER option `{key}`; the options are planner, plan and runtime"
+                    ),
                 })
             }
         }
@@ -946,18 +997,23 @@ fn parse_using_hint(pair: pest::iterators::Pair<Rule>) -> ParseResult<PlanHint> 
     Ok(match rule {
         Rule::using_index_hint => PlanHint::Index {
             variable: one(&mut variables),
-            label: label.ok_or_else(|| ParseError::SemanticError("USING INDEX needs a label".into()))?,
+            label: label
+                .ok_or_else(|| ParseError::SemanticError("USING INDEX needs a label".into()))?,
             properties,
         },
         Rule::using_scan_hint => PlanHint::Scan {
             variable: one(&mut variables),
-            label: label.ok_or_else(|| ParseError::SemanticError("USING SCAN needs a label".into()))?,
+            label: label
+                .ok_or_else(|| ParseError::SemanticError("USING SCAN needs a label".into()))?,
         },
         _ => PlanHint::Join { variables },
     })
 }
 
-fn parse_create_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+fn parse_create_index_statement(
+    pair: pest::iterators::Pair<Rule>,
+    query: &mut Query,
+) -> ParseResult<()> {
     let mut label = None;
     let mut properties: Vec<String> = Vec::new();
 
@@ -969,7 +1025,8 @@ fn parse_create_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Q
         }
     }
 
-    let first_property = properties.first()
+    let first_property = properties
+        .first()
         .ok_or_else(|| ParseError::SemanticError("Missing property".to_string()))?
         .clone();
     let additional_properties = properties.into_iter().skip(1).collect();
@@ -1051,7 +1108,10 @@ fn parse_create_hierarchy_index_statement(
     Ok(())
 }
 
-fn parse_drop_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+fn parse_drop_index_statement(
+    pair: pest::iterators::Pair<Rule>,
+    query: &mut Query,
+) -> ParseResult<()> {
     let mut label = None;
     let mut property = None;
 
@@ -1065,12 +1125,16 @@ fn parse_drop_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Que
 
     query.drop_index_clause = Some(DropIndexClause {
         label: label.ok_or_else(|| ParseError::SemanticError("Missing label".to_string()))?,
-        property: property.ok_or_else(|| ParseError::SemanticError("Missing property".to_string()))?,
+        property: property
+            .ok_or_else(|| ParseError::SemanticError("Missing property".to_string()))?,
     });
     Ok(())
 }
 
-fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+fn parse_create_constraint_statement(
+    pair: pest::iterators::Pair<Rule>,
+    query: &mut Query,
+) -> ParseResult<()> {
     let mut variable = None;
     let mut label = None;
     let mut property = None;
@@ -1082,9 +1146,7 @@ fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &
     let inner_pairs: Vec<_> = pair
         .into_inner()
         .flat_map(|p| match p.as_rule() {
-            Rule::constraint_modern | Rule::constraint_legacy => {
-                p.into_inner().collect::<Vec<_>>()
-            }
+            Rule::constraint_modern | Rule::constraint_legacy => p.into_inner().collect::<Vec<_>>(),
             _ => vec![p],
         })
         .collect();
@@ -1110,14 +1172,19 @@ fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &
     }
 
     query.create_constraint_clause = Some(CreateConstraintClause {
-        variable: variable.ok_or_else(|| ParseError::SemanticError("Missing variable".to_string()))?,
+        variable: variable
+            .ok_or_else(|| ParseError::SemanticError("Missing variable".to_string()))?,
         label: label.ok_or_else(|| ParseError::SemanticError("Missing label".to_string()))?,
-        property: property.ok_or_else(|| ParseError::SemanticError("Missing property".to_string()))?,
+        property: property
+            .ok_or_else(|| ParseError::SemanticError("Missing property".to_string()))?,
     });
     Ok(())
 }
 
-fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+fn parse_create_vector_index_statement(
+    pair: pest::iterators::Pair<Rule>,
+    query: &mut Query,
+) -> ParseResult<()> {
     let mut index_name = None;
     let mut label = None;
     let mut property_key = None;
@@ -1191,11 +1258,9 @@ Accepted values are `none` and `fp16`."
                                 )))
                             }
                         },
-                        other => {
-                            return Err(ParseError::SemanticError(format!(
-                                "CREATE VECTOR INDEX: `quantization` must be a string, got {other:?}"
-                            )))
-                        }
+                        other => return Err(ParseError::SemanticError(format!(
+                            "CREATE VECTOR INDEX: `quantization` must be a string, got {other:?}"
+                        ))),
                     }
                 }
                 if let Some(value) = options_map.get("similarity") {
@@ -1216,8 +1281,12 @@ Accepted values are `none` and `fp16`."
     query.create_vector_index_clause = Some(CreateVectorIndexClause {
         index_name,
         quantization,
-        label: label.ok_or_else(|| ParseError::SemanticError("Missing label in CREATE VECTOR INDEX".to_string()))?,
-        property_key: property_key.ok_or_else(|| ParseError::SemanticError("Missing property key in CREATE VECTOR INDEX".to_string()))?,
+        label: label.ok_or_else(|| {
+            ParseError::SemanticError("Missing label in CREATE VECTOR INDEX".to_string())
+        })?,
+        property_key: property_key.ok_or_else(|| {
+            ParseError::SemanticError("Missing property key in CREATE VECTOR INDEX".to_string())
+        })?,
         dimensions,
         similarity,
     });
@@ -1313,7 +1382,11 @@ fn parse_create_graph_projection(pair: pest::iterators::Pair<Rule>) -> GraphProj
             _ => {}
         }
     }
-    GraphProjectionDdl::Create { name, spec, if_not_exists }
+    GraphProjectionDdl::Create {
+        name,
+        spec,
+        if_not_exists,
+    }
 }
 
 fn unescape_name(raw: &str) -> String {
@@ -1391,7 +1464,10 @@ fn unescape_string_literal(literal: &str) -> ParseResult<String> {
     Ok(out)
 }
 
-fn parse_match_statement_partial(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
+fn parse_match_statement_partial(
+    pair: pest::iterators::Pair<Rule>,
+    query: &mut Query,
+) -> ParseResult<()> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::pattern => {
@@ -1459,7 +1535,11 @@ fn parse_yield_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<YieldItem>
 /// The AND-conjuncts of a predicate, in order.
 fn and_conjuncts(e: &Expression, out: &mut Vec<Expression>) {
     match e {
-        Expression::Binary { left, op: BinaryOp::And, right } => {
+        Expression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
             and_conjuncts(left, out);
             and_conjuncts(right, out);
         }
@@ -1566,7 +1646,12 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                     } else {
                         Some(query.post_with_unwind_clauses.remove(0))
                     };
-                    query.extra_with_stages.push((prev_with, prev_unwind, post_matches, post_where));
+                    query.extra_with_stages.push((
+                        prev_with,
+                        prev_unwind,
+                        post_matches,
+                        post_where,
+                    ));
                 }
                 // Record where WITH splits pre-WITH from post-WITH match clauses
                 query.with_split_index = Some(query.match_clauses.len());
@@ -1594,7 +1679,10 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                         _ => {}
                     }
                 }
-                query.correlated_call = Some(CorrelatedCall { imports, body: Box::new(body) });
+                query.correlated_call = Some(CorrelatedCall {
+                    imports,
+                    body: Box::new(body),
+                });
             }
             Rule::create_clause => {
                 for create_inner in inner.into_inner() {
@@ -1718,7 +1806,9 @@ fn parse_with_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WithClaus
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::distinct => { distinct = true; }
+            Rule::distinct => {
+                distinct = true;
+            }
             Rule::return_items => {
                 items = parse_return_items(inner)?;
             }
@@ -1738,7 +1828,16 @@ fn parse_with_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WithClaus
         }
     }
 
-    Ok(WithClause { items, distinct, where_clause, order_by, skip, limit, deferred_skip, deferred_limit })
+    Ok(WithClause {
+        items,
+        distinct,
+        where_clause,
+        order_by,
+        skip,
+        limit,
+        deferred_skip,
+        deferred_limit,
+    })
 }
 
 fn parse_delete_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<DeleteClause> {
@@ -1752,7 +1851,10 @@ fn parse_delete_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<DeleteC
         }
     }
 
-    Ok(DeleteClause { expressions, detach })
+    Ok(DeleteClause {
+        expressions,
+        detach,
+    })
 }
 
 /// `SET n = {…}` / `SET n += {…}`, in a `SET` clause or in `ON CREATE`/`ON MATCH`.
@@ -1799,7 +1901,9 @@ fn parse_set_label_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetLab
         }
     }
     if labels.is_empty() {
-        return Err(ParseError::SemanticError("SET label item has no label".to_string()));
+        return Err(ParseError::SemanticError(
+            "SET label item has no label".to_string(),
+        ));
     }
     Ok(SetLabelItem { variable, labels })
 }
@@ -1843,7 +1947,9 @@ fn parse_set_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetClause>
             ops.push(SetOp::Property(SetItem {
                 variable,
                 property,
-                value: value.ok_or_else(|| ParseError::SemanticError("SET item missing value".to_string()))?,
+                value: value.ok_or_else(|| {
+                    ParseError::SemanticError("SET item missing value".to_string())
+                })?,
             }));
         }
     }
@@ -1906,8 +2012,10 @@ fn parse_unwind_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<UnwindC
     }
 
     Ok(UnwindClause {
-        expression: expression.ok_or_else(|| ParseError::SemanticError("UNWIND missing expression".to_string()))?,
-        variable: variable.ok_or_else(|| ParseError::SemanticError("UNWIND missing AS variable".to_string()))?,
+        expression: expression
+            .ok_or_else(|| ParseError::SemanticError("UNWIND missing expression".to_string()))?,
+        variable: variable
+            .ok_or_else(|| ParseError::SemanticError("UNWIND missing AS variable".to_string()))?,
     })
 }
 
@@ -2008,7 +2116,8 @@ fn parse_merge_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
     }
 
     query.merge_clause = Some(MergeClause {
-        pattern: pattern.ok_or_else(|| ParseError::SemanticError("MERGE missing pattern".to_string()))?,
+        pattern: pattern
+            .ok_or_else(|| ParseError::SemanticError("MERGE missing pattern".to_string()))?,
         on_create,
         on_match,
     });
@@ -2051,7 +2160,8 @@ fn parse_merge_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<MergeCla
     }
 
     Ok(MergeClause {
-        pattern: pattern.ok_or_else(|| ParseError::SemanticError("MERGE missing pattern".to_string()))?,
+        pattern: pattern
+            .ok_or_else(|| ParseError::SemanticError("MERGE missing pattern".to_string()))?,
         on_create,
         on_match,
     })
@@ -2081,7 +2191,8 @@ fn parse_set_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<SetItem> {
     Ok(SetItem {
         variable,
         property,
-        value: value.ok_or_else(|| ParseError::SemanticError("SET item missing value".to_string()))?,
+        value: value
+            .ok_or_else(|| ParseError::SemanticError("SET item missing value".to_string()))?,
     })
 }
 
@@ -2155,7 +2266,8 @@ fn parse_named_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPatter
         }
     }
 
-    let mut pp = path_pattern.ok_or_else(|| ParseError::SemanticError("Named path missing path pattern".to_string()))?;
+    let mut pp = path_pattern
+        .ok_or_else(|| ParseError::SemanticError("Named path missing path pattern".to_string()))?;
     pp.path_variable = path_variable;
     if let Some(r) = restrictor {
         pp.restrictor = r;
@@ -2187,7 +2299,11 @@ fn parse_path_restrictor(text: &str) -> PathRestrictor {
 /// Whitespace-normalised before matching, because `ALL   SHORTEST` is the same
 /// selector and the grammar allows any separator between the two words.
 fn parse_path_selector(text: &str) -> PathSelector {
-    let norm = text.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
+    let norm = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
     match norm.as_str() {
         "ANY" => PathSelector::Any,
         "ALL SHORTEST" => PathSelector::AllShortest,
@@ -2211,7 +2327,9 @@ fn parse_shortest_path_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<Pa
         }
     }
 
-    let mut path = pp.ok_or_else(|| ParseError::SemanticError("shortestPath() missing inner path".to_string()))?;
+    let mut path = pp.ok_or_else(|| {
+        ParseError::SemanticError("shortestPath() missing inner path".to_string())
+    })?;
     path.path_type = path_type;
     Ok(path)
 }
@@ -2233,7 +2351,9 @@ fn parse_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPattern> {
     }
 
     if nodes.is_empty() {
-        return Err(ParseError::SemanticError("Path must have at least one node".to_string()));
+        return Err(ParseError::SemanticError(
+            "Path must have at least one node".to_string(),
+        ));
     }
 
     let start = nodes.remove(0);
@@ -2243,7 +2363,15 @@ fn parse_path(pair: pest::iterators::Pair<Rule>) -> ParseResult<PathPattern> {
         segments.push(PathSegment { edge, node });
     }
 
-    Ok(PathPattern { path_variable: None, path_type: PathType::Normal, restrictor: Default::default(), restrictor_explicit: false, selector: Default::default(), start, segments })
+    Ok(PathPattern {
+        path_variable: None,
+        path_type: PathType::Normal,
+        restrictor: Default::default(),
+        restrictor_explicit: false,
+        selector: Default::default(),
+        start,
+        segments,
+    })
 }
 
 fn parse_node(pair: pest::iterators::Pair<Rule>) -> ParseResult<NodePattern> {
@@ -2375,7 +2503,11 @@ fn parse_length_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<Length
                 None
             };
 
-            return Ok(LengthPattern { min, max, bare_star: false });
+            return Ok(LengthPattern {
+                min,
+                max,
+                bare_star: false,
+            });
         } else if inner.as_rule() == Rule::integer {
             let exact = parse_length_bound(inner.as_str().trim(), "exact")?;
             return Ok(LengthPattern {
@@ -2402,7 +2534,10 @@ fn parse_length_pattern(pair: pest::iterators::Pair<Rule>) -> ParseResult<Length
 /// (`{n: p.n}`, `{id: row.id}`) is returned separately for CREATE/MERGE to evaluate per
 /// row. Returning `(literals, exprs)` rather than converting everything to expressions
 /// keeps all existing consumers of `properties` working unchanged.
-type SplitProperties = (HashMap<String, PropertyValue>, Option<HashMap<String, Expression>>);
+type SplitProperties = (
+    HashMap<String, PropertyValue>,
+    Option<HashMap<String, Expression>>,
+);
 
 fn parse_properties_split(pair: pest::iterators::Pair<Rule>) -> ParseResult<SplitProperties> {
     let mut literals = HashMap::new();
@@ -2434,7 +2569,9 @@ fn parse_properties_split(pair: pest::iterators::Pair<Rule>) -> ParseResult<Spli
 }
 
 #[allow(dead_code)]
-fn parse_properties(pair: pest::iterators::Pair<Rule>) -> ParseResult<HashMap<String, PropertyValue>> {
+fn parse_properties(
+    pair: pest::iterators::Pair<Rule>,
+) -> ParseResult<HashMap<String, PropertyValue>> {
     let mut props = HashMap::new();
 
     for inner in pair.into_inner() {
@@ -2474,7 +2611,9 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 return Ok(PropertyValue::Boolean(val));
             }
             Rule::integer => {
-                return Ok(PropertyValue::Integer(parse_integer_literal(inner.as_str())?));
+                return Ok(PropertyValue::Integer(parse_integer_literal(
+                    inner.as_str(),
+                )?));
             }
             Rule::float => {
                 let text = inner.as_str().trim();
@@ -2496,7 +2635,9 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                 return Ok(PropertyValue::Float(val));
             }
             Rule::string => {
-                return Ok(PropertyValue::String(unescape_string_literal(inner.as_str())?));
+                return Ok(PropertyValue::String(unescape_string_literal(
+                    inner.as_str(),
+                )?));
             }
             Rule::list => {
                 // `Vector` is the embedding type -- f32 throughout. Treating *any*
@@ -2532,7 +2673,7 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
                     if entry.as_rule() == Rule::map_entry {
                         let mut key = String::new();
                         let mut val = PropertyValue::Null;
-                        
+
                         for part in entry.into_inner() {
                             match part.as_rule() {
                                 Rule::property_key => key = unescape_name(part.as_str()),
@@ -2563,7 +2704,9 @@ fn parse_where_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WhereCla
             });
         }
     }
-    Err(ParseError::SemanticError("Invalid WHERE clause".to_string()))
+    Err(ParseError::SemanticError(
+        "Invalid WHERE clause".to_string(),
+    ))
 }
 
 fn parse_return_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnClause> {
@@ -2600,7 +2743,9 @@ fn parse_return_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnIte
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::star_item => {
-                expression = Some(Expression::Variable(crate::query::ast::STAR_ITEM.to_string()));
+                expression = Some(Expression::Variable(
+                    crate::query::ast::STAR_ITEM.to_string(),
+                ));
             }
             Rule::expression => {
                 source_text = Some(inner.as_str().trim().to_string());
@@ -2614,7 +2759,8 @@ fn parse_return_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<ReturnIte
     }
 
     Ok(ReturnItem {
-        expression: expression.ok_or_else(|| ParseError::SemanticError("Missing expression in RETURN".to_string()))?,
+        expression: expression
+            .ok_or_else(|| ParseError::SemanticError("Missing expression in RETURN".to_string()))?,
         alias,
         source_text,
     })
@@ -2646,15 +2792,17 @@ fn parse_order_item(pair: pest::iterators::Pair<Rule>) -> ParseResult<OrderByIte
                 expression = Some(parse_expression(inner)?);
             }
             Rule::order_direction => {
-                ascending = inner.as_str().eq_ignore_ascii_case("ASC") ||
-                           inner.as_str().eq_ignore_ascii_case("ASCENDING");
+                ascending = inner.as_str().eq_ignore_ascii_case("ASC")
+                    || inner.as_str().eq_ignore_ascii_case("ASCENDING");
             }
             _ => {}
         }
     }
 
     Ok(OrderByItem {
-        expression: expression.ok_or_else(|| ParseError::SemanticError("Missing expression in ORDER BY".to_string()))?,
+        expression: expression.ok_or_else(|| {
+            ParseError::SemanticError("Missing expression in ORDER BY".to_string())
+        })?,
         ascending,
     })
 }
@@ -2720,9 +2868,10 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression
     // avoid.
     //
     // Until then: an error the caller can see, never a silently empty result.
-    if ops.windows(2).any(|w| {
-        w[0].as_rule() == Rule::comparison_op && w[1].as_rule() == Rule::comparison_op
-    }) {
+    if ops
+        .windows(2)
+        .any(|w| w[0].as_rule() == Rule::comparison_op && w[1].as_rule() == Rule::comparison_op)
+    {
         return Err(ParseError::SemanticError(
             "a chained comparison (like `1 < x < 3`) is only supported when it is the \
              whole expression; here it is combined with other operators. Write it as \
@@ -2745,7 +2894,7 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression
         .map_infix(|left, op, right| {
             let left = left?;
             let right = right?;
-            
+
             let op = match op.as_rule() {
                 Rule::or_op => BinaryOp::Or,
                 Rule::xor_op => BinaryOp::Xor,
@@ -2755,7 +2904,12 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression
                 Rule::in_op => BinaryOp::In,
                 Rule::add_sub_op => parse_op_str(op.as_str())?,
                 Rule::mul_div_mod_op => parse_op_str(op.as_str())?,
-                _ => return Err(ParseError::SemanticError(format!("Unexpected operator: {:?}", op.as_rule()))),
+                _ => {
+                    return Err(ParseError::SemanticError(format!(
+                        "Unexpected operator: {:?}",
+                        op.as_rule()
+                    )))
+                }
             };
 
             Ok(Expression::Binary {
@@ -2785,7 +2939,12 @@ fn parse_op_str(op_str: &str) -> ParseResult<BinaryOp> {
         _ if op_str.eq_ignore_ascii_case("CONTAINS") => BinaryOp::Contains,
         _ if op_str.eq_ignore_ascii_case("IN") => BinaryOp::In,
         "=~" => BinaryOp::RegexMatch,
-        _ => return Err(ParseError::SemanticError(format!("Unknown operator: {}", op_str))),
+        _ => {
+            return Err(ParseError::SemanticError(format!(
+                "Unknown operator: {}",
+                op_str
+            )))
+        }
     })
 }
 
@@ -2822,8 +2981,7 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             {
                 if let Some(primary) = primary_pair.as_ref() {
                     let text = primary.as_str().trim();
-                    let numeric = !text.is_empty()
-                        && text.bytes().all(|b| b.is_ascii_digit())
+                    let numeric = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
                         || text.len() > 2
                             && text.starts_with('0')
                             && matches!(text.as_bytes()[1], b'x' | b'X' | b'o' | b'O');
@@ -2957,7 +3115,10 @@ fn parse_term(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             Ok(expr)
         }
         Rule::primary => parse_primary(pair),
-        _ => Err(ParseError::SemanticError(format!("Unexpected term: {:?}", pair.as_rule())))
+        _ => Err(ParseError::SemanticError(format!(
+            "Unexpected term: {:?}",
+            pair.as_rule()
+        ))),
     }
 }
 
@@ -2977,14 +3138,18 @@ fn parse_nested_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResul
             _ => {}
         }
     }
-    let variable = variable
-        .ok_or_else(|| ParseError::SemanticError("Missing variable in property path".to_string()))?;
+    let variable = variable.ok_or_else(|| {
+        ParseError::SemanticError("Missing variable in property path".to_string())
+    })?;
     let mut it = keys.into_iter();
-    let first = it
-        .next()
-        .ok_or_else(|| ParseError::SemanticError("Missing property in property path".to_string()))?;
+    let first = it.next().ok_or_else(|| {
+        ParseError::SemanticError("Missing property in property path".to_string())
+    })?;
 
-    let mut expr = Expression::Property { variable, property: first };
+    let mut expr = Expression::Property {
+        variable,
+        property: first,
+    };
     for key in it {
         expr = Expression::Index {
             expr: Box::new(expr),
@@ -3012,12 +3177,16 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 for part in inner.into_inner() {
                     match part.as_rule() {
                         Rule::pattern => pattern = Some(parse_pattern(part)?),
-                        Rule::where_clause => where_clause = Some(Box::new(parse_where_clause(part)?)),
+                        Rule::where_clause => {
+                            where_clause = Some(Box::new(parse_where_clause(part)?))
+                        }
                         _ => {}
                     }
                 }
                 return Ok(Expression::ExistsSubquery {
-                    pattern: pattern.ok_or_else(|| ParseError::SemanticError("COUNT missing pattern".to_string()))?,
+                    pattern: pattern.ok_or_else(|| {
+                        ParseError::SemanticError("COUNT missing pattern".to_string())
+                    })?,
                     where_clause,
                     bare_pattern: false,
                     count: true,
@@ -3029,7 +3198,9 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 // exactly `EXISTS { MATCH ... }` -- so it desugars to the same node and
                 // inherits its (already correct) evaluation, including under NOT.
                 return Ok(Expression::ExistsSubquery {
-                    pattern: Pattern { paths: vec![parse_path(inner)?] },
+                    pattern: Pattern {
+                        paths: vec![parse_path(inner)?],
+                    },
                     where_clause: None,
                     bare_pattern: true,
                     count: false,
@@ -3105,16 +3276,30 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 let var = parts
                     .next()
                     .map(|v| v.as_str().to_string())
-                    .ok_or_else(|| ParseError::SemanticError("map projection missing its variable".to_string()))?;
+                    .ok_or_else(|| {
+                        ParseError::SemanticError("map projection missing its variable".to_string())
+                    })?;
                 let mut entries: Vec<(String, Expression)> = Vec::new();
                 let mut all_properties = false;
                 for item in parts {
-                    let Some(part) = item.into_inner().next() else { continue };
+                    let Some(part) = item.into_inner().next() else {
+                        continue;
+                    };
                     match part.as_rule() {
                         Rule::map_projection_all => all_properties = true,
                         Rule::map_projection_property => {
-                            let key = part.into_inner().next().map(|k| unescape_name(k.as_str())).unwrap_or_default();
-                            entries.push((key.clone(), Expression::Property { variable: var.clone(), property: key }));
+                            let key = part
+                                .into_inner()
+                                .next()
+                                .map(|k| unescape_name(k.as_str()))
+                                .unwrap_or_default();
+                            entries.push((
+                                key.clone(),
+                                Expression::Property {
+                                    variable: var.clone(),
+                                    property: key,
+                                },
+                            ));
                         }
                         Rule::map_expr_entry => {
                             let mut key = String::new();
@@ -3154,7 +3339,10 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
                 return Ok(Expression::Case {
                     operand: None,
                     when_clauses: vec![(
-                        Expression::Unary { op: UnaryOp::IsNull, expr: Box::new(Expression::Variable(var)) },
+                        Expression::Unary {
+                            op: UnaryOp::IsNull,
+                            expr: Box::new(Expression::Variable(var)),
+                        },
                         Expression::Literal(PropertyValue::Null),
                     )],
                     else_result: Some(Box::new(body)),
@@ -3190,7 +3378,9 @@ fn parse_primary(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
             _ => {}
         }
     }
-    Err(ParseError::SemanticError("Invalid primary expression".to_string()))
+    Err(ParseError::SemanticError(
+        "Invalid primary expression".to_string(),
+    ))
 }
 
 fn parse_case_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
@@ -3261,7 +3451,8 @@ fn parse_exists_subquery(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
     }
 
     Ok(Expression::ExistsSubquery {
-        pattern: pattern.ok_or_else(|| ParseError::SemanticError("EXISTS missing pattern".to_string()))?,
+        pattern: pattern
+            .ok_or_else(|| ParseError::SemanticError("EXISTS missing pattern".to_string()))?,
         where_clause: where_clause.map(Box::new),
         // `EXISTS { ... }` may introduce variables; a bare pattern predicate
         // may not (#798).
@@ -3313,10 +3504,16 @@ fn parse_list_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult<Ex
     }
 
     Ok(Expression::ListComprehension {
-        variable: variable.ok_or_else(|| ParseError::SemanticError("List comprehension missing variable".to_string()))?,
-        list_expr: Box::new(list_expr.ok_or_else(|| ParseError::SemanticError("List comprehension missing list expression".to_string()))?),
+        variable: variable.ok_or_else(|| {
+            ParseError::SemanticError("List comprehension missing variable".to_string())
+        })?,
+        list_expr: Box::new(list_expr.ok_or_else(|| {
+            ParseError::SemanticError("List comprehension missing list expression".to_string())
+        })?),
         filter: filter.map(Box::new),
-        map_expr: Box::new(map_expr.ok_or_else(|| ParseError::SemanticError("List comprehension missing map expression".to_string()))?),
+        map_expr: Box::new(map_expr.ok_or_else(|| {
+            ParseError::SemanticError("List comprehension missing map expression".to_string())
+        })?),
     })
 }
 
@@ -3337,14 +3534,18 @@ fn parse_predicate_function(pair: pest::iterators::Pair<Rule>) -> ParseResult<Ex
 
     // expressions: [list_expr, predicate]
     if expressions.len() < 2 {
-        return Err(ParseError::SemanticError("Predicate function requires list and predicate".to_string()));
+        return Err(ParseError::SemanticError(
+            "Predicate function requires list and predicate".to_string(),
+        ));
     }
     let list_expr = expressions.remove(0);
     let predicate = expressions.remove(0);
 
     Ok(Expression::PredicateFunction {
         name,
-        variable: variable.ok_or_else(|| ParseError::SemanticError("Predicate function missing variable".to_string()))?,
+        variable: variable.ok_or_else(|| {
+            ParseError::SemanticError("Predicate function missing variable".to_string())
+        })?,
         list_expr: Box::new(list_expr),
         predicate: Box::new(predicate),
     })
@@ -3375,7 +3576,9 @@ fn parse_pattern_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult
     // The last expression is the projection
     projection = expressions.pop();
 
-    let mut path = pattern_path.ok_or_else(|| ParseError::SemanticError("Pattern comprehension missing pattern".to_string()))?;
+    let mut path = pattern_path.ok_or_else(|| {
+        ParseError::SemanticError("Pattern comprehension missing pattern".to_string())
+    })?;
     if path_variable.is_some() {
         path.path_variable = path_variable;
     }
@@ -3383,7 +3586,9 @@ fn parse_pattern_comprehension(pair: pest::iterators::Pair<Rule>) -> ParseResult
     Ok(Expression::PatternComprehension {
         pattern: Pattern { paths: vec![path] },
         filter: filter.map(Box::new),
-        projection: Box::new(projection.ok_or_else(|| ParseError::SemanticError("Pattern comprehension missing projection".to_string()))?),
+        projection: Box::new(projection.ok_or_else(|| {
+            ParseError::SemanticError("Pattern comprehension missing projection".to_string())
+        })?),
     })
 }
 
@@ -3403,7 +3608,9 @@ fn parse_reduce_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Exp
     // variables: [accumulator, iterator]
     // expressions: [init, list, body]
     if variables.len() < 2 || expressions.len() < 3 {
-        return Err(ParseError::SemanticError("reduce() requires (acc = init, x IN list | expr)".to_string()));
+        return Err(ParseError::SemanticError(
+            "reduce() requires (acc = init, x IN list | expr)".to_string(),
+        ));
     }
 
     Ok(Expression::Reduce {
@@ -3433,7 +3640,9 @@ fn parse_foreach_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<Foreac
             Rule::create_clause => {
                 for ci in inner.into_inner() {
                     if ci.as_rule() == Rule::pattern {
-                        body.push(ForeachBody::Create(CreateClause { pattern: parse_pattern(ci)? }));
+                        body.push(ForeachBody::Create(CreateClause {
+                            pattern: parse_pattern(ci)?,
+                        }));
                     }
                 }
             }
@@ -3453,8 +3662,10 @@ fn parse_foreach_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<Foreac
     }
 
     Ok(ForeachClause {
-        variable: variable.ok_or_else(|| ParseError::SemanticError("FOREACH missing variable".to_string()))?,
-        expression: expression.ok_or_else(|| ParseError::SemanticError("FOREACH missing expression".to_string()))?,
+        variable: variable
+            .ok_or_else(|| ParseError::SemanticError("FOREACH missing variable".to_string()))?,
+        expression: expression
+            .ok_or_else(|| ParseError::SemanticError("FOREACH missing expression".to_string()))?,
         body,
     })
 }
@@ -3463,7 +3674,9 @@ fn parse_property_access(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expre
     let parts: Vec<_> = pair.into_inner().collect();
 
     if parts.len() != 2 {
-        return Err(ParseError::SemanticError("Invalid property access".to_string()));
+        return Err(ParseError::SemanticError(
+            "Invalid property access".to_string(),
+        ));
     }
 
     // Both halves index **positionally**, so neither is found by a grep for
@@ -3513,16 +3726,38 @@ fn parse_function_call(pair: pest::iterators::Pair<Rule>) -> ParseResult<Express
     if name.eq_ignore_ascii_case("exists")
         && !distinct
         && args.len() == 1
-        && matches!(args[0], Expression::ExistsSubquery { bare_pattern: true, .. })
+        && matches!(
+            args[0],
+            Expression::ExistsSubquery {
+                bare_pattern: true,
+                ..
+            }
+        )
     {
-        if let Expression::ExistsSubquery { pattern, where_clause, count, body, .. } = args.remove(0) {
-            return Ok(Expression::ExistsSubquery { pattern, where_clause, bare_pattern: false, count, body });
+        if let Expression::ExistsSubquery {
+            pattern,
+            where_clause,
+            count,
+            body,
+            ..
+        } = args.remove(0)
+        {
+            return Ok(Expression::ExistsSubquery {
+                pattern,
+                where_clause,
+                bare_pattern: false,
+                count,
+                body,
+            });
         }
     }
 
-    Ok(Expression::Function { name, args, distinct })
+    Ok(Expression::Function {
+        name,
+        args,
+        distinct,
+    })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -3600,15 +3835,21 @@ mod tests {
     fn test_parse_is_null() {
         let query = "MATCH (n:Person) WHERE n.email IS NULL RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse IS NULL: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse IS NULL: {:?}",
+            result.err()
+        );
 
         let ast = result.unwrap();
         let predicate = &ast.where_clause.unwrap().predicate;
         match predicate {
             Expression::Unary { op, expr } => {
                 assert_eq!(*op, UnaryOp::IsNull);
-                assert!(matches!(expr.as_ref(), Expression::Property { variable, property }
-                    if variable == "n" && property == "email"));
+                assert!(
+                    matches!(expr.as_ref(), Expression::Property { variable, property }
+                    if variable == "n" && property == "email")
+                );
             }
             other => panic!("Expected Unary(IsNull), got {:?}", other),
         }
@@ -3618,15 +3859,21 @@ mod tests {
     fn test_parse_is_not_null() {
         let query = "MATCH (n:Person) WHERE n.name IS NOT NULL RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse IS NOT NULL: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse IS NOT NULL: {:?}",
+            result.err()
+        );
 
         let ast = result.unwrap();
         let predicate = &ast.where_clause.unwrap().predicate;
         match predicate {
             Expression::Unary { op, expr } => {
                 assert_eq!(*op, UnaryOp::IsNotNull);
-                assert!(matches!(expr.as_ref(), Expression::Property { variable, property }
-                    if variable == "n" && property == "name"));
+                assert!(
+                    matches!(expr.as_ref(), Expression::Property { variable, property }
+                    if variable == "n" && property == "name")
+                );
             }
             other => panic!("Expected Unary(IsNotNull), got {:?}", other),
         }
@@ -3643,8 +3890,10 @@ mod tests {
         match predicate {
             Expression::Unary { op, expr } => {
                 assert_eq!(*op, UnaryOp::Not);
-                assert!(matches!(expr.as_ref(), Expression::Property { variable, property }
-                    if variable == "n" && property == "active"));
+                assert!(
+                    matches!(expr.as_ref(), Expression::Property { variable, property }
+                    if variable == "n" && property == "active")
+                );
             }
             other => panic!("Expected Unary(Not), got {:?}", other),
         }
@@ -3654,7 +3903,11 @@ mod tests {
     fn test_parse_optional_match() {
         let query = "MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m:Person) RETURN n, m";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse OPTIONAL MATCH: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse OPTIONAL MATCH: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert_eq!(ast.match_clauses.len(), 2);
         assert!(!ast.match_clauses[0].optional);
@@ -3694,7 +3947,11 @@ mod tests {
     fn test_parse_detach_delete() {
         let query = "MATCH (n:Person) DETACH DELETE n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse DETACH DELETE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse DETACH DELETE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.delete_clause.as_ref().unwrap().detach);
     }
@@ -3726,14 +3983,24 @@ mod tests {
         assert!(result.is_ok(), "Failed to parse IN: {:?}", result.err());
         let ast = result.unwrap();
         let pred = &ast.where_clause.unwrap().predicate;
-        assert!(matches!(pred, Expression::Binary { op: BinaryOp::In, .. }));
+        assert!(matches!(
+            pred,
+            Expression::Binary {
+                op: BinaryOp::In,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn test_parse_arithmetic() {
         let query = "MATCH (n:Person) RETURN n.age + 1";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse arithmetic: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse arithmetic: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -3743,7 +4010,13 @@ mod tests {
         assert!(result.is_ok(), "Failed to parse regex: {:?}", result.err());
         let ast = result.unwrap();
         let pred = &ast.where_clause.unwrap().predicate;
-        assert!(matches!(pred, Expression::Binary { op: BinaryOp::RegexMatch, .. }));
+        assert!(matches!(
+            pred,
+            Expression::Binary {
+                op: BinaryOp::RegexMatch,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3757,14 +4030,22 @@ mod tests {
     fn test_parse_collect() {
         let query = "MATCH (n:Person) RETURN collect(n.name)";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse collect: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse collect: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_string_functions() {
         let query = r#"MATCH (n:Person) RETURN toUpper(n.name), toLower(n.name), trim(n.name)"#;
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse string functions: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse string functions: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -3793,7 +4074,11 @@ mod tests {
     fn test_parse_merge_simple() {
         let query = r#"MERGE (n:Person {name: "Alice"})"#;
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse simple MERGE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse simple MERGE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.merge_clause.is_some());
     }
@@ -3812,7 +4097,11 @@ mod tests {
     fn test_parse_union_all() {
         let query = "MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Person) RETURN m.name";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse UNION ALL: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse UNION ALL: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert_eq!(ast.union_queries.len(), 1);
         assert!(ast.union_queries[0].1); // is UNION ALL
@@ -3822,7 +4111,11 @@ mod tests {
     fn test_parse_list_index() {
         let query = "MATCH (n:Person) RETURN n.tags[0]";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse list index: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse list index: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let item = &ast.return_clause.unwrap().items[0];
         assert!(matches!(&item.expression, Expression::Index { .. }));
@@ -3833,40 +4126,71 @@ mod tests {
         // Test [1..3]
         let query = "MATCH (n:Person) RETURN n.tags[1..3]";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse list slice [1..3]: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse list slice [1..3]: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let item = &ast.return_clause.unwrap().items[0];
-        assert!(matches!(&item.expression, Expression::ListSlice { .. }),
-            "Expected ListSlice, got: {:?}", item.expression);
+        assert!(
+            matches!(&item.expression, Expression::ListSlice { .. }),
+            "Expected ListSlice, got: {:?}",
+            item.expression
+        );
 
         // Test [..2]
         let query2 = "MATCH (n:Person) RETURN n.tags[..2]";
         let result2 = parse_query(query2);
-        assert!(result2.is_ok(), "Failed to parse list slice [..2]: {:?}", result2.err());
+        assert!(
+            result2.is_ok(),
+            "Failed to parse list slice [..2]: {:?}",
+            result2.err()
+        );
 
         // Test [1..]
         let query3 = "MATCH (n:Person) RETURN n.tags[1..]";
         let result3 = parse_query(query3);
-        assert!(result3.is_ok(), "Failed to parse list slice [1..]: {:?}", result3.err());
+        assert!(
+            result3.is_ok(),
+            "Failed to parse list slice [1..]: {:?}",
+            result3.err()
+        );
     }
 
     #[test]
     fn test_parse_exists_subquery() {
         let query = "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->(:Person) } RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse EXISTS subquery: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse EXISTS subquery: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let where_clause = ast.where_clause.unwrap();
-        assert!(matches!(where_clause.predicate, Expression::ExistsSubquery { .. }));
+        assert!(matches!(
+            where_clause.predicate,
+            Expression::ExistsSubquery { .. }
+        ));
     }
 
     #[test]
     fn test_parse_exists_subquery_with_where() {
         let query = "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.age > 30 } RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse EXISTS with WHERE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse EXISTS with WHERE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
-        if let Expression::ExistsSubquery { pattern, where_clause, .. } = &ast.where_clause.unwrap().predicate {
+        if let Expression::ExistsSubquery {
+            pattern,
+            where_clause,
+            ..
+        } = &ast.where_clause.unwrap().predicate
+        {
             assert!(!pattern.paths.is_empty());
             assert!(where_clause.is_some());
         } else {
@@ -3878,10 +4202,17 @@ mod tests {
     fn test_parse_list_comprehension() {
         let query = "MATCH (n:Person) RETURN [x IN n.tags WHERE x <> 'admin' | x]";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse list comprehension: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse list comprehension: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let item = &ast.return_clause.unwrap().items[0];
-        if let Expression::ListComprehension { variable, filter, .. } = &item.expression {
+        if let Expression::ListComprehension {
+            variable, filter, ..
+        } = &item.expression
+        {
             assert_eq!(variable, "x");
             assert!(filter.is_some());
         } else {
@@ -3893,10 +4224,17 @@ mod tests {
     fn test_parse_list_comprehension_no_filter() {
         let query = "MATCH (n:Person) RETURN [x IN n.scores | x * 2]";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse list comprehension without filter: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse list comprehension without filter: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let item = &ast.return_clause.unwrap().items[0];
-        if let Expression::ListComprehension { variable, filter, .. } = &item.expression {
+        if let Expression::ListComprehension {
+            variable, filter, ..
+        } = &item.expression
+        {
             assert_eq!(variable, "x");
             // Note: without a WHERE, there should be no filter
             // But in practice, the parser might not distinguish - just check it parsed
@@ -3909,31 +4247,50 @@ mod tests {
     fn test_parse_foreach() {
         let query = "MATCH (n:Person) FOREACH (tag IN n.tags | SET n.processed = TRUE)";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse FOREACH: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse FOREACH: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.foreach_clause.is_some());
         let fc = ast.foreach_clause.unwrap();
         assert_eq!(fc.variable, "tag");
-        assert!(matches!(fc.body.as_slice(), [crate::query::ast::ForeachBody::Set(_)]));
+        assert!(matches!(
+            fc.body.as_slice(),
+            [crate::query::ast::ForeachBody::Set(_)]
+        ));
     }
 
     #[test]
     fn test_parse_foreach_with_create() {
-        let query = r#"MATCH (n:Person) FOREACH (x IN n.friends | CREATE (:Person {name: "friend"}))"#;
+        let query =
+            r#"MATCH (n:Person) FOREACH (x IN n.friends | CREATE (:Person {name: "friend"}))"#;
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse FOREACH with CREATE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse FOREACH with CREATE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.foreach_clause.is_some());
         let fc = ast.foreach_clause.unwrap();
         assert_eq!(fc.variable, "x");
-        assert!(matches!(fc.body.as_slice(), [crate::query::ast::ForeachBody::Create(_)]));
+        assert!(matches!(
+            fc.body.as_slice(),
+            [crate::query::ast::ForeachBody::Create(_)]
+        ));
     }
 
     #[test]
     fn test_parse_complex_where_with_exists_and_and() {
         let query = "MATCH (n:Person) WHERE n.age > 25 AND EXISTS { MATCH (n)-[:WORKS_AT]->(:Company) } RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse complex WHERE with EXISTS: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse complex WHERE with EXISTS: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let where_clause = ast.where_clause.unwrap();
         // Should be Binary(And, Property comparison, ExistsSubquery)
@@ -3941,7 +4298,10 @@ mod tests {
             assert_eq!(*op, BinaryOp::And);
             assert!(matches!(right.as_ref(), Expression::ExistsSubquery { .. }));
         } else {
-            panic!("Expected Binary(And, ..., ExistsSubquery), got {:?}", where_clause.predicate);
+            panic!(
+                "Expected Binary(And, ..., ExistsSubquery), got {:?}",
+                where_clause.predicate
+            );
         }
     }
 
@@ -3951,7 +4311,11 @@ mod tests {
     fn test_parse_profile() {
         let query = "PROFILE MATCH (n:Person) RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse PROFILE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse PROFILE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.profile);
     }
@@ -3960,14 +4324,21 @@ mod tests {
     fn test_parse_parameterized_query() {
         let query = "MATCH (n:Person) WHERE n.name = $name RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse parameterized query: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse parameterized query: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let where_clause = ast.where_clause.unwrap();
         // The predicate should contain a Parameter expression
         if let Expression::Binary { right, .. } = &where_clause.predicate {
             assert!(matches!(right.as_ref(), Expression::Parameter(_)));
         } else {
-            panic!("Expected Binary with Parameter, got {:?}", where_clause.predicate);
+            panic!(
+                "Expected Binary with Parameter, got {:?}",
+                where_clause.predicate
+            );
         }
     }
 
@@ -3975,7 +4346,11 @@ mod tests {
     fn test_parse_create_index() {
         let query = "CREATE INDEX ON :Person(name)";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CREATE INDEX: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CREATE INDEX: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let idx = ast.create_index_clause.unwrap();
         assert_eq!(idx.label, Label::new("Person"));
@@ -3986,7 +4361,11 @@ mod tests {
     fn test_parse_create_composite_index() {
         let query = "CREATE INDEX ON :Person(name, age)";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse composite index: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse composite index: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let idx = ast.create_index_clause.unwrap();
         assert_eq!(idx.label, Label::new("Person"));
@@ -3998,7 +4377,11 @@ mod tests {
     fn test_parse_drop_index() {
         let query = "DROP INDEX ON :Person(name)";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse DROP INDEX: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse DROP INDEX: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let di = ast.drop_index_clause.unwrap();
         assert_eq!(di.label, Label::new("Person"));
@@ -4009,7 +4392,11 @@ mod tests {
     fn test_parse_show_indexes() {
         let query = "SHOW INDEXES";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse SHOW INDEXES: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse SHOW INDEXES: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.show_indexes);
     }
@@ -4018,7 +4405,11 @@ mod tests {
     fn test_parse_show_constraints() {
         let query = "SHOW CONSTRAINTS";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse SHOW CONSTRAINTS: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse SHOW CONSTRAINTS: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.show_constraints);
     }
@@ -4027,7 +4418,11 @@ mod tests {
     fn test_parse_create_constraint() {
         let query = "CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CREATE CONSTRAINT: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CREATE CONSTRAINT: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let cc = ast.create_constraint_clause.unwrap();
         assert_eq!(cc.label, Label::new("Person"));
@@ -4039,7 +4434,11 @@ mod tests {
     fn test_parse_create_vector_index() {
         let query = "CREATE VECTOR INDEX myIdx FOR (n:Document) ON (n.embedding) OPTIONS {dimensions: 384, similarity: 'cosine'}";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CREATE VECTOR INDEX: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CREATE VECTOR INDEX: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let vi = ast.create_vector_index_clause.unwrap();
         assert_eq!(vi.label, Label::new("Document"));
@@ -4050,9 +4449,14 @@ mod tests {
 
     #[test]
     fn test_parse_call_algorithm() {
-        let query = "CALL algo.pageRank({maxIterations: 20, dampingFactor: 0.85}) YIELD node, score";
+        let query =
+            "CALL algo.pageRank({maxIterations: 20, dampingFactor: 0.85}) YIELD node, score";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CALL algo: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CALL algo: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let call = ast.call_clause.unwrap();
         assert!(call.procedure_name.starts_with("algo."));
@@ -4062,7 +4466,11 @@ mod tests {
     fn test_parse_named_path() {
         let query = "MATCH p = (a:Person)-[:KNOWS]->(b:Person) RETURN p";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse named path: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse named path: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         // Named path should be captured
         assert!(!ast.match_clauses.is_empty());
@@ -4072,21 +4480,33 @@ mod tests {
     fn test_parse_collect_distinct() {
         let query = "MATCH (n:Person) RETURN collect(DISTINCT n.name) AS names";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse collect(DISTINCT): {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse collect(DISTINCT): {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_datetime_constructor() {
         let query = "MATCH (n) RETURN datetime({year: 2024, month: 1, day: 15})";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse datetime({{}}): {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse datetime({{}}): {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_multiple_match_clauses() {
         let query = "MATCH (a:Person) MATCH (b:Company) RETURN a, b";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse multi-MATCH: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse multi-MATCH: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert_eq!(ast.match_clauses.len(), 2);
     }
@@ -4095,21 +4515,33 @@ mod tests {
     fn test_parse_variable_length_edge() {
         let query = "MATCH (a:Person)-[:KNOWS*1..3]->(b:Person) RETURN b";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse variable-length edge: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse variable-length edge: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_bidirectional_edge() {
         let query = "MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN b";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse bidirectional edge: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse bidirectional edge: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_return_distinct() {
         let query = "MATCH (n:Person) RETURN DISTINCT n.name";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse RETURN DISTINCT: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse RETURN DISTINCT: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
         assert!(ret.distinct);
@@ -4167,7 +4599,11 @@ mod tests {
     fn test_parse_order_by_desc() {
         let query = "MATCH (n:Person) RETURN n.name ORDER BY n.age DESC";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse ORDER BY DESC: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse ORDER BY DESC: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ob = ast.order_by.unwrap();
         assert!(!ob.items.is_empty());
@@ -4178,7 +4614,11 @@ mod tests {
     fn test_parse_skip_and_limit() {
         let query = "MATCH (n:Person) RETURN n SKIP 5 LIMIT 10";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse SKIP+LIMIT: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse SKIP+LIMIT: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert_eq!(ast.skip, Some(5));
         assert_eq!(ast.limit, Some(10));
@@ -4202,7 +4642,11 @@ mod tests {
     fn test_parse_merge_on_create_on_match() {
         let query = "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true ON MATCH SET n.visits = 1";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse MERGE ON CREATE/ON MATCH: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse MERGE ON CREATE/ON MATCH: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.merge_clause.is_some());
     }
@@ -4211,54 +4655,86 @@ mod tests {
     fn test_parse_map_literal_in_properties() {
         let query = "MATCH (n:Person {name: 'Alice', age: 30}) RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse map literal: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse map literal: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_boolean_values() {
         let query = "MATCH (n) WHERE n.active = true AND n.deleted = false RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse boolean values: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse boolean values: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_null_check() {
         let query = "MATCH (n) WHERE n.name IS NULL RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse IS NULL: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse IS NULL: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_or_expression() {
         let query = "MATCH (n) WHERE n.age > 30 OR n.name = 'Alice' RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse OR expression: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse OR expression: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_nested_function_calls() {
         let query = "MATCH (n) RETURN toUpper(trim(n.name))";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse nested functions: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse nested functions: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_count_function() {
         let query = "MATCH (n:Person) RETURN count(n)";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse count(n): {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse count(n): {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_count_star() {
         let query = "MATCH (n) RETURN count(*)";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse count(*): {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse count(*): {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let items = &ast.return_clause.unwrap().items;
         assert_eq!(items.len(), 1);
         match &items[0].expression {
-            Expression::Function { name, args, distinct } => {
+            Expression::Function {
+                name,
+                args,
+                distinct,
+            } => {
                 assert_eq!(name, "count");
                 assert!(args.is_empty(), "count(*) should have empty args");
                 assert!(!distinct);
@@ -4271,7 +4747,11 @@ mod tests {
     fn test_parse_count_star_with_alias() {
         let query = "MATCH (n:Person) RETURN count(*) AS total";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse count(*) AS total: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse count(*) AS total: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let items = &ast.return_clause.unwrap().items;
         assert_eq!(items[0].alias, Some("total".to_string()));
@@ -4281,7 +4761,11 @@ mod tests {
     fn test_parse_count_star_distinct() {
         let query = "MATCH (n) RETURN count(DISTINCT *)";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse count(DISTINCT *): {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse count(DISTINCT *): {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let items = &ast.return_clause.unwrap().items;
         match &items[0].expression {
@@ -4297,7 +4781,11 @@ mod tests {
     fn test_parse_return_alias() {
         let query = "MATCH (n:Person) RETURN n.name AS personName, count(n) AS total";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse RETURN alias: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse RETURN alias: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let items = &ast.return_clause.unwrap().items;
         assert_eq!(items.len(), 2);
@@ -4307,9 +4795,14 @@ mod tests {
 
     #[test]
     fn test_parse_with_aggregation() {
-        let query = "MATCH (n:Person) WITH n.city AS city, count(n) AS cnt RETURN city ORDER BY cnt DESC";
+        let query =
+            "MATCH (n:Person) WITH n.city AS city, count(n) AS cnt RETURN city ORDER BY cnt DESC";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse WITH aggregation: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse WITH aggregation: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -4344,7 +4837,11 @@ mod tests {
     fn test_parse_predicate_function_single() {
         let query = "MATCH (n) WHERE single(x IN n.scores WHERE x = 100) RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse single(): {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse single(): {:?}",
+            result.err()
+        );
     }
 
     // ========== Coverage batch: additional parser paths ==========
@@ -4353,7 +4850,11 @@ mod tests {
     fn test_parse_profile_with_where() {
         let query = "PROFILE MATCH (n:Person) WHERE n.age > 25 RETURN n.name";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse PROFILE with WHERE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse PROFILE with WHERE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.profile);
         assert!(!ast.explain); // PROFILE sets profile, not explain
@@ -4364,7 +4865,11 @@ mod tests {
     fn test_parse_explain_not_profile() {
         let query = "EXPLAIN MATCH (n) RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse EXPLAIN: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse EXPLAIN: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.explain);
         assert!(!ast.profile);
@@ -4374,26 +4879,43 @@ mod tests {
     fn test_parse_parameterized_multiple_params() {
         let query = "MATCH (n:Person) WHERE n.name = $name AND n.age > $minAge RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse multi-param query: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse multi-param query: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let where_clause = ast.where_clause.unwrap();
         // Should be Binary(And, Binary(Eq, ..., Parameter), Binary(Gt, ..., Parameter))
         if let Expression::Binary { op, left, right } = &where_clause.predicate {
             assert_eq!(*op, BinaryOp::And);
             // Check left side has parameter
-            if let Expression::Binary { right: inner_right, .. } = left.as_ref() {
-                assert!(matches!(inner_right.as_ref(), Expression::Parameter(name) if name == "name"));
+            if let Expression::Binary {
+                right: inner_right, ..
+            } = left.as_ref()
+            {
+                assert!(
+                    matches!(inner_right.as_ref(), Expression::Parameter(name) if name == "name")
+                );
             } else {
                 panic!("Expected Binary on left, got {:?}", left);
             }
             // Check right side has parameter
-            if let Expression::Binary { right: inner_right, .. } = right.as_ref() {
-                assert!(matches!(inner_right.as_ref(), Expression::Parameter(name) if name == "minAge"));
+            if let Expression::Binary {
+                right: inner_right, ..
+            } = right.as_ref()
+            {
+                assert!(
+                    matches!(inner_right.as_ref(), Expression::Parameter(name) if name == "minAge")
+                );
             } else {
                 panic!("Expected Binary on right, got {:?}", right);
             }
         } else {
-            panic!("Expected Binary(And, ...), got {:?}", where_clause.predicate);
+            panic!(
+                "Expected Binary(And, ...), got {:?}",
+                where_clause.predicate
+            );
         }
     }
 
@@ -4402,7 +4924,11 @@ mod tests {
         // Same pattern as test_parse_create_vector_index but with different values
         let query = "CREATE VECTOR INDEX vecIdx FOR (n:Label) ON (n.prop) OPTIONS {dimensions: 128, similarity: 'cosine'}";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CREATE VECTOR INDEX: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CREATE VECTOR INDEX: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let vi = ast.create_vector_index_clause.unwrap();
         assert_eq!(vi.label, Label::new("Label"));
@@ -4415,7 +4941,11 @@ mod tests {
     fn test_parse_create_vector_index_l2_similarity() {
         let query = "CREATE VECTOR INDEX vecIdx FOR (n:Embedding) ON (n.vec) OPTIONS {dimensions: 256, similarity: 'l2'}";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse l2 vector index: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse l2 vector index: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let vi = ast.create_vector_index_clause.unwrap();
         assert_eq!(vi.label, Label::new("Embedding"));
@@ -4429,7 +4959,11 @@ mod tests {
     fn test_parse_drop_index_different_label() {
         let query = "DROP INDEX ON :Company(revenue)";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse DROP INDEX: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse DROP INDEX: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let di = ast.drop_index_clause.unwrap();
         assert_eq!(di.label, Label::new("Company"));
@@ -4440,7 +4974,11 @@ mod tests {
     fn test_parse_create_constraint_unique_different() {
         let query = "CREATE CONSTRAINT ON (c:Company) ASSERT c.taxId IS UNIQUE";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CREATE CONSTRAINT: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CREATE CONSTRAINT: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let cc = ast.create_constraint_clause.unwrap();
         assert_eq!(cc.label, Label::new("Company"));
@@ -4452,7 +4990,11 @@ mod tests {
     fn test_parse_call_algo_pagerank_with_config() {
         let query = "CALL algo.pageRank({label: 'Person', maxIterations: 20, dampingFactor: 0.85}) YIELD node, score";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CALL algo.pageRank: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CALL algo.pageRank: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let call = ast.call_clause.unwrap();
         assert_eq!(call.procedure_name, "algo.pageRank");
@@ -4466,7 +5008,11 @@ mod tests {
     fn test_parse_call_algo_wcc() {
         let query = "CALL algo.wcc({label: 'Node'}) YIELD node, componentId";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CALL algo.wcc: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CALL algo.wcc: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let call = ast.call_clause.unwrap();
         assert_eq!(call.procedure_name, "algo.wcc");
@@ -4548,7 +5094,11 @@ mod tests {
     fn test_parse_named_path_with_return_p() {
         let query = "MATCH p = (a:Person)-[:KNOWS]->(b:Person) RETURN p";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse named path: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse named path: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(!ast.match_clauses.is_empty());
         let mc = &ast.match_clauses[0];
@@ -4565,11 +5115,20 @@ mod tests {
     fn test_parse_collect_distinct_full() {
         let query = "MATCH (n:Person) RETURN collect(DISTINCT n.name) AS names";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse collect(DISTINCT): {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse collect(DISTINCT): {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
         assert_eq!(ret.items.len(), 1);
-        if let Expression::Function { name, distinct, args } = &ret.items[0].expression {
+        if let Expression::Function {
+            name,
+            distinct,
+            args,
+        } = &ret.items[0].expression
+        {
             assert_eq!(name, "collect");
             assert!(*distinct);
             assert_eq!(args.len(), 1);
@@ -4584,7 +5143,11 @@ mod tests {
         // datetime with string argument
         let query = r#"MATCH (n) RETURN datetime("2024-01-15T10:30:00Z")"#;
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse datetime string: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse datetime string: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
         assert_eq!(ret.items.len(), 1);
@@ -4593,7 +5156,8 @@ mod tests {
     #[test]
     fn test_parse_foreach_with_variable_list() {
         // FOREACH with variable reference is supported; list literals in FOREACH are not
-        let query = r#"MATCH (n) WITH collect(n.name) AS names FOREACH (x IN names | SET n.tag = 'done')"#;
+        let query =
+            r#"MATCH (n) WITH collect(n.name) AS names FOREACH (x IN names | SET n.tag = 'done')"#;
         let result = parse_query(query);
         // Parser may or may not support this exact form; just verify no crash
         let _ = result;
@@ -4606,7 +5170,11 @@ mod tests {
         assert!(result.is_err(), "Expected parse error for malformed query");
         let err = result.err().unwrap();
         let err_str = format!("{}", err);
-        assert!(err_str.contains("Parse error"), "Error should be a PestError, got: {}", err_str);
+        assert!(
+            err_str.contains("Parse error"),
+            "Error should be a PestError, got: {}",
+            err_str
+        );
     }
 
     #[test]
@@ -4631,7 +5199,7 @@ mod tests {
         let ast = result.unwrap();
         assert_eq!(ast.union_queries.len(), 1);
         assert!(!ast.union_queries[0].1); // not UNION ALL
-        // Check main query has match clause with label A
+                                          // Check main query has match clause with label A
         assert!(!ast.match_clauses.is_empty());
         // Check union query has match clause with label B
         let union_q = &ast.union_queries[0].0;
@@ -4642,7 +5210,11 @@ mod tests {
     fn test_parse_union_all_same_labels() {
         let query = "MATCH (n:Person) WHERE n.age > 30 RETURN n.name UNION ALL MATCH (n:Person) WHERE n.age <= 30 RETURN n.name";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse UNION ALL with WHERE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse UNION ALL with WHERE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert_eq!(ast.union_queries.len(), 1);
         assert!(ast.union_queries[0].1); // is UNION ALL
@@ -4652,7 +5224,11 @@ mod tests {
     fn test_parse_optional_match_with_return() {
         let query = "MATCH (n:Person) OPTIONAL MATCH (n)-[:FRIEND]->(m:Person) RETURN n, m";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse OPTIONAL MATCH: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse OPTIONAL MATCH: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.match_clauses.len() >= 2);
         // First match is mandatory
@@ -4663,9 +5239,14 @@ mod tests {
 
     #[test]
     fn test_parse_optional_match_with_where() {
-        let query = "MATCH (n:Person) OPTIONAL MATCH (n)-[:REL]->(m) WHERE m.active = true RETURN n, m";
+        let query =
+            "MATCH (n:Person) OPTIONAL MATCH (n)-[:REL]->(m) WHERE m.active = true RETURN n, m";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse OPTIONAL MATCH with WHERE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse OPTIONAL MATCH with WHERE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(ast.match_clauses.len() >= 2);
         assert!(ast.match_clauses[1].optional);
@@ -4675,10 +5256,19 @@ mod tests {
     fn test_parse_exists_subquery_simple() {
         let query = "MATCH (n) WHERE EXISTS { MATCH (n)-[:KNOWS]->() } RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse EXISTS subquery: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse EXISTS subquery: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let wc = ast.where_clause.unwrap();
-        if let Expression::ExistsSubquery { pattern, where_clause, .. } = &wc.predicate {
+        if let Expression::ExistsSubquery {
+            pattern,
+            where_clause,
+            ..
+        } = &wc.predicate
+        {
             assert!(!pattern.paths.is_empty());
             assert!(where_clause.is_none());
         } else {
@@ -4690,7 +5280,11 @@ mod tests {
     fn test_parse_starts_with_operator() {
         let query = "MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse STARTS WITH: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse STARTS WITH: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let wc = ast.where_clause.unwrap();
         if let Expression::Binary { op, .. } = &wc.predicate {
@@ -4704,7 +5298,11 @@ mod tests {
     fn test_parse_ends_with_operator() {
         let query = "MATCH (n:Person) WHERE n.name ENDS WITH 'son' RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse ENDS WITH: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse ENDS WITH: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let wc = ast.where_clause.unwrap();
         if let Expression::Binary { op, .. } = &wc.predicate {
@@ -4718,7 +5316,11 @@ mod tests {
     fn test_parse_contains_operator() {
         let query = "MATCH (n:Person) WHERE n.name CONTAINS 'lic' RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CONTAINS: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CONTAINS: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let wc = ast.where_clause.unwrap();
         if let Expression::Binary { op, .. } = &wc.predicate {
@@ -4732,7 +5334,11 @@ mod tests {
     fn test_parse_in_list_operator() {
         let query = "MATCH (n:Person) WHERE n.age IN [25, 30, 35] RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse IN list: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse IN list: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let wc = ast.where_clause.unwrap();
         if let Expression::Binary { op, .. } = &wc.predicate {
@@ -4767,21 +5373,33 @@ mod tests {
     fn test_parse_arithmetic_operations() {
         let query = "MATCH (n) RETURN n.a + n.b * 2 - n.c / n.d % 3";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse arithmetic: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse arithmetic: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_unary_minus() {
         let query = "MATCH (n) WHERE n.balance < -100 RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse unary minus: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse unary minus: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_is_not_null_postfix() {
         let query = "MATCH (n) WHERE n.email IS NOT NULL RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse IS NOT NULL: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse IS NOT NULL: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let wc = ast.where_clause.unwrap();
         if let Expression::Unary { op, .. } = &wc.predicate {
@@ -4795,7 +5413,11 @@ mod tests {
     fn test_parse_match_create_in_same_query() {
         let query = "MATCH (a:Person {name: 'Alice'}) CREATE (a)-[:KNOWS]->(:Person {name: 'Bob'})";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse MATCH+CREATE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse MATCH+CREATE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(!ast.match_clauses.is_empty());
         assert!(ast.create_clause.is_some());
@@ -4805,7 +5427,11 @@ mod tests {
     fn test_parse_match_set_clause() {
         let query = "MATCH (n:Person {name: 'Alice'}) SET n.age = 31 RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse SET clause: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse SET clause: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(!ast.set_clauses.is_empty());
         let item = ast.set_clauses[0].items().next().unwrap();
@@ -4826,7 +5452,11 @@ mod tests {
     fn test_parse_detach_delete_with_property() {
         let query = "MATCH (n:Person {name: 'test'}) DETACH DELETE n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse DETACH DELETE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse DETACH DELETE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let dc = ast.delete_clause.unwrap();
         assert!(dc.detach);
@@ -4836,7 +5466,11 @@ mod tests {
     fn test_parse_multiple_set_items() {
         let query = "MATCH (n:Person) SET n.name = 'Bob', n.age = 25 RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse multiple SET items: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse multiple SET items: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(!ast.set_clauses.is_empty());
         assert!(ast.set_clauses[0].items().count() >= 2);
@@ -4844,9 +5478,14 @@ mod tests {
 
     #[test]
     fn test_parse_with_where_clause() {
-        let query = "MATCH (n:Person) WITH n.city AS city, count(n) AS cnt WHERE cnt > 5 RETURN city";
+        let query =
+            "MATCH (n:Person) WITH n.city AS city, count(n) AS cnt WHERE cnt > 5 RETURN city";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse WITH WHERE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse WITH WHERE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let wc = ast.with_clause.unwrap();
         assert!(wc.where_clause.is_some());
@@ -4856,7 +5495,11 @@ mod tests {
     fn test_parse_with_distinct() {
         let query = "MATCH (n:Person) WITH DISTINCT n.city AS city RETURN city";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse WITH DISTINCT: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse WITH DISTINCT: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let wc = ast.with_clause.unwrap();
         assert!(wc.distinct);
@@ -4866,21 +5509,33 @@ mod tests {
     fn test_parse_incoming_edge() {
         let query = "MATCH (a:Person)<-[:FOLLOWS]-(b:Person) RETURN b";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse incoming edge: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse incoming edge: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_edge_with_variable() {
         let query = "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN r";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse edge variable: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse edge variable: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_multiple_labels_on_node() {
         let query = "MATCH (n:Person:Employee) RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse multi-label node: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse multi-label node: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let paths = &ast.match_clauses[0].pattern.paths;
         assert!(paths[0].start.labels.len() >= 2);
@@ -4899,7 +5554,11 @@ mod tests {
     fn test_parse_long_chain_pattern() {
         let query = "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:WORKS_AT]->(c:Company) RETURN a, b, c";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse chain pattern: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse chain pattern: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let pp = &ast.match_clauses[0].pattern.paths[0];
         assert_eq!(pp.segments.len(), 2);
@@ -4909,11 +5568,18 @@ mod tests {
     fn test_parse_create_node_with_properties() {
         let query = r#"CREATE (n:Person {name: "Alice", age: 30, active: true})"#;
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CREATE with properties: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CREATE with properties: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let create = ast.create_clause.unwrap();
         let props = create.pattern.paths[0].start.properties.as_ref().unwrap();
-        assert_eq!(props.get("name"), Some(&PropertyValue::String("Alice".to_string())));
+        assert_eq!(
+            props.get("name"),
+            Some(&PropertyValue::String("Alice".to_string()))
+        );
         assert_eq!(props.get("age"), Some(&PropertyValue::Integer(30)));
         assert_eq!(props.get("active"), Some(&PropertyValue::Boolean(true)));
     }
@@ -4923,7 +5589,11 @@ mod tests {
         // Test returning multiple variables
         let query = "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, r, b";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse multi-return: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse multi-return: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
         assert_eq!(ret.items.len(), 3);
@@ -4933,7 +5603,11 @@ mod tests {
     fn test_parse_count_distinct() {
         let query = "MATCH (n:Person) RETURN count(DISTINCT n.city) AS uniqueCities";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse count(DISTINCT): {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse count(DISTINCT): {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
         if let Expression::Function { name, distinct, .. } = &ret.items[0].expression {
@@ -4948,7 +5622,11 @@ mod tests {
     fn test_parse_aggregation_functions() {
         let query = "MATCH (n:Person) RETURN sum(n.salary), avg(n.age), min(n.age), max(n.age)";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse aggregation functions: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse aggregation functions: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
         assert_eq!(ret.items.len(), 4);
@@ -4958,7 +5636,11 @@ mod tests {
     fn test_parse_string_functions_detailed() {
         let query = r#"MATCH (n) RETURN toLower(n.name), substring(n.name, 0, 3), replace(n.name, 'a', 'b')"#;
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse string functions: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse string functions: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
         assert_eq!(ret.items.len(), 3);
@@ -4968,7 +5650,11 @@ mod tests {
     fn test_parse_coalesce_function() {
         let query = "MATCH (n) RETURN coalesce(n.nickname, n.name, 'Unknown')";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse coalesce: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse coalesce: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
         if let Expression::Function { name, args, .. } = &ret.items[0].expression {
@@ -4983,21 +5669,33 @@ mod tests {
     fn test_parse_variable_length_unbounded() {
         let query = "MATCH (a:Person)-[:KNOWS*]->(b:Person) RETURN b";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse unbounded variable-length: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse unbounded variable-length: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_variable_length_exact() {
         let query = "MATCH (a:Person)-[:KNOWS*2]->(b:Person) RETURN b";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse exact variable-length: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse exact variable-length: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_order_by_asc_explicit() {
         let query = "MATCH (n:Person) RETURN n.name ORDER BY n.name ASC";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse ORDER BY ASC: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse ORDER BY ASC: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ob = ast.order_by.unwrap();
         assert!(ob.items[0].ascending);
@@ -5007,7 +5705,11 @@ mod tests {
     fn test_parse_order_by_multiple() {
         let query = "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age DESC, n.name ASC";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse multi ORDER BY: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse multi ORDER BY: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ob = ast.order_by.unwrap();
         assert_eq!(ob.items.len(), 2);
@@ -5019,7 +5721,11 @@ mod tests {
     fn test_parse_float_literal() {
         let query = "MATCH (n) WHERE n.weight > 3.14 RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse float literal: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse float literal: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -5055,14 +5761,22 @@ mod tests {
     fn test_parse_negative_integer() {
         let query = "MATCH (n) WHERE n.temperature < -10 RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse negative integer: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse negative integer: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_null_literal() {
         let query = "MATCH (n) WHERE n.value = null RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse null literal: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse null literal: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -5087,7 +5801,11 @@ mod tests {
     fn test_parse_empty_properties_node() {
         let query = "MATCH (n:Person {}) RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse empty properties: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse empty properties: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -5108,7 +5826,11 @@ mod tests {
     fn test_parse_merge_inline_after_match() {
         let query = "MATCH (a:Person {name: 'Alice'}) MERGE (a)-[:KNOWS]->(b:Person {name: 'Bob'})";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse MERGE after MATCH: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse MERGE after MATCH: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(!ast.match_clauses.is_empty());
         assert!(ast.merge_clause.is_some());
@@ -5119,17 +5841,30 @@ mod tests {
         // Standalone UNWIND with list literal not yet supported; test with variable
         let query = "MATCH (n) WITH collect(n.name) AS names UNWIND names AS x RETURN x";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse UNWIND with variable: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse UNWIND with variable: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_case_without_else() {
         let query = r#"MATCH (n) RETURN CASE WHEN n.age > 18 THEN "adult" END"#;
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CASE without ELSE: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CASE without ELSE: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
-        if let Expression::Case { else_result, when_clauses, .. } = &ret.items[0].expression {
+        if let Expression::Case {
+            else_result,
+            when_clauses,
+            ..
+        } = &ret.items[0].expression
+        {
             assert!(!when_clauses.is_empty());
             assert!(else_result.is_none());
         } else {
@@ -5141,7 +5876,11 @@ mod tests {
     fn test_parse_nested_boolean_logic() {
         let query = "MATCH (n) WHERE (n.a > 1 OR n.b < 2) AND (n.c = 3 OR n.d = 4) RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse nested boolean: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse nested boolean: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -5154,10 +5893,21 @@ mod tests {
             "MATCH (n) WHERE n.x <= 1 RETURN n",
             "MATCH (n) WHERE n.x >= 1 RETURN n",
         ];
-        let expected_ops = vec![BinaryOp::Eq, BinaryOp::Lt, BinaryOp::Gt, BinaryOp::Le, BinaryOp::Ge];
+        let expected_ops = vec![
+            BinaryOp::Eq,
+            BinaryOp::Lt,
+            BinaryOp::Gt,
+            BinaryOp::Le,
+            BinaryOp::Ge,
+        ];
         for (query, expected_op) in queries.iter().zip(expected_ops.iter()) {
             let result = parse_query(query);
-            assert!(result.is_ok(), "Failed to parse {}: {:?}", query, result.err());
+            assert!(
+                result.is_ok(),
+                "Failed to parse {}: {:?}",
+                query,
+                result.err()
+            );
             let wc = result.unwrap().where_clause.unwrap();
             if let Expression::Binary { op, .. } = &wc.predicate {
                 assert_eq!(op, expected_op, "Wrong op for query: {}", query);
@@ -5181,17 +5931,28 @@ mod tests {
     fn test_parse_pattern_comprehension() {
         let query = "MATCH (n:Person) RETURN [(n)-[:KNOWS]->(m) WHERE m.age > 20 | m.name]";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse pattern comprehension: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse pattern comprehension: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let ret = ast.return_clause.unwrap();
-        assert!(matches!(&ret.items[0].expression, Expression::PatternComprehension { .. }));
+        assert!(matches!(
+            &ret.items[0].expression,
+            Expression::PatternComprehension { .. }
+        ));
     }
 
     #[test]
     fn test_parse_with_order_by_skip_limit() {
         let query = "MATCH (n:Person) WITH n ORDER BY n.age SKIP 5 LIMIT 10 RETURN n.name";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse WITH ORDER BY SKIP LIMIT: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse WITH ORDER BY SKIP LIMIT: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let wc = ast.with_clause.unwrap();
         assert!(wc.order_by.is_some());
@@ -5203,7 +5964,11 @@ mod tests {
     fn test_parse_shortest_path() {
         let query = "MATCH p = shortestPath((a:Person)-[:KNOWS*1..10]->(b:Person)) RETURN p";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse shortestPath: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse shortestPath: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let pp = &ast.match_clauses[0].pattern.paths[0];
         assert_eq!(pp.path_type, PathType::Shortest);
@@ -5214,7 +5979,11 @@ mod tests {
     fn test_parse_all_shortest_paths() {
         let query = "MATCH p = allShortestPaths((a:Person)-[:KNOWS*1..10]->(b:Person)) RETURN p";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse allShortestPaths: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse allShortestPaths: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let pp = &ast.match_clauses[0].pattern.paths[0];
         assert_eq!(pp.path_type, PathType::AllShortest);
@@ -5224,14 +5993,22 @@ mod tests {
     fn test_parse_edge_with_properties() {
         let query = r#"MATCH (a)-[r:TRANSFER {amount: 1000}]->(b) RETURN r"#;
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse edge with properties: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse edge with properties: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_parse_remove_label() {
         let query = "MATCH (n:Person) REMOVE n:Employee RETURN n";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse REMOVE label: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse REMOVE label: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         assert!(!ast.remove_clauses.is_empty());
     }
@@ -5240,7 +6017,11 @@ mod tests {
     fn test_parse_vector_list_literal() {
         let query = "CREATE (n:Doc {embedding: [0.1, 0.2, 0.3, 0.4]})";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse vector list: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse vector list: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let create = ast.create_clause.unwrap();
         let props = create.pattern.paths[0].start.properties.as_ref().unwrap();
@@ -5257,14 +6038,22 @@ mod tests {
                 PropertyValue::Float(0.4),
             ])
         );
-        assert_eq!(embedding.to_vector().map(|v| v.len()), Some(4), "still indexable");
+        assert_eq!(
+            embedding.to_vector().map(|v| v.len()),
+            Some(4),
+            "still indexable"
+        );
     }
 
     #[test]
     fn test_parse_call_with_yield_alias() {
         let query = "CALL algo.bfs({startNode: 'n1'}) YIELD node AS vertex, depth AS level";
         let result = parse_query(query);
-        assert!(result.is_ok(), "Failed to parse CALL with YIELD alias: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse CALL with YIELD alias: {:?}",
+            result.err()
+        );
         let ast = result.unwrap();
         let call = ast.call_clause.unwrap();
         assert_eq!(call.yield_items.len(), 2);

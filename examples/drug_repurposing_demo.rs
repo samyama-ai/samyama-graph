@@ -24,8 +24,8 @@ static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
 use ndarray::Array1;
 use samyama::graph::GraphStore;
 use samyama::optimization::CypherProblem;
-use samyama::query::QueryEngine;
 use samyama::query::executor::record::Value;
+use samyama::query::QueryEngine;
 use samyama_optimization::algorithms::{
     BMWRSolver, EHRJayaSolver, JayaSolver, RaoSolver, RaoVariant, SAMPJayaSolver,
 };
@@ -71,18 +71,47 @@ fn parse_args() -> Args {
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
-            "--snapshot" => { a.snapshot = PathBuf::from(&argv[i + 1]); i += 2; }
-            "--candidates" => { a.candidates = argv[i + 1].parse().unwrap(); i += 2; }
-            "--targets" => { a.targets = argv[i + 1].parse().unwrap(); i += 2; }
-            "--k" => { a.k = argv[i + 1].parse().unwrap(); i += 2; }
-            "--seeds" => { a.seeds = argv[i + 1].parse().unwrap(); i += 2; }
-            "--out" => { a.out = PathBuf::from(&argv[i + 1]); i += 2; }
-            "--sider-weight" => { a.sider_weight = argv[i + 1].parse().unwrap(); i += 2; }
-            "--export-edges" => { a.export_edges = Some(PathBuf::from(&argv[i + 1])); i += 2; }
+            "--snapshot" => {
+                a.snapshot = PathBuf::from(&argv[i + 1]);
+                i += 2;
+            }
+            "--candidates" => {
+                a.candidates = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--targets" => {
+                a.targets = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--k" => {
+                a.k = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--seeds" => {
+                a.seeds = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--out" => {
+                a.out = PathBuf::from(&argv[i + 1]);
+                i += 2;
+            }
+            "--sider-weight" => {
+                a.sider_weight = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--export-edges" => {
+                a.export_edges = Some(PathBuf::from(&argv[i + 1]));
+                i += 2;
+            }
             // Consumed by `missing_data::skip`, which reads it straight from
             // `env::args`. Accepted here so the parser does not reject it (#566).
-            "--require-data" => { i += 1; }
-            other => { eprintln!("unknown arg: {}", other); std::process::exit(2); }
+            "--require-data" => {
+                i += 1;
+            }
+            other => {
+                eprintln!("unknown arg: {}", other);
+                std::process::exit(2);
+            }
         }
     }
     a
@@ -96,16 +125,25 @@ fn make_subs(
     sider_weight: f64,
     k: usize,
 ) -> Vec<(String, String)> {
-    let mut idxs: Vec<(usize, f64)> = x.iter().enumerate()
+    let mut idxs: Vec<(usize, f64)> = x
+        .iter()
+        .enumerate()
         .filter(|(_, &v)| v > 0.5)
-        .map(|(i, &v)| (i, v)).collect();
+        .map(|(i, &v)| (i, v))
+        .collect();
     idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let take = k.min(idxs.len());
     let selected: Vec<usize> = idxs.iter().take(take).map(|(i, _)| *i).collect();
-    let list = selected.iter()
+    let list = selected
+        .iter()
         .map(|i| format!("'{}'", candidates[*i].replace('\'', "\\'")))
-        .collect::<Vec<_>>().join(",");
-    let list = if list.is_empty() { "'__NONE__'".to_string() } else { list };
+        .collect::<Vec<_>>()
+        .join(",");
+    let list = if list.is_empty() {
+        "'__NONE__'".to_string()
+    } else {
+        list
+    };
     let sider_cost: f64 = selected.iter().map(|i| sider_counts[*i]).sum::<f64>() * sider_weight;
     vec![
         ("$selected".to_string(), list),
@@ -117,12 +155,14 @@ fn make_subs(
 fn query_strings(engine: &QueryEngine, store: &GraphStore, q: &str) -> Vec<String> {
     let batch = engine.execute(q, store).expect("query failed");
     let col = batch.columns.first().expect("no columns").clone();
-    batch.records.iter().filter_map(|r| {
-        match r.get(&col) {
+    batch
+        .records
+        .iter()
+        .filter_map(|r| match r.get(&col) {
             Some(Value::Property(samyama::graph::PropertyValue::String(s))) => Some(s.clone()),
             _ => None,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 fn main() {
@@ -138,8 +178,10 @@ fn main() {
     });
     let stats = samyama::snapshot::import_tenant(&mut store, f).expect("import");
     let load_ms = t0.elapsed().as_millis();
-    eprintln!("loaded {} nodes, {} edges in {} ms",
-        stats.node_count, stats.edge_count, load_ms);
+    eprintln!(
+        "loaded {} nodes, {} edges in {} ms",
+        stats.node_count, stats.edge_count, load_ms
+    );
 
     let engine = Arc::new(QueryEngine::new());
 
@@ -149,7 +191,9 @@ fn main() {
          WITH d, count(g) AS deg \
          ORDER BY deg DESC \
          LIMIT {} \
-         RETURN d.drugbank_id AS id", a.candidates);
+         RETURN d.drugbank_id AS id",
+        a.candidates
+    );
     let candidates = query_strings(&engine, &store, &cand_q);
     eprintln!("got {} candidate drugs", candidates.len());
     assert!(!candidates.is_empty(), "no candidates returned");
@@ -160,7 +204,9 @@ fn main() {
          WITH g, count(d) AS deg \
          ORDER BY deg DESC \
          LIMIT {} \
-         RETURN g.gene_name AS name", a.targets);
+         RETURN g.gene_name AS name",
+        a.targets
+    );
     let targets = query_strings(&engine, &store, &tgt_q);
     eprintln!("got {} target genes: {:?}", targets.len(), targets);
     assert!(!targets.is_empty(), "no targets returned");
@@ -175,16 +221,22 @@ fn main() {
                 RETURN d.drugbank_id AS id, count(s) AS n";
     let se_batch = engine.execute(se_q, &store).expect("side-effect query");
     for r in &se_batch.records {
-        if let (Some(Value::Property(samyama::graph::PropertyValue::String(id))),
-                Some(Value::Property(samyama::graph::PropertyValue::Integer(n)))) =
-            (r.get("id"), r.get("n"))
+        if let (
+            Some(Value::Property(samyama::graph::PropertyValue::String(id))),
+            Some(Value::Property(samyama::graph::PropertyValue::Integer(n))),
+        ) = (r.get("id"), r.get("n"))
         {
-            if let Some(&idx) = id_to_idx.get(id) { sider_counts[idx] = *n as f64; }
+            if let Some(&idx) = id_to_idx.get(id) {
+                sider_counts[idx] = *n as f64;
+            }
         }
     }
     let mean_se: f64 = sider_counts.iter().sum::<f64>() / sider_counts.len() as f64;
-    eprintln!("side-effect counts per candidate: mean={:.1}, max={:.0}",
-        mean_se, sider_counts.iter().cloned().fold(0.0f64, f64::max));
+    eprintln!(
+        "side-effect counts per candidate: mean={:.1}, max={:.0}",
+        mean_se,
+        sider_counts.iter().cloned().fold(0.0f64, f64::max)
+    );
 
     // 5. Optional edge-export for the OR-tools baseline.
     if let Some(path) = &a.export_edges {
@@ -192,10 +244,17 @@ fn main() {
             "MATCH (d:Drug)-[:INTERACTS_WITH_GENE]->(g:Gene) \
              WHERE d.drugbank_id IN [{}] AND g.gene_name IN [{}] \
              RETURN d.drugbank_id AS drug, g.gene_name AS gene",
-            candidates.iter().map(|c| format!("'{}'", c.replace('\'', "\\'")))
-                .collect::<Vec<_>>().join(","),
-            targets.iter().map(|t| format!("'{}'", t.replace('\'', "\\'")))
-                .collect::<Vec<_>>().join(","));
+            candidates
+                .iter()
+                .map(|c| format!("'{}'", c.replace('\'', "\\'")))
+                .collect::<Vec<_>>()
+                .join(","),
+            targets
+                .iter()
+                .map(|t| format!("'{}'", t.replace('\'', "\\'")))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         let edge_batch = engine.execute(&edge_q, &store).expect("edge export");
         use std::io::Write as _;
         let mut f = std::fs::File::create(path).unwrap();
@@ -206,28 +265,40 @@ fn main() {
             sider_counts.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(",")).unwrap();
         let mut first = true;
         for r in &edge_batch.records {
-            if let (Some(Value::Property(samyama::graph::PropertyValue::String(d))),
-                    Some(Value::Property(samyama::graph::PropertyValue::String(g)))) =
-                (r.get("drug"), r.get("gene")) {
-                if !first { writeln!(f, ",").unwrap(); }
+            if let (
+                Some(Value::Property(samyama::graph::PropertyValue::String(d))),
+                Some(Value::Property(samyama::graph::PropertyValue::String(g))),
+            ) = (r.get("drug"), r.get("gene"))
+            {
+                if !first {
+                    writeln!(f, ",").unwrap();
+                }
                 write!(f, r#"  {{"drug": "{}", "gene": "{}"}}"#, d, g).unwrap();
                 first = false;
             }
         }
         writeln!(f, "\n]}}").unwrap();
-        eprintln!("edges -> {} ({} drug-gene edges)", path.display(), edge_batch.records.len());
+        eprintln!(
+            "edges -> {} ({} drug-gene edges)",
+            path.display(),
+            edge_batch.records.len()
+        );
     }
 
     // 6. Build objective template. Targets are fixed; $selected and $sider_cost
     //    vary per candidate. $sider_cost is the Rust-computed penalty injected
     //    as a numeric literal so the Cypher query stays simple (no sum-over-CASE).
-    let targets_list = targets.iter()
+    let targets_list = targets
+        .iter()
         .map(|g| format!("'{}'", g.replace('\'', "\\'")))
-        .collect::<Vec<_>>().join(",");
+        .collect::<Vec<_>>()
+        .join(",");
     let objective = format!(
         "MATCH (d:Drug)-[:INTERACTS_WITH_GENE]->(g:Gene) \
          WHERE d.drugbank_id IN [$selected] AND g.gene_name IN [{}] \
-         RETURN (-toFloat(count(DISTINCT g)) + $sider_cost) AS f", targets_list);
+         RETURN (-toFloat(count(DISTINCT g)) + $sider_cost) AS f",
+        targets_list
+    );
 
     let graph = Arc::new(RwLock::new(store));
     let candidates_for_sub = candidates.clone();
@@ -245,7 +316,8 @@ fn main() {
         objective,
         graph.clone(),
         engine.clone(),
-    ).with_subs({
+    )
+    .with_subs({
         let candidates_for_sub = candidates_for_sub.clone();
         let sider_counts = sider_counts.clone();
         let sider_weight = a.sider_weight;
@@ -254,35 +326,49 @@ fn main() {
     });
 
     // 6. Run a small panel of Rao-family solvers.
-    let solvers: Vec<(&str, fn(SolverConfig, &CypherProblem) -> samyama_optimization::common::OptimizationResult)> = vec![
-        ("BMWR",      |c, p| BMWRSolver::new(c).solve(p)),
-        ("Jaya",      |c, p| JayaSolver::new(c).solve(p)),
+    let solvers: Vec<(
+        &str,
+        fn(SolverConfig, &CypherProblem) -> samyama_optimization::common::OptimizationResult,
+    )> = vec![
+        ("BMWR", |c, p| BMWRSolver::new(c).solve(p)),
+        ("Jaya", |c, p| JayaSolver::new(c).solve(p)),
         ("SAMP-Jaya", |c, p| SAMPJayaSolver::new(c).solve(p)),
-        ("EHR-Jaya",  |c, p| EHRJayaSolver::new(c).solve(p)),
-        ("Rao-1",     |c, p| RaoSolver::new(c, RaoVariant::Rao1).solve(p)),
+        ("EHR-Jaya", |c, p| EHRJayaSolver::new(c).solve(p)),
+        ("Rao-1", |c, p| RaoSolver::new(c, RaoVariant::Rao1).solve(p)),
     ];
 
-    let cfg = SolverConfig { population_size: 30, max_iterations: 100 };
+    let cfg = SolverConfig {
+        population_size: 30,
+        max_iterations: 100,
+    };
     let csv_path = a.out.join("results.csv");
     use std::io::Write;
     let mut csv = std::fs::File::create(&csv_path).unwrap();
     writeln!(csv, "solver,seed,best_fitness,coverage_only,sider_cost,wall_ms,cache_hits,cache_misses,avg_eval_ms").unwrap();
 
-    println!("\n=== Drug repurposing (k <= {}; candidates={}, targets={}, sider_weight={}) ===",
-        a.k, a.candidates, a.targets, a.sider_weight);
+    println!(
+        "\n=== Drug repurposing (k <= {}; candidates={}, targets={}, sider_weight={}) ===",
+        a.k, a.candidates, a.targets, a.sider_weight
+    );
     println!("targets: {:?}", targets);
     println!("");
-    println!("{:<12} {:>5} {:>10} {:>10} {:>10} {:>10} {:>10} {:>12}",
-        "solver", "seed", "fitness", "coverage", "sider", "wall_ms", "misses", "avg_eval_ms");
+    println!(
+        "{:<12} {:>5} {:>10} {:>10} {:>10} {:>10} {:>10} {:>12}",
+        "solver", "seed", "fitness", "coverage", "sider", "wall_ms", "misses", "avg_eval_ms"
+    );
 
     for (name, run) in &solvers {
         for seed in 0..a.seeds {
             // Fresh problem per run so cache stats are per-run.
             let prob = CypherProblem::new(
-                dim, Array1::zeros(dim), Array1::ones(dim),
+                dim,
+                Array1::zeros(dim),
+                Array1::ones(dim),
                 problem.objective_template.clone(),
-                graph.clone(), engine.clone(),
-            ).with_subs({
+                graph.clone(),
+                engine.clone(),
+            )
+            .with_subs({
                 let cands = candidates.clone();
                 let se = sider_counts.clone();
                 let w = a.sider_weight;
@@ -294,15 +380,38 @@ fn main() {
             let wall = t0.elapsed().as_millis();
             let stats = prob.stats();
             // Recover coverage and SIDER components from the best variables.
-            let subs = make_subs(&r.best_variables, &candidates, &sider_counts, a.sider_weight, a.k);
-            let sider_cost: f64 = subs.iter().find(|(p, _)| p == "$sider_cost")
-                .map(|(_, v)| v.parse().unwrap_or(0.0)).unwrap_or(0.0);
+            let subs = make_subs(
+                &r.best_variables,
+                &candidates,
+                &sider_counts,
+                a.sider_weight,
+                a.k,
+            );
+            let sider_cost: f64 = subs
+                .iter()
+                .find(|(p, _)| p == "$sider_cost")
+                .map(|(_, v)| v.parse().unwrap_or(0.0))
+                .unwrap_or(0.0);
             let coverage = -(r.best_fitness - sider_cost);
             let avg_eval = stats.total_eval_ms as f64 / stats.misses.max(1) as f64;
-            println!("{:<12} {:>5} {:>10.2} {:>10.0} {:>10.2} {:>10} {:>10} {:>12.2}",
-                name, seed, r.best_fitness, coverage, sider_cost, wall, stats.misses, avg_eval);
-            writeln!(csv, "{},{},{:.4},{},{:.4},{},{},{},{:.3}",
-                name, seed, r.best_fitness, coverage, sider_cost, wall, stats.hits, stats.misses, avg_eval).unwrap();
+            println!(
+                "{:<12} {:>5} {:>10.2} {:>10.0} {:>10.2} {:>10} {:>10} {:>12.2}",
+                name, seed, r.best_fitness, coverage, sider_cost, wall, stats.misses, avg_eval
+            );
+            writeln!(
+                csv,
+                "{},{},{:.4},{},{:.4},{},{},{},{:.3}",
+                name,
+                seed,
+                r.best_fitness,
+                coverage,
+                sider_cost,
+                wall,
+                stats.hits,
+                stats.misses,
+                avg_eval
+            )
+            .unwrap();
         }
     }
     eprintln!("\nresults -> {}", csv_path.display());
@@ -315,9 +424,19 @@ fn main() {
   "target_genes": [{}]
 }}
 "#,
-        a.snapshot.display(), a.candidates, a.targets, a.k, a.seeds,
-        stats.node_count, stats.edge_count, load_ms,
-        targets.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(",")
+        a.snapshot.display(),
+        a.candidates,
+        a.targets,
+        a.k,
+        a.seeds,
+        stats.node_count,
+        stats.edge_count,
+        load_ms,
+        targets
+            .iter()
+            .map(|t| format!("\"{}\"", t))
+            .collect::<Vec<_>>()
+            .join(",")
     );
     std::fs::write(a.out.join("manifest.json"), manifest).unwrap();
 }

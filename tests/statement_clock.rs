@@ -33,7 +33,13 @@ fn eval(cypher: &str) -> PropertyValue {
 /// Two calls to the same constructor in one statement give the same instant.
 #[test]
 fn two_calls_in_one_statement_agree() {
-    for f in ["localtime()", "time()", "datetime()", "localdatetime()", "date()"] {
+    for f in [
+        "localtime()",
+        "time()",
+        "datetime()",
+        "localdatetime()",
+        "date()",
+    ] {
         assert_eq!(
             eval(&format!("RETURN duration.inSeconds({f}, {f}) AS r")).to_cypher_string(),
             "PT0S",
@@ -46,11 +52,20 @@ fn two_calls_in_one_statement_agree() {
 /// meet it.
 #[test]
 fn the_clock_is_stable_across_an_expression() {
-    assert_eq!(eval("RETURN datetime() = datetime() AS r"), PropertyValue::Boolean(true));
-    assert_eq!(eval("RETURN date() = date() AS r"), PropertyValue::Boolean(true));
+    assert_eq!(
+        eval("RETURN datetime() = datetime() AS r"),
+        PropertyValue::Boolean(true)
+    );
+    assert_eq!(
+        eval("RETURN date() = date() AS r"),
+        PropertyValue::Boolean(true)
+    );
     // Different constructors read the same underlying instant, so the date
     // part of `datetime()` is `date()`.
-    assert_eq!(eval("RETURN date(datetime()) = date() AS r"), PropertyValue::Boolean(true));
+    assert_eq!(
+        eval("RETURN date(datetime()) = date() AS r"),
+        PropertyValue::Boolean(true)
+    );
 }
 
 /// **The clock is fixed per statement, not frozen.**
@@ -78,5 +93,8 @@ fn a_failed_statement_does_not_leak_its_clock() {
     let after = eval("RETURN datetime() AS r");
     std::thread::sleep(std::time::Duration::from_millis(30));
     let later = eval("RETURN datetime() AS r");
-    assert_ne!(after, later, "the clock must still advance after a failed statement");
+    assert_ne!(
+        after, later,
+        "the clock must still advance after a failed statement"
+    );
 }

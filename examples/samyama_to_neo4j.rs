@@ -15,17 +15,17 @@ use std::path::PathBuf;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: {} <snapshot.sgsnap> <output_dir> [id_offset]", args[0]);
+        eprintln!(
+            "usage: {} <snapshot.sgsnap> <output_dir> [id_offset]",
+            args[0]
+        );
         eprintln!("  id_offset (u64): added to every NodeId — use to merge multiple snapshots");
         eprintln!("                   into one Neo4j graph without ID collisions (default 0)");
         std::process::exit(1);
     }
     let snap_path = &args[1];
     let out_dir = PathBuf::from(&args[2]);
-    let id_offset: u64 = args
-        .get(3)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let id_offset: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
     std::fs::create_dir_all(&out_dir)?;
     eprintln!("[convert] id_offset = {}", id_offset);
 
@@ -86,8 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_default();
                 write!(w, ",{}", csv_escape(&cell))?;
             }
-            let labels: Vec<String> =
-                node.labels.iter().map(|l| l.as_str().to_string()).collect();
+            let labels: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
             writeln!(w, ",{}", labels.join(";"))?;
         }
         eprintln!("[convert] wrote {} ({} rows)", path.display(), ids.len());
@@ -111,7 +110,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut w = BufWriter::new(File::create(&path)?);
         writeln!(w, ":START_ID,:END_ID,:TYPE")?;
         for (src, tgt) in edges {
-            writeln!(w, "{},{},{}", src.as_u64() + id_offset, tgt.as_u64() + id_offset, etype)?;
+            writeln!(
+                w,
+                "{},{},{}",
+                src.as_u64() + id_offset,
+                tgt.as_u64() + id_offset,
+                etype
+            )?;
         }
         eprintln!("[convert] wrote {} ({} rows)", path.display(), edges.len());
     }
@@ -132,11 +137,7 @@ fn format_value(v: &PropertyValue) -> String {
         PropertyValue::Boolean(b) => b.to_string(),
         PropertyValue::DateTime(ts) => ts.to_string(), // Unix ms timestamp
         PropertyValue::Null => String::new(),
-        PropertyValue::Array(a) => a
-            .iter()
-            .map(format_value)
-            .collect::<Vec<_>>()
-            .join(";"),
+        PropertyValue::Array(a) => a.iter().map(format_value).collect::<Vec<_>>().join(";"),
         _ => String::new(), // skip Map / nested types
     }
 }

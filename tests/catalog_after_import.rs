@@ -29,7 +29,11 @@ fn built_store() -> GraphStore {
     let mut store = GraphStore::new();
     for i in 0..NODES {
         engine
-            .execute_mut(&format!("CREATE (:Person {{id: {i}}})"), &mut store, "default")
+            .execute_mut(
+                &format!("CREATE (:Person {{id: {i}}})"),
+                &mut store,
+                "default",
+            )
             .unwrap();
     }
     for i in 0..NODES {
@@ -71,7 +75,11 @@ fn triple_statistics_survive_a_snapshot_import() {
 
     let imported = round_trip(&store);
     assert_eq!(imported.node_count(), NODES, "nodes did not survive");
-    assert_eq!(imported.edge_count(), NODES * OUT_DEGREE, "edges did not survive");
+    assert_eq!(
+        imported.edge_count(),
+        NODES * OUT_DEGREE,
+        "edges did not survive"
+    );
 
     let after = imported.catalog().estimate_expand_out(&person, &knows);
     assert!(
@@ -106,6 +114,11 @@ fn label_counts_survive_too() {
     // why the missing triple stats were easy to miss. Pinned so a future
     // change to the node stub cannot quietly break them either.
     let imported = round_trip(&built_store());
-    let n = imported.catalog().estimate_label_scan(&Label::new("Person"));
-    assert!((n - NODES as f64).abs() < 0.5, "label count after import: {n}");
+    let n = imported
+        .catalog()
+        .estimate_label_scan(&Label::new("Person"));
+    assert!(
+        (n - NODES as f64).abs() < 0.5,
+        "label count after import: {n}"
+    );
 }

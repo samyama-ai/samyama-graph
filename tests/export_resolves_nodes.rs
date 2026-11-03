@@ -30,14 +30,24 @@ fn first_node_props(v: &Value) -> Option<&std::collections::HashMap<String, Prop
 fn a_node_inside_a_list_carries_its_properties_after_resolve() {
     let store = restored(r#"CREATE (:P {name: "x", age: 3})"#);
     let engine = QueryEngine::new();
-    let mut batch = engine.execute("MATCH (n:P) RETURN [n] AS xs", &store).unwrap();
+    let mut batch = engine
+        .execute("MATCH (n:P) RETURN [n] AS xs", &store)
+        .unwrap();
 
     samyama::export::resolve_nodes(&mut batch, &store);
 
-    let props = first_node_props(batch.records[0].get("xs").expect("xs"))
-        .expect("a node inside the list");
-    assert_eq!(props.get("name"), Some(&PropertyValue::String("x".into())), "{props:?}");
-    assert_eq!(props.get("age"), Some(&PropertyValue::Integer(3)), "{props:?}");
+    let props =
+        first_node_props(batch.records[0].get("xs").expect("xs")).expect("a node inside the list");
+    assert_eq!(
+        props.get("name"),
+        Some(&PropertyValue::String("x".into())),
+        "{props:?}"
+    );
+    assert_eq!(
+        props.get("age"),
+        Some(&PropertyValue::Integer(3)),
+        "{props:?}"
+    );
 }
 
 /// Values that are not nodes pass through unchanged, so resolving cannot alter
@@ -46,7 +56,9 @@ fn a_node_inside_a_list_carries_its_properties_after_resolve() {
 fn resolve_leaves_non_node_values_alone() {
     let store = restored(r#"CREATE (:P {name: "x"})"#);
     let engine = QueryEngine::new();
-    let mut batch = engine.execute("MATCH (n:P) RETURN n.name AS s, 7 AS k", &store).unwrap();
+    let mut batch = engine
+        .execute("MATCH (n:P) RETURN n.name AS s, 7 AS k", &store)
+        .unwrap();
     let before = format!("{:?}", batch.records[0].bindings());
     samyama::export::resolve_nodes(&mut batch, &store);
     assert_eq!(format!("{:?}", batch.records[0].bindings()), before);

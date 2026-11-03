@@ -1,4 +1,6 @@
-use crate::common::{MultiObjectiveIndividual, MultiObjectiveProblem, MultiObjectiveResult, SolverConfig};
+use crate::common::{
+    MultiObjectiveIndividual, MultiObjectiveProblem, MultiObjectiveResult, SolverConfig,
+};
 use ndarray::Array1;
 use rand::prelude::*;
 
@@ -12,7 +14,7 @@ pub struct NSGA2Solver {
 impl NSGA2Solver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
-            seed: None, 
+            seed: None,
             config,
             mutation_rate: 0.1,
         }
@@ -57,11 +59,12 @@ impl NSGA2Solver {
             while offspring.len() < pop_size {
                 let p1 = self.tournament_select(&population, &mut rng);
                 let p2 = self.tournament_select(&population, &mut rng);
-                
-                let (mut c1_vars, mut c2_vars) = self.crossover(&p1.variables, &p2.variables, &mut rng);
+
+                let (mut c1_vars, mut c2_vars) =
+                    self.crossover(&p1.variables, &p2.variables, &mut rng);
                 self.mutate(&mut c1_vars, &lower, &upper, &mut rng);
                 self.mutate(&mut c2_vars, &lower, &upper, &mut rng);
-                
+
                 let f1 = crate::common::evaluate_objectives(problem, &c1_vars);
                 let v1 = problem.penalties(&c1_vars).iter().sum();
                 offspring.push(MultiObjectiveIndividual::new(c1_vars.clone(), f1, v1));
@@ -89,10 +92,10 @@ impl NSGA2Solver {
                     crate::common::descending_nan_last(a.crowding_distance, b.crowding_distance)
                 }
             });
-            
+
             combined.truncate(pop_size);
             population = combined;
-            
+
             history.push(population[0].fitness[0]); // Track first objective of best-ranked
         }
 
@@ -105,17 +108,21 @@ impl NSGA2Solver {
     fn evaluate_population(&self, population: &mut [MultiObjectiveIndividual]) {
         // Fast Non-dominated Sort
         self.non_dominated_sort(population);
-        
+
         // Crowding Distance per rank
         let mut rank = 0;
         loop {
-            let current_rank_indices: Vec<usize> = population.iter().enumerate()
+            let current_rank_indices: Vec<usize> = population
+                .iter()
+                .enumerate()
                 .filter(|(_, ind)| ind.rank == rank)
                 .map(|(i, _)| i)
                 .collect();
-            
-            if current_rank_indices.is_empty() { break; }
-            
+
+            if current_rank_indices.is_empty() {
+                break;
+            }
+
             self.calculate_crowding_distance(population, &current_rank_indices);
             rank += 1;
         }
@@ -129,15 +136,21 @@ impl NSGA2Solver {
 
         for i in 0..n {
             for j in 0..n {
-                if i == j { continue; }
+                if i == j {
+                    continue;
+                }
                 if self.dominates(
-                    &population[i].fitness, population[i].constraint_violation,
-                    &population[j].fitness, population[j].constraint_violation
+                    &population[i].fitness,
+                    population[i].constraint_violation,
+                    &population[j].fitness,
+                    population[j].constraint_violation,
                 ) {
                     dominated_sets[i].push(j);
                 } else if self.dominates(
-                    &population[j].fitness, population[j].constraint_violation,
-                    &population[i].fitness, population[i].constraint_violation
+                    &population[j].fitness,
+                    population[j].constraint_violation,
+                    &population[i].fitness,
+                    population[i].constraint_violation,
                 ) {
                     dominance_counts[i] += 1;
                 }
@@ -183,13 +196,21 @@ impl NSGA2Solver {
         // 3. Both Feasible: Pareto dominance
         let mut better = false;
         for i in 0..f1.len() {
-            if f1[i] > f2[i] { return false; }
-            if f1[i] < f2[i] { better = true; }
+            if f1[i] > f2[i] {
+                return false;
+            }
+            if f1[i] < f2[i] {
+                better = true;
+            }
         }
         better
     }
 
-    fn calculate_crowding_distance(&self, population: &mut [MultiObjectiveIndividual], indices: &[usize]) {
+    fn calculate_crowding_distance(
+        &self,
+        population: &mut [MultiObjectiveIndividual],
+        indices: &[usize],
+    ) {
         let num_objectives = population[0].fitness.len();
         for &idx in indices {
             population[idx].crowding_distance = 0.0;
@@ -197,8 +218,13 @@ impl NSGA2Solver {
 
         for m in 0..num_objectives {
             let mut sorted_indices = indices.to_vec();
-            sorted_indices.sort_by(|&a, &b| crate::common::ascending_nan_last(population[a].fitness[m], population[b].fitness[m]));
-            
+            sorted_indices.sort_by(|&a, &b| {
+                crate::common::ascending_nan_last(
+                    population[a].fitness[m],
+                    population[b].fitness[m],
+                )
+            });
+
             let min_val = population[*sorted_indices.first().unwrap()].fitness[m];
             let max_val = population[*sorted_indices.last().unwrap()].fitness[m];
             let range = max_val - min_val;
@@ -208,8 +234,8 @@ impl NSGA2Solver {
 
             if range > 1e-9 {
                 for i in 1..(sorted_indices.len() - 1) {
-                    let prev = population[sorted_indices[i-1]].fitness[m];
-                    let next = population[sorted_indices[i+1]].fitness[m];
+                    let prev = population[sorted_indices[i - 1]].fitness[m];
+                    let next = population[sorted_indices[i + 1]].fitness[m];
                     population[sorted_indices[i]].crowding_distance += (next - prev) / range;
                 }
             }
@@ -218,22 +244,36 @@ impl NSGA2Solver {
 
     /// Draws from the solver's one `rng`. Rebuilding it from the seed here
     /// repeated the same draws on every call, so a seeded run never moved.
-    fn tournament_select<'a>(&self, population: &'a [MultiObjectiveIndividual], rng: &mut impl Rng) -> &'a MultiObjectiveIndividual {
+    fn tournament_select<'a>(
+        &self,
+        population: &'a [MultiObjectiveIndividual],
+        rng: &mut impl Rng,
+    ) -> &'a MultiObjectiveIndividual {
         let i1 = rng.gen_range(0..population.len());
         let i2 = rng.gen_range(0..population.len());
-        
+
         let p1 = &population[i1];
         let p2 = &population[i2];
 
-        if p1.rank < p2.rank { p1 }
-        else if p2.rank < p1.rank { p2 }
-        else if p1.crowding_distance > p2.crowding_distance { p1 }
-        else { p2 }
+        if p1.rank < p2.rank {
+            p1
+        } else if p2.rank < p1.rank {
+            p2
+        } else if p1.crowding_distance > p2.crowding_distance {
+            p1
+        } else {
+            p2
+        }
     }
 
     /// Draws from the solver's one `rng`. Rebuilding it from the seed here
     /// repeated the same draws on every call, so a seeded run never moved.
-    fn crossover(&self, p1: &Array1<f64>, p2: &Array1<f64>, rng: &mut impl Rng) -> (Array1<f64>, Array1<f64>) {
+    fn crossover(
+        &self,
+        p1: &Array1<f64>,
+        p2: &Array1<f64>,
+        rng: &mut impl Rng,
+    ) -> (Array1<f64>, Array1<f64>) {
         let dim = p1.len();
         let mut c1 = p1.clone();
         let mut c2 = p2.clone();
@@ -245,10 +285,10 @@ impl NSGA2Solver {
                 let min = p1[i].min(p2[i]);
                 let max = p1[i].max(p2[i]);
                 let range = max - min;
-                
+
                 let lower = min - alpha * range;
                 let upper = max + alpha * range;
-                
+
                 if (upper - lower).abs() > 1e-9 {
                     c1[i] = rng.gen_range(lower..upper);
                     c2[i] = rng.gen_range(lower..upper);
@@ -260,7 +300,13 @@ impl NSGA2Solver {
 
     /// Draws from the solver's one `rng`. Rebuilding it from the seed here
     /// repeated the same draws on every call, so a seeded run never moved.
-    fn mutate(&self, vars: &mut Array1<f64>, lower: &Array1<f64>, upper: &Array1<f64>, rng: &mut impl Rng) {
+    fn mutate(
+        &self,
+        vars: &mut Array1<f64>,
+        lower: &Array1<f64>,
+        upper: &Array1<f64>,
+        rng: &mut impl Rng,
+    ) {
         for i in 0..vars.len() {
             if rng.gen::<f64>() < self.mutation_rate {
                 let range = upper[i] - lower[i];

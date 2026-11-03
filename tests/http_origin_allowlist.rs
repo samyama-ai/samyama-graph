@@ -30,8 +30,7 @@ const ATTACKER: &str = "https://evil.example";
 
 fn server(origins: Vec<&str>) -> HttpServer {
     let store = Arc::new(RwLock::new(GraphStore::new()));
-    HttpServer::new(store, 0)
-        .with_allowed_origins(origins.into_iter().map(String::from).collect())
+    HttpServer::new(store, 0).with_allowed_origins(origins.into_iter().map(String::from).collect())
 }
 
 /// A CORS preflight that also asks for private-network access, as Chrome sends
@@ -130,7 +129,10 @@ async fn a_request_that_does_not_ask_for_private_network_never_gets_it() {
         )
         .await
         .expect("router");
-    assert!(res.headers().get("access-control-allow-private-network").is_none());
+    assert!(res
+        .headers()
+        .get("access-control-allow-private-network")
+        .is_none());
 }
 
 #[tokio::test]

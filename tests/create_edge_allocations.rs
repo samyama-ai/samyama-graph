@@ -59,7 +59,9 @@ fn creating_a_relationship_costs_about_one_allocation() {
     let mut two = PropertyMap::new();
     two.insert("amount".to_string(), PropertyValue::Integer(0));
     two.insert("mcc".to_string(), PropertyValue::Integer(0));
-    store.create_edge_with_properties(a, b, "PAID", two).unwrap();
+    store
+        .create_edge_with_properties(a, b, "PAID", two)
+        .unwrap();
 
     let before = calls();
     for _ in 0..EDGES {
@@ -84,7 +86,10 @@ fn creating_a_relationship_costs_about_one_allocation() {
     let with_props = (calls() - before) as f64 / EDGES as f64;
 
     eprintln!("allocator calls per edge: create_edge {bare:.2}, create_edge_with_properties (2 ints) {with_props:.2}");
-    assert!(bare <= 1.5, "create_edge made {bare:.2} allocator calls per edge");
+    assert!(
+        bare <= 1.5,
+        "create_edge made {bare:.2} allocator calls per edge"
+    );
     assert!(
         with_props <= 1.5,
         "create_edge_with_properties made {with_props:.2} allocator calls per edge"
@@ -94,7 +99,16 @@ fn creating_a_relationship_costs_about_one_allocation() {
     assert_eq!(store.edge_count(), 2 * EDGES + 2);
     let last = last.unwrap();
     assert_eq!(store.get_edge_endpoints(last), Some((a, b)));
-    assert_eq!(store.get_edge_type(last).map(|t| t.as_str().to_string()), Some("PAID".to_string()));
-    assert_eq!(store.edge_property(last, "amount"), Some(PropertyValue::Integer(EDGES as i64 - 1)));
-    assert_eq!(store.edge_property(last, "mcc"), Some(PropertyValue::Integer((EDGES as i64 - 1) % 900)));
+    assert_eq!(
+        store.get_edge_type(last).map(|t| t.as_str().to_string()),
+        Some("PAID".to_string())
+    );
+    assert_eq!(
+        store.edge_property(last, "amount"),
+        Some(PropertyValue::Integer(EDGES as i64 - 1))
+    );
+    assert_eq!(
+        store.edge_property(last, "mcc"),
+        Some(PropertyValue::Integer((EDGES as i64 - 1) % 900))
+    );
 }

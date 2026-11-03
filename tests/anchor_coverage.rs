@@ -50,7 +50,12 @@ fn fixture() -> GraphStore {
     let ids: Vec<_> = (0..200i64)
         .map(|i| {
             let id = store.create_node("N");
-            let _ = store.set_node_property("default", id, "seq".to_string(), PropertyValue::Integer(i));
+            let _ = store.set_node_property(
+                "default",
+                id,
+                "seq".to_string(),
+                PropertyValue::Integer(i),
+            );
             id
         })
         .collect();
@@ -58,7 +63,9 @@ fn fixture() -> GraphStore {
         store.create_edge(w[0], w[1], "KNOWS").unwrap();
     }
     for (i, &a) in ids.iter().enumerate() {
-        store.create_edge(a, ids[(i * 7 + 3) % ids.len()], "LIKES").unwrap();
+        store
+            .create_edge(a, ids[(i * 7 + 3) % ids.len()], "LIKES")
+            .unwrap();
     }
     let create = parse_query("CREATE INDEX ON :N(seq)").unwrap();
     let mut mutating = MutQueryExecutor::new(&mut store, "default".to_string());
@@ -73,9 +80,11 @@ fn plan_unchecked(store: &GraphStore, cypher: &str) -> String {
         .execute(&query)
         .unwrap_or_else(|e| panic!("{cypher}: exec {e:?}"));
     match batch.records[0].get("plan") {
-        Some(Value::Property(PropertyValue::String(t))) => {
-            t.lines().take_while(|l| !l.starts_with("---")).collect::<Vec<_>>().join("\n")
-        }
+        Some(Value::Property(PropertyValue::String(t))) => t
+            .lines()
+            .take_while(|l| !l.starts_with("---"))
+            .collect::<Vec<_>>()
+            .join("\n"),
         other => panic!("{other:?}"),
     }
 }
@@ -101,26 +110,90 @@ fn plan(store: &GraphStore, cypher: &str) -> String {
 const SHAPES: &[(&str, &str, usize)] = &[
     // A scan the predicate can replace outright.
     ("id() equality", "MATCH (n:N) WHERE id(n) = 5 RETURN n", 1),
-    ("id() IN a list", "MATCH (n:N) WHERE id(n) IN [1,2,3] RETURN n", 1),
-    ("indexed property", "MATCH (n:N) WHERE n.seq = 5 RETURN n", 1),
+    (
+        "id() IN a list",
+        "MATCH (n:N) WHERE id(n) IN [1,2,3] RETURN n",
+        1,
+    ),
+    (
+        "indexed property",
+        "MATCH (n:N) WHERE n.seq = 5 RETURN n",
+        1,
+    ),
     ("inline property", "MATCH (n:N {seq: 5}) RETURN n", 1),
     // One end anchored, the other reached by expansion — one anchor is correct.
-    ("expand from an anchored start", "MATCH (a:N)-[:KNOWS]->(b:N) WHERE id(a) = 5 RETURN b", 1),
-    ("expand anchored at the far end", "MATCH (a:N)-[:KNOWS]->(b:N) WHERE id(b) = 5 RETURN a", 1),
-    ("both ends constrained, one hop", "MATCH (a:N)-[:KNOWS]->(b:N) WHERE a.seq = 1 AND b.seq = 2 RETURN a, b", 1),
-    ("three-node path, ends anchored", "MATCH (a:N)-[:KNOWS]->(m:N)-[:KNOWS]->(b:N) WHERE id(a) = 1 AND id(b) = 3 RETURN m", 1),
-    ("a second label", "MATCH (a:N)-[:LIKES]->(b:N) WHERE a.seq = 1 RETURN b", 1),
-    ("var-length from an anchor", "MATCH (a:N)-[:KNOWS*1..3]->(b:N) WHERE id(a) = 1 RETURN b", 1),
-    ("anchored inside EXISTS", "MATCH (a:N) WHERE id(a) = 1 AND EXISTS { MATCH (b:N) WHERE id(b) = 6 } RETURN a", 1),
+    (
+        "expand from an anchored start",
+        "MATCH (a:N)-[:KNOWS]->(b:N) WHERE id(a) = 5 RETURN b",
+        1,
+    ),
+    (
+        "expand anchored at the far end",
+        "MATCH (a:N)-[:KNOWS]->(b:N) WHERE id(b) = 5 RETURN a",
+        1,
+    ),
+    (
+        "both ends constrained, one hop",
+        "MATCH (a:N)-[:KNOWS]->(b:N) WHERE a.seq = 1 AND b.seq = 2 RETURN a, b",
+        1,
+    ),
+    (
+        "three-node path, ends anchored",
+        "MATCH (a:N)-[:KNOWS]->(m:N)-[:KNOWS]->(b:N) WHERE id(a) = 1 AND id(b) = 3 RETURN m",
+        1,
+    ),
+    (
+        "a second label",
+        "MATCH (a:N)-[:LIKES]->(b:N) WHERE a.seq = 1 RETURN b",
+        1,
+    ),
+    (
+        "var-length from an anchor",
+        "MATCH (a:N)-[:KNOWS*1..3]->(b:N) WHERE id(a) = 1 RETURN b",
+        1,
+    ),
+    (
+        "anchored inside EXISTS",
+        "MATCH (a:N) WHERE id(a) = 1 AND EXISTS { MATCH (b:N) WHERE id(b) = 6 } RETURN a",
+        1,
+    ),
     // Joined by a cartesian product — both ends must be anchored. This is
     // where #584 lived.
-    ("shortestPath, both by id", "MATCH p = shortestPath((a:N)-[:KNOWS*]-(b:N)) WHERE id(a) = 1 AND id(b) = 6 RETURN p", 2),
-    ("shortestPath, both by index", "MATCH p = shortestPath((a:N)-[:KNOWS*]-(b:N)) WHERE a.seq = 1 AND b.seq = 6 RETURN p", 2),
-    ("allShortestPaths, both by id", "MATCH p = allShortestPaths((a:N)-[:KNOWS*]-(b:N)) WHERE id(a) = 1 AND id(b) = 6 RETURN p", 2),
-    ("two disjoint patterns, by id", "MATCH (a:N), (b:N) WHERE id(a) = 1 AND id(b) = 6 RETURN a, b", 2),
-    ("two disjoint patterns, by index", "MATCH (a:N), (b:N) WHERE a.seq = 1 AND b.seq = 6 RETURN a, b", 2),
-    ("OPTIONAL MATCH, both anchored", "MATCH (a:N) WHERE id(a) = 1 OPTIONAL MATCH (b:N) WHERE id(b) = 6 RETURN a, b", 2),
-    ("WITH between two anchored matches", "MATCH (a:N) WHERE id(a) = 1 WITH a MATCH (b:N) WHERE id(b) = 6 RETURN a, b", 2),
+    (
+        "shortestPath, both by id",
+        "MATCH p = shortestPath((a:N)-[:KNOWS*]-(b:N)) WHERE id(a) = 1 AND id(b) = 6 RETURN p",
+        2,
+    ),
+    (
+        "shortestPath, both by index",
+        "MATCH p = shortestPath((a:N)-[:KNOWS*]-(b:N)) WHERE a.seq = 1 AND b.seq = 6 RETURN p",
+        2,
+    ),
+    (
+        "allShortestPaths, both by id",
+        "MATCH p = allShortestPaths((a:N)-[:KNOWS*]-(b:N)) WHERE id(a) = 1 AND id(b) = 6 RETURN p",
+        2,
+    ),
+    (
+        "two disjoint patterns, by id",
+        "MATCH (a:N), (b:N) WHERE id(a) = 1 AND id(b) = 6 RETURN a, b",
+        2,
+    ),
+    (
+        "two disjoint patterns, by index",
+        "MATCH (a:N), (b:N) WHERE a.seq = 1 AND b.seq = 6 RETURN a, b",
+        2,
+    ),
+    (
+        "OPTIONAL MATCH, both anchored",
+        "MATCH (a:N) WHERE id(a) = 1 OPTIONAL MATCH (b:N) WHERE id(b) = 6 RETURN a, b",
+        2,
+    ),
+    (
+        "WITH between two anchored matches",
+        "MATCH (a:N) WHERE id(a) = 1 WITH a MATCH (b:N) WHERE id(b) = 6 RETURN a, b",
+        2,
+    ),
 ];
 
 #[test]
@@ -159,6 +232,9 @@ fn the_shapes_all_still_answer() {
         let batch = QueryExecutor::new(&store)
             .execute(&query)
             .unwrap_or_else(|e| panic!("{label}: {e:?}"));
-        assert!(!batch.records.is_empty(), "{label} returned nothing:\n  {cypher}");
+        assert!(
+            !batch.records.is_empty(),
+            "{label} returned nothing:\n  {cypher}"
+        );
     }
 }

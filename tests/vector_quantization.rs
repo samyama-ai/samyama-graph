@@ -34,7 +34,9 @@ const K: usize = 10;
 const QUERIES: usize = 100;
 
 fn lcg(seed: &mut u64) -> f32 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     ((*seed >> 33) as f32 / (1u64 << 31) as f32) - 1.0
 }
 
@@ -50,7 +52,9 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 
 fn corpus(n: usize, dim: usize) -> Vec<Vec<f32>> {
     let mut seed = 42u64;
-    (0..n).map(|_| (0..dim).map(|_| lcg(&mut seed)).collect()).collect()
+    (0..n)
+        .map(|_| (0..dim).map(|_| lcg(&mut seed)).collect())
+        .collect()
 }
 
 fn build(vectors: &[Vec<f32>], q: Quantization) -> VectorIndex {
@@ -66,12 +70,18 @@ fn recall(idx: &VectorIndex, vectors: &[Vec<f32>]) -> f64 {
     let (mut hit, mut total) = (0usize, 0usize);
     for _ in 0..QUERIES {
         let query: Vec<f32> = (0..DIM).map(|_| lcg(&mut qseed)).collect();
-        let mut exact: Vec<(usize, f32)> =
-            vectors.iter().enumerate().map(|(i, v)| (i, cosine(&query, v))).collect();
+        let mut exact: Vec<(usize, f32)> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, cosine(&query, v)))
+            .collect();
         exact.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("no NaNs"));
         let truth: HashSet<usize> = exact.iter().take(K).map(|(i, _)| *i).collect();
         let got = idx.search(&query, K).expect("search");
-        hit += got.iter().filter(|(id, _)| truth.contains(&(id.0 as usize))).count();
+        hit += got
+            .iter()
+            .filter(|(id, _)| truth.contains(&(id.0 as usize)))
+            .count();
         total += K;
     }
     hit as f64 / total as f64
@@ -104,7 +114,10 @@ fn fp16_recall_tracks_full_precision_on_the_same_corpus() {
     let full = recall(&build(&vectors, Quantization::None), &vectors);
     let half = recall(&build(&vectors, Quantization::Fp16), &vectors);
 
-    assert!(full > 0.85, "the unquantized reference itself is broken: {full:.4}");
+    assert!(
+        full > 0.85,
+        "the unquantized reference itself is broken: {full:.4}"
+    );
     assert!(
         half >= full - 0.10,
         "fp16 recall {half:.4} is more than 0.10 below f32 {full:.4}; that is a real \
@@ -153,8 +166,16 @@ fn the_ddl_option_reaches_the_index_and_survives_the_backfill() {
             .get_index(label, "v")
             .map(|i| i.read().unwrap().quantization())
     };
-    assert_eq!(q_of("V"), Some(Quantization::None), "the default is unchanged");
-    assert_eq!(q_of("W"), Some(Quantization::Fp16), "the option reached the index");
+    assert_eq!(
+        q_of("V"),
+        Some(Quantization::None),
+        "the default is unchanged"
+    );
+    assert_eq!(
+        q_of("W"),
+        Some(Quantization::Fp16),
+        "the option reached the index"
+    );
 }
 
 #[test]

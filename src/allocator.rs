@@ -31,4 +31,8 @@ pub const SHIPPED: Shipped = std::alloc::System;
 
 /// The shipped allocator's name, for benchmark output and envelopes, so a number
 /// measured under one allocator is not compared with one measured under another.
-pub const NAME: &str = if cfg!(feature = "mimalloc") { "mimalloc" } else { "system" };
+pub const NAME: &str = if cfg!(feature = "mimalloc") {
+    "mimalloc"
+} else {
+    "system"
+};

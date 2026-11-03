@@ -57,8 +57,11 @@ fn median(mut v: Vec<f64>) -> f64 {
 ///
 /// The LDBC bench uses (3) and `query_probe` uses (1), and on IS3 at SF10 they
 /// disagree 3.3×. (2) is the arm that says which half of the gap is which.
-async fn ldbc_mode(data_dir: &std::path::Path, queries: &[(String, String)], runs: usize)
-    -> Result<(), Box<dyn std::error::Error>> {
+async fn ldbc_mode(
+    data_dir: &std::path::Path,
+    queries: &[(String, String)],
+    runs: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     use samyama::query::QueryEngine;
 
     let mut direct = GraphStore::new();
@@ -75,7 +78,16 @@ async fn ldbc_mode(data_dir: &std::path::Path, queries: &[(String, String)], run
     // whole runtime at SF1 and drowns the thing being compared. Leaving them
     // out is how the first version of this probe reported 1.083 ms for a query
     // the bench measures at 0.04 ms.
-    for label in ["Person", "Post", "Comment", "Forum", "Place", "Organisation", "Tag", "TagClass"] {
+    for label in [
+        "Person",
+        "Post",
+        "Comment",
+        "Forum",
+        "Place",
+        "Organisation",
+        "Tag",
+        "TagClass",
+    ] {
         let stmt = format!("CREATE INDEX ON :{label}(id)");
         let q = parse_query(&stmt)?;
         samyama::query::executor::MutQueryExecutor::new(&mut direct, "default".to_string())
@@ -89,23 +101,34 @@ async fn ldbc_mode(data_dir: &std::path::Path, queries: &[(String, String)], run
         "\n{:<22} {:>11} {:>11} {:>11}  {:>9} {:>9}",
         "query", "executor", "engine", "client", "eng/exec", "cli/eng"
     );
-    println!("{:-<22} {:->11} {:->11} {:->11}  {:->9} {:->9}", "", "", "", "", "", "");
+    println!(
+        "{:-<22} {:->11} {:->11} {:->11}  {:->9} {:->9}",
+        "", "", "", "", "", ""
+    );
 
     for (label, cypher) in queries {
         let q = parse_query(cypher)?;
         let _ = QueryExecutor::new(&direct).execute(&q)?;
-        let exec_ms = median((0..runs).map(|_| {
-            let t = Instant::now();
-            let _ = QueryExecutor::new(&direct).execute(&q).expect("runs");
-            t.elapsed().as_secs_f64() * 1000.0
-        }).collect());
+        let exec_ms = median(
+            (0..runs)
+                .map(|_| {
+                    let t = Instant::now();
+                    let _ = QueryExecutor::new(&direct).execute(&q).expect("runs");
+                    t.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect(),
+        );
 
         let _ = engine.execute(cypher, &direct)?;
-        let engine_ms = median((0..runs).map(|_| {
-            let t = Instant::now();
-            let _ = engine.execute(cypher, &direct).expect("runs");
-            t.elapsed().as_secs_f64() * 1000.0
-        }).collect());
+        let engine_ms = median(
+            (0..runs)
+                .map(|_| {
+                    let t = Instant::now();
+                    let _ = engine.execute(cypher, &direct).expect("runs");
+                    t.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect(),
+        );
 
         let _ = client.query_readonly("default", cypher).await?;
         let mut cts = Vec::with_capacity(runs);
@@ -118,7 +141,9 @@ async fn ldbc_mode(data_dir: &std::path::Path, queries: &[(String, String)], run
 
         println!(
             "{label:<22} {:>9.3}ms {:>9.3}ms {:>9.3}ms  {:>8.2}x {:>8.2}x",
-            exec_ms, engine_ms, client_ms,
+            exec_ms,
+            engine_ms,
+            client_ms,
             engine_ms / exec_ms.max(1e-9),
             client_ms / engine_ms.max(1e-9),
         );
@@ -137,7 +162,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = bench_setup::report_calibration();
 
     let args: Vec<String> = std::env::args().collect();
-    let one = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1));
+    let one = |f: &str| {
+        args.iter()
+            .position(|a| a == f)
+            .and_then(|i| args.get(i + 1))
+    };
     if let Some(dir) = one("--data-dir") {
         let runs: usize = one("--runs").map(|s| s.parse()).transpose()?.unwrap_or(9);
         let queries: Vec<(String, String)> = args
@@ -174,7 +203,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "\n{:>8}  {:>12}  {:>12}  {:>10}  {:>12}",
         "rows", "executor", "client", "client/exec", "delta/row"
     );
-    println!("{:->8}  {:->12}  {:->12}  {:->10}  {:->12}", "", "", "", "", "");
+    println!(
+        "{:->8}  {:->12}  {:->12}  {:->10}  {:->12}",
+        "", "", "", "", ""
+    );
 
     for &n in ROWS {
         // Properties, not just a count: a bare count returns one row and would

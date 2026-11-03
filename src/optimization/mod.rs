@@ -21,4 +21,4 @@
 //! near elite solutions).
 
 pub mod cypher_problem;
-pub use cypher_problem::{CypherProblem, CypherMOProblem, CypherProblemStats};
+pub use cypher_problem::{CypherMOProblem, CypherProblem, CypherProblemStats};

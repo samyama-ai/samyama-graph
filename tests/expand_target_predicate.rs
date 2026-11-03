@@ -54,16 +54,25 @@ fn a_where_equality_on_the_expansion_target_selects_the_same_rows() {
     // is what notices.
     let store = graph();
     assert_eq!(
-        rows(&store, "MATCH (p:Person)-[:WORKS_AT]->(o:Org) WHERE o.name = 'Wanted' RETURN p"),
+        rows(
+            &store,
+            "MATCH (p:Person)-[:WORKS_AT]->(o:Org) WHERE o.name = 'Wanted' RETURN p"
+        ),
         2,
         "persons 1 and 3 work at Wanted"
     );
     assert_eq!(
-        rows(&store, "MATCH (p:Person)-[:WORKS_AT]->(o:Org) WHERE o.name = 'Other' RETURN p"),
+        rows(
+            &store,
+            "MATCH (p:Person)-[:WORKS_AT]->(o:Org) WHERE o.name = 'Other' RETURN p"
+        ),
         1
     );
     assert_eq!(
-        rows(&store, "MATCH (p:Person)-[:WORKS_AT]->(o:Org) WHERE o.name = 'Absent' RETURN p"),
+        rows(
+            &store,
+            "MATCH (p:Person)-[:WORKS_AT]->(o:Org) WHERE o.name = 'Absent' RETURN p"
+        ),
         0
     );
 }
@@ -75,8 +84,14 @@ fn the_inline_form_and_the_where_form_agree() {
     // comparing.
     let store = graph();
     assert_eq!(
-        rows(&store, "MATCH (p:Person)-[:WORKS_AT]->(o:Org {name: 'Wanted'}) RETURN p"),
-        rows(&store, "MATCH (p:Person)-[:WORKS_AT]->(o:Org) WHERE o.name = 'Wanted' RETURN p")
+        rows(
+            &store,
+            "MATCH (p:Person)-[:WORKS_AT]->(o:Org {name: 'Wanted'}) RETURN p"
+        ),
+        rows(
+            &store,
+            "MATCH (p:Person)-[:WORKS_AT]->(o:Org) WHERE o.name = 'Wanted' RETURN p"
+        )
     );
 }
 
@@ -101,7 +116,10 @@ fn a_non_equality_predicate_on_the_target_is_unaffected() {
     // the ordinary filter.
     let store = graph();
     assert_eq!(
-        rows(&store, "MATCH (p:Person)-[:WORKS_AT]->(o:Org) WHERE o.name <> 'Wanted' RETURN p"),
+        rows(
+            &store,
+            "MATCH (p:Person)-[:WORKS_AT]->(o:Org) WHERE o.name <> 'Wanted' RETURN p"
+        ),
         2
     );
 }

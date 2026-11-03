@@ -96,7 +96,8 @@ fn agreed(indexed: &GraphStore, plain: &GraphStore, q: &str) -> Vec<String> {
     let a = rows(indexed, q);
     let b = rows(plain, q);
     assert_eq!(
-        a, b,
+        a,
+        b,
         "the indexed and unindexed plans disagree, so one of them is wrong:\n\
          indexed: {a:?}\nplain:   {b:?}\nplan was:\n{}",
         plan(indexed, q)
@@ -136,8 +137,7 @@ fn federation(d: i64, per: i64) -> (GraphStore, GraphStore) {
 }
 
 /// The #1822 shape: the equality alone, no constant.
-const OM08_NO_CONSTANT: &str =
-    "MATCH (v:Variant)-[:ASSOCIATED_WITH_DISEASE]->(d1:Disease) \
+const OM08_NO_CONSTANT: &str = "MATCH (v:Variant)-[:ASSOCIATED_WITH_DISEASE]->(d1:Disease) \
      MATCH (t:Target)-[:ASSOCIATED_WITH_DISEASE]->(d2:Disease) \
      WHERE d1.mondo_id = d2.mondo_id \
      RETURN DISTINCT v.rs_id AS v, t.symbol AS t";
@@ -172,7 +172,10 @@ fn a_limit_keeps_the_lazy_product_startup_plan() {
 fn disjoint_matches_after_with_use_the_same_expression_join_rule() {
     let (mut indexed, _) = federation(3, 2);
     write(&mut indexed, "CREATE (:Seed)");
-    let text = plan(&indexed, &format!("MATCH (seed:Seed) WITH seed {OM08_NO_CONSTANT}"));
+    let text = plan(
+        &indexed,
+        &format!("MATCH (seed:Seed) WITH seed {OM08_NO_CONSTANT}"),
+    );
     assert!(text.contains("ExpressionHashJoin"), "{text}");
 }
 
@@ -195,7 +198,8 @@ fn the_equality_answers_and_both_plans_agree() {
     assert!(
         !got.iter().any(|r| {
             let (v, t) = r.split_once('|').expect("pair");
-            v.trim_start_matches("rs").split('_').next() != t.trim_start_matches('T').split('_').next()
+            v.trim_start_matches("rs").split('_').next()
+                != t.trim_start_matches('T').split('_').next()
         }),
         "a pair crossed diseases, so the join condition was not applied: {got:?}"
     );
@@ -446,13 +450,20 @@ fn an_equality_within_one_pattern_is_not_a_join() {
              WHERE d1.mondo_id = d1.mondo_id \
              RETURN v.rs_id AS v";
     let got = agreed(&indexed, &plain, q);
-    assert_eq!(got.len(), 2, "a reflexive equality excludes nothing: {got:?}");
+    assert_eq!(
+        got.len(),
+        2,
+        "a reflexive equality excludes nothing: {got:?}"
+    );
 }
 
 #[test]
 fn one_row_scans_keep_the_cheaper_product_plan() {
-    let mut s=GraphStore::new();
-    write(&mut s,"CREATE (:TinyA {k: 1}), (:TinyB {k: 1})");
-    let text=plan(&s,"MATCH (a:TinyA) MATCH (b:TinyB) WHERE a.k = b.k RETURN a");
-    assert!(!text.contains("ExpressionHashJoin"),"{text}");
+    let mut s = GraphStore::new();
+    write(&mut s, "CREATE (:TinyA {k: 1}), (:TinyB {k: 1})");
+    let text = plan(
+        &s,
+        "MATCH (a:TinyA) MATCH (b:TinyB) WHERE a.k = b.k RETURN a",
+    );
+    assert!(!text.contains("ExpressionHashJoin"), "{text}");
 }

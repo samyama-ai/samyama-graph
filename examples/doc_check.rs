@@ -62,13 +62,18 @@ fn blocks_in(path: &Path, text: &str) -> Vec<Block> {
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
         // Build output, dependencies and vendored checkouts are not our docs.
         if p.is_dir() {
-            if matches!(name, "target" | ".git" | "node_modules" | ".harness-cache" | "data") {
+            if matches!(
+                name,
+                "target" | ".git" | "node_modules" | ".harness-cache" | "data"
+            ) {
                 continue;
             }
             walk(&p, out);
@@ -112,7 +117,10 @@ fn statements(block: &str) -> Vec<String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| -> Option<String> {
-        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
     };
     let root = arg("--root").unwrap_or_else(|| ".".into());
 
@@ -126,7 +134,9 @@ fn main() {
     let mut docs_with_cypher = 0usize;
 
     for file in &files {
-        let Ok(text) = std::fs::read_to_string(file) else { continue };
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
         let blocks = blocks_in(file, &text);
         if !blocks.is_empty() {
             docs_with_cypher += 1;
@@ -139,8 +149,20 @@ fn main() {
             for stmt in statements(&b.query) {
                 checked += 1;
                 if let Err(e) = parse_query(&stmt) {
-                    let short: String = e.to_string().lines().next().unwrap_or("").chars().take(90).collect();
-                    failed.push((b.file.clone(), b.line, stmt.lines().next().unwrap_or("").chars().take(90).collect(), short));
+                    let short: String = e
+                        .to_string()
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(90)
+                        .collect();
+                    failed.push((
+                        b.file.clone(),
+                        b.line,
+                        stmt.lines().next().unwrap_or("").chars().take(90).collect(),
+                        short,
+                    ));
                 }
             }
         }
@@ -180,7 +202,9 @@ fn main() {
             let _ = write!(
                 cases,
                 "{{\"file\": \"{}\", \"line\": {l}, \"query\": \"{}\", \"error\": \"{}\"}}",
-                esc(f), esc(q), esc(e)
+                esc(f),
+                esc(q),
+                esc(e)
             );
         }
         let envelope = format!(

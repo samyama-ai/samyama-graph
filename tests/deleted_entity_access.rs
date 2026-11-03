@@ -19,8 +19,8 @@
 //! function ran, and materialising something deleted failed.
 
 use samyama::graph::GraphStore;
-use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
 use samyama::graph::PropertyValue;
+use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
 use samyama::query::parser::parse_query;
 
 fn setup(cypher: &str) -> GraphStore {
@@ -32,7 +32,10 @@ fn setup(cypher: &str) -> GraphStore {
     store
 }
 
-fn run(store: &mut GraphStore, cypher: &str) -> Result<Vec<samyama::query::executor::Record>, String> {
+fn run(
+    store: &mut GraphStore,
+    cypher: &str,
+) -> Result<Vec<samyama::query::executor::Record>, String> {
     let q = parse_query(cypher).map_err(|e| format!("{e:?}"))?;
     MutQueryExecutor::new(store, "default".to_string())
         .execute(&q)
@@ -58,7 +61,8 @@ fn a_property_of_a_deleted_relationship_is_an_error_too() {
 #[test]
 fn the_type_of_a_deleted_relationship_still_reads() {
     let mut store = setup("CREATE ()-[:T]->()");
-    let rows = run(&mut store, "MATCH ()-[r]->() DELETE r RETURN type(r) AS t").expect("must succeed");
+    let rows =
+        run(&mut store, "MATCH ()-[r]->() DELETE r RETURN type(r) AS t").expect("must succeed");
     assert_eq!(
         rows.first().and_then(|r| r.get("t")),
         Some(&Value::Property(PropertyValue::String("T".to_string())))
@@ -71,13 +75,17 @@ fn the_type_of_a_deleted_relationship_still_reads() {
 fn an_unset_property_on_a_live_entity_is_still_null() {
     let store = setup("CREATE (:A)");
     let q = parse_query("MATCH (n:A) RETURN n.nothing AS v").expect("parses");
-    let rows = QueryExecutor::new(&store).execute(&q).expect("runs").records;
+    let rows = QueryExecutor::new(&store)
+        .execute(&q)
+        .expect("runs")
+        .records;
     assert!(
         matches!(
             rows.first().and_then(|r| r.get("v")),
             Some(Value::Null) | Some(Value::Property(PropertyValue::Null))
         ),
-        "{:?}", rows.first()
+        "{:?}",
+        rows.first()
     );
 }
 
@@ -90,7 +98,10 @@ fn a_live_entity_reads_normally() {
         ("MATCH ()-[r:T]->() RETURN r.w AS v", 1),
     ] {
         let q = parse_query(cypher).expect("parses");
-        let rows = QueryExecutor::new(&store).execute(&q).expect("runs").records;
+        let rows = QueryExecutor::new(&store)
+            .execute(&q)
+            .expect("runs")
+            .records;
         assert_eq!(
             rows.first().and_then(|r| r.get("v")),
             Some(&Value::Property(PropertyValue::Integer(want))),

@@ -1,7 +1,7 @@
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use samyama::graph::{GraphStore, Label, PropertyValue};
-use samyama::query::parser::parse_query;
 use samyama::query::executor::QueryExecutor;
+use samyama::query::parser::parse_query;
 
 /// Benchmark node insertion throughput
 fn bench_node_insertion(c: &mut Criterion) {
@@ -71,7 +71,9 @@ fn bench_traversal(c: &mut Criterion) {
         node_ids.push(id);
     }
     for i in 0..99 {
-        store.create_edge(node_ids[i], node_ids[i + 1], "KNOWS").unwrap();
+        store
+            .create_edge(node_ids[i], node_ids[i + 1], "KNOWS")
+            .unwrap();
     }
 
     // 1-hop traversal
@@ -87,7 +89,10 @@ fn bench_traversal(c: &mut Criterion) {
     // 2-hop traversal
     group.bench_function("2_hop", |b| {
         b.iter(|| {
-            let query = parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN c.name").unwrap();
+            let query = parse_query(
+                "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN c.name",
+            )
+            .unwrap();
             let executor = QueryExecutor::new(&store);
             let result = executor.execute(&query).unwrap();
             criterion::black_box(result.records.len());
@@ -131,7 +136,9 @@ fn bench_where_filter(c: &mut Criterion) {
 
     group.bench_function("compound", |b| {
         b.iter(|| {
-            let query = parse_query("MATCH (n:Person) WHERE n.age > 20 AND n.age < 40 RETURN n.name").unwrap();
+            let query =
+                parse_query("MATCH (n:Person) WHERE n.age > 20 AND n.age < 40 RETURN n.name")
+                    .unwrap();
             let executor = QueryExecutor::new(&store);
             let result = executor.execute(&query).unwrap();
             criterion::black_box(result.records.len());
@@ -153,9 +160,12 @@ fn bench_cypher_parse(c: &mut Criterion) {
 
     group.bench_function("match_where_return", |b| {
         b.iter(|| {
-            criterion::black_box(parse_query(
-                "MATCH (n:Person) WHERE n.age > 30 AND n.name = 'Alice' RETURN n.name, n.age"
-            ).unwrap());
+            criterion::black_box(
+                parse_query(
+                    "MATCH (n:Person) WHERE n.age > 30 AND n.name = 'Alice' RETURN n.name, n.age",
+                )
+                .unwrap(),
+            );
         });
     });
 

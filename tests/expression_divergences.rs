@@ -18,7 +18,9 @@ use samyama::query::parser::parse_query;
 fn run(q: &str) -> Result<String, String> {
     let s = GraphStore::new();
     let p = parse_query(q).map_err(|e| e.to_string())?;
-    let out = QueryExecutor::new(&s).execute(&p).map_err(|e| e.to_string())?;
+    let out = QueryExecutor::new(&s)
+        .execute(&p)
+        .map_err(|e| e.to_string())?;
     Ok(match out.records[0].get("x") {
         Some(Value::Property(PropertyValue::String(s))) => format!("\"{s}\""),
         Some(Value::Property(PropertyValue::Null)) | Some(Value::Null) | None => "null".into(),
@@ -28,7 +30,11 @@ fn run(q: &str) -> Result<String, String> {
 }
 
 fn is(q: &str, expected: &str) {
-    assert_eq!(run(q).unwrap_or_else(|e| panic!("`{q}`: {e}")), expected, "{q}");
+    assert_eq!(
+        run(q).unwrap_or_else(|e| panic!("`{q}`: {e}")),
+        expected,
+        "{q}"
+    );
 }
 
 fn refused(q: &str) {

@@ -51,8 +51,10 @@ fn fixture() -> (GraphStore, Vec<u64>) {
     // A triangle, a tail, and a disconnected pair.
     for (a, b) in [(0, 1), (1, 2), (2, 0), (2, 3), (4, 5)] {
         let e = s.create_edge(nodes[a], nodes[b], "KNOWS").unwrap();
-        s.set_edge_property(e, "capacity", PropertyValue::Integer(3)).unwrap();
-        s.set_edge_property(e, "weight", PropertyValue::Float(1.5)).unwrap();
+        s.set_edge_property(e, "capacity", PropertyValue::Integer(3))
+            .unwrap();
+        s.set_edge_property(e, "weight", PropertyValue::Float(1.5))
+            .unwrap();
     }
     (s, ids)
 }
@@ -65,110 +67,364 @@ fn fixture() -> (GraphStore, Vec<u64>) {
 /// many aliases we felt like adding -- a measurement that improves when
 /// nothing is built.
 const ALIASES: &[&str] = &[
-    "betweennessCentrality", "closenessCentrality", "commonNeighbours", "coreNumber", "degreeCentrality", "eigenvectorCentrality", "findCycle", "harmonicCentrality", "labelPropagation",
+    "betweennessCentrality",
+    "closenessCentrality",
+    "commonNeighbours",
+    "coreNumber",
+    "degreeCentrality",
+    "eigenvectorCentrality",
+    "findCycle",
+    "harmonicCentrality",
+    "labelPropagation",
 ];
 
 /// Every candidate, with a call that would work if the algorithm existed.
 /// `{a}` and `{b}` are node ids.
 const CANDIDATES: &[(&str, &str)] = &[
     // Dispatched today.
-    ("pageRank", "CALL algo.pageRank('Person', 'KNOWS') YIELD node, score RETURN count(*)"),
-    ("shortestPath", "CALL algo.shortestPath({a}, {b}) YIELD path, cost RETURN count(*)"),
-    ("wcc", "CALL algo.wcc() YIELD node, component RETURN count(*)"),
-    ("scc", "CALL algo.scc() YIELD node, component RETURN count(*)"),
-    ("weightedPath", "CALL algo.weightedPath({a}, {b}, 'weight') YIELD path, cost RETURN count(*)"),
-    ("maxFlow", "CALL algo.maxFlow({a}, {b}, 'capacity') YIELD max_flow RETURN count(*)"),
-    ("mst", "CALL algo.mst('weight') YIELD source, target, weight RETURN count(*)"),
-    ("triangleCount", "CALL algo.triangleCount() YIELD count RETURN count(*)"),
-    ("cdlp", "CALL algo.cdlp() YIELD node, community RETURN count(*)"),
-    ("lcc", "CALL algo.lcc() YIELD node, coefficient RETURN count(*)"),
-    ("or.solve", "CALL algo.or.solve({}) YIELD result RETURN count(*)"),
+    (
+        "pageRank",
+        "CALL algo.pageRank('Person', 'KNOWS') YIELD node, score RETURN count(*)",
+    ),
+    (
+        "shortestPath",
+        "CALL algo.shortestPath({a}, {b}) YIELD path, cost RETURN count(*)",
+    ),
+    (
+        "wcc",
+        "CALL algo.wcc() YIELD node, component RETURN count(*)",
+    ),
+    (
+        "scc",
+        "CALL algo.scc() YIELD node, component RETURN count(*)",
+    ),
+    (
+        "weightedPath",
+        "CALL algo.weightedPath({a}, {b}, 'weight') YIELD path, cost RETURN count(*)",
+    ),
+    (
+        "maxFlow",
+        "CALL algo.maxFlow({a}, {b}, 'capacity') YIELD max_flow RETURN count(*)",
+    ),
+    (
+        "mst",
+        "CALL algo.mst('weight') YIELD source, target, weight RETURN count(*)",
+    ),
+    (
+        "triangleCount",
+        "CALL algo.triangleCount() YIELD count RETURN count(*)",
+    ),
+    (
+        "cdlp",
+        "CALL algo.cdlp() YIELD node, community RETURN count(*)",
+    ),
+    (
+        "lcc",
+        "CALL algo.lcc() YIELD node, coefficient RETURN count(*)",
+    ),
+    (
+        "or.solve",
+        "CALL algo.or.solve({}) YIELD result RETURN count(*)",
+    ),
     // In the algorithms crate but not obviously reachable from Cypher.
-    ("pca", "CALL algo.pca() YIELD node, component RETURN count(*)"),
+    (
+        "pca",
+        "CALL algo.pca() YIELD node, component RETURN count(*)",
+    ),
     ("bfs", "CALL algo.bfs({a}) YIELD node RETURN count(*)"),
-    ("dijkstra", "CALL algo.dijkstra({a}, {b}, 'weight') YIELD path RETURN count(*)"),
+    (
+        "dijkstra",
+        "CALL algo.dijkstra({a}, {b}, 'weight') YIELD path RETURN count(*)",
+    ),
     // Common in other engines and named by the spec's 40. Expected absent --
     // the list is written from what a user would reach for, not from ours.
-    ("betweenness", "CALL algo.betweenness() YIELD node, score RETURN count(*)"),
-    ("closeness", "CALL algo.closeness() YIELD node, score RETURN count(*)"),
-    ("degree", "CALL algo.degree() YIELD node, score RETURN count(*)"),
-    ("betweennessCentrality", "CALL algo.betweennessCentrality() YIELD node, score RETURN count(*)"),
-    ("closenessCentrality", "CALL algo.closenessCentrality() YIELD node, score RETURN count(*)"),
-    ("degreeCentrality", "CALL algo.degreeCentrality() YIELD node, score RETURN count(*)"),
-    ("eigenvector", "CALL algo.eigenvector() YIELD node, score RETURN count(*)"),
-    ("harmonic", "CALL algo.harmonic() YIELD node, score RETURN count(*)"),
-    ("harmonicCentrality", "CALL algo.harmonicCentrality() YIELD node, score RETURN count(*)"),
-    ("eigenvectorCentrality", "CALL algo.eigenvectorCentrality() YIELD node, score RETURN count(*)"),
-    ("coreNumber", "CALL algo.coreNumber() YIELD node, score RETURN count(*)"),
+    (
+        "betweenness",
+        "CALL algo.betweenness() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "closeness",
+        "CALL algo.closeness() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "degree",
+        "CALL algo.degree() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "betweennessCentrality",
+        "CALL algo.betweennessCentrality() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "closenessCentrality",
+        "CALL algo.closenessCentrality() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "degreeCentrality",
+        "CALL algo.degreeCentrality() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "eigenvector",
+        "CALL algo.eigenvector() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "harmonic",
+        "CALL algo.harmonic() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "harmonicCentrality",
+        "CALL algo.harmonicCentrality() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "eigenvectorCentrality",
+        "CALL algo.eigenvectorCentrality() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "coreNumber",
+        "CALL algo.coreNumber() YIELD node, score RETURN count(*)",
+    ),
     // Whole-graph shape. Two of these return a single scalar rather than a
     // score per node, which is why they are separate algorithms rather than
     // readings of one -- a caller wants a number or a column, not both.
-    ("eccentricity", "CALL algo.eccentricity() YIELD node, eccentricity RETURN count(*)"),
-    ("diameter", "CALL algo.diameter() YIELD diameter RETURN count(*)"),
+    (
+        "eccentricity",
+        "CALL algo.eccentricity() YIELD node, eccentricity RETURN count(*)",
+    ),
+    (
+        "diameter",
+        "CALL algo.diameter() YIELD diameter RETURN count(*)",
+    ),
     ("radius", "CALL algo.radius() YIELD radius RETURN count(*)"),
-    ("averageNeighborDegree", "CALL algo.averageNeighborDegree() YIELD node, score RETURN count(*)"),
-    ("degreeAssortativity", "CALL algo.degreeAssortativity() YIELD assortativity RETURN count(*)"),
-    ("articleRank", "CALL algo.articleRank() YIELD node, score RETURN count(*)"),
-    ("katz", "CALL algo.katz({alpha: 0.05}) YIELD node, score RETURN count(*)"),
-    ("hits", "CALL algo.hits() YIELD node, hub, authority RETURN count(*)"),
-    ("personalizedPageRank", "CALL algo.personalizedPageRank([{a}]) YIELD node, score RETURN count(*)"),
-    ("voteRank", "CALL algo.voteRank({k: 3}) YIELD node, rank RETURN count(*)"),
-    ("bellmanFord", "CALL algo.bellmanFord({a}) YIELD node, distance RETURN count(*)"),
-    ("allPairsShortestPath", "CALL algo.allPairsShortestPath() YIELD source, target, hops RETURN count(*)"),
-    ("wienerIndex", "CALL algo.wienerIndex() YIELD wienerIndex RETURN wienerIndex"),
-    ("dagLongestPath", "CALL algo.dagLongestPath() YIELD node, position RETURN count(*)"),
-    ("transitiveClosure", "CALL algo.transitiveClosure() YIELD source, target RETURN count(*)"),
-    ("bipartite", "CALL algo.bipartite() YIELD node, side RETURN count(*)"),
-    ("maximalMatching", "CALL algo.maximalMatching() YIELD source, target RETURN count(*)"),
-    ("colouring", "CALL algo.colouring() YIELD node, colour RETURN count(*)"),
-    ("dominatingSet", "CALL algo.dominatingSet() YIELD node RETURN count(*)"),
-    ("kTruss", "CALL algo.kTruss({k: 3}) YIELD node RETURN count(*)"),
-    ("transitivity", "CALL algo.transitivity() YIELD transitivity RETURN transitivity"),
-    ("globalEfficiency", "CALL algo.globalEfficiency() YIELD efficiency RETURN efficiency"),
-    ("squareClustering", "CALL algo.squareClustering() YIELD node, coefficient RETURN count(*)"),
-    ("richClub", "CALL algo.richClub({k: 1}) YIELD coefficient RETURN coefficient"),
-    ("biconnectedComponents", "CALL algo.biconnectedComponents() YIELD node, componentId RETURN count(*)"),
-    ("nodeSimilarity", "CALL algo.nodeSimilarity({topK: 3}) YIELD node, other, similarity RETURN count(*)"),
-    ("overlap", "CALL algo.overlap() YIELD node, other, similarity RETURN count(*)"),
-    ("cosine", "CALL algo.cosine() YIELD node, other, similarity RETURN count(*)"),
-    ("effectiveSize", "CALL algo.effectiveSize() YIELD node, value RETURN count(*)"),
-    ("constraint", "CALL algo.constraint() YIELD node, value RETURN count(*)"),
-    ("reciprocity", "CALL algo.reciprocity() YIELD reciprocity RETURN reciprocity"),
-    ("louvain", "CALL algo.louvain() YIELD node, communityId, modularity RETURN count(*)"),
+    (
+        "averageNeighborDegree",
+        "CALL algo.averageNeighborDegree() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "degreeAssortativity",
+        "CALL algo.degreeAssortativity() YIELD assortativity RETURN count(*)",
+    ),
+    (
+        "articleRank",
+        "CALL algo.articleRank() YIELD node, score RETURN count(*)",
+    ),
+    (
+        "katz",
+        "CALL algo.katz({alpha: 0.05}) YIELD node, score RETURN count(*)",
+    ),
+    (
+        "hits",
+        "CALL algo.hits() YIELD node, hub, authority RETURN count(*)",
+    ),
+    (
+        "personalizedPageRank",
+        "CALL algo.personalizedPageRank([{a}]) YIELD node, score RETURN count(*)",
+    ),
+    (
+        "voteRank",
+        "CALL algo.voteRank({k: 3}) YIELD node, rank RETURN count(*)",
+    ),
+    (
+        "bellmanFord",
+        "CALL algo.bellmanFord({a}) YIELD node, distance RETURN count(*)",
+    ),
+    (
+        "allPairsShortestPath",
+        "CALL algo.allPairsShortestPath() YIELD source, target, hops RETURN count(*)",
+    ),
+    (
+        "wienerIndex",
+        "CALL algo.wienerIndex() YIELD wienerIndex RETURN wienerIndex",
+    ),
+    (
+        "dagLongestPath",
+        "CALL algo.dagLongestPath() YIELD node, position RETURN count(*)",
+    ),
+    (
+        "transitiveClosure",
+        "CALL algo.transitiveClosure() YIELD source, target RETURN count(*)",
+    ),
+    (
+        "bipartite",
+        "CALL algo.bipartite() YIELD node, side RETURN count(*)",
+    ),
+    (
+        "maximalMatching",
+        "CALL algo.maximalMatching() YIELD source, target RETURN count(*)",
+    ),
+    (
+        "colouring",
+        "CALL algo.colouring() YIELD node, colour RETURN count(*)",
+    ),
+    (
+        "dominatingSet",
+        "CALL algo.dominatingSet() YIELD node RETURN count(*)",
+    ),
+    (
+        "kTruss",
+        "CALL algo.kTruss({k: 3}) YIELD node RETURN count(*)",
+    ),
+    (
+        "transitivity",
+        "CALL algo.transitivity() YIELD transitivity RETURN transitivity",
+    ),
+    (
+        "globalEfficiency",
+        "CALL algo.globalEfficiency() YIELD efficiency RETURN efficiency",
+    ),
+    (
+        "squareClustering",
+        "CALL algo.squareClustering() YIELD node, coefficient RETURN count(*)",
+    ),
+    (
+        "richClub",
+        "CALL algo.richClub({k: 1}) YIELD coefficient RETURN coefficient",
+    ),
+    (
+        "biconnectedComponents",
+        "CALL algo.biconnectedComponents() YIELD node, componentId RETURN count(*)",
+    ),
+    (
+        "nodeSimilarity",
+        "CALL algo.nodeSimilarity({topK: 3}) YIELD node, other, similarity RETURN count(*)",
+    ),
+    (
+        "overlap",
+        "CALL algo.overlap() YIELD node, other, similarity RETURN count(*)",
+    ),
+    (
+        "cosine",
+        "CALL algo.cosine() YIELD node, other, similarity RETURN count(*)",
+    ),
+    (
+        "effectiveSize",
+        "CALL algo.effectiveSize() YIELD node, value RETURN count(*)",
+    ),
+    (
+        "constraint",
+        "CALL algo.constraint() YIELD node, value RETURN count(*)",
+    ),
+    (
+        "reciprocity",
+        "CALL algo.reciprocity() YIELD reciprocity RETURN reciprocity",
+    ),
+    (
+        "louvain",
+        "CALL algo.louvain() YIELD node, communityId, modularity RETURN count(*)",
+    ),
     // Routed to cdlp -- that *is* label propagation, LDBC's -- so it is an
     // alias rather than a distinct algorithm and is not counted.
-    ("labelPropagation", "CALL algo.labelPropagation() YIELD node, communityId RETURN count(*)"),
-    ("modularity", "CALL algo.modularity([[{a}, 0], [{b}, 0]]) YIELD modularity RETURN count(*)"),
-    ("kCore", "CALL algo.kCore() YIELD node, core RETURN count(*)"),
-    ("kMeans", "CALL algo.kMeans() YIELD node, cluster RETURN count(*)"),
-    ("nodeSimilarity", "CALL algo.nodeSimilarity() YIELD node1, node2, similarity RETURN count(*)"),
-    ("jaccard", "CALL algo.jaccard({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
-    ("adamicAdar", "CALL algo.adamicAdar({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
-    ("commonNeighbors", "CALL algo.commonNeighbors({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
-    ("commonNeighbours", "CALL algo.commonNeighbours({a}, {b}) YIELD node1, node2, score RETURN count(*)"),
-    ("allShortestPaths", "CALL algo.allShortestPaths({a}, {b}) YIELD path, rank, cost RETURN count(*)"),
-    ("aStar", "CALL algo.aStar({a}, {b}) YIELD path, cost RETURN count(*)"),
-    ("yens", "CALL algo.yens({a}, {b}, 3) YIELD path, rank, cost RETURN count(*)"),
-    ("randomWalk", "CALL algo.randomWalk({a}, {steps: 5, seed: 7}) YIELD node, step RETURN count(*)"),
-    ("node2vec", "CALL algo.node2vec() YIELD node, embedding RETURN count(*)"),
-    ("fastRP", "CALL algo.fastRP() YIELD node, embedding RETURN count(*)"),
-    ("graphSage", "CALL algo.graphSage() YIELD node, embedding RETURN count(*)"),
-    ("topologicalSort", "CALL algo.topologicalSort() YIELD node, position RETURN count(*)"),
-    ("cycleDetection", "CALL algo.cycleDetection() YIELD node, position RETURN count(*)"),
-    ("findCycle", "CALL algo.findCycle() YIELD node, position RETURN count(*)"),
-    ("bridges", "CALL algo.bridges() YIELD source, target RETURN count(*)"),
-    ("articulationPoints", "CALL algo.articulationPoints() YIELD node RETURN count(*)"),
+    (
+        "labelPropagation",
+        "CALL algo.labelPropagation() YIELD node, communityId RETURN count(*)",
+    ),
+    (
+        "modularity",
+        "CALL algo.modularity([[{a}, 0], [{b}, 0]]) YIELD modularity RETURN count(*)",
+    ),
+    (
+        "kCore",
+        "CALL algo.kCore() YIELD node, core RETURN count(*)",
+    ),
+    (
+        "kMeans",
+        "CALL algo.kMeans() YIELD node, cluster RETURN count(*)",
+    ),
+    (
+        "nodeSimilarity",
+        "CALL algo.nodeSimilarity() YIELD node1, node2, similarity RETURN count(*)",
+    ),
+    (
+        "jaccard",
+        "CALL algo.jaccard({a}, {b}) YIELD node1, node2, score RETURN count(*)",
+    ),
+    (
+        "adamicAdar",
+        "CALL algo.adamicAdar({a}, {b}) YIELD node1, node2, score RETURN count(*)",
+    ),
+    (
+        "commonNeighbors",
+        "CALL algo.commonNeighbors({a}, {b}) YIELD node1, node2, score RETURN count(*)",
+    ),
+    (
+        "commonNeighbours",
+        "CALL algo.commonNeighbours({a}, {b}) YIELD node1, node2, score RETURN count(*)",
+    ),
+    (
+        "allShortestPaths",
+        "CALL algo.allShortestPaths({a}, {b}) YIELD path, rank, cost RETURN count(*)",
+    ),
+    (
+        "aStar",
+        "CALL algo.aStar({a}, {b}) YIELD path, cost RETURN count(*)",
+    ),
+    (
+        "yens",
+        "CALL algo.yens({a}, {b}, 3) YIELD path, rank, cost RETURN count(*)",
+    ),
+    (
+        "randomWalk",
+        "CALL algo.randomWalk({a}, {steps: 5, seed: 7}) YIELD node, step RETURN count(*)",
+    ),
+    (
+        "node2vec",
+        "CALL algo.node2vec() YIELD node, embedding RETURN count(*)",
+    ),
+    (
+        "fastRP",
+        "CALL algo.fastRP() YIELD node, embedding RETURN count(*)",
+    ),
+    (
+        "graphSage",
+        "CALL algo.graphSage() YIELD node, embedding RETURN count(*)",
+    ),
+    (
+        "topologicalSort",
+        "CALL algo.topologicalSort() YIELD node, position RETURN count(*)",
+    ),
+    (
+        "cycleDetection",
+        "CALL algo.cycleDetection() YIELD node, position RETURN count(*)",
+    ),
+    (
+        "findCycle",
+        "CALL algo.findCycle() YIELD node, position RETURN count(*)",
+    ),
+    (
+        "bridges",
+        "CALL algo.bridges() YIELD source, target RETURN count(*)",
+    ),
+    (
+        "articulationPoints",
+        "CALL algo.articulationPoints() YIELD node RETURN count(*)",
+    ),
     // The four temporal/causal primitives ALGO-15 names, and which ALGO-01's
     // target of 40 counts explicitly.
-    ("temporalReachability", "CALL algo.temporalReachability({a}) YIELD node RETURN count(*)"),
-    ("temporalShortestPath", "CALL algo.temporalShortestPath({a}, {b}) YIELD path RETURN count(*)"),
-    ("propagationRanking", "CALL algo.propagationRanking({a}) YIELD node, rank RETURN count(*)"),
-    ("symptomExplanation", "CALL algo.symptomExplanation([[{b}, 9999]]) YIELD node, explains RETURN count(*)"),
+    (
+        "temporalReachability",
+        "CALL algo.temporalReachability({a}) YIELD node RETURN count(*)",
+    ),
+    (
+        "temporalShortestPath",
+        "CALL algo.temporalShortestPath({a}, {b}) YIELD path RETURN count(*)",
+    ),
+    (
+        "propagationRanking",
+        "CALL algo.propagationRanking({a}) YIELD node, rank RETURN count(*)",
+    ),
+    (
+        "symptomExplanation",
+        "CALL algo.symptomExplanation([[{b}, 9999]]) YIELD node, explains RETURN count(*)",
+    ),
     // Plausible aliases for the two above that we do *not* provide. Kept in
     // the list because the point of it is to name what a user would reach for,
     // and someone coming from an RCA tool reaches for these.
-    ("causalAncestors", "CALL algo.causalAncestors({a}) YIELD node RETURN count(*)"),
-    ("causalDescendants", "CALL algo.causalDescendants({a}) YIELD node RETURN count(*)"),
+    (
+        "causalAncestors",
+        "CALL algo.causalAncestors({a}) YIELD node RETURN count(*)",
+    ),
+    (
+        "causalDescendants",
+        "CALL algo.causalDescendants({a}) YIELD node RETURN count(*)",
+    ),
 ];
 
 fn main() {
@@ -181,7 +437,9 @@ fn main() {
     let mut redirected = Vec::new();
 
     for (name, template) in CANDIDATES {
-        let cypher = template.replace("{a}", &a.to_string()).replace("{b}", &b.to_string());
+        let cypher = template
+            .replace("{a}", &a.to_string())
+            .replace("{b}", &b.to_string());
         let outcome = match parse_query(&cypher) {
             Err(e) => format!("parse: {e}"),
             // The *mutating* executor, so a write-requiring algorithm is
@@ -280,10 +538,16 @@ fn main() {
             let check = parse_query("MATCH (n) WHERE n.pr IS NOT NULL RETURN count(n) AS n")
                 .expect("parse the write check");
             match QueryExecutor::new(&store).execute(&check) {
-                Ok(r) if r.records.first().and_then(|rec| rec.get("n"))
-                    .and_then(|v| v.as_property())
-                    .and_then(|p| p.as_integer())
-                    .is_some_and(|n| n > 0) => String::new(),
+                Ok(r)
+                    if r.records
+                        .first()
+                        .and_then(|rec| rec.get("n"))
+                        .and_then(|v| v.as_property())
+                        .and_then(|p| p.as_integer())
+                        .is_some_and(|n| n > 0) =>
+                {
+                    String::new()
+                }
                 Ok(_) => "the call succeeded and no node has the property".to_string(),
                 Err(e) => format!("{e}"),
             }
@@ -313,7 +577,10 @@ fn main() {
         "write_back_modes_refused": modes_refused,
     });
     let out = std::env::args().collect::<Vec<_>>();
-    let path = out.iter().position(|a| a == "--json").and_then(|i| out.get(i + 1));
+    let path = out
+        .iter()
+        .position(|a| a == "--json")
+        .and_then(|i| out.get(i + 1));
     let text = serde_json::to_string_pretty(&json).unwrap();
     match path {
         Some(p) => std::fs::write(p, &text).unwrap(),
@@ -322,6 +589,8 @@ fn main() {
     eprintln!(
         "{} distinct algorithms callable from Cypher ({} names incl. aliases), \
          of {} probed. ALGO-01 H1 target: 40",
-        distinct.len(), callable.len(), CANDIDATES.len()
+        distinct.len(),
+        callable.len(),
+        CANDIDATES.len()
     );
 }

@@ -70,9 +70,15 @@ fn a_query_past_the_threshold_is_logged_with_its_text() {
         &["UNWIND range(1, 20000) AS i CREATE (:Marker {tag: 'findme'})"],
     );
     assert!(out.contains("slow query"), "nothing logged:\n{out}");
-    assert!(out.contains("findme"), "the query text is not in the line:\n{out}");
+    assert!(
+        out.contains("findme"),
+        "the query text is not in the line:\n{out}"
+    );
     assert!(out.contains("elapsed_ms"), "no duration:\n{out}");
-    assert!(out.contains("threshold_ms"), "no threshold, so the line cannot be read in context:\n{out}");
+    assert!(
+        out.contains("threshold_ms"),
+        "no threshold, so the line cannot be read in context:\n{out}"
+    );
 }
 
 #[test]
@@ -89,5 +95,8 @@ fn zero_switches_the_log_off() {
         0,
         &["UNWIND range(1, 20000) AS i CREATE (:Marker {tag: 'silent'})"],
     );
-    assert!(!out.contains("slow query"), "0 should disable the log:\n{out}");
+    assert!(
+        !out.contains("slow query"),
+        "0 should disable the log:\n{out}"
+    );
 }

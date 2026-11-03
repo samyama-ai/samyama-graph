@@ -37,7 +37,10 @@ fn a_literal_non_boolean_operand_is_refused() {
         "{} AND true",
         "{x: []} AND true",
     ] {
-        assert!(rejected(&format!("RETURN {expr}")), "should be refused: {expr}");
+        assert!(
+            rejected(&format!("RETURN {expr}")),
+            "should be refused: {expr}"
+        );
     }
 }
 
@@ -45,11 +48,17 @@ fn a_literal_non_boolean_operand_is_refused() {
 #[test]
 fn all_three_operators_and_both_sides_are_checked() {
     for expr in [
-        "123 AND true", "true AND 123",
-        "123 OR true",  "true OR 123",
-        "123 XOR true", "true XOR 123",
+        "123 AND true",
+        "true AND 123",
+        "123 OR true",
+        "true OR 123",
+        "123 XOR true",
+        "true XOR 123",
     ] {
-        assert!(rejected(&format!("RETURN {expr}")), "should be refused: {expr}");
+        assert!(
+            rejected(&format!("RETURN {expr}")),
+            "should be refused: {expr}"
+        );
     }
 }
 
@@ -88,7 +97,9 @@ fn the_check_reaches_nested_expressions() {
     assert!(rejected("RETURN CASE WHEN 1 AND true THEN 1 ELSE 2 END"));
     // ...without disturbing the same shapes with legal operands.
     assert!(accepted("MATCH (n) WHERE (n.a AND true) RETURN n"));
-    assert!(accepted("RETURN CASE WHEN true AND false THEN 1 ELSE 2 END"));
+    assert!(accepted(
+        "RETURN CASE WHEN true AND false THEN 1 ELSE 2 END"
+    ));
 }
 
 /// Comparisons produce booleans, so they are legal operands even though their

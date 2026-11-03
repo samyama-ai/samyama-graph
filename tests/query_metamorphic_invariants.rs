@@ -137,7 +137,9 @@ fn declaring_an_index_does_not_change_any_answer() {
         let before = answer(&plain, q);
         let after = answer(&indexed, q);
         if before != after {
-            differing.push(format!("{q}\n      without: {before:?}\n      with:    {after:?}"));
+            differing.push(format!(
+                "{q}\n      without: {before:?}\n      with:    {after:?}"
+            ));
         }
     }
     assert!(
@@ -241,7 +243,10 @@ fn the_relation_compares_two_plans_and_not_one() {
     let bare = build(FIXTURE);
     assert_eq!(
         plan_of("MATCH (p:Person {age: 30}) RETURN p.name AS a", &bare),
-        plan_of("MATCH (p:Person) WHERE p.age = 30 RETURN p.name AS a", &bare),
+        plan_of(
+            "MATCH (p:Person) WHERE p.age = 30 RETURN p.name AS a",
+            &bare
+        ),
         "the planner used to normalise these into one plan without an index; if that \
          has changed, this relation is stronger than its comment claims"
     );
@@ -255,7 +260,10 @@ fn the_relation_compares_two_plans_and_not_one() {
     // deleted.
     let store = indexed_store();
     let inline = plan_of("MATCH (p:Person {age: 30}) RETURN p.name AS a", &store);
-    let predicate = plan_of("MATCH (p:Person) WHERE p.age = 30 RETURN p.name AS a", &store);
+    let predicate = plan_of(
+        "MATCH (p:Person) WHERE p.age = 30 RETURN p.name AS a",
+        &store,
+    );
     assert_eq!(
         inline, predicate,
         "#1380 made these converge; if they have diverged again the redundant \
@@ -290,7 +298,10 @@ fn the_relation_compares_two_plans_and_not_one() {
 
     // And a range, which #1380 deliberately does not touch: a scan that
     // narrows is not a scan that decides.
-    let ranged = plan_of("MATCH (p:Person) WHERE p.age > 20 RETURN p.name AS a", &store);
+    let ranged = plan_of(
+        "MATCH (p:Person) WHERE p.age > 20 RETURN p.name AS a",
+        &store,
+    );
     assert!(
         ranged.contains("IndexScan") && ranged.contains("Filter"),
         "a range scan must keep its filter: {ranged}"

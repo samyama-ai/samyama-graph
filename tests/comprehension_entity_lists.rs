@@ -91,7 +91,10 @@ fn ordinary_comprehensions_still_work() {
 fn a_null_list_gives_null() {
     let got = run("MATCH (n) RETURN [x IN null | x] AS r").expect("null is not an error");
     assert!(
-        matches!(got, Value::Null | Value::Property(samyama::graph::PropertyValue::Null)),
+        matches!(
+            got,
+            Value::Null | Value::Property(samyama::graph::PropertyValue::Null)
+        ),
         "expected null, got {got:?}"
     );
 }

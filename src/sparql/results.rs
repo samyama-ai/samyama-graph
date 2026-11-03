@@ -1,6 +1,6 @@
 //! SPARQL query results
 
-use crate::rdf::{Triple, RdfTerm};
+use crate::rdf::{RdfTerm, Triple};
 use std::collections::HashMap;
 
 /// SPARQL result format
@@ -99,7 +99,10 @@ mod tests {
     fn test_empty_results() {
         let results = SparqlResults::empty();
         match results {
-            SparqlResults::Bindings { variables, solutions } => {
+            SparqlResults::Bindings {
+                variables,
+                solutions,
+            } => {
                 assert!(variables.is_empty());
                 assert!(solutions.is_empty());
             }
@@ -111,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_query_solution_bind_and_get() {
-        use crate::rdf::{NamedNode, Literal};
+        use crate::rdf::{Literal, NamedNode};
 
         let mut sol = QuerySolution::new();
         let term = RdfTerm::NamedNode(NamedNode::new("http://example.org/x").unwrap());

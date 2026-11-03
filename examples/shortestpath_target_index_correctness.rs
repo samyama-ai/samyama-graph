@@ -14,11 +14,17 @@ fn build(indexed: bool) -> GraphStore {
     let mut ids = Vec::new();
     for i in 0..300i64 {
         let n = s.create_node_with_labels([Label::new("Account")]);
-        s.set_node_property("default", n, "id", PropertyValue::Integer(i)).unwrap();
+        s.set_node_property("default", n, "id", PropertyValue::Integer(i))
+            .unwrap();
         // Two accounts share `id`-adjacent values but differ on `kind`, so a
         // query naming both properties has a wrong answer available to it.
-        s.set_node_property("default", n, "kind",
-            PropertyValue::String(if i % 2 == 0 { "even" } else { "odd" }.into())).unwrap();
+        s.set_node_property(
+            "default",
+            n,
+            "kind",
+            PropertyValue::String(if i % 2 == 0 { "even" } else { "odd" }.into()),
+        )
+        .unwrap();
         ids.push(n);
     }
     for i in 0..(ids.len() - 1) {
@@ -26,14 +32,19 @@ fn build(indexed: bool) -> GraphStore {
     }
     if indexed {
         let q = parse_query("CREATE INDEX ON :Account(id)").unwrap();
-        MutQueryExecutor::new(&mut s, "default".to_string()).execute(&q).unwrap();
+        MutQueryExecutor::new(&mut s, "default".to_string())
+            .execute(&q)
+            .unwrap();
     }
     s
 }
 
 fn run(s: &GraphStore, q: &str) -> Option<usize> {
     let parsed = parse_query(q).ok()?;
-    QueryExecutor::new(s).execute(&parsed).ok().map(|b| b.records.len())
+    QueryExecutor::new(s)
+        .execute(&parsed)
+        .ok()
+        .map(|b| b.records.len())
 }
 
 fn main() {
@@ -59,8 +70,16 @@ fn main() {
     for (label, q) in cases {
         let (u, i) = (run(&plain, q), run(&indexed, q));
         let ok = u == i;
-        if !ok { bad += 1; }
-        println!("{:<52} unindexed={:?} indexed={:?}  {}", label, u, i, if ok { "ok" } else { "MISMATCH" });
+        if !ok {
+            bad += 1;
+        }
+        println!(
+            "{:<52} unindexed={:?} indexed={:?}  {}",
+            label,
+            u,
+            i,
+            if ok { "ok" } else { "MISMATCH" }
+        );
     }
     assert_eq!(bad, 0, "{bad} cases where the index changed the answer");
     println!("\nOK: the indexed target scan returns what the unindexed scan returned");

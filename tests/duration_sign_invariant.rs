@@ -39,12 +39,26 @@ fn duration_of(expr: &str) -> PropertyValue {
 /// No two components may disagree in sign.
 fn assert_sign_consistent(expr: &str) {
     let v = duration_of(expr);
-    let PropertyValue::Duration { months, days, seconds, nanos } = v else {
+    let PropertyValue::Duration {
+        months,
+        days,
+        seconds,
+        nanos,
+    } = v
+    else {
         panic!("{expr} did not produce a Duration: {v:?}");
     };
     let signs: Vec<i32> = [months as i128, days as i128, seconds as i128, nanos as i128]
         .iter()
-        .map(|x| if *x > 0 { 1 } else if *x < 0 { -1 } else { 0 })
+        .map(|x| {
+            if *x > 0 {
+                1
+            } else if *x < 0 {
+                -1
+            } else {
+                0
+            }
+        })
         .filter(|s| *s != 0)
         .collect();
     let mixed = signs.windows(2).any(|w| w[0] != w[1]);
@@ -113,12 +127,25 @@ fn every_duration_path_is_sign_consistent() {
 /// nothing. A hand-built mixed-sign duration is what the bug looked like.
 #[test]
 fn the_invariant_would_catch_a_mixed_sign_duration() {
-    let bad = PropertyValue::Duration { months: 0, days: 0, seconds: -1, nanos: 600_000_000 };
+    let bad = PropertyValue::Duration {
+        months: 0,
+        days: 0,
+        seconds: -1,
+        nanos: 600_000_000,
+    };
     // This is exactly what `div_euclid` produced for -0.4s.
     assert_eq!(bad.to_cypher_string(), "PT-1.6S");
     let signs: Vec<i32> = [bad_seconds(&bad), bad_nanos(&bad)]
         .iter()
-        .map(|x| if *x > 0 { 1 } else if *x < 0 { -1 } else { 0 })
+        .map(|x| {
+            if *x > 0 {
+                1
+            } else if *x < 0 {
+                -1
+            } else {
+                0
+            }
+        })
         .filter(|s| *s != 0)
         .collect();
     assert!(
@@ -128,8 +155,14 @@ fn the_invariant_would_catch_a_mixed_sign_duration() {
 }
 
 fn bad_seconds(p: &PropertyValue) -> i64 {
-    match p { PropertyValue::Duration { seconds, .. } => *seconds, _ => 0 }
+    match p {
+        PropertyValue::Duration { seconds, .. } => *seconds,
+        _ => 0,
+    }
 }
 fn bad_nanos(p: &PropertyValue) -> i64 {
-    match p { PropertyValue::Duration { nanos, .. } => *nanos as i64, _ => 0 }
+    match p {
+        PropertyValue::Duration { nanos, .. } => *nanos as i64,
+        _ => 0,
+    }
 }

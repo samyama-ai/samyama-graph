@@ -81,7 +81,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
+            eprintln!(
+                "--data-dir <path> is required (this example needs input; see the header comment)"
+            );
             std::process::exit(2)
         });
 
@@ -109,7 +111,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     ids.sort_unstable();
     println!("{} persons\n", ids.len());
-    println!("{:>5} {:>9} {:>12} {:>10} {:>10}", "pct", "persons", "triangles", "median", "ns/tri");
+    println!(
+        "{:>5} {:>9} {:>12} {:>10} {:>10}",
+        "pct", "persons", "triangles", "median", "ns/tri"
+    );
 
     let mut points: Vec<(f64, f64)> = Vec::new();
     for p in [25u32, 50, 75, 100] {
@@ -135,7 +140,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .fold((0.0, 0.0), |(a, b), (x, y)| (a + x.ln(), b + y.ln()));
         let (mx, my) = (sx / n, sy / n);
-        let num: f64 = points.iter().map(|(x, y)| (x.ln() - mx) * (y.ln() - my)).sum();
+        let num: f64 = points
+            .iter()
+            .map(|(x, y)| (x.ln() - mx) * (y.ln() - my))
+            .sum();
         let den: f64 = points.iter().map(|(x, _)| (x.ln() - mx).powi(2)).sum();
         let k = num / den;
         println!("\nruntime ~ triangles^{k:.2}");

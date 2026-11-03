@@ -30,7 +30,10 @@ use samyama::query::executor::QueryExecutor;
 use samyama::query::parser::parse_query;
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 /// `articles` :Article nodes, `terms` :MeSHTerm nodes each with a distinct
@@ -65,7 +68,9 @@ fn build(articles: usize, terms: usize, per_article: usize) -> GraphStore {
             } else {
                 (a * per_article + k * 7919) % terms
             };
-            store.create_edge(aid, term_ids[t % terms], "ANNOTATED_WITH").unwrap();
+            store
+                .create_edge(aid, term_ids[t % terms], "ANNOTATED_WITH")
+                .unwrap();
             e += 1;
         }
     }
@@ -124,17 +129,25 @@ fn plan(store: &GraphStore, cypher: &str) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let articles: usize =
-        arg(&args, "--articles").and_then(|v| v.parse().ok()).unwrap_or(200_000);
-    let terms: usize = arg(&args, "--terms").and_then(|v| v.parse().ok()).unwrap_or(100_000);
-    let per_article: usize =
-        arg(&args, "--per-article").and_then(|v| v.parse().ok()).unwrap_or(5);
-    let reps: usize = arg(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(3);
+    let articles: usize = arg(&args, "--articles")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200_000);
+    let terms: usize = arg(&args, "--terms")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100_000);
+    let per_article: usize = arg(&args, "--per-article")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let reps: usize = arg(&args, "--reps")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
     // Nodes of an unrelated label with no edges, standing in for the other
     // KGs of a federation. The Q16 residual on #1812 was a cost per node in
     // the *store*, not per node or edge the query reads, so it only shows
     // with these present.
-    let filler: usize = arg(&args, "--filler").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let filler: usize = arg(&args, "--filler")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     let t = Instant::now();
     let mut store = build(articles, terms, per_article);
@@ -150,7 +163,10 @@ fn main() {
 
     let t = Instant::now();
     let edges = store.edge_count();
-    println!("edge_count() = {edges} in {:.3} ms", t.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "edge_count() = {edges} in {:.3} ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
 
     let shapes: &[(&str, &str)] = &[
         (

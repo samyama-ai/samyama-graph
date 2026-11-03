@@ -29,7 +29,8 @@ fn store(n: i64, indexed: bool) -> GraphStore {
     let add = |s: &mut GraphStore, v: Option<PropertyValue>| {
         let id = s.create_node("P");
         if let Some(v) = v {
-            s.set_node_property("default", id, "id".to_string(), v).unwrap();
+            s.set_node_property("default", id, "id".to_string(), v)
+                .unwrap();
         }
     };
     for i in 1..=n {
@@ -46,7 +47,11 @@ fn store(n: i64, indexed: bool) -> GraphStore {
 fn ids(store: &GraphStore, cypher: &str) -> Vec<String> {
     let query = parse_query(cypher).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
     let batch = QueryExecutor::new(store).execute(&query).unwrap();
-    let mut out: Vec<String> = batch.records.iter().map(|r| format!("{:?}", r.get("v"))).collect();
+    let mut out: Vec<String> = batch
+        .records
+        .iter()
+        .map(|r| format!("{:?}", r.get("v")))
+        .collect();
     out.sort();
     out
 }
@@ -79,7 +84,12 @@ fn a_two_sided_range_answers_what_the_unindexed_store_answers() {
     let with = store(300, true);
     let without = store(300, false);
     for cypher in CASES {
-        assert_eq!(ids(&with, cypher), ids(&without, cypher), "{cypher}\n{}", plan(&with, cypher));
+        assert_eq!(
+            ids(&with, cypher),
+            ids(&without, cypher),
+            "{cypher}\n{}",
+            plan(&with, cypher)
+        );
     }
     // Spot-check the ties are really in there, so the comparison above is
     // not two empty answers agreeing.
@@ -91,15 +101,33 @@ fn a_two_sided_range_answers_what_the_unindexed_store_answers() {
 #[test]
 fn the_scan_reads_both_ends_from_the_index() {
     let s = store(300, true);
-    let text = plan(&s, "MATCH (p:P) WHERE p.id > 100 AND p.id < 100 + 50 RETURN count(p)");
-    assert!(text.contains("P.id > Integer(100), <= Float(150.0)"), "{text}");
+    let text = plan(
+        &s,
+        "MATCH (p:P) WHERE p.id > 100 AND p.id < 100 + 50 RETURN count(p)",
+    );
+    assert!(
+        text.contains("P.id > Integer(100), <= Float(150.0)"),
+        "{text}"
+    );
     // Single-bound scans at a tie, which missed the other spelling before.
-    for (q, want) in [("MATCH (p:P) WHERE p.id >= 100.0 RETURN count(p) AS v", "Integer(205)"), ("MATCH (p:P) WHERE p.id <= 150 RETURN count(p) AS v", "Integer(155)")] {
+    for (q, want) in [
+        (
+            "MATCH (p:P) WHERE p.id >= 100.0 RETURN count(p) AS v",
+            "Integer(205)",
+        ),
+        (
+            "MATCH (p:P) WHERE p.id <= 150 RETURN count(p) AS v",
+            "Integer(155)",
+        ),
+    ] {
         assert_eq!(ids(&s, q), ids(&store(300, false), q), "{q}");
         assert!(ids(&s, q)[0].contains(want), "{q}: {:?}", ids(&s, q));
     }
     // A bound of another type is not a bound on this index.
-    let text = plan(&s, "MATCH (p:P) WHERE p.id > 100 AND p.id < '2' RETURN count(p)");
+    let text = plan(
+        &s,
+        "MATCH (p:P) WHERE p.id > 100 AND p.id < '2' RETURN count(p)",
+    );
     assert!(!text.contains(", <="), "{text}");
 }
 

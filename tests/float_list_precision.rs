@@ -41,15 +41,24 @@ fn a_float_in_a_list_literal_survives_unwind_unchanged() {
     let store = GraphStore::new();
     // Exact equality is the assertion. 1.3 as an f32 widened back to f64 is
     // 1.2999999523162842, which is not 1.3 by any tolerance worth having.
-    assert_eq!(floats(&store, "UNWIND [1.3, 1.5] AS v RETURN v AS x"), vec![1.3, 1.5]);
-    assert_eq!(floats(&store, "UNWIND [999.99] AS v RETURN v AS x"), vec![999.99]);
+    assert_eq!(
+        floats(&store, "UNWIND [1.3, 1.5] AS v RETURN v AS x"),
+        vec![1.3, 1.5]
+    );
+    assert_eq!(
+        floats(&store, "UNWIND [999.99] AS v RETURN v AS x"),
+        vec![999.99]
+    );
 }
 
 #[test]
 fn ordering_floats_from_a_list_compares_the_values_that_were_written() {
     let store = GraphStore::new();
     assert_eq!(
-        floats(&store, "UNWIND [1.3, 999.99, 1.5] AS v WITH v ORDER BY v DESC RETURN v AS x"),
+        floats(
+            &store,
+            "UNWIND [1.3, 999.99, 1.5] AS v WITH v ORDER BY v DESC RETURN v AS x"
+        ),
         vec![999.99, 1.5, 1.3]
     );
 }
@@ -99,10 +108,15 @@ fn an_embedding_written_as_a_list_literal_is_still_searchable() {
          YIELD node RETURN node.name AS x",
     )
     .expect("query should parse");
-    let found = QueryExecutor::new(&store).execute(&q).expect("search should run");
+    let found = QueryExecutor::new(&store)
+        .execute(&q)
+        .expect("search should run");
     assert_eq!(found.records.len(), 1, "the index must not be empty");
     assert_eq!(
-        found.records[0].get("x").and_then(|v| v.as_property()).and_then(|p| p.as_string()),
+        found.records[0]
+            .get("x")
+            .and_then(|v| v.as_property())
+            .and_then(|p| p.as_string()),
         Some("near")
     );
 }

@@ -72,7 +72,11 @@ fn call_yield_with_projects_and_counts() {
     let s = store();
     // The plain case from the issue.
     assert_eq!(
-        one_int(&s, "CALL algo.pageRank() YIELD node, score WITH score RETURN count(*) AS c", "c"),
+        one_int(
+            &s,
+            "CALL algo.pageRank() YIELD node, score WITH score RETURN count(*) AS c",
+            "c"
+        ),
         3,
         "one row per node survives the WITH"
     );
@@ -139,10 +143,17 @@ fn an_aggregate_after_with_sees_every_yielded_row() {
         &s,
         "CALL algo.pageRank() YIELD node, score WITH sum(score) AS total RETURN total",
     );
-    assert_eq!(rows.len(), 1, "an aggregate with no grouping key gives one row");
+    assert_eq!(
+        rows.len(),
+        1,
+        "an aggregate with no grouping key gives one row"
+    );
     match rows[0].iter().find(|(c, _)| c == "total").map(|(_, v)| v) {
         Some(Value::Property(PropertyValue::Float(f))) => {
-            assert!((*f - 1.0).abs() < 0.05, "pageRank scores sum to about 1, got {f}")
+            assert!(
+                (*f - 1.0).abs() < 0.05,
+                "pageRank scores sum to about 1, got {f}"
+            )
         }
         other => panic!("wanted a float, got {other:?}"),
     }
@@ -214,7 +225,11 @@ fn a_match_before_the_call_still_works() {
         "a plain MATCH is unaffected"
     );
     assert_eq!(
-        one_int(&s, "CALL algo.pageRank() YIELD node, score RETURN count(*) AS c", "c"),
+        one_int(
+            &s,
+            "CALL algo.pageRank() YIELD node, score RETURN count(*) AS c",
+            "c"
+        ),
         3,
         "CALL with no WITH is unaffected"
     );

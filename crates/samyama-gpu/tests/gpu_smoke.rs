@@ -34,7 +34,11 @@ fn gpu_context_smoke() {
         return;
     };
     assert!(!ctx.adapter_name().is_empty());
-    eprintln!("[gpu-test] adapter: {} ({:?})", ctx.adapter_name(), ctx.backend());
+    eprintln!(
+        "[gpu-test] adapter: {} ({:?})",
+        ctx.adapter_name(),
+        ctx.backend()
+    );
 }
 
 #[test]

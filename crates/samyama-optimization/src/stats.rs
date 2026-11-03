@@ -49,7 +49,11 @@ use std::f64::consts::PI;
 pub fn average_ranks(row: &[f64]) -> Vec<f64> {
     let n = row.len();
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| row[a].partial_cmp(&row[b]).unwrap_or(std::cmp::Ordering::Equal));
+    order.sort_by(|&a, &b| {
+        row[a]
+            .partial_cmp(&row[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut ranks = vec![0.0; n];
     let mut i = 0;
@@ -164,7 +168,11 @@ pub fn friedman(blocks: &[Vec<f64>]) -> Option<FriedmanResult> {
     };
     let df1 = k - 1;
     let df2 = (k - 1) * (n - 1);
-    let f_p = if f.is_infinite() { 0.0 } else { f_sf(f, df1 as f64, df2 as f64) };
+    let f_p = if f.is_infinite() {
+        0.0
+    } else {
+        f_sf(f, df1 as f64, df2 as f64)
+    };
 
     Some(FriedmanResult {
         k,
@@ -255,7 +263,10 @@ pub fn wilcoxon_signed_rank(a: &[f64], b: &[f64]) -> Option<WilcoxonResult> {
     let (p, method) = if !has_ties && !dropped_zeros && n <= EXACT_MAX_N {
         (exact_two_sided_p(statistic, n), WilcoxonMethod::Exact)
     } else {
-        (normal_two_sided_p(w_plus, n, &tie_sizes), WilcoxonMethod::Normal)
+        (
+            normal_two_sided_p(w_plus, n, &tie_sizes),
+            WilcoxonMethod::Normal,
+        )
     };
 
     Some(WilcoxonResult {

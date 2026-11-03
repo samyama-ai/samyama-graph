@@ -72,7 +72,10 @@ use samyama::graph::GraphStore;
 use samyama::query::QueryEngine;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 /// Process CPU time in seconds (user + system), from the kernel.
@@ -117,19 +120,31 @@ fn cores_used_for<F: FnMut()>(min_wall: f64, mut f: F) -> (f64, f64, u64) {
     loop {
         f();
         iters += 1;
-        if t0.elapsed().as_secs_f64() >= min_wall { break; }
+        if t0.elapsed().as_secs_f64() >= min_wall {
+            break;
+        }
     }
     let wall = t0.elapsed().as_secs_f64();
     let cpu = cpu_seconds() - c0;
-    if wall <= 0.0 { (0.0, 0.0, iters) } else { (cpu / wall, wall, iters) }
+    if wall <= 0.0 {
+        (0.0, 0.0, iters)
+    } else {
+        (cpu / wall, wall, iters)
+    }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let scale: usize = arg(&args, "--scale").and_then(|v| v.parse().ok()).unwrap_or(200_000);
-    let depth: usize = arg(&args, "--depth").and_then(|v| v.parse().ok()).unwrap_or(10);
+    let scale: usize = arg(&args, "--scale")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200_000);
+    let depth: usize = arg(&args, "--depth")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
 
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
 
     // ── fixture ─────────────────────────────────────────────────────────────
     //
@@ -177,9 +192,7 @@ fn main() {
     });
 
     // ── arm 2: the requirement, a single deep traversal ─────────────────────
-    let trav_q = format!(
-        "MATCH p=(a:Chain)-[:NEXT*1..{depth}]->(b:Chain) RETURN count(p)"
-    );
+    let trav_q = format!("MATCH p=(a:Chain)-[:NEXT*1..{depth}]->(b:Chain) RETURN count(p)");
     let (trav_cores, trav_wall, trav_iters) = cores_used_for(MIN_WALL, || {
         let _ = engine.execute(&trav_q, &store);
     });
@@ -193,16 +206,20 @@ fn main() {
     println!("  \"control_query\": {control_q:?},");
     println!("  \"control_mean_cores\": {control_cores:.3},");
     println!("  \"control_wall_s\": {control_wall:.3}, \"control_iters\": {control_iters},");
-    println!("  \"control_throughput_per_s\": {:.2},",
-             control_iters as f64 / control_wall.max(f64::MIN_POSITIVE));
+    println!(
+        "  \"control_throughput_per_s\": {:.2},",
+        control_iters as f64 / control_wall.max(f64::MIN_POSITIVE)
+    );
     println!("  \"instrument_ok\": {instrument_ok},");
     println!("  \"traversal_query\": {trav_q:?},");
     println!("  \"traversal_mean_cores\": {trav_cores:.3},");
     println!("  \"traversal_wall_s\": {trav_wall:.3}, \"traversal_iters\": {trav_iters},");
     // The number a core count cannot substitute for. Compared across runs, a
     // rise in cores beside a fall here is the #1460 signature.
-    println!("  \"traversal_throughput_per_s\": {:.2},",
-             trav_iters as f64 / trav_wall.max(f64::MIN_POSITIVE));
+    println!(
+        "  \"traversal_throughput_per_s\": {:.2},",
+        trav_iters as f64 / trav_wall.max(f64::MIN_POSITIVE)
+    );
     println!("  \"traversal_core_efficiency\": {efficiency:.4}");
     println!("}}");
 }

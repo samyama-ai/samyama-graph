@@ -116,7 +116,7 @@ impl Node {
             version: 1,
             labels,
             properties: PropertyMap::new(), // zero allocation until first insert
-            created_at: 0,  // skip chrono::Utc::now() — saves syscall per node
+            created_at: 0,                  // skip chrono::Utc::now() — saves syscall per node
             updated_at: 0,
         }
     }
@@ -137,11 +137,7 @@ impl Node {
     }
 
     /// Create a new node with labels and properties
-    pub fn new_with_properties(
-        id: NodeId,
-        labels: Vec<Label>,
-        properties: PropertyMap,
-    ) -> Self {
+    pub fn new_with_properties(id: NodeId, labels: Vec<Label>, properties: PropertyMap) -> Self {
         let now = chrono::Utc::now().timestamp_millis();
         let label_set: HashSet<Label> = labels.into_iter().collect();
 
@@ -181,7 +177,11 @@ impl Node {
     }
 
     /// Set a property value
-    pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<PropertyValue>) -> Option<PropertyValue> {
+    pub fn set_property(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<PropertyValue>,
+    ) -> Option<PropertyValue> {
         let old = self.properties.insert(key.into(), value.into());
         self.update_timestamp();
         old
@@ -352,9 +352,15 @@ mod tests {
         node.set_property("active", true);
 
         // Get properties
-        assert_eq!(node.get_property("name").unwrap().as_string(), Some("Alice"));
+        assert_eq!(
+            node.get_property("name").unwrap().as_string(),
+            Some("Alice")
+        );
         assert_eq!(node.get_property("age").unwrap().as_integer(), Some(30));
-        assert_eq!(node.get_property("active").unwrap().as_boolean(), Some(true));
+        assert_eq!(
+            node.get_property("active").unwrap().as_boolean(),
+            Some(true)
+        );
         assert_eq!(node.property_count(), 3);
 
         // Remove property
@@ -372,11 +378,7 @@ mod tests {
         props.insert("age".to_string(), 25i64.into());
         props.insert("score".to_string(), 95.5.into());
 
-        let node = Node::new_with_properties(
-            NodeId::new(5),
-            vec![Label::new("Student")],
-            props,
-        );
+        let node = Node::new_with_properties(NodeId::new(5), vec![Label::new("Student")], props);
 
         assert_eq!(node.property_count(), 3);
         assert_eq!(node.get_property("name").unwrap().as_string(), Some("Bob"));

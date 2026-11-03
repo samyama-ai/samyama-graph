@@ -68,8 +68,8 @@ fn a_dual_labelled_node_merges_whichever_label_comes_first() {
         let snapshot = snapshot_with_label_order(order);
         let mut store = uniprot_side();
 
-        let stats = import_tenant_with_dedup(&mut store, &snapshot[..], &["accession"])
-            .expect("import");
+        let stats =
+            import_tenant_with_dedup(&mut store, &snapshot[..], &["accession"]).expect("import");
 
         assert_eq!(
             stats.merged_count, 1,
@@ -88,7 +88,10 @@ fn a_dual_labelled_node_merges_whichever_label_comes_first() {
             .map(|l| l.as_str().to_string())
             .collect();
         for expected in ["Protein", "ChemblTarget"] {
-            assert!(labels.contains(&expected.to_string()), "labels {order}: {labels:?}");
+            assert!(
+                labels.contains(&expected.to_string()),
+                "labels {order}: {labels:?}"
+            );
         }
     }
 }
@@ -105,7 +108,8 @@ fn nodes_sharing_no_label_are_not_merged() {
         PropertyValue::String("P12345".to_string()),
     );
 
-    let stats = import_tenant_with_dedup(&mut store, &snapshot[..], &["accession"]).expect("import");
+    let stats =
+        import_tenant_with_dedup(&mut store, &snapshot[..], &["accession"]).expect("import");
 
     assert_eq!(stats.merged_count, 0, "no shared label, so no merge");
     assert_eq!(store.all_nodes().len(), 2);
@@ -147,7 +151,8 @@ fn labels_absent_from_the_snapshot_are_not_indexed_or_merged() {
     );
     let before = store.all_nodes().len();
 
-    let stats = import_tenant_with_dedup(&mut store, &snapshot[..], &["accession"]).expect("import");
+    let stats =
+        import_tenant_with_dedup(&mut store, &snapshot[..], &["accession"]).expect("import");
 
     assert_eq!(stats.merged_count, 1, "should merge only with the :Protein");
     assert_eq!(
@@ -172,7 +177,8 @@ fn with_header_labels(snapshot: &[u8], labels: &[&str]) -> Vec<u8> {
     let mut header: serde_json::Value = serde_json::from_str(head).expect("header json");
     header["labels"] = serde_json::json!(labels);
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(format!("{header}\n{rest}").as_bytes()).expect("encode");
+    enc.write_all(format!("{header}\n{rest}").as_bytes())
+        .expect("encode");
     enc.finish().expect("finish")
 }
 
@@ -187,10 +193,17 @@ fn a_header_that_omits_a_label_still_merges_on_it() {
         let snapshot = with_header_labels(&exported, header);
         let mut store = uniprot_side();
 
-        let stats = import_tenant_with_dedup(&mut store, &snapshot[..], &["accession"])
-            .expect("import");
+        let stats =
+            import_tenant_with_dedup(&mut store, &snapshot[..], &["accession"]).expect("import");
 
-        assert_eq!(stats.merged_count, 1, "header {header:?}: must merge on :Protein");
-        assert_eq!(store.all_nodes().len(), 1, "header {header:?}: no duplicate");
+        assert_eq!(
+            stats.merged_count, 1,
+            "header {header:?}: must merge on :Protein"
+        );
+        assert_eq!(
+            store.all_nodes().len(),
+            1,
+            "header {header:?}: no duplicate"
+        );
     }
 }

@@ -1976,8 +1976,15 @@ fn similarity_and_structural_holes() {
         && rec_node(r, "other") == ids[2]
         && rec_float(r, "similarity") == 1.0));
     // `topK` in the map is the documented spelling and limits each node to one pair.
-    let top1 = algo_rows(&mut store, "algo.nodeSimilarity", vec![lmap(&[("topK", pint(1))])]);
-    assert_eq!(top1.len(), algo_rows(&mut store, "algo.nodeSimilarity", vec![li(1)]).len());
+    let top1 = algo_rows(
+        &mut store,
+        "algo.nodeSimilarity",
+        vec![lmap(&[("topK", pint(1))])],
+    );
+    assert_eq!(
+        top1.len(),
+        algo_rows(&mut store, "algo.nodeSimilarity", vec![li(1)]).len()
+    );
 
     for name in ["algo.overlap", "algo.cosine"] {
         let rows = algo_rows(&mut store, name, vec![]);
@@ -2622,7 +2629,11 @@ fn set_property_operator_paths() {
         vec![("m".to_string(), "k".to_string(), var("unbound"))],
     );
     assert!(op.next_mut(&mut store, TENANT).is_err());
-    assert_eq!(store.node_property(b, "k"), Some(pint(5)), "k is left as it was");
+    assert_eq!(
+        store.node_property(b, "k"),
+        Some(pint(5)),
+        "k is left as it was"
+    );
 
     // Null removes, on nodes and on edges.
     let mut op = SetPropertyOperator::new(
@@ -6549,18 +6560,33 @@ fn write_back_refuses_a_node_that_appears_twice() {
     let (mut store, ids) = path4();
     let id = NodeId::new(ids[0] as u64);
     let mut op = write_back_op(vec![
-        score_row(Some(Value::NodeRef(id)), Value::Property(PropertyValue::Float(1.0))),
-        score_row(Some(Value::NodeRef(id)), Value::Property(PropertyValue::Float(2.0))),
+        score_row(
+            Some(Value::NodeRef(id)),
+            Value::Property(PropertyValue::Float(1.0)),
+        ),
+        score_row(
+            Some(Value::NodeRef(id)),
+            Value::Property(PropertyValue::Float(2.0)),
+        ),
     ]);
-    let err = op.write_back(&mut store, TENANT, "wb", "score").unwrap_err().to_string();
+    let err = op
+        .write_back(&mut store, TENANT, "wb", "score")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("appears in two result rows"), "{err}");
 }
 
 #[test]
 fn write_back_refuses_a_row_with_no_node() {
     let (mut store, _) = path4();
-    let mut op = write_back_op(vec![score_row(None, Value::Property(PropertyValue::Float(1.0)))]);
-    let err = op.write_back(&mut store, TENANT, "wb", "score").unwrap_err().to_string();
+    let mut op = write_back_op(vec![score_row(
+        None,
+        Value::Property(PropertyValue::Float(1.0)),
+    )]);
+    let err = op
+        .write_back(&mut store, TENANT, "wb", "score")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("no `node`"), "{err}");
 }
 
@@ -6568,8 +6594,14 @@ fn write_back_refuses_a_row_with_no_node() {
 fn write_back_refuses_a_value_that_is_not_a_property() {
     let (mut store, ids) = path4();
     let id = NodeId::new(ids[0] as u64);
-    let mut op = write_back_op(vec![score_row(Some(Value::NodeRef(id)), Value::NodeRef(id))]);
-    let err = op.write_back(&mut store, TENANT, "wb", "score").unwrap_err().to_string();
+    let mut op = write_back_op(vec![score_row(
+        Some(Value::NodeRef(id)),
+        Value::NodeRef(id),
+    )]);
+    let err = op
+        .write_back(&mut store, TENANT, "wb", "score")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("is not a property value"), "{err}");
     assert_eq!(store.node_property(id, "wb"), None, "nothing was written");
 }
@@ -6583,7 +6615,10 @@ fn write_back_stores_a_value_on_a_node_given_by_reference() {
         Value::Property(PropertyValue::Float(0.5)),
     )]);
     op.write_back(&mut store, TENANT, "wb", "score").unwrap();
-    assert_eq!(store.node_property(id, "wb"), Some(PropertyValue::Float(0.5)));
+    assert_eq!(
+        store.node_property(id, "wb"),
+        Some(PropertyValue::Float(0.5))
+    );
 }
 
 #[test]
@@ -6607,9 +6642,15 @@ fn write_back_refuses_a_row_missing_the_column_rather_than_erasing_the_property(
     let mut row = Record::new();
     row.bind("node".to_string(), Value::NodeRef(id));
     let mut op = write_back_op(vec![row]);
-    let err = op.write_back(&mut store, TENANT, "wb", "score").unwrap_err().to_string();
+    let err = op
+        .write_back(&mut store, TENANT, "wb", "score")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("no `score` column"), "{err}");
-    assert_eq!(store.node_property(id, "wb"), Some(PropertyValue::Integer(7)));
+    assert_eq!(
+        store.node_property(id, "wb"),
+        Some(PropertyValue::Integer(7))
+    );
 }
 
 #[test]
@@ -6621,7 +6662,10 @@ fn write_back_removes_the_property_for_a_null_result() {
     // Both shapes a null takes in a result row.
     let mut op = write_back_op(vec![
         score_row(Some(Value::NodeRef(a)), Value::Null),
-        score_row(Some(Value::NodeRef(b)), Value::Property(PropertyValue::Null)),
+        score_row(
+            Some(Value::NodeRef(b)),
+            Value::Property(PropertyValue::Null),
+        ),
     ]);
     op.write_back(&mut store, TENANT, "wb", "score").unwrap();
     assert_eq!(store.node_property(a, "wb"), None);
@@ -6652,10 +6696,16 @@ fn a_graph_the_algorithm_never_used_is_refused_not_ignored() {
 
 #[test]
 fn reset_forgets_that_a_projection_was_used() {
-    let mut op = AlgorithmOperator::new("algo.pageRank".to_string(), vec![lmap(&[("graph", pstr("p"))])]);
+    let mut op = AlgorithmOperator::new(
+        "algo.pageRank".to_string(),
+        vec![lmap(&[("graph", pstr("p"))])],
+    );
     op.projection_used.set(true);
     op.reset();
-    assert!(op.check_projection_used().is_err(), "a re-run must take its view again");
+    assert!(
+        op.check_projection_used().is_err(),
+        "a re-run must take its view again"
+    );
 }
 
 /// A filter the algorithm reads is one its config map accepts, and one it
@@ -6669,15 +6719,28 @@ fn reset_forgets_that_a_projection_was_used() {
 fn config_map_filters_are_read_and_accepted() {
     let (store, ids) = path4();
     let outcome = |name: &str, args: Vec<Expression>| -> Result<usize, String> {
-        run_algo(&store, name, args).map(|rows| rows.len()).map_err(|e| e.to_string())
+        run_algo(&store, name, args)
+            .map(|rows| rows.len())
+            .map_err(|e| e.to_string())
     };
     let source = |rest: Vec<Expression>| [vec![li(ids[0])], rest].concat();
     for name in [
-        "algo.wcc", "algo.katz", "algo.hits", "algo.articleRank", "algo.eccentricity",
-        "algo.nodeSimilarity", "algo.randomWalk",
+        "algo.wcc",
+        "algo.katz",
+        "algo.hits",
+        "algo.articleRank",
+        "algo.eccentricity",
+        "algo.nodeSimilarity",
+        "algo.randomWalk",
     ] {
         let walk = name == "algo.randomWalk";
-        let call = |filter: Expression| if walk { source(vec![filter]) } else { vec![filter] };
+        let call = |filter: Expression| {
+            if walk {
+                source(vec![filter])
+            } else {
+                vec![filter]
+            }
+        };
         // randomWalk's first argument is its source, so the map is its only
         // way to take a label; the others read either spelling the same.
         for label in ["V", "Nope"].into_iter().filter(|_| !walk) {
@@ -6692,7 +6755,12 @@ fn config_map_filters_are_read_and_accepted() {
             "{name}: a label matching no node must change the answer"
         );
         let typed = outcome(name, call(lmap(&[("edgeType", pstr("E"))])));
-        assert!(!typed.clone().is_err_and(|e| e.contains("unknown config key")), "{name}: {typed:?}");
+        assert!(
+            !typed
+                .clone()
+                .is_err_and(|e| e.contains("unknown config key")),
+            "{name}: {typed:?}"
+        );
     }
     for key in ["startTime", "timeProperty"] {
         let e = outcome("algo.wcc", vec![lmap(&[(key, pint(1))])]).unwrap_err();

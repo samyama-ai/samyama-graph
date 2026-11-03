@@ -42,11 +42,20 @@ fn solve(engine: &QueryEngine, store: &mut GraphStore, cfg: &str) -> Result<Stri
 #[test]
 fn an_unknown_algorithm_is_refused_and_the_message_lists_the_real_ones() {
     let (mut store, engine) = store_with_vars();
-    let err = solve(&engine, &mut store, "algorithm:'NoSuchSolver', maxIterations:3")
-        .expect_err("an unknown solver name must not silently become Jaya");
-    assert!(err.contains("NoSuchSolver"), "the message must name what was asked: {err}");
-    assert!(err.contains("Jaya") && err.contains("PSO"),
-            "and list what is available: {err}");
+    let err = solve(
+        &engine,
+        &mut store,
+        "algorithm:'NoSuchSolver', maxIterations:3",
+    )
+    .expect_err("an unknown solver name must not silently become Jaya");
+    assert!(
+        err.contains("NoSuchSolver"),
+        "the message must name what was asked: {err}"
+    );
+    assert!(
+        err.contains("Jaya") && err.contains("PSO"),
+        "and list what is available: {err}"
+    );
 }
 
 #[test]
@@ -56,8 +65,8 @@ fn the_solvers_that_shipped_unreachable_now_run() {
     // this fails rather than quietly answering with a different algorithm.
     let (mut store, engine) = store_with_vars();
     for name in [
-        "PSO", "DE", "BMR", "BWR", "BMWR", "QOJaya", "SAMPJaya", "EHRJaya", "ITLBO",
-        "GOTLBO", "QORao", "SAPHR",
+        "PSO", "DE", "BMR", "BWR", "BMWR", "QOJaya", "SAMPJaya", "EHRJaya", "ITLBO", "GOTLBO",
+        "QORao", "SAPHR",
     ] {
         let cfg = format!("algorithm:'{name}', maxIterations:3, populationSize:6");
         assert!(
@@ -81,7 +90,10 @@ fn an_unknown_config_key_is_refused() {
     let (mut store, engine) = store_with_vars();
     let err = solve(&engine, &mut store, "algorithm:'Jaya', maxIterationz:3")
         .expect_err("a misspelt key must not be ignored");
-    assert!(err.contains("maxIterationz"), "the message must name the key: {err}");
+    assert!(
+        err.contains("maxIterationz"),
+        "the message must name the key: {err}"
+    );
 }
 
 #[test]
@@ -91,8 +103,16 @@ fn both_spellings_of_the_config_keys_are_accepted() {
     // callers, and refusing the second is what made `{maxIterations: 5}` run a
     // hundred iterations.
     let (mut store, engine) = store_with_vars();
-    assert!(solve(&engine, &mut store,
-                  "algorithm:'Jaya', max_iterations:3, population_size:6").is_ok());
-    assert!(solve(&engine, &mut store,
-                  "algorithm:'Jaya', maxIterations:3, populationSize:6").is_ok());
+    assert!(solve(
+        &engine,
+        &mut store,
+        "algorithm:'Jaya', max_iterations:3, population_size:6"
+    )
+    .is_ok());
+    assert!(solve(
+        &engine,
+        &mut store,
+        "algorithm:'Jaya', maxIterations:3, populationSize:6"
+    )
+    .is_ok());
 }

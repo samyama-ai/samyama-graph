@@ -47,16 +47,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Vec<_>>();
     let queries_path = args.get("queries").ok_or("--queries required")?.clone();
     let out_path = args.get("csv").ok_or("--csv required")?.clone();
-    let warm: usize = args
-        .get("warm")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
-    let runs: usize = args
-        .get("runs")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(3);
+    let warm: usize = args.get("warm").and_then(|s| s.parse().ok()).unwrap_or(1);
+    let runs: usize = args.get("runs").and_then(|s| s.parse().ok()).unwrap_or(3);
 
-    eprintln!("[b3] loading {} snapshots into single store...", snapshots.len());
+    eprintln!(
+        "[b3] loading {} snapshots into single store...",
+        snapshots.len()
+    );
     let mut store = GraphStore::new();
     let load_start = Instant::now();
     for snap in &snapshots {
@@ -129,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if i == 0 {
             continue;
         } // header
-        // Parse CSV: id,name,kg,category,hops,cypher (cypher may be quoted with commas inside)
+          // Parse CSV: id,name,kg,category,hops,cypher (cypher may be quoted with commas inside)
         if let Some((id, kg, cypher)) = parse_csv_row(&line) {
             queries.push((id, kg, cypher));
         }
@@ -159,8 +156,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(e) => {
                     // Sanitize for CSV: collapse newlines + commas to spaces/semicolons
-                    let msg = e.to_string()
-                        .lines().next().unwrap_or("error").to_string()
+                    let msg = e
+                        .to_string()
+                        .lines()
+                        .next()
+                        .unwrap_or("error")
+                        .to_string()
                         .replace(',', ";");
                     status = format!("error:{}", msg);
                     latencies_ms.push(-1.0);

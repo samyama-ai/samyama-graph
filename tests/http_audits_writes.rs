@@ -29,7 +29,10 @@ const TOKEN: &str = "s3cret-token";
 
 fn digest_of(token: &str) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -66,7 +69,9 @@ fn entries(path: &std::path::Path) -> Vec<serde_json::Value> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     text.lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("line is not JSON: {l:?} ({e})")))
+        .map(|l| {
+            serde_json::from_str(l).unwrap_or_else(|e| panic!("line is not JSON: {l:?} ({e})"))
+        })
         .collect()
 }
 
@@ -101,12 +106,19 @@ async fn a_write_is_recorded_with_the_subject_that_made_it() {
         .oneshot(post_query("CREATE (:N {n: 1})", Some(TOKEN)))
         .await
         .expect("response");
-    assert!(res.status().is_success(), "the write itself failed: {}", res.status());
+    assert!(
+        res.status().is_success(),
+        "the write itself failed: {}",
+        res.status()
+    );
 
     let rows = entries(&f.log_path);
     assert_eq!(rows.len(), 1, "expected one entry, got {rows:?}");
     let e = &rows[0];
-    assert_eq!(e["subject"], "ops", "the entry names the credential, not the token");
+    assert_eq!(
+        e["subject"], "ops",
+        "the entry names the credential, not the token"
+    );
     assert_eq!(e["method"], "POST");
     assert_eq!(e["path"], "/api/query");
     assert_eq!(e["status"], 200);
@@ -124,10 +136,20 @@ async fn the_token_never_appears_in_the_log() {
     // file. Asserted because this is the failure that would be discovered by
     // somebody else reading the log.
     let f = fixture(credentials("ops", TOKEN));
-    let _ = f.app.clone().oneshot(post_query("CREATE (:N)", Some(TOKEN))).await;
+    let _ = f
+        .app
+        .clone()
+        .oneshot(post_query("CREATE (:N)", Some(TOKEN)))
+        .await;
     let text = std::fs::read_to_string(&f.log_path).unwrap_or_default();
-    assert!(!text.contains(TOKEN), "the log contains the bearer token:\n{text}");
-    assert!(!text.contains("Bearer"), "the log contains the header:\n{text}");
+    assert!(
+        !text.contains(TOKEN),
+        "the log contains the bearer token:\n{text}"
+    );
+    assert!(
+        !text.contains("Bearer"),
+        "the log contains the header:\n{text}"
+    );
 }
 
 #[tokio::test]
@@ -170,7 +192,11 @@ async fn a_read_submitted_as_a_post_is_recorded_too() {
     // Stated rather than hidden. Telling this apart means parsing Cypher in a
     // middleware; over-recording is the safe direction.
     let f = fixture(credentials("ops", TOKEN));
-    let _ = f.app.clone().oneshot(post_query("MATCH (n) RETURN count(n)", Some(TOKEN))).await;
+    let _ = f
+        .app
+        .clone()
+        .oneshot(post_query("MATCH (n) RETURN count(n)", Some(TOKEN)))
+        .await;
     let rows = entries(&f.log_path);
     assert_eq!(rows.len(), 1, "a POST is recorded whether or not it wrote");
 }

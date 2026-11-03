@@ -36,15 +36,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _c = bench_setup::report_calibration();
 
     let args: Vec<String> = std::env::args().collect();
-    let arg = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1));
+    let arg = |f: &str| {
+        args.iter()
+            .position(|a| a == f)
+            .and_then(|i| args.get(i + 1))
+    };
     let data_dir = arg("--data-dir").map(PathBuf::from).unwrap_or_else(|| {
-            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
+        eprintln!(
+            "--data-dir <path> is required (this example needs input; see the header comment)"
+        );
+        std::process::exit(2)
+    });
+    let post_id: i64 = arg("--post-id")
+        .unwrap_or_else(|| {
+            eprintln!(
+                "--post-id <id> is required (this example needs input; see the header comment)"
+            );
             std::process::exit(2)
-        });
-    let post_id: i64 = arg("--post-id").unwrap_or_else(|| {
-            eprintln!("--post-id <id> is required (this example needs input; see the header comment)");
-            std::process::exit(2)
-        }).parse()?;
+        })
+        .parse()?;
     let runs: usize = arg("--runs").map(|s| s.parse()).transpose()?.unwrap_or(11);
 
     let mut graph = GraphStore::new();
@@ -76,7 +86,10 @@ ORDER BY c.creationDate DESC
 LIMIT 20"
     );
 
-    for (label, cypher) in [("IS7, EXISTS (ours)", &ours), ("IS7, OPTIONAL MATCH (theirs)", &theirs)] {
+    for (label, cypher) in [
+        ("IS7, EXISTS (ours)", &ours),
+        ("IS7, OPTIONAL MATCH (theirs)", &theirs),
+    ] {
         let q = match parse_query(cypher) {
             Ok(q) => q,
             Err(e) => {
@@ -104,7 +117,10 @@ LIMIT 20"
             continue;
         }
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!("{label:<32} median {:>9.3} ms   rows {rows}", times[times.len() / 2]);
+        println!(
+            "{label:<32} median {:>9.3} ms   rows {rows}",
+            times[times.len() / 2]
+        );
     }
 
     for (label, cypher) in [("ours", &ours), ("theirs", &theirs)] {

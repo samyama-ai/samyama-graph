@@ -28,7 +28,9 @@ fn accepted(cypher: &str) -> bool {
 
 #[test]
 fn a_property_read_on_a_path_is_refused() {
-    assert!(refused("MATCH (n) MATCH r = (n)-[*]->() WHERE r.name = 'apa' RETURN r"));
+    assert!(refused(
+        "MATCH (n) MATCH r = (n)-[*]->() WHERE r.name = 'apa' RETURN r"
+    ));
     assert!(refused("MATCH p = (a)-->(b) RETURN p.x"));
 }
 

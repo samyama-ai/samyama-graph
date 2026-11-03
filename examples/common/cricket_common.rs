@@ -30,11 +30,11 @@ pub struct LoadResult {
 // ============================================================================
 
 pub struct IdMaps {
-    pub player: HashMap<String, NodeId>,      // cricsheet_id -> NodeId
-    pub team: HashMap<String, NodeId>,        // name.lower() -> NodeId
-    pub venue: HashMap<String, NodeId>,       // name.lower() -> NodeId
-    pub tournament: HashMap<String, NodeId>,  // name.lower() -> NodeId
-    pub season: HashMap<String, NodeId>,      // year_str -> NodeId
+    pub player: HashMap<String, NodeId>,     // cricsheet_id -> NodeId
+    pub team: HashMap<String, NodeId>,       // name.lower() -> NodeId
+    pub venue: HashMap<String, NodeId>,      // name.lower() -> NodeId
+    pub tournament: HashMap<String, NodeId>, // name.lower() -> NodeId
+    pub season: HashMap<String, NodeId>,     // year_str -> NodeId
     pub player_teams: std::collections::HashSet<String>, // "pid|team" edge dedup
 }
 
@@ -124,7 +124,10 @@ fn get_or_create_player(
     }
     let id = graph.create_node("Player");
     if let Some(n) = graph.get_node_mut(id) {
-        n.set_property("cricsheet_id", PropertyValue::String(cricsheet_id.to_string()));
+        n.set_property(
+            "cricsheet_id",
+            PropertyValue::String(cricsheet_id.to_string()),
+        );
         n.set_property("name", PropertyValue::String(clean_str(name)));
     }
     maps.player.insert(cricsheet_id.to_string(), id);
@@ -279,7 +282,12 @@ fn ingest_match(
     };
 
     let tournament_id = if !tournament_name.is_empty() {
-        Some(get_or_create_tournament(graph, maps, &tournament_name, node_count))
+        Some(get_or_create_tournament(
+            graph,
+            maps,
+            &tournament_name,
+            node_count,
+        ))
     } else {
         None
     };
@@ -297,10 +305,7 @@ fn ingest_match(
             if let Some(arr) = player_list.as_array() {
                 for pname_val in arr {
                     let pname = pname_val.as_str().unwrap_or("");
-                    let pid = registry
-                        .get(pname)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let pid = registry.get(pname).and_then(|v| v.as_str()).unwrap_or("");
                     if !pid.is_empty() {
                         get_or_create_player(graph, maps, pid, pname, node_count);
                     }
@@ -374,7 +379,10 @@ fn ingest_match(
                     graph.create_edge(*tid, match_id, "WON_TOSS")?;
                 } else {
                     let mut props = samyama_sdk::PropertyMap::new();
-                    props.insert("decision".to_string(), PropertyValue::String(toss_decision.clone()));
+                    props.insert(
+                        "decision".to_string(),
+                        PropertyValue::String(toss_decision.clone()),
+                    );
                     graph.create_edge_with_properties(*tid, match_id, "WON_TOSS", props)?;
                 }
                 *edge_count += 1;
@@ -420,10 +428,7 @@ fn ingest_match(
             if let (Some(arr), Some(tid)) = (player_list.as_array(), team_nid) {
                 for pname_val in arr {
                     let pname = pname_val.as_str().unwrap_or("");
-                    let pid = registry
-                        .get(pname)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let pid = registry.get(pname).and_then(|v| v.as_str()).unwrap_or("");
                     if pid.is_empty() {
                         continue;
                     }
@@ -445,10 +450,7 @@ fn ingest_match(
     if let Some(pom_arr) = player_of_match {
         for pname_val in pom_arr {
             let pname = pname_val.as_str().unwrap_or("");
-            let pid = registry
-                .get(pname)
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let pid = registry.get(pname).and_then(|v| v.as_str()).unwrap_or("");
             if let Some(&player_nid) = maps.player.get(pid) {
                 graph.create_edge(player_nid, match_id, "PLAYER_OF_MATCH")?;
                 *edge_count += 1;
@@ -541,7 +543,9 @@ fn ingest_match(
                                         .map(|arr| {
                                             arr.iter()
                                                 .filter_map(|f| {
-                                                    f.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())
+                                                    f.get("name")
+                                                        .and_then(|n| n.as_str())
+                                                        .map(|s| s.to_string())
                                                 })
                                                 .collect()
                                         })
@@ -575,9 +579,7 @@ fn ingest_match(
 
                     // Maiden check
                     if !bowler_this_over.is_empty() && bowler_runs_this_over == 0 {
-                        let entry = bowling
-                            .entry(bowler_this_over)
-                            .or_insert((0, 0, 0, 0));
+                        let entry = bowling.entry(bowler_this_over).or_insert((0, 0, 0, 0));
                         entry.3 += 1;
                     }
                 }
@@ -611,9 +613,7 @@ fn ingest_match(
                     if is_super_over {
                         props.insert("super_over".to_string(), PropertyValue::Integer(1));
                     }
-                    graph.create_edge_with_properties(
-                        player_nid, match_id, "BATTED_IN", props,
-                    )?;
+                    graph.create_edge_with_properties(player_nid, match_id, "BATTED_IN", props)?;
                     *edge_count += 1;
                 }
             }
@@ -628,8 +628,7 @@ fn ingest_match(
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if let Some(&player_nid) = maps.player.get(pid) {
-                    let overs =
-                        (*balls_bowled / 6) as f64 + (*balls_bowled % 6) as f64 / 10.0;
+                    let overs = (*balls_bowled / 6) as f64 + (*balls_bowled % 6) as f64 / 10.0;
                     let economy = if *balls_bowled > 0 {
                         (*runs_conceded as f64 / (*balls_bowled as f64 / 6.0) * 100.0).round()
                             / 100.0
@@ -652,9 +651,7 @@ fn ingest_match(
                         "innings_num".to_string(),
                         PropertyValue::Integer(inn_idx as i64),
                     );
-                    graph.create_edge_with_properties(
-                        player_nid, match_id, "BOWLED_IN", props,
-                    )?;
+                    graph.create_edge_with_properties(player_nid, match_id, "BOWLED_IN", props)?;
                     *edge_count += 1;
                 }
             }
@@ -687,20 +684,17 @@ fn ingest_match(
                     {
                         if let Some(&bowler_nid) = maps.player.get(bowler_pid) {
                             let mut props = samyama_sdk::PropertyMap::new();
-                            props.insert(
-                                "kind".to_string(),
-                                PropertyValue::String(d.kind.clone()),
-                            );
-                            props.insert(
-                                "over".to_string(),
-                                PropertyValue::Integer(d.over),
-                            );
+                            props.insert("kind".to_string(), PropertyValue::String(d.kind.clone()));
+                            props.insert("over".to_string(), PropertyValue::Integer(d.over));
                             props.insert(
                                 "match_file_id".to_string(),
                                 PropertyValue::String(file_id.to_string()),
                             );
                             graph.create_edge_with_properties(
-                                bowler_nid, out_id, "DISMISSED", props,
+                                bowler_nid,
+                                out_id,
+                                "DISMISSED",
+                                props,
                             )?;
                             *edge_count += 1;
                         }
@@ -719,16 +713,16 @@ fn ingest_match(
                                     "kind".to_string(),
                                     PropertyValue::String(d.kind.clone()),
                                 );
-                                props.insert(
-                                    "over".to_string(),
-                                    PropertyValue::Integer(d.over),
-                                );
+                                props.insert("over".to_string(), PropertyValue::Integer(d.over));
                                 props.insert(
                                     "match_file_id".to_string(),
                                     PropertyValue::String(file_id.to_string()),
                                 );
                                 graph.create_edge_with_properties(
-                                    fielder_nid, out_id, "FIELDED_DISMISSAL", props,
+                                    fielder_nid,
+                                    out_id,
+                                    "FIELDED_DISMISSAL",
+                                    props,
                                 )?;
                                 *edge_count += 1;
                             }
@@ -752,7 +746,11 @@ pub fn load_dataset(
     max_matches: usize,
 ) -> Result<LoadResult, Error> {
     let json_dir = data_dir.join("json");
-    let search_dir = if json_dir.exists() { &json_dir } else { data_dir };
+    let search_dir = if json_dir.exists() {
+        &json_dir
+    } else {
+        data_dir
+    };
 
     // Collect JSON files
     let mut files: Vec<_> = fs::read_dir(search_dir)?
@@ -772,7 +770,11 @@ pub fn load_dataset(
     } else {
         files.len()
     };
-    eprintln!("Found {} JSON files in {}", format_num(files.len()), search_dir.display());
+    eprintln!(
+        "Found {} JSON files in {}",
+        format_num(files.len()),
+        search_dir.display()
+    );
 
     let mut maps = IdMaps::new();
     let mut node_count = 0usize;
@@ -787,10 +789,7 @@ pub fn load_dataset(
             break;
         }
 
-        let file_id = fpath
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let file_id = fpath.file_stem().and_then(|s| s.to_str()).unwrap_or("");
 
         let content = match fs::read_to_string(fpath) {
             Ok(c) => c,
@@ -814,7 +813,14 @@ pub fn load_dataset(
             continue;
         }
 
-        match ingest_match(graph, &data, file_id, &mut maps, &mut node_count, &mut edge_count) {
+        match ingest_match(
+            graph,
+            &data,
+            file_id,
+            &mut maps,
+            &mut node_count,
+            &mut edge_count,
+        ) {
             Ok(()) => loaded += 1,
             Err(_) => {
                 errors += 1;

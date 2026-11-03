@@ -115,7 +115,11 @@ fn main() {
     store.create_edge(a, b, "R").unwrap();
 
     let try_call = |name: &str, counterpart: &str| -> (bool, String) {
-        let q = format!("CALL {}({}) YIELD node RETURN count(*)", name, args_for(counterpart));
+        let q = format!(
+            "CALL {}({}) YIELD node RETURN count(*)",
+            name,
+            args_for(counterpart)
+        );
         match parse_query(&q) {
             Err(e) => (false, format!("{e}")),
             Ok(p) => match QueryExecutor::new(&store).execute(&p) {

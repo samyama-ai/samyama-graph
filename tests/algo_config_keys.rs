@@ -35,11 +35,16 @@ fn run(s: &GraphStore, q: &str) -> Result<usize, String> {
 #[test]
 fn an_unknown_config_key_is_refused_and_the_accepted_ones_are_named() {
     let s = store();
-    let err = run(&s, "CALL algo.pageRank({scale: 2}) YIELD node, score RETURN node")
-        .expect_err("a key the algorithm does not read must be refused");
+    let err = run(
+        &s,
+        "CALL algo.pageRank({scale: 2}) YIELD node, score RETURN node",
+    )
+    .expect_err("a key the algorithm does not read must be refused");
     assert!(err.contains("scale"), "the message names the key: {err}");
-    assert!(err.contains("iterations") && err.contains("damping"),
-            "and lists what it does read: {err}");
+    assert!(
+        err.contains("iterations") && err.contains("damping"),
+        "and lists what it does read: {err}"
+    );
 }
 
 #[test]
@@ -48,8 +53,11 @@ fn write_property_is_read_now_and_needs_the_write_executor() {
     // since ALGO-06 (#1683), so it is no longer "unknown"; on the read
     // executor it is refused because it writes.
     let s = store();
-    let err = run(&s, "CALL algo.pageRank({writeProperty: 'pr'}) YIELD node, score RETURN node")
-        .expect_err("a write-back must not run on the read executor");
+    let err = run(
+        &s,
+        "CALL algo.pageRank({writeProperty: 'pr'}) YIELD node, score RETURN node",
+    )
+    .expect_err("a write-back must not run on the read executor");
     assert!(!err.contains("unknown config key"), "{err}");
     assert!(err.contains("requires write access"), "{err}");
 }
@@ -59,15 +67,20 @@ fn a_typo_is_refused_rather_than_run_at_the_default() {
     let s = store();
     // The failure this prevents is silent: `iteratons` ran 20 iterations and
     // said nothing, so a caller tuning it saw no change and no error.
-    let err = run(&s, "CALL algo.pageRank({iteratons: 100}) YIELD node, score RETURN node")
-        .expect_err("a misspelled key must be refused");
+    let err = run(
+        &s,
+        "CALL algo.pageRank({iteratons: 100}) YIELD node, score RETURN node",
+    )
+    .expect_err("a misspelled key must be refused");
     assert!(err.contains("iteratons"), "{err}");
 }
 
 #[test]
 fn every_key_an_algorithm_reads_is_still_accepted() {
     let s = store();
-    let src = s.get_nodes_by_label(&samyama::graph::Label::new("N"))[0].id.as_u64();
+    let src = s.get_nodes_by_label(&samyama::graph::Label::new("N"))[0]
+        .id
+        .as_u64();
     for q in [
         "CALL algo.pageRank({iterations: 10, damping: 0.9}) YIELD node, score RETURN node".to_string(),
         "CALL algo.cdlp({maxIterations: 5}) YIELD node, community RETURN node".to_string(),
@@ -96,8 +109,13 @@ fn the_message_says_mutate_is_not_implemented() {
     // (#1683). "Unknown key" alone would read as a typo rather than a missing
     // feature, so the message says what is missing: graph projections.
     let s = store();
-    let err = run(&s, "CALL algo.cdlp({mutate: true}) YIELD node, community RETURN node")
-        .expect_err("refused");
-    assert!(err.contains("ALGO-06") || err.contains("write-back"),
-            "the message points at the unbuilt feature: {err}");
+    let err = run(
+        &s,
+        "CALL algo.cdlp({mutate: true}) YIELD node, community RETURN node",
+    )
+    .expect_err("refused");
+    assert!(
+        err.contains("ALGO-06") || err.contains("write-back"),
+        "the message points at the unbuilt feature: {err}"
+    );
 }

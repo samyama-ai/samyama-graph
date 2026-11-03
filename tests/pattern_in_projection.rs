@@ -53,6 +53,9 @@ fn the_legitimate_uses_are_untouched() {
 /// obvious from "unexpected syntax".
 #[test]
 fn the_error_suggests_the_alternative() {
-    let e = format!("{:?}", parse_query("MATCH (n) RETURN (n)-[]->()").unwrap_err());
+    let e = format!(
+        "{:?}",
+        parse_query("MATCH (n) RETURN (n)-[]->()").unwrap_err()
+    );
     assert!(e.contains("EXISTS"), "error does not point at EXISTS: {e}");
 }

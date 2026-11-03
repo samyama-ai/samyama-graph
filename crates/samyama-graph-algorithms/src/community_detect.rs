@@ -114,7 +114,10 @@ pub fn modularity(view: &GraphView, communities: &[usize]) -> Option<f64> {
     let mut communities: Vec<(usize, f64)> = tot.into_iter().collect();
     communities.sort_unstable_by_key(|&(c, _)| c);
     let q: f64 = inside / two_m
-        - communities.iter().map(|&(_, t)| (t / two_m) * (t / two_m)).sum::<f64>();
+        - communities
+            .iter()
+            .map(|&(_, t)| (t / two_m) * (t / two_m))
+            .sum::<f64>();
     Some(q)
 }
 

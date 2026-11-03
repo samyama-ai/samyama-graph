@@ -2,8 +2,8 @@
 //!
 //! Captures changes to the graph for indexing, replication, etc.
 
-use super::types::{Label, NodeId};
 use super::property::{PropertyMap, PropertyValue};
+use super::types::{Label, NodeId};
 
 #[derive(Debug, Clone)]
 pub enum IndexEvent {

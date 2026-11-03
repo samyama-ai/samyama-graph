@@ -76,7 +76,8 @@ fn main() {
     let iris_stable = !iris_first.is_empty() && iris_first == iris_second;
 
     let lossless = imported.lossless();
-    let ok = nodes_in == nodes_out && edges_in == edges_out && types_kept && iris_stable && lossless;
+    let ok =
+        nodes_in == nodes_out && edges_in == edges_out && types_kept && iris_stable && lossless;
 
     println!("RDF round trip (NDS-15)");
     println!("  triples written      {}", report.triples_written);
@@ -92,7 +93,14 @@ fn main() {
         imported.language_tags_dropped,
         imported.literals_typed_as_string,
     );
-    println!("  {}", if ok { "round trip preserved the graph" } else { "ROUND TRIP LOST SOMETHING" });
+    println!(
+        "  {}",
+        if ok {
+            "round trip preserved the graph"
+        } else {
+            "ROUND TRIP LOST SOMETHING"
+        }
+    );
 
     if let Some(path) = json_out {
         let json = format!(
@@ -116,10 +124,12 @@ fn iris(store: &GraphStore) -> Vec<String> {
     let mut v: Vec<String> = store
         .all_nodes()
         .into_iter()
-        .filter_map(|n| match store.node_properties_merged(n.id).get(IRI_PROPERTY) {
-            Some(PropertyValue::String(s)) => Some(s.clone()),
-            _ => None,
-        })
+        .filter_map(
+            |n| match store.node_properties_merged(n.id).get(IRI_PROPERTY) {
+                Some(PropertyValue::String(s)) => Some(s.clone()),
+                _ => None,
+            },
+        )
         .collect();
     v.sort();
     v

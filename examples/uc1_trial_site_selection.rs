@@ -229,7 +229,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     println!("\n[pareto] {} non-dominated plans:", rows.len());
-    println!("  {:>12}  {:>10}  {:>8}  selected sites", "time-to-enrol", "cost", "n_sites");
+    println!(
+        "  {:>12}  {:>10}  {:>8}  selected sites",
+        "time-to-enrol", "cost", "n_sites"
+    );
     for (f1, f2, n, sites) in rows.iter().take(10) {
         let preview = if sites.len() > 8 {
             format!("{:?}... ({} more)", &sites[..6], sites.len() - 6)

@@ -295,7 +295,8 @@ fn a_property_group_key_streams_too_and_still_merges_groups() {
         }
     }
 
-    let q = "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c ORDER BY c DESC LIMIT 1";
+    let q =
+        "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c ORDER BY c DESC LIMIT 1";
     let p = plan(&store, q);
     assert!(p.contains("topk=1 desc"), "plan was:\n{p}");
     assert_eq!(
@@ -345,7 +346,8 @@ fn count_distinct_streams_over_the_deduped_counts() {
     store.create_edge(ids[1], ids[0], "CITES").unwrap();
     store.create_edge(ids[2], ids[1], "CITES").unwrap();
 
-    let q = "MATCH (a:Article)<-[:CITES]-(b) RETURN a, count(DISTINCT b) AS c ORDER BY c DESC LIMIT 1";
+    let q =
+        "MATCH (a:Article)<-[:CITES]-(b) RETURN a, count(DISTINCT b) AS c ORDER BY c DESC LIMIT 1";
     let p = plan(&store, q);
     assert!(p.contains("topk=1 desc"), "plan was:\n{p}");
     assert_eq!(counts(&store, q), vec![1]);
@@ -358,7 +360,10 @@ fn no_limit_declines_and_sorts_every_group() {
     let store = graded(&[3, 2, 1]);
     let q = "MATCH (a:Article)<-[:CITES]-() RETURN a, count(*) AS c ORDER BY c DESC";
     let p = plan(&store, q);
-    assert!(!p.contains("topk="), "there is no k to bound by; plan was:\n{p}");
+    assert!(
+        !p.contains("topk="),
+        "there is no k to bound by; plan was:\n{p}"
+    );
     assert!(p.contains("Sort ("), "plan was:\n{p}");
     assert_eq!(counts(&store, q), vec![3, 2, 1]);
 }
@@ -380,7 +385,8 @@ fn no_order_by_declines() {
 #[test]
 fn order_by_the_group_key_declines_and_answers_right() {
     let store = graded(&[3, 2, 1]);
-    let q = "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c ORDER BY t DESC LIMIT 2";
+    let q =
+        "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c ORDER BY t DESC LIMIT 2";
     let p = plan(&store, q);
     assert!(!p.contains("topk="), "plan was:\n{p}");
     assert!(p.contains("Sort ("), "plan was:\n{p}");

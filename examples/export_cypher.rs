@@ -39,7 +39,11 @@ fn literal(v: &PropertyValue) -> String {
         PropertyValue::Float(f) => {
             // `1` would be read back as an integer and change the property's
             // type across the move, which is a silent schema change.
-            if f.fract() == 0.0 { format!("{f:.1}") } else { f.to_string() }
+            if f.fract() == 0.0 {
+                format!("{f:.1}")
+            } else {
+                f.to_string()
+            }
         }
         PropertyValue::Boolean(b) => b.to_string(),
         PropertyValue::Array(a) => {
@@ -68,7 +72,10 @@ fn literal(v: &PropertyValue) -> String {
         PropertyValue::Null => "null".to_string(),
         PropertyValue::Vector(v) => format!(
             "[{}]",
-            v.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(", ")
+            v.iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }

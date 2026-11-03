@@ -9,7 +9,10 @@
 use std::collections::BTreeMap;
 
 fn baseline() -> serde_json::Value {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tools/conformance/baseline.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tools/conformance/baseline.json"
+    );
     serde_json::from_str(&std::fs::read_to_string(path).expect("baseline.json is missing"))
         .expect("baseline.json is not valid JSON")
 }
@@ -26,7 +29,11 @@ fn the_baseline_records_every_construct_with_a_known_verdict() {
         verdicts.len()
     );
     const KNOWN: [&str; 6] = [
-        "CONFORMS", "DIVERGES", "REJECTS", "INEXPRESSIBLE", "NONDETERMINISTIC",
+        "CONFORMS",
+        "DIVERGES",
+        "REJECTS",
+        "INEXPRESSIBLE",
+        "NONDETERMINISTIC",
         "ENGINE_UNAVAILABLE",
     ];
     for (case, v) in &verdicts {
@@ -41,8 +48,7 @@ fn the_baseline_is_not_all_green() {
     // #1646. If this ever fails because every cell conforms, delete the test with the
     // commit that made it true.
     let b = baseline();
-    let verdicts: BTreeMap<String, String> =
-        serde_json::from_value(b["verdicts"].clone()).unwrap();
+    let verdicts: BTreeMap<String, String> = serde_json::from_value(b["verdicts"].clone()).unwrap();
     let conforming = verdicts.values().filter(|v| *v == "CONFORMS").count();
     assert!(
         conforming < verdicts.len(),
@@ -64,7 +70,10 @@ fn the_baseline_says_which_suite_and_which_build_it_came_from() {
          engine change"
     );
     assert!(
-        b["engine_version"].as_str().unwrap_or_default().contains("samyama"),
+        b["engine_version"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("samyama"),
         "engine_version must name the build measured"
     );
     assert!(

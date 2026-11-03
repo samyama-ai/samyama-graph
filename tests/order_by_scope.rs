@@ -98,5 +98,7 @@ fn a_constant_sort_key_is_not_a_variable() {
 #[test]
 fn expressions_over_in_scope_variables_are_allowed() {
     assert!(accepted("WITH 1 AS a WITH a ORDER BY a * a DESC RETURN a"));
-    assert!(accepted("WITH 1 AS a WITH a ORDER BY -1 * a ASC, a DESC RETURN a"));
+    assert!(accepted(
+        "WITH 1 AS a WITH a ORDER BY -1 * a ASC, a DESC RETURN a"
+    ));
 }

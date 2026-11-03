@@ -36,7 +36,10 @@ fn one_node() -> GraphStore {
 #[test]
 fn a_zero_length_path_survives_a_with() {
     let store = one_node();
-    assert_eq!(path_of(&store, "MATCH p = (a) WITH p RETURN p", "p"), (1, 0));
+    assert_eq!(
+        path_of(&store, "MATCH p = (a) WITH p RETURN p", "p"),
+        (1, 0)
+    );
 }
 
 #[test]
@@ -49,13 +52,19 @@ fn it_still_works_without_a_with() {
 #[test]
 fn it_survives_an_aliasing_with() {
     let store = one_node();
-    assert_eq!(path_of(&store, "MATCH p = (a) WITH p AS q RETURN q", "q"), (1, 0));
+    assert_eq!(
+        path_of(&store, "MATCH p = (a) WITH p AS q RETURN q", "q"),
+        (1, 0)
+    );
 }
 
 #[test]
 fn it_survives_a_with_star() {
     let store = one_node();
-    assert_eq!(path_of(&store, "MATCH p = (a) WITH * RETURN p", "p"), (1, 0));
+    assert_eq!(
+        path_of(&store, "MATCH p = (a) WITH * RETURN p", "p"),
+        (1, 0)
+    );
 }
 
 #[test]
@@ -65,8 +74,14 @@ fn a_path_with_segments_is_unaffected() {
     let a = store.create_node_with_labels([Label::new("A")]);
     let b = store.create_node_with_labels([Label::new("B")]);
     store.create_edge(a, b, "R").unwrap();
-    assert_eq!(path_of(&store, "MATCH p = (:A)-[:R]->(:B) RETURN p", "p"), (2, 1));
-    assert_eq!(path_of(&store, "MATCH p = (:A)-[:R]->(:B) WITH p RETURN p", "p"), (2, 1));
+    assert_eq!(
+        path_of(&store, "MATCH p = (:A)-[:R]->(:B) RETURN p", "p"),
+        (2, 1)
+    );
+    assert_eq!(
+        path_of(&store, "MATCH p = (:A)-[:R]->(:B) WITH p RETURN p", "p"),
+        (2, 1)
+    );
 }
 
 #[test]

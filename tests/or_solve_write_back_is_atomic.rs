@@ -37,7 +37,11 @@ fn store(unique: bool) -> (GraphStore, QueryEngine) {
     for (i, v) in BEFORE.iter().enumerate() {
         engine
             .execute_mut(
-                &format!("CREATE (:Item {{name: 'n{i}', alloc: {v:?}, c1: {}.0, c2: {}.0}})", i + 1, 4 - i),
+                &format!(
+                    "CREATE (:Item {{name: 'n{i}', alloc: {v:?}, c1: {}.0, c2: {}.0}})",
+                    i + 1,
+                    4 - i
+                ),
                 &mut store,
                 TENANT,
             )
@@ -45,7 +49,11 @@ fn store(unique: bool) -> (GraphStore, QueryEngine) {
     }
     if unique {
         engine
-            .execute_mut("CREATE CONSTRAINT FOR (n:Item) REQUIRE n.alloc IS UNIQUE", &mut store, TENANT)
+            .execute_mut(
+                "CREATE CONSTRAINT FOR (n:Item) REQUIRE n.alloc IS UNIQUE",
+                &mut store,
+                TENANT,
+            )
             .unwrap();
     }
     (store, engine)

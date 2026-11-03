@@ -32,7 +32,9 @@ mod bench_setup;
 /// Read every line of a file and discard it: the floor cost of touching the data.
 fn read_only(path: &PathBuf) -> (usize, f64) {
     let t = Instant::now();
-    let Ok(file) = File::open(path) else { return (0, 0.0) };
+    let Ok(file) = File::open(path) else {
+        return (0, 0.0);
+    };
     let mut n = 0usize;
     let mut sink = 0usize;
     for line in BufReader::with_capacity(1 << 16, file).lines() {
@@ -48,7 +50,9 @@ fn read_only(path: &PathBuf) -> (usize, f64) {
 /// edge load does except touching the store.
 fn read_and_parse(path: &PathBuf) -> (usize, f64) {
     let t = Instant::now();
-    let Ok(file) = File::open(path) else { return (0, 0.0) };
+    let Ok(file) = File::open(path) else {
+        return (0, 0.0);
+    };
     let mut lines = BufReader::with_capacity(1 << 16, file).lines();
     let _header = lines.next();
     let mut n = 0usize;
@@ -64,8 +68,14 @@ fn read_and_parse(path: &PathBuf) -> (usize, f64) {
         }
         // LDBC ids are sometimes float-formatted in relationship files
         // (`1236950581248.0`), which is why this is not a plain parse.
-        let a = fields[0].split('.').next().and_then(|s| s.parse::<i64>().ok());
-        let b = fields[1].split('.').next().and_then(|s| s.parse::<i64>().ok());
+        let a = fields[0]
+            .split('.')
+            .next()
+            .and_then(|s| s.parse::<i64>().ok());
+        let b = fields[1]
+            .split('.')
+            .next()
+            .and_then(|s| s.parse::<i64>().ok());
         if let (Some(a), Some(b)) = (a, b) {
             sink = sink.wrapping_add(a ^ b);
             n += 1;
@@ -96,7 +106,9 @@ fn main() {
     if !data_dir.exists() {
         println!("SKIP: LDBC dataset not present at {}", data_dir.display());
         println!("      Fetch it with scripts/download_ldbc_snb.sh, or pass --data-dir PATH.");
-        println!("      Skipping rather than failing: the benchmark did not run, it did not break.");
+        println!(
+            "      Skipping rather than failing: the benchmark did not run, it did not break."
+        );
         return;
     }
 
@@ -111,7 +123,10 @@ fn main() {
 
     println!("Ingestion profile — where the time goes");
     println!("{}", "-".repeat(78));
-    println!("{:<40} {:>10} {:>10} {:>10}", "file", "rows", "read s", "parse s");
+    println!(
+        "{:<40} {:>10} {:>10} {:>10}",
+        "file", "rows", "read s", "parse s"
+    );
 
     let mut tot_rows = 0usize;
     let mut tot_read = 0.0;
@@ -141,7 +156,10 @@ fn main() {
     }
 
     println!("{}", "-".repeat(78));
-    println!("{:<40} {:>10} {:>10.2} {:>10.2}", "TOTAL", tot_rows, tot_read, tot_parse);
+    println!(
+        "{:<40} {:>10} {:>10.2} {:>10.2}",
+        "TOTAL", tot_rows, tot_read, tot_parse
+    );
     println!();
 
     // Deliberately NOT compared against a synthetic apply: measuring real files
@@ -152,14 +170,21 @@ fn main() {
     let parse_only = (tot_parse - tot_read).max(0.0);
     println!("read  {:>6.2} s", tot_read);
     println!("parse {:>6.2} s   (parse cost above read)", parse_only);
-    println!("both  {:>6.2} s   for {} rows across {} of the largest relationship files",
-        tot_read + parse_only, tot_rows, candidates.len());
+    println!(
+        "both  {:>6.2} s   for {} rows across {} of the largest relationship files",
+        tot_read + parse_only,
+        tot_rows,
+        candidates.len()
+    );
     println!();
     if let Some(total) = arg_total {
         let both = tot_read + parse_only;
         let share = 100.0 * both / total;
         println!("against a full load of {total:.1} s: read+parse is {share:.1}% of it");
-        println!("so parallelising only those two caps out at {:.2}x (Amdahl)", 1.0 / (1.0 - share / 100.0));
+        println!(
+            "so parallelising only those two caps out at {:.2}x (Amdahl)",
+            1.0 / (1.0 - share / 100.0)
+        );
     } else {
         println!("pass --total-load-secs N (a measured end-to-end load) to get the share");
         println!("and the Amdahl ceiling for parallelising read and parse alone.");

@@ -1,4 +1,6 @@
-use crate::common::{MultiObjectiveIndividual, MultiObjectiveProblem, MultiObjectiveResult, SolverConfig};
+use crate::common::{
+    MultiObjectiveIndividual, MultiObjectiveProblem, MultiObjectiveResult, SolverConfig,
+};
 use ndarray::Array1;
 use rand::prelude::*;
 
@@ -10,8 +12,7 @@ pub struct MOTLBOSolver {
 
 impl MOTLBOSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self {
-            seed: None, config }
+        Self { seed: None, config }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -61,9 +62,10 @@ impl MOTLBOSolver {
                 let mut new_vars = Array1::zeros(dim);
                 for j in 0..dim {
                     let r: f64 = local_rng.gen();
-                    new_vars[j] = (ind.variables[j] + r * (teacher_vars[j] - tf * mean_vars[j])).clamp(lower[j], upper[j]);
+                    new_vars[j] = (ind.variables[j] + r * (teacher_vars[j] - tf * mean_vars[j]))
+                        .clamp(lower[j], upper[j]);
                 }
-                
+
                 let fitness = crate::common::evaluate_objectives(problem, &new_vars);
                 let penalties = problem.penalties(&new_vars);
                 let violation: f64 = penalties.iter().sum();
@@ -76,31 +78,41 @@ impl MOTLBOSolver {
                 let mut j;
                 loop {
                     j = local_rng.gen_range(0..pop_size);
-                    if j != i { break; }
+                    if j != i {
+                        break;
+                    }
                 }
 
                 let mut new_vars = Array1::zeros(dim);
                 let dominates_i_j = self.dominates(
-                    &population[i].fitness, population[i].constraint_violation,
-                    &population[j].fitness, population[j].constraint_violation
+                    &population[i].fitness,
+                    population[i].constraint_violation,
+                    &population[j].fitness,
+                    population[j].constraint_violation,
                 );
                 let dominates_j_i = self.dominates(
-                    &population[j].fitness, population[j].constraint_violation,
-                    &population[i].fitness, population[i].constraint_violation
+                    &population[j].fitness,
+                    population[j].constraint_violation,
+                    &population[i].fitness,
+                    population[i].constraint_violation,
                 );
 
                 for k in 0..dim {
                     let r: f64 = local_rng.gen();
                     if dominates_i_j {
-                        new_vars[k] = (population[i].variables[k] + r * (population[i].variables[k] - population[j].variables[k])).clamp(lower[k], upper[k]);
+                        new_vars[k] = (population[i].variables[k]
+                            + r * (population[i].variables[k] - population[j].variables[k]))
+                            .clamp(lower[k], upper[k]);
                     } else if dominates_j_i {
-                        new_vars[k] = (population[i].variables[k] + r * (population[j].variables[k] - population[i].variables[k])).clamp(lower[k], upper[k]);
+                        new_vars[k] = (population[i].variables[k]
+                            + r * (population[j].variables[k] - population[i].variables[k]))
+                            .clamp(lower[k], upper[k]);
                     } else {
                         // Random movement if non-dominated
                         new_vars[k] = population[i].variables[k];
                     }
                 }
-                
+
                 let fitness = crate::common::evaluate_objectives(problem, &new_vars);
                 let penalties = problem.penalties(&new_vars);
                 let violation: f64 = penalties.iter().sum();
@@ -120,10 +132,10 @@ impl MOTLBOSolver {
                     crate::common::descending_nan_last(a.crowding_distance, b.crowding_distance)
                 }
             });
-            
+
             combined.truncate(pop_size);
             population = combined;
-            
+
             history.push(population[0].fitness[0]);
         }
 
@@ -137,11 +149,13 @@ impl MOTLBOSolver {
     /// repeated the same draws on every call, so a seeded run never moved.
     fn select_teacher(&self, population: &[MultiObjectiveIndividual], rng: &mut impl Rng) -> usize {
         // Teacher is chosen from the first rank (best non-dominated front)
-        let first_rank: Vec<usize> = population.iter().enumerate()
+        let first_rank: Vec<usize> = population
+            .iter()
+            .enumerate()
             .filter(|(_, ind)| ind.rank == 0)
             .map(|(i, _)| i)
             .collect();
-        
+
         *first_rank.choose(rng).unwrap_or(&0)
     }
 
@@ -158,11 +172,15 @@ impl MOTLBOSolver {
         self.non_dominated_sort(population);
         let mut rank = 0;
         loop {
-            let indices: Vec<usize> = population.iter().enumerate()
+            let indices: Vec<usize> = population
+                .iter()
+                .enumerate()
                 .filter(|(_, ind)| ind.rank == rank)
                 .map(|(i, _)| i)
                 .collect();
-            if indices.is_empty() { break; }
+            if indices.is_empty() {
+                break;
+            }
             self.calculate_crowding_distance(population, &indices);
             rank += 1;
         }
@@ -176,15 +194,21 @@ impl MOTLBOSolver {
 
         for i in 0..n {
             for j in 0..n {
-                if i == j { continue; }
+                if i == j {
+                    continue;
+                }
                 if self.dominates(
-                    &population[i].fitness, population[i].constraint_violation,
-                    &population[j].fitness, population[j].constraint_violation
+                    &population[i].fitness,
+                    population[i].constraint_violation,
+                    &population[j].fitness,
+                    population[j].constraint_violation,
                 ) {
                     dominated_sets[i].push(j);
                 } else if self.dominates(
-                    &population[j].fitness, population[j].constraint_violation,
-                    &population[i].fitness, population[i].constraint_violation
+                    &population[j].fitness,
+                    population[j].constraint_violation,
+                    &population[i].fitness,
+                    population[i].constraint_violation,
                 ) {
                     dominance_counts[i] += 1;
                 }
@@ -229,13 +253,21 @@ impl MOTLBOSolver {
         // 3. Both Feasible: Pareto dominance
         let mut better = false;
         for i in 0..f1.len() {
-            if f1[i] > f2[i] { return false; }
-            if f1[i] < f2[i] { better = true; }
+            if f1[i] > f2[i] {
+                return false;
+            }
+            if f1[i] < f2[i] {
+                better = true;
+            }
         }
         better
     }
 
-    fn calculate_crowding_distance(&self, population: &mut [MultiObjectiveIndividual], indices: &[usize]) {
+    fn calculate_crowding_distance(
+        &self,
+        population: &mut [MultiObjectiveIndividual],
+        indices: &[usize],
+    ) {
         let num_objectives = population[0].fitness.len();
         for &idx in indices {
             population[idx].crowding_distance = 0.0;
@@ -243,8 +275,13 @@ impl MOTLBOSolver {
 
         for m in 0..num_objectives {
             let mut sorted_indices = indices.to_vec();
-            sorted_indices.sort_by(|&a, &b| crate::common::ascending_nan_last(population[a].fitness[m], population[b].fitness[m]));
-            
+            sorted_indices.sort_by(|&a, &b| {
+                crate::common::ascending_nan_last(
+                    population[a].fitness[m],
+                    population[b].fitness[m],
+                )
+            });
+
             let min_val = population[*sorted_indices.first().unwrap()].fitness[m];
             let max_val = population[*sorted_indices.last().unwrap()].fitness[m];
             let range = max_val - min_val;
@@ -254,8 +291,8 @@ impl MOTLBOSolver {
 
             if range > 1e-9 {
                 for i in 1..(sorted_indices.len() - 1) {
-                    let prev = population[sorted_indices[i-1]].fitness[m];
-                    let next = population[sorted_indices[i+1]].fitness[m];
+                    let prev = population[sorted_indices[i - 1]].fitness[m];
+                    let next = population[sorted_indices[i + 1]].fitness[m];
                     population[sorted_indices[i]].crowding_distance += (next - prev) / range;
                 }
             }

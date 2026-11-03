@@ -55,9 +55,9 @@ fn rows(s: &GraphStore, q: &str) -> Vec<String> {
                     Some(Value::Property(PropertyValue::String(x))) => x.clone(),
                     Some(Value::Property(PropertyValue::Integer(i))) => i.to_string(),
                     Some(Value::Property(PropertyValue::Float(f))) => format!("{f:?}"),
-                    Some(Value::Null)
-                    | Some(Value::Property(PropertyValue::Null))
-                    | None => "NULL".to_string(),
+                    Some(Value::Null) | Some(Value::Property(PropertyValue::Null)) | None => {
+                        "NULL".to_string()
+                    }
                     other => format!("{other:?}"),
                 })
                 .collect();
@@ -225,13 +225,31 @@ fn duplicate_rows_survive_in_the_same_number() {
     let mut s = GraphStore::new();
     // Two diseases carrying the *same* mondo_id, so each (v, t) pair is found
     // through two d1 bindings and two d2 bindings: four duplicates per pair.
-    write(&mut s, "CREATE (:Disease {mondo_id: 'X'}), (:Disease {mondo_id: 'X'}), (:Disease {mondo_id: 'Y'})");
-    write(&mut s, "MATCH (d:Disease {mondo_id: 'X'}) CREATE (:Variant {rs_id: 'r1'})-[:A]->(d)");
-    write(&mut s, "MATCH (d:Disease {mondo_id: 'X'}) CREATE (:Target {symbol: 't1'})-[:A]->(d)");
+    write(
+        &mut s,
+        "CREATE (:Disease {mondo_id: 'X'}), (:Disease {mondo_id: 'X'}), (:Disease {mondo_id: 'Y'})",
+    );
+    write(
+        &mut s,
+        "MATCH (d:Disease {mondo_id: 'X'}) CREATE (:Variant {rs_id: 'r1'})-[:A]->(d)",
+    );
+    write(
+        &mut s,
+        "MATCH (d:Disease {mondo_id: 'X'}) CREATE (:Target {symbol: 't1'})-[:A]->(d)",
+    );
     let mut indexed = GraphStore::new();
-    write(&mut indexed, "CREATE (:Disease {mondo_id: 'X'}), (:Disease {mondo_id: 'X'}), (:Disease {mondo_id: 'Y'})");
-    write(&mut indexed, "MATCH (d:Disease {mondo_id: 'X'}) CREATE (:Variant {rs_id: 'r1'})-[:A]->(d)");
-    write(&mut indexed, "MATCH (d:Disease {mondo_id: 'X'}) CREATE (:Target {symbol: 't1'})-[:A]->(d)");
+    write(
+        &mut indexed,
+        "CREATE (:Disease {mondo_id: 'X'}), (:Disease {mondo_id: 'X'}), (:Disease {mondo_id: 'Y'})",
+    );
+    write(
+        &mut indexed,
+        "MATCH (d:Disease {mondo_id: 'X'}) CREATE (:Variant {rs_id: 'r1'})-[:A]->(d)",
+    );
+    write(
+        &mut indexed,
+        "MATCH (d:Disease {mondo_id: 'X'}) CREATE (:Target {symbol: 't1'})-[:A]->(d)",
+    );
     write(&mut indexed, "CREATE INDEX ON :Disease(mondo_id)");
 
     let q = "MATCH (v:Variant)-[:A]->(d1:Disease) MATCH (t:Target)-[:A]->(d2:Disease) \
@@ -244,11 +262,21 @@ fn duplicate_rows_survive_in_the_same_number() {
     assert_eq!(a, b, "indexed and unindexed plans disagree on duplicates");
     assert!(!a.is_empty(), "the fixture produced no rows");
 
-    let distinct = format!("MATCH (v:Variant)-[:A]->(d1:Disease) MATCH (t:Target)-[:A]->(d2:Disease) \
+    let distinct = format!(
+        "MATCH (v:Variant)-[:A]->(d1:Disease) MATCH (t:Target)-[:A]->(d2:Disease) \
              WHERE d1.mondo_id = d2.mondo_id AND d1.mondo_id = 'X' \
-             RETURN DISTINCT v.rs_id AS v, t.symbol AS t");
-    assert_eq!(rows(&indexed, &distinct), rows(&s, &distinct), "DISTINCT disagrees");
-    assert_eq!(rows(&indexed, &distinct), vec!["r1|t1".to_string()], "DISTINCT collapses to one pair");
+             RETURN DISTINCT v.rs_id AS v, t.symbol AS t"
+    );
+    assert_eq!(
+        rows(&indexed, &distinct),
+        rows(&s, &distinct),
+        "DISTINCT disagrees"
+    );
+    assert_eq!(
+        rows(&indexed, &distinct),
+        vec!["r1|t1".to_string()],
+        "DISTINCT collapses to one pair"
+    );
 }
 
 /// A value no node carries: both plans return nothing, and neither errors.
@@ -268,9 +296,18 @@ fn an_empty_result_is_empty_in_both_plans() {
 #[test]
 fn a_null_property_matches_nothing_in_either_plan() {
     let build = |s: &mut GraphStore| {
-        write(s, "CREATE (:Disease {mondo_id: 'X'}), (:Disease {name: 'no-id'})");
-        write(s, "MATCH (d:Disease) CREATE (:Variant {rs_id: 'r'})-[:A]->(d)");
-        write(s, "MATCH (d:Disease) CREATE (:Target {symbol: 't'})-[:A]->(d)");
+        write(
+            s,
+            "CREATE (:Disease {mondo_id: 'X'}), (:Disease {name: 'no-id'})",
+        );
+        write(
+            s,
+            "MATCH (d:Disease) CREATE (:Variant {rs_id: 'r'})-[:A]->(d)",
+        );
+        write(
+            s,
+            "MATCH (d:Disease) CREATE (:Target {symbol: 't'})-[:A]->(d)",
+        );
     };
     let (mut indexed, mut plain) = (GraphStore::new(), GraphStore::new());
     build(&mut indexed);
@@ -281,7 +318,11 @@ fn a_null_property_matches_nothing_in_either_plan() {
     let q = "MATCH (v:Variant)-[:A]->(d1:Disease) MATCH (t:Target)-[:A]->(d2:Disease) \
              WHERE d1.mondo_id = d2.mondo_id AND d1.mondo_id = 'X' \
              RETURN v.rs_id AS v, t.symbol AS t";
-    assert_eq!(rows(&indexed, q), rows(&plain, q), "nullable property: plans disagree");
+    assert_eq!(
+        rows(&indexed, q),
+        rows(&plain, q),
+        "nullable property: plans disagree"
+    );
     assert_eq!(rows(&indexed, q), vec!["r|t".to_string()]);
 
     // No constant at all: nothing to propagate, and the null rows must still
@@ -289,8 +330,16 @@ fn a_null_property_matches_nothing_in_either_plan() {
     let no_const = "MATCH (v:Variant)-[:A]->(d1:Disease) MATCH (t:Target)-[:A]->(d2:Disease) \
              WHERE d1.mondo_id = d2.mondo_id \
              RETURN v.rs_id AS v, t.symbol AS t";
-    assert_eq!(rows(&indexed, no_const), rows(&plain, no_const), "no constant: plans disagree");
-    assert_eq!(rows(&indexed, no_const).len(), 1, "only the non-null disease pairs with itself");
+    assert_eq!(
+        rows(&indexed, no_const),
+        rows(&plain, no_const),
+        "no constant: plans disagree"
+    );
+    assert_eq!(
+        rows(&indexed, no_const).len(),
+        1,
+        "only the non-null disease pairs with itself"
+    );
 }
 
 /// Mixed types across the equality. `d1.k = 5` with `d2.k` a string must not
@@ -299,9 +348,18 @@ fn a_null_property_matches_nothing_in_either_plan() {
 #[test]
 fn mixed_types_answer_the_same_with_and_without_the_derivation() {
     let build = |s: &mut GraphStore| {
-        write(s, "CREATE (:D {k: 5}), (:D {k: '5'}), (:D {k: 5.0}), (:D {k: true})");
-        write(s, "MATCH (d:D) CREATE (:V {n: 'v' + toString(d.k)})-[:A]->(d)");
-        write(s, "MATCH (d:D) CREATE (:T {n: 't' + toString(d.k)})-[:A]->(d)");
+        write(
+            s,
+            "CREATE (:D {k: 5}), (:D {k: '5'}), (:D {k: 5.0}), (:D {k: true})",
+        );
+        write(
+            s,
+            "MATCH (d:D) CREATE (:V {n: 'v' + toString(d.k)})-[:A]->(d)",
+        );
+        write(
+            s,
+            "MATCH (d:D) CREATE (:T {n: 't' + toString(d.k)})-[:A]->(d)",
+        );
     };
     let (mut indexed, mut plain) = (GraphStore::new(), GraphStore::new());
     build(&mut indexed);
@@ -353,7 +411,11 @@ fn either_operand_order_propagates() {
         assert_eq!(rows(&indexed, q), want, "indexed: {q}");
         assert_eq!(rows(&plain, q), want, "unindexed: {q}");
         let scans = index_scans(&plan(&indexed, q));
-        assert_eq!(scans.len(), 2, "both sides must be pinned: {scans:?} for {q}");
+        assert_eq!(
+            scans.len(),
+            2,
+            "both sides must be pinned: {scans:?} for {q}"
+        );
     }
 }
 
@@ -404,7 +466,10 @@ fn declines_an_equality_under_or() {
              WHERE d1.mondo_id = d2.mondo_id OR d1.mondo_id = 'MONDO:1' \
              RETURN v.rs_id AS v, t.symbol AS t";
     let scans = index_scans(&plan(&indexed, q));
-    assert!(scans.is_empty(), "nothing may be pinned under OR: {scans:?}");
+    assert!(
+        scans.is_empty(),
+        "nothing may be pinned under OR: {scans:?}"
+    );
     assert_eq!(rows(&indexed, q), rows(&plain, q), "OR: plans disagree");
     // 3 matching pairs (d1 = d2) plus the whole d1 = MONDO:1 row set.
     assert!(rows(&indexed, q).len() > 3, "the OR must widen the result");
@@ -441,7 +506,11 @@ fn declines_a_non_equality_comparison() {
         !scans.iter().any(|s| s.contains("var=d2")),
         "d2 must not be pinned by an inequality: {scans:?}"
     );
-    assert_eq!(rows(&indexed, q), rows(&plain, q), "inequality: plans disagree");
+    assert_eq!(
+        rows(&indexed, q),
+        rows(&plain, q),
+        "inequality: plans disagree"
+    );
 }
 
 /// Two different constants in one chain is a contradiction. The engine must
@@ -455,8 +524,15 @@ fn declines_a_chain_with_two_different_constants() {
              WHERE d1.mondo_id = d2.mondo_id AND d1.mondo_id = 'MONDO:1' \
                AND d2.mondo_id = 'MONDO:2' \
              RETURN v.rs_id AS v, t.symbol AS t";
-    assert_eq!(rows(&indexed, q), rows(&plain, q), "contradiction: plans disagree");
-    assert!(rows(&indexed, q).is_empty(), "a contradiction answers nothing");
+    assert_eq!(
+        rows(&indexed, q),
+        rows(&plain, q),
+        "contradiction: plans disagree"
+    );
+    assert!(
+        rows(&indexed, q).is_empty(),
+        "a contradiction answers nothing"
+    );
 }
 
 /// A property of a variable bound by `OPTIONAL MATCH` must not acquire a
@@ -467,7 +543,10 @@ fn declines_a_chain_with_two_different_constants() {
 fn declines_propagating_into_an_optional_match() {
     let build = |s: &mut GraphStore| {
         write(s, "CREATE (:Disease {mondo_id: 'X'})");
-        write(s, "MATCH (d:Disease) CREATE (:Variant {rs_id: 'r'})-[:A]->(d)");
+        write(
+            s,
+            "MATCH (d:Disease) CREATE (:Variant {rs_id: 'r'})-[:A]->(d)",
+        );
         // No :Target at all, so the OPTIONAL MATCH must null-fill.
         write(s, "CREATE (:Other {mondo_id: 'X'})");
     };
@@ -480,7 +559,11 @@ fn declines_propagating_into_an_optional_match() {
              OPTIONAL MATCH (t:Target)-[:A]->(d2:Disease) \
              WHERE d1.mondo_id = d2.mondo_id AND d1.mondo_id = 'X' \
              RETURN v.rs_id AS v, t.symbol AS t";
-    assert_eq!(rows(&indexed, q), rows(&plain, q), "OPTIONAL MATCH: plans disagree");
+    assert_eq!(
+        rows(&indexed, q),
+        rows(&plain, q),
+        "OPTIONAL MATCH: plans disagree"
+    );
     assert_eq!(
         rows(&indexed, q),
         vec!["r|NULL".to_string()],
@@ -499,7 +582,10 @@ fn declines_propagating_into_an_optional_match() {
 #[test]
 fn a_same_pattern_equality_propagates_within_the_clause() {
     let build = |s: &mut GraphStore| {
-        write(s, "CREATE (:P {x: 1, y: 1}), (:P {x: 1, y: 2}), (:P {x: 2, y: 2})");
+        write(
+            s,
+            "CREATE (:P {x: 1, y: 1}), (:P {x: 1, y: 2}), (:P {x: 2, y: 2})",
+        );
     };
     let (mut indexed, mut plain) = (GraphStore::new(), GraphStore::new());
     build(&mut indexed);
@@ -507,7 +593,11 @@ fn a_same_pattern_equality_propagates_within_the_clause() {
     write(&mut indexed, "CREATE INDEX ON :P(y)");
 
     let q = "MATCH (a:P) WHERE a.x = a.y AND a.x = 1 RETURN a.x AS x, a.y AS y";
-    assert_eq!(rows(&indexed, q), rows(&plain, q), "same-pattern: plans disagree");
+    assert_eq!(
+        rows(&indexed, q),
+        rows(&plain, q),
+        "same-pattern: plans disagree"
+    );
     assert_eq!(rows(&indexed, q), vec!["1|1".to_string()]);
     // Only `y` is indexed, and only the derivation puts a literal next to it.
     let scans = index_scans(&plan(&indexed, q));
@@ -533,7 +623,11 @@ fn declines_an_expression_operand() {
         !scans.iter().any(|s| s.contains("var=d2")),
         "a function result is not a pinnable term: {scans:?}"
     );
-    assert_eq!(rows(&indexed, q), rows(&plain, q), "expression operand: plans disagree");
+    assert_eq!(
+        rows(&indexed, q),
+        rows(&plain, q),
+        "expression operand: plans disagree"
+    );
 }
 
 /// Different properties on the two sides: `d1.mondo_id = d2.name` pins
@@ -546,7 +640,11 @@ fn propagates_to_the_named_property_not_the_variable() {
              MATCH (t:Target)-[:ASSOCIATED_WITH_DISEASE]->(d2:Disease) \
              WHERE d1.mondo_id = d2.name AND d1.mondo_id = 'd2' \
              RETURN v.rs_id AS v, t.symbol AS t";
-    assert_eq!(rows(&indexed, q), rows(&plain, q), "named property: plans disagree");
+    assert_eq!(
+        rows(&indexed, q),
+        rows(&plain, q),
+        "named property: plans disagree"
+    );
     // `d2.name` is 'd2' on the second disease; `d1.mondo_id = 'd2'` matches no
     // disease, so the answer is empty — and both plans must say so.
     assert!(rows(&indexed, q).is_empty());
@@ -599,7 +697,10 @@ fn the_derivation_reaches_both_ast_shapes() {
     // The pipeline query writes, so it needs the mutating executor. Its
     // projection is the same two columns; the leading CREATE contributes no row
     // of its own.
-    for (what, s) in [("indexed", federation(4, 2).0), ("unindexed", federation(4, 2).1)] {
+    for (what, s) in [
+        ("indexed", federation(4, 2).0),
+        ("unindexed", federation(4, 2).1),
+    ] {
         let mut s = s;
         let got = rows_mut(&mut s, &pipeline);
         assert_eq!(
@@ -654,7 +755,10 @@ fn no_predicate_pushdown_in_the_pipeline_inline_arm() {
 #[test]
 fn the_query_answers_under_a_budget_the_cross_product_blows() {
     let mut s = GraphStore::new();
-    write(&mut s, "UNWIND range(1, 200) AS i CREATE (:Disease {mondo_id: 'MONDO:' + toString(i)})");
+    write(
+        &mut s,
+        "UNWIND range(1, 200) AS i CREATE (:Disease {mondo_id: 'MONDO:' + toString(i)})",
+    );
     write(&mut s, "CREATE INDEX ON :Disease(mondo_id)");
     write(
         &mut s,
@@ -680,12 +784,18 @@ fn the_query_answers_under_a_budget_the_cross_product_blows() {
         .unwrap_or_else(|e| {
             panic!("refused under a 1M-row budget — the cross product is unpinned: {e}")
         });
-    assert_eq!(out.records.len(), 400, "20 variants x 20 targets on MONDO:77");
+    assert_eq!(
+        out.records.len(),
+        400,
+        "20 variants x 20 targets on MONDO:77"
+    );
 
     // #1822 now joins the no-constant equality within the same budget.
     let joined = q.replace(" AND d1.mondo_id = 'MONDO:77'", "");
-    let out = QueryExecutor::new(&s).with_row_budget(1_000_000)
-        .execute(&parse_query(&joined).unwrap()).unwrap();
+    let out = QueryExecutor::new(&s)
+        .with_row_budget(1_000_000)
+        .execute(&parse_query(&joined).unwrap())
+        .unwrap();
     assert_eq!(out.records.len(), 200 * 20 * 20);
 
     // Keep a genuine product as the negative control: a disjunction must not

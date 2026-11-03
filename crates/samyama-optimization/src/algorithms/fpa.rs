@@ -14,7 +14,7 @@ pub struct FPASolver {
 impl FPASolver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
-            seed: None, 
+            seed: None,
             config,
             p: 0.8,
         }
@@ -31,9 +31,9 @@ impl FPASolver {
     /// repeated the same draws on every call, so a seeded run never moved.
     fn levy_flight(&self, dim: usize, rng: &mut impl Rng) -> Array1<f64> {
         let beta = 1.5;
-        let sigma_u = ((gamma(1.0 + beta) * (PI * beta / 2.0).sin()) / 
-                      (gamma((1.0 + beta) / 2.0) * beta * 2.0f64.powf((beta - 1.0) / 2.0)))
-                      .powf(1.0 / beta);
+        let sigma_u = ((gamma(1.0 + beta) * (PI * beta / 2.0).sin())
+            / (gamma((1.0 + beta) / 2.0) * beta * 2.0f64.powf((beta - 1.0) / 2.0)))
+        .powf(1.0 / beta);
         let sigma_v = 1.0;
 
         let mut step = Array1::zeros(dim);
@@ -100,12 +100,15 @@ impl FPASolver {
                     loop {
                         j_idx = rng.gen_range(0..pop_size);
                         k_idx = rng.gen_range(0..pop_size);
-                        if j_idx != k_idx { break; }
+                        if j_idx != k_idx {
+                            break;
+                        }
                     }
-                    
+
                     let epsilon: f64 = rng.gen();
                     for j in 0..dim {
-                        let step = epsilon * (population[j_idx].variables[j] - population[k_idx].variables[j]);
+                        let step = epsilon
+                            * (population[j_idx].variables[j] - population[k_idx].variables[j]);
                         new_vars[j] = (population[i].variables[j] + step).clamp(lower[j], upper[j]);
                     }
                 }
@@ -131,8 +134,12 @@ impl FPASolver {
 
 // Reuse gamma function from cuckoo or move to common
 fn gamma(x: f64) -> f64 {
-    if (x - 1.5).abs() < 1e-6 { return 0.886227; }
-    if (x - 2.5).abs() < 1e-6 { return 1.32934; }
+    if (x - 1.5).abs() < 1e-6 {
+        return 0.886227;
+    }
+    if (x - 2.5).abs() < 1e-6 {
+        return 1.32934;
+    }
     let term1 = (2.0 * PI / x).sqrt();
     let term2 = (x / std::f64::consts::E).powf(x);
     term1 * term2

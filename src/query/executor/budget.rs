@@ -59,9 +59,7 @@
 
 use crate::graph::GraphStore;
 use crate::query::error_code;
-use crate::query::executor::operator::{
-    OperatorBox, OperatorDescription, PhysicalOperator,
-};
+use crate::query::executor::operator::{OperatorBox, OperatorDescription, PhysicalOperator};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, RecordBatch};
 
 /// Rows a single operator may produce before the query is refused.
@@ -178,13 +176,21 @@ impl PhysicalOperator for BudgetedOperator {
         Ok(out)
     }
 
-    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
+    fn next_mut(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+    ) -> ExecutionResult<Option<Record>> {
         let out = self.inner.next_mut(store, tenant_id)?;
         self.charge(usize::from(out.is_some()))?;
         Ok(out)
     }
 
-    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(
+        &mut self,
+        store: &GraphStore,
+        batch_size: usize,
+    ) -> ExecutionResult<Option<RecordBatch>> {
         let out = self.inner.next_batch(store, batch_size)?;
         self.charge(out.as_ref().map_or(0, |b| b.records.len()))?;
         Ok(out)
@@ -480,7 +486,8 @@ mod tests {
         let mut s = GraphStore::new();
         for i in 0..n {
             let node = s.create_node_with_labels([Label::new("N")]);
-            s.set_node_property("default", node, "i", PropertyValue::Integer(i as i64)).unwrap();
+            s.set_node_property("default", node, "i", PropertyValue::Integer(i as i64))
+                .unwrap();
         }
         s
     }
@@ -495,7 +502,10 @@ mod tests {
             .expect_err("1,728,000 rows must not pass a 10,000 row budget");
         let msg = err.to_string();
         assert!(msg.contains(error_code::ROW_BUDGET_EXCEEDED), "{msg}");
-        assert!(msg.contains("10000"), "the message must name the budget: {msg}");
+        assert!(
+            msg.contains("10000"),
+            "the message must name the budget: {msg}"
+        );
         assert!(
             msg.contains("CartesianProduct"),
             "the message must name the operator, not just fail: {msg}"
@@ -536,13 +546,20 @@ mod tests {
         // together they cross the 250-row total. This is the shape the per-pass
         // bound cannot see.
         for pass in 0..2 {
-            op.charge(90).unwrap_or_else(|e| panic!("pass {pass} of 90 rows is inside the per-pass budget: {e}"));
-            assert_eq!(op.produced, 90, "the pass count must not accumulate across passes");
+            op.charge(90).unwrap_or_else(|e| {
+                panic!("pass {pass} of 90 rows is inside the per-pass budget: {e}")
+            });
+            assert_eq!(
+                op.produced, 90,
+                "the pass count must not accumulate across passes"
+            );
             op.reset();
             assert_eq!(op.produced, 0, "reset must clear the pass count");
         }
 
-        let err = op.charge(90).expect_err("270 rows across three passes must cross a 250-row total");
+        let err = op
+            .charge(90)
+            .expect_err("270 rows across three passes must cross a 250-row total");
         let msg = err.to_string();
         assert!(msg.contains(error_code::ROW_BUDGET_EXCEEDED), "{msg}");
         assert!(
@@ -550,7 +567,10 @@ mod tests {
             "a query that crossed the total must not be reported against the \
              per-operator limit, which it never crossed: {msg}"
         );
-        assert!(msg.contains("CartesianProduct"), "the message must name the operator: {msg}");
+        assert!(
+            msg.contains("CartesianProduct"),
+            "the message must name the operator: {msg}"
+        );
     }
 
     /// Why the test above is a unit test.
@@ -604,10 +624,10 @@ mod tests {
     fn a_large_scan_is_not_an_explosion_and_is_not_refused() {
         let s = store(500);
         let engine = QueryEngine::new().with_row_budget(100);
-        let batch = engine
-            .execute("MATCH (n:N) RETURN n", &s)
-            .expect("a 500-row scan under a 100-row budget must still run: a scan \
-                     is bounded by the data, not amplifying");
+        let batch = engine.execute("MATCH (n:N) RETURN n", &s).expect(
+            "a 500-row scan under a 100-row budget must still run: a scan \
+                     is bounded by the data, not amplifying",
+        );
         assert_eq!(batch.records.len(), 500);
     }
 

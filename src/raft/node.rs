@@ -148,10 +148,7 @@ impl RaftNode {
     }
 
     /// Change cluster membership
-    pub async fn change_membership(
-        &self,
-        members: BTreeSet<RaftNodeId>,
-    ) -> RaftResult<()> {
+    pub async fn change_membership(&self, members: BTreeSet<RaftNodeId>) -> RaftResult<()> {
         info!("Changing cluster membership to: {:?}", members);
 
         if *self.initialized.read().await {

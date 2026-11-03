@@ -36,15 +36,87 @@ fn test_grouped_aggregations() {
 
     // Verify Engineering (comes first alphabetically)
     let eng_rec = &result.records[0];
-    assert_eq!(eng_rec.get("dept").unwrap().as_property().unwrap().as_string().unwrap(), "Engineering");
-    assert_eq!(eng_rec.get("count").unwrap().as_property().unwrap().as_integer().unwrap(), 2);
-    assert_eq!(eng_rec.get("avg_age").unwrap().as_property().unwrap().as_float().unwrap(), 22.5);
-    assert_eq!(eng_rec.get("max_age").unwrap().as_property().unwrap().as_integer().unwrap(), 25);
+    assert_eq!(
+        eng_rec
+            .get("dept")
+            .unwrap()
+            .as_property()
+            .unwrap()
+            .as_string()
+            .unwrap(),
+        "Engineering"
+    );
+    assert_eq!(
+        eng_rec
+            .get("count")
+            .unwrap()
+            .as_property()
+            .unwrap()
+            .as_integer()
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        eng_rec
+            .get("avg_age")
+            .unwrap()
+            .as_property()
+            .unwrap()
+            .as_float()
+            .unwrap(),
+        22.5
+    );
+    assert_eq!(
+        eng_rec
+            .get("max_age")
+            .unwrap()
+            .as_property()
+            .unwrap()
+            .as_integer()
+            .unwrap(),
+        25
+    );
 
     // Verify HR
     let hr_rec = &result.records[1];
-    assert_eq!(hr_rec.get("dept").unwrap().as_property().unwrap().as_string().unwrap(), "HR");
-    assert_eq!(hr_rec.get("count").unwrap().as_property().unwrap().as_integer().unwrap(), 3);
-    assert_eq!(hr_rec.get("avg_age").unwrap().as_property().unwrap().as_float().unwrap(), 40.0);
-    assert_eq!(hr_rec.get("max_age").unwrap().as_property().unwrap().as_integer().unwrap(), 50);
+    assert_eq!(
+        hr_rec
+            .get("dept")
+            .unwrap()
+            .as_property()
+            .unwrap()
+            .as_string()
+            .unwrap(),
+        "HR"
+    );
+    assert_eq!(
+        hr_rec
+            .get("count")
+            .unwrap()
+            .as_property()
+            .unwrap()
+            .as_integer()
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        hr_rec
+            .get("avg_age")
+            .unwrap()
+            .as_property()
+            .unwrap()
+            .as_float()
+            .unwrap(),
+        40.0
+    );
+    assert_eq!(
+        hr_rec
+            .get("max_age")
+            .unwrap()
+            .as_property()
+            .unwrap()
+            .as_integer()
+            .unwrap(),
+        50
+    );
 }

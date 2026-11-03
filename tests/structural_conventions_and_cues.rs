@@ -64,7 +64,8 @@ fn sgsnap_header_omits_structures_when_empty_and_roundtrips_when_present() {
 
     let with_struct_bytes = export_bytes(&store);
     assert!(header_raw_json(&with_struct_bytes).contains_key("structures"));
-    let parsed_header: SnapshotHeader = samyama::snapshot::peek_header(&with_struct_bytes[..]).unwrap();
+    let parsed_header: SnapshotHeader =
+        samyama::snapshot::peek_header(&with_struct_bytes[..]).unwrap();
     assert_eq!(parsed_header.structures, vec![conv.clone()]);
 
     let mut restored = GraphStore::new();

@@ -18,7 +18,9 @@ use samyama::query::parser::parse_query;
 fn pairs(cypher: &str, cols: &[&str]) -> Vec<Vec<i64>> {
     let store = GraphStore::new();
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(&store).execute(&q).expect("query should run");
+    let batch = QueryExecutor::new(&store)
+        .execute(&q)
+        .expect("query should run");
     let mut out: Vec<Vec<i64>> = batch
         .records
         .iter()
@@ -38,7 +40,10 @@ fn pairs(cypher: &str, cols: &[&str]) -> Vec<Vec<i64>> {
 #[test]
 fn two_unwinds_produce_the_cross_product() {
     assert_eq!(
-        pairs("UNWIND [1, 2] AS a UNWIND [3, 4] AS b RETURN a, b", &["a", "b"]),
+        pairs(
+            "UNWIND [1, 2] AS a UNWIND [3, 4] AS b RETURN a, b",
+            &["a", "b"]
+        ),
         vec![vec![1, 3], vec![1, 4], vec![2, 3], vec![2, 4]],
     );
 }
@@ -69,11 +74,19 @@ fn a_later_unwind_expands_rather_than_replaces() {
     // The plausible-looking wrong answer: an implementation that rebinds
     // instead of chaining returns the length of the *last* list.
     assert_eq!(
-        pairs("UNWIND [1, 2, 3] AS a UNWIND [9] AS b RETURN a, b", &["a", "b"]).len(),
+        pairs(
+            "UNWIND [1, 2, 3] AS a UNWIND [9] AS b RETURN a, b",
+            &["a", "b"]
+        )
+        .len(),
         3,
     );
     assert_eq!(
-        pairs("UNWIND [1] AS a UNWIND [7, 8, 9] AS b RETURN a, b", &["a", "b"]).len(),
+        pairs(
+            "UNWIND [1] AS a UNWIND [7, 8, 9] AS b RETURN a, b",
+            &["a", "b"]
+        )
+        .len(),
         3,
     );
 }
@@ -99,6 +112,8 @@ fn a_boolean_truth_table_over_three_variables_has_twenty_seven_rows() {
          UNWIND [true, false, null] AS c RETURN a, b, c",
     )
     .expect("query should parse");
-    let batch = QueryExecutor::new(&store).execute(&q).expect("query should run");
+    let batch = QueryExecutor::new(&store)
+        .execute(&q)
+        .expect("query should run");
     assert_eq!(batch.records.len(), 27);
 }

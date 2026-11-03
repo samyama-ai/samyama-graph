@@ -42,7 +42,10 @@ fn rows(store: &GraphStore, cypher: &str) -> usize {
 #[test]
 fn a_with_after_an_unwind_does_not_lose_the_match_scope() {
     let store = graph();
-    assert_eq!(rows(&store, "MATCH (n:N) UNWIND [n] AS x WITH x RETURN x"), 1);
+    assert_eq!(
+        rows(&store, "MATCH (n:N) UNWIND [n] AS x WITH x RETURN x"),
+        1
+    );
 }
 
 #[test]
@@ -51,7 +54,10 @@ fn the_unwind_reads_variables_the_with_drops() {
     // away, so the WITH may legitimately keep neither.
     let store = graph();
     assert_eq!(
-        rows(&store, "MATCH (n:N)-[r:REL]->(m:M) UNWIND [n, r] AS x WITH x RETURN x"),
+        rows(
+            &store,
+            "MATCH (n:N)-[r:REL]->(m:M) UNWIND [n, r] AS x WITH x RETURN x"
+        ),
         2
     );
 }
@@ -63,7 +69,10 @@ fn the_unwind_runs_exactly_once() {
     // caught it.
     let store = graph();
     assert_eq!(rows(&store, "MATCH (n:N) UNWIND [1, 2] AS x RETURN x"), 2);
-    assert_eq!(rows(&store, "MATCH (n:N) UNWIND [1, 2] AS x WITH x RETURN x"), 2);
+    assert_eq!(
+        rows(&store, "MATCH (n:N) UNWIND [1, 2] AS x WITH x RETURN x"),
+        2
+    );
     assert_eq!(rows(&store, "UNWIND [1, 2] AS x RETURN x"), 2);
     assert_eq!(rows(&store, "UNWIND [1, 2] AS x WITH x RETURN x"), 2);
 }
@@ -76,7 +85,10 @@ fn consecutive_unwinds_still_stack() {
         4
     );
     assert_eq!(
-        rows(&store, "MATCH (n:N) UNWIND [1, 2] AS a UNWIND [3, 4] AS b WITH a, b RETURN a, b"),
+        rows(
+            &store,
+            "MATCH (n:N) UNWIND [1, 2] AS a UNWIND [3, 4] AS b WITH a, b RETURN a, b"
+        ),
         4
     );
 }
@@ -87,7 +99,10 @@ fn an_unwind_after_a_with_still_reads_what_the_with_projected() {
     // on the far side of the barrier.
     let store = graph();
     assert_eq!(
-        rows(&store, "MATCH (n:N) WITH [1, 2, 3] AS l UNWIND l AS x RETURN x"),
+        rows(
+            &store,
+            "MATCH (n:N) WITH [1, 2, 3] AS l UNWIND l AS x RETURN x"
+        ),
         3
     );
 }
@@ -122,16 +137,25 @@ fn a_where_over_the_unwound_variable_still_filters() {
     // only reached one of the two AST shapes would look like it worked.
     let store = graph();
     assert_eq!(
-        rows(&store, "MATCH (n:N) UNWIND [1, 2, 3] AS x WHERE x > 1 RETURN x"),
+        rows(
+            &store,
+            "MATCH (n:N) UNWIND [1, 2, 3] AS x WHERE x > 1 RETURN x"
+        ),
         2
     );
     assert_eq!(
-        rows(&store, "MATCH (n:N) UNWIND [1, 2, 3] AS x WHERE x > 1 WITH x RETURN x"),
+        rows(
+            &store,
+            "MATCH (n:N) UNWIND [1, 2, 3] AS x WHERE x > 1 WITH x RETURN x"
+        ),
         2
     );
     // And the filter is not applied twice or skipped: all three survive.
     assert_eq!(
-        rows(&store, "MATCH (n:N) UNWIND [1, 2, 3] AS x WHERE x > 0 RETURN x"),
+        rows(
+            &store,
+            "MATCH (n:N) UNWIND [1, 2, 3] AS x WHERE x > 0 RETURN x"
+        ),
         3
     );
 }

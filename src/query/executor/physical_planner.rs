@@ -7,10 +7,10 @@
 //! - ExpandInto → ExpandIntoOperator
 //! - Filter → FilterOperator
 
-use crate::query::ast::{Direction, Expression};
-use super::logical_plan::{LogicalPlanNode, ExpandDirection};
+use super::leapfrog::{PhysicalTrieConstraint, TrieJoinOperator};
+use super::logical_plan::{ExpandDirection, LogicalPlanNode};
 use super::operator::*;
-use super::leapfrog::{TrieJoinOperator, PhysicalTrieConstraint};
+use crate::query::ast::{Direction, Expression};
 
 /// Convert a logical plan tree into a physical operator tree
 pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
@@ -23,7 +23,13 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
             Box::new(NodeScanOperator::new(variable.clone(), labels))
         }
 
-        LogicalPlanNode::IndexLookup { variable, label, property, op, value } => {
+        LogicalPlanNode::IndexLookup {
+            variable,
+            label,
+            property,
+            op,
+            value,
+        } => {
             // The plan enumerator only ever emits IndexLookup after confirming an
             // index exists for (label, property) and normalizing `value` to a
             // literal (see plan_enumerator::normalize_index_predicate); by the time
@@ -41,7 +47,14 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
             }
         }
 
-        LogicalPlanNode::Expand { input, source_var, target_var, edge_var, edge_types, direction } => {
+        LogicalPlanNode::Expand {
+            input,
+            source_var,
+            target_var,
+            edge_var,
+            edge_types,
+            direction,
+        } => {
             let physical_input = logical_to_physical(input);
 
             // QP-14: direction reversal — map logical direction to physical
@@ -50,7 +63,10 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
                 ExpandDirection::Reverse => Direction::Incoming,
             };
 
-            let et_strings: Vec<String> = edge_types.iter().map(|et| et.as_str().to_string()).collect();
+            let et_strings: Vec<String> = edge_types
+                .iter()
+                .map(|et| et.as_str().to_string())
+                .collect();
 
             Box::new(ExpandOperator::new(
                 physical_input,
@@ -62,7 +78,13 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
             ))
         }
 
-        LogicalPlanNode::ExpandInto { input, source_var, target_var, edge_types, edge_var } => {
+        LogicalPlanNode::ExpandInto {
+            input,
+            source_var,
+            target_var,
+            edge_types,
+            edge_var,
+        } => {
             let physical_input = logical_to_physical(input);
 
             let et = if edge_types.len() == 1 {
@@ -80,22 +102,33 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
             ))
         }
 
-        LogicalPlanNode::TrieJoin { input, target_var, constraints } => {
+        LogicalPlanNode::TrieJoin {
+            input,
+            target_var,
+            constraints,
+        } => {
             let physical_input = logical_to_physical(input);
 
-            let physical_constraints: Vec<PhysicalTrieConstraint> = constraints.iter().map(|c| {
-                let direction = match c.direction {
-                    ExpandDirection::Forward => Direction::Outgoing,
-                    ExpandDirection::Reverse => Direction::Incoming,
-                };
-                let et_strings: Vec<String> = c.edge_types.iter().map(|et| et.as_str().to_string()).collect();
-                PhysicalTrieConstraint {
-                    bound_var: c.bound_var.clone(),
-                    direction,
-                    edge_types: et_strings,
-                    edge_var: c.edge_var.clone(),
-                }
-            }).collect();
+            let physical_constraints: Vec<PhysicalTrieConstraint> = constraints
+                .iter()
+                .map(|c| {
+                    let direction = match c.direction {
+                        ExpandDirection::Forward => Direction::Outgoing,
+                        ExpandDirection::Reverse => Direction::Incoming,
+                    };
+                    let et_strings: Vec<String> = c
+                        .edge_types
+                        .iter()
+                        .map(|et| et.as_str().to_string())
+                        .collect();
+                    PhysicalTrieConstraint {
+                        bound_var: c.bound_var.clone(),
+                        direction,
+                        edge_types: et_strings,
+                        edge_var: c.edge_var.clone(),
+                    }
+                })
+                .collect();
 
             Box::new(TrieJoinOperator::new(
                 physical_input,
@@ -109,12 +142,20 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
             Box::new(FilterOperator::new(physical_input, predicate.clone()))
         }
 
-        LogicalPlanNode::Join { left, right, join_keys } => {
+        LogicalPlanNode::Join {
+            left,
+            right,
+            join_keys,
+        } => {
             let physical_left = logical_to_physical(left);
             let physical_right = logical_to_physical(right);
             // JoinOperator takes a single join variable
             let join_var = join_keys.first().cloned().unwrap_or_default();
-            Box::new(JoinOperator::new(physical_left, physical_right, vec![join_var]))
+            Box::new(JoinOperator::new(
+                physical_left,
+                physical_right,
+                vec![join_var],
+            ))
         }
 
         LogicalPlanNode::CartesianProduct { left, right } => {
@@ -154,10 +195,10 @@ pub fn logical_to_physical(plan: &LogicalPlanNode) -> OperatorBox {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::graph::types::{Label, EdgeType};
-    use crate::graph::GraphStore;
     use super::super::record::Value;
+    use super::*;
+    use crate::graph::types::{EdgeType, Label};
+    use crate::graph::GraphStore;
 
     #[test]
     fn test_label_scan_conversion() {
@@ -208,15 +249,25 @@ mod tests {
         let desc = op.describe();
         assert_eq!(desc.name, "Expand");
         // Direction should be Incoming (arrow notation: <-)
-        assert!(desc.details.contains("<-"), "Reverse expand should produce Incoming direction (arrow <-), got: {}", desc.details);
+        assert!(
+            desc.details.contains("<-"),
+            "Reverse expand should produce Incoming direction (arrow <-), got: {}",
+            desc.details
+        );
     }
 
     #[test]
     fn test_expand_into_conversion() {
         let plan = LogicalPlanNode::ExpandInto {
             input: Box::new(LogicalPlanNode::CartesianProduct {
-                left: Box::new(LogicalPlanNode::LabelScan { variable: "a".to_string(), label: Some(Label::new("Person")) }),
-                right: Box::new(LogicalPlanNode::LabelScan { variable: "b".to_string(), label: Some(Label::new("Person")) }),
+                left: Box::new(LogicalPlanNode::LabelScan {
+                    variable: "a".to_string(),
+                    label: Some(Label::new("Person")),
+                }),
+                right: Box::new(LogicalPlanNode::LabelScan {
+                    variable: "b".to_string(),
+                    label: Some(Label::new("Person")),
+                }),
             }),
             source_var: "a".to_string(),
             target_var: "b".to_string(),
@@ -287,7 +338,10 @@ mod tests {
         assert_eq!(reverse_results[0], (p1, c1));
     }
 
-    fn drain(op: &mut OperatorBox, store: &GraphStore) -> Vec<crate::query::executor::record::Record> {
+    fn drain(
+        op: &mut OperatorBox,
+        store: &GraphStore,
+    ) -> Vec<crate::query::executor::record::Record> {
         let mut out = Vec::new();
         while let Some(r) = op.next(store).unwrap() {
             out.push(r);
@@ -300,7 +354,9 @@ mod tests {
         ages.iter()
             .map(|&age| {
                 let id = store.create_node("Person");
-                store.set_node_property("default", id, "age", PropertyValue::Integer(age)).unwrap();
+                store
+                    .set_node_property("default", id, "age", PropertyValue::Integer(age))
+                    .unwrap();
                 id
             })
             .collect()
@@ -311,7 +367,10 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("Person");
         store.create_node("Company");
-        let plan = LogicalPlanNode::LabelScan { variable: "n".to_string(), label: None };
+        let plan = LogicalPlanNode::LabelScan {
+            variable: "n".to_string(),
+            label: None,
+        };
         let mut op = logical_to_physical(&plan);
         assert_eq!(op.describe().name, "NodeScan");
         assert_eq!(drain(&mut op, &store).len(), 2);
@@ -322,7 +381,9 @@ mod tests {
         use crate::graph::PropertyValue;
         use crate::query::ast::BinaryOp;
         let mut store = GraphStore::new();
-        store.property_index.create_index(Label::new("Person"), "age".to_string());
+        store
+            .property_index
+            .create_index(Label::new("Person"), "age".to_string());
         let ids = person_ages(&mut store, &[20, 30, 40]);
 
         let plan = LogicalPlanNode::IndexLookup {
@@ -369,16 +430,25 @@ mod tests {
         let ids = person_ages(&mut store, &[10, 50, 70]);
 
         let plan = LogicalPlanNode::Filter {
-            input: Box::new(LogicalPlanNode::LabelScan { variable: "n".to_string(), label: Some(Label::new("Person")) }),
+            input: Box::new(LogicalPlanNode::LabelScan {
+                variable: "n".to_string(),
+                label: Some(Label::new("Person")),
+            }),
             predicate: Expression::Binary {
-                left: Box::new(Expression::Property { variable: "n".to_string(), property: "age".to_string() }),
+                left: Box::new(Expression::Property {
+                    variable: "n".to_string(),
+                    property: "age".to_string(),
+                }),
                 op: BinaryOp::Gt,
                 right: Box::new(Expression::Literal(PropertyValue::Integer(40))),
             },
         };
         let mut op = logical_to_physical(&plan);
         assert_eq!(op.describe().name, "Filter");
-        let mut got: Vec<_> = drain(&mut op, &store).iter().map(|r| r.get("n").unwrap().node_id().unwrap()).collect();
+        let mut got: Vec<_> = drain(&mut op, &store)
+            .iter()
+            .map(|r| r.get("n").unwrap().node_id().unwrap())
+            .collect();
         got.sort();
         assert_eq!(got, vec![ids[1], ids[2]]);
     }
@@ -392,8 +462,14 @@ mod tests {
         store.create_node("Company");
         store.create_node("Company");
         let plan = LogicalPlanNode::CartesianProduct {
-            left: Box::new(LogicalPlanNode::LabelScan { variable: "p".to_string(), label: Some(Label::new("Person")) }),
-            right: Box::new(LogicalPlanNode::LabelScan { variable: "c".to_string(), label: Some(Label::new("Company")) }),
+            left: Box::new(LogicalPlanNode::LabelScan {
+                variable: "p".to_string(),
+                label: Some(Label::new("Person")),
+            }),
+            right: Box::new(LogicalPlanNode::LabelScan {
+                variable: "c".to_string(),
+                label: Some(Label::new("Company")),
+            }),
         };
         let mut op = logical_to_physical(&plan);
         assert_eq!(op.describe().name, "CartesianProduct");
@@ -405,13 +481,20 @@ mod tests {
     #[test]
     fn test_join_conversion_joins_on_first_key() {
         let mut store = GraphStore::new();
-        let both = store.create_node_with_labels(vec![Label::new("Person"), Label::new("Employee")]);
+        let both =
+            store.create_node_with_labels(vec![Label::new("Person"), Label::new("Employee")]);
         store.create_node("Person");
         store.create_node("Employee");
 
         let plan = LogicalPlanNode::Join {
-            left: Box::new(LogicalPlanNode::LabelScan { variable: "n".to_string(), label: Some(Label::new("Person")) }),
-            right: Box::new(LogicalPlanNode::LabelScan { variable: "n".to_string(), label: Some(Label::new("Employee")) }),
+            left: Box::new(LogicalPlanNode::LabelScan {
+                variable: "n".to_string(),
+                label: Some(Label::new("Person")),
+            }),
+            right: Box::new(LogicalPlanNode::LabelScan {
+                variable: "n".to_string(),
+                label: Some(Label::new("Employee")),
+            }),
             join_keys: vec!["n".to_string(), "ignored".to_string()],
         };
         let mut op = logical_to_physical(&plan);
@@ -423,8 +506,14 @@ mod tests {
     #[test]
     fn test_join_conversion_with_no_keys_uses_empty_join_var() {
         let plan = LogicalPlanNode::Join {
-            left: Box::new(LogicalPlanNode::LabelScan { variable: "a".to_string(), label: None }),
-            right: Box::new(LogicalPlanNode::LabelScan { variable: "b".to_string(), label: None }),
+            left: Box::new(LogicalPlanNode::LabelScan {
+                variable: "a".to_string(),
+                label: None,
+            }),
+            right: Box::new(LogicalPlanNode::LabelScan {
+                variable: "b".to_string(),
+                label: None,
+            }),
             join_keys: vec![],
         };
         let op = logical_to_physical(&plan);
@@ -441,8 +530,14 @@ mod tests {
 
         let make = |types: Vec<EdgeType>| LogicalPlanNode::ExpandInto {
             input: Box::new(LogicalPlanNode::CartesianProduct {
-                left: Box::new(LogicalPlanNode::LabelScan { variable: "a".to_string(), label: Some(Label::new("Person")) }),
-                right: Box::new(LogicalPlanNode::LabelScan { variable: "b".to_string(), label: Some(Label::new("Person")) }),
+                left: Box::new(LogicalPlanNode::LabelScan {
+                    variable: "a".to_string(),
+                    label: Some(Label::new("Person")),
+                }),
+                right: Box::new(LogicalPlanNode::LabelScan {
+                    variable: "b".to_string(),
+                    label: Some(Label::new("Person")),
+                }),
             }),
             source_var: "a".to_string(),
             target_var: "b".to_string(),
@@ -450,7 +545,8 @@ mod tests {
             edge_var: None,
         };
         // Two types: the physical operator receives "any type" and finds the LIKES edge.
-        let mut op = logical_to_physical(&make(vec![EdgeType::new("KNOWS"), EdgeType::new("HATES")]));
+        let mut op =
+            logical_to_physical(&make(vec![EdgeType::new("KNOWS"), EdgeType::new("HATES")]));
         let rows = drain(&mut op, &store);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get("a").unwrap().node_id(), Some(a));
@@ -475,7 +571,10 @@ mod tests {
 
         let plan = LogicalPlanNode::TrieJoin {
             input: Box::new(LogicalPlanNode::Expand {
-                input: Box::new(LogicalPlanNode::LabelScan { variable: "a".to_string(), label: Some(Label::new("Node")) }),
+                input: Box::new(LogicalPlanNode::LabelScan {
+                    variable: "a".to_string(),
+                    label: Some(Label::new("Node")),
+                }),
                 source_var: "a".to_string(),
                 target_var: "b".to_string(),
                 edge_var: None,
@@ -484,8 +583,18 @@ mod tests {
             }),
             target_var: "c".to_string(),
             constraints: vec![
-                TrieJoinConstraint { bound_var: "b".to_string(), direction: ExpandDirection::Forward, edge_types: vec![EdgeType::new("EDGE")], edge_var: None },
-                TrieJoinConstraint { bound_var: "a".to_string(), direction: ExpandDirection::Reverse, edge_types: vec![], edge_var: None },
+                TrieJoinConstraint {
+                    bound_var: "b".to_string(),
+                    direction: ExpandDirection::Forward,
+                    edge_types: vec![EdgeType::new("EDGE")],
+                    edge_var: None,
+                },
+                TrieJoinConstraint {
+                    bound_var: "a".to_string(),
+                    direction: ExpandDirection::Reverse,
+                    edge_types: vec![],
+                    edge_var: None,
+                },
             ],
         };
         let mut op = logical_to_physical(&plan);
@@ -510,7 +619,10 @@ mod tests {
 
     fn adjacency_plan(direction: ExpandDirection) -> LogicalPlanNode {
         LogicalPlanNode::AdjacencyCountAggregate {
-            input: Box::new(LogicalPlanNode::LabelScan { variable: "p".to_string(), label: Some(Label::new("Person")) }),
+            input: Box::new(LogicalPlanNode::LabelScan {
+                variable: "p".to_string(),
+                label: Some(Label::new("Person")),
+            }),
             grouped_var: "p".to_string(),
             neighbor_var: "f".to_string(),
             edge_type: EdgeType::new("KNOWS"),
@@ -521,7 +633,9 @@ mod tests {
         }
     }
 
-    fn counts_by_node(rows: &[crate::query::executor::record::Record]) -> std::collections::HashMap<crate::graph::NodeId, i64> {
+    fn counts_by_node(
+        rows: &[crate::query::executor::record::Record],
+    ) -> std::collections::HashMap<crate::graph::NodeId, i64> {
         use crate::graph::PropertyValue;
         rows.iter()
             .map(|r| {

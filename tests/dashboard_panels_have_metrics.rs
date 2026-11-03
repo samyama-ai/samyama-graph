@@ -24,10 +24,14 @@ use samyama::graph::GraphStore;
 use samyama::query::QueryEngine;
 
 fn dashboard() -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("ops/grafana/samyama-overview.json");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("the dashboard must ship in the repo: {}: {e}", path.display()))
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ops/grafana/samyama-overview.json");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "the dashboard must ship in the repo: {}: {e}",
+            path.display()
+        )
+    })
 }
 
 /// Metric names inside PromQL expressions in the dashboard.
@@ -37,8 +41,19 @@ fn dashboard() -> String {
 /// PromQL keywords, because the alternative is a PromQL parser in a test.
 fn metrics_plotted(json: &str) -> BTreeSet<String> {
     const KEYWORDS: &[&str] = &[
-        "rate", "sum", "by", "le", "histogram_quantile", "clamp_min", "job", "label_values",
-        "max", "min", "avg", "increase", "irate",
+        "rate",
+        "sum",
+        "by",
+        "le",
+        "histogram_quantile",
+        "clamp_min",
+        "job",
+        "label_values",
+        "max",
+        "min",
+        "avg",
+        "increase",
+        "irate",
     ];
     let mut out = BTreeSet::new();
     for line in json.lines() {
@@ -161,7 +176,9 @@ fn the_latency_family_is_plotted_somewhere() {
     // question, which is what this one did before the histogram existed.
     let plotted = metrics_plotted(&dashboard());
     assert!(
-        plotted.iter().any(|m| m.starts_with("samyama_query_duration_seconds")),
+        plotted
+            .iter()
+            .any(|m| m.starts_with("samyama_query_duration_seconds")),
         "no panel plots query latency: {plotted:?}"
     );
     assert!(

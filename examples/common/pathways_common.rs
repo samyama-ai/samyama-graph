@@ -200,12 +200,18 @@ fn get_or_create_reaction(
     }
     let id = graph.create_node("Reaction");
     if let Some(n) = graph.get_node_mut(id) {
-        n.set_property("reaction_id", PropertyValue::String(reaction_id.to_string()));
+        n.set_property(
+            "reaction_id",
+            PropertyValue::String(reaction_id.to_string()),
+        );
         if !name.is_empty() {
             n.set_property("name", PropertyValue::String(clean_str(name)));
         }
         if !reaction_type.is_empty() {
-            n.set_property("reaction_type", PropertyValue::String(reaction_type.to_string()));
+            n.set_property(
+                "reaction_type",
+                PropertyValue::String(reaction_type.to_string()),
+            );
         }
     }
     maps.reaction.insert(reaction_id.to_string(), id);
@@ -438,7 +444,12 @@ fn load_reactome(
 
             // Create/get pathway node (may already exist from step 1)
             let pathway_nid = get_or_create_pathway(
-                graph, maps, reactome_id, pathway_name, "Homo sapiens", counts,
+                graph,
+                maps,
+                reactome_id,
+                pathway_name,
+                "Homo sapiens",
+                counts,
             );
 
             // Edge dedup: "uid|pwid"
@@ -522,22 +533,14 @@ fn load_reactome(
 
             // Create/get protein nodes
             let prot1_nid = get_or_create_protein(graph, maps, uniprot1, name1, counts);
-            if !uniprot2.is_empty()
-                && uniprot2.chars().next().unwrap_or(' ').is_alphanumeric()
-            {
+            if !uniprot2.is_empty() && uniprot2.chars().next().unwrap_or(' ').is_alphanumeric() {
                 let _prot2_nid = get_or_create_protein(graph, maps, uniprot2, name2, counts);
             }
 
             // Create/get reaction node
             if !reactome_id.is_empty() {
-                let reaction_nid = get_or_create_reaction(
-                    graph,
-                    maps,
-                    reactome_id,
-                    "",
-                    reaction_type,
-                    counts,
-                );
+                let reaction_nid =
+                    get_or_create_reaction(graph, maps, reactome_id, "", reaction_type, counts);
                 if maps.reaction.len() > reaction_count {
                     reaction_count = maps.reaction.len();
                 }
@@ -862,16 +865,9 @@ fn load_string(
 
             // Create INTERACTS_WITH edge with combined_score
             let mut props = samyama_sdk::PropertyMap::new();
-            props.insert(
-                "combined_score".to_string(),
-                PropertyValue::Integer(score),
-            );
-            let _ = graph.create_edge_with_properties(
-                prot1_nid,
-                prot2_nid,
-                "INTERACTS_WITH",
-                props,
-            );
+            props.insert("combined_score".to_string(), PropertyValue::Integer(score));
+            let _ =
+                graph.create_edge_with_properties(prot1_nid, prot2_nid, "INTERACTS_WITH", props);
             counts.edges += 1;
             interaction_count += 1;
             maps.interacts_with.insert(dedup_key);
@@ -940,10 +936,7 @@ fn load_go(
                 if let Some(nodes) = graph0.get("nodes").and_then(|v| v.as_array()) {
                     eprintln!("    Parsing {} GO nodes...", format_num(nodes.len()));
                     for node_val in nodes {
-                        let id_uri = node_val
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let id_uri = node_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         if id_uri.is_empty() {
                             continue;
                         }
@@ -954,10 +947,7 @@ fn load_go(
                             continue;
                         }
 
-                        let name = node_val
-                            .get("lbl")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let name = node_val.get("lbl").and_then(|v| v.as_str()).unwrap_or("");
 
                         // Extract namespace from meta.basicPropertyValues
                         let namespace = extract_go_namespace(node_val);
@@ -991,18 +981,9 @@ fn load_go(
                     let mut edge_idx = 0usize;
 
                     for edge_val in edges {
-                        let sub_uri = edge_val
-                            .get("sub")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let pred = edge_val
-                            .get("pred")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let obj_uri = edge_val
-                            .get("obj")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let sub_uri = edge_val.get("sub").and_then(|v| v.as_str()).unwrap_or("");
+                        let pred = edge_val.get("pred").and_then(|v| v.as_str()).unwrap_or("");
+                        let obj_uri = edge_val.get("obj").and_then(|v| v.as_str()).unwrap_or("");
 
                         let sub_id = extract_go_id(sub_uri);
                         let obj_id = extract_go_id(obj_uri);
@@ -1018,8 +999,7 @@ fn load_go(
                             // Map predicate to edge type
                             let edge_type = if pred == "is_a" {
                                 "IS_A"
-                            } else if pred.contains("BFO:0000050") || pred.contains("BFO_0000050")
-                            {
+                            } else if pred.contains("BFO:0000050") || pred.contains("BFO_0000050") {
                                 "PART_OF"
                             } else if pred.contains("RO:0002211") || pred.contains("RO_0002211") {
                                 "REGULATES"
@@ -1128,10 +1108,7 @@ fn load_go(
         if is_tty {
             eprintln!();
         }
-        eprintln!(
-            "    ANNOTATED_WITH edges: {}",
-            format_num(annotated_count),
-        );
+        eprintln!("    ANNOTATED_WITH edges: {}", format_num(annotated_count),);
     } else {
         eprintln!("  WARNING: goa_human.gaf not found");
     }
@@ -1181,10 +1158,7 @@ fn extract_go_namespace(node_val: &serde_json::Value) -> String {
 
     if let Some(arr) = bpvs {
         for item in arr {
-            let pred = item
-                .get("pred")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let pred = item.get("pred").and_then(|v| v.as_str()).unwrap_or("");
             if pred.contains("hasOBONamespace") {
                 return item
                     .get("val")

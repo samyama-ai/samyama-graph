@@ -36,8 +36,14 @@ fn a_negative_bound_is_refused() {
 /// the caller has to be able to see which bound is at fault.
 #[test]
 fn the_error_names_the_bound() {
-    let e = format!("{:?}", parse_query("MATCH (a)-[:R*..-2]->(c) RETURN c").unwrap_err());
-    assert!(e.contains("-2"), "error does not mention the offending text: {e}");
+    let e = format!(
+        "{:?}",
+        parse_query("MATCH (a)-[:R*..-2]->(c) RETURN c").unwrap_err()
+    );
+    assert!(
+        e.contains("-2"),
+        "error does not mention the offending text: {e}"
+    );
     assert!(
         e.contains("non-negative") || e.contains("upper"),
         "error does not say what was expected: {e}"

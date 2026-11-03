@@ -35,7 +35,9 @@ fn write(store: &mut GraphStore, cypher: &str) {
 
 fn names(store: &GraphStore, cypher: &str) -> Vec<String> {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
+    let batch = QueryExecutor::new(store)
+        .execute(&q)
+        .expect("query should run");
     let mut out: Vec<String> = batch
         .records
         .iter()
@@ -51,7 +53,9 @@ fn names(store: &GraphStore, cypher: &str) -> Vec<String> {
 
 fn plan_of_unchecked(store: &GraphStore, cypher: &str) -> String {
     let q = parse_query(&format!("EXPLAIN {cypher}")).expect("query should parse");
-    let batch = QueryExecutor::new(store).execute(&q).expect("EXPLAIN should run");
+    let batch = QueryExecutor::new(store)
+        .execute(&q)
+        .expect("EXPLAIN should run");
     match batch.records[0].get("plan") {
         Some(Value::Property(PropertyValue::String(t))) => t.clone(),
         other => panic!("expected a plan, got {other:?}"),
@@ -171,14 +175,33 @@ fn a_target_matching_several_nodes_is_not_pinned() {
     // Pinning requires *exactly one* node. Two nodes sharing the value must
     // both remain reachable targets, or rows go missing.
     let mut store = build(true);
-    write(&mut store, "CREATE (f:N {n: 'f', key: 'SHARED'}), (g:N {n: 'g', key: 'SHARED'})");
-    write(&mut store, "MATCH (x:N {n: 'e'}), (y:N {n: 'f'}) CREATE (x)-[:R]->(y)");
-    write(&mut store, "MATCH (x:N {n: 'c'}), (y:N {n: 'g'}) CREATE (x)-[:R]->(y)");
-    write(&mut store, "MATCH (h:H {tag: 'PICK'}), (x:N {n: 'f'}) CREATE (h)-[:LINK]->(x)");
-    write(&mut store, "MATCH (h:H {tag: 'PICK'}), (x:N {n: 'g'}) CREATE (h)-[:LINK]->(x)");
+    write(
+        &mut store,
+        "CREATE (f:N {n: 'f', key: 'SHARED'}), (g:N {n: 'g', key: 'SHARED'})",
+    );
+    write(
+        &mut store,
+        "MATCH (x:N {n: 'e'}), (y:N {n: 'f'}) CREATE (x)-[:R]->(y)",
+    );
+    write(
+        &mut store,
+        "MATCH (x:N {n: 'c'}), (y:N {n: 'g'}) CREATE (x)-[:R]->(y)",
+    );
+    write(
+        &mut store,
+        "MATCH (h:H {tag: 'PICK'}), (x:N {n: 'f'}) CREATE (h)-[:LINK]->(x)",
+    );
+    write(
+        &mut store,
+        "MATCH (h:H {tag: 'PICK'}), (x:N {n: 'g'}) CREATE (h)-[:LINK]->(x)",
+    );
 
-    let q = "MATCH (h:H {tag: 'PICK'})-[:LINK]->(n:N)-[:R*1..1]->(p:N {key: 'SHARED'}) RETURN n.n AS n";
-    assert!(!plan_of(&store, q).contains("target pinned"), "two nodes match SHARED");
+    let q =
+        "MATCH (h:H {tag: 'PICK'})-[:LINK]->(n:N)-[:R*1..1]->(p:N {key: 'SHARED'}) RETURN n.n AS n";
+    assert!(
+        !plan_of(&store, q).contains("target pinned"),
+        "two nodes match SHARED"
+    );
     assert_eq!(names(&store, q), vec!["c", "e"]);
 }
 
@@ -226,11 +249,19 @@ fn a_cycle_does_not_lose_the_target() {
 // `[target pinned to node …]` — which is the case it was built for.
 
 use samyama::graph::{Label, NodeId};
-use samyama::query::executor::operator::{NodeScanOperator, PhysicalOperator, VarLengthExpandOperator};
 use samyama::query::ast::Direction;
+use samyama::query::executor::operator::{
+    NodeScanOperator, PhysicalOperator, VarLengthExpandOperator,
+};
 
 /// The `n` values produced by a var-length expand from `:N`, optionally pinned.
-fn walk(store: &GraphStore, min: usize, max: usize, dir: Direction, pin: Option<NodeId>) -> Vec<String> {
+fn walk(
+    store: &GraphStore,
+    min: usize,
+    max: usize,
+    dir: Direction,
+    pin: Option<NodeId>,
+) -> Vec<String> {
     let scan = NodeScanOperator::new("n".to_string(), vec![Label::new("N")]);
     let mut expand = VarLengthExpandOperator::new(
         Box::new(scan),
@@ -292,7 +323,10 @@ fn pinned_matches_general(min: usize, max: usize, dir: Direction) {
             "pinned produced {name}, which the general path did not reach at all"
         );
     }
-    assert!(!pinned.is_empty() || min > 2, "expected the pin to find something");
+    assert!(
+        !pinned.is_empty() || min > 2,
+        "expected the pin to find something"
+    );
 }
 
 #[test]
@@ -307,11 +341,23 @@ fn the_pinned_operator_agrees_with_the_general_one() {
 fn the_pinned_operator_finds_exactly_the_nodes_that_reach_the_target() {
     let store = build(false);
     let t = target_id(&store);
-    assert_eq!(walk(&store, 1, 1, Direction::Outgoing, Some(t)), vec!["a", "d"]);
-    assert_eq!(walk(&store, 1, 2, Direction::Outgoing, Some(t)), vec!["a", "b", "d"]);
-    assert_eq!(walk(&store, 1, 3, Direction::Outgoing, Some(t)), vec!["a", "b", "c", "d"]);
+    assert_eq!(
+        walk(&store, 1, 1, Direction::Outgoing, Some(t)),
+        vec!["a", "d"]
+    );
+    assert_eq!(
+        walk(&store, 1, 2, Direction::Outgoing, Some(t)),
+        vec!["a", "b", "d"]
+    );
+    assert_eq!(
+        walk(&store, 1, 3, Direction::Outgoing, Some(t)),
+        vec!["a", "b", "c", "d"]
+    );
     // `min_hops == 0` lets the target reach itself.
-    assert_eq!(walk(&store, 0, 2, Direction::Outgoing, Some(t)), vec!["a", "b", "d", "t"]);
+    assert_eq!(
+        walk(&store, 0, 2, Direction::Outgoing, Some(t)),
+        vec!["a", "b", "d", "t"]
+    );
     // Edges point toward `t`; following them outward from it reaches nothing.
     assert!(walk(&store, 1, 2, Direction::Incoming, Some(t)).is_empty());
 }

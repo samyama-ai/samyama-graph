@@ -36,10 +36,22 @@ fn path_shape(cypher: &str) -> Option<(usize, usize)> {
 #[test]
 fn create_binds_a_named_path() {
     assert_eq!(path_shape("CREATE p = (a {num: 1}) RETURN p"), Some((1, 0)));
-    assert_eq!(path_shape("CREATE p = (a)-[:R]->(b) RETURN p"), Some((2, 1)));
-    assert_eq!(path_shape("CREATE p = (a)-[r:R]->(b) RETURN p"), Some((2, 1)));
-    assert_eq!(path_shape("CREATE p = (a)-[r:R]->(b)-[:S]->(c) RETURN p"), Some((3, 2)));
-    assert_eq!(path_shape("CREATE p = (a)<-[:R]-(b) RETURN p"), Some((2, 1)));
+    assert_eq!(
+        path_shape("CREATE p = (a)-[:R]->(b) RETURN p"),
+        Some((2, 1))
+    );
+    assert_eq!(
+        path_shape("CREATE p = (a)-[r:R]->(b) RETURN p"),
+        Some((2, 1))
+    );
+    assert_eq!(
+        path_shape("CREATE p = (a)-[r:R]->(b)-[:S]->(c) RETURN p"),
+        Some((3, 2))
+    );
+    assert_eq!(
+        path_shape("CREATE p = (a)<-[:R]-(b) RETURN p"),
+        Some((2, 1))
+    );
 }
 
 /// A bare `MERGE` binds it too.
@@ -58,7 +70,10 @@ fn an_unnamed_pattern_binds_nothing() {
         .execute(&q)
         .expect("runs");
     let rec = batch.records.first().expect("one row");
-    assert!(rec.get("p").is_none(), "bound `p` for a pattern that names no path");
+    assert!(
+        rec.get("p").is_none(),
+        "bound `p` for a pattern that names no path"
+    );
     assert!(rec.get("a").is_some(), "the node variable is still bound");
 }
 

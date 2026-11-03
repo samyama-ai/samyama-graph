@@ -62,7 +62,12 @@ pub struct Rect {
 
 impl Rect {
     pub fn point(x: f64, y: f64) -> Self {
-        Self { min_x: x, min_y: y, max_x: x, max_y: y }
+        Self {
+            min_x: x,
+            min_y: y,
+            max_x: x,
+            max_y: y,
+        }
     }
 
     fn union(&self, o: &Rect) -> Rect {
@@ -79,7 +84,10 @@ impl Rect {
     }
 
     fn intersects(&self, o: &Rect) -> bool {
-        self.min_x <= o.max_x && o.min_x <= self.max_x && self.min_y <= o.max_y && o.min_y <= self.max_y
+        self.min_x <= o.max_x
+            && o.min_x <= self.max_x
+            && self.min_y <= o.max_y
+            && o.min_y <= self.max_y
     }
 
     fn contains_point(&self, x: f64, y: f64) -> bool {
@@ -88,8 +96,20 @@ impl Rect {
 
     /// Planar distance from `(x, y)` to the nearest point of the box.
     fn min_dist(&self, x: f64, y: f64) -> f64 {
-        let dx = if x < self.min_x { self.min_x - x } else if x > self.max_x { x - self.max_x } else { 0.0 };
-        let dy = if y < self.min_y { self.min_y - y } else if y > self.max_y { y - self.max_y } else { 0.0 };
+        let dx = if x < self.min_x {
+            self.min_x - x
+        } else if x > self.max_x {
+            x - self.max_x
+        } else {
+            0.0
+        };
+        let dy = if y < self.min_y {
+            self.min_y - y
+        } else if y > self.max_y {
+            y - self.max_y
+        } else {
+            0.0
+        };
         (dx * dx + dy * dy).sqrt()
     }
 
@@ -105,7 +125,13 @@ impl Rect {
     /// longitude by the cosine of one latitude would not be a bound: the
     /// parallel is longer than the great circle between two points on it.
     fn min_haversine(&self, lon: f64, lat: f64) -> f64 {
-        let dlat = if lat < self.min_y { self.min_y - lat } else if lat > self.max_y { lat - self.max_y } else { 0.0 };
+        let dlat = if lat < self.min_y {
+            self.min_y - lat
+        } else if lat > self.max_y {
+            lat - self.max_y
+        } else {
+            0.0
+        };
         let dlon = if self.min_x <= lon && lon <= self.max_x {
             0.0
         } else {
@@ -115,7 +141,12 @@ impl Rect {
             };
             wrap(lon - self.min_x).min(wrap(lon - self.max_x))
         };
-        let cos_box = self.min_y.to_radians().cos().min(self.max_y.to_radians().cos()).max(0.0);
+        let cos_box = self
+            .min_y
+            .to_radians()
+            .cos()
+            .min(self.max_y.to_radians().cos())
+            .max(0.0);
         let h = (dlat.to_radians() / 2.0).sin().powi(2)
             + lat.to_radians().cos().max(0.0) * cos_box * (dlon.to_radians() / 2.0).sin().powi(2);
         // Rounding must not lift a bound above the exact distance of a point
@@ -142,7 +173,9 @@ impl Node {
 /// The coordinates of a point value: `(x, y, geographic)`, longitude first for
 /// a geographic point. `None` for anything that is not a point.
 pub fn point_coords(value: &PropertyValue) -> Option<(f64, f64, bool)> {
-    let PropertyValue::Map(m) = value else { return None };
+    let PropertyValue::Map(m) = value else {
+        return None;
+    };
     let num = |k: &str| -> Option<f64> {
         m.get(k).and_then(|v| match v {
             PropertyValue::Float(f) => Some(*f),
@@ -159,7 +192,11 @@ pub fn point_coords(value: &PropertyValue) -> Option<(f64, f64, bool)> {
         },
     };
     if geographic {
-        Some((num("longitude").or_else(|| num("x"))?, num("latitude").or_else(|| num("y"))?, true))
+        Some((
+            num("longitude").or_else(|| num("x"))?,
+            num("latitude").or_else(|| num("y"))?,
+            true,
+        ))
     } else {
         Some((num("x")?, num("y")?, false))
     }
@@ -177,7 +214,12 @@ pub struct PointIndex {
 
 impl PointIndex {
     pub fn new(label: impl Into<String>, property: impl Into<String>) -> Self {
-        Self { label: label.into(), property: property.into(), root: Node::Leaf(Vec::new()), at: HashMap::new() }
+        Self {
+            label: label.into(),
+            property: property.into(),
+            root: Node::Leaf(Vec::new()),
+            at: HashMap::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -253,8 +295,13 @@ impl PointIndex {
                         .min_by(|(_, (a, _)), (_, (b, _))| {
                             let ea = a.union(&entry).area() - a.area();
                             let eb = b.union(&entry).area() - b.area();
-                            ea.partial_cmp(&eb).unwrap_or(std::cmp::Ordering::Equal)
-                                .then(a.area().partial_cmp(&b.area()).unwrap_or(std::cmp::Ordering::Equal))
+                            ea.partial_cmp(&eb)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then(
+                                    a.area()
+                                        .partial_cmp(&b.area())
+                                        .unwrap_or(std::cmp::Ordering::Equal),
+                                )
                         })
                         .map(|(i, _)| i)
                         .expect("an inner node has children");
@@ -262,7 +309,9 @@ impl PointIndex {
                     *r = r.union(&entry);
                     if let Some(sibling) = ins(child, entry, id) {
                         *r = child.bounds().expect("a split keeps entries on both sides");
-                        let sr = sibling.bounds().expect("a split keeps entries on both sides");
+                        let sr = sibling
+                            .bounds()
+                            .expect("a split keeps entries on both sides");
                         children.push((sr, Box::new(sibling)));
                     }
                     (children.len() > MAX_ENTRIES).then(|| {
@@ -276,17 +325,28 @@ impl PointIndex {
         }
         /// Sort along the wider axis of the entries' extent and cut in half.
         fn split<T>(entries: &mut Vec<(Rect, T)>, rect: impl Fn(&Rect) -> Rect) -> Vec<(Rect, T)> {
-            let b = entries.iter().map(|(r, _)| rect(r)).reduce(|a, c| a.union(&c)).expect("non-empty");
+            let b = entries
+                .iter()
+                .map(|(r, _)| rect(r))
+                .reduce(|a, c| a.union(&c))
+                .expect("non-empty");
             let by_x = (b.max_x - b.min_x) >= (b.max_y - b.min_y);
             entries.sort_by(|(a, _), (c, _)| {
-                let (ka, kc) = if by_x { (a.min_x + a.max_x, c.min_x + c.max_x) } else { (a.min_y + a.max_y, c.min_y + c.max_y) };
+                let (ka, kc) = if by_x {
+                    (a.min_x + a.max_x, c.min_x + c.max_x)
+                } else {
+                    (a.min_y + a.max_y, c.min_y + c.max_y)
+                };
                 ka.partial_cmp(&kc).unwrap_or(std::cmp::Ordering::Equal)
             });
             entries.split_off(entries.len() / 2)
         }
         if let Some(sibling) = ins(&mut self.root, entry, id) {
             let old = std::mem::replace(&mut self.root, Node::Leaf(Vec::new()));
-            let (a, b) = (old.bounds().expect("non-empty"), sibling.bounds().expect("non-empty"));
+            let (a, b) = (
+                old.bounds().expect("non-empty"),
+                sibling.bounds().expect("non-empty"),
+            );
             self.root = Node::Inner(vec![(a, Box::new(old)), (b, Box::new(sibling))]);
         }
     }
@@ -297,8 +357,16 @@ impl PointIndex {
         let mut stack = vec![&self.root];
         while let Some(node) = stack.pop() {
             match node {
-                Node::Leaf(e) => out.extend(e.iter().filter(|(r, _)| r.intersects(area)).map(|(_, n)| *n)),
-                Node::Inner(c) => stack.extend(c.iter().filter(|(r, _)| r.intersects(area)).map(|(_, n)| n.as_ref())),
+                Node::Leaf(e) => out.extend(
+                    e.iter()
+                        .filter(|(r, _)| r.intersects(area))
+                        .map(|(_, n)| *n),
+                ),
+                Node::Inner(c) => stack.extend(
+                    c.iter()
+                        .filter(|(r, _)| r.intersects(area))
+                        .map(|(_, n)| n.as_ref()),
+                ),
             }
         }
         out
@@ -307,7 +375,11 @@ impl PointIndex {
     /// The `k` nodes nearest `(x, y)` by planar distance in the index's own
     /// coordinates, nearest first, with that distance. For a cartesian index.
     pub fn nearest(&self, x: f64, y: f64, k: usize) -> Vec<(NodeId, f64)> {
-        self.nearest_by(k, |r| r.min_dist(x, y), |px, py| ((px - x).powi(2) + (py - y).powi(2)).sqrt())
+        self.nearest_by(
+            k,
+            |r| r.min_dist(x, y),
+            |px, py| ((px - x).powi(2) + (py - y).powi(2)).sqrt(),
+        )
     }
 
     /// The `k` nodes nearest `(lon, lat)` by great-circle distance, nearest
@@ -316,14 +388,23 @@ impl PointIndex {
     /// ordered by a lower bound on metres (`Rect::min_haversine`), so a point
     /// east or west of the centre at high latitude is reached in its turn.
     pub fn nearest_geographic(&self, lon: f64, lat: f64, k: usize) -> Vec<(NodeId, f64)> {
-        self.nearest_by(k, |r| r.min_haversine(lon, lat), |px, py| haversine_m((lon, lat), (px, py)))
+        self.nearest_by(
+            k,
+            |r| r.min_haversine(lon, lat),
+            |px, py| haversine_m((lon, lat), (px, py)),
+        )
     }
 
     /// Best-first descent: a subtree is keyed by `bound`, a lower bound on the
     /// distance to anything in it, and an entry by its exact `distance`. An
     /// entry popped from the heap is therefore no farther than anything still
     /// in it, so the first `k` popped are the `k` nearest.
-    fn nearest_by(&self, k: usize, bound: impl Fn(&Rect) -> f64, distance: impl Fn(f64, f64) -> f64) -> Vec<(NodeId, f64)> {
+    fn nearest_by(
+        &self,
+        k: usize,
+        bound: impl Fn(&Rect) -> f64,
+        distance: impl Fn(f64, f64) -> f64,
+    ) -> Vec<(NodeId, f64)> {
         struct Item<'a>(f64, Option<NodeId>, Option<&'a Node>);
         impl PartialEq for Item<'_> {
             fn eq(&self, o: &Self) -> bool {
@@ -339,7 +420,8 @@ impl PointIndex {
         impl Ord for Item<'_> {
             // Min-heap on distance.
             fn cmp(&self, o: &Self) -> std::cmp::Ordering {
-                o.0.partial_cmp(&self.0).unwrap_or(std::cmp::Ordering::Equal)
+                o.0.partial_cmp(&self.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }
         }
         let mut heap = BinaryHeap::new();
@@ -375,7 +457,9 @@ impl PointIndex {
                 Node::Leaf(e) => e.capacity() * size_of::<(Rect, NodeId)>(),
                 Node::Inner(c) => {
                     c.capacity() * size_of::<(Rect, Box<Node>)>()
-                        + c.iter().map(|(_, n)| size_of::<Node>() + walk(n)).sum::<usize>()
+                        + c.iter()
+                            .map(|(_, n)| size_of::<Node>() + walk(n))
+                            .sum::<usize>()
                 }
             }
         }
@@ -399,14 +483,29 @@ pub fn geographic_box(lon: f64, lat: f64, metres: f64) -> Rect {
     let dlat = metres / METRES_PER_DEGREE;
     let (lo_lat, hi_lat) = (lat - dlat, lat + dlat);
     if lo_lat <= -90.0 || hi_lat >= 90.0 {
-        return Rect { min_x: -180.0, min_y: lo_lat.max(-90.0), max_x: 180.0, max_y: hi_lat.min(90.0) };
+        return Rect {
+            min_x: -180.0,
+            min_y: lo_lat.max(-90.0),
+            max_x: 180.0,
+            max_y: hi_lat.min(90.0),
+        };
     }
     let worst = lo_lat.abs().max(hi_lat.abs()).to_radians().cos();
     let dlon = metres / (METRES_PER_DEGREE * worst);
     if dlon >= 180.0 || lon - dlon < -180.0 || lon + dlon > 180.0 {
-        return Rect { min_x: -180.0, min_y: lo_lat, max_x: 180.0, max_y: hi_lat };
+        return Rect {
+            min_x: -180.0,
+            min_y: lo_lat,
+            max_x: 180.0,
+            max_y: hi_lat,
+        };
     }
-    Rect { min_x: lon - dlon, min_y: lo_lat, max_x: lon + dlon, max_y: hi_lat }
+    Rect {
+        min_x: lon - dlon,
+        min_y: lo_lat,
+        max_x: lon + dlon,
+        max_y: hi_lat,
+    }
 }
 
 /// Every point index in a store, by name.
@@ -417,7 +516,10 @@ pub struct PointIndexes {
 
 impl PointIndexes {
     pub fn create(&self, name: impl Into<String>, label: &str, property: &str) {
-        self.by_name.write().unwrap().insert(name.into(), PointIndex::new(label, property));
+        self.by_name
+            .write()
+            .unwrap()
+            .insert(name.into(), PointIndex::new(label, property));
     }
 
     pub fn drop_index(&self, name: &str) -> bool {
@@ -431,7 +533,10 @@ impl PointIndexes {
     /// `(name, label, property)` for every index, sorted by name.
     pub fn listing(&self) -> Vec<(String, String, String)> {
         let g = self.by_name.read().unwrap();
-        let mut v: Vec<_> = g.iter().map(|(n, i)| (n.clone(), i.label.clone(), i.property.clone())).collect();
+        let mut v: Vec<_> = g
+            .iter()
+            .map(|(n, i)| (n.clone(), i.label.clone(), i.property.clone()))
+            .collect();
         v.sort();
         v
     }
@@ -439,13 +544,24 @@ impl PointIndexes {
     /// The name of the index on `(label, property)`, if one exists.
     pub fn name_for(&self, label: &str, property: &str) -> Option<String> {
         let g = self.by_name.read().unwrap();
-        g.iter().find(|(_, i)| i.label == label && i.property == property).map(|(n, _)| n.clone())
+        g.iter()
+            .find(|(_, i)| i.label == label && i.property == property)
+            .map(|(n, _)| n.clone())
     }
 
     /// A property of a node with `label` changed to `value` (`None`: removed).
-    pub fn on_property_set(&self, label: &str, key: &str, id: NodeId, value: Option<&PropertyValue>) {
+    pub fn on_property_set(
+        &self,
+        label: &str,
+        key: &str,
+        id: NodeId,
+        value: Option<&PropertyValue>,
+    ) {
         let mut g = self.by_name.write().unwrap();
-        for idx in g.values_mut().filter(|i| i.label == label && i.property == key) {
+        for idx in g
+            .values_mut()
+            .filter(|i| i.label == label && i.property == key)
+        {
             match value {
                 Some(v) => idx.set(id, v),
                 None => idx.remove(id),
@@ -456,13 +572,20 @@ impl PointIndexes {
     /// A node lost `label`, or was deleted (`label` `None`: every index).
     pub fn on_node_removed(&self, label: Option<&str>, id: NodeId) {
         let mut g = self.by_name.write().unwrap();
-        for idx in g.values_mut().filter(|i| label.is_none_or(|l| i.label == l)) {
+        for idx in g
+            .values_mut()
+            .filter(|i| label.is_none_or(|l| i.label == l))
+        {
             idx.remove(id);
         }
     }
 
     /// Replace an index's contents with `points` (a build or a rebuild).
-    pub fn rebuild(&self, name: &str, points: impl IntoIterator<Item = (NodeId, PropertyValue)>) -> usize {
+    pub fn rebuild(
+        &self,
+        name: &str,
+        points: impl IntoIterator<Item = (NodeId, PropertyValue)>,
+    ) -> usize {
         let mut g = self.by_name.write().unwrap();
         let Some(idx) = g.get_mut(name) else { return 0 };
         *idx = PointIndex::new(idx.label.clone(), idx.property.clone());
@@ -473,9 +596,16 @@ impl PointIndexes {
     }
 
     /// Run `f` against the index on `(label, property)`.
-    pub fn with<R>(&self, label: &str, property: &str, f: impl FnOnce(&PointIndex) -> R) -> Option<R> {
+    pub fn with<R>(
+        &self,
+        label: &str,
+        property: &str,
+        f: impl FnOnce(&PointIndex) -> R,
+    ) -> Option<R> {
         let g = self.by_name.read().unwrap();
-        g.values().find(|i| i.label == label && i.property == property).map(f)
+        g.values()
+            .find(|i| i.label == label && i.property == property)
+            .map(f)
     }
 
     /// Run `f` against the index named `name`.
@@ -485,7 +615,17 @@ impl PointIndexes {
 
     pub fn index_memory(&self) -> Vec<(String, String, String, usize, usize)> {
         let g = self.by_name.read().unwrap();
-        g.iter().map(|(n, i)| (n.clone(), i.label.clone(), i.property.clone(), i.heap_bytes(), i.len())).collect()
+        g.iter()
+            .map(|(n, i)| {
+                (
+                    n.clone(),
+                    i.label.clone(),
+                    i.property.clone(),
+                    i.heap_bytes(),
+                    i.len(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -518,14 +658,32 @@ mod tests {
     fn within_matches_a_scan() {
         let (idx, all) = grid();
         for area in [
-            Rect { min_x: 3.0, min_y: 2.0, max_x: 12.0, max_y: 9.5 },
-            Rect { min_x: -5.0, min_y: -5.0, max_x: 0.1, max_y: 0.1 },
-            Rect { min_x: 100.0, min_y: 100.0, max_x: 200.0, max_y: 200.0 },
+            Rect {
+                min_x: 3.0,
+                min_y: 2.0,
+                max_x: 12.0,
+                max_y: 9.5,
+            },
+            Rect {
+                min_x: -5.0,
+                min_y: -5.0,
+                max_x: 0.1,
+                max_y: 0.1,
+            },
+            Rect {
+                min_x: 100.0,
+                min_y: 100.0,
+                max_x: 200.0,
+                max_y: 200.0,
+            },
         ] {
             let mut got = idx.within(&area);
             got.sort();
-            let mut want: Vec<NodeId> =
-                all.iter().filter(|(_, x, y)| area.contains_point(*x, *y)).map(|(n, _, _)| *n).collect();
+            let mut want: Vec<NodeId> = all
+                .iter()
+                .filter(|(_, x, y)| area.contains_point(*x, *y))
+                .map(|(n, _, _)| *n)
+                .collect();
             want.sort();
             assert_eq!(got, want, "{area:?}");
         }
@@ -535,8 +693,15 @@ mod tests {
     fn nearest_matches_a_sort() {
         let (idx, all) = grid();
         let (qx, qy) = (17.3, 11.1);
-        let got: Vec<f64> = idx.nearest(qx, qy, 25).into_iter().map(|(_, d)| d).collect();
-        let mut want: Vec<f64> = all.iter().map(|(_, x, y)| ((x - qx).powi(2) + (y - qy).powi(2)).sqrt()).collect();
+        let got: Vec<f64> = idx
+            .nearest(qx, qy, 25)
+            .into_iter()
+            .map(|(_, d)| d)
+            .collect();
+        let mut want: Vec<f64> = all
+            .iter()
+            .map(|(_, x, y)| ((x - qx).powi(2) + (y - qy).powi(2)).sqrt())
+            .collect();
         want.sort_by(|a, b| a.partial_cmp(b).unwrap());
         want.truncate(25);
         for (g, w) in got.iter().zip(&want) {
@@ -547,7 +712,12 @@ mod tests {
     #[test]
     fn removal_and_update_are_seen() {
         let (mut idx, _) = grid();
-        let area = Rect { min_x: 0.0, min_y: 0.0, max_x: 0.0, max_y: 0.0 };
+        let area = Rect {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 0.0,
+            max_y: 0.0,
+        };
         assert_eq!(idx.within(&area), vec![NodeId::new(0)]);
         idx.remove(NodeId::new(0));
         assert!(idx.within(&area).is_empty());
@@ -561,7 +731,9 @@ mod tests {
     /// A tiny deterministic generator, so the property tests below need no
     /// seed plumbing and fail the same way every time.
     fn lcg(state: &mut u64) -> f64 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*state >> 11) as f64 / (1u64 << 53) as f64
     }
 
@@ -583,7 +755,10 @@ mod tests {
         let probe_lat = r / METRES_PER_DEGREE * (1.0 - 1e-4);
         assert!(haversine_m((0.0, 0.0), (0.0, probe_lat)) < r);
         assert!(geographic_box(0.0, 0.0, r).contains_point(0.0, probe_lat));
-        assert!(probe_lat > r / 111_320.0, "the probe sits in the band the old constant clipped");
+        assert!(
+            probe_lat > r / 111_320.0,
+            "the probe sits in the band the old constant clipped"
+        );
 
         // Every bearing, every longitude including either side of the
         // antimeridian, latitudes up to 85, radii from metres to 500 km, at
@@ -598,7 +773,10 @@ mod tests {
             let plon = (plon + 540.0).rem_euclid(360.0) - 180.0;
             assert!(haversine_m((lon, lat), (plon, plat)) < r);
             let b = geographic_box(lon, lat, r);
-            assert!(b.contains_point(plon, plat), "centre ({lon}, {lat}) r={r} bearing={bearing}: ({plon}, {plat}) outside {b:?}");
+            assert!(
+                b.contains_point(plon, plat),
+                "centre ({lon}, {lat}) r={r} bearing={bearing}: ({plon}, {plat}) outside {b:?}"
+            );
         }
     }
 
@@ -620,9 +798,18 @@ mod tests {
             idx.set(NodeId::new(i), &PropertyValue::Map(m));
             all.push((NodeId::new(i), lon, lat));
         }
-        for (qlon, qlat, k) in [(10.0, 80.0, 1), (10.0, 80.0, 40), (0.5, 81.5, 25), (-170.0, 79.0, 10), (10.0, 80.0, 3000)] {
+        for (qlon, qlat, k) in [
+            (10.0, 80.0, 1),
+            (10.0, 80.0, 40),
+            (0.5, 81.5, 25),
+            (-170.0, 79.0, 10),
+            (10.0, 80.0, 3000),
+        ] {
             let got = idx.nearest_geographic(qlon, qlat, k);
-            let mut want: Vec<f64> = all.iter().map(|(_, x, y)| haversine_m((qlon, qlat), (*x, *y))).collect();
+            let mut want: Vec<f64> = all
+                .iter()
+                .map(|(_, x, y)| haversine_m((qlon, qlat), (*x, *y)))
+                .collect();
             want.sort_by(|a, b| a.partial_cmp(b).unwrap());
             want.truncate(k);
             assert_eq!(got.len(), want.len());

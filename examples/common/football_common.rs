@@ -159,21 +159,18 @@ fn col(hdr: &HashMap<String, usize>, name: &str) -> Result<usize, Error> {
 // PUBLIC: LOAD DATASET
 // ============================================================================
 
-pub fn load_dataset(
-    graph: &mut GraphStore,
-    data_dir: &Path,
-) -> Result<LoadResult, Error> {
+pub fn load_dataset(graph: &mut GraphStore, data_dir: &Path) -> Result<LoadResult, Error> {
     let mut node_count = 0usize;
     let mut edge_count = 0usize;
     let is_tty = io::stderr().is_terminal();
 
     // ID maps
     let mut country_map: HashMap<String, NodeId> = HashMap::new();
-    let mut team_map: HashMap<String, NodeId> = HashMap::new();      // team_id -> NodeId
+    let mut team_map: HashMap<String, NodeId> = HashMap::new(); // team_id -> NodeId
     let mut tournament_map: HashMap<String, NodeId> = HashMap::new(); // tournament_id -> NodeId
-    let mut stadium_map: HashMap<String, NodeId> = HashMap::new();    // stadium_id -> NodeId
-    let mut match_map: HashMap<String, NodeId> = HashMap::new();      // match_id -> NodeId
-    let mut player_map: HashMap<String, NodeId> = HashMap::new();     // player_id -> NodeId
+    let mut stadium_map: HashMap<String, NodeId> = HashMap::new(); // stadium_id -> NodeId
+    let mut match_map: HashMap<String, NodeId> = HashMap::new(); // match_id -> NodeId
+    let mut player_map: HashMap<String, NodeId> = HashMap::new(); // player_id -> NodeId
 
     let mut tournament_count = 0usize;
     let mut team_count = 0usize;
@@ -210,17 +207,19 @@ pub fn load_dataset(
     {
         let path = data_dir.join("teams.csv");
         let (hdr, reader) = open_csv(&path)?;
-        let c_id    = col(&hdr, "team_id")?;
-        let c_name  = col(&hdr, "team_name")?;
-        let c_code  = col(&hdr, "team_code")?;
-        let c_conf  = col(&hdr, "confederation_name")?;
+        let c_id = col(&hdr, "team_id")?;
+        let c_name = col(&hdr, "team_name")?;
+        let c_code = col(&hdr, "team_code")?;
+        let c_conf = col(&hdr, "confederation_name")?;
         let c_region = col(&hdr, "region_name")?;
 
         for line in reader.lines() {
             let line = line?;
             let f = parse_csv_line(&line);
             let team_id = csv_field(&f, c_id);
-            if team_id.is_empty() { continue; }
+            if team_id.is_empty() {
+                continue;
+            }
 
             let name = csv_field(&f, c_name);
             let code = csv_field(&f, c_code);
@@ -246,7 +245,11 @@ pub fn load_dataset(
             }
         }
     }
-    eprintln!("  Teams: {}   Countries: {}", format_num(team_count), format_num(country_map.len()));
+    eprintln!(
+        "  Teams: {}   Countries: {}",
+        format_num(team_count),
+        format_num(country_map.len())
+    );
 
     // ========================================================================
     // Phase 2: Stadiums
@@ -255,24 +258,35 @@ pub fn load_dataset(
     {
         let path = data_dir.join("stadiums.csv");
         let (hdr, reader) = open_csv(&path)?;
-        let c_id       = col(&hdr, "stadium_id")?;
-        let c_name     = col(&hdr, "stadium_name")?;
-        let c_city     = col(&hdr, "city_name")?;
-        let c_country  = col(&hdr, "country_name")?;
+        let c_id = col(&hdr, "stadium_id")?;
+        let c_name = col(&hdr, "stadium_name")?;
+        let c_city = col(&hdr, "city_name")?;
+        let c_country = col(&hdr, "country_name")?;
         let c_capacity = col(&hdr, "stadium_capacity")?;
 
         for line in reader.lines() {
             let line = line?;
             let f = parse_csv_line(&line);
             let sid = csv_field(&f, c_id);
-            if sid.is_empty() { continue; }
+            if sid.is_empty() {
+                continue;
+            }
 
             let nid = graph.create_node("Stadium");
             if let Some(n) = graph.get_node_mut(nid) {
                 n.set_property("stadium_id", PropertyValue::String(sid.to_string()));
-                n.set_property("name", PropertyValue::String(csv_field(&f, c_name).to_string()));
-                n.set_property("city", PropertyValue::String(csv_field(&f, c_city).to_string()));
-                n.set_property("country", PropertyValue::String(csv_field(&f, c_country).to_string()));
+                n.set_property(
+                    "name",
+                    PropertyValue::String(csv_field(&f, c_name).to_string()),
+                );
+                n.set_property(
+                    "city",
+                    PropertyValue::String(csv_field(&f, c_city).to_string()),
+                );
+                n.set_property(
+                    "country",
+                    PropertyValue::String(csv_field(&f, c_country).to_string()),
+                );
                 if let Some(cap) = opt_i64(csv_field(&f, c_capacity)) {
                     n.set_property("capacity", PropertyValue::Integer(cap));
                 }
@@ -291,12 +305,12 @@ pub fn load_dataset(
     {
         let path = data_dir.join("tournaments.csv");
         let (hdr, reader) = open_csv(&path)?;
-        let c_id      = col(&hdr, "tournament_id")?;
-        let c_name    = col(&hdr, "tournament_name")?;
-        let c_year    = col(&hdr, "year")?;
-        let c_host    = col(&hdr, "host_country")?;
-        let c_winner  = col(&hdr, "winner")?;
-        let c_teams   = col(&hdr, "count_teams")?;
+        let c_id = col(&hdr, "tournament_id")?;
+        let c_name = col(&hdr, "tournament_name")?;
+        let c_year = col(&hdr, "year")?;
+        let c_host = col(&hdr, "host_country")?;
+        let c_winner = col(&hdr, "winner")?;
+        let c_teams = col(&hdr, "count_teams")?;
 
         // We need winner team_id — look it up from tournament_standings later.
         // For now store winner name as string property.
@@ -304,7 +318,9 @@ pub fn load_dataset(
             let line = line?;
             let f = parse_csv_line(&line);
             let tid = csv_field(&f, c_id);
-            if tid.is_empty() { continue; }
+            if tid.is_empty() {
+                continue;
+            }
 
             let year_str = csv_field(&f, c_year);
             let host = csv_field(&f, c_host);
@@ -313,7 +329,10 @@ pub fn load_dataset(
             let nid = graph.create_node("Tournament");
             if let Some(n) = graph.get_node_mut(nid) {
                 n.set_property("tournament_id", PropertyValue::String(tid.to_string()));
-                n.set_property("name", PropertyValue::String(csv_field(&f, c_name).to_string()));
+                n.set_property(
+                    "name",
+                    PropertyValue::String(csv_field(&f, c_name).to_string()),
+                );
                 if let Some(y) = opt_i64(year_str) {
                     n.set_property("year", PropertyValue::Integer(y));
                 }
@@ -343,33 +362,47 @@ pub fn load_dataset(
     {
         let path = data_dir.join("players.csv");
         let (hdr, reader) = open_csv(&path)?;
-        let c_id         = col(&hdr, "player_id")?;
-        let c_family     = col(&hdr, "family_name")?;
-        let c_given      = col(&hdr, "given_name")?;
-        let c_birth      = col(&hdr, "birth_date")?;
-        let c_gk         = col(&hdr, "goal_keeper")?;
-        let c_def        = col(&hdr, "defender")?;
-        let c_mid        = col(&hdr, "midfielder")?;
-        let c_fwd        = col(&hdr, "forward")?;
-        let c_count_t    = col(&hdr, "count_tournaments")?;
+        let c_id = col(&hdr, "player_id")?;
+        let c_family = col(&hdr, "family_name")?;
+        let c_given = col(&hdr, "given_name")?;
+        let c_birth = col(&hdr, "birth_date")?;
+        let c_gk = col(&hdr, "goal_keeper")?;
+        let c_def = col(&hdr, "defender")?;
+        let c_mid = col(&hdr, "midfielder")?;
+        let c_fwd = col(&hdr, "forward")?;
+        let c_count_t = col(&hdr, "count_tournaments")?;
 
         for line in reader.lines() {
             let line = line?;
             let f = parse_csv_line(&line);
             let pid = csv_field(&f, c_id);
-            if pid.is_empty() { continue; }
+            if pid.is_empty() {
+                continue;
+            }
 
-            let position = if csv_field(&f, c_gk) == "1" { "Goalkeeper" }
-                else if csv_field(&f, c_def) == "1" { "Defender" }
-                else if csv_field(&f, c_mid) == "1" { "Midfielder" }
-                else if csv_field(&f, c_fwd) == "1" { "Forward" }
-                else { "Unknown" };
+            let position = if csv_field(&f, c_gk) == "1" {
+                "Goalkeeper"
+            } else if csv_field(&f, c_def) == "1" {
+                "Defender"
+            } else if csv_field(&f, c_mid) == "1" {
+                "Midfielder"
+            } else if csv_field(&f, c_fwd) == "1" {
+                "Forward"
+            } else {
+                "Unknown"
+            };
 
             let nid = graph.create_node("Player");
             if let Some(n) = graph.get_node_mut(nid) {
                 n.set_property("player_id", PropertyValue::String(pid.to_string()));
-                n.set_property("family_name", PropertyValue::String(csv_field(&f, c_family).to_string()));
-                n.set_property("given_name", PropertyValue::String(csv_field(&f, c_given).to_string()));
+                n.set_property(
+                    "family_name",
+                    PropertyValue::String(csv_field(&f, c_family).to_string()),
+                );
+                n.set_property(
+                    "given_name",
+                    PropertyValue::String(csv_field(&f, c_given).to_string()),
+                );
                 n.set_property("position", PropertyValue::String(position.to_string()));
                 if let Some(b) = opt_str(csv_field(&f, c_birth)) {
                     n.set_property("birth_date", PropertyValue::String(b.to_string()));
@@ -392,33 +425,47 @@ pub fn load_dataset(
     {
         let path = data_dir.join("matches.csv");
         let (hdr, reader) = open_csv(&path)?;
-        let c_match_id    = col(&hdr, "match_id")?;
-        let c_match_name  = col(&hdr, "match_name")?;
-        let c_tourn_id    = col(&hdr, "tournament_id")?;
-        let c_stage       = col(&hdr, "stage_name")?;
-        let c_date        = col(&hdr, "match_date")?;
-        let c_stadium_id  = col(&hdr, "stadium_id")?;
-        let c_home_id     = col(&hdr, "home_team_id")?;
-        let c_away_id     = col(&hdr, "away_team_id")?;
-        let c_home_score  = col(&hdr, "home_team_score")?;
-        let c_away_score  = col(&hdr, "away_team_score")?;
-        let c_result      = col(&hdr, "result")?;
-        let c_extra_time  = col(&hdr, "extra_time")?;
-        let c_penalties   = col(&hdr, "penalty_shootout")?;
+        let c_match_id = col(&hdr, "match_id")?;
+        let c_match_name = col(&hdr, "match_name")?;
+        let c_tourn_id = col(&hdr, "tournament_id")?;
+        let c_stage = col(&hdr, "stage_name")?;
+        let c_date = col(&hdr, "match_date")?;
+        let c_stadium_id = col(&hdr, "stadium_id")?;
+        let c_home_id = col(&hdr, "home_team_id")?;
+        let c_away_id = col(&hdr, "away_team_id")?;
+        let c_home_score = col(&hdr, "home_team_score")?;
+        let c_away_score = col(&hdr, "away_team_score")?;
+        let c_result = col(&hdr, "result")?;
+        let c_extra_time = col(&hdr, "extra_time")?;
+        let c_penalties = col(&hdr, "penalty_shootout")?;
 
         for line in reader.lines() {
             let line = line?;
             let f = parse_csv_line(&line);
             let mid = csv_field(&f, c_match_id);
-            if mid.is_empty() { continue; }
+            if mid.is_empty() {
+                continue;
+            }
 
             let nid = graph.create_node("Match");
             if let Some(n) = graph.get_node_mut(nid) {
                 n.set_property("match_id", PropertyValue::String(mid.to_string()));
-                n.set_property("name", PropertyValue::String(csv_field(&f, c_match_name).to_string()));
-                n.set_property("stage", PropertyValue::String(csv_field(&f, c_stage).to_string()));
-                n.set_property("date", PropertyValue::String(csv_field(&f, c_date).to_string()));
-                n.set_property("result", PropertyValue::String(csv_field(&f, c_result).to_string()));
+                n.set_property(
+                    "name",
+                    PropertyValue::String(csv_field(&f, c_match_name).to_string()),
+                );
+                n.set_property(
+                    "stage",
+                    PropertyValue::String(csv_field(&f, c_stage).to_string()),
+                );
+                n.set_property(
+                    "date",
+                    PropertyValue::String(csv_field(&f, c_date).to_string()),
+                );
+                n.set_property(
+                    "result",
+                    PropertyValue::String(csv_field(&f, c_result).to_string()),
+                );
                 if let Some(hs) = opt_i64(csv_field(&f, c_home_score)) {
                     n.set_property("home_score", PropertyValue::Integer(hs));
                 }
@@ -468,26 +515,37 @@ pub fn load_dataset(
     {
         let path = data_dir.join("goals.csv");
         let (hdr, reader) = open_csv(&path)?;
-        let c_goal_id   = col(&hdr, "goal_id")?;
-        let c_match_id  = col(&hdr, "match_id")?;
+        let c_goal_id = col(&hdr, "goal_id")?;
+        let c_match_id = col(&hdr, "match_id")?;
         let c_player_id = col(&hdr, "player_id")?;
-        let c_minute    = col(&hdr, "minute_regulation")?;
-        let c_period    = col(&hdr, "match_period")?;
-        let c_own       = col(&hdr, "own_goal")?;
-        let c_penalty   = col(&hdr, "penalty")?;
+        let c_minute = col(&hdr, "minute_regulation")?;
+        let c_period = col(&hdr, "match_period")?;
+        let c_own = col(&hdr, "own_goal")?;
+        let c_penalty = col(&hdr, "penalty")?;
 
         for line in reader.lines() {
             let line = line?;
             let f = parse_csv_line(&line);
             let gid = csv_field(&f, c_goal_id);
-            if gid.is_empty() { continue; }
+            if gid.is_empty() {
+                continue;
+            }
 
             let nid = graph.create_node("Goal");
             if let Some(n) = graph.get_node_mut(nid) {
                 n.set_property("goal_id", PropertyValue::String(gid.to_string()));
-                n.set_property("period", PropertyValue::String(csv_field(&f, c_period).to_string()));
-                n.set_property("own_goal", PropertyValue::Boolean(csv_field(&f, c_own) == "1"));
-                n.set_property("penalty", PropertyValue::Boolean(csv_field(&f, c_penalty) == "1"));
+                n.set_property(
+                    "period",
+                    PropertyValue::String(csv_field(&f, c_period).to_string()),
+                );
+                n.set_property(
+                    "own_goal",
+                    PropertyValue::Boolean(csv_field(&f, c_own) == "1"),
+                );
+                n.set_property(
+                    "penalty",
+                    PropertyValue::Boolean(csv_field(&f, c_penalty) == "1"),
+                );
                 if let Some(m) = opt_i64(csv_field(&f, c_minute)) {
                     n.set_property("minute", PropertyValue::Integer(m));
                 }
@@ -516,9 +574,9 @@ pub fn load_dataset(
     {
         let path = data_dir.join("managers.csv");
         let (hdr, reader) = open_csv(&path)?;
-        let c_id      = col(&hdr, "manager_id")?;
-        let c_family  = col(&hdr, "family_name")?;
-        let c_given   = col(&hdr, "given_name")?;
+        let c_id = col(&hdr, "manager_id")?;
+        let c_family = col(&hdr, "family_name")?;
+        let c_given = col(&hdr, "given_name")?;
         let c_country = col(&hdr, "country_name")?;
 
         // Track manager_id -> NodeId to avoid duplicate nodes
@@ -528,15 +586,28 @@ pub fn load_dataset(
             let line = line?;
             let f = parse_csv_line(&line);
             let mgr_id = csv_field(&f, c_id);
-            if mgr_id.is_empty() { continue; }
-            if manager_map.contains_key(mgr_id) { continue; }
+            if mgr_id.is_empty() {
+                continue;
+            }
+            if manager_map.contains_key(mgr_id) {
+                continue;
+            }
 
             let nid = graph.create_node("Manager");
             if let Some(n) = graph.get_node_mut(nid) {
                 n.set_property("manager_id", PropertyValue::String(mgr_id.to_string()));
-                n.set_property("family_name", PropertyValue::String(csv_field(&f, c_family).to_string()));
-                n.set_property("given_name", PropertyValue::String(csv_field(&f, c_given).to_string()));
-                n.set_property("country", PropertyValue::String(csv_field(&f, c_country).to_string()));
+                n.set_property(
+                    "family_name",
+                    PropertyValue::String(csv_field(&f, c_family).to_string()),
+                );
+                n.set_property(
+                    "given_name",
+                    PropertyValue::String(csv_field(&f, c_given).to_string()),
+                );
+                n.set_property(
+                    "country",
+                    PropertyValue::String(csv_field(&f, c_country).to_string()),
+                );
             }
             node_count += 1;
             manager_count += 1;

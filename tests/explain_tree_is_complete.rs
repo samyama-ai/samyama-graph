@@ -42,11 +42,15 @@ fn fixture() -> GraphStore {
 /// The plan tree, without the trailing statistics block.
 fn plan(store: &GraphStore, cypher: &str) -> String {
     let query = parse_query(&format!("EXPLAIN {cypher}")).expect("query should parse");
-    let batch = QueryExecutor::new(store).execute(&query).expect("EXPLAIN should run");
+    let batch = QueryExecutor::new(store)
+        .execute(&query)
+        .expect("EXPLAIN should run");
     match batch.records[0].get("plan") {
-        Some(Value::Property(PropertyValue::String(t))) => {
-            t.lines().take_while(|l| !l.starts_with("---")).collect::<Vec<_>>().join("\n")
-        }
+        Some(Value::Property(PropertyValue::String(t))) => t
+            .lines()
+            .take_while(|l| !l.starts_with("---"))
+            .collect::<Vec<_>>()
+            .join("\n"),
         other => panic!("expected a plan string, got {other:?}"),
     }
 }
@@ -125,8 +129,14 @@ fn a_write_pipeline_plan_can_be_asserted_about_negatively() {
         "MATCH (a:P) WHERE a.n = 'a' CREATE (:Marker) WITH a.n AS u RETURN u",
     );
     assert!(undescribed_plan_lines(&text).is_empty(), "{text}");
-    assert!(text.contains("Scan (var=a"), "the scan must be visible:\n{text}");
-    assert!(!text.contains("IndexScan"), "there is no index on :P(n):\n{text}");
+    assert!(
+        text.contains("Scan (var=a"),
+        "the scan must be visible:\n{text}"
+    );
+    assert!(
+        !text.contains("IndexScan"),
+        "there is no index on :P(n):\n{text}"
+    );
 }
 
 #[test]
@@ -144,7 +154,10 @@ fn the_detector_names_an_undescribed_operator_and_its_path() {
         children: vec![unknown],
     };
     assert_eq!(tree.unknown_nodes(), vec!["Project -> Unknown".to_string()]);
-    assert_eq!(undescribed_plan_lines(&tree.format(0)), vec!["+- Unknown".to_string()]);
+    assert_eq!(
+        undescribed_plan_lines(&tree.format(0)),
+        vec!["+- Unknown".to_string()]
+    );
     // And it does not cry wolf on a tree with none.
     let described = OperatorDescription {
         name: "Project".to_string(),

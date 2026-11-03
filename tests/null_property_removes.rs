@@ -46,7 +46,10 @@ fn keys(store: &GraphStore, cypher: &str) -> Vec<String> {
 fn create_does_not_store_a_null_property() {
     let mut store = GraphStore::new();
     run(&mut store, "CREATE ({exists: 42, missing: null})");
-    assert_eq!(keys(&store, "MATCH (n) RETURN keys(n) AS k"), vec!["exists"]);
+    assert_eq!(
+        keys(&store, "MATCH (n) RETURN keys(n) AS k"),
+        vec!["exists"]
+    );
 }
 
 #[test]

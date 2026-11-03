@@ -17,7 +17,9 @@
 //! three nodes rather than on 26 million.
 
 use samyama::graph::{GraphStore, PropertyValue};
-use samyama::snapshot::{export_tenant, import_tenant_with_dedup, import_tenant_with_dedup_options};
+use samyama::snapshot::{
+    export_tenant, import_tenant_with_dedup, import_tenant_with_dedup_options,
+};
 
 /// One snapshot holding `(accession, symbol)` pairs, each as a `:Protein`.
 ///
@@ -32,7 +34,10 @@ fn proteins(rows: &[(&str, &str)]) -> Vec<u8> {
             "accession".to_string(),
             PropertyValue::String((*accession).to_string()),
         );
-        node.set_property("symbol".to_string(), PropertyValue::String((*symbol).to_string()));
+        node.set_property(
+            "symbol".to_string(),
+            PropertyValue::String((*symbol).to_string()),
+        );
     }
     let mut buf = Vec::new();
     export_tenant(&src, &mut buf).expect("export");
@@ -41,8 +46,11 @@ fn proteins(rows: &[(&str, &str)]) -> Vec<u8> {
 
 /// Three distinct proteins, one shared gene symbol. BRCA1 orthologues in human,
 /// mouse and rat are three entities with three accessions and one symbol.
-const ORTHOLOGUES: &[(&str, &str)] =
-    &[("P38398", "BRCA1"), ("P48754", "BRCA1"), ("O54952", "BRCA1")];
+const ORTHOLOGUES: &[(&str, &str)] = &[
+    ("P38398", "BRCA1"),
+    ("P48754", "BRCA1"),
+    ("O54952", "BRCA1"),
+];
 
 /// CONTROL: the identifier key is an identifier, so nothing merges.
 ///
@@ -68,8 +76,8 @@ fn an_identifier_key_merges_nothing_when_identifiers_differ() {
 #[test]
 fn a_shared_non_identifier_value_collapses_entities_within_one_snapshot() {
     let mut store = GraphStore::new();
-    let stats =
-        import_tenant_with_dedup(&mut store, &proteins(ORTHOLOGUES)[..], &["symbol"]).expect("import");
+    let stats = import_tenant_with_dedup(&mut store, &proteins(ORTHOLOGUES)[..], &["symbol"])
+        .expect("import");
 
     assert_eq!(
         store.node_count(),
@@ -133,15 +141,19 @@ fn a_declared_identifier_now_protects_against_a_conflicting_annotation() {
 #[test]
 fn the_merge_count_reads_the_same_for_a_correct_merge_and_a_destructive_one() {
     // Correct: one entity, three records, same accession. Merging is right.
-    let duplicates = &[("P38398", "BRCA1"), ("P38398", "BRCA1"), ("P38398", "BRCA1")];
+    let duplicates = &[
+        ("P38398", "BRCA1"),
+        ("P38398", "BRCA1"),
+        ("P38398", "BRCA1"),
+    ];
     let mut good = GraphStore::new();
-    let good_stats =
-        import_tenant_with_dedup(&mut good, &proteins(duplicates)[..], &["accession"]).expect("import");
+    let good_stats = import_tenant_with_dedup(&mut good, &proteins(duplicates)[..], &["accession"])
+        .expect("import");
 
     // Destructive: three entities, one symbol.
     let mut bad = GraphStore::new();
-    let bad_stats =
-        import_tenant_with_dedup(&mut bad, &proteins(ORTHOLOGUES)[..], &["symbol"]).expect("import");
+    let bad_stats = import_tenant_with_dedup(&mut bad, &proteins(ORTHOLOGUES)[..], &["symbol"])
+        .expect("import");
 
     assert_eq!(good_stats.merged_count, 2, "three records of one entity");
     assert_eq!(bad_stats.merged_count, 2, "three entities destroyed");
@@ -162,14 +174,18 @@ fn the_merge_count_reads_the_same_for_a_correct_merge_and_a_destructive_one() {
 /// though `merged_count` is still 2 for both.
 #[test]
 fn the_merge_shape_separates_a_correct_merge_from_a_collapse() {
-    let duplicates = &[("P38398", "BRCA1"), ("P38398", "BRCA1"), ("P38398", "BRCA1")];
+    let duplicates = &[
+        ("P38398", "BRCA1"),
+        ("P38398", "BRCA1"),
+        ("P38398", "BRCA1"),
+    ];
     let mut good = GraphStore::new();
-    let good_stats =
-        import_tenant_with_dedup(&mut good, &proteins(duplicates)[..], &["accession"]).expect("import");
+    let good_stats = import_tenant_with_dedup(&mut good, &proteins(duplicates)[..], &["accession"])
+        .expect("import");
 
     let mut bad = GraphStore::new();
-    let bad_stats =
-        import_tenant_with_dedup(&mut bad, &proteins(ORTHOLOGUES)[..], &["symbol"]).expect("import");
+    let bad_stats = import_tenant_with_dedup(&mut bad, &proteins(ORTHOLOGUES)[..], &["symbol"])
+        .expect("import");
 
     // Still indistinguishable on the old statistic.
     assert_eq!(good_stats.merged_count, bad_stats.merged_count);
@@ -214,9 +230,12 @@ fn the_attributed_key_is_the_one_that_matched_not_the_first_listed() {
 fn many_pairs_and_one_large_group_report_different_shapes() {
     // Three separate entities, each duplicated once: three groups of two.
     let pairs = &[
-        ("P00001", "AAA"), ("P00001", "AAA"),
-        ("P00002", "BBB"), ("P00002", "BBB"),
-        ("P00003", "CCC"), ("P00003", "CCC"),
+        ("P00001", "AAA"),
+        ("P00001", "AAA"),
+        ("P00002", "BBB"),
+        ("P00002", "BBB"),
+        ("P00003", "CCC"),
+        ("P00003", "CCC"),
     ];
     let mut many = GraphStore::new();
     let many_stats =
@@ -224,22 +243,36 @@ fn many_pairs_and_one_large_group_report_different_shapes() {
 
     // Six records, one shared symbol: one group of six.
     let one_group = &[
-        ("P00001", "SHARED"), ("P00002", "SHARED"), ("P00003", "SHARED"),
-        ("P00004", "SHARED"), ("P00005", "SHARED"), ("P00006", "SHARED"),
+        ("P00001", "SHARED"),
+        ("P00002", "SHARED"),
+        ("P00003", "SHARED"),
+        ("P00004", "SHARED"),
+        ("P00005", "SHARED"),
+        ("P00006", "SHARED"),
     ];
     let mut collapsed = GraphStore::new();
     let collapsed_stats =
-        import_tenant_with_dedup(&mut collapsed, &proteins(one_group)[..], &["symbol"]).expect("import");
+        import_tenant_with_dedup(&mut collapsed, &proteins(one_group)[..], &["symbol"])
+            .expect("import");
 
     // Identical merge counts, opposite shapes.
     assert_eq!(many_stats.merged_count, 3);
     assert_eq!(collapsed_stats.merged_count, 5);
 
     assert_eq!(many_stats.merge_groups, 3, "three duplicate pairs");
-    assert_eq!(many_stats.largest_merge_group, 2, "a pair is the largest group");
+    assert_eq!(
+        many_stats.largest_merge_group, 2,
+        "a pair is the largest group"
+    );
 
-    assert_eq!(collapsed_stats.merge_groups, 1, "one value swallowed everything");
-    assert_eq!(collapsed_stats.largest_merge_group, 6, "six records into one node");
+    assert_eq!(
+        collapsed_stats.merge_groups, 1,
+        "one value swallowed everything"
+    );
+    assert_eq!(
+        collapsed_stats.largest_merge_group, 6,
+        "six records into one node"
+    );
 
     assert_eq!(many.node_count(), 3, "three entities survive");
     assert_eq!(collapsed.node_count(), 1, "five entities destroyed");

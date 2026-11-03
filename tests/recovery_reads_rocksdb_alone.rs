@@ -49,7 +49,11 @@ fn restart(dir: &Path) -> GraphStore {
 }
 
 fn assert_the_graph_is_whole(store: &GraphStore) {
-    assert_eq!(store.get_nodes_by_label(&Label::new("Person")).len(), 2, "a node was lost or a deleted one came back");
+    assert_eq!(
+        store.get_nodes_by_label(&Label::new("Person")).len(),
+        2,
+        "a node was lost or a deleted one came back"
+    );
     assert_eq!(store.edge_count(), 1, "the relationship was lost");
     let r = QueryEngine::new()
         .execute(
@@ -57,10 +61,23 @@ fn assert_the_graph_is_whole(store: &GraphStore) {
             store,
         )
         .unwrap();
-    assert_eq!(r.records.len(), 1, "the pattern did not survive the restart");
+    assert_eq!(
+        r.records.len(),
+        1,
+        "the pattern did not survive the restart"
+    );
     let row = &r.records[0];
-    let get = |k: &str| row.get(k).and_then(|v| v.as_property()).map(|p| p.to_string()).unwrap_or_default();
-    assert!(get("t").contains("countess"), "the SET was lost: {}", get("t"));
+    let get = |k: &str| {
+        row.get(k)
+            .and_then(|v| v.as_property())
+            .map(|p| p.to_string())
+            .unwrap_or_default()
+    };
+    assert!(
+        get("t").contains("countess"),
+        "the SET was lost: {}",
+        get("t")
+    );
     assert_eq!(get("b"), "1815");
     assert_eq!(get("s"), "1833");
     assert!(get("c").contains("charles"));
@@ -81,7 +98,10 @@ fn a_restart_with_the_logical_wal_intact_finds_the_graph() {
     // that persisted nothing and a check that looked at nothing.
     let dir = tempfile::tempdir().unwrap();
     persist_a_graph(dir.path());
-    assert!(!wal_logs(dir.path()).is_empty(), "the write path no longer writes the logical WAL");
+    assert!(
+        !wal_logs(dir.path()).is_empty(),
+        "the write path no longer writes the logical WAL"
+    );
     assert_the_graph_is_whole(&restart(dir.path()));
 }
 

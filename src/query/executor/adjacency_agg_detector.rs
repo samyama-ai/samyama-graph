@@ -170,17 +170,19 @@ pub fn detect(query: &Query, store: &GraphStore) -> Option<AdjacencyAggPattern> 
     }
 
     let mut count_info: Option<(String, String, bool)> = None; // (alias, arg_var, distinct)
-    // Each entry is (variable, optional_property). `None` property means the
-    // user wrote `RETURN g, ...` (the variable itself, always safe to emit
-    // per-node). `Some(p)` means `RETURN g.p, ...` and is only safe when
-    // (label, p) has a UNIQUE constraint — checked below.
+                                                               // Each entry is (variable, optional_property). `None` property means the
+                                                               // user wrote `RETURN g, ...` (the variable itself, always safe to emit
+                                                               // per-node). `Some(p)` means `RETURN g.p, ...` and is only safe when
+                                                               // (label, p) has a UNIQUE constraint — checked below.
     let mut group_by_items: Vec<(String, Option<String>)> = Vec::new();
 
     for (i, item) in ret.items.iter().enumerate() {
         match &item.expression {
-            Expression::Function { name, args, distinct }
-                if name.eq_ignore_ascii_case("count") =>
-            {
+            Expression::Function {
+                name,
+                args,
+                distinct,
+            } if name.eq_ignore_ascii_case("count") => {
                 if count_info.is_some() {
                     return None; // multiple count()s not supported
                 }
@@ -764,7 +766,10 @@ pub fn detect_aggregate_then_expand(
         return None;
     }
 
-    let post_aggregate_filter = agg_with.where_clause.as_ref().map(|wc| wc.predicate.clone());
+    let post_aggregate_filter = agg_with
+        .where_clause
+        .as_ref()
+        .map(|wc| wc.predicate.clone());
     if let Some(pred) = &post_aggregate_filter {
         if !expression_references_only(pred, &core.count_alias) {
             return None;
@@ -848,7 +853,11 @@ pub fn detect_aggregate_then_expand(
     } else {
         return None;
     };
-    let bound_node = if bound_is_start { &post_path.start } else { &seg.node };
+    let bound_node = if bound_is_start {
+        &post_path.start
+    } else {
+        &seg.node
+    };
     if bound_node.properties.is_some() {
         return None;
     }
@@ -912,7 +921,10 @@ mod tests {
         .unwrap();
         let p = detect(&q, &GraphStore::new()).expect("should detect");
         assert_eq!(p.grouped_var, "j");
-        assert_eq!(p.grouped_label.as_ref().map(|l| l.as_str()), Some("Journal"));
+        assert_eq!(
+            p.grouped_label.as_ref().map(|l| l.as_str()),
+            Some("Journal")
+        );
         assert_eq!(p.neighbor_var, "a");
         assert_eq!(p.neighbor_label.as_ref().unwrap().as_str(), "Article");
         assert_eq!(p.edge_type.as_str(), "PUBLISHED_IN");
@@ -924,10 +936,9 @@ mod tests {
     /// Forward direction: count outgoing neighbors grouped on the source side.
     #[test]
     fn detects_forward_direction() {
-        let q = parse_query(
-            "MATCH (u:User)-[:AUTHORED]->(p:Post) RETURN u.name, count(p) AS posts",
-        )
-        .unwrap();
+        let q =
+            parse_query("MATCH (u:User)-[:AUTHORED]->(p:Post) RETURN u.name, count(p) AS posts")
+                .unwrap();
         let p = detect(&q, &GraphStore::new()).expect("should detect");
         assert_eq!(p.grouped_var, "u");
         assert_eq!(p.neighbor_var, "p");
@@ -1022,10 +1033,8 @@ mod tests {
     /// nothing else does. `MATCH (a:Article)<-[:CITES]-()` is #304's Q19.
     #[test]
     fn accepts_an_anonymous_counted_endpoint() {
-        let q = parse_query(
-            "MATCH (a:Article)<-[:CITES]-() RETURN a.title, count(*) AS c",
-        )
-        .unwrap();
+        let q =
+            parse_query("MATCH (a:Article)<-[:CITES]-() RETURN a.title, count(*) AS c").unwrap();
         let p = detect(&q, &GraphStore::new()).expect("Q19's own shape");
         assert_eq!(p.grouped_var, "a");
         assert_eq!(p.direction, ExpandDirection::Reverse);
@@ -1102,10 +1111,9 @@ mod tests {
     /// No aggregate at all — not our shape.
     #[test]
     fn rejects_plain_match_return() {
-        let q = parse_query(
-            "MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) RETURN j.title, a.pmid",
-        )
-        .unwrap();
+        let q =
+            parse_query("MATCH (a:Article)-[:PUBLISHED_IN]->(j:Journal) RETURN j.title, a.pmid")
+                .unwrap();
         assert!(detect(&q, &GraphStore::new()).is_none());
     }
 
@@ -1124,7 +1132,10 @@ mod tests {
         .unwrap();
         let p = detect_with_binding(&q).expect("should detect");
         assert_eq!(p.core.grouped_var, "m");
-        assert_eq!(p.core.grouped_label.as_ref().map(|l| l.as_str()), Some("MeSHTerm"));
+        assert_eq!(
+            p.core.grouped_label.as_ref().map(|l| l.as_str()),
+            Some("MeSHTerm")
+        );
         assert_eq!(p.core.neighbor_var, "a");
         assert_eq!(p.core.neighbor_label.as_ref().unwrap().as_str(), "Article");
         assert_eq!(p.core.edge_type.as_str(), "ANNOTATED_WITH");
@@ -1149,7 +1160,10 @@ mod tests {
         .unwrap();
         let p = detect_with_binding(&q).expect("should detect");
         assert_eq!(p.core.grouped_var, "au");
-        assert_eq!(p.core.grouped_label.as_ref().map(|l| l.as_str()), Some("Author"));
+        assert_eq!(
+            p.core.grouped_label.as_ref().map(|l| l.as_str()),
+            Some("Author")
+        );
         assert_eq!(p.core.direction, ExpandDirection::Reverse);
         assert_eq!(p.grouped_scan_limit, Some(100));
         assert!(p.prefilter.is_some(), "WHERE on grouped side must be kept");
@@ -1319,13 +1333,18 @@ mod tests {
         }
         // `count(DISTINCT r)` is still declined: edge ids are unique, so it is
         // the same number, but it is not reasoned about here.
-        assert!(d("MATCH (a:Article)-[r:P]->(j:Journal) RETURN j.title, count(DISTINCT r) AS n").is_none());
+        assert!(
+            d("MATCH (a:Article)-[r:P]->(j:Journal) RETURN j.title, count(DISTINCT r) AS n")
+                .is_none()
+        );
     }
 
     #[test]
     fn phase1_rejects_clause_fields_set_programmatically() {
         let mut query = q(P1);
-        query.with_clause = q("MATCH (m:M) WITH m LIMIT 1 MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c").with_clause;
+        query.with_clause =
+            q("MATCH (m:M) WITH m LIMIT 1 MATCH (a)-[:X]->(m) RETURN m.name, count(a) AS c")
+                .with_clause;
         assert!(detect(&query, &GraphStore::new()).is_none());
 
         let mut query = q(P1);
@@ -1341,7 +1360,9 @@ mod tests {
         assert!(detect(&query, &GraphStore::new()).is_none());
 
         let mut query = q(P1);
-        if let Expression::Function { args, .. } = &mut query.return_clause.as_mut().unwrap().items[1].expression {
+        if let Expression::Function { args, .. } =
+            &mut query.return_clause.as_mut().unwrap().items[1].expression
+        {
             args.push(Expression::Variable("a".into()));
         }
         assert!(detect(&query, &GraphStore::new()).is_none());
@@ -1353,10 +1374,15 @@ mod tests {
                    RETURN j.title, count(a) AS n")
             .expect("grouped-only WHERE accepted");
         assert!(p.prefilter.is_some());
-        assert!(d("MATCH (a:Article)-[:P]->(j:Journal) WHERE CASE WHEN j.x THEN true END \
-                   RETURN j.title, count(a) AS n")
-            .is_none());
-        assert!(d("MATCH (a:Article)-[:P]->(j:Journal) WHERE j.x = $p RETURN j.title, count(a) AS n").is_some());
+        assert!(d(
+            "MATCH (a:Article)-[:P]->(j:Journal) WHERE CASE WHEN j.x THEN true END \
+                   RETURN j.title, count(a) AS n"
+        )
+        .is_none());
+        assert!(d(
+            "MATCH (a:Article)-[:P]->(j:Journal) WHERE j.x = $p RETURN j.title, count(a) AS n"
+        )
+        .is_some());
     }
 
     // ——— Phase 3a WITH-bound detector ———
@@ -1375,7 +1401,10 @@ mod tests {
         let p = dw("MATCH (m:MeSHTerm) WITH m MATCH (m:MeSHTerm)<-[:TAGS]-(a) RETURN m.name, count(a) AS c").unwrap();
         assert_eq!(p.core.direction, ExpandDirection::Reverse);
 
-        let p = dw("MATCH (m:MeSHTerm) WITH m SKIP 2 MATCH (a)<-[:TAGS]-(m) RETURN m.name, count(a) AS c").unwrap();
+        let p = dw(
+            "MATCH (m:MeSHTerm) WITH m SKIP 2 MATCH (a)<-[:TAGS]-(m) RETURN m.name, count(a) AS c",
+        )
+        .unwrap();
         assert_eq!(p.core.direction, ExpandDirection::Forward);
         assert_eq!(p.grouped_scan_skip, Some(2));
 
@@ -1478,7 +1507,9 @@ mod tests {
         assert!(detect_with_binding(&query).is_none());
 
         let mut query = q(W);
-        if let Expression::Function { args, .. } = &mut query.return_clause.as_mut().unwrap().items[1].expression {
+        if let Expression::Function { args, .. } =
+            &mut query.return_clause.as_mut().unwrap().items[1].expression
+        {
             args.push(Expression::Variable("a".into()));
         }
         assert!(detect_with_binding(&query).is_none());
@@ -1496,20 +1527,28 @@ mod tests {
         assert_eq!(p.core.grouped_var, "j");
         assert_eq!(p.core.count_alias, "c");
         assert_eq!(p.expand_neighbor_var, "e");
-        assert_eq!(p.expand_neighbor_label.as_ref().map(|l| l.as_str()), Some("Editor"));
+        assert_eq!(
+            p.expand_neighbor_label.as_ref().map(|l| l.as_str()),
+            Some("Editor")
+        );
         assert_eq!(p.expand_edge_type.as_str(), "EDITED_BY");
         assert_eq!(p.expand_direction, Direction::Outgoing);
         assert_eq!(p.post_aggregate_skip, Some(1));
         assert_eq!(p.post_aggregate_limit, Some(3));
-        assert_eq!(p.post_aggregate_order_by, Some(vec![(Expression::Variable("c".into()), false)]));
+        assert_eq!(
+            p.post_aggregate_order_by,
+            Some(vec![(Expression::Variable("c".into()), false)])
+        );
         assert!(p.post_aggregate_filter.is_none());
     }
 
     #[test]
     fn aggregate_then_expand_directions_and_post_filter() {
-        let p = dae("MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c WHERE c > 2 \
-                     MATCH (e)-[:EDITS]->(j:Journal) RETURN j, c, e")
-            .expect("should detect");
+        let p = dae(
+            "MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c WHERE c > 2 \
+                     MATCH (e)-[:EDITS]->(j:Journal) RETURN j, c, e",
+        )
+        .expect("should detect");
         assert_eq!(p.expand_direction, Direction::Incoming);
         assert_eq!(p.expand_neighbor_label, None);
         assert!(p.post_aggregate_filter.is_some());
@@ -1517,11 +1556,11 @@ mod tests {
 
         let p = dae("MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c \
                      MATCH (j)<-[:EDITS]-(e) RETURN j, c, e")
-            .unwrap();
+        .unwrap();
         assert_eq!(p.expand_direction, Direction::Incoming);
         let p = dae("MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c \
                      MATCH (e)<-[:EDITS]-(j) RETURN j, c, e")
-            .unwrap();
+        .unwrap();
         assert_eq!(p.expand_direction, Direction::Outgoing);
     }
 
@@ -1581,7 +1620,9 @@ mod tests {
 
         let mut query = q(AE);
         let stage = query.with_clause.clone().unwrap();
-        query.extra_with_stages.push((stage.clone(), None, vec![], None));
+        query
+            .extra_with_stages
+            .push((stage.clone(), None, vec![], None));
         query.extra_with_stages.push((stage, None, vec![], None));
         assert!(detect_aggregate_then_expand(&query, &GraphStore::new()).is_none());
 
@@ -1593,7 +1634,10 @@ mod tests {
     /// Builds the two-WITH form directly: `extra_with_stages[0]` holds the
     /// aggregating WITH, `with_clause` the pass-through that feeds the MATCH.
     fn two_stage(agg: &str, passthrough: &str) -> Query {
-        let agg_q = q(&format!("MATCH (a:Article)-[:P]->(j:Journal) {} RETURN j, c", agg));
+        let agg_q = q(&format!(
+            "MATCH (a:Article)-[:P]->(j:Journal) {} RETURN j, c",
+            agg
+        ));
         let pt_q = q(&format!("MATCH (j), (c) {} RETURN j", passthrough));
         let mut query = q("MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c MATCH (j)-[:E]->(e) RETURN j, c, e");
         query.extra_with_stages = vec![(agg_q.with_clause.unwrap(), None, vec![], None)];
@@ -1607,13 +1651,27 @@ mod tests {
 
     #[test]
     fn aggregate_then_expand_two_stage_takes_limits_from_either_with() {
-        let p = dae_q(&two_stage("WITH j, count(a) AS c ORDER BY c DESC", "WITH j, c SKIP 1 LIMIT 4")).expect("detect");
-        assert_eq!(p.post_aggregate_order_by, Some(vec![(Expression::Variable("c".into()), false)]));
+        let p = dae_q(&two_stage(
+            "WITH j, count(a) AS c ORDER BY c DESC",
+            "WITH j, c SKIP 1 LIMIT 4",
+        ))
+        .expect("detect");
+        assert_eq!(
+            p.post_aggregate_order_by,
+            Some(vec![(Expression::Variable("c".into()), false)])
+        );
         assert_eq!(p.post_aggregate_skip, Some(1));
         assert_eq!(p.post_aggregate_limit, Some(4));
 
-        let p = dae_q(&two_stage("WITH j, count(a) AS c SKIP 2 LIMIT 5", "WITH j AS j, c ORDER BY c")).expect("detect");
-        assert_eq!(p.post_aggregate_order_by, Some(vec![(Expression::Variable("c".into()), true)]));
+        let p = dae_q(&two_stage(
+            "WITH j, count(a) AS c SKIP 2 LIMIT 5",
+            "WITH j AS j, c ORDER BY c",
+        ))
+        .expect("detect");
+        assert_eq!(
+            p.post_aggregate_order_by,
+            Some(vec![(Expression::Variable("c".into()), true)])
+        );
         assert_eq!(p.post_aggregate_skip, Some(2));
         assert_eq!(p.post_aggregate_limit, Some(5));
     }
@@ -1623,9 +1681,12 @@ mod tests {
         let p = dae("MATCH (a:Article)-[:P]->(j:Journal) WITH j, count(a) AS c \
                      WITH j, c ORDER BY c DESC LIMIT 4 \
                      MATCH (j)-[:E]->(e) RETURN j, c, e")
-            .expect("two-WITH form should detect");
+        .expect("two-WITH form should detect");
         assert_eq!(p.post_aggregate_limit, Some(4));
-        assert_eq!(p.post_aggregate_order_by, Some(vec![(Expression::Variable("c".into()), false)]));
+        assert_eq!(
+            p.post_aggregate_order_by,
+            Some(vec![(Expression::Variable("c".into()), false)])
+        );
     }
 
     #[test]
@@ -1640,7 +1701,12 @@ mod tests {
             ("WITH j, count(a) AS c SKIP 1", "WITH j, c SKIP 1"),
             ("WITH j, count(a) AS c LIMIT 1", "WITH j, c LIMIT 1"),
         ] {
-            assert!(dae_q(&two_stage(agg, pt)).is_none(), "should reject: {} / {}", agg, pt);
+            assert!(
+                dae_q(&two_stage(agg, pt)).is_none(),
+                "should reject: {} / {}",
+                agg,
+                pt
+            );
         }
     }
 
@@ -1669,13 +1735,30 @@ mod tests {
 
     #[test]
     fn expression_references_only_covers_each_kind() {
-        let parse_where = |s: &str| q(&format!("MATCH (x), (y) WHERE {} RETURN x", s)).where_clause.unwrap().predicate;
-        assert!(expression_references_only(&Expression::Variable("x".into()), "x"));
-        assert!(!expression_references_only(&Expression::Variable("y".into()), "x"));
+        let parse_where = |s: &str| {
+            q(&format!("MATCH (x), (y) WHERE {} RETURN x", s))
+                .where_clause
+                .unwrap()
+                .predicate
+        };
+        assert!(expression_references_only(
+            &Expression::Variable("x".into()),
+            "x"
+        ));
+        assert!(!expression_references_only(
+            &Expression::Variable("y".into()),
+            "x"
+        ));
         assert!(expression_references_only(&parse_where("NOT x.a"), "x"));
         assert!(!expression_references_only(&parse_where("NOT y.a"), "x"));
-        assert!(expression_references_only(&parse_where("toUpper(x.a) = $p"), "x"));
-        assert!(!expression_references_only(&parse_where("toUpper(y.a) = 'A'"), "x"));
+        assert!(expression_references_only(
+            &parse_where("toUpper(x.a) = $p"),
+            "x"
+        ));
+        assert!(!expression_references_only(
+            &parse_where("toUpper(y.a) = 'A'"),
+            "x"
+        ));
         assert!(!expression_references_only(&parse_where("x.l[0] = 1"), "x"));
     }
 

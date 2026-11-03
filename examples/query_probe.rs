@@ -46,11 +46,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _calibration = bench_setup::report_calibration();
 
     let args: Vec<String> = std::env::args().collect();
-    let one = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
+    let one = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+    };
     let data_dir = one("--data-dir").map(PathBuf::from).unwrap_or_else(|| {
-            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
-            std::process::exit(2)
-        });
+        eprintln!(
+            "--data-dir <path> is required (this example needs input; see the header comment)"
+        );
+        std::process::exit(2)
+    });
     let runs: usize = one("--runs").map(|s| s.parse()).transpose()?.unwrap_or(11);
     let explain = args.iter().any(|a| a == "--explain");
 
@@ -80,12 +86,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The same `id` indexes the benchmark builds. Without them every
     // `MATCH (x:Label {id: ...})` is a full label scan, which drowns whatever
     // the variants are trying to separate.
-    for label in ["Person", "Post", "Comment", "Forum", "Place", "Organisation", "Tag"] {
+    for label in [
+        "Person",
+        "Post",
+        "Comment",
+        "Forum",
+        "Place",
+        "Organisation",
+        "Tag",
+    ] {
         let q = parse_query(&format!("CREATE INDEX ON :{label}(id)"))?;
         MutQueryExecutor::new(&mut graph, "default".to_string()).execute(&q)?;
     }
 
-    let width = variants.iter().map(|(l, _)| l.len()).max().unwrap_or(10).max(10);
+    let width = variants
+        .iter()
+        .map(|(l, _)| l.len())
+        .max()
+        .unwrap_or(10)
+        .max(10);
     for (label, cypher) in &variants {
         let q = match parse_query(cypher) {
             Ok(q) => q,

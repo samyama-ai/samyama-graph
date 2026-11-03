@@ -30,8 +30,8 @@ fn truncated(buf: &[u8]) -> Vec<u8> {
         .read_to_string(&mut plain)
         .expect("decode");
     let lines: Vec<&str> = plain.lines().collect();
-    let cut = lines[..lines.len() / 2].join("\n")
-        + "\n{\"t\":\"n\",\"id\":999,\"labels\":[\"N\"],\"pro";
+    let cut =
+        lines[..lines.len() / 2].join("\n") + "\n{\"t\":\"n\",\"id\":999,\"labels\":[\"N\"],\"pro";
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     enc.write_all(cut.as_bytes()).expect("encode");
     enc.finish().expect("finish")
@@ -67,7 +67,11 @@ fn a_failed_import_does_not_disturb_existing_data() {
     let snapshot = truncated(&good_snapshot(50));
     assert!(import_tenant(&mut store, &snapshot[..]).is_err());
 
-    assert_eq!(store.all_nodes().len(), 2, "pre-existing nodes must survive");
+    assert_eq!(
+        store.all_nodes().len(),
+        2,
+        "pre-existing nodes must survive"
+    );
     let batch = engine
         .execute("MATCH (x:Existing) RETURN x.k AS k", &store)
         .expect("still queryable");
@@ -108,14 +112,22 @@ fn a_snapshot_round_trips_at_every_compression_level() {
     let mut source = GraphStore::new();
     for i in 0..200 {
         engine
-            .execute_mut(&format!("CREATE (:N {{id: {i}, name: \"node {i}\"}})"), &mut source, "default")
+            .execute_mut(
+                &format!("CREATE (:N {{id: {i}, name: \"node {i}\"}})"),
+                &mut source,
+                "default",
+            )
             .unwrap();
     }
     for i in 0..100 {
         engine
             .execute_mut(
-                &format!("MATCH (a:N {{id: {i}}}), (b:N {{id: {}}}) CREATE (a)-[:R]->(b)", i + 1),
-                &mut source, "default",
+                &format!(
+                    "MATCH (a:N {{id: {i}}}), (b:N {{id: {}}}) CREATE (a)-[:R]->(b)",
+                    i + 1
+                ),
+                &mut source,
+                "default",
             )
             .unwrap();
     }

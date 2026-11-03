@@ -19,7 +19,12 @@ use std::path::Path;
 
 const DOC: &str = "docs/ALGORITHM-CONVENTIONS.md";
 const AXES: [&str; 6] = [
-    "directedness", "weights", "self-loops", "disconnected", "tie-breaking", "normalisation",
+    "directedness",
+    "weights",
+    "self-loops",
+    "disconnected",
+    "tie-breaking",
+    "normalisation",
 ];
 
 /// `algo.pageRank`, `pagerank` and `page_rank` are one algorithm, so compare on
@@ -30,21 +35,34 @@ fn canonical(name: &str) -> String {
         Some((prefix, tail)) if prefix != "or" => tail,
         _ => bare,
     };
-    bare.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
+    bare.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
 
 /// The names `is_algorithm` will dispatch, read from its match arms.
 fn dispatchable(src: &str) -> BTreeSet<String> {
-    let start = src.find("pub fn is_algorithm").expect("is_algorithm not found");
+    let start = src
+        .find("pub fn is_algorithm")
+        .expect("is_algorithm not found");
     let body = &src[start..];
     let end = body.find("\n    }").expect("is_algorithm has no end");
     let mut out = BTreeSet::new();
     for chunk in body[..end].split('"').skip(1).step_by(2) {
-        if !chunk.is_empty() && chunk.chars().all(|c| c.is_ascii_lowercase() || c == '.' || c.is_ascii_digit()) {
+        if !chunk.is_empty()
+            && chunk
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '.' || c.is_ascii_digit())
+        {
             out.insert(chunk.to_string());
         }
     }
-    assert!(out.len() > 40, "read only {} names from is_algorithm", out.len());
+    assert!(
+        out.len() > 40,
+        "read only {} names from is_algorithm",
+        out.len()
+    );
     out
 }
 
@@ -96,12 +114,21 @@ fn documented(doc: &str) -> std::collections::BTreeMap<String, BTreeSet<String>>
             .map(|c| c.trim().replace('\u{1}', "|"))
             .collect();
         let cells: Vec<&str> = cells.iter().map(String::as_str).collect();
-        let heads: Vec<String> = cells.iter().map(|c| c.to_lowercase().replace('*', "").trim().to_string()).collect();
+        let heads: Vec<String> = cells
+            .iter()
+            .map(|c| c.to_lowercase().replace('*', "").trim().to_string())
+            .collect();
         if let Some(i) = heads.iter().position(|h| h.starts_with("cypher name")) {
             name_col = Some(i);
             header_cells = cells.len();
-            cols = AXES.iter()
-                .filter_map(|axis| heads.iter().position(|h| h.starts_with(axis)).map(|i| (axis.to_string(), i)))
+            cols = AXES
+                .iter()
+                .filter_map(|axis| {
+                    heads
+                        .iter()
+                        .position(|h| h.starts_with(axis))
+                        .map(|i| (axis.to_string(), i))
+                })
                 .collect();
             continue;
         }
@@ -126,11 +153,15 @@ fn documented(doc: &str) -> std::collections::BTreeMap<String, BTreeSet<String>>
         );
         // A cell that is present and says nothing is not documentation. Without
         // this, a table of em dashes scores full marks.
-        let filled: BTreeSet<String> = cols.iter()
+        let filled: BTreeSet<String> = cols
+            .iter()
             .filter(|(_, i)| {
                 let v = cells[*i].to_lowercase().replace('*', "");
                 let v = v.trim();
-                !matches!(v, "" | "-" | "--" | "—" | "–" | "n/a" | "na" | "tbd" | "?" | "todo")
+                !matches!(
+                    v,
+                    "" | "-" | "--" | "—" | "–" | "n/a" | "na" | "tbd" | "?" | "todo"
+                )
             })
             .map(|(a, _)| a.clone())
             .collect();
@@ -141,7 +172,10 @@ fn documented(doc: &str) -> std::collections::BTreeMap<String, BTreeSet<String>>
             }
         }
     }
-    assert!(name_col.is_some(), "{DOC} has no table with a 'Cypher name' column");
+    assert!(
+        name_col.is_some(),
+        "{DOC} has no table with a 'Cypher name' column"
+    );
     rows
 }
 
@@ -159,8 +193,11 @@ fn every_callable_algorithm_documents_its_conventions() {
         match rows.get(&canonical(&name)) {
             None => undocumented.push(name),
             Some(filled) if filled.len() < AXES.len() => {
-                let missing: Vec<&str> =
-                    AXES.iter().copied().filter(|a| !filled.contains(*a)).collect();
+                let missing: Vec<&str> = AXES
+                    .iter()
+                    .copied()
+                    .filter(|a| !filled.contains(*a))
+                    .collect();
                 incomplete.push(format!("{name} (no {})", missing.join(", ")));
             }
             Some(_) => {}
@@ -172,8 +209,16 @@ fn every_callable_algorithm_documents_its_conventions() {
         "ALGO-03: {DOC} does not cover every algorithm the dispatcher accepts.\n\
          Add a row, or a spelling to an existing row, for: {}\n\
          Fill in the missing conventions for: {}",
-        if undocumented.is_empty() { "-".into() } else { undocumented.join(", ") },
-        if incomplete.is_empty() { "-".into() } else { incomplete.join("; ") },
+        if undocumented.is_empty() {
+            "-".into()
+        } else {
+            undocumented.join(", ")
+        },
+        if incomplete.is_empty() {
+            "-".into()
+        } else {
+            incomplete.join("; ")
+        },
     );
 }
 
@@ -187,9 +232,20 @@ fn the_gate_notices_a_missing_row_and_an_empty_cell() {
                  | PageRank | algo.pageRank | out | ignored | counted | all | none | L1 |\n\
                  | HITS | hits | out | ignored | counted | all | none | — |\n";
     let rows = documented(table);
-    assert_eq!(rows["pagerank"].len(), 6, "a full row documents six conventions");
-    assert_eq!(rows["hits"].len(), 5, "an em dash is not a documented convention");
-    assert!(!rows.contains_key("louvain"), "a name with no row is not documented");
+    assert_eq!(
+        rows["pagerank"].len(),
+        6,
+        "a full row documents six conventions"
+    );
+    assert_eq!(
+        rows["hits"].len(),
+        5,
+        "an em dash is not a documented convention"
+    );
+    assert!(
+        !rows.contains_key("louvain"),
+        "a name with no row is not documented"
+    );
 }
 
 /// The check that was missing when three rows shifted: a row whose cell count

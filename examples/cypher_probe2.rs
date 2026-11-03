@@ -17,11 +17,19 @@ fn render(v: Option<&Value>) -> String {
     match v {
         Some(Value::Map(entries)) => format!(
             "{{{}}}",
-            entries.iter().map(|(k, v)| format!("{k}: {}", render(Some(v)))).collect::<Vec<_>>().join(", ")
+            entries
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", render(Some(v))))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Some(Value::List(items)) => format!(
             "[{}]",
-            items.iter().map(|i| render(Some(i))).collect::<Vec<_>>().join(", ")
+            items
+                .iter()
+                .map(|i| render(Some(i)))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Some(Value::Property(p)) => match p {
             PropertyValue::Integer(n) => n.to_string(),
@@ -31,21 +39,26 @@ fn render(v: Option<&Value>) -> String {
             PropertyValue::Null => "null".into(),
             PropertyValue::Array(a) => format!(
                 "[{}]",
-                a.iter().map(|x| match x {
-                    PropertyValue::Integer(n) => n.to_string(),
-                    PropertyValue::String(s) => format!("\"{s}\""),
-                    PropertyValue::Float(f) => format!("{f}"),
-                    PropertyValue::Boolean(b) => b.to_string(),
-                    PropertyValue::Null => "null".into(),
-                    other => format!("{other:?}"),
-                }).collect::<Vec<_>>().join(", ")
+                a.iter()
+                    .map(|x| match x {
+                        PropertyValue::Integer(n) => n.to_string(),
+                        PropertyValue::String(s) => format!("\"{s}\""),
+                        PropertyValue::Float(f) => format!("{f}"),
+                        PropertyValue::Boolean(b) => b.to_string(),
+                        PropertyValue::Null => "null".into(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             other => format!("{other:?}"),
         },
         Some(Value::Null) | None => "null".into(),
         Some(Value::NodeRef(_)) | Some(Value::Node(..)) => "<node>".into(),
         Some(Value::EdgeRef(..)) | Some(Value::Edge(..)) => "<edge>".into(),
-        Some(Value::Path { nodes, edges }) => format!("<path {} nodes {} edges>", nodes.len(), edges.len()),
+        Some(Value::Path { nodes, edges }) => {
+            format!("<path {} nodes {} edges>", nodes.len(), edges.len())
+        }
     }
 }
 
@@ -75,8 +88,14 @@ fn run(setup: &[&str], read: &str) -> Result<String, String> {
         m.execute(&q).map_err(|e| format!("exec `{stmt}`: {e:?}"))?;
     }
     let q = parse_query(read).map_err(|e| format!("parse: {e:?}"))?;
-    let batch = QueryExecutor::new(&store).execute(&q).map_err(|e| format!("exec: {e:?}"))?;
-    Ok(batch.records.first().map(|r| render(r.get("r"))).unwrap_or("<no rows>".into()))
+    let batch = QueryExecutor::new(&store)
+        .execute(&q)
+        .map_err(|e| format!("exec: {e:?}"))?;
+    Ok(batch
+        .records
+        .first()
+        .map(|r| render(r.get("r")))
+        .unwrap_or("<no rows>".into()))
 }
 
 fn main() {
@@ -131,9 +150,12 @@ fn main() {
     for (label, setup, read, expected) in cases {
         match run(setup, read) {
             Err(e) => errored.push((label.to_string(), read.to_string(), e)),
-            Ok(got) if got != *expected => {
-                wrong.push((label.to_string(), read.to_string(), expected.to_string(), got))
-            }
+            Ok(got) if got != *expected => wrong.push((
+                label.to_string(),
+                read.to_string(),
+                expected.to_string(),
+                got,
+            )),
             Ok(_) => {}
         }
     }

@@ -43,13 +43,28 @@ fn seeded() -> GraphStore {
     run(&mut store, "CREATE (:H {name: 'hub'})");
     run(&mut store, "CREATE (:N {name: 'd1'})");
     run(&mut store, "CREATE (:N {name: 'd2'})");
-    run(&mut store, "MATCH (a:N {name:'a'}), (h:H) CREATE (a)-[:R]->(h)");
-    run(&mut store, "MATCH (b:N {name:'b'}), (h:H) CREATE (b)-[:R]->(h)");
-    run(&mut store, "MATCH (d:N {name:'d1'}), (h:H) CREATE (d)-[:R]->(h)");
-    run(&mut store, "MATCH (d:N {name:'d2'}), (h:H) CREATE (d)-[:R]->(h)");
+    run(
+        &mut store,
+        "MATCH (a:N {name:'a'}), (h:H) CREATE (a)-[:R]->(h)",
+    );
+    run(
+        &mut store,
+        "MATCH (b:N {name:'b'}), (h:H) CREATE (b)-[:R]->(h)",
+    );
+    run(
+        &mut store,
+        "MATCH (d:N {name:'d1'}), (h:H) CREATE (d)-[:R]->(h)",
+    );
+    run(
+        &mut store,
+        "MATCH (d:N {name:'d2'}), (h:H) CREATE (d)-[:R]->(h)",
+    );
     // c attaches by a different edge type, so it must not count as sharing.
     run(&mut store, "CREATE (:H {name: 'hub2'})");
-    run(&mut store, "MATCH (c:N {name:'c'}), (h:H {name:'hub2'}) CREATE (c)-[:OTHER]->(h)");
+    run(
+        &mut store,
+        "MATCH (c:N {name:'c'}), (h:H {name:'hub2'}) CREATE (c)-[:OTHER]->(h)",
+    );
     store
 }
 
@@ -58,9 +73,11 @@ fn a_pinned_endpoint_that_is_reachable_matches() {
     let store = seeded();
     // BI-11's exact shape: both ends bound, meeting at a shared middle node.
     assert_eq!(
-        count(&store,
+        count(
+            &store,
             "MATCH (a:N {name:'a'}), (b:N {name:'b'}) \
-             WHERE EXISTS { MATCH (a)-[:R]->(h:H)<-[:R]-(b) } RETURN count(*) AS c"),
+             WHERE EXISTS { MATCH (a)-[:R]->(h:H)<-[:R]-(b) } RETURN count(*) AS c"
+        ),
         1
     );
 }
@@ -70,9 +87,11 @@ fn a_pinned_endpoint_that_is_not_reachable_does_not_match() {
     let store = seeded();
     // c hangs off a different hub by a different edge type.
     assert_eq!(
-        count(&store,
+        count(
+            &store,
             "MATCH (a:N {name:'a'}), (c:N {name:'c'}) \
-             WHERE EXISTS { MATCH (a)-[:R]->(h:H)<-[:R]-(c) } RETURN count(*) AS c"),
+             WHERE EXISTS { MATCH (a)-[:R]->(h:H)<-[:R]-(c) } RETURN count(*) AS c"
+        ),
         0
     );
 }
@@ -82,15 +101,19 @@ fn the_negation_is_the_complement() {
     // BI-11 is NOT EXISTS, so the inverse has to hold on the same fixture.
     let store = seeded();
     assert_eq!(
-        count(&store,
+        count(
+            &store,
             "MATCH (a:N {name:'a'}), (b:N {name:'b'}) \
-             WHERE NOT EXISTS { MATCH (a)-[:R]->(h:H)<-[:R]-(b) } RETURN count(*) AS c"),
+             WHERE NOT EXISTS { MATCH (a)-[:R]->(h:H)<-[:R]-(b) } RETURN count(*) AS c"
+        ),
         0
     );
     assert_eq!(
-        count(&store,
+        count(
+            &store,
             "MATCH (a:N {name:'a'}), (c:N {name:'c'}) \
-             WHERE NOT EXISTS { MATCH (a)-[:R]->(h:H)<-[:R]-(c) } RETURN count(*) AS c"),
+             WHERE NOT EXISTS { MATCH (a)-[:R]->(h:H)<-[:R]-(c) } RETURN count(*) AS c"
+        ),
         1
     );
 }
@@ -101,9 +124,11 @@ fn direction_is_still_honoured_for_a_pinned_endpoint() {
     // hub's perspective must fail. A filter that ignores direction would pass.
     let store = seeded();
     assert_eq!(
-        count(&store,
+        count(
+            &store,
             "MATCH (a:N {name:'a'}), (b:N {name:'b'}) \
-             WHERE EXISTS { MATCH (a)-[:R]->(h:H)-[:R]->(b) } RETURN count(*) AS c"),
+             WHERE EXISTS { MATCH (a)-[:R]->(h:H)-[:R]->(b) } RETURN count(*) AS c"
+        ),
         0
     );
 }
@@ -112,9 +137,11 @@ fn direction_is_still_honoured_for_a_pinned_endpoint() {
 fn edge_type_is_still_honoured_for_a_pinned_endpoint() {
     let store = seeded();
     assert_eq!(
-        count(&store,
+        count(
+            &store,
             "MATCH (a:N {name:'a'}), (b:N {name:'b'}) \
-             WHERE EXISTS { MATCH (a)-[:R]->(h:H)<-[:OTHER]-(b) } RETURN count(*) AS c"),
+             WHERE EXISTS { MATCH (a)-[:R]->(h:H)<-[:OTHER]-(b) } RETURN count(*) AS c"
+        ),
         0
     );
 }

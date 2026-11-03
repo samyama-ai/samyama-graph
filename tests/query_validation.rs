@@ -148,7 +148,9 @@ fn labelled_graph() -> GraphStore {
 
 fn one_bool(store: &GraphStore, cypher: &str) -> Option<bool> {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
+    let batch = QueryExecutor::new(store)
+        .execute(&q)
+        .expect("query should run");
     match batch.records[0].get("r") {
         Some(Value::Property(PropertyValue::Boolean(b))) => Some(*b),
         Some(Value::Property(PropertyValue::Null)) => None,
@@ -158,7 +160,9 @@ fn one_bool(store: &GraphStore, cypher: &str) -> Option<bool> {
 
 fn names(store: &GraphStore, cypher: &str) -> Vec<String> {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
+    let batch = QueryExecutor::new(store)
+        .execute(&q)
+        .expect("query should run");
     let mut out: Vec<String> = batch
         .records
         .iter()
@@ -174,30 +178,54 @@ fn names(store: &GraphStore, cypher: &str) -> Vec<String> {
 #[test]
 fn a_label_test_returns_true_only_when_the_label_is_present() {
     let store = labelled_graph();
-    assert_eq!(one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN n:A AS r"), Some(true));
-    assert_eq!(one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN n:C AS r"), Some(false));
+    assert_eq!(
+        one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN n:A AS r"),
+        Some(true)
+    );
+    assert_eq!(
+        one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN n:C AS r"),
+        Some(false)
+    );
 }
 
 #[test]
 fn a_multi_label_test_requires_every_label() {
     let store = labelled_graph();
-    assert_eq!(one_bool(&store, "MATCH (n) WHERE n.n = 'ab' RETURN n:A:B AS r"), Some(true));
+    assert_eq!(
+        one_bool(&store, "MATCH (n) WHERE n.n = 'ab' RETURN n:A:B AS r"),
+        Some(true)
+    );
     // `a` has A but not B, so the conjunction is false.
-    assert_eq!(one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN n:A:B AS r"), Some(false));
+    assert_eq!(
+        one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN n:A:B AS r"),
+        Some(false)
+    );
 }
 
 #[test]
 fn a_label_test_filters_in_where() {
     let store = labelled_graph();
-    assert_eq!(names(&store, "MATCH (n) WHERE n:A RETURN n.n AS x"), vec!["a", "ab"]);
-    assert_eq!(names(&store, "MATCH (n) WHERE n:A:B RETURN n.n AS x"), vec!["ab"]);
-    assert_eq!(names(&store, "MATCH (n) WHERE NOT n:C RETURN n.n AS x"), vec!["a", "ab"]);
+    assert_eq!(
+        names(&store, "MATCH (n) WHERE n:A RETURN n.n AS x"),
+        vec!["a", "ab"]
+    );
+    assert_eq!(
+        names(&store, "MATCH (n) WHERE n:A:B RETURN n.n AS x"),
+        vec!["ab"]
+    );
+    assert_eq!(
+        names(&store, "MATCH (n) WHERE NOT n:C RETURN n.n AS x"),
+        vec!["a", "ab"]
+    );
 }
 
 #[test]
 fn parenthesising_a_label_test_changes_nothing() {
     let store = labelled_graph();
-    assert_eq!(one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN (n:A) AS r"), Some(true));
+    assert_eq!(
+        one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN (n:A) AS r"),
+        Some(true)
+    );
 }
 
 #[test]
@@ -206,9 +234,24 @@ fn is_null_still_parses_as_is_null() {
     // its labels became `IS NULL`. This pins the other direction — `IS NULL`
     // must not become a label test.
     let store = labelled_graph();
-    assert_eq!(one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN n.missing IS NULL AS r"), Some(true));
-    assert_eq!(one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN n.n IS NULL AS r"), Some(false));
-    assert_eq!(one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN n.n IS NOT NULL AS r"), Some(true));
+    assert_eq!(
+        one_bool(
+            &store,
+            "MATCH (n) WHERE n.n = 'a' RETURN n.missing IS NULL AS r"
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        one_bool(&store, "MATCH (n) WHERE n.n = 'a' RETURN n.n IS NULL AS r"),
+        Some(false)
+    );
+    assert_eq!(
+        one_bool(
+            &store,
+            "MATCH (n) WHERE n.n = 'a' RETURN n.n IS NOT NULL AS r"
+        ),
+        Some(true)
+    );
 }
 
 #[test]
@@ -216,7 +259,9 @@ fn a_map_literal_is_not_read_as_a_label_test() {
     // `:` is also the map-literal separator, so the postfix must not steal it.
     let store = labelled_graph();
     let q = parse_query("RETURN {a: 1, b: 2} AS m").expect("map literal should still parse");
-    let batch = QueryExecutor::new(&store).execute(&q).expect("query should run");
+    let batch = QueryExecutor::new(&store)
+        .execute(&q)
+        .expect("query should run");
     assert!(matches!(
         batch.records[0].get("m"),
         Some(Value::Property(PropertyValue::Map(_)))

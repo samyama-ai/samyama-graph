@@ -98,9 +98,15 @@ fn a_writing_mode_is_refused_with_the_reason() {
     // "Unknown procedure" sends the reader looking for an algorithm that is in
     // fact right there. The mode is what is missing, and the message says so.
     for (q, mode) in [
-        ("CALL gds.pageRank.write() YIELD node RETURN count(*)", "write"),
+        (
+            "CALL gds.pageRank.write() YIELD node RETURN count(*)",
+            "write",
+        ),
         ("CALL gds.wcc.mutate() YIELD node RETURN count(*)", "mutate"),
-        ("CALL gds.pageRank.stats() YIELD node RETURN count(*)", "stats"),
+        (
+            "CALL gds.pageRank.stats() YIELD node RETURN count(*)",
+            "stats",
+        ),
     ] {
         let err = run(q).expect_err("a writing mode must not run");
         assert!(
@@ -129,8 +135,17 @@ fn the_streaming_mode_actually_runs() {
 #[test]
 fn our_own_spellings_are_unchanged() {
     // The aliasing must not move any existing name.
-    for name in ["pageRank", "algo.pageRank", "algo.pagerank", "samyama.pageRank"] {
-        assert_eq!(AlgorithmOperator::canonical_name(name), "pagerank", "{name}");
+    for name in [
+        "pageRank",
+        "algo.pageRank",
+        "algo.pagerank",
+        "samyama.pageRank",
+    ] {
+        assert_eq!(
+            AlgorithmOperator::canonical_name(name),
+            "pagerank",
+            "{name}"
+        );
     }
 }
 

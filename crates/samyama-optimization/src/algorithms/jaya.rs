@@ -11,8 +11,7 @@ pub struct JayaSolver {
 
 impl JayaSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self {
-            seed: None, config }
+        Self { seed: None, config }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -44,7 +43,10 @@ impl JayaSolver {
                 break;
             }
             if iter % 10 == 0 {
-                println!("Jaya Solver: Iteration {}/{}", iter, self.config.max_iterations);
+                println!(
+                    "Jaya Solver: Iteration {}/{}",
+                    iter, self.config.max_iterations
+                );
             }
             let (best_idx, worst_idx) = self.find_best_worst(&population);
             let best_vars = population[best_idx].variables.clone();
@@ -65,10 +67,9 @@ impl JayaSolver {
                     let r2: f64 = local_rng.gen();
 
                     for j in 0..dim {
-                        let val = ind.variables[j] 
-                            + r1 * (best_vars[j] - ind.variables[j].abs()) 
+                        let val = ind.variables[j] + r1 * (best_vars[j] - ind.variables[j].abs())
                             - r2 * (worst_vars[j] - ind.variables[j].abs());
-                        
+
                         new_vars[j] = val.clamp(lower[j], upper[j]);
                     }
 

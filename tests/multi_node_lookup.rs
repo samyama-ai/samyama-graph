@@ -15,13 +15,17 @@ use samyama::query::parser::parse_query;
 
 fn write(s: &mut GraphStore, q: &str) {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    MutQueryExecutor::new(s, "default".into()).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    MutQueryExecutor::new(s, "default".into())
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
 }
 
 /// Column `c`, sorted.
 fn rows(s: &GraphStore, q: &str) -> Vec<String> {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(s)
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let mut v: Vec<String> = out
         .records
         .iter()
@@ -36,7 +40,9 @@ fn rows(s: &GraphStore, q: &str) -> Vec<String> {
 }
 
 fn plan_unchecked(s: &GraphStore, q: &str) -> String {
-    let out = QueryExecutor::new(s).execute(&parse_query(&format!("EXPLAIN {q}")).unwrap()).unwrap();
+    let out = QueryExecutor::new(s)
+        .execute(&parse_query(&format!("EXPLAIN {q}")).unwrap())
+        .unwrap();
     match out.records[0].get("plan") {
         Some(Value::Property(PropertyValue::String(t))) => t.clone(),
         other => panic!("no plan: {other:?}"),
@@ -65,7 +71,10 @@ fn stores() -> (GraphStore, GraphStore) {
     let mut indexed = GraphStore::new();
     let mut plain = GraphStore::new();
     for s in [&mut indexed, &mut plain] {
-        write(s, "UNWIND range(1, 30) AS i CREATE (:N {id: i, next: i + 1, name: 'n' + toString(i)})");
+        write(
+            s,
+            "UNWIND range(1, 30) AS i CREATE (:N {id: i, next: i + 1, name: 'n' + toString(i)})",
+        );
     }
     write(&mut indexed, "CREATE INDEX ON :N(id)");
     (indexed, plain)

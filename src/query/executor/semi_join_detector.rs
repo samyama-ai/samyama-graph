@@ -147,12 +147,11 @@ pub fn detect(query: &Query) -> Option<SemiJoinPattern> {
     let shared_var = shared[0].to_string();
 
     // Resolve, for each match, the "other" endpoint (not the shared one).
-    let (first_other_node, first_other_var, first_shared_is_start) =
-        if p1_start_var == shared_var {
-            (p1_target, p1_target_var.clone(), true)
-        } else {
-            (p1_start, p1_start_var.clone(), false)
-        };
+    let (first_other_node, first_other_var, first_shared_is_start) = if p1_start_var == shared_var {
+        (p1_target, p1_target_var.clone(), true)
+    } else {
+        (p1_start, p1_start_var.clone(), false)
+    };
     let (second_other_node, second_other_var, second_shared_is_start) =
         if p2_start_var == shared_var {
             (p2_target, p2_target_var.clone(), true)
@@ -234,10 +233,7 @@ pub fn detect(query: &Query) -> Option<SemiJoinPattern> {
     // second_other_var (or a property of it) and exactly one count aggregate
     // over shared_var. No other items, no distinct, no where.
     let with_clause = query.with_clause.as_ref()?;
-    if with_clause.distinct
-        || with_clause.where_clause.is_some()
-        || with_clause.items.len() != 2
-    {
+    if with_clause.distinct || with_clause.where_clause.is_some() || with_clause.items.len() != 2 {
         return None;
     }
 
@@ -257,10 +253,7 @@ pub fn detect(query: &Query) -> Option<SemiJoinPattern> {
                     Expression::Variable(v) if v == &shared_var => {}
                     _ => return None, // must count the shared variable
                 }
-                let alias = item
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| format!("count_{}", i));
+                let alias = item.alias.clone().unwrap_or_else(|| format!("count_{}", i));
                 count_info = Some((alias, *distinct));
             }
             expr @ (Expression::Property { .. } | Expression::Variable(_)) => {
@@ -391,18 +384,18 @@ fn expression_references(expr: &Expression, var: &str) -> bool {
             expression_references(left, var) || expression_references(right, var)
         }
         Expression::Unary { expr, .. } => expression_references(expr, var),
-        Expression::Function { args, .. } => {
-            args.iter().any(|a| expression_references(a, var))
-        }
+        Expression::Function { args, .. } => args.iter().any(|a| expression_references(a, var)),
         Expression::Case {
             operand,
             when_clauses,
             else_result,
         } => {
-            operand.as_deref().map_or(false, |e| expression_references(e, var))
-                || when_clauses.iter().any(|(c, r)| {
-                    expression_references(c, var) || expression_references(r, var)
-                })
+            operand
+                .as_deref()
+                .map_or(false, |e| expression_references(e, var))
+                || when_clauses
+                    .iter()
+                    .any(|(c, r)| expression_references(c, var) || expression_references(r, var))
                 || else_result
                     .as_deref()
                     .map_or(false, |e| expression_references(e, var))
@@ -412,8 +405,12 @@ fn expression_references(expr: &Expression, var: &str) -> bool {
         }
         Expression::ListSlice { expr, start, end } => {
             expression_references(expr, var)
-                || start.as_deref().map_or(false, |e| expression_references(e, var))
-                || end.as_deref().map_or(false, |e| expression_references(e, var))
+                || start
+                    .as_deref()
+                    .map_or(false, |e| expression_references(e, var))
+                || end
+                    .as_deref()
+                    .map_or(false, |e| expression_references(e, var))
         }
         // Subquery / comprehension / predicate expressions: be conservative
         // — say "yes" so we reject rather than misclassify.
@@ -629,7 +626,10 @@ mod tests {
     }
 
     fn prop(v: &str, p: &str) -> Expression {
-        Expression::Property { variable: v.to_string(), property: p.to_string() }
+        Expression::Property {
+            variable: v.to_string(),
+            property: p.to_string(),
+        }
     }
 
     #[test]
@@ -640,18 +640,19 @@ mod tests {
         assert!(p.second_predicate.is_none());
         assert!(p.order_by.is_none());
         assert_eq!(p.limit, None);
-        assert_eq!(p.first_other_label.as_ref().map(|l| l.as_str()), Some("Condition"));
+        assert_eq!(
+            p.first_other_label.as_ref().map(|l| l.as_str()),
+            Some("Condition")
+        );
         assert_eq!(p.group_by_expr, prop("c2", "name"));
     }
 
     #[test]
     fn detects_reversed_endpoints_and_directions() {
         // Shared var is the *target* of both paths, written with both arrow styles.
-        let p = detect(&q(
-            "MATCH (c1)-[:HAS]->(p:Person) \
+        let p = detect(&q("MATCH (c1)-[:HAS]->(p:Person) \
              MATCH (c2:Condition)<-[:OWNS]-(p) \
-             WITH c2 AS cond, count(p) AS c ORDER BY c DESC RETURN cond, c",
-        ))
+             WITH c2 AS cond, count(p) AS c ORDER BY c DESC RETURN cond, c"))
         .expect("should detect");
         assert_eq!(p.first_other_var, "c1");
         assert_eq!(p.first_other_label, None);
@@ -664,11 +665,9 @@ mod tests {
 
     #[test]
     fn detects_incoming_arrow_on_shared_start_and_outgoing_on_shared_end() {
-        let p = detect(&q(
-            "MATCH (p:Person)<-[:A]-(c1) \
+        let p = detect(&q("MATCH (p:Person)<-[:A]-(c1) \
              MATCH (c2)-[:B]->(p) \
-             WITH c2.name AS n, count(p) AS c RETURN n, c",
-        ))
+             WITH c2.name AS n, count(p) AS c RETURN n, c"))
         .expect("should detect");
         assert_eq!(p.first_direction, Direction::Incoming);
         assert_eq!(p.second_direction, Direction::Incoming);
@@ -676,11 +675,9 @@ mod tests {
 
     #[test]
     fn detects_remaining_direction_combinations() {
-        let p = detect(&q(
-            "MATCH (c1)<-[:A]-(p:Person) \
+        let p = detect(&q("MATCH (c1)<-[:A]-(p:Person) \
              MATCH (p)<-[:B]-(c2) \
-             WITH c2.name AS n, count(p) AS c RETURN n, c",
-        ))
+             WITH c2.name AS n, count(p) AS c RETURN n, c"))
         .expect("should detect");
         assert_eq!(p.first_direction, Direction::Outgoing);
         assert_eq!(p.second_direction, Direction::Incoming);
@@ -688,27 +685,37 @@ mod tests {
 
     #[test]
     fn rejects_count_of_the_second_endpoint() {
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
-             WITH c2.name AS n, count(c2) AS c RETURN n, c",
-        ))
-        .is_none());
+        assert!(
+            detect(&q("MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(c2) AS c RETURN n, c",))
+            .is_none()
+        );
     }
 
     #[test]
     fn predicates_are_split_by_side_and_anded() {
-        let p = detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1:Condition) \
+        let p = detect(&q("MATCH (p:Person)-[:HAS]->(c1:Condition) \
              MATCH (p)-[:HAS]->(c2:Condition) \
              WHERE p.age > 18 AND c1.x = 1 AND c2.y = 2 AND c2.z = 3 \
-             WITH c2.name AS n, count(p) AS c RETURN n, c",
-        ))
+             WITH c2.name AS n, count(p) AS c RETURN n, c"))
         .expect("should detect");
         // Shared-only and first-side predicates go to the first MATCH.
         let first = p.first_predicate.expect("first");
-        assert!(matches!(first, Expression::Binary { op: BinaryOp::And, .. }));
+        assert!(matches!(
+            first,
+            Expression::Binary {
+                op: BinaryOp::And,
+                ..
+            }
+        ));
         let second = p.second_predicate.expect("second");
-        assert!(matches!(second, Expression::Binary { op: BinaryOp::And, .. }));
+        assert!(matches!(
+            second,
+            Expression::Binary {
+                op: BinaryOp::And,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -726,10 +733,8 @@ mod tests {
 
     #[test]
     fn rejects_when_split_is_not_after_both_matches() {
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1) WITH p \
-             MATCH (p)-[:HAS]->(c2) RETURN c2.name, count(p)",
-        ))
+        assert!(detect(&q("MATCH (p:Person)-[:HAS]->(c1) WITH p \
+             MATCH (p)-[:HAS]->(c2) RETURN c2.name, count(p)",))
         .is_none());
         let mut query = q(BASE);
         query.with_split_index = None;
@@ -762,7 +767,9 @@ mod tests {
     #[test]
     fn rejects_post_with_where() {
         let mut query = q(BASE);
-        query.post_with_where_clause = Some(WhereClause { predicate: Expression::Literal(crate::graph::PropertyValue::Boolean(true)) });
+        query.post_with_where_clause = Some(WhereClause {
+            predicate: Expression::Literal(crate::graph::PropertyValue::Boolean(true)),
+        });
         assert!(detect(&query).is_none());
     }
 
@@ -775,56 +782,44 @@ mod tests {
 
     #[test]
     fn rejects_multiple_paths_in_a_match() {
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1), (x) \
+        assert!(detect(&q("MATCH (p:Person)-[:HAS]->(c1), (x) \
              MATCH (p)-[:HAS]->(c2) \
-             WITH c2.name AS n, count(p) AS c RETURN n, c",
-        ))
+             WITH c2.name AS n, count(p) AS c RETURN n, c",))
         .is_none());
     }
 
     #[test]
     fn rejects_multi_hop_and_var_length() {
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1)-[:X]->(d) \
+        assert!(detect(&q("MATCH (p:Person)-[:HAS]->(c1)-[:X]->(d) \
              MATCH (p)-[:HAS]->(c2) \
-             WITH c2.name AS n, count(p) AS c RETURN n, c",
-        ))
+             WITH c2.name AS n, count(p) AS c RETURN n, c",))
         .is_none());
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS*1..2]->(c1) \
+        assert!(detect(&q("MATCH (p:Person)-[:HAS*1..2]->(c1) \
              MATCH (p)-[:HAS]->(c2) \
-             WITH c2.name AS n, count(p) AS c RETURN n, c",
-        ))
+             WITH c2.name AS n, count(p) AS c RETURN n, c",))
         .is_none());
     }
 
     #[test]
     fn rejects_anonymous_endpoint() {
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->() \
+        assert!(detect(&q("MATCH (p:Person)-[:HAS]->() \
              MATCH (p)-[:HAS]->(c2) \
-             WITH c2.name AS n, count(p) AS c RETURN n, c",
-        ))
+             WITH c2.name AS n, count(p) AS c RETURN n, c",))
         .is_none());
     }
 
     #[test]
     fn rejects_two_shared_variables() {
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c) \
+        assert!(detect(&q("MATCH (p:Person)-[:HAS]->(c) \
              MATCH (p)-[:LIKES]->(c) \
-             WITH c.name AS n, count(p) AS k RETURN n, k",
-        ))
+             WITH c.name AS n, count(p) AS k RETURN n, k",))
         .is_none());
     }
 
     #[test]
     fn rejects_unlabelled_or_multi_labelled_shared_variable() {
-        assert!(detect(&q(
-            "MATCH (p)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
-             WITH c2.name AS n, count(p) AS c RETURN n, c",
-        ))
+        assert!(detect(&q("MATCH (p)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c",))
         .is_none());
         assert!(detect(&q(
             "MATCH (p:Person:Patient)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
@@ -868,7 +863,10 @@ mod tests {
              WITH c2.name AS n, count(p) AS c RETURN n, c",
         ))
         .unwrap();
-        assert_eq!(p.second_other_label.as_ref().map(|l| l.as_str()), Some("Drug"));
+        assert_eq!(
+            p.second_other_label.as_ref().map(|l| l.as_str()),
+            Some("Drug")
+        );
     }
 
     #[test]
@@ -916,34 +914,37 @@ mod tests {
         assert!(detect(&query).is_none());
 
         let mut query = q(BASE);
-        query.with_clause.as_mut().unwrap().where_clause =
-            Some(WhereClause { predicate: Expression::Literal(crate::graph::PropertyValue::Boolean(true)) });
+        query.with_clause.as_mut().unwrap().where_clause = Some(WhereClause {
+            predicate: Expression::Literal(crate::graph::PropertyValue::Boolean(true)),
+        });
         assert!(detect(&query).is_none());
 
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
-             WITH c2.name AS n, c2.code AS k, count(p) AS c RETURN n, k, c",
-        ))
-        .is_none());
+        assert!(
+            detect(&q("MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, c2.code AS k, count(p) AS c RETURN n, k, c",))
+            .is_none()
+        );
     }
 
     #[test]
     fn rejects_bad_count_shapes() {
         // Two counts.
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
-             WITH count(p) AS a, count(p) AS b RETURN a, b",
-        ))
-        .is_none());
+        assert!(
+            detect(&q("MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH count(p) AS a, count(p) AS b RETURN a, b",))
+            .is_none()
+        );
         // count(*) — not a variable.
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
-             WITH c2.name AS n, count(*) AS c RETURN n, c",
-        ))
-        .is_none());
+        assert!(
+            detect(&q("MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(*) AS c RETURN n, c",))
+            .is_none()
+        );
         // count with two args is not produced by the parser; build it.
         let mut query = q(BASE);
-        if let Expression::Function { args, .. } = &mut query.with_clause.as_mut().unwrap().items[1].expression {
+        if let Expression::Function { args, .. } =
+            &mut query.with_clause.as_mut().unwrap().items[1].expression
+        {
             args.push(var("p"));
         }
         assert!(detect(&query).is_none());
@@ -951,21 +952,21 @@ mod tests {
 
     #[test]
     fn rejects_group_by_that_is_not_the_second_endpoint() {
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
-             WITH p.name AS n, count(p) AS c RETURN n, c",
-        ))
-        .is_none());
+        assert!(
+            detect(&q("MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH p.name AS n, count(p) AS c RETURN n, c",))
+            .is_none()
+        );
         // Two group-by items on c2.
         let mut query = q(BASE);
         query.with_clause.as_mut().unwrap().items[1].expression = prop("c2", "other");
         assert!(detect(&query).is_none());
         // A non-projection expression.
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
-             WITH c2.a + 1 AS n, count(p) AS c RETURN n, c",
-        ))
-        .is_none());
+        assert!(
+            detect(&q("MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.a + 1 AS n, count(p) AS c RETURN n, c",))
+            .is_none()
+        );
     }
 
     #[test]
@@ -977,7 +978,8 @@ mod tests {
 
         // Only a count and a literal: the literal is not a projection.
         let mut query = q(BASE);
-        query.with_clause.as_mut().unwrap().items[0].expression = Expression::Literal(crate::graph::PropertyValue::Integer(1));
+        query.with_clause.as_mut().unwrap().items[0].expression =
+            Expression::Literal(crate::graph::PropertyValue::Integer(1));
         assert!(detect(&query).is_none());
     }
 
@@ -986,11 +988,11 @@ mod tests {
         let mut query = q(BASE);
         query.return_clause.as_mut().unwrap().distinct = true;
         assert!(detect(&query).is_none());
-        assert!(detect(&q(
-            "MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
-             WITH c2.name AS n, count(p) AS c RETURN n, c + 1",
-        ))
-        .is_none());
+        assert!(
+            detect(&q("MATCH (p:Person)-[:HAS]->(c1) MATCH (p)-[:HAS]->(c2) \
+             WITH c2.name AS n, count(p) AS c RETURN n, c + 1",))
+            .is_none()
+        );
         let mut query = q(BASE);
         query.return_clause = None;
         assert!(detect(&query).is_none());
@@ -1003,7 +1005,10 @@ mod tests {
     fn rejects_first_other_var_in_with_order_by_or_return() {
         let mut query = q(BASE);
         query.with_clause.as_mut().unwrap().order_by = Some(crate::query::ast::OrderByClause {
-            items: vec![crate::query::ast::OrderByItem { expression: prop("c1", "x"), ascending: true }],
+            items: vec![crate::query::ast::OrderByItem {
+                expression: prop("c1", "x"),
+                ascending: true,
+            }],
         });
         assert!(detect(&query).is_none());
 
@@ -1014,49 +1019,117 @@ mod tests {
         // An ORDER BY that does not mention c1 is fine.
         let mut query = q(BASE);
         query.with_clause.as_mut().unwrap().order_by = Some(crate::query::ast::OrderByClause {
-            items: vec![crate::query::ast::OrderByItem { expression: var("c"), ascending: true }],
+            items: vec![crate::query::ast::OrderByItem {
+                expression: var("c"),
+                ascending: true,
+            }],
         });
-        assert_eq!(detect(&query).unwrap().order_by, Some(vec![(var("c"), true)]));
+        assert_eq!(
+            detect(&query).unwrap().order_by,
+            Some(vec![(var("c"), true)])
+        );
     }
 
     #[test]
     fn expression_references_walks_every_supported_node() {
         use crate::graph::PropertyValue;
         let lit = Expression::Literal(PropertyValue::Integer(1));
-        assert!(expression_references(&Expression::PathVariable("x".into()), "x"));
-        assert!(!expression_references(&Expression::PathVariable("y".into()), "x"));
+        assert!(expression_references(
+            &Expression::PathVariable("x".into()),
+            "x"
+        ));
+        assert!(!expression_references(
+            &Expression::PathVariable("y".into()),
+            "x"
+        ));
         assert!(!expression_references(&lit, "x"));
-        assert!(!expression_references(&Expression::Parameter("x".into()), "x"));
+        assert!(!expression_references(
+            &Expression::Parameter("x".into()),
+            "x"
+        ));
 
-        let parse_where = |s: &str| q(&format!("MATCH (x), (y) WHERE {} RETURN x", s)).where_clause.unwrap().predicate;
+        let parse_where = |s: &str| {
+            q(&format!("MATCH (x), (y) WHERE {} RETURN x", s))
+                .where_clause
+                .unwrap()
+                .predicate
+        };
         assert!(expression_references(&parse_where("NOT x.a"), "x"));
         assert!(!expression_references(&parse_where("NOT y.a"), "x"));
-        assert!(expression_references(&parse_where("toUpper(x.a) = 'A'"), "x"));
-        assert!(expression_references(&parse_where("CASE x.a WHEN 1 THEN true END"), "x"));
-        assert!(expression_references(&parse_where("CASE WHEN y.a = 1 THEN x.b END"), "x"));
-        assert!(expression_references(&parse_where("CASE WHEN y.a = 1 THEN true ELSE x.b END"), "x"));
-        assert!(!expression_references(&parse_where("CASE WHEN y.a = 1 THEN true ELSE false END"), "x"));
+        assert!(expression_references(
+            &parse_where("toUpper(x.a) = 'A'"),
+            "x"
+        ));
+        assert!(expression_references(
+            &parse_where("CASE x.a WHEN 1 THEN true END"),
+            "x"
+        ));
+        assert!(expression_references(
+            &parse_where("CASE WHEN y.a = 1 THEN x.b END"),
+            "x"
+        ));
+        assert!(expression_references(
+            &parse_where("CASE WHEN y.a = 1 THEN true ELSE x.b END"),
+            "x"
+        ));
+        assert!(!expression_references(
+            &parse_where("CASE WHEN y.a = 1 THEN true ELSE false END"),
+            "x"
+        ));
         assert!(expression_references(&parse_where("y.l[x.i] = 1"), "x"));
         assert!(!expression_references(&parse_where("y.l[0] = 1"), "x"));
-        assert!(expression_references(&parse_where("size(y.l[x.i..]) = 1"), "x"));
-        assert!(expression_references(&parse_where("size(y.l[..x.i]) = 1"), "x"));
-        assert!(!expression_references(&parse_where("size(y.l[1..2]) = 1"), "x"));
-        let open_slice = Expression::ListSlice { expr: Box::new(var("y")), start: None, end: None };
+        assert!(expression_references(
+            &parse_where("size(y.l[x.i..]) = 1"),
+            "x"
+        ));
+        assert!(expression_references(
+            &parse_where("size(y.l[..x.i]) = 1"),
+            "x"
+        ));
+        assert!(!expression_references(
+            &parse_where("size(y.l[1..2]) = 1"),
+            "x"
+        ));
+        let open_slice = Expression::ListSlice {
+            expr: Box::new(var("y")),
+            start: None,
+            end: None,
+        };
         assert!(!expression_references(&open_slice, "x"));
         // Anything else is conservatively a reference.
-        assert!(expression_references(&parse_where("any(z IN y.l WHERE z = 1)"), "x"));
+        assert!(expression_references(
+            &parse_where("any(z IN y.l WHERE z = 1)"),
+            "x"
+        ));
     }
 
     #[test]
     fn references_only_allowed_rejects_unknown_expression_kinds() {
         use crate::graph::PropertyValue;
-        let parse_where = |s: &str| q(&format!("MATCH (x), (y) WHERE {} RETURN x", s)).where_clause.unwrap().predicate;
-        assert!(references_only_allowed(&Expression::Parameter("p".into()), &["x"]));
-        assert!(references_only_allowed(&Expression::Literal(PropertyValue::Null), &[]));
+        let parse_where = |s: &str| {
+            q(&format!("MATCH (x), (y) WHERE {} RETURN x", s))
+                .where_clause
+                .unwrap()
+                .predicate
+        };
+        assert!(references_only_allowed(
+            &Expression::Parameter("p".into()),
+            &["x"]
+        ));
+        assert!(references_only_allowed(
+            &Expression::Literal(PropertyValue::Null),
+            &[]
+        ));
         assert!(references_only_allowed(&parse_where("NOT x.a"), &["x"]));
         assert!(!references_only_allowed(&parse_where("NOT y.a"), &["x"]));
-        assert!(references_only_allowed(&parse_where("toUpper(x.a) = 'A'"), &["x"]));
-        assert!(!references_only_allowed(&parse_where("CASE WHEN x.a THEN 1 END = 1"), &["x"]));
+        assert!(references_only_allowed(
+            &parse_where("toUpper(x.a) = 'A'"),
+            &["x"]
+        ));
+        assert!(!references_only_allowed(
+            &parse_where("CASE WHEN x.a THEN 1 END = 1"),
+            &["x"]
+        ));
         assert!(!references_only_allowed(&var("z"), &["x", "y"]));
         assert!(expression_references_only(&prop("x", "a"), "x"));
     }

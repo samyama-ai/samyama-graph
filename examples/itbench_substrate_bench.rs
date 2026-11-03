@@ -242,8 +242,12 @@ fn load(dir: &Path) -> std::io::Result<Loaded> {
     let mut nodes = 0usize;
 
     for line in std::fs::read_to_string(dir.join("nodes.jsonl"))?.lines() {
-        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(line) else { continue };
-        let (Some(id), Some(label)) = (v["id"].as_str(), v["label"].as_str()) else { continue };
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(line) else {
+            continue;
+        };
+        let (Some(id), Some(label)) = (v["id"].as_str(), v["label"].as_str()) else {
+            continue;
+        };
         let nid = store.create_node_with_labels(vec![Label::new(label)]);
         for (k, val) in v.as_object().into_iter().flatten() {
             if k == "id" || k == "label" {
@@ -265,7 +269,9 @@ fn load(dir: &Path) -> std::io::Result<Loaded> {
     let mut edge_types: HashMap<String, usize> = HashMap::new();
     let mut fires_on: Vec<(String, NodeId)> = Vec::new();
     for line in std::fs::read_to_string(dir.join("edges.jsonl"))?.lines() {
-        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(line) else { continue };
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(line) else {
+            continue;
+        };
         let (Some(s), Some(t), Some(ty)) =
             (v["src"].as_str(), v["dst"].as_str(), v["type"].as_str())
         else {
@@ -292,10 +298,22 @@ fn load(dir: &Path) -> std::io::Result<Loaded> {
 
     fires_on.sort();
     let anchor = fires_on.first().map(|(_, n)| *n);
-    let second = fires_on.iter().map(|(_, n)| *n).find(|n| Some(*n) != anchor);
+    let second = fires_on
+        .iter()
+        .map(|(_, n)| *n)
+        .find(|n| Some(*n) != anchor);
     let symptoms: Vec<NodeId> = fires_on.iter().take(5).map(|(_, n)| *n).collect();
 
-    Ok(Loaded { store, nodes, edges, dangling, edge_types, anchor, second, symptoms })
+    Ok(Loaded {
+        store,
+        nodes,
+        edges,
+        dangling,
+        edge_types,
+        anchor,
+        second,
+        symptoms,
+    })
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -312,13 +330,17 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |name: &str| -> Option<String> {
-        args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
     };
-    let graph_dir = PathBuf::from(
-        arg("--graph-dir").unwrap_or_else(|| "../itbench-kg/graph".to_string()),
-    );
+    let graph_dir =
+        PathBuf::from(arg("--graph-dir").unwrap_or_else(|| "../itbench-kg/graph".to_string()));
     let runs: usize = arg("--runs").and_then(|s| s.parse().ok()).unwrap_or(5);
-    let limit: usize = arg("--scenarios").and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+    let limit: usize = arg("--scenarios")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(usize::MAX);
 
     let mut scenarios: Vec<PathBuf> = match std::fs::read_dir(&graph_dir) {
         Ok(rd) => rd
@@ -349,7 +371,11 @@ fn main() {
     let mut edge_types: HashMap<String, usize> = HashMap::new();
 
     for dir in &scenarios {
-        let name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+        let name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
         let loaded = match load(dir) {
             Ok(l) => l,
             Err(e) => {
@@ -403,7 +429,11 @@ fn main() {
                         c = c.replace("{symptoms}", &symptoms_lit);
                     }
                 }
-                if c.is_empty() { None } else { Some(c) }
+                if c.is_empty() {
+                    None
+                } else {
+                    Some(c)
+                }
             }) else {
                 // No alert in this scenario, so no symptom to start from. Not
                 // an error and not a zero-latency success: recorded as a
@@ -497,6 +527,10 @@ fn main() {
         p95,
         p99,
         max,
-        if out["within_budget"].as_bool().unwrap_or(false) { "within" } else { "OVER" }
+        if out["within_budget"].as_bool().unwrap_or(false) {
+            "within"
+        } else {
+            "OVER"
+        }
     );
 }

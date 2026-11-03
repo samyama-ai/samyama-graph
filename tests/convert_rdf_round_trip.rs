@@ -748,3 +748,148 @@ fn infinities_and_nan_round_trip_as_xsd_doubles() {
     assert!(losses.is_empty(), "{losses:?}");
     assert_eq!(output, input);
 }
+
+/// A key read as a language map on one node and as an inlined blank node on
+/// another holds a map either way, and the writer cannot tell which: the mix
+/// is reported on the way in, so the read is not called lossless (#1912
+/// review).
+#[test]
+fn a_language_map_and_an_inlined_map_under_one_key_are_reported() {
+    let yaml = "blank_nodes: inline\nlanguages: { others: map }";
+    let body = "ex:a ex:p \"Hello\"@en . ex:b ex:p [ ex:q \"value\" ] .";
+    let (input, output, losses) = round_trip_under(yaml, body);
+    assert!(
+        losses.contains(&"rdf_language_maps_ambiguous".to_string()),
+        "{losses:?}"
+    );
+    assert_ne!(output, input, "reported because it does not round-trip");
+
+    // Each kind under its own key: nothing ambiguous.
+    let body = "ex:a ex:p \"Hello\"@en . ex:b ex:r [ ex:q \"value\" ] .";
+    let losses = read_losses(yaml, body);
+    assert!(
+        !losses.contains(&"rdf_language_maps_ambiguous".to_string()),
+        "{losses:?}"
+    );
+}
+
+/// The `.sgsnap` of a graph built in Samyama, holding `props`.
+fn snapshot_of(
+    dir: &Path,
+    name: &str,
+    props: &[(&str, samyama::graph::PropertyValue)],
+) -> std::path::PathBuf {
+    let mut store = samyama::graph::GraphStore::new();
+    let id = store.create_node("Thing");
+    let node = store.get_node_mut(id).unwrap();
+    for (k, v) in props {
+        node.set_property(*k, v.clone());
+    }
+    let path = dir.join(name);
+    samyama::snapshot::export_tenant(&store, std::fs::File::create(&path).unwrap()).unwrap();
+    path
+}
+
+/// A null has no RDF object: it is counted as not written, and a lossless
+/// write is refused without touching the file already there (#1912 review).
+#[test]
+fn a_null_value_is_reported_as_not_written() {
+    use samyama::graph::PropertyValue;
+    let dir = tempfile::tempdir().unwrap();
+    let snap = snapshot_of(
+        dir.path(),
+        "nulls.sgsnap",
+        &[
+            ("name", PropertyValue::String("kept".into())),
+            ("gone", PropertyValue::Null),
+        ],
+    );
+    let out = dir.path().join("out.ttl");
+    let report = convert(&snap, &out, &Options::default()).unwrap();
+    let losses: Vec<String> = report
+        .output
+        .dropped()
+        .iter()
+        .map(|d| d.what.clone())
+        .collect();
+    assert!(
+        losses.contains(&"rdf_values_not_written".to_string()),
+        "{losses:?}"
+    );
+
+    let strict = Options {
+        require_lossless: true,
+        ..Options::default()
+    };
+    std::fs::write(&out, "earlier").unwrap();
+    let err = convert(&snap, &out, &strict).unwrap_err();
+    assert!(matches!(err, ConvertError::Lossy(_)), "{err}");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "earlier");
+
+    // Without the null: nothing to report.
+    let snap = snapshot_of(
+        dir.path(),
+        "plain.sgsnap",
+        &[("name", PropertyValue::String("kept".into()))],
+    );
+    let report = convert(&snap, &dir.path().join("plain.ttl"), &Options::default()).unwrap();
+    assert!(
+        report.output.dropped().is_empty(),
+        "{:?}",
+        report.output.dropped()
+    );
+}
+
+/// A graph read from two RDF files under different mappings can be written
+/// back under only one of them, the last recorded: the other is reported
+/// (#1912 review).
+#[test]
+fn a_second_recorded_mapping_is_reported_when_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_of = |name: &str, yaml: &str| {
+        let input = write(
+            dir.path(),
+            &format!("{name}.ttl"),
+            &format!("{PREFIXES}{SKOS}"),
+        );
+        let out = dir.path().join(format!("{name}.sgsnap"));
+        let opts = Options {
+            mapping: Some(Mapping::from_yaml(yaml).unwrap()),
+            ..Options::default()
+        };
+        convert(&input, &out, &opts).unwrap();
+        samyama::snapshot::peek_header(std::fs::File::open(&out).unwrap())
+            .unwrap()
+            .sources
+    };
+    let generic = source_of("generic", "");
+    let skos = source_of("skos", "preset: skos");
+    assert_ne!(generic[0].mapping, skos[0].mapping);
+
+    let losses_with = |sources: Vec<samyama::snapshot::format::SnapshotSource>| {
+        let mut store = samyama::graph::GraphStore::new();
+        store.create_node("Thing");
+        store.add_snapshot_sources(sources);
+        let snap = dir.path().join("both.sgsnap");
+        samyama::snapshot::export_tenant(&store, std::fs::File::create(&snap).unwrap()).unwrap();
+        let report = convert(&snap, &dir.path().join("both.ttl"), &Options::default()).unwrap();
+        report
+            .output
+            .dropped()
+            .iter()
+            .map(|d| d.what.clone())
+            .collect::<Vec<_>>()
+    };
+    let losses = losses_with(generic.iter().chain(&skos).cloned().collect());
+    assert!(
+        losses.contains(&"rdf_mappings_not_used".to_string()),
+        "{losses:?}"
+    );
+
+    // The same mapping recorded twice is one mapping.
+    let losses = losses_with(generic.iter().chain(&generic).cloned().collect());
+    assert!(
+        !losses.contains(&"rdf_mappings_not_used".to_string()),
+        "{losses:?}"
+    );
+}

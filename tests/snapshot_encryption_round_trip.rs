@@ -11,8 +11,8 @@
 //! say what went wrong.
 
 use samyama::graph::{GraphStore, PropertyValue};
-use samyama::snapshot::{export_tenant, export_tenant_encrypted, import_tenant_maybe_encrypted};
 use samyama::snapshot::encryption::KEY_BYTES;
+use samyama::snapshot::{export_tenant, export_tenant_encrypted, import_tenant_maybe_encrypted};
 
 fn graph() -> GraphStore {
     let mut s = GraphStore::new();

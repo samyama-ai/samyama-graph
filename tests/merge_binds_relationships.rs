@@ -30,7 +30,11 @@ fn run(store: &mut GraphStore, cypher: &str) -> Vec<samyama::query::executor::Re
 
 fn count(store: &GraphStore, cypher: &str) -> usize {
     let q = parse_query(cypher).expect("count query parses");
-    QueryExecutor::new(store).execute(&q).expect("count runs").records.len()
+    QueryExecutor::new(store)
+        .execute(&q)
+        .expect("count runs")
+        .records
+        .len()
 }
 
 /// On the create branch and on the match branch — the same name, both times.
@@ -40,16 +44,28 @@ fn a_relationship_variable_is_bound_whether_created_or_matched() {
 
     let created = run(&mut store, "MERGE (a:A)-[r:R]->(b:B) RETURN r");
     assert!(
-        matches!(created.first().and_then(|r| r.get("r")), Some(Value::EdgeRef(..)) | Some(Value::Edge(..))),
-        "created: {:?}", created.first()
+        matches!(
+            created.first().and_then(|r| r.get("r")),
+            Some(Value::EdgeRef(..)) | Some(Value::Edge(..))
+        ),
+        "created: {:?}",
+        created.first()
     );
 
     let matched = run(&mut store, "MERGE (a:A)-[r:R]->(b:B) RETURN r");
     assert!(
-        matches!(matched.first().and_then(|r| r.get("r")), Some(Value::EdgeRef(..)) | Some(Value::Edge(..))),
-        "matched: {:?}", matched.first()
+        matches!(
+            matched.first().and_then(|r| r.get("r")),
+            Some(Value::EdgeRef(..)) | Some(Value::Edge(..))
+        ),
+        "matched: {:?}",
+        matched.first()
     );
-    assert_eq!(count(&store, "MATCH ()-[r:R]->() RETURN r"), 1, "the second MERGE matched");
+    assert_eq!(
+        count(&store, "MATCH ()-[r:R]->() RETURN r"),
+        1,
+        "the second MERGE matched"
+    );
 }
 
 #[test]

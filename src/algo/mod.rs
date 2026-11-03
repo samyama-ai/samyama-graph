@@ -4,41 +4,30 @@
 //! Algorithms are implemented in `samyama-graph-algorithms` crate.
 //! This module provides the integration/adapter layer.
 
-use crate::graph::{GraphStore, EdgeType, Label, PropertyValue};
+use crate::graph::{EdgeType, GraphStore, Label, PropertyValue};
 pub use samyama_graph_algorithms::GraphView;
 use samyama_graph_algorithms::NodeId as AlgoNodeId;
 use std::collections::HashMap;
 
 // Re-export algorithms
 pub use samyama_graph_algorithms::{
-    page_rank, page_rank_with, PageRankConfig,
-    Progress, NoProgress, Stopped,
-    weakly_connected_components, WccResult,
-    strongly_connected_components, SccResult,
-    bfs, dijkstra, bfs_all_shortest_paths, PathResult,
-    edmonds_karp, FlowResult,
-    prim_mst, MSTResult,
-    count_triangles,
-    cdlp, CdlpResult, CdlpConfig,
-    local_clustering_coefficient, local_clustering_coefficient_directed, LccResult,
-    pca, PcaConfig, PcaResult, PcaSolver,
-    temporal_reachability, temporal_shortest_path, symptom_explanation,
-    TemporalEdges, Explanation, TemporalPath,
-    betweenness_centrality, closeness_centrality, core_number, degree_centrality,
-    eigenvector_centrality, harmonic_centrality, ranked,
-    predict_links, score_one, LinkScore, PairScore,
-    articulation_points, bridges, find_cycle, topological_sort, TopoResult,
-    average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius, ranked_opt,
-    louvain, modularity, with_ids,
-    hits, index_of, katz_centrality, personalised_page_rank, ranked_scores, vote_rank,
-    all_pairs_hops, bellman_ford, dag_longest_path, transitive_closure, wiener_index,
-    biconnected_components, bipartite_sets, dominating_set, global_efficiency,
-    greedy_colouring, k_truss, maximal_matching, rich_club_coefficient,
-    square_clustering, transitivity,
-    constraint, cosine_similarity, effective_size, node_similarity, overlap_coefficient,
-    reciprocity,
-    a_star, all_shortest_paths, article_rank, random_walk, yens_k_shortest,
-    fastrp, node2vec, FastRpConfig, Node2VecConfig,
+    a_star, all_pairs_hops, all_shortest_paths, article_rank, articulation_points,
+    average_neighbour_degree, bellman_ford, betweenness_centrality, bfs, bfs_all_shortest_paths,
+    biconnected_components, bipartite_sets, bridges, cdlp, closeness_centrality, constraint,
+    core_number, cosine_similarity, count_triangles, dag_longest_path, degree_assortativity,
+    degree_centrality, diameter, dijkstra, dominating_set, eccentricity, edmonds_karp,
+    effective_size, eigenvector_centrality, fastrp, find_cycle, global_efficiency,
+    greedy_colouring, harmonic_centrality, hits, index_of, k_truss, katz_centrality,
+    local_clustering_coefficient, local_clustering_coefficient_directed, louvain, maximal_matching,
+    modularity, node2vec, node_similarity, overlap_coefficient, page_rank, page_rank_with, pca,
+    personalised_page_rank, predict_links, prim_mst, radius, random_walk, ranked, ranked_opt,
+    ranked_scores, reciprocity, rich_club_coefficient, score_one, square_clustering,
+    strongly_connected_components, symptom_explanation, temporal_reachability,
+    temporal_shortest_path, topological_sort, transitive_closure, transitivity, vote_rank,
+    weakly_connected_components, wiener_index, with_ids, yens_k_shortest, CdlpConfig, CdlpResult,
+    Explanation, FastRpConfig, FlowResult, LccResult, LinkScore, MSTResult, NoProgress,
+    Node2VecConfig, PageRankConfig, PairScore, PathResult, PcaConfig, PcaResult, PcaSolver,
+    Progress, SccResult, Stopped, TemporalEdges, TemporalPath, TopoResult, WccResult,
 };
 
 /// Build a GraphView from the store for algorithm execution
@@ -73,7 +62,15 @@ pub fn build_view_with(
     weight_property: Option<&str>,
     progress: &dyn Progress,
 ) -> Result<GraphView, Stopped> {
-    build_view_inner(store, node_label, edge_type, weight_property, None, progress).map(|(view, _)| view)
+    build_view_inner(
+        store,
+        node_label,
+        edge_type,
+        weight_property,
+        None,
+        progress,
+    )
+    .map(|(view, _)| view)
 }
 
 /// A view plus edge timestamps aligned with its `out_targets`, for the
@@ -96,7 +93,14 @@ pub fn build_temporal_view(
     edge_type: Option<&str>,
     time_property: Option<&str>,
 ) -> (GraphView, Vec<i64>) {
-    let (view, times) = match build_view_inner(store, node_label, edge_type, None, Some(time_property), &NoProgress) {
+    let (view, times) = match build_view_inner(
+        store,
+        node_label,
+        edge_type,
+        None,
+        Some(time_property),
+        &NoProgress,
+    ) {
         Ok(built) => built,
         Err(_) => unreachable!("NoProgress never stops a build"),
     };
@@ -131,15 +135,13 @@ fn build_view_inner(
     // this sort is a no-op there and only pays for itself on the label path.
     let mut nodes: Vec<AlgoNodeId> = if let Some(label_str) = node_label {
         let label = Label::new(label_str);
-        store.get_nodes_by_label(&label)
+        store
+            .get_nodes_by_label(&label)
             .iter()
             .map(|n| n.id.as_u64())
             .collect()
     } else {
-        store.all_nodes()
-            .iter()
-            .map(|n| n.id.as_u64())
-            .collect()
+        store.all_nodes().iter().map(|n| n.id.as_u64()).collect()
     };
     nodes.sort_unstable();
 
@@ -169,11 +171,14 @@ fn build_view_inner(
 
     for (u_idx, &u_id) in index_to_node.iter().enumerate() {
         if u_idx % VIEW_PROGRESS_EVERY == 0 && !progress.step(u_idx, node_count) {
-            return Err(Stopped { done: u_idx, total: node_count });
+            return Err(Stopped {
+                done: u_idx,
+                total: node_count,
+            });
         }
         let u_node_id = crate::graph::NodeId::new(u_id);
         let edges = store.get_outgoing_edges(u_node_id);
-        
+
         for edge in edges {
             // Apply edge filter if present
             if let Some(ref et) = filter_edge_type {
@@ -193,7 +198,7 @@ fn build_view_inner(
                     let w = match edge.get_property(prop_name) {
                         Some(PropertyValue::Integer(i)) => *i as f64,
                         Some(PropertyValue::Float(f)) => *f,
-                        _ => 1.0, 
+                        _ => 1.0,
                     };
                     w_vec[u_idx].push(w);
                 }
@@ -213,15 +218,23 @@ fn build_view_inner(
     let mut out_targets = Vec::new();
     let mut in_offsets = Vec::with_capacity(node_count + 1);
     let mut in_sources = Vec::new();
-    let mut weights = if temp_weights.is_some() { Some(Vec::new()) } else { None };
-    let mut times: Option<Vec<i64>> = if temp_times.is_some() { Some(Vec::new()) } else { None };
+    let mut weights = if temp_weights.is_some() {
+        Some(Vec::new())
+    } else {
+        None
+    };
+    let mut times: Option<Vec<i64>> = if temp_times.is_some() {
+        Some(Vec::new())
+    } else {
+        None
+    };
 
     // Flatten Outgoing
     out_offsets.push(0);
     for (i, neighbors) in temp_outgoing.into_iter().enumerate() {
         out_targets.extend(neighbors);
         out_offsets.push(out_targets.len());
-        
+
         if let Some(ref mut w_flat) = weights {
             if let Some(w_row) = temp_weights.as_mut().map(|w| &mut w[i]) {
                 w_flat.extend(w_row.iter());
@@ -281,4 +294,6 @@ fn edge_time(edge: &crate::graph::Edge, property: Option<&str>) -> i64 {
     }
     edge.created_at
 }
-#[cfg(test)] #[path = "algo_cov_tests.rs"] mod cov_tests;
+#[cfg(test)]
+#[path = "algo_cov_tests.rs"]
+mod cov_tests;

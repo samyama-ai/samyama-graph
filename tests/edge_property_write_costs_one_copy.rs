@@ -53,7 +53,9 @@ unsafe impl GlobalAlloc for Counting {
 static G: Counting = Counting;
 
 fn live() -> usize {
-    ALLOCATED.load(Ordering::Relaxed).saturating_sub(FREED.load(Ordering::Relaxed))
+    ALLOCATED
+        .load(Ordering::Relaxed)
+        .saturating_sub(FREED.load(Ordering::Relaxed))
 }
 
 const EDGES: usize = 5_000;
@@ -62,18 +64,25 @@ const EDGES: usize = 5_000;
 /// amount, a count.
 fn props(i: usize) -> [(String, PropertyValue); 3] {
     [
-        ("ref".to_string(), PropertyValue::String(format!("TXN{i:012}"))),
+        (
+            "ref".to_string(),
+            PropertyValue::String(format!("TXN{i:012}")),
+        ),
         ("amount".to_string(), PropertyValue::Float(i as f64 * 1.37)),
         ("count".to_string(), PropertyValue::Integer(i as i64)),
     ]
 }
 
 /// Live bytes the property writes alone leave behind, over `EDGES` edges.
-fn property_bytes(write: impl Fn(&mut GraphStore, samyama::graph::EdgeId, String, PropertyValue)) -> (GraphStore, usize) {
+fn property_bytes(
+    write: impl Fn(&mut GraphStore, samyama::graph::EdgeId, String, PropertyValue),
+) -> (GraphStore, usize) {
     let mut store = GraphStore::new();
     let a = store.create_node("A");
     let b = store.create_node("B");
-    let edges: Vec<_> = (0..EDGES).map(|_| store.create_edge(a, b, "PAID").unwrap()).collect();
+    let edges: Vec<_> = (0..EDGES)
+        .map(|_| store.create_edge(a, b, "PAID").unwrap())
+        .collect();
     let before = live();
     for (i, &e) in edges.iter().enumerate() {
         for (k, v) in props(i) {
@@ -91,7 +100,10 @@ fn set_edge_property_costs_what_the_row_map_setter_costs() {
 
     // Both stores hold the same values.
     let e = samyama::graph::EdgeId::new(EDGES as u64 / 2);
-    assert_eq!(row_store.edge_property(e, "ref"), full_store.edge_property(e, "ref"));
+    assert_eq!(
+        row_store.edge_property(e, "ref"),
+        full_store.edge_property(e, "ref")
+    );
     assert!(full_store.edge_property(e, "amount").is_some());
 
     let row_per_edge = row as f64 / EDGES as f64;

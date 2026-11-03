@@ -15,7 +15,9 @@ fn graph() -> GraphStore {
     let mut s = GraphStore::new();
     let q = "CREATE (a:P {n: 'a', v: 1}), (b:P {n: 'b', v: 2}), (c:P {n: 'c', v: 3}), (d:P {n: 'd', v: 4}), \
              (a)-[:K {w: 1}]->(b), (b)-[:K {w: 2}]->(c), (a)-[:L]->(c), (d)-[:K {w: 3}]->(d)";
-    MutQueryExecutor::new(&mut s, "default".into()).execute(&parse_query(q).unwrap()).unwrap();
+    MutQueryExecutor::new(&mut s, "default".into())
+        .execute(&parse_query(q).unwrap())
+        .unwrap();
     s
 }
 
@@ -29,11 +31,19 @@ fn cell(v: Option<&Value>) -> String {
 
 fn rows(s: &GraphStore, q: &str) -> Vec<String> {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(s)
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let mut got: Vec<String> = out
         .records
         .iter()
-        .map(|r| out.columns.iter().map(|c| cell(r.get(c))).collect::<Vec<_>>().join("|"))
+        .map(|r| {
+            out.columns
+                .iter()
+                .map(|c| cell(r.get(c)))
+                .collect::<Vec<_>>()
+                .join("|")
+        })
         .collect();
     got.sort();
     got
@@ -45,7 +55,11 @@ fn check(q: &str, expected: &[&str]) {
 
 /// `p.n|count` for a, b, c, d.
 fn per_node(counts: [i64; 4]) -> Vec<String> {
-    ["a", "b", "c", "d"].iter().zip(counts).map(|(n, c)| format!("{n}|{c}")).collect()
+    ["a", "b", "c", "d"]
+        .iter()
+        .zip(counts)
+        .map(|(n, c)| format!("{n}|{c}"))
+        .collect()
 }
 
 fn counts(body: &str, expected: [i64; 4]) {
@@ -84,17 +98,26 @@ fn variable_length_counts_trails() {
 
 #[test]
 fn as_a_value_in_where_with_set_and_aggregates() {
-    check("MATCH (p:P) WHERE COUNT { (p)-[]->() } > 1 RETURN p.n", &["a"]);
+    check(
+        "MATCH (p:P) WHERE COUNT { (p)-[]->() } > 1 RETURN p.n",
+        &["a"],
+    );
     check(
         "MATCH (p:P) WITH p, COUNT { (p)-[:K]->() } AS k WHERE k > 0 RETURN p.n, k",
         &["a|1", "b|1", "d|1"],
     );
-    check("MATCH (p:P) RETURN sum(COUNT { (p)-[]->() }) AS total", &["4"]);
+    check(
+        "MATCH (p:P) RETURN sum(COUNT { (p)-[]->() }) AS total",
+        &["4"],
+    );
     let mut s = graph();
     MutQueryExecutor::new(&mut s, "default".into())
         .execute(&parse_query("MATCH (p:P) SET p.deg = COUNT { (p)-[]->() }").unwrap())
         .unwrap();
-    assert_eq!(rows(&s, "MATCH (p:P) RETURN p.n, p.deg"), per_node([2, 1, 0, 1]));
+    assert_eq!(
+        rows(&s, "MATCH (p:P) RETURN p.n, p.deg"),
+        per_node([2, 1, 0, 1])
+    );
 }
 
 /// `count(*)` and `count(x)` are untouched.

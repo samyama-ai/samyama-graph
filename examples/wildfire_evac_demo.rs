@@ -31,8 +31,8 @@ static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
 
 use ndarray::Array1;
 use samyama::graph::{GraphStore, Label, PropertyValue};
-use samyama::query::QueryEngine;
 use samyama::query::executor::record::Value;
+use samyama::query::QueryEngine;
 use samyama_optimization::algorithms::{
     BMWRSolver, EHRJayaSolver, JayaSolver, RaoSolver, RaoVariant, SAMPJayaSolver,
 };
@@ -83,25 +83,65 @@ fn parse_args() -> Args {
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
-            "--osm" => { a.osm = PathBuf::from(&argv[i + 1]); i += 2; }
-            "--n-centroids" => { a.n_centroids = argv[i + 1].parse().unwrap(); i += 2; }
-            "--n-exits" => { a.n_exits = argv[i + 1].parse().unwrap(); i += 2; }
-            "--seeds" => { a.seeds = argv[i + 1].parse().unwrap(); i += 2; }
-            "--congestion-weight" => { a.congestion_weight = argv[i + 1].parse().unwrap(); i += 2; }
-            "--balance-penalty" => { a.balance_penalty = argv[i + 1].parse().unwrap(); i += 2; }
-            "--disrupt-frac" => { a.disrupt_frac = argv[i + 1].parse().unwrap(); i += 2; }
-            "--speed-kmh" => { a.speed_kmh = argv[i + 1].parse().unwrap(); i += 2; }
-            "--out" => { a.out = PathBuf::from(&argv[i + 1]); i += 2; }
-            "--export-spec" => { a.export_spec = Some(PathBuf::from(&argv[i + 1])); i += 2; }
-            "--export-snapshot" => { a.export_snapshot = Some(PathBuf::from(&argv[i + 1])); i += 2; }
-            other => { eprintln!("unknown arg: {}", other); std::process::exit(2); }
+            "--osm" => {
+                a.osm = PathBuf::from(&argv[i + 1]);
+                i += 2;
+            }
+            "--n-centroids" => {
+                a.n_centroids = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--n-exits" => {
+                a.n_exits = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--seeds" => {
+                a.seeds = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--congestion-weight" => {
+                a.congestion_weight = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--balance-penalty" => {
+                a.balance_penalty = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--disrupt-frac" => {
+                a.disrupt_frac = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--speed-kmh" => {
+                a.speed_kmh = argv[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--out" => {
+                a.out = PathBuf::from(&argv[i + 1]);
+                i += 2;
+            }
+            "--export-spec" => {
+                a.export_spec = Some(PathBuf::from(&argv[i + 1]));
+                i += 2;
+            }
+            "--export-snapshot" => {
+                a.export_snapshot = Some(PathBuf::from(&argv[i + 1]));
+                i += 2;
+            }
+            other => {
+                eprintln!("unknown arg: {}", other);
+                std::process::exit(2);
+            }
         }
     }
     a
 }
 
 #[derive(Clone, Debug)]
-struct OsmNode { id: i64, lat: f64, lon: f64 }
+struct OsmNode {
+    id: i64,
+    lat: f64,
+    lon: f64,
+}
 
 fn haversine_km(a: (f64, f64), b: (f64, f64)) -> f64 {
     let r = 6371.0_f64;
@@ -114,9 +154,7 @@ fn haversine_km(a: (f64, f64), b: (f64, f64)) -> f64 {
 }
 
 /// Parse Overpass JSON, build KG, return (nodes, degree-map).
-fn parse_osm(path: &std::path::Path)
-    -> (GraphStore, Vec<OsmNode>, HashMap<i64, usize>)
-{
+fn parse_osm(path: &std::path::Path) -> (GraphStore, Vec<OsmNode>, HashMap<i64, usize>) {
     let mut file = File::open(path).unwrap_or_else(|e| {
         eprintln!("Error: cannot read an OSM JSON extract: {}", path.display());
         eprintln!("       {e}");
@@ -127,7 +165,10 @@ fn parse_osm(path: &std::path::Path)
     let mut buf = String::new();
     file.read_to_string(&mut buf).expect("read");
     let v: serde_json::Value = serde_json::from_str(&buf).expect("json parse");
-    let elements = v.get("elements").and_then(|e| e.as_array()).expect("elements");
+    let elements = v
+        .get("elements")
+        .and_then(|e| e.as_array())
+        .expect("elements");
 
     let mut nodes_raw: HashMap<i64, OsmNode> = HashMap::new();
     let mut ways: Vec<(String, Vec<i64>)> = Vec::new();
@@ -141,11 +182,20 @@ fn parse_osm(path: &std::path::Path)
                 nodes_raw.insert(id, OsmNode { id, lat, lon });
             }
             "way" => {
-                let highway = el.get("tags").and_then(|t| t.get("highway"))
-                    .and_then(|s| s.as_str()).unwrap_or("").to_string();
-                let refs: Vec<i64> = el.get("nodes").and_then(|n| n.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_i64()).collect()).unwrap_or_default();
-                if !refs.is_empty() { ways.push((highway, refs)); }
+                let highway = el
+                    .get("tags")
+                    .and_then(|t| t.get("highway"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let refs: Vec<i64> = el
+                    .get("nodes")
+                    .and_then(|n| n.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
+                    .unwrap_or_default();
+                if !refs.is_empty() {
+                    ways.push((highway, refs));
+                }
             }
             _ => {}
         }
@@ -154,7 +204,9 @@ fn parse_osm(path: &std::path::Path)
     // Compute degree from ways (number of ways each node appears in, capped).
     let mut degree: HashMap<i64, usize> = HashMap::new();
     for (_, refs) in &ways {
-        for &n in refs { *degree.entry(n).or_insert(0) += 1; }
+        for &n in refs {
+            *degree.entry(n).or_insert(0) += 1;
+        }
     }
 
     // Build KG.
@@ -168,7 +220,10 @@ fn parse_osm(path: &std::path::Path)
         m.set_property("osm_id", PropertyValue::Integer(n.id));
         m.set_property("lat", PropertyValue::Float(n.lat));
         m.set_property("lon", PropertyValue::Float(n.lon));
-        m.set_property("degree", PropertyValue::Integer(*degree.get(&n.id).unwrap_or(&0) as i64));
+        m.set_property(
+            "degree",
+            PropertyValue::Integer(*degree.get(&n.id).unwrap_or(&0) as i64),
+        );
         graph_node_id.insert(n.id, nid);
     }
     // Optional: also materialise way records (not required for the optimization).
@@ -191,12 +246,15 @@ struct EvacProblem {
 }
 
 impl Problem for EvacProblem {
-    fn dim(&self) -> usize { self.n_centroids * self.n_exits }
+    fn dim(&self) -> usize {
+        self.n_centroids * self.n_exits
+    }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (Array1::zeros(self.dim()), Array1::ones(self.dim()))
     }
     fn objective(&self, x: &Array1<f64>) -> f64 {
-        self.eval_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.eval_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut travel = 0.0;
         let mut exit_flow = vec![0.0_f64; self.n_exits];
         let mut balance = 0.0;
@@ -228,40 +286,78 @@ fn main() {
     let t0 = Instant::now();
     let (store, nodes, degree) = parse_osm(&a.osm);
     let parse_ms = t0.elapsed().as_millis();
-    eprintln!("KG built: {} :RoadNode nodes in {} ms", nodes.len(), parse_ms);
+    eprintln!(
+        "KG built: {} :RoadNode nodes in {} ms",
+        nodes.len(),
+        parse_ms
+    );
 
     // Cypher sanity.
     let engine = QueryEngine::new();
-    let b = engine.execute("MATCH (n:RoadNode) RETURN count(n) AS c", &store).expect("count");
+    let b = engine
+        .execute("MATCH (n:RoadNode) RETURN count(n) AS c", &store)
+        .expect("count");
     let n_count = match b.records.first().and_then(|r| r.get("c")) {
-        Some(Value::Property(PropertyValue::Integer(i))) => *i, _ => -1,
+        Some(Value::Property(PropertyValue::Integer(i))) => *i,
+        _ => -1,
     };
     eprintln!("Cypher sanity: count(:RoadNode) = {}", n_count);
 
     if let Some(path) = &a.export_snapshot {
         let f = File::create(path).expect("snapshot file");
         let stats = samyama::snapshot::export_tenant(&store, f).expect("export");
-        eprintln!("snapshot -> {} ({} nodes, {} edges)", path.display(),
-            stats.node_count, stats.edge_count);
+        eprintln!(
+            "snapshot -> {} ({} nodes, {} edges)",
+            path.display(),
+            stats.node_count,
+            stats.edge_count
+        );
     }
 
     // Pick centroids: top-N by degree (busy intersections).
-    let mut ranked_by_deg: Vec<(&OsmNode, usize)> = nodes.iter()
-        .map(|n| (n, *degree.get(&n.id).unwrap_or(&0))).collect();
+    let mut ranked_by_deg: Vec<(&OsmNode, usize)> = nodes
+        .iter()
+        .map(|n| (n, *degree.get(&n.id).unwrap_or(&0)))
+        .collect();
     ranked_by_deg.sort_by(|a, b| b.1.cmp(&a.1));
-    let centroids: Vec<&OsmNode> = ranked_by_deg.iter().take(a.n_centroids).map(|(n, _)| *n).collect();
+    let centroids: Vec<&OsmNode> = ranked_by_deg
+        .iter()
+        .take(a.n_centroids)
+        .map(|(n, _)| *n)
+        .collect();
 
     // Pick exits: boundary nodes (extreme lat/lon — likely highway-leaving-town nodes).
     let mut ranked_by_lat_n: Vec<&OsmNode> = nodes.iter().collect();
-    ranked_by_lat_n.sort_by(|a, b| b.lat.partial_cmp(&a.lat).unwrap_or(std::cmp::Ordering::Equal));
+    ranked_by_lat_n.sort_by(|a, b| {
+        b.lat
+            .partial_cmp(&a.lat)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut ranked_by_lat_s: Vec<&OsmNode> = nodes.iter().collect();
-    ranked_by_lat_s.sort_by(|a, b| a.lat.partial_cmp(&b.lat).unwrap_or(std::cmp::Ordering::Equal));
+    ranked_by_lat_s.sort_by(|a, b| {
+        a.lat
+            .partial_cmp(&b.lat)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut ranked_by_lon_e: Vec<&OsmNode> = nodes.iter().collect();
-    ranked_by_lon_e.sort_by(|a, b| b.lon.partial_cmp(&a.lon).unwrap_or(std::cmp::Ordering::Equal));
+    ranked_by_lon_e.sort_by(|a, b| {
+        b.lon
+            .partial_cmp(&a.lon)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut ranked_by_lon_w: Vec<&OsmNode> = nodes.iter().collect();
-    ranked_by_lon_w.sort_by(|a, b| a.lon.partial_cmp(&b.lon).unwrap_or(std::cmp::Ordering::Equal));
+    ranked_by_lon_w.sort_by(|a, b| {
+        a.lon
+            .partial_cmp(&b.lon)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut exits: Vec<&OsmNode> = Vec::new();
-    let groups = [&ranked_by_lat_n, &ranked_by_lat_s, &ranked_by_lon_e, &ranked_by_lon_w];
+    let groups = [
+        &ranked_by_lat_n,
+        &ranked_by_lat_s,
+        &ranked_by_lon_e,
+        &ranked_by_lon_w,
+    ];
     let mut cursors = [0usize; 4];
     let mut g = 0;
     while exits.len() < a.n_exits {
@@ -276,12 +372,20 @@ fn main() {
             }
         }
         g += 1;
-        if g > 1000 { break; }
+        if g > 1000 {
+            break;
+        }
     }
-    assert!(exits.len() == a.n_exits, "could not pick {} unique exits", a.n_exits);
+    assert!(
+        exits.len() == a.n_exits,
+        "could not pick {} unique exits",
+        a.n_exits
+    );
     // Population per centroid: derive from degree (more intersections → more people).
-    let pop: Vec<f64> = centroids.iter()
-        .map(|c| (*degree.get(&c.id).unwrap_or(&1) as f64) * 500.0).collect();
+    let pop: Vec<f64> = centroids
+        .iter()
+        .map(|c| (*degree.get(&c.id).unwrap_or(&1) as f64) * 500.0)
+        .collect();
     // Exit capacities: assume highway can move 2000 people/hour each (typical).
     let capacity: Vec<f64> = (0..a.n_exits).map(|_| 2000.0).collect();
 
@@ -292,10 +396,14 @@ fn main() {
         for j in 0..a.n_exits {
             let d_km = haversine_km(
                 (centroids[i].lat, centroids[i].lon),
-                (exits[j].lat, exits[j].lon));
+                (exits[j].lat, exits[j].lon),
+            );
             let base = d_km / a.speed_kmh;
             // Pseudo-random disruption: hash i,j.
-            let h = (i as u64).wrapping_mul(2654435761).wrapping_add(j as u64).wrapping_mul(40503);
+            let h = (i as u64)
+                .wrapping_mul(2654435761)
+                .wrapping_add(j as u64)
+                .wrapping_mul(40503);
             let r = (h % 1000) as f64 / 1000.0;
             let mult = if r < a.disrupt_frac { 3.0 } else { 1.0 };
             tt[i][j] = base * mult;
@@ -311,18 +419,59 @@ fn main() {
         let mut f = File::create(path).unwrap();
         writeln!(f, r#"{{"n_centroids": {}, "n_exits": {}, "congestion_weight": {}, "balance_penalty": {},"#,
             a.n_centroids, a.n_exits, a.congestion_weight, a.balance_penalty).unwrap();
-        writeln!(f, r#""centroids": [{}],"#,
-            centroids.iter().map(|c| format!(r#"{{"osm_id":{},"lat":{},"lon":{}}}"#, c.id, c.lat, c.lon))
-                .collect::<Vec<_>>().join(",")).unwrap();
-        writeln!(f, r#""exits": [{}],"#,
-            exits.iter().map(|e| format!(r#"{{"osm_id":{},"lat":{},"lon":{}}}"#, e.id, e.lat, e.lon))
-                .collect::<Vec<_>>().join(",")).unwrap();
-        writeln!(f, r#""pop": [{}],"#, pop.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",")).unwrap();
-        writeln!(f, r#""capacity": [{}],"#, capacity.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",")).unwrap();
+        writeln!(
+            f,
+            r#""centroids": [{}],"#,
+            centroids
+                .iter()
+                .map(|c| format!(r#"{{"osm_id":{},"lat":{},"lon":{}}}"#, c.id, c.lat, c.lon))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#""exits": [{}],"#,
+            exits
+                .iter()
+                .map(|e| format!(r#"{{"osm_id":{},"lat":{},"lon":{}}}"#, e.id, e.lat, e.lon))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#""pop": [{}],"#,
+            pop.iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#""capacity": [{}],"#,
+            capacity
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .unwrap();
         write!(f, r#""travel_time": [["#).unwrap();
         for (i, row) in tt.iter().enumerate() {
-            if i > 0 { write!(f, "],[").unwrap(); }
-            write!(f, "{}", row.iter().map(|v| format!("{:.6}", v)).collect::<Vec<_>>().join(",")).unwrap();
+            if i > 0 {
+                write!(f, "],[").unwrap();
+            }
+            write!(
+                f,
+                "{}",
+                row.iter()
+                    .map(|v| format!("{:.6}", v))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+            .unwrap();
         }
         writeln!(f, "]]}}").unwrap();
         eprintln!("spec -> {}", path.display());
@@ -340,32 +489,54 @@ fn main() {
     });
 
     let solvers: Vec<(&str, fn(SolverConfig, &EvacProblem) -> OptimizationResult)> = vec![
-        ("BMWR",      |c, p| BMWRSolver::new(c).solve(p)),
-        ("Jaya",      |c, p| JayaSolver::new(c).solve(p)),
+        ("BMWR", |c, p| BMWRSolver::new(c).solve(p)),
+        ("Jaya", |c, p| JayaSolver::new(c).solve(p)),
         ("SAMP-Jaya", |c, p| SAMPJayaSolver::new(c).solve(p)),
-        ("EHR-Jaya",  |c, p| EHRJayaSolver::new(c).solve(p)),
-        ("Rao-1",     |c, p| RaoSolver::new(c, RaoVariant::Rao1).solve(p)),
+        ("EHR-Jaya", |c, p| EHRJayaSolver::new(c).solve(p)),
+        ("Rao-1", |c, p| RaoSolver::new(c, RaoVariant::Rao1).solve(p)),
     ];
-    let cfg = SolverConfig { population_size: 60, max_iterations: 500 };
+    let cfg = SolverConfig {
+        population_size: 60,
+        max_iterations: 500,
+    };
 
     let csv_path = a.out.join("results.csv");
     let mut csv = File::create(&csv_path).unwrap();
     writeln!(csv, "solver,seed,best_fitness,wall_ms,evals").unwrap();
 
-    println!("\n=== Wildfire evac ({} centroids × {} exits = {} dim, disrupt_frac={}) ===",
-        a.n_centroids, a.n_exits, a.n_centroids * a.n_exits, a.disrupt_frac);
-    println!("{:<12} {:>5} {:>14} {:>10} {:>10}", "solver", "seed", "fitness", "wall_ms", "evals");
+    println!(
+        "\n=== Wildfire evac ({} centroids × {} exits = {} dim, disrupt_frac={}) ===",
+        a.n_centroids,
+        a.n_exits,
+        a.n_centroids * a.n_exits,
+        a.disrupt_frac
+    );
+    println!(
+        "{:<12} {:>5} {:>14} {:>10} {:>10}",
+        "solver", "seed", "fitness", "wall_ms", "evals"
+    );
 
     for (name, run) in &solvers {
         for seed in 0..a.seeds {
-            problem.eval_count.store(0, std::sync::atomic::Ordering::Relaxed);
+            problem
+                .eval_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             let t0 = Instant::now();
             let r = run(cfg.clone(), &problem);
             let wall = t0.elapsed().as_millis();
-            let evals = problem.eval_count.load(std::sync::atomic::Ordering::Relaxed);
-            println!("{:<12} {:>5} {:>14.2} {:>10} {:>10}",
-                name, seed, r.best_fitness, wall, evals);
-            writeln!(csv, "{},{},{:.6},{},{}", name, seed, r.best_fitness, wall, evals).unwrap();
+            let evals = problem
+                .eval_count
+                .load(std::sync::atomic::Ordering::Relaxed);
+            println!(
+                "{:<12} {:>5} {:>14.2} {:>10} {:>10}",
+                name, seed, r.best_fitness, wall, evals
+            );
+            writeln!(
+                csv,
+                "{},{},{:.6},{},{}",
+                name, seed, r.best_fitness, wall, evals
+            )
+            .unwrap();
         }
     }
     eprintln!("\nresults -> {}", csv_path.display());
@@ -373,7 +544,16 @@ fn main() {
     let manifest = format!(
         r#"{{"args": {{"osm": "{}", "n_centroids": {}, "n_exits": {}, "seeds": {}, "disrupt_frac": {}, "speed_kmh": {}}}, "osm_node_count": {}, "total_pop": {}, "total_capacity_per_hr": {}, "parse_ms": {}}}
 "#,
-        a.osm.display(), a.n_centroids, a.n_exits, a.seeds, a.disrupt_frac, a.speed_kmh,
-        nodes.len(), total_pop, total_cap, parse_ms);
+        a.osm.display(),
+        a.n_centroids,
+        a.n_exits,
+        a.seeds,
+        a.disrupt_frac,
+        a.speed_kmh,
+        nodes.len(),
+        total_pop,
+        total_cap,
+        parse_ms
+    );
     std::fs::write(a.out.join("manifest.json"), manifest).unwrap();
 }

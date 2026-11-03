@@ -24,7 +24,9 @@ use samyama::query::parser::parse_query;
 
 fn plan_of_unchecked(store: &GraphStore, cypher: &str) -> String {
     let query = parse_query(&format!("EXPLAIN {cypher}")).expect("query should parse");
-    let batch = QueryExecutor::new(store).execute(&query).expect("EXPLAIN should run");
+    let batch = QueryExecutor::new(store)
+        .execute(&query)
+        .expect("EXPLAIN should run");
     match batch.records[0].get("plan") {
         Some(Value::Property(PropertyValue::String(t))) => t.clone(),
         other => panic!("{other:?}"),
@@ -66,7 +68,11 @@ fn fixture() -> GraphStore {
 
 fn count(store: &GraphStore, cypher: &str) -> usize {
     let query = parse_query(cypher).expect("query should parse");
-    QueryExecutor::new(store).execute(&query).expect("query should run").records.len()
+    QueryExecutor::new(store)
+        .execute(&query)
+        .expect("query should run")
+        .records
+        .len()
 }
 
 #[test]
@@ -88,11 +94,17 @@ fn the_two_forms_still_differ_in_the_answer() {
     // the bug is real and much worse than a rendering problem.
     let store = fixture();
     assert_eq!(
-        count(&store, "MATCH (r:R) WHERE r.d >= 10 AND r.d < 100 AND (r.c = \"X\" OR r.c = \"Y\") RETURN r"),
+        count(
+            &store,
+            "MATCH (r:R) WHERE r.d >= 10 AND r.d < 100 AND (r.c = \"X\" OR r.c = \"Y\") RETURN r"
+        ),
         2
     );
     assert_eq!(
-        count(&store, "MATCH (r:R) WHERE r.d >= 10 AND r.d < 100 AND r.c = \"X\" OR r.c = \"Y\" RETURN r"),
+        count(
+            &store,
+            "MATCH (r:R) WHERE r.d >= 10 AND r.d < 100 AND r.c = \"X\" OR r.c = \"Y\" RETURN r"
+        ),
         3
     );
 }
@@ -102,7 +114,10 @@ fn brackets_are_not_added_where_they_are_not_needed() {
     // Bracketing everything would be correct and unreadable. A chain of ANDs at
     // one precedence level should print flat.
     let store = fixture();
-    let text = plan_of(&store, "MATCH (r:R) WHERE r.d >= 10 AND r.d < 100 AND r.c = \"X\" RETURN r");
+    let text = plan_of(
+        &store,
+        "MATCH (r:R) WHERE r.d >= 10 AND r.d < 100 AND r.c = \"X\" RETURN r",
+    );
     assert!(!text.contains("(("), "over-bracketed:\n{text}");
     assert!(
         text.contains("r.d >= Integer(10) AND r.d < Integer(100) AND r.c = String(\"X\")"),
@@ -122,7 +137,10 @@ fn right_association_is_preserved() {
     // `a - (b - c)` must keep its brackets; `(a - b) - c` does not need them.
     let store = fixture();
     let nested_right = plan_of(&store, "MATCH (r:R) WHERE r.d - (r.d - 1) > 0 RETURN r");
-    assert!(nested_right.contains("r.d - (r.d - Integer(1))"), "{nested_right}");
+    assert!(
+        nested_right.contains("r.d - (r.d - Integer(1))"),
+        "{nested_right}"
+    );
 
     let nested_left = plan_of(&store, "MATCH (r:R) WHERE (r.d - 1) - 1 > 0 RETURN r");
     assert!(
@@ -134,7 +152,10 @@ fn right_association_is_preserved() {
 #[test]
 fn not_brackets_a_binary_operand() {
     let store = fixture();
-    let text = plan_of(&store, "MATCH (r:R) WHERE NOT (r.d > 10 AND r.c = \"X\") RETURN r");
+    let text = plan_of(
+        &store,
+        "MATCH (r:R) WHERE NOT (r.d > 10 AND r.c = \"X\") RETURN r",
+    );
     assert!(
         text.contains("NOT (r.d > Integer(10) AND r.c = String(\"X\"))"),
         "NOT over a binary operand must bracket it:\n{text}"
@@ -188,7 +209,11 @@ fn a_rendered_predicate_reparses_to_the_same_predicate() {
             Ok(q) => q,
             Err(e) => panic!("rendered predicate does not reparse: {rendered}\n  {e:?}"),
         };
-        let got = QueryExecutor::new(&store).execute(&reparsed).expect("should run").records.len();
+        let got = QueryExecutor::new(&store)
+            .execute(&reparsed)
+            .expect("should run")
+            .records
+            .len();
         let want = count(&store, &original);
         assert_eq!(
             got, want,

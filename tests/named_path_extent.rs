@@ -36,7 +36,11 @@ fn path_extent(store: &GraphStore, cypher: &str) -> (usize, usize) {
     let out = QueryExecutor::new(store)
         .execute(&q)
         .unwrap_or_else(|e| panic!("`{cypher}` should run: {e}"));
-    assert_eq!(out.records.len(), 1, "`{cypher}` should match exactly one path");
+    assert_eq!(
+        out.records.len(),
+        1,
+        "`{cypher}` should match exactly one path"
+    );
     match out.records[0].get("p") {
         Some(Value::Path { nodes, edges }) => (nodes.len(), edges.len()),
         other => panic!("`{cypher}` should bind a path, got {other:?}"),
@@ -47,7 +51,10 @@ fn path_extent(store: &GraphStore, cypher: &str) -> (usize, usize) {
 fn a_two_hop_named_path_holds_both_hops() {
     let store = chain();
     assert_eq!(
-        path_extent(&store, "MATCH p = (a:A)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN p"),
+        path_extent(
+            &store,
+            "MATCH p = (a:A)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN p"
+        ),
         (3, 2)
     );
 }
@@ -59,7 +66,10 @@ fn the_fixed_and_variable_length_spellings_agree_on_the_path() {
     // missing, and it is the cheapest way to notice if one of them drifts.
     let store = chain();
     assert_eq!(
-        path_extent(&store, "MATCH p = (a:A)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN p"),
+        path_extent(
+            &store,
+            "MATCH p = (a:A)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN p"
+        ),
         path_extent(&store, "MATCH p = (a:A)-[:KNOWS*2]->(c) RETURN p")
     );
 }
@@ -69,7 +79,9 @@ fn length_of_a_named_path_counts_every_relationship() {
     let store = chain();
     let q = parse_query("MATCH p = (a:A)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN length(p) AS n")
         .expect("query should parse");
-    let out = QueryExecutor::new(&store).execute(&q).expect("query should run");
+    let out = QueryExecutor::new(&store)
+        .execute(&q)
+        .expect("query should run");
     assert_eq!(
         out.records[0].get("n"),
         Some(&Value::Property(PropertyValue::Integer(2))),
@@ -80,7 +92,10 @@ fn length_of_a_named_path_counts_every_relationship() {
 #[test]
 fn a_single_hop_named_path_is_unchanged() {
     let store = chain();
-    assert_eq!(path_extent(&store, "MATCH p = (a:A)-[:KNOWS]->(b) RETURN p"), (2, 1));
+    assert_eq!(
+        path_extent(&store, "MATCH p = (a:A)-[:KNOWS]->(b) RETURN p"),
+        (2, 1)
+    );
 }
 
 #[test]
@@ -97,7 +112,9 @@ fn a_path_is_not_continued_across_a_disconnected_pattern() {
 
     let q = parse_query("MATCH (a:A)-[:KNOWS]->(b:B), p = (x:X)-[:KNOWS]->(y:Y) RETURN p")
         .expect("query should parse");
-    let out = QueryExecutor::new(&store).execute(&q).expect("query should run");
+    let out = QueryExecutor::new(&store)
+        .execute(&q)
+        .expect("query should run");
     assert_eq!(out.records.len(), 1);
     match out.records[0].get("p") {
         Some(Value::Path { nodes, edges }) => {

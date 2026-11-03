@@ -78,14 +78,19 @@ impl Proxy {
     /// reply. Peers in a cluster are assumed to run with the same setting.
     pub fn new() -> Self {
         let query_secs = std::env::var("SAMYAMA_QUERY_TIMEOUT")
-            .ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120);
         Self::with_timeouts(DEFAULT_CONNECT_TIMEOUT, reply_timeout_for(query_secs))
     }
 
     /// A proxy with explicit limits. `reply_timeout` covers writing the
     /// command and reading the whole reply; `None` waits as long as it takes.
     pub fn with_timeouts(connect_timeout: Duration, reply_timeout: Option<Duration>) -> Self {
-        Self { connect_timeout, reply_timeout }
+        Self {
+            connect_timeout,
+            reply_timeout,
+        }
     }
 
     pub fn connect_timeout(&self) -> Duration {
@@ -110,25 +115,39 @@ impl Proxy {
     pub async fn forward(&self, target_addr: &str, command: &[u8]) -> Result<Vec<u8>, String> {
         debug!("Forwarding request to {}", target_addr);
 
-        let mut stream = tokio::time::timeout(self.connect_timeout, TcpStream::connect(target_addr))
-            .await
-            .map_err(|_| format!("Failed to connect to {}: no connection after {:?}",
-                                 target_addr, self.connect_timeout))?
-            .map_err(|e| format!("Failed to connect to {}: {}", target_addr, e))?;
+        let mut stream =
+            tokio::time::timeout(self.connect_timeout, TcpStream::connect(target_addr))
+                .await
+                .map_err(|_| {
+                    format!(
+                        "Failed to connect to {}: no connection after {:?}",
+                        target_addr, self.connect_timeout
+                    )
+                })?
+                .map_err(|e| format!("Failed to connect to {}: {}", target_addr, e))?;
 
         let exchange = Self::exchange(&mut stream, target_addr, command);
         match self.reply_timeout {
-            Some(limit) => tokio::time::timeout(limit, exchange).await
-                .map_err(|_| format!("Failed to read from {}: no complete reply after {:?}",
-                                     target_addr, limit))?,
+            Some(limit) => tokio::time::timeout(limit, exchange).await.map_err(|_| {
+                format!(
+                    "Failed to read from {}: no complete reply after {:?}",
+                    target_addr, limit
+                )
+            })?,
             None => exchange.await,
         }
     }
 
     /// Write the command and read back exactly one RESP frame.
-    async fn exchange(stream: &mut TcpStream, target_addr: &str, command: &[u8]) -> Result<Vec<u8>, String> {
+    async fn exchange(
+        stream: &mut TcpStream,
+        target_addr: &str,
+        command: &[u8],
+    ) -> Result<Vec<u8>, String> {
         // Write command
-        stream.write_all(command).await
+        stream
+            .write_all(command)
+            .await
             .map_err(|e| format!("Failed to write to {}: {}", target_addr, e))?;
 
         // Read until the reply is a **complete RESP frame**, not until the first
@@ -156,7 +175,9 @@ impl Proxy {
                 // to return.
                 return Ok(reply[..len].to_vec());
             }
-            let n = stream.read(&mut chunk).await
+            let n = stream
+                .read(&mut chunk)
+                .await
                 .map_err(|e| format!("Failed to read from {}: {}", target_addr, e))?;
             if n == 0 {
                 if reply.is_empty() {
@@ -166,7 +187,10 @@ impl Proxy {
                 }
                 return Err(format!(
                     "Failed to read from {}: peer closed after {} byte(s) with an \
-                     incomplete RESP frame", target_addr, reply.len()));
+                     incomplete RESP frame",
+                    target_addr,
+                    reply.len()
+                ));
             }
             reply.extend_from_slice(&chunk[..n]);
         }
@@ -234,8 +258,13 @@ mod tests {
         });
         let reply = Proxy::new().forward(&addr, b"GET big\r\n").await.unwrap();
         server.await.unwrap();
-        assert_eq!(reply.len(), frame.len(),
-                   "truncated: got {} of {} bytes", reply.len(), frame.len());
+        assert_eq!(
+            reply.len(),
+            frame.len(),
+            "truncated: got {} of {} bytes",
+            reply.len(),
+            frame.len()
+        );
         assert_eq!(reply, frame.as_bytes());
     }
 
@@ -303,11 +332,17 @@ mod tests {
     /// Far above both: reaching it means the proxy never gave up.
     const OUTER: Duration = Duration::from_secs(10);
 
-    async fn forward_bounded(proxy: &Proxy, addr: &str, cmd: &[u8]) -> (Result<Vec<u8>, String>, Duration) {
+    async fn forward_bounded(
+        proxy: &Proxy,
+        addr: &str,
+        cmd: &[u8],
+    ) -> (Result<Vec<u8>, String>, Duration) {
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(OUTER, proxy.forward(addr, cmd))
             .await
-            .unwrap_or_else(|_| panic!("forward to {addr} was still waiting after {OUTER:?}: no deadline"));
+            .unwrap_or_else(|_| {
+                panic!("forward to {addr} was still waiting after {OUTER:?}: no deadline")
+            });
         (result, started.elapsed())
     }
 
@@ -330,7 +365,10 @@ mod tests {
         server.await.unwrap();
         let err = result.unwrap_err();
         assert!(err.contains("no complete reply after"), "{err}");
-        assert!(took >= REPLY, "gave up after {took:?}, before the {REPLY:?} limit");
+        assert!(
+            took >= REPLY,
+            "gave up after {took:?}, before the {REPLY:?} limit"
+        );
     }
 
     /// The same, but the peer stops half-way through a frame. The read loop
@@ -372,16 +410,29 @@ mod tests {
             match tokio::time::timeout(Duration::from_millis(200), TcpStream::connect(addr)).await {
                 Ok(Ok(s)) => held.push(s),
                 Ok(Err(e)) => panic!("could not fill the backlog: {e}"),
-                Err(_) => { full = true; break; }
+                Err(_) => {
+                    full = true;
+                    break;
+                }
             }
         }
-        assert!(full, "the backlog never filled after {} connections; this test cannot run here", held.len());
+        assert!(
+            full,
+            "the backlog never filled after {} connections; this test cannot run here",
+            held.len()
+        );
 
         let proxy = Proxy::with_timeouts(CONNECT, Some(REPLY));
         let (result, took) = forward_bounded(&proxy, &addr.to_string(), b"PING\r\n").await;
         let err = result.unwrap_err();
-        assert!(err.contains("Failed to connect") && err.contains("no connection after"), "{err}");
-        assert!(took >= CONNECT, "gave up after {took:?}, before the {CONNECT:?} limit");
+        assert!(
+            err.contains("Failed to connect") && err.contains("no connection after"),
+            "{err}"
+        );
+        assert!(
+            took >= CONNECT,
+            "gave up after {took:?}, before the {CONNECT:?} limit"
+        );
         drop(listener);
     }
 

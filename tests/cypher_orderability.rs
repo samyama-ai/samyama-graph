@@ -45,18 +45,25 @@ fn lists_sort_element_wise_with_a_shorter_prefix_first() {
         "UNWIND [[], ['a'], ['a', 1], [1], [1, 'a']] AS l WITH l ORDER BY l LIMIT 4 RETURN l AS x",
     );
     assert_eq!(got.len(), 4, "expected four rows, got {got:?}");
-    assert!(got[0].contains("[]"), "empty list sorts first, got {:?}", got[0]);
+    assert!(
+        got[0].contains("[]"),
+        "empty list sorts first, got {:?}",
+        got[0]
+    );
     assert!(
         got[1].contains("String(\"a\")") && !got[1].contains("Integer"),
-        "['a'] second, got {:?}", got[1]
+        "['a'] second, got {:?}",
+        got[1]
     );
     assert!(
         got[2].contains("String(\"a\")") && got[2].contains("Integer"),
-        "['a', 1] third — a shared prefix orders by length, got {:?}", got[2]
+        "['a', 1] third — a shared prefix orders by length, got {:?}",
+        got[2]
     );
     assert!(
         got[3].contains("Integer(1)") && !got[3].contains("String"),
-        "[1] fourth — a string element sorts before a numeric one, got {:?}", got[3]
+        "[1] fourth — a string element sorts before a numeric one, got {:?}",
+        got[3]
     );
 }
 
@@ -65,7 +72,10 @@ fn a_string_sorts_before_a_number() {
     // The single comparison the list ordering above depends on, isolated.
     // PropertyValue's index order puts these the other way round.
     let store = GraphStore::new();
-    let got = column(&store, "UNWIND [1, 'a'] AS v WITH v ORDER BY v RETURN v AS x");
+    let got = column(
+        &store,
+        "UNWIND [1, 'a'] AS v WITH v ORDER BY v RETURN v AS x",
+    );
     assert!(got[0].contains("String"), "string first, got {got:?}");
     assert!(got[1].contains("Integer"), "number second, got {got:?}");
 }
@@ -81,10 +91,22 @@ fn the_cross_type_order_is_map_list_string_boolean_number_null() {
     );
     assert_eq!(got.len(), 6, "got {got:?}");
     assert!(got[0].contains("Map"), "map first, got {:?}", got[0]);
-    assert!(got[1].contains("Array") || got[1].contains("["), "list second, got {:?}", got[1]);
+    assert!(
+        got[1].contains("Array") || got[1].contains("["),
+        "list second, got {:?}",
+        got[1]
+    );
     assert!(got[2].contains("String"), "string third, got {:?}", got[2]);
-    assert!(got[3].contains("Boolean"), "boolean fourth, got {:?}", got[3]);
-    assert!(got[4].contains("Float") || got[4].contains("Integer"), "number fifth, got {:?}", got[4]);
+    assert!(
+        got[3].contains("Boolean"),
+        "boolean fourth, got {:?}",
+        got[3]
+    );
+    assert!(
+        got[4].contains("Float") || got[4].contains("Integer"),
+        "number fifth, got {:?}",
+        got[4]
+    );
     assert!(got[5].contains("Null"), "null last, got {:?}", got[5]);
 }
 
@@ -95,7 +117,11 @@ fn descending_reverses_the_whole_order() {
         &store,
         "UNWIND [1.5, 'text', false, null, {a: 'map'}] AS v WITH v ORDER BY v DESC RETURN v AS x",
     );
-    assert!(got[0].contains("Null"), "null first on DESC, got {:?}", got[0]);
+    assert!(
+        got[0].contains("Null"),
+        "null first on DESC, got {:?}",
+        got[0]
+    );
     assert!(got[4].contains("Map"), "map last on DESC, got {:?}", got[4]);
 }
 
@@ -104,7 +130,10 @@ fn numbers_still_compare_numerically_across_integer_and_float() {
     // The property the index order exists for must survive: 999999 > 6.9 even
     // though they are different variants.
     let store = GraphStore::new();
-    let got = column(&store, "UNWIND [999999, 6.9, 2] AS v WITH v ORDER BY v RETURN v AS x");
+    let got = column(
+        &store,
+        "UNWIND [999999, 6.9, 2] AS v WITH v ORDER BY v RETURN v AS x",
+    );
     assert!(got[0].contains("Integer(2)"), "got {got:?}");
     assert!(got[1].contains("6.9"), "got {got:?}");
     assert!(got[2].contains("999999"), "got {got:?}");
@@ -114,9 +143,19 @@ fn numbers_still_compare_numerically_across_integer_and_float() {
 fn ordinary_same_type_sorts_are_unchanged() {
     let store = GraphStore::new();
     assert_eq!(
-        column(&store, "UNWIND ['b', 'a', 'c'] AS v WITH v ORDER BY v RETURN v AS x").len(),
+        column(
+            &store,
+            "UNWIND ['b', 'a', 'c'] AS v WITH v ORDER BY v RETURN v AS x"
+        )
+        .len(),
         3
     );
-    let nums = column(&store, "UNWIND [3, 1, 2] AS v WITH v ORDER BY v RETURN v AS x");
-    assert!(nums[0].contains("Integer(1)") && nums[2].contains("Integer(3)"), "got {nums:?}");
+    let nums = column(
+        &store,
+        "UNWIND [3, 1, 2] AS v WITH v ORDER BY v RETURN v AS x",
+    );
+    assert!(
+        nums[0].contains("Integer(1)") && nums[2].contains("Integer(3)"),
+        "got {nums:?}"
+    );
 }

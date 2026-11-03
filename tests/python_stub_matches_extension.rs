@@ -138,7 +138,10 @@ fn same_default(rust: &str, py: &str) -> bool {
             "None" => "none".into(),
             "true" | "True" => "true".into(),
             "false" | "False" => "false".into(),
-            other => other.trim_start_matches('"').trim_end_matches('"').to_lowercase(),
+            other => other
+                .trim_start_matches('"')
+                .trim_end_matches('"')
+                .to_lowercase(),
         }
     };
     let (a, b) = (norm(rust), norm(py));
@@ -191,10 +194,14 @@ fn the_defaults_agree() {
     let stub = stub_methods();
     let mut wrong = Vec::new();
     for (name, rdefs) in &rust {
-        let Some(sdefs) = stub.get(name) else { continue };
+        let Some(sdefs) = stub.get(name) else {
+            continue;
+        };
         for (arg, rv) in rdefs {
             match sdefs.get(arg) {
-                None => wrong.push(format!("{name}({arg}): Rust defaults to {rv}, stub has no default")),
+                None => wrong.push(format!(
+                    "{name}({arg}): Rust defaults to {rv}, stub has no default"
+                )),
                 Some(sv) if !same_default(rv, sv) => {
                     wrong.push(format!("{name}({arg}): Rust {rv} vs stub {sv}"))
                 }
@@ -202,7 +209,11 @@ fn the_defaults_agree() {
             }
         }
     }
-    assert!(wrong.is_empty(), "defaults disagree:\n  {}", wrong.join("\n  "));
+    assert!(
+        wrong.is_empty(),
+        "defaults disagree:\n  {}",
+        wrong.join("\n  ")
+    );
 }
 
 #[test]

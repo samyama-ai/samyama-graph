@@ -88,7 +88,9 @@ fn comparisons_and_label_tests_on_entities_stay_legal() {
 fn a_boolean_variable_is_still_a_predicate() {
     // The rule keys on the variable binding an *entity*, not on it being a
     // variable, so an ordinary boolean still filters.
-    assert!(accepted("UNWIND [true, false] AS flag WITH flag WHERE flag RETURN flag"));
+    assert!(accepted(
+        "UNWIND [true, false] AS flag WITH flag WHERE flag RETURN flag"
+    ));
 }
 
 #[test]

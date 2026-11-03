@@ -68,10 +68,7 @@ pub fn griewank(x: &Array1<f64>) -> f64 {
 
 pub fn schwefel(x: &Array1<f64>) -> f64 {
     let n = x.len() as f64;
-    418.9828872724337 * n
-        - x.iter()
-            .map(|&v| v * v.abs().sqrt().sin())
-            .sum::<f64>()
+    418.9828872724337 * n - x.iter().map(|&v| v * v.abs().sqrt().sin()).sum::<f64>()
 }
 
 pub fn levy(x: &Array1<f64>) -> f64 {
@@ -87,7 +84,11 @@ pub fn levy(x: &Array1<f64>) -> f64 {
 
 pub fn zakharov(x: &Array1<f64>) -> f64 {
     let s1: f64 = x.iter().map(|&v| v * v).sum();
-    let s2: f64 = x.iter().enumerate().map(|(i, &v)| 0.5 * (i + 1) as f64 * v).sum();
+    let s2: f64 = x
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| 0.5 * (i + 1) as f64 * v)
+        .sum();
     s1 + s2.powi(2) + s2.powi(4)
 }
 
@@ -101,7 +102,10 @@ pub fn dixon_price(x: &Array1<f64>) -> f64 {
 
 /// Styblinski-Tang. Global minimum at x_i = -2.903534, value = -39.16599 * n.
 pub fn styblinski_tang(x: &Array1<f64>) -> f64 {
-    0.5 * x.iter().map(|&v| v.powi(4) - 16.0 * v * v + 5.0 * v).sum::<f64>()
+    0.5 * x
+        .iter()
+        .map(|&v| v.powi(4) - 16.0 * v * v + 5.0 * v)
+        .sum::<f64>()
 }
 
 /// The suite the survey ranks solvers over: 28 scalable functions with
@@ -116,35 +120,230 @@ pub fn so_suite(dim: usize) -> Vec<SOProblemSpec> {
     let st_min = -39.16599 * dim as f64;
     let n2 = (dim * dim) as f64;
     vec![
-        SOProblemSpec { name: "sphere",          dim, lower: -100.0, upper: 100.0,  global_minimum: 0.0,   func: sphere },
-        SOProblemSpec { name: "rastrigin",       dim, lower: -5.12,  upper: 5.12,   global_minimum: 0.0,   func: rastrigin },
-        SOProblemSpec { name: "ackley",          dim, lower: -32.768,upper: 32.768, global_minimum: 0.0,   func: ackley },
-        SOProblemSpec { name: "rosenbrock",      dim, lower: -5.0,   upper: 10.0,   global_minimum: 0.0,   func: rosenbrock },
-        SOProblemSpec { name: "griewank",        dim, lower: -600.0, upper: 600.0,  global_minimum: 0.0,   func: griewank },
-        SOProblemSpec { name: "schwefel",        dim, lower: -500.0, upper: 500.0,  global_minimum: 0.0,   func: schwefel },
-        SOProblemSpec { name: "levy",            dim, lower: -10.0,  upper: 10.0,   global_minimum: 0.0,   func: levy },
-        SOProblemSpec { name: "zakharov",        dim, lower: -5.0,   upper: 10.0,   global_minimum: 0.0,   func: zakharov },
-        SOProblemSpec { name: "dixon_price",     dim, lower: -10.0,  upper: 10.0,   global_minimum: 0.0,   func: dixon_price },
-        SOProblemSpec { name: "styblinski_tang", dim, lower: -5.0,   upper: 5.0,    global_minimum: st_min,func: styblinski_tang },
-
-        SOProblemSpec { name: "schwefel_1_2",    dim, lower: -100.0, upper: 100.0,  global_minimum: 0.0,   func: schwefel_1_2 },
-        SOProblemSpec { name: "schwefel_2_21",   dim, lower: -100.0, upper: 100.0,  global_minimum: 0.0,   func: schwefel_2_21 },
-        SOProblemSpec { name: "schwefel_2_22",   dim, lower: -10.0,  upper: 10.0,   global_minimum: 0.0,   func: schwefel_2_22 },
-        SOProblemSpec { name: "step",            dim, lower: -100.0, upper: 100.0,  global_minimum: 0.0,   func: step },
-        SOProblemSpec { name: "sum_squares",     dim, lower: -10.0,  upper: 10.0,   global_minimum: 0.0,   func: sum_squares },
-        SOProblemSpec { name: "sum_of_different_powers", dim, lower: -1.0, upper: 1.0, global_minimum: 0.0, func: sum_of_different_powers },
-        SOProblemSpec { name: "trid",            dim, lower: -n2,    upper: n2,     global_minimum: trid_minimum(dim), func: trid },
-        SOProblemSpec { name: "alpine1",         dim, lower: -10.0,  upper: 10.0,   global_minimum: 0.0,   func: alpine1 },
-        SOProblemSpec { name: "happy_cat",       dim, lower: -2.0,   upper: 2.0,    global_minimum: 0.0,   func: happy_cat },
-        SOProblemSpec { name: "hgbat",           dim, lower: -2.0,   upper: 2.0,    global_minimum: 0.0,   func: hgbat },
-        SOProblemSpec { name: "bent_cigar",      dim, lower: -100.0, upper: 100.0,  global_minimum: 0.0,   func: bent_cigar },
-        SOProblemSpec { name: "discus",          dim, lower: -100.0, upper: 100.0,  global_minimum: 0.0,   func: discus },
-        SOProblemSpec { name: "high_conditioned_elliptic", dim, lower: -100.0, upper: 100.0, global_minimum: 0.0, func: high_conditioned_elliptic },
-        SOProblemSpec { name: "salomon",         dim, lower: -100.0, upper: 100.0,  global_minimum: 0.0,   func: salomon },
-        SOProblemSpec { name: "qing",            dim, lower: -500.0, upper: 500.0,  global_minimum: 0.0,   func: qing },
-        SOProblemSpec { name: "chung_reynolds",  dim, lower: -100.0, upper: 100.0,  global_minimum: 0.0,   func: chung_reynolds },
-        SOProblemSpec { name: "exponential",     dim, lower: -1.0,   upper: 1.0,    global_minimum: -1.0,  func: exponential },
-        SOProblemSpec { name: "periodic",        dim, lower: -10.0,  upper: 10.0,   global_minimum: 0.9,   func: periodic },
+        SOProblemSpec {
+            name: "sphere",
+            dim,
+            lower: -100.0,
+            upper: 100.0,
+            global_minimum: 0.0,
+            func: sphere,
+        },
+        SOProblemSpec {
+            name: "rastrigin",
+            dim,
+            lower: -5.12,
+            upper: 5.12,
+            global_minimum: 0.0,
+            func: rastrigin,
+        },
+        SOProblemSpec {
+            name: "ackley",
+            dim,
+            lower: -32.768,
+            upper: 32.768,
+            global_minimum: 0.0,
+            func: ackley,
+        },
+        SOProblemSpec {
+            name: "rosenbrock",
+            dim,
+            lower: -5.0,
+            upper: 10.0,
+            global_minimum: 0.0,
+            func: rosenbrock,
+        },
+        SOProblemSpec {
+            name: "griewank",
+            dim,
+            lower: -600.0,
+            upper: 600.0,
+            global_minimum: 0.0,
+            func: griewank,
+        },
+        SOProblemSpec {
+            name: "schwefel",
+            dim,
+            lower: -500.0,
+            upper: 500.0,
+            global_minimum: 0.0,
+            func: schwefel,
+        },
+        SOProblemSpec {
+            name: "levy",
+            dim,
+            lower: -10.0,
+            upper: 10.0,
+            global_minimum: 0.0,
+            func: levy,
+        },
+        SOProblemSpec {
+            name: "zakharov",
+            dim,
+            lower: -5.0,
+            upper: 10.0,
+            global_minimum: 0.0,
+            func: zakharov,
+        },
+        SOProblemSpec {
+            name: "dixon_price",
+            dim,
+            lower: -10.0,
+            upper: 10.0,
+            global_minimum: 0.0,
+            func: dixon_price,
+        },
+        SOProblemSpec {
+            name: "styblinski_tang",
+            dim,
+            lower: -5.0,
+            upper: 5.0,
+            global_minimum: st_min,
+            func: styblinski_tang,
+        },
+        SOProblemSpec {
+            name: "schwefel_1_2",
+            dim,
+            lower: -100.0,
+            upper: 100.0,
+            global_minimum: 0.0,
+            func: schwefel_1_2,
+        },
+        SOProblemSpec {
+            name: "schwefel_2_21",
+            dim,
+            lower: -100.0,
+            upper: 100.0,
+            global_minimum: 0.0,
+            func: schwefel_2_21,
+        },
+        SOProblemSpec {
+            name: "schwefel_2_22",
+            dim,
+            lower: -10.0,
+            upper: 10.0,
+            global_minimum: 0.0,
+            func: schwefel_2_22,
+        },
+        SOProblemSpec {
+            name: "step",
+            dim,
+            lower: -100.0,
+            upper: 100.0,
+            global_minimum: 0.0,
+            func: step,
+        },
+        SOProblemSpec {
+            name: "sum_squares",
+            dim,
+            lower: -10.0,
+            upper: 10.0,
+            global_minimum: 0.0,
+            func: sum_squares,
+        },
+        SOProblemSpec {
+            name: "sum_of_different_powers",
+            dim,
+            lower: -1.0,
+            upper: 1.0,
+            global_minimum: 0.0,
+            func: sum_of_different_powers,
+        },
+        SOProblemSpec {
+            name: "trid",
+            dim,
+            lower: -n2,
+            upper: n2,
+            global_minimum: trid_minimum(dim),
+            func: trid,
+        },
+        SOProblemSpec {
+            name: "alpine1",
+            dim,
+            lower: -10.0,
+            upper: 10.0,
+            global_minimum: 0.0,
+            func: alpine1,
+        },
+        SOProblemSpec {
+            name: "happy_cat",
+            dim,
+            lower: -2.0,
+            upper: 2.0,
+            global_minimum: 0.0,
+            func: happy_cat,
+        },
+        SOProblemSpec {
+            name: "hgbat",
+            dim,
+            lower: -2.0,
+            upper: 2.0,
+            global_minimum: 0.0,
+            func: hgbat,
+        },
+        SOProblemSpec {
+            name: "bent_cigar",
+            dim,
+            lower: -100.0,
+            upper: 100.0,
+            global_minimum: 0.0,
+            func: bent_cigar,
+        },
+        SOProblemSpec {
+            name: "discus",
+            dim,
+            lower: -100.0,
+            upper: 100.0,
+            global_minimum: 0.0,
+            func: discus,
+        },
+        SOProblemSpec {
+            name: "high_conditioned_elliptic",
+            dim,
+            lower: -100.0,
+            upper: 100.0,
+            global_minimum: 0.0,
+            func: high_conditioned_elliptic,
+        },
+        SOProblemSpec {
+            name: "salomon",
+            dim,
+            lower: -100.0,
+            upper: 100.0,
+            global_minimum: 0.0,
+            func: salomon,
+        },
+        SOProblemSpec {
+            name: "qing",
+            dim,
+            lower: -500.0,
+            upper: 500.0,
+            global_minimum: 0.0,
+            func: qing,
+        },
+        SOProblemSpec {
+            name: "chung_reynolds",
+            dim,
+            lower: -100.0,
+            upper: 100.0,
+            global_minimum: 0.0,
+            func: chung_reynolds,
+        },
+        SOProblemSpec {
+            name: "exponential",
+            dim,
+            lower: -1.0,
+            upper: 1.0,
+            global_minimum: -1.0,
+            func: exponential,
+        },
+        SOProblemSpec {
+            name: "periodic",
+            dim,
+            lower: -10.0,
+            upper: 10.0,
+            global_minimum: 0.9,
+            func: periodic,
+        },
     ]
 }
 
@@ -203,7 +402,10 @@ pub fn step(x: &Array1<f64>) -> f64 {
 
 /// Weighted sphere: coordinate `i` costs `i` times as much.
 pub fn sum_squares(x: &Array1<f64>) -> f64 {
-    x.iter().enumerate().map(|(i, &v)| (i + 1) as f64 * v * v).sum()
+    x.iter()
+        .enumerate()
+        .map(|(i, &v)| (i + 1) as f64 * v * v)
+        .sum()
 }
 
 /// Sum of different powers. Ill-conditioned near the optimum.

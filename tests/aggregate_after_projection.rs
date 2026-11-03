@@ -23,7 +23,10 @@ fn rows(store: &GraphStore, cypher: &str) -> Vec<Value> {
     let out = QueryExecutor::new(store)
         .execute(&q)
         .unwrap_or_else(|e| panic!("`{cypher}` should run, not error: {e}"));
-    out.records.iter().map(|r| r.get("c").cloned().unwrap_or(Value::Null)).collect()
+    out.records
+        .iter()
+        .map(|r| r.get("c").cloned().unwrap_or(Value::Null))
+        .collect()
 }
 
 fn total(store: &GraphStore, cypher: &str) -> i64 {
@@ -41,7 +44,10 @@ fn count_star_after_a_with_projection() {
     let store = GraphStore::new();
     // The String8 shape: UNWIND, project to a computed name, then aggregate.
     assert_eq!(
-        total(&store, "UNWIND [1, 2, 3] AS n WITH n * 2 AS v RETURN v, count(*) AS c"),
+        total(
+            &store,
+            "UNWIND [1, 2, 3] AS n WITH n * 2 AS v RETURN v, count(*) AS c"
+        ),
         3
     );
 }

@@ -68,16 +68,22 @@ where
     let header = lines.next().ok_or("Empty file")??;
     let headers: Vec<&str> = header.split('|').collect();
 
-    let id_col = headers.iter().position(|h| *h == "id")
+    let id_col = headers
+        .iter()
+        .position(|h| *h == "id")
         .ok_or_else(|| format!("No 'id' column in {}", path.display()))?;
 
     let mut count = 0usize;
     for line_result in lines {
         let line = line_result?;
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         let fields: Vec<&str> = line.split('|').collect();
-        if fields.len() <= id_col { continue; }
+        if fields.len() <= id_col {
+            continue;
+        }
 
         let csv_id: i64 = fields[id_col].parse()?;
 
@@ -97,7 +103,11 @@ where
         count += 1;
 
         if count % 500_000 == 0 && io::stderr().is_terminal() {
-            eprint!("\r  {:16} {:>12} nodes...          ", label, format_num(count));
+            eprint!(
+                "\r  {:16} {:>12} nodes...          ",
+                label,
+                format_num(count)
+            );
         }
     }
 
@@ -133,27 +143,43 @@ where
     let mut skipped = 0usize;
     for line_result in lines {
         let line = line_result?;
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
 
         let fields: Vec<&str> = line.split('|').collect();
-        if fields.len() < 2 { continue; }
+        if fields.len() < 2 {
+            continue;
+        }
 
         let src_id: i64 = match fields[0].parse() {
             Ok(v) => v,
-            Err(_) => { skipped += 1; continue; }
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
         let tgt_id: i64 = match fields[1].parse() {
             Ok(v) => v,
-            Err(_) => { skipped += 1; continue; }
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
         };
 
         let src_node = match src_map.get(&src_id) {
             Some(&n) => n,
-            None => { skipped += 1; continue; }
+            None => {
+                skipped += 1;
+                continue;
+            }
         };
         let tgt_node = match tgt_map.get(&tgt_id) {
             Some(&n) => n,
-            None => { skipped += 1; continue; }
+            None => {
+                skipped += 1;
+                continue;
+            }
         };
 
         match graph.create_edge(src_node, tgt_node, edge_type) {
@@ -163,11 +189,17 @@ where
                 graph.set_edge_properties_sparse(edge_id, parse_props(&headers, &fields));
                 count += 1;
             }
-            Err(_) => { skipped += 1; }
+            Err(_) => {
+                skipped += 1;
+            }
         }
 
         if count % 500_000 == 0 && count > 0 && io::stderr().is_terminal() {
-            eprint!("\r  {:42} {:>12} edges...          ", edge_type, format_num(count));
+            eprint!(
+                "\r  {:42} {:>12} edges...          ",
+                edge_type,
+                format_num(count)
+            );
         }
     }
 
@@ -183,26 +215,34 @@ where
 // ============================================================================
 
 pub fn field_str(headers: &[&str], fields: &[&str], name: &str) -> Option<String> {
-    headers.iter().position(|h| *h == name)
+    headers
+        .iter()
+        .position(|h| *h == name)
         .and_then(|i| fields.get(i))
         .filter(|v| !v.is_empty())
         .map(|v| v.to_string())
 }
 
 pub fn field_i64(headers: &[&str], fields: &[&str], name: &str) -> Option<i64> {
-    headers.iter().position(|h| *h == name)
+    headers
+        .iter()
+        .position(|h| *h == name)
         .and_then(|i| fields.get(i))
         .and_then(|v| v.parse().ok())
 }
 
 pub fn field_f64(headers: &[&str], fields: &[&str], name: &str) -> Option<f64> {
-    headers.iter().position(|h| *h == name)
+    headers
+        .iter()
+        .position(|h| *h == name)
         .and_then(|i| fields.get(i))
         .and_then(|v| v.parse().ok())
 }
 
 pub fn field_bool(headers: &[&str], fields: &[&str], name: &str) -> Option<bool> {
-    headers.iter().position(|h| *h == name)
+    headers
+        .iter()
+        .position(|h| *h == name)
         .and_then(|i| fields.get(i))
         .and_then(|v| match v.to_lowercase().as_str() {
             "true" | "1" => Some(true),
@@ -297,7 +337,10 @@ pub fn props_timestamp(headers: &[&str], fields: &[&str]) -> Vec<(&'static str, 
 }
 
 /// timestamp + amount (for TRANSFER, WITHDRAW, DEPOSIT, REPAY)
-pub fn props_timestamp_amount(headers: &[&str], fields: &[&str]) -> Vec<(&'static str, PropertyValue)> {
+pub fn props_timestamp_amount(
+    headers: &[&str],
+    fields: &[&str],
+) -> Vec<(&'static str, PropertyValue)> {
     let mut props = Vec::new();
     if let Some(v) = field_i64(headers, fields, "timestamp") {
         props.push(("timestamp", PropertyValue::DateTime(v)));
@@ -317,7 +360,10 @@ pub fn props_timestamp_amount(headers: &[&str], fields: &[&str]) -> Vec<(&'stati
 }
 
 /// timestamp + ratio (for INVEST)
-pub fn props_timestamp_ratio(headers: &[&str], fields: &[&str]) -> Vec<(&'static str, PropertyValue)> {
+pub fn props_timestamp_ratio(
+    headers: &[&str],
+    fields: &[&str],
+) -> Vec<(&'static str, PropertyValue)> {
     let mut props = Vec::new();
     if let Some(v) = field_i64(headers, fields, "timestamp") {
         props.push(("timestamp", PropertyValue::DateTime(v)));
@@ -344,7 +390,9 @@ pub fn format_num(n: usize) -> String {
     let s = n.to_string();
     let mut result = String::new();
     for (i, ch) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 { result.push(','); }
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
         result.push(ch);
     }
     result.chars().rev().collect()
@@ -394,28 +442,78 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &Path) -> Result<LoadResul
     eprintln!("=== Phase 1: Loading Nodes ===");
 
     let t = std::time::Instant::now();
-    let n = load_nodes(&data_dir.join("account.csv"), "Account", graph, &mut ids.account, props_account)?;
-    print_done(&format!("  Account:       {:>12} nodes ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_nodes(
+        &data_dir.join("account.csv"),
+        "Account",
+        graph,
+        &mut ids.account,
+        props_account,
+    )?;
+    print_done(&format!(
+        "  Account:       {:>12} nodes ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_nodes += n;
 
     let t = std::time::Instant::now();
-    let n = load_nodes(&data_dir.join("person.csv"), "Person", graph, &mut ids.person, props_person)?;
-    print_done(&format!("  Person:        {:>12} nodes ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_nodes(
+        &data_dir.join("person.csv"),
+        "Person",
+        graph,
+        &mut ids.person,
+        props_person,
+    )?;
+    print_done(&format!(
+        "  Person:        {:>12} nodes ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_nodes += n;
 
     let t = std::time::Instant::now();
-    let n = load_nodes(&data_dir.join("company.csv"), "Company", graph, &mut ids.company, props_company)?;
-    print_done(&format!("  Company:       {:>12} nodes ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_nodes(
+        &data_dir.join("company.csv"),
+        "Company",
+        graph,
+        &mut ids.company,
+        props_company,
+    )?;
+    print_done(&format!(
+        "  Company:       {:>12} nodes ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_nodes += n;
 
     let t = std::time::Instant::now();
-    let n = load_nodes(&data_dir.join("loan.csv"), "Loan", graph, &mut ids.loan, props_loan)?;
-    print_done(&format!("  Loan:          {:>12} nodes ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_nodes(
+        &data_dir.join("loan.csv"),
+        "Loan",
+        graph,
+        &mut ids.loan,
+        props_loan,
+    )?;
+    print_done(&format!(
+        "  Loan:          {:>12} nodes ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_nodes += n;
 
     let t = std::time::Instant::now();
-    let n = load_nodes(&data_dir.join("medium.csv"), "Medium", graph, &mut ids.medium, props_medium)?;
-    print_done(&format!("  Medium:        {:>12} nodes ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_nodes(
+        &data_dir.join("medium.csv"),
+        "Medium",
+        graph,
+        &mut ids.medium,
+        props_medium,
+    )?;
+    print_done(&format!(
+        "  Medium:        {:>12} nodes ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_nodes += n;
 
     eprintln!();
@@ -427,79 +525,225 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &Path) -> Result<LoadResul
 
     // OWN: Person/Company -> Account
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("personOwnAccount.csv"), "OWN", graph, &ids.person, &ids.account, props_timestamp)?;
-    print_done(&format!("  OWN (Person->Account):                 {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("personOwnAccount.csv"),
+        "OWN",
+        graph,
+        &ids.person,
+        &ids.account,
+        props_timestamp,
+    )?;
+    print_done(&format!(
+        "  OWN (Person->Account):                 {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("companyOwnAccount.csv"), "OWN", graph, &ids.company, &ids.account, props_timestamp)?;
-    print_done(&format!("  OWN (Company->Account):                {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("companyOwnAccount.csv"),
+        "OWN",
+        graph,
+        &ids.company,
+        &ids.account,
+        props_timestamp,
+    )?;
+    print_done(&format!(
+        "  OWN (Company->Account):                {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     // TRANSFER: Account -> Account
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("transfer.csv"), "TRANSFER", graph, &ids.account, &ids.account, props_timestamp_amount)?;
-    print_done(&format!("  TRANSFER (Account->Account):           {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("transfer.csv"),
+        "TRANSFER",
+        graph,
+        &ids.account,
+        &ids.account,
+        props_timestamp_amount,
+    )?;
+    print_done(&format!(
+        "  TRANSFER (Account->Account):           {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     // WITHDRAW: Account -> Account
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("withdraw.csv"), "WITHDRAW", graph, &ids.account, &ids.account, props_timestamp_amount)?;
-    print_done(&format!("  WITHDRAW (Account->Account):           {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("withdraw.csv"),
+        "WITHDRAW",
+        graph,
+        &ids.account,
+        &ids.account,
+        props_timestamp_amount,
+    )?;
+    print_done(&format!(
+        "  WITHDRAW (Account->Account):           {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     // DEPOSIT: Loan -> Account
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("deposit.csv"), "DEPOSIT", graph, &ids.loan, &ids.account, props_timestamp_amount)?;
-    print_done(&format!("  DEPOSIT (Loan->Account):               {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("deposit.csv"),
+        "DEPOSIT",
+        graph,
+        &ids.loan,
+        &ids.account,
+        props_timestamp_amount,
+    )?;
+    print_done(&format!(
+        "  DEPOSIT (Loan->Account):               {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     // REPAY: Account -> Loan
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("repay.csv"), "REPAY", graph, &ids.account, &ids.loan, props_timestamp_amount)?;
-    print_done(&format!("  REPAY (Account->Loan):                 {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("repay.csv"),
+        "REPAY",
+        graph,
+        &ids.account,
+        &ids.loan,
+        props_timestamp_amount,
+    )?;
+    print_done(&format!(
+        "  REPAY (Account->Loan):                 {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     // SIGN_IN: Account -> Medium
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("signIn.csv"), "SIGN_IN", graph, &ids.account, &ids.medium, props_timestamp)?;
-    print_done(&format!("  SIGN_IN (Account->Medium):             {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("signIn.csv"),
+        "SIGN_IN",
+        graph,
+        &ids.account,
+        &ids.medium,
+        props_timestamp,
+    )?;
+    print_done(&format!(
+        "  SIGN_IN (Account->Medium):             {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     // APPLY: Person/Company -> Loan
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("personApplyLoan.csv"), "APPLY", graph, &ids.person, &ids.loan, props_timestamp)?;
-    print_done(&format!("  APPLY (Person->Loan):                  {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("personApplyLoan.csv"),
+        "APPLY",
+        graph,
+        &ids.person,
+        &ids.loan,
+        props_timestamp,
+    )?;
+    print_done(&format!(
+        "  APPLY (Person->Loan):                  {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("companyApplyLoan.csv"), "APPLY", graph, &ids.company, &ids.loan, props_timestamp)?;
-    print_done(&format!("  APPLY (Company->Loan):                 {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("companyApplyLoan.csv"),
+        "APPLY",
+        graph,
+        &ids.company,
+        &ids.loan,
+        props_timestamp,
+    )?;
+    print_done(&format!(
+        "  APPLY (Company->Loan):                 {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     // INVEST: Company/Person -> Company
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("companyInvestCompany.csv"), "INVEST", graph, &ids.company, &ids.company, props_timestamp_ratio)?;
-    print_done(&format!("  INVEST (Company->Company):             {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("companyInvestCompany.csv"),
+        "INVEST",
+        graph,
+        &ids.company,
+        &ids.company,
+        props_timestamp_ratio,
+    )?;
+    print_done(&format!(
+        "  INVEST (Company->Company):             {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("personInvestCompany.csv"), "INVEST", graph, &ids.person, &ids.company, props_timestamp_ratio)?;
-    print_done(&format!("  INVEST (Person->Company):              {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("personInvestCompany.csv"),
+        "INVEST",
+        graph,
+        &ids.person,
+        &ids.company,
+        props_timestamp_ratio,
+    )?;
+    print_done(&format!(
+        "  INVEST (Person->Company):              {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     // GUARANTEE: Company/Person -> Company/Person
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("companyGuaranteeCompany.csv"), "GUARANTEE", graph, &ids.company, &ids.company, props_timestamp)?;
-    print_done(&format!("  GUARANTEE (Company->Company):          {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("companyGuaranteeCompany.csv"),
+        "GUARANTEE",
+        graph,
+        &ids.company,
+        &ids.company,
+        props_timestamp,
+    )?;
+    print_done(&format!(
+        "  GUARANTEE (Company->Company):          {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
     let t = std::time::Instant::now();
-    let n = load_edges(&data_dir.join("personGuaranteePerson.csv"), "GUARANTEE", graph, &ids.person, &ids.person, props_timestamp)?;
-    print_done(&format!("  GUARANTEE (Person->Person):            {:>12} edges ({})", format_num(n), format_duration(t.elapsed())));
+    let n = load_edges(
+        &data_dir.join("personGuaranteePerson.csv"),
+        "GUARANTEE",
+        graph,
+        &ids.person,
+        &ids.person,
+        props_timestamp,
+    )?;
+    print_done(&format!(
+        "  GUARANTEE (Person->Person):            {:>12} edges ({})",
+        format_num(n),
+        format_duration(t.elapsed())
+    ));
     total_edges += n;
 
-    Ok(LoadResult { total_nodes, total_edges })
+    Ok(LoadResult {
+        total_nodes,
+        total_edges,
+    })
 }
 
 // ============================================================================
@@ -545,7 +789,9 @@ struct SimpleRng {
 
 impl SimpleRng {
     fn new(seed: u64) -> Self {
-        Self { state: if seed == 0 { 1 } else { seed } }
+        Self {
+            state: if seed == 0 { 1 } else { seed },
+        }
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -571,35 +817,80 @@ impl SimpleRng {
 }
 
 const FIRST_NAMES: &[&str] = &[
-    "Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry",
-    "Ivy", "Jack", "Karen", "Leo", "Mona", "Nathan", "Olivia", "Paul",
-    "Quinn", "Rachel", "Sam", "Tina", "Uma", "Victor", "Wendy", "Xavier",
-    "Yuki", "Zara", "Amit", "Bala", "Chen", "Dev", "Elena", "Feng",
-    "Gita", "Hans", "Ines", "Jun", "Kira", "Liam", "Mai", "Noor",
-    "Omar", "Priya", "Raj", "Suki", "Tao", "Uri", "Vera", "Wei",
+    "Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry", "Ivy", "Jack", "Karen",
+    "Leo", "Mona", "Nathan", "Olivia", "Paul", "Quinn", "Rachel", "Sam", "Tina", "Uma", "Victor",
+    "Wendy", "Xavier", "Yuki", "Zara", "Amit", "Bala", "Chen", "Dev", "Elena", "Feng", "Gita",
+    "Hans", "Ines", "Jun", "Kira", "Liam", "Mai", "Noor", "Omar", "Priya", "Raj", "Suki", "Tao",
+    "Uri", "Vera", "Wei",
 ];
 
 const LAST_NAMES: &[&str] = &[
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
-    "Davis", "Rodriguez", "Martinez", "Kumar", "Singh", "Wang", "Li",
-    "Zhang", "Chen", "Yang", "Huang", "Zhao", "Wu", "Patel", "Shah",
-    "Gupta", "Muller", "Schmidt", "Fischer", "Weber", "Meyer", "Tanaka",
-    "Suzuki", "Takahashi", "Watanabe", "Kim", "Park", "Lee", "Choi",
+    "Smith",
+    "Johnson",
+    "Williams",
+    "Brown",
+    "Jones",
+    "Garcia",
+    "Miller",
+    "Davis",
+    "Rodriguez",
+    "Martinez",
+    "Kumar",
+    "Singh",
+    "Wang",
+    "Li",
+    "Zhang",
+    "Chen",
+    "Yang",
+    "Huang",
+    "Zhao",
+    "Wu",
+    "Patel",
+    "Shah",
+    "Gupta",
+    "Muller",
+    "Schmidt",
+    "Fischer",
+    "Weber",
+    "Meyer",
+    "Tanaka",
+    "Suzuki",
+    "Takahashi",
+    "Watanabe",
+    "Kim",
+    "Park",
+    "Lee",
+    "Choi",
 ];
 
 const COMPANY_SUFFIXES: &[&str] = &[
-    "Corp", "Inc", "Ltd", "Group", "Holdings", "Partners", "Capital",
-    "Technologies", "Financial", "Solutions", "Global", "Systems",
-    "Ventures", "Dynamics", "Industries", "Consulting", "Networks",
-    "Analytics", "Digital", "Services",
+    "Corp",
+    "Inc",
+    "Ltd",
+    "Group",
+    "Holdings",
+    "Partners",
+    "Capital",
+    "Technologies",
+    "Financial",
+    "Solutions",
+    "Global",
+    "Systems",
+    "Ventures",
+    "Dynamics",
+    "Industries",
+    "Consulting",
+    "Networks",
+    "Analytics",
+    "Digital",
+    "Services",
 ];
 
 const COMPANY_PREFIXES: &[&str] = &[
-    "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Theta",
-    "Atlas", "Nova", "Apex", "Vertex", "Nexus", "Prism", "Quantum",
-    "Stellar", "Fusion", "Orion", "Phoenix", "Summit", "Prime",
-    "Azure", "Cobalt", "Emerald", "Falcon", "Glacier", "Harbor",
-    "Ivory", "Jade", "Keystone", "Lunar", "Marble", "Neptune",
+    "Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Theta", "Atlas", "Nova", "Apex",
+    "Vertex", "Nexus", "Prism", "Quantum", "Stellar", "Fusion", "Orion", "Phoenix", "Summit",
+    "Prime", "Azure", "Cobalt", "Emerald", "Falcon", "Glacier", "Harbor", "Ivory", "Jade",
+    "Keystone", "Lunar", "Marble", "Neptune",
 ];
 
 const ACCOUNT_TYPES: &[&str] = &["checking", "savings", "investment", "business"];
@@ -617,9 +908,8 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
     // Time range: 3 years in milliseconds
     let time_range: i64 = 3 * 365 * 24 * 3600 * 1000;
 
-    let random_ts = |rng: &mut SimpleRng| -> i64 {
-        base_ts + (rng.next_u64() % time_range as u64) as i64
-    };
+    let random_ts =
+        |rng: &mut SimpleRng| -> i64 { base_ts + (rng.next_u64() % time_range as u64) as i64 };
 
     // ====================================================================
     // PHASE 1: Generate nodes
@@ -641,7 +931,11 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         ids.person.insert(person_id, node_id);
         total_nodes += 1;
     }
-    print_done(&format!("  Person:        {:>12} nodes ({})", format_num(config.num_persons), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  Person:        {:>12} nodes ({})",
+        format_num(config.num_persons),
+        format_duration(t.elapsed())
+    ));
 
     // Companies
     let t = std::time::Instant::now();
@@ -652,13 +946,20 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
             node.set_property("id", company_id);
             let prefix = COMPANY_PREFIXES[rng.next_usize(COMPANY_PREFIXES.len())];
             let suffix = COMPANY_SUFFIXES[rng.next_usize(COMPANY_SUFFIXES.len())];
-            node.set_property("name", PropertyValue::String(format!("{} {}", prefix, suffix)));
+            node.set_property(
+                "name",
+                PropertyValue::String(format!("{} {}", prefix, suffix)),
+            );
             node.set_property("isBlocked", PropertyValue::Boolean(rng.next_bool(0.01)));
         }
         ids.company.insert(company_id, node_id);
         total_nodes += 1;
     }
-    print_done(&format!("  Company:       {:>12} nodes ({})", format_num(config.num_companies), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  Company:       {:>12} nodes ({})",
+        format_num(config.num_companies),
+        format_duration(t.elapsed())
+    ));
 
     // Accounts
     let t = std::time::Instant::now();
@@ -675,7 +976,11 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         ids.account.insert(account_id, node_id);
         total_nodes += 1;
     }
-    print_done(&format!("  Account:       {:>12} nodes ({})", format_num(config.num_accounts), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  Account:       {:>12} nodes ({})",
+        format_num(config.num_accounts),
+        format_duration(t.elapsed())
+    ));
 
     // Loans
     let t = std::time::Instant::now();
@@ -694,7 +999,11 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         ids.loan.insert(loan_id, node_id);
         total_nodes += 1;
     }
-    print_done(&format!("  Loan:          {:>12} nodes ({})", format_num(config.num_loans), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  Loan:          {:>12} nodes ({})",
+        format_num(config.num_loans),
+        format_duration(t.elapsed())
+    ));
 
     // Mediums
     let t = std::time::Instant::now();
@@ -710,7 +1019,11 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         ids.medium.insert(medium_id, node_id);
         total_nodes += 1;
     }
-    print_done(&format!("  Medium:        {:>12} nodes ({})", format_num(config.num_mediums), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  Medium:        {:>12} nodes ({})",
+        format_num(config.num_mediums),
+        format_duration(t.elapsed())
+    ));
 
     eprintln!();
 
@@ -735,11 +1048,17 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let num_accounts = 1 + rng.next_usize(5);
         for _ in 0..num_accounts {
             let aid = account_ids[rng.next_usize(account_ids.len())];
-            if owned_accounts.contains(&aid) { continue; }
+            if owned_accounts.contains(&aid) {
+                continue;
+            }
             let src = ids.person[&pid];
             let tgt = ids.account[&aid];
             if let Ok(eid) = graph.create_edge(src, tgt, "OWN") {
-                graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+                graph.set_edge_property_sparse(
+                    eid,
+                    "timestamp",
+                    PropertyValue::DateTime(random_ts(&mut rng)),
+                );
                 own_count += 1;
                 owned_accounts.insert(aid);
             }
@@ -749,17 +1068,27 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let num_accounts = 1 + rng.next_usize(3);
         for _ in 0..num_accounts {
             let aid = account_ids[rng.next_usize(account_ids.len())];
-            if owned_accounts.contains(&aid) { continue; }
+            if owned_accounts.contains(&aid) {
+                continue;
+            }
             let src = ids.company[&cid];
             let tgt = ids.account[&aid];
             if let Ok(eid) = graph.create_edge(src, tgt, "OWN") {
-                graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+                graph.set_edge_property_sparse(
+                    eid,
+                    "timestamp",
+                    PropertyValue::DateTime(random_ts(&mut rng)),
+                );
                 own_count += 1;
                 owned_accounts.insert(aid);
             }
         }
     }
-    print_done(&format!("  OWN:                                   {:>12} edges ({})", format_num(own_count), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  OWN:                                   {:>12} edges ({})",
+        format_num(own_count),
+        format_duration(t.elapsed())
+    ));
     total_edges += own_count;
 
     // TRANSFER: Account -> Account
@@ -774,13 +1103,21 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let src = ids.account[&src_aid];
         let tgt = ids.account[&tgt_aid];
         if let Ok(eid) = graph.create_edge(src, tgt, "TRANSFER") {
-            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            graph.set_edge_property_sparse(
+                eid,
+                "timestamp",
+                PropertyValue::DateTime(random_ts(&mut rng)),
+            );
             let amount = 10.0 + rng.next_f64() * 50_000.0;
             graph.set_edge_property_sparse(eid, "amount", PropertyValue::Float(amount));
             transfer_count += 1;
         }
     }
-    print_done(&format!("  TRANSFER:                              {:>12} edges ({})", format_num(transfer_count), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  TRANSFER:                              {:>12} edges ({})",
+        format_num(transfer_count),
+        format_duration(t.elapsed())
+    ));
     total_edges += transfer_count;
 
     // WITHDRAW: Account -> Account
@@ -795,13 +1132,21 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let src = ids.account[&src_aid];
         let tgt = ids.account[&tgt_aid];
         if let Ok(eid) = graph.create_edge(src, tgt, "WITHDRAW") {
-            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            graph.set_edge_property_sparse(
+                eid,
+                "timestamp",
+                PropertyValue::DateTime(random_ts(&mut rng)),
+            );
             let amount = 50.0 + rng.next_f64() * 20_000.0;
             graph.set_edge_property_sparse(eid, "amount", PropertyValue::Float(amount));
             withdraw_count += 1;
         }
     }
-    print_done(&format!("  WITHDRAW:                              {:>12} edges ({})", format_num(withdraw_count), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  WITHDRAW:                              {:>12} edges ({})",
+        format_num(withdraw_count),
+        format_duration(t.elapsed())
+    ));
     total_edges += withdraw_count;
 
     // DEPOSIT: Loan -> Account
@@ -813,13 +1158,21 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let src = ids.loan[&lid];
         let tgt = ids.account[&aid];
         if let Ok(eid) = graph.create_edge(src, tgt, "DEPOSIT") {
-            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            graph.set_edge_property_sparse(
+                eid,
+                "timestamp",
+                PropertyValue::DateTime(random_ts(&mut rng)),
+            );
             let amount = 500.0 + rng.next_f64() * 100_000.0;
             graph.set_edge_property_sparse(eid, "amount", PropertyValue::Float(amount));
             deposit_count += 1;
         }
     }
-    print_done(&format!("  DEPOSIT:                               {:>12} edges ({})", format_num(deposit_count), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  DEPOSIT:                               {:>12} edges ({})",
+        format_num(deposit_count),
+        format_duration(t.elapsed())
+    ));
     total_edges += deposit_count;
 
     // REPAY: Account -> Loan
@@ -831,13 +1184,21 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let src = ids.account[&aid];
         let tgt = ids.loan[&lid];
         if let Ok(eid) = graph.create_edge(src, tgt, "REPAY") {
-            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            graph.set_edge_property_sparse(
+                eid,
+                "timestamp",
+                PropertyValue::DateTime(random_ts(&mut rng)),
+            );
             let amount = 100.0 + rng.next_f64() * 50_000.0;
             graph.set_edge_property_sparse(eid, "amount", PropertyValue::Float(amount));
             repay_count += 1;
         }
     }
-    print_done(&format!("  REPAY:                                 {:>12} edges ({})", format_num(repay_count), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  REPAY:                                 {:>12} edges ({})",
+        format_num(repay_count),
+        format_duration(t.elapsed())
+    ));
     total_edges += repay_count;
 
     // SIGN_IN: Account -> Medium
@@ -849,11 +1210,19 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let src = ids.account[&aid];
         let tgt = ids.medium[&mid];
         if let Ok(eid) = graph.create_edge(src, tgt, "SIGN_IN") {
-            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            graph.set_edge_property_sparse(
+                eid,
+                "timestamp",
+                PropertyValue::DateTime(random_ts(&mut rng)),
+            );
             signin_count += 1;
         }
     }
-    print_done(&format!("  SIGN_IN:                               {:>12} edges ({})", format_num(signin_count), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  SIGN_IN:                               {:>12} edges ({})",
+        format_num(signin_count),
+        format_duration(t.elapsed())
+    ));
     total_edges += signin_count;
 
     // APPLY: Person/Company -> Loan
@@ -870,11 +1239,19 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         };
         let tgt = ids.loan[&lid];
         if let Ok(eid) = graph.create_edge(src, tgt, "APPLY") {
-            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            graph.set_edge_property_sparse(
+                eid,
+                "timestamp",
+                PropertyValue::DateTime(random_ts(&mut rng)),
+            );
             apply_count += 1;
         }
     }
-    print_done(&format!("  APPLY:                                 {:>12} edges ({})", format_num(apply_count), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  APPLY:                                 {:>12} edges ({})",
+        format_num(apply_count),
+        format_duration(t.elapsed())
+    ));
     total_edges += apply_count;
 
     // INVEST: Company/Person -> Company
@@ -885,7 +1262,9 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         let tgt_cid = company_ids[rng.next_usize(company_ids.len())];
         let src = if rng.next_bool(0.7) {
             let cid = company_ids[rng.next_usize(company_ids.len())];
-            if cid == tgt_cid { continue; }
+            if cid == tgt_cid {
+                continue;
+            }
             ids.company[&cid]
         } else {
             let pid = person_ids[rng.next_usize(person_ids.len())];
@@ -893,13 +1272,21 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         };
         let tgt = ids.company[&tgt_cid];
         if let Ok(eid) = graph.create_edge(src, tgt, "INVEST") {
-            graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+            graph.set_edge_property_sparse(
+                eid,
+                "timestamp",
+                PropertyValue::DateTime(random_ts(&mut rng)),
+            );
             let ratio = rng.next_f64();
             graph.set_edge_property_sparse(eid, "ratio", PropertyValue::Float(ratio));
             invest_count += 1;
         }
     }
-    print_done(&format!("  INVEST:                                {:>12} edges ({})", format_num(invest_count), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  INVEST:                                {:>12} edges ({})",
+        format_num(invest_count),
+        format_duration(t.elapsed())
+    ));
     total_edges += invest_count;
 
     // GUARANTEE: Company/Person -> Company/Person
@@ -911,29 +1298,48 @@ pub fn generate_dataset(graph: &mut GraphStore, config: &GeneratorConfig) -> Loa
         if rng.next_bool(0.6) {
             let src_cid = company_ids[rng.next_usize(company_ids.len())];
             let tgt_cid = company_ids[rng.next_usize(company_ids.len())];
-            if src_cid == tgt_cid { continue; }
+            if src_cid == tgt_cid {
+                continue;
+            }
             let src = ids.company[&src_cid];
             let tgt = ids.company[&tgt_cid];
             if let Ok(eid) = graph.create_edge(src, tgt, "GUARANTEE") {
-                graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+                graph.set_edge_property_sparse(
+                    eid,
+                    "timestamp",
+                    PropertyValue::DateTime(random_ts(&mut rng)),
+                );
                 guarantee_count += 1;
             }
         } else {
             let src_pid = person_ids[rng.next_usize(person_ids.len())];
             let tgt_pid = person_ids[rng.next_usize(person_ids.len())];
-            if src_pid == tgt_pid { continue; }
+            if src_pid == tgt_pid {
+                continue;
+            }
             let src = ids.person[&src_pid];
             let tgt = ids.person[&tgt_pid];
             if let Ok(eid) = graph.create_edge(src, tgt, "GUARANTEE") {
-                graph.set_edge_property_sparse(eid, "timestamp", PropertyValue::DateTime(random_ts(&mut rng)));
+                graph.set_edge_property_sparse(
+                    eid,
+                    "timestamp",
+                    PropertyValue::DateTime(random_ts(&mut rng)),
+                );
                 guarantee_count += 1;
             }
         }
     }
-    print_done(&format!("  GUARANTEE:                             {:>12} edges ({})", format_num(guarantee_count), format_duration(t.elapsed())));
+    print_done(&format!(
+        "  GUARANTEE:                             {:>12} edges ({})",
+        format_num(guarantee_count),
+        format_duration(t.elapsed())
+    ));
     total_edges += guarantee_count;
 
-    LoadResult { total_nodes, total_edges }
+    LoadResult {
+        total_nodes,
+        total_edges,
+    }
 }
 
 // ============================================================================
@@ -949,9 +1355,8 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
     // Base timestamp: 2020-01-01 00:00:00 UTC (in milliseconds)
     let base_ts: i64 = 1_577_836_800_000;
     let time_range: i64 = 3 * 365 * 24 * 3600 * 1000;
-    let random_ts = |rng: &mut SimpleRng| -> i64 {
-        base_ts + (rng.next_u64() % time_range as u64) as i64
-    };
+    let random_ts =
+        |rng: &mut SimpleRng| -> i64 { base_ts + (rng.next_u64() % time_range as u64) as i64 };
 
     eprintln!("Writing FinBench CSV files to: {}", data_dir.display());
 
@@ -965,7 +1370,10 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             writeln!(f, "{}|{} {}|{}", i + 1, first, last, rng.next_bool(0.02))?;
         }
     }
-    eprintln!("  person.csv             ({} rows)", format_num(config.num_persons));
+    eprintln!(
+        "  person.csv             ({} rows)",
+        format_num(config.num_persons)
+    );
 
     // --- Company ---
     {
@@ -977,7 +1385,10 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             writeln!(f, "{}|{} {}|{}", i + 1, prefix, suffix, rng.next_bool(0.01))?;
         }
     }
-    eprintln!("  company.csv            ({} rows)", format_num(config.num_companies));
+    eprintln!(
+        "  company.csv            ({} rows)",
+        format_num(config.num_companies)
+    );
 
     // --- Account ---
     {
@@ -985,10 +1396,20 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
         writeln!(f, "id|createTime|isBlocked|accountType")?;
         for i in 0..config.num_accounts {
             let acct_type = ACCOUNT_TYPES[rng.next_usize(ACCOUNT_TYPES.len())];
-            writeln!(f, "{}|{}|{}|{}", i + 1, random_ts(&mut rng), rng.next_bool(0.03), acct_type)?;
+            writeln!(
+                f,
+                "{}|{}|{}|{}",
+                i + 1,
+                random_ts(&mut rng),
+                rng.next_bool(0.03),
+                acct_type
+            )?;
         }
     }
-    eprintln!("  account.csv            ({} rows)", format_num(config.num_accounts));
+    eprintln!(
+        "  account.csv            ({} rows)",
+        format_num(config.num_accounts)
+    );
 
     // --- Loan ---
     {
@@ -1000,7 +1421,10 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             writeln!(f, "{}|{:.2}|{:.2}", i + 1, amount, balance)?;
         }
     }
-    eprintln!("  loan.csv               ({} rows)", format_num(config.num_loans));
+    eprintln!(
+        "  loan.csv               ({} rows)",
+        format_num(config.num_loans)
+    );
 
     // --- Medium ---
     {
@@ -1011,7 +1435,10 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             writeln!(f, "{}|{}|{}", i + 1, mtype, rng.next_bool(0.02))?;
         }
     }
-    eprintln!("  medium.csv             ({} rows)", format_num(config.num_mediums));
+    eprintln!(
+        "  medium.csv             ({} rows)",
+        format_num(config.num_mediums)
+    );
 
     // --- Edge CSVs ---
 
@@ -1026,7 +1453,9 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             let num_accounts = 1 + rng.next_usize(5);
             for _ in 0..num_accounts {
                 let aid = (1 + rng.next_usize(config.num_accounts)) as i64;
-                if owned_accounts.contains(&aid) { continue; }
+                if owned_accounts.contains(&aid) {
+                    continue;
+                }
                 writeln!(f, "{}|{}|{}", pid, aid, random_ts(&mut rng))?;
                 owned_accounts.insert(aid);
                 count += 1;
@@ -1045,7 +1474,9 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             let num_accounts = 1 + rng.next_usize(3);
             for _ in 0..num_accounts {
                 let aid = (1 + rng.next_usize(config.num_accounts)) as i64;
-                if owned_accounts.contains(&aid) { continue; }
+                if owned_accounts.contains(&aid) {
+                    continue;
+                }
                 writeln!(f, "{}|{}|{}", cid, aid, random_ts(&mut rng))?;
                 owned_accounts.insert(aid);
                 count += 1;
@@ -1061,11 +1492,16 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
         for _ in 0..config.num_transfers {
             let src = (1 + rng.next_usize(config.num_accounts)) as i64;
             let mut tgt = (1 + rng.next_usize(config.num_accounts)) as i64;
-            while tgt == src { tgt = (1 + rng.next_usize(config.num_accounts)) as i64; }
+            while tgt == src {
+                tgt = (1 + rng.next_usize(config.num_accounts)) as i64;
+            }
             let amount = 10.0 + rng.next_f64() * 50_000.0;
             writeln!(f, "{}|{}|{}|{:.2}", src, tgt, random_ts(&mut rng), amount)?;
         }
-        eprintln!("  transfer.csv           ({} rows)", format_num(config.num_transfers));
+        eprintln!(
+            "  transfer.csv           ({} rows)",
+            format_num(config.num_transfers)
+        );
     }
 
     // withdraw.csv
@@ -1075,11 +1511,16 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
         for _ in 0..config.num_withdrawals {
             let src = (1 + rng.next_usize(config.num_accounts)) as i64;
             let mut tgt = (1 + rng.next_usize(config.num_accounts)) as i64;
-            while tgt == src { tgt = (1 + rng.next_usize(config.num_accounts)) as i64; }
+            while tgt == src {
+                tgt = (1 + rng.next_usize(config.num_accounts)) as i64;
+            }
             let amount = 50.0 + rng.next_f64() * 20_000.0;
             writeln!(f, "{}|{}|{}|{:.2}", src, tgt, random_ts(&mut rng), amount)?;
         }
-        eprintln!("  withdraw.csv           ({} rows)", format_num(config.num_withdrawals));
+        eprintln!(
+            "  withdraw.csv           ({} rows)",
+            format_num(config.num_withdrawals)
+        );
     }
 
     // deposit.csv
@@ -1092,7 +1533,10 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             let amount = 500.0 + rng.next_f64() * 100_000.0;
             writeln!(f, "{}|{}|{}|{:.2}", lid, aid, random_ts(&mut rng), amount)?;
         }
-        eprintln!("  deposit.csv            ({} rows)", format_num(config.num_deposits));
+        eprintln!(
+            "  deposit.csv            ({} rows)",
+            format_num(config.num_deposits)
+        );
     }
 
     // repay.csv
@@ -1105,7 +1549,10 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             let amount = 100.0 + rng.next_f64() * 50_000.0;
             writeln!(f, "{}|{}|{}|{:.2}", aid, lid, random_ts(&mut rng), amount)?;
         }
-        eprintln!("  repay.csv              ({} rows)", format_num(config.num_repayments));
+        eprintln!(
+            "  repay.csv              ({} rows)",
+            format_num(config.num_repayments)
+        );
     }
 
     // signIn.csv
@@ -1117,7 +1564,10 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             let mid = (1 + rng.next_usize(config.num_mediums)) as i64;
             writeln!(f, "{}|{}|{}", aid, mid, random_ts(&mut rng))?;
         }
-        eprintln!("  signIn.csv             ({} rows)", format_num(config.num_sign_ins));
+        eprintln!(
+            "  signIn.csv             ({} rows)",
+            format_num(config.num_sign_ins)
+        );
     }
 
     // personApplyLoan.csv and companyApplyLoan.csv
@@ -1157,12 +1607,28 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             let tgt_cid = (1 + rng.next_usize(config.num_companies)) as i64;
             if rng.next_bool(0.7) {
                 let src_cid = (1 + rng.next_usize(config.num_companies)) as i64;
-                if src_cid == tgt_cid { continue; }
-                writeln!(fc, "{}|{}|{}|{:.4}", src_cid, tgt_cid, random_ts(&mut rng), rng.next_f64())?;
+                if src_cid == tgt_cid {
+                    continue;
+                }
+                writeln!(
+                    fc,
+                    "{}|{}|{}|{:.4}",
+                    src_cid,
+                    tgt_cid,
+                    random_ts(&mut rng),
+                    rng.next_f64()
+                )?;
                 ccount += 1;
             } else {
                 let pid = (1 + rng.next_usize(config.num_persons)) as i64;
-                writeln!(fp, "{}|{}|{}|{:.4}", pid, tgt_cid, random_ts(&mut rng), rng.next_f64())?;
+                writeln!(
+                    fp,
+                    "{}|{}|{}|{:.4}",
+                    pid,
+                    tgt_cid,
+                    random_ts(&mut rng),
+                    rng.next_f64()
+                )?;
                 pcount += 1;
             }
         }
@@ -1183,18 +1649,25 @@ pub fn write_csv_dataset(data_dir: &Path, config: &GeneratorConfig) -> Result<()
             if rng.next_bool(0.6) {
                 let src = (1 + rng.next_usize(config.num_companies)) as i64;
                 let tgt = (1 + rng.next_usize(config.num_companies)) as i64;
-                if src == tgt { continue; }
+                if src == tgt {
+                    continue;
+                }
                 writeln!(fc, "{}|{}|{}", src, tgt, random_ts(&mut rng))?;
                 ccount += 1;
             } else {
                 let src = (1 + rng.next_usize(config.num_persons)) as i64;
                 let tgt = (1 + rng.next_usize(config.num_persons)) as i64;
-                if src == tgt { continue; }
+                if src == tgt {
+                    continue;
+                }
                 writeln!(fp, "{}|{}|{}", src, tgt, random_ts(&mut rng))?;
                 pcount += 1;
             }
         }
-        eprintln!("  companyGuaranteeCompany.csv ({} rows)", format_num(ccount));
+        eprintln!(
+            "  companyGuaranteeCompany.csv ({} rows)",
+            format_num(ccount)
+        );
         eprintln!("  personGuaranteePerson.csv  ({} rows)", format_num(pcount));
     }
 

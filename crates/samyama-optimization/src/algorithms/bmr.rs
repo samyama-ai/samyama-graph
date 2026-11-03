@@ -11,8 +11,7 @@ pub struct BMRSolver {
 
 impl BMRSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self {
-            seed: None, config }
+        Self { seed: None, config }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -44,7 +43,10 @@ impl BMRSolver {
                 break;
             }
             if iter % 10 == 0 {
-                println!("BMR Solver: Iteration {}/{}", iter, self.config.max_iterations);
+                println!(
+                    "BMR Solver: Iteration {}/{}",
+                    iter, self.config.max_iterations
+                );
             }
             let (best_idx, _) = self.find_best_worst(&population);
             let best_vars = population[best_idx].variables.clone();
@@ -65,14 +67,14 @@ impl BMRSolver {
                     let r3: f64 = local_rng.gen();
                     let r4: f64 = local_rng.gen();
                     let t: f64 = local_rng.gen_range(1..3) as f64;
-                    
+
                     let _rand_idx = local_rng.gen_range(0..self.config.population_size);
                     // Note: In parallel map, we can't easily access the current population.
                     // But we can approximate by having each thread pick its own random.
-                    // Or we just pass the population down. 
+                    // Or we just pass the population down.
                     // For now, let's use a random individual generated from bounds if we can't access population.
                     // Actually, let's stick to the Python logic by passing the whole population if needed.
-                    // But BMR/BWR use a 'random solution from population'. 
+                    // But BMR/BWR use a 'random solution from population'.
                     // We'll generate a random vector from bounds as a proxy for 'random solution' to keep it parallel and stateless.
                     let mut rand_vars = Array1::zeros(dim);
                     for j in 0..dim {
@@ -81,12 +83,14 @@ impl BMRSolver {
 
                     if r4 > 0.5 {
                         for j in 0..dim {
-                            let delta = r1 * (best_vars[j] - t * mean_vars[j]) + r2 * (best_vars[j] - rand_vars[j]);
+                            let delta = r1 * (best_vars[j] - t * mean_vars[j])
+                                + r2 * (best_vars[j] - rand_vars[j]);
                             new_vars[j] = (ind.variables[j] + delta).clamp(lower[j], upper[j]);
                         }
                     } else {
                         for j in 0..dim {
-                            new_vars[j] = (upper[j] - (upper[j] - lower[j]) * r3).clamp(lower[j], upper[j]);
+                            new_vars[j] =
+                                (upper[j] - (upper[j] - lower[j]) * r3).clamp(lower[j], upper[j]);
                         }
                     }
 

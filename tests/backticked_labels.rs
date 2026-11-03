@@ -54,7 +54,10 @@ fn scalars(store: &GraphStore, query: &str) -> Vec<String> {
 #[test]
 fn a_label_with_a_space_can_be_created_and_matched() {
     let mut s = store();
-    write(&mut s, "CREATE (:`Research Paper` {title: 'On Computable Numbers'})");
+    write(
+        &mut s,
+        "CREATE (:`Research Paper` {title: 'On Computable Numbers'})",
+    );
     assert_eq!(
         scalars(&s, "MATCH (n:`Research Paper`) RETURN n.title AS t").len(),
         1,
@@ -91,9 +94,15 @@ fn the_backticks_do_not_survive_into_the_name() {
     );
     let labels = scalars(&s, "MATCH (n:`Research Paper`) RETURN labels(n) AS l");
     assert!(labels[0].contains("Research Paper"), "{labels:?}");
-    assert!(!labels[0].contains('`'), "backticks leaked into the label: {labels:?}");
+    assert!(
+        !labels[0].contains('`'),
+        "backticks leaked into the label: {labels:?}"
+    );
     let types = scalars(&s, "MATCH ()-[r:`WORKS WITH`]->() RETURN type(r) AS t");
-    assert!(!types[0].contains('`'), "backticks leaked into the type: {types:?}");
+    assert!(
+        !types[0].contains('`'),
+        "backticks leaked into the type: {types:?}"
+    );
 }
 
 #[test]
@@ -124,7 +133,10 @@ fn no_read_site_leaves_a_backtick_in_a_name() {
     // can find under the name they wrote. So the check is over every shape
     // that reads a label or a type, not over one of them.
     let mut s = store();
-    write(&mut s, "CREATE (:`A B` {k: 1}), (:`A B` {k: 2}), (:`C D` {k: 3})");
+    write(
+        &mut s,
+        "CREATE (:`A B` {k: 1}), (:`A B` {k: 2}), (:`C D` {k: 3})",
+    );
     write(
         &mut s,
         "MATCH (a:`A B` {k: 1}), (b:`C D` {k: 3}) CREATE (a)-[:`E F`]->(b)",
@@ -176,7 +188,10 @@ fn an_ordinary_label_is_untouched() {
     // accidentally preferred `escaped_name` would break every query in the
     // suite, but a subtler mistake might only break the plain path here.
     let mut s = store();
-    write(&mut s, "CREATE (:Person {name: 'Ada'})-[:KNOWS]->(:Person {name: 'Alan'})");
+    write(
+        &mut s,
+        "CREATE (:Person {name: 'Ada'})-[:KNOWS]->(:Person {name: 'Alan'})",
+    );
     assert_eq!(scalars(&s, "MATCH (n:Person) RETURN n.name AS n").len(), 2);
     assert_eq!(
         scalars(&s, "MATCH ()-[r:KNOWS]->() RETURN type(r) AS t"),

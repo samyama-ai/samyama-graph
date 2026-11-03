@@ -81,7 +81,11 @@ fn the_same_calls_still_answer_when_every_weight_is_positive() {
         a.as_u64(),
         b.as_u64()
     );
-    assert_eq!(run(&store, &q), Ok(1), "a positive-weight graph is unaffected");
+    assert_eq!(
+        run(&store, &q),
+        Ok(1),
+        "a positive-weight graph is unaffected"
+    );
 }
 
 /// What the refusal is protecting against, stated as a fact about the graph.
@@ -97,13 +101,20 @@ fn the_same_calls_still_answer_when_every_weight_is_positive() {
 fn the_algorithm_itself_refuses_rather_than_skipping() {
     let (store, a, c) = store_with_a_negative_edge();
     let view = samyama::algo::build_view(&store, None, None, Some("w"));
-    assert_eq!(view.first_negative_weight(), Some(-4.0), "the fixture has one");
+    assert_eq!(
+        view.first_negative_weight(),
+        Some(-4.0),
+        "the fixture has one"
+    );
 
     let err = samyama::algo::dijkstra(&view, a, c)
         .expect_err("a negative-weight graph is refused, not answered");
     assert_eq!(err.weight, -4.0);
     let msg = err.to_string();
-    assert!(msg.contains("bellmanFord"), "the refusal must name the way out: {msg}");
+    assert!(
+        msg.contains("bellmanFord"),
+        "the refusal must name the way out: {msg}"
+    );
 }
 
 /// The same shape without the negative edge still answers, so the refusal is a
@@ -133,5 +144,9 @@ fn the_algorithm_answers_once_the_negative_edge_is_gone() {
 fn hop_counting_is_not_refused_by_a_negative_weight() {
     let (store, a, c) = store_with_a_negative_edge();
     let q = format!("CALL algo.shortestPath({a}, {c}) YIELD cost RETURN count(*) AS v");
-    assert_eq!(run(&store, &q), Ok(1), "shortestPath without a weight counts hops");
+    assert_eq!(
+        run(&store, &q),
+        Ok(1),
+        "shortestPath without a weight counts hops"
+    );
 }

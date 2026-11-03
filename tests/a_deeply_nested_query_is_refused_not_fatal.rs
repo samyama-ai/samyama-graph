@@ -57,9 +57,17 @@ fn a_query_at_the_limit_still_parses() {
 fn one_past_the_limit_is_refused_with_a_message_that_says_why() {
     let limit = nesting_limit();
     let q = nested('(', ')', limit + 1);
-    let err = parse_query(&q).expect_err("depth beyond the limit must be refused").to_string();
-    assert!(err.contains(&(limit + 1).to_string()), "the error must state the depth found: {err}");
-    assert!(err.contains(&limit.to_string()), "the error must state the limit: {err}");
+    let err = parse_query(&q)
+        .expect_err("depth beyond the limit must be refused")
+        .to_string();
+    assert!(
+        err.contains(&(limit + 1).to_string()),
+        "the error must state the depth found: {err}"
+    );
+    assert!(
+        err.contains(&limit.to_string()),
+        "the error must state the limit: {err}"
+    );
 }
 
 /// The shape that actually aborted the process.

@@ -51,7 +51,10 @@ const CASES: &[(&str, &str)] = &[
     ("bad-literal", "RETURN '\\uZZ'"),
     ("bad-argument", "RETURN range(1, 10, 0)"),
     ("bad-argument", "RETURN substring('abc')"),
-    ("collection-in-pattern", "WITH [1] AS xs MATCH (xs)-->() RETURN 1"),
+    (
+        "collection-in-pattern",
+        "WITH [1] AS xs MATCH (xs)-->() RETURN 1",
+    ),
     // `RETURN count(*) + n` was the case here, and it does not test what it
     // says: it fails because `n` is unbound, which is correct and has nothing
     // to do with aggregation. It reported an aggregate-misuse code identical
@@ -80,10 +83,13 @@ fn extract_code(msg: &str) -> Option<String> {
     msg.split_whitespace()
         .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-'))
         .find(|t| {
-            (t.contains('.') && t.split('.').count() >= 3
+            (t.contains('.')
+                && t.split('.').count() >= 3
                 && t.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
-                || (t.contains('-') && t.split('-').next().is_some_and(
-                    |p| p.len() >= 2 && p.chars().all(|c| c.is_ascii_uppercase())))
+                || (t.contains('-')
+                    && t.split('-')
+                        .next()
+                        .is_some_and(|p| p.len() >= 2 && p.chars().all(|c| c.is_ascii_uppercase())))
         })
         .map(str::to_string)
 }
@@ -94,10 +100,13 @@ fn has_code(msg: &str) -> bool {
     // that found nothing would be indistinguishable from a broken detector.
     msg.split_whitespace().any(|t| {
         let t = t.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-');
-        (t.contains('.') && t.split('.').count() >= 3
+        (t.contains('.')
+            && t.split('.').count() >= 3
             && t.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
-            || (t.contains('-') && t.split('-').next().is_some_and(
-                |p| p.len() >= 2 && p.chars().all(|c| c.is_ascii_uppercase())))
+            || (t.contains('-')
+                && t.split('-')
+                    .next()
+                    .is_some_and(|p| p.len() >= 2 && p.chars().all(|c| c.is_ascii_uppercase())))
     }) || msg.to_lowercase().contains("code:")
 }
 
@@ -105,8 +114,12 @@ fn has_code(msg: &str) -> bool {
 /// diagram, or an explicit offset.
 fn has_span(msg: &str) -> bool {
     let l = msg.to_lowercase();
-    l.contains("-->") || l.contains("^") || l.contains("line ") || l.contains("column ")
-        || l.contains("offset") || l.contains("position")
+    l.contains("-->")
+        || l.contains("^")
+        || l.contains("line ")
+        || l.contains("column ")
+        || l.contains("offset")
+        || l.contains("position")
 }
 
 fn main() {
@@ -116,8 +129,14 @@ fn main() {
     // null + List. The first attempt left it unset, and the case "did not
     // error" -- correctly, because `null + anything` is null in Cypher. A
     // probe whose fixture makes the fault untriggerable measures nothing.
-    store.set_node_property("default", n, "name",
-                            samyama::graph::PropertyValue::String("a".into())).unwrap();
+    store
+        .set_node_property(
+            "default",
+            n,
+            "name",
+            samyama::graph::PropertyValue::String("a".into()),
+        )
+        .unwrap();
 
     let engine = QueryEngine::new();
     let mut rows = Vec::new();
@@ -143,7 +162,8 @@ fn main() {
     let errored: Vec<_> = rows.iter().filter(|r| r["errored"] == true).collect();
     let with_code = errored.iter().filter(|r| r["has_code"] == true).count();
     let with_span = errored.iter().filter(|r| r["has_span"] == true).count();
-    let did_not_error: Vec<_> = rows.iter()
+    let did_not_error: Vec<_> = rows
+        .iter()
         .filter(|r| r["errored"] == false)
         .map(|r| r["query"].as_str().unwrap_or("").to_string())
         .collect();
@@ -196,13 +216,21 @@ fn main() {
     });
     let args: Vec<String> = std::env::args().collect();
     let text = serde_json::to_string_pretty(&json).unwrap();
-    match args.iter().position(|a| a == "--json").and_then(|i| args.get(i + 1)) {
+    match args
+        .iter()
+        .position(|a| a == "--json")
+        .and_then(|i| args.get(i + 1))
+    {
         Some(p) => std::fs::write(p, &text).unwrap(),
         None => println!("{text}"),
     }
     eprintln!(
         "{} errored; {} carry a code, {} a span; {} distinct codes over {} fault classes \
          (LANG-12 wants 100% of both, and one code per class)",
-        errored.len(), with_code, with_span, distinct_codes.len(), class_codes.len()
+        errored.len(),
+        with_code,
+        with_span,
+        distinct_codes.len(),
+        class_codes.len()
     );
 }

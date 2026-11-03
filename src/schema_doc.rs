@@ -140,7 +140,10 @@ where
 
         let src = v.get("src").and_then(|s| s.as_u64());
         let tgt = v.get("tgt").and_then(|s| s.as_u64());
-        match (src.and_then(|s| node_label.get(&s)), tgt.and_then(|t| node_label.get(&t))) {
+        match (
+            src.and_then(|s| node_label.get(&s)),
+            tgt.and_then(|t| node_label.get(&t)),
+        ) {
             (Some(s), Some(t)) => {
                 let key = (
                     label_ids[*s as usize].clone(),
@@ -245,4 +248,6 @@ pub fn derive_from_path(path: &std::path::Path) -> Result<Schema, String> {
     })
 }
 
-#[cfg(test)] #[path = "schema_doc_cov_tests.rs"] mod cov_tests;
+#[cfg(test)]
+#[path = "schema_doc_cov_tests.rs"]
+mod cov_tests;

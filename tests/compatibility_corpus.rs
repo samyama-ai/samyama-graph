@@ -63,8 +63,12 @@ const ACCEPTED_FLOOR: usize = 54;
 fn corpus() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("benchmarks/compat/neo4j-idioms.cypher");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("the corpus must be in the repository: {}: {e}", path.display()));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "the corpus must be in the repository: {}: {e}",
+            path.display()
+        )
+    });
     split_queries(&text)
 }
 
@@ -100,7 +104,12 @@ fn no_query_that_used_to_be_accepted_is_refused_now() {
             if known {
                 None
             } else {
-                Some(format!("{}\n      -> {} {}", v.query, r.short_code(), r.detail))
+                Some(format!(
+                    "{}\n      -> {} {}",
+                    v.query,
+                    r.short_code(),
+                    r.detail
+                ))
             }
         })
         .collect();

@@ -38,7 +38,10 @@ fn every_parent_operator_implements_next_mut() {
     let mut blocks: Vec<(String, usize)> = Vec::new();
     for (offset, _) in src.match_indices("impl PhysicalOperator for ") {
         let rest = &src[offset + "impl PhysicalOperator for ".len()..];
-        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
         blocks.push((name, offset));
     }
     assert!(
@@ -67,7 +70,10 @@ fn every_parent_operator_implements_next_mut() {
 
 fn run(cypher: &str) -> Result<usize, String> {
     let mut store = GraphStore::new();
-    for setup in ["CREATE (a:A {n: 1}), (b:B {n: 2})", "CREATE (:C)-[:R]->(:D)"] {
+    for setup in [
+        "CREATE (a:A {n: 1}), (b:B {n: 2})",
+        "CREATE (:C)-[:R]->(:D)",
+    ] {
         let q = parse_query(setup).expect("setup parses");
         MutQueryExecutor::new(&mut store, "default".to_string())
             .execute(&q)
@@ -118,7 +124,11 @@ fn reads_are_unaffected() {
         ("MATCH (a)-[*1..2]->(b) RETURN a, b", 1),
     ] {
         let p = parse_query(cypher).expect("parses");
-        let rows = QueryExecutor::new(&store).execute(&p).expect("runs").records.len();
+        let rows = QueryExecutor::new(&store)
+            .execute(&p)
+            .expect("runs")
+            .records
+            .len();
         assert_eq!(rows, want, "{cypher}");
     }
 }

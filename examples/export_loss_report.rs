@@ -102,6 +102,9 @@ fn main() {
 }
 
 fn json_string(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ");
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', " ");
     format!("\"{escaped}\"")
 }

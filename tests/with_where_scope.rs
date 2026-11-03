@@ -47,9 +47,18 @@ fn one_edge() -> GraphStore {
 #[test]
 fn a_where_may_name_variables_the_with_drops() {
     let store = GraphStore::new();
-    assert_eq!(rows(&store, "UNWIND [1,2,3] AS i WITH i*10 AS x WHERE i > 1 RETURN x"), 2);
     assert_eq!(
-        rows(&store, "UNWIND [0,1] AS i UNWIND [0,1] AS j WITH i AS a, j AS b WHERE i <> j RETURN a, b"),
+        rows(
+            &store,
+            "UNWIND [1,2,3] AS i WITH i*10 AS x WHERE i > 1 RETURN x"
+        ),
+        2
+    );
+    assert_eq!(
+        rows(
+            &store,
+            "UNWIND [0,1] AS i UNWIND [0,1] AS j WITH i AS a, j AS b WHERE i <> j RETURN a, b"
+        ),
         2
     );
 }
@@ -59,10 +68,25 @@ fn a_where_may_name_variables_the_with_drops() {
 #[test]
 fn a_where_naming_an_alias_still_runs_after_the_barrier() {
     let store = GraphStore::new();
-    assert_eq!(rows(&store, "UNWIND [1,2,3] AS i WITH i*10 AS x WHERE x > 10 RETURN x"), 2);
-    assert_eq!(rows(&store, "UNWIND [1,2,3] AS i WITH count(*) AS c WHERE c > 1 RETURN c"), 1);
     assert_eq!(
-        rows(&store, "UNWIND [1,1,2,2,3] AS i WITH i, count(*) AS c WHERE c > 1 RETURN i"),
+        rows(
+            &store,
+            "UNWIND [1,2,3] AS i WITH i*10 AS x WHERE x > 10 RETURN x"
+        ),
+        2
+    );
+    assert_eq!(
+        rows(
+            &store,
+            "UNWIND [1,2,3] AS i WITH count(*) AS c WHERE c > 1 RETURN c"
+        ),
+        1
+    );
+    assert_eq!(
+        rows(
+            &store,
+            "UNWIND [1,1,2,2,3] AS i WITH i, count(*) AS c WHERE c > 1 RETURN i"
+        ),
         2
     );
 }
@@ -72,7 +96,10 @@ fn a_where_naming_an_alias_still_runs_after_the_barrier() {
 fn a_mixed_predicate_is_split_by_conjunct() {
     let store = GraphStore::new();
     assert_eq!(
-        rows(&store, "UNWIND [1,2,3] AS i WITH i*10 AS x WHERE i > 1 AND x < 30 RETURN x"),
+        rows(
+            &store,
+            "UNWIND [1,2,3] AS i WITH i*10 AS x WHERE i > 1 AND x < 30 RETURN x"
+        ),
         1
     );
 }
@@ -82,7 +109,9 @@ fn a_mixed_predicate_is_split_by_conjunct() {
 #[test]
 fn ordering_an_entity_yields_null() {
     let store = one_edge();
-    for expr in ["n < 1", "n < ''", "r < 1", "p < 1", "n < n", "1 > n", "p >= r"] {
+    for expr in [
+        "n < 1", "n < ''", "r < 1", "p < 1", "n < n", "1 > n", "p >= r",
+    ] {
         let cypher = format!("MATCH p = (n)-[r]->() RETURN {expr} AS x");
         let q = parse_query(&cypher).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
         let batch = QueryExecutor::new(&store)

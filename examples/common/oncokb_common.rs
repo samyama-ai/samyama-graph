@@ -110,7 +110,11 @@ pub fn parse_actionable_variant(v: &Value) -> Option<OncoKBActionableVariant> {
     let drugs: Vec<String> = v
         .get("drugs")
         .and_then(|d| d.as_array())
-        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     Some(OncoKBActionableVariant {
         hugo_symbol,
@@ -162,8 +166,18 @@ pub fn upsert_gene(
     set_bool(graph, id, "tsg", row.tsg);
     set_str(graph, id, "grch38_isoform", &row.grch38_isoform);
     set_str(graph, id, "grch38_refseq", &row.grch38_refseq);
-    set_str(graph, id, "highest_sensitive_level", &row.highest_sensitive_level);
-    set_str(graph, id, "highest_resistance_level", &row.highest_resistance_level);
+    set_str(
+        graph,
+        id,
+        "highest_sensitive_level",
+        &row.highest_sensitive_level,
+    );
+    set_str(
+        graph,
+        id,
+        "highest_resistance_level",
+        &row.highest_resistance_level,
+    );
     sym_to_node.insert(row.hugo_symbol.clone(), id);
     (id, true)
 }
@@ -179,7 +193,9 @@ pub fn load_curated_genes_json(
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let arr: Value = serde_json::from_reader(reader)?;
-    let entries = arr.as_array().ok_or("OncoKB genes JSON: top-level must be an array")?;
+    let entries = arr
+        .as_array()
+        .ok_or("OncoKB genes JSON: top-level must be an array")?;
     let mut sym_to_node: HashMap<String, NodeId> = HashMap::with_capacity(1_000);
     let mut result = LoadResult::default();
 
@@ -215,7 +231,9 @@ pub fn load_actionable_variants_json(
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let arr: Value = serde_json::from_reader(reader)?;
-    let entries = arr.as_array().ok_or("OncoKB variants JSON: top-level must be an array")?;
+    let entries = arr
+        .as_array()
+        .ok_or("OncoKB variants JSON: top-level must be an array")?;
     let mut variant_to_node: HashMap<(String, String), NodeId> = HashMap::new();
     let mut drug_to_node: HashMap<String, NodeId> = HashMap::new();
     let mut result = LoadResult::default();
@@ -253,7 +271,10 @@ pub fn load_actionable_variants_json(
                 result.drug_nodes += 1;
                 id
             };
-            if graph.create_edge(vid, did, "HAS_THERAPEUTIC_IMPLICATION").is_ok() {
+            if graph
+                .create_edge(vid, did, "HAS_THERAPEUTIC_IMPLICATION")
+                .is_ok()
+            {
                 result.therapeutic_edges += 1;
             }
         }
@@ -393,7 +414,7 @@ mod tests {
         hgnc_idx.insert("BRAF".to_string(), braf_hgnc);
 
         let res = load_curated_genes_json(&mut g, &path, Some(&hgnc_idx)).unwrap();
-        assert_eq!(res.gene_nodes, 2);    // BRAF + TP53; empty-symbol skipped
+        assert_eq!(res.gene_nodes, 2); // BRAF + TP53; empty-symbol skipped
         assert_eq!(res.same_as_edges, 1); // BRAF only
     }
 
@@ -435,13 +456,20 @@ mod tests {
 
     fn tempdir() -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("oncokb_test_{}_{}", std::process::id(), rand_suffix()));
+        p.push(format!(
+            "oncokb_test_{}_{}",
+            std::process::id(),
+            rand_suffix()
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
     fn rand_suffix() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
         format!("{}", nanos)
     }
 }

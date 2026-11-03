@@ -137,7 +137,11 @@ pub fn collect_result_nodes(batch: &RecordBatch) -> Vec<NodeId> {
 }
 
 /// Detect declared-enrichable, missing properties on the given nodes.
-pub fn detect_gaps(config: &EnrichConfig, store: &GraphStore, node_ids: &[NodeId]) -> Vec<GapEvent> {
+pub fn detect_gaps(
+    config: &EnrichConfig,
+    store: &GraphStore,
+    node_ids: &[NodeId],
+) -> Vec<GapEvent> {
     let mut seen: HashSet<(u64, String, String)> = HashSet::new();
     let mut gaps = Vec::new();
     for &id in node_ids {
@@ -271,7 +275,13 @@ fn parse_list(answer: &str) -> Vec<String> {
         .map(|l| {
             l.trim()
                 .trim_start_matches(|c: char| {
-                    c == '-' || c == '*' || c == '•' || c.is_ascii_digit() || c == '.' || c == ')' || c == ' '
+                    c == '-'
+                        || c == '*'
+                        || c == '•'
+                        || c.is_ascii_digit()
+                        || c == '.'
+                        || c == ')'
+                        || c == ' '
                 })
                 .trim()
                 .to_string()
@@ -338,7 +348,10 @@ impl EnrichmentWorker {
 // ─────────────────────────── quarantine + verification (#700/#701/#702)
 
 fn read_enrichment_map(store: &GraphStore, node_id: NodeId) -> HashMap<String, PropertyValue> {
-    match store.node_properties_merged(node_id).get(ENRICHMENT_PROPERTY) {
+    match store
+        .node_properties_merged(node_id)
+        .get(ENRICHMENT_PROPERTY)
+    {
         Some(PropertyValue::Map(m)) => m.clone(),
         _ => HashMap::new(),
     }
@@ -351,34 +364,64 @@ pub fn quarantine(store: &mut GraphStore, out: &Outcome) -> Result<(), String> {
     let mut entry: HashMap<String, PropertyValue> = HashMap::new();
     entry.insert("value".into(), PropertyValue::String(out.value.clone()));
     entry.insert("source".into(), PropertyValue::String("llm".into()));
-    entry.insert("status".into(), PropertyValue::String("pending_verification".into()));
+    entry.insert(
+        "status".into(),
+        PropertyValue::String("pending_verification".into()),
+    );
     entry.insert("confidence".into(), PropertyValue::Float(out.confidence));
     entry.insert("method".into(), PropertyValue::String(out.method.clone()));
-    entry.insert("prompt_hash".into(), PropertyValue::String(out.prompt_hash.clone()));
+    entry.insert(
+        "prompt_hash".into(),
+        PropertyValue::String(out.prompt_hash.clone()),
+    );
     if let (Some(targets), Some(mat)) = (&out.targets, &out.materialize) {
-        let arr: Vec<PropertyValue> = targets.iter().map(|t| PropertyValue::String(t.clone())).collect();
+        let arr: Vec<PropertyValue> = targets
+            .iter()
+            .map(|t| PropertyValue::String(t.clone()))
+            .collect();
         entry.insert("kind".into(), PropertyValue::String("relationship".into()));
         entry.insert("targets".into(), PropertyValue::Array(arr));
-        entry.insert("edge_type".into(), PropertyValue::String(mat.edge_type.clone()));
-        entry.insert("target_label".into(), PropertyValue::String(mat.target_label.clone()));
-        entry.insert("target_key".into(), PropertyValue::String(mat.target_key.clone()));
+        entry.insert(
+            "edge_type".into(),
+            PropertyValue::String(mat.edge_type.clone()),
+        );
+        entry.insert(
+            "target_label".into(),
+            PropertyValue::String(mat.target_label.clone()),
+        );
+        entry.insert(
+            "target_key".into(),
+            PropertyValue::String(mat.target_key.clone()),
+        );
     }
     root.insert(out.property.clone(), PropertyValue::Map(entry));
     store
-        .set_node_property(TENANT, node_id, ENRICHMENT_PROPERTY, PropertyValue::Map(root))
+        .set_node_property(
+            TENANT,
+            node_id,
+            ENRICHMENT_PROPERTY,
+            PropertyValue::Map(root),
+        )
         .map_err(|e| format!("{:?}", e))
 }
 
 /// Materialize `(node)-[:edge]->(:target_label {target_key: name})` for each name, MERGE-ing
 /// target nodes by `target_key`; tags new targets `source:"LLM-derived"`. Returns edges created.
-fn materialize_edges(store: &mut GraphStore, node_id: NodeId, targets: &[String], mat: &Materialize) -> usize {
+fn materialize_edges(
+    store: &mut GraphStore,
+    node_id: NodeId,
+    targets: &[String],
+    mat: &Materialize,
+) -> usize {
     let tlabel = Label::new(mat.target_label.clone());
     // Existing target name -> id (immutable phase).
     let mut existing: HashMap<String, NodeId> = HashMap::new();
     if let Some(ids) = store.nodes_with_label(&tlabel) {
         let ids: Vec<NodeId> = ids.iter().copied().collect();
         for tid in ids {
-            if let Some(PropertyValue::String(nm)) = store.node_properties_merged(tid).get(&mat.target_key) {
+            if let Some(PropertyValue::String(nm)) =
+                store.node_properties_merged(tid).get(&mat.target_key)
+            {
                 existing.insert(nm.clone(), tid);
             }
         }
@@ -389,13 +432,20 @@ fn materialize_edges(store: &mut GraphStore, node_id: NodeId, targets: &[String]
             id
         } else {
             let id = store.create_node(tlabel.clone());
-            let _ = store.set_node_property(TENANT, id, mat.target_key.clone(), PropertyValue::String(name.clone()));
+            let _ = store.set_node_property(
+                TENANT,
+                id,
+                mat.target_key.clone(),
+                PropertyValue::String(name.clone()),
+            );
             // Was `source: "LLM-derived"` -- an unreserved property name that
             // collides with any graph that already has a `source`, and that
             // nothing read. The reserved marker says the same thing where one
             // predicate can find it, and says the node was created whole.
             let _ = store.set_node_property(
-                TENANT, id, GENERATED_PROPERTY,
+                TENANT,
+                id,
+                GENERATED_PROPERTY,
                 generated_map(true, vec![mat.target_key.clone()]),
             );
             existing.insert(name.clone(), id);
@@ -413,7 +463,10 @@ fn materialize_edges(store: &mut GraphStore, node_id: NodeId, targets: &[String]
 }
 
 fn read_generated_map(store: &GraphStore, node_id: NodeId) -> HashMap<String, PropertyValue> {
-    match store.node_properties_merged(node_id).get(GENERATED_PROPERTY) {
+    match store
+        .node_properties_merged(node_id)
+        .get(GENERATED_PROPERTY)
+    {
         Some(PropertyValue::Map(m)) => m.clone(),
         _ => HashMap::new(),
     }
@@ -436,14 +489,25 @@ fn mark_generated_property(store: &mut GraphStore, node_id: NodeId, property: &s
     let mut names: Vec<String> = match existing.get("properties") {
         Some(PropertyValue::Array(a)) => a
             .iter()
-            .filter_map(|v| if let PropertyValue::String(s) = v { Some(s.clone()) } else { None })
+            .filter_map(|v| {
+                if let PropertyValue::String(s) = v {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            })
             .collect(),
         _ => Vec::new(),
     };
     if !names.iter().any(|n| n == property) {
         names.push(property.to_string());
     }
-    let _ = store.set_node_property(TENANT, node_id, GENERATED_PROPERTY, generated_map(created, names));
+    let _ = store.set_node_property(
+        TENANT,
+        node_id,
+        GENERATED_PROPERTY,
+        generated_map(created, names),
+    );
 }
 
 fn is_generated_whole(store: &GraphStore, node_id: NodeId) -> bool {
@@ -496,7 +560,13 @@ pub fn retract(store: &mut GraphStore, node_ids: &[NodeId]) -> RetractReport {
         let names: Vec<String> = match marker.get("properties") {
             Some(PropertyValue::Array(a)) => a
                 .iter()
-                .filter_map(|v| if let PropertyValue::String(s) = v { Some(s.clone()) } else { None })
+                .filter_map(|v| {
+                    if let PropertyValue::String(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
                 .collect(),
             _ => Vec::new(),
         };
@@ -531,12 +601,16 @@ pub fn retract(store: &mut GraphStore, node_ids: &[NodeId]) -> RetractReport {
         for (_property, entry) in root.iter_mut() {
             if let PropertyValue::Map(e) = entry {
                 if matches!(e.get("status"), Some(PropertyValue::String(s)) if s == "verified") {
-                    e.insert("status".into(), PropertyValue::String("pending_verification".into()));
+                    e.insert(
+                        "status".into(),
+                        PropertyValue::String("pending_verification".into()),
+                    );
                 }
             }
         }
         if !root.is_empty() {
-            let _ = store.set_node_property(TENANT, id, ENRICHMENT_PROPERTY, PropertyValue::Map(root));
+            let _ =
+                store.set_node_property(TENANT, id, ENRICHMENT_PROPERTY, PropertyValue::Map(root));
         }
         store.remove_node_property(id, GENERATED_PROPERTY);
     }
@@ -572,7 +646,9 @@ pub fn verify(config: &EnrichConfig, store: &mut GraphStore, node_ids: &[NodeId]
         let mut scalar_promotions: Vec<(String, String)> = Vec::new();
         let mut rel_promotions: Vec<(String, Vec<String>, Materialize)> = Vec::new();
         for (property, entry) in root.iter() {
-            let PropertyValue::Map(e) = entry else { continue };
+            let PropertyValue::Map(e) = entry else {
+                continue;
+            };
             let status = match e.get("status") {
                 Some(PropertyValue::String(s)) => s.clone(),
                 _ => continue,
@@ -592,27 +668,50 @@ pub fn verify(config: &EnrichConfig, store: &mut GraphStore, node_ids: &[NodeId]
                 rep.still_pending += 1;
                 continue;
             }
-            let is_rel = matches!(e.get("kind"), Some(PropertyValue::String(k)) if k == "relationship");
+            let is_rel =
+                matches!(e.get("kind"), Some(PropertyValue::String(k)) if k == "relationship");
             if is_rel {
-                if let (Some(PropertyValue::Array(arr)), Some(PropertyValue::String(edge)),
-                        Some(PropertyValue::String(tl)), Some(PropertyValue::String(tk))) =
-                    (e.get("targets"), e.get("edge_type"), e.get("target_label"), e.get("target_key"))
-                {
+                if let (
+                    Some(PropertyValue::Array(arr)),
+                    Some(PropertyValue::String(edge)),
+                    Some(PropertyValue::String(tl)),
+                    Some(PropertyValue::String(tk)),
+                ) = (
+                    e.get("targets"),
+                    e.get("edge_type"),
+                    e.get("target_label"),
+                    e.get("target_key"),
+                ) {
                     let targets: Vec<String> = arr
                         .iter()
-                        .filter_map(|v| if let PropertyValue::String(s) = v { Some(s.clone()) } else { None })
+                        .filter_map(|v| {
+                            if let PropertyValue::String(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
                         .collect();
-                    rel_promotions.push((property.clone(), targets, Materialize {
-                        edge_type: edge.clone(), target_label: tl.clone(), target_key: tk.clone(),
-                        vocabulary: None,
-                    }));
+                    rel_promotions.push((
+                        property.clone(),
+                        targets,
+                        Materialize {
+                            edge_type: edge.clone(),
+                            target_label: tl.clone(),
+                            target_key: tk.clone(),
+                            vocabulary: None,
+                        },
+                    ));
                 }
             } else if let Some(PropertyValue::String(v)) = e.get("value") {
                 scalar_promotions.push((property.clone(), v.clone()));
             }
         }
         for (property, value) in scalar_promotions {
-            if store.set_node_property(TENANT, id, property.clone(), PropertyValue::String(value)).is_ok() {
+            if store
+                .set_node_property(TENANT, id, property.clone(), PropertyValue::String(value))
+                .is_ok()
+            {
                 if let Some(PropertyValue::Map(e)) = root.get_mut(&property) {
                     e.insert("status".into(), PropertyValue::String("verified".into()));
                 }
@@ -659,7 +758,9 @@ pub fn global_config() -> &'static std::sync::RwLock<EnrichConfig> {
     G.get_or_init(|| std::sync::RwLock::new(EnrichConfig::default()))
 }
 
-#[cfg(test)] #[path = "enrich_cov_tests.rs"] mod cov_tests;
+#[cfg(test)]
+#[path = "enrich_cov_tests.rs"]
+mod cov_tests;
 
 #[cfg(test)]
 mod tests {
@@ -677,25 +778,45 @@ mod tests {
     #[test]
     fn list_prompt_injects_org_vocabulary_when_set() {
         let vocab = serde_json::json!({ "Supply Temperature": ["Evaporator Water side fouling"] });
-        let ctx = vec![("name".to_string(), "Chiller 7 Supply Temperature".to_string())];
+        let ctx = vec![(
+            "name".to_string(),
+            "Chiller 7 Supply Temperature".to_string(),
+        )];
         let p = build_list_prompt("Sensor", &mat(Some(vocab)), &ctx);
         // tier 1: org taxonomy is presented with its exact strings
-        assert!(p.contains("approved taxonomy"), "tiered vocab instruction missing:\n{p}");
-        assert!(p.contains("Evaporator Water side fouling"), "org vocab strings missing:\n{p}");
+        assert!(
+            p.contains("approved taxonomy"),
+            "tiered vocab instruction missing:\n{p}"
+        );
+        assert!(
+            p.contains("Evaporator Water side fouling"),
+            "org vocab strings missing:\n{p}"
+        );
         // tier 2: LLM fallback where the taxonomy is silent
-        assert!(p.contains("fall back to general domain knowledge"), "LLM-fallback tier missing:\n{p}");
+        assert!(
+            p.contains("fall back to general domain knowledge"),
+            "LLM-fallback tier missing:\n{p}"
+        );
     }
 
     #[test]
     fn list_prompt_omits_vocabulary_block_when_none() {
-        let ctx = vec![("name".to_string(), "Chiller 7 Supply Temperature".to_string())];
+        let ctx = vec![(
+            "name".to_string(),
+            "Chiller 7 Supply Temperature".to_string(),
+        )];
         let p = build_list_prompt("Sensor", &mat(None), &ctx);
-        assert!(!p.contains("approved taxonomy"), "vocab block should be absent when None:\n{p}");
+        assert!(
+            !p.contains("approved taxonomy"),
+            "vocab block should be absent when None:\n{p}"
+        );
     }
 
     #[test]
     fn parse_list_strips_bullets_and_drops_unknown() {
-        let got = parse_list("- Evaporator Water side fouling\n2) Condenser Water side fouling\nUNKNOWN\n\n");
+        let got = parse_list(
+            "- Evaporator Water side fouling\n2) Condenser Water side fouling\nUNKNOWN\n\n",
+        );
         assert_eq!(
             got,
             vec![

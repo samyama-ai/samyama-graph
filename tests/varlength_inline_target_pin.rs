@@ -29,7 +29,15 @@ fn rows(store: &GraphStore, cypher: &str) -> Vec<String> {
     let mut got: Vec<String> = out
         .records
         .iter()
-        .map(|r| format!("{:?}", out.columns.iter().map(|c| r.get(c).cloned()).collect::<Vec<_>>()))
+        .map(|r| {
+            format!(
+                "{:?}",
+                out.columns
+                    .iter()
+                    .map(|c| r.get(c).cloned())
+                    .collect::<Vec<_>>()
+            )
+        })
         .collect();
     got.sort();
     got
@@ -64,17 +72,25 @@ fn people(indexed: bool) -> GraphStore {
     let ids: Vec<NodeId> = (0..40)
         .map(|i| {
             let n = store.create_node("P");
-            store.set_node_property("default", n, "id", i as i64).unwrap();
+            store
+                .set_node_property("default", n, "id", i as i64)
+                .unwrap();
             n
         })
         .collect();
     for i in 0..40 {
-        store.create_edge(ids[i], ids[(i + 1) % 40], "KNOWS").unwrap();
-        store.create_edge(ids[i], ids[(i * 7 + 3) % 40], "KNOWS").unwrap();
+        store
+            .create_edge(ids[i], ids[(i + 1) % 40], "KNOWS")
+            .unwrap();
+        store
+            .create_edge(ids[i], ids[(i * 7 + 3) % 40], "KNOWS")
+            .unwrap();
     }
     if indexed {
         let q = parse_query("CREATE INDEX ON :P(id)").unwrap();
-        MutQueryExecutor::new(&mut store, "default".to_string()).execute(&q).unwrap();
+        MutQueryExecutor::new(&mut store, "default".to_string())
+            .execute(&q)
+            .unwrap();
     }
     store
 }
@@ -114,7 +130,10 @@ fn an_inline_target_property_pins_as_where_does() {
     let store = people(true);
     for shape in INLINE {
         let w = where_form(shape);
-        assert!(plan(&store, &w).contains("target pinned"), "the WHERE form should pin: `{w}`");
+        assert!(
+            plan(&store, &w).contains("target pinned"),
+            "the WHERE form should pin: `{w}`"
+        );
         assert!(
             plan(&store, shape).contains("target pinned"),
             "`{shape}` does not pin its target:\n{}",
@@ -129,12 +148,24 @@ fn pinning_an_inline_target_changes_no_answer() {
     let walked = people(false);
     for shape in INLINE.iter().chain(COUNTED) {
         let expected = rows(&walked, shape);
-        assert!(!plan(&walked, shape).contains("target pinned"), "an unindexed store cannot pin");
+        assert!(
+            !plan(&walked, shape).contains("target pinned"),
+            "an unindexed store cannot pin"
+        );
         let reached = !expected.is_empty()
-            && (!COUNTED.contains(shape) || expected != vec!["[Some(Property(Integer(0)))]".to_string()]);
+            && (!COUNTED.contains(shape)
+                || expected != vec!["[Some(Property(Integer(0)))]".to_string()]);
         assert!(reached, "`{shape}` should reach its target: {expected:?}");
-        assert_eq!(rows(&indexed, shape), expected, "`{shape}` answers differently on the indexed store");
-        assert_eq!(rows(&indexed, &where_form(shape)), expected, "the WHERE form of `{shape}` differs");
+        assert_eq!(
+            rows(&indexed, shape),
+            expected,
+            "`{shape}` answers differently on the indexed store"
+        );
+        assert_eq!(
+            rows(&indexed, &where_form(shape)),
+            expected,
+            "the WHERE form of `{shape}` differs"
+        );
     }
 }
 
@@ -146,13 +177,22 @@ fn a_counted_target_is_not_pinned_and_counts_every_path() {
     let walked = people(false);
     for shape in COUNTED {
         for form in [shape.to_string(), where_form(shape)] {
-            assert!(!plan(&indexed, &form).contains("target pinned"), "`{form}` counts paths and must not pin");
+            assert!(
+                !plan(&indexed, &form).contains("target pinned"),
+                "`{form}` counts paths and must not pin"
+            );
         }
     }
     let undirected = COUNTED[0];
-    assert_eq!(rows(&walked, undirected), vec!["[Some(Property(Integer(2)))]".to_string()]);
+    assert_eq!(
+        rows(&walked, undirected),
+        vec!["[Some(Property(Integer(2)))]".to_string()]
+    );
     assert_eq!(rows(&indexed, undirected), rows(&walked, undirected));
-    assert_eq!(rows(&indexed, &where_form(undirected)), rows(&walked, undirected));
+    assert_eq!(
+        rows(&indexed, &where_form(undirected)),
+        rows(&walked, undirected)
+    );
 }
 
 /// Two nodes match: that is a filter, not a pin.
@@ -160,7 +200,12 @@ fn a_counted_target_is_not_pinned_and_counts_every_path() {
 fn an_inline_property_matching_two_nodes_does_not_pin() {
     let mut store = people(true);
     let extra = store.create_node("P");
-    store.set_node_property("default", extra, "id", 7i64).unwrap();
+    store
+        .set_node_property("default", extra, "id", 7i64)
+        .unwrap();
     let shape = "MATCH (p:P {id: 1})-[:KNOWS*1..3]-(q:P {id: 7}) RETURN count(q) AS n";
-    assert!(!plan(&store, shape).contains("target pinned"), "two nodes have id 7, so nothing is pinned");
+    assert!(
+        !plan(&store, shape).contains("target pinned"),
+        "two nodes have id 7, so nothing is pinned"
+    );
 }

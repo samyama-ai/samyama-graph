@@ -45,16 +45,34 @@ fn import(turtle: &str) -> (GraphStore, samyama::rdf::RdfImportReport) {
 fn skos_predicates_are_counted_as_skipped() {
     let (graph, report) = import(SKOS);
     assert_eq!(report.triples_read, 10);
-    assert_eq!(report.predicates_skipped.get("http://www.w3.org/2004/02/skos/core#prefLabel"), Some(&3));
-    assert_eq!(report.predicates_skipped.get("http://www.w3.org/2004/02/skos/core#broader"), Some(&2));
-    assert_eq!(report.predicates_skipped.len(), 2, "{:?}", report.predicates_skipped);
+    assert_eq!(
+        report
+            .predicates_skipped
+            .get("http://www.w3.org/2004/02/skos/core#prefLabel"),
+        Some(&3)
+    );
+    assert_eq!(
+        report
+            .predicates_skipped
+            .get("http://www.w3.org/2004/02/skos/core#broader"),
+        Some(&2)
+    );
+    assert_eq!(
+        report.predicates_skipped.len(),
+        2,
+        "{:?}",
+        report.predicates_skipped
+    );
     assert!(!report.lossless());
 
     // What did arrive, counted by the import and matching the graph.
     assert_eq!(report.nodes_created, 3);
     assert_eq!(graph.node_count(), 3);
     assert_eq!(report.labels_applied, 3);
-    assert_eq!(report.edges_created, 0, "skos:broader is not mapped to an edge yet (#1910)");
+    assert_eq!(
+        report.edges_created, 0,
+        "skos:broader is not mapped to an edge yet (#1910)"
+    );
     assert_eq!(graph.edge_count(), 0);
     assert_eq!(report.properties_set, 2);
 }
@@ -62,8 +80,14 @@ fn skos_predicates_are_counted_as_skipped() {
 #[test]
 fn a_language_tag_and_an_unread_datatype_are_counted() {
     let (_, report) = import(SKOS);
-    assert_eq!(report.language_tags_dropped, 1, "\"Informatik\"@de lost its tag");
-    assert_eq!(report.literals_typed_as_string, 1, "xsd:date arrived as a string");
+    assert_eq!(
+        report.language_tags_dropped, 1,
+        "\"Informatik\"@de lost its tag"
+    );
+    assert_eq!(
+        report.literals_typed_as_string, 1,
+        "xsd:date arrived as a string"
+    );
 }
 
 #[test]

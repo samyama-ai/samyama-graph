@@ -5,11 +5,11 @@
 //! would pass every one of them.
 
 use samyama::graph::{GraphStore, Label, PropertyValue};
-use samyama::snapshot::verify::{
-    build_catalog, canonical_hash, verify, CatalogEntry, FailureClass, QueryCatalog,
-    QuerySpec, CATALOG_FORMAT,
-};
 use samyama::query::QueryEngine;
+use samyama::snapshot::verify::{
+    build_catalog, canonical_hash, verify, CatalogEntry, FailureClass, QueryCatalog, QuerySpec,
+    CATALOG_FORMAT,
+};
 
 fn seeded() -> GraphStore {
     let mut store = GraphStore::new();
@@ -42,13 +42,21 @@ fn queries() -> Vec<QuerySpec> {
     vec![
         spec("q_nodes", "MATCH (t:Thing) RETURN count(t) AS n"),
         spec("q_names", "MATCH (t:Thing) RETURN t.name ORDER BY t.name"),
-        spec("q_edges", "MATCH (:Thing)-[:LINKS]->(:Thing) RETURN count(*) AS n"),
+        spec(
+            "q_edges",
+            "MATCH (:Thing)-[:LINKS]->(:Thing) RETURN count(*) AS n",
+        ),
         // Not an aggregate, on purpose. `count(*)` returns one row whether it
         // counted 11 edges or none, so an aggregate alone cannot tell a missing
         // edge type from a changed value.
-        spec("q_edge_pairs",
-             "MATCH (a:Thing)-[:LINKS]->(b:Thing) RETURN a.id, b.id ORDER BY a.id"),
-        spec("q_props", "MATCH (t:Thing) WHERE t.id < 5 RETURN t.id, t.name"),
+        spec(
+            "q_edge_pairs",
+            "MATCH (a:Thing)-[:LINKS]->(b:Thing) RETURN a.id, b.id ORDER BY a.id",
+        ),
+        spec(
+            "q_props",
+            "MATCH (t:Thing) WHERE t.id < 5 RETURN t.id, t.name",
+        ),
     ]
 }
 
@@ -69,7 +77,10 @@ fn a_sound_round_trip_verifies() {
     assert!(
         report.is_ok(),
         "a clean round trip failed its own catalog: {:?}",
-        report.failed().map(|r| (&r.id, r.failure, &r.detail)).collect::<Vec<_>>()
+        report
+            .failed()
+            .map(|r| (&r.id, r.failure, &r.detail))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -87,7 +98,10 @@ fn a_zero_row_entry_is_refused_at_build_time() {
 
     // Unless it is deliberately an unanswerable item, which KG-08 asks for.
     let ok = build_catalog(&store, &q, &["q_none".to_string()]).expect("unanswerable allowed");
-    assert!(ok.entries.iter().any(|e| e.id == "q_none" && e.unanswerable && e.rows == 0));
+    assert!(ok
+        .entries
+        .iter()
+        .any(|e| e.id == "q_none" && e.unanswerable && e.rows == 0));
 }
 
 /// A run where every entry returns nothing fails whatever the expectations say.
@@ -109,15 +123,22 @@ fn an_all_empty_run_fails_even_when_expectations_match() {
             difficulty: "easy".into(),
             cypher: "MATCH (x:Absent) RETURN x".into(),
             rows: 0,
-            hash: canonical_hash(&QueryEngine::new()
-                .execute("MATCH (x:Absent) RETURN x", &store).unwrap()),
+            hash: canonical_hash(
+                &QueryEngine::new()
+                    .execute("MATCH (x:Absent) RETURN x", &store)
+                    .unwrap(),
+            ),
             unanswerable: true,
             params: vec![],
             work: None,
         }],
     };
     let report = verify(&store, &catalog).expect("verify");
-    assert_eq!(report.failed().count(), 0, "no individual entry should fail");
+    assert_eq!(
+        report.failed().count(),
+        0,
+        "no individual entry should fail"
+    );
     assert!(report.everything_empty);
     assert!(
         !report.is_ok(),
@@ -135,10 +156,14 @@ fn properties_lost_by_a_restore_are_caught_as_values_differing() {
     // Same nodes and edges, different property values -- the shape a restore
     // takes when the row copy is empty and only some properties survive.
     let mut damaged = seeded();
-    let targets: Vec<_> = damaged.get_nodes_by_label(&Label::new("Thing"))
-        .iter().map(|n| n.id).collect();
+    let targets: Vec<_> = damaged
+        .get_nodes_by_label(&Label::new("Thing"))
+        .iter()
+        .map(|n| n.id)
+        .collect();
     for id in targets {
-        damaged.set_node_property("default", id, "name", PropertyValue::String("".into()))
+        damaged
+            .set_node_property("default", id, "name", PropertyValue::String("".into()))
             .expect("blank the name");
     }
 
@@ -171,18 +196,38 @@ fn a_missing_edge_type_is_caught_and_named() {
     // Nodes restored, edges lost.
 
     let report = verify(&damaged, &catalog).expect("verify");
-    assert!(!report.is_ok(), "a graph with no edges passed a catalog that counts them");
+    assert!(
+        !report.is_ok(),
+        "a graph with no edges passed a catalog that counts them"
+    );
     // The aggregate can only report that its single row changed value.
-    let agg = report.results.iter().find(|r| r.id == "q_edges").expect("q_edges");
-    assert_eq!(agg.failure, Some(FailureClass::ValuesDiffer),
-               "count(*) returns one row either way, so this is a value change");
+    let agg = report
+        .results
+        .iter()
+        .find(|r| r.id == "q_edges")
+        .expect("q_edges");
+    assert_eq!(
+        agg.failure,
+        Some(FailureClass::ValuesDiffer),
+        "count(*) returns one row either way, so this is a value change"
+    );
 
     // The non-aggregate is the one that names the shape: 11 rows became none.
-    let pairs = report.results.iter().find(|r| r.id == "q_edge_pairs").expect("q_edge_pairs");
-    assert_eq!(pairs.failure, Some(FailureClass::EmptyResult),
-               "expected an empty result where the edges went missing");
-    assert!(pairs.failure.unwrap().explain().contains("edge type"),
-            "the failure should name a probable class: {}", pairs.failure.unwrap().explain());
+    let pairs = report
+        .results
+        .iter()
+        .find(|r| r.id == "q_edge_pairs")
+        .expect("q_edge_pairs");
+    assert_eq!(
+        pairs.failure,
+        Some(FailureClass::EmptyResult),
+        "expected an empty result where the edges went missing"
+    );
+    assert!(
+        pairs.failure.unwrap().explain().contains("edge type"),
+        "the failure should name a probable class: {}",
+        pairs.failure.unwrap().explain()
+    );
 }
 
 /// Row order must not decide the verdict, or an unordered query reports a
@@ -238,8 +283,14 @@ fn kg08_conformance_names_what_is_missing() {
     let problems = kg08_conformance(&small);
 
     // Five entries, all answerable, all labelled easy with a question.
-    assert!(problems.iter().any(|p| p.contains("at least 30")), "{problems:?}");
-    assert!(problems.iter().any(|p| p.contains("unanswerable")), "{problems:?}");
+    assert!(
+        problems.iter().any(|p| p.contains("at least 30")),
+        "{problems:?}"
+    );
+    assert!(
+        problems.iter().any(|p| p.contains("unanswerable")),
+        "{problems:?}"
+    );
     assert!(
         !problems.iter().any(|p| p.contains("difficulty")),
         "difficulty was labelled but reported missing: {problems:?}"
@@ -250,7 +301,9 @@ fn kg08_conformance_names_what_is_missing() {
     q[0].question = String::new();
     let c = build_catalog(&store, &q, &[]).expect("build");
     assert!(
-        kg08_conformance(&c).iter().any(|p| p.contains("no question text")),
+        kg08_conformance(&c)
+            .iter()
+            .any(|p| p.contains("no question text")),
         "an entry with no question passed"
     );
 
@@ -259,7 +312,9 @@ fn kg08_conformance_names_what_is_missing() {
     q[1].difficulty = "trivial".into();
     let c = build_catalog(&store, &q, &[]).expect("build");
     assert!(
-        kg08_conformance(&c).iter().any(|p| p.contains("difficulty")),
+        kg08_conformance(&c)
+            .iter()
+            .any(|p| p.contains("difficulty")),
         "an unrecognised difficulty passed"
     );
 }
@@ -276,6 +331,14 @@ fn the_catalog_digest_changes_when_the_catalog_does() {
     let b = build_catalog(&store, &q, &[]).expect("build");
     let sa = serde_json::to_string(&a).unwrap();
     let sb = serde_json::to_string(&b).unwrap();
-    assert_ne!(catalog_digest(&sa), catalog_digest(&sb), "editing a query left the digest alone");
-    assert_eq!(catalog_digest(&sa), catalog_digest(&sa), "the digest is not stable");
+    assert_ne!(
+        catalog_digest(&sa),
+        catalog_digest(&sb),
+        "editing a query left the digest alone"
+    );
+    assert_eq!(
+        catalog_digest(&sa),
+        catalog_digest(&sa),
+        "the digest is not stable"
+    );
 }

@@ -65,18 +65,30 @@ fn show(store: &GraphStore, id: &str, q: &str) {
                 let text = format!("{v:?}").replace("\\n", "\n");
                 let mut show = false;
                 for line in text.lines() {
-                    if line.contains("Profile (per operator)") { show = true; }
-                    if show { println!("  {}", line.trim_matches(|c| c == '"')); }
-                    if line.contains("Hottest") { break; }
+                    if line.contains("Profile (per operator)") {
+                        show = true;
+                    }
+                    if show {
+                        println!("  {}", line.trim_matches(|c| c == '"'));
+                    }
+                    if line.contains("Hottest") {
+                        break;
+                    }
                 }
             }
         }
     }
     let t = Instant::now();
-    match parse_query(q).map_err(|e| format!("{e:?}"))
-        .and_then(|p| QueryExecutor::new(store).execute(&p).map_err(|e| format!("{e:?}")))
-    {
-        Ok(b) => println!("\n  answer: {:?} in {}", b.records.first(), format_duration(t.elapsed())),
+    match parse_query(q).map_err(|e| format!("{e:?}")).and_then(|p| {
+        QueryExecutor::new(store)
+            .execute(&p)
+            .map_err(|e| format!("{e:?}"))
+    }) {
+        Ok(b) => println!(
+            "\n  answer: {:?} in {}",
+            b.records.first(),
+            format_duration(t.elapsed())
+        ),
         Err(e) => println!("\n  ERROR after {}: {e}", format_duration(t.elapsed())),
     }
 }
@@ -85,7 +97,9 @@ fn show(store: &GraphStore, id: &str, q: &str) {
 async fn main() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().collect();
     let dir = PathBuf::from(
-        args.iter().position(|a| a == "--data-dir").and_then(|i| args.get(i + 1))
+        args.iter()
+            .position(|a| a == "--data-dir")
+            .and_then(|i| args.get(i + 1))
             .ok_or("--data-dir <extract> required")?,
     );
     let client = EmbeddedClient::new();
@@ -94,11 +108,21 @@ async fn main() -> Result<(), Error> {
         let mut g = client.store_write().await;
         ldbc_common::load_dataset(&mut g, &dir)?
     };
-    eprintln!("Loaded {} nodes, {} edges in {}",
-        format_num(loaded.total_nodes), format_num(loaded.total_edges),
-        format_duration(t.elapsed()));
-    for (label, prop) in &[("Person", "id"), ("Post", "id"), ("Comment", "id"), ("Tag", "id")] {
-        let _ = client.query("default", &format!("CREATE INDEX ON :{label}({prop})")).await;
+    eprintln!(
+        "Loaded {} nodes, {} edges in {}",
+        format_num(loaded.total_nodes),
+        format_num(loaded.total_edges),
+        format_duration(t.elapsed())
+    );
+    for (label, prop) in &[
+        ("Person", "id"),
+        ("Post", "id"),
+        ("Comment", "id"),
+        ("Tag", "id"),
+    ] {
+        let _ = client
+            .query("default", &format!("CREATE INDEX ON :{label}({prop})"))
+            .await;
     }
     let store = client.store_read().await;
     show(&store, "BI-17 Friend Triangles", BI17);

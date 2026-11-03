@@ -21,7 +21,8 @@ use samyama::query::parser::parse_query;
 
 fn store() -> GraphStore {
     let mut store = GraphStore::new();
-    let q = parse_query("CREATE (a:A) CREATE (a)-[:T]->(:B), (a)-[:T]->(:C)").expect("setup parses");
+    let q =
+        parse_query("CREATE (a:A) CREATE (a)-[:T]->(:B), (a)-[:T]->(:C)").expect("setup parses");
     MutQueryExecutor::new(&mut store, "default".to_string())
         .execute(&q)
         .expect("setup runs");
@@ -46,7 +47,10 @@ fn value(store: &GraphStore, cypher: &str) -> Value {
 #[test]
 fn a_comprehension_projecting_nodes_returns_nodes() {
     let s = store();
-    match value(&s, "MATCH p = (n)-->() RETURN [x IN collect(p) | head(nodes(x))] AS r") {
+    match value(
+        &s,
+        "MATCH p = (n)-->() RETURN [x IN collect(p) | head(nodes(x))] AS r",
+    ) {
         Value::List(items) => {
             assert_eq!(items.len(), 2);
             for item in &items {
@@ -67,14 +71,22 @@ fn every_entity_kind_survives_a_comprehension() {
     for (cypher, want) in [
         ("MATCH p = (n)-->() RETURN [x IN collect(p) | x] AS r", 2),
         ("MATCH p = (n)-->() RETURN [x IN nodes(p) | x] AS r", 2),
-        ("MATCH p = (n)-->() RETURN [x IN relationships(p) | x] AS r", 1),
-        ("MATCH p = (n)-->() RETURN [x IN collect(p) | nodes(x)] AS r", 2),
+        (
+            "MATCH p = (n)-->() RETURN [x IN relationships(p) | x] AS r",
+            1,
+        ),
+        (
+            "MATCH p = (n)-->() RETURN [x IN collect(p) | nodes(x)] AS r",
+            2,
+        ),
     ] {
         match value(&s, cypher) {
             Value::List(items) => {
                 assert_eq!(items.len(), want, "{cypher}");
                 assert!(
-                    !items.iter().any(|i| matches!(i, Value::Null | Value::Property(PropertyValue::Null))),
+                    !items
+                        .iter()
+                        .any(|i| matches!(i, Value::Null | Value::Property(PropertyValue::Null))),
                     "{cypher} produced a null"
                 );
             }
@@ -100,7 +112,10 @@ fn a_scalar_comprehension_is_still_a_property_array() {
     // And a projection that genuinely yields nulls still does.
     assert_eq!(
         value(&s, "RETURN [x IN [1, 2] | null] AS r"),
-        Value::Property(PropertyValue::Array(vec![PropertyValue::Null, PropertyValue::Null]))
+        Value::Property(PropertyValue::Array(vec![
+            PropertyValue::Null,
+            PropertyValue::Null
+        ]))
     );
 }
 
@@ -109,8 +124,14 @@ fn a_scalar_comprehension_is_still_a_property_array() {
 fn reduce_folds_a_list_of_entities() {
     let s = store();
     for (cypher, want) in [
-        ("MATCH p = (n)-->() RETURN reduce(acc = 0, x IN nodes(p) | acc + 1) AS r", 2),
-        ("MATCH p = (n)-->() RETURN reduce(acc = 0, x IN relationships(p) | acc + 1) AS r", 1),
+        (
+            "MATCH p = (n)-->() RETURN reduce(acc = 0, x IN nodes(p) | acc + 1) AS r",
+            2,
+        ),
+        (
+            "MATCH p = (n)-->() RETURN reduce(acc = 0, x IN relationships(p) | acc + 1) AS r",
+            1,
+        ),
         // Scalars unchanged.
         ("RETURN reduce(acc = 0, x IN [1, 2, 3] | acc + x) AS r", 6),
         // An empty list still gives the seed, which is the answer this used to

@@ -56,12 +56,24 @@ fn build() -> (GraphStore, samyama::graph::NodeId) {
     for i in 0..ROWS {
         let p = store.create_node("P");
         let k = i * 7919 % ROWS;
-        store.set_node_property("default", p, "i", k as i64).unwrap();
         store
-            .set_node_property("default", p, "s", PropertyValue::String(format!("name-{k:06}")))
+            .set_node_property("default", p, "i", k as i64)
             .unwrap();
         store
-            .set_node_property("default", p, "t", PropertyValue::String(format!("last-{:06}", ROWS - k)))
+            .set_node_property(
+                "default",
+                p,
+                "s",
+                PropertyValue::String(format!("name-{k:06}")),
+            )
+            .unwrap();
+        store
+            .set_node_property(
+                "default",
+                p,
+                "t",
+                PropertyValue::String(format!("last-{:06}", ROWS - k)),
+            )
             .unwrap();
         let e = store.create_edge(hub, p, "KNOWS").unwrap();
         store
@@ -73,7 +85,9 @@ fn build() -> (GraphStore, samyama::graph::NodeId) {
 
 fn run(store: &GraphStore, cypher: &str) -> samyama::query::RecordBatch {
     let q = parse_query(cypher).unwrap_or_else(|e| panic!("`{cypher}`: {e}"));
-    QueryExecutor::new(store).execute(&q).unwrap_or_else(|e| panic!("`{cypher}`: {e}"))
+    QueryExecutor::new(store)
+        .execute(&q)
+        .unwrap_or_else(|e| panic!("`{cypher}`: {e}"))
 }
 
 fn calls_per_row(store: &GraphStore, cypher: &str) -> f64 {
@@ -126,8 +140,14 @@ fn a_string_comparison_copies_neither_operand() {
 
     // The comparison itself costs nothing per row. It cost 2: the property's
     // copy and the literal's.
-    assert!(worst < 0.05, "a string comparison in WHERE still allocates {worst:.2} calls/row");
-    assert!(projected < 0.05, "a string comparison in RETURN still allocates {projected:.2} calls/row");
+    assert!(
+        worst < 0.05,
+        "a string comparison in WHERE still allocates {worst:.2} calls/row"
+    );
+    assert!(
+        projected < 0.05,
+        "a string comparison in RETURN still allocates {projected:.2} calls/row"
+    );
 
     // Left open (#750): a returned string is an owned copy. IS3's shape --
     // two string columns, sorted by both -- costs exactly those two copies and
@@ -136,7 +156,10 @@ fn a_string_comparison_copies_neither_operand() {
     let is3_int = rows("RETURN p.i AS id, p.i AS a, p.i AS b ORDER BY p.i, p.i");
     let returned = is3 - is3_int;
     eprintln!("IS3 shape: {is3:.2} calls/row, {returned:.2} of them the returned strings");
-    assert!((returned - 2.0).abs() < 0.05, "IS3 shape costs {returned:.2} string copies per row, expected the 2 returned");
+    assert!(
+        (returned - 2.0).abs() < 0.05,
+        "IS3 shape costs {returned:.2} string copies per row, expected the 2 returned"
+    );
 
     // Same answers as before. Counted with the data's own ordering: `k` runs
     // over 0..ROWS exactly once, so `name-000000`..`name-000009` are ten rows.
@@ -153,21 +176,43 @@ fn a_string_comparison_copies_neither_operand() {
     assert_eq!(q("p.s = p.t"), 0);
     // Not a string on one side: the ordinary path, with its ordinary answers.
     assert_eq!(q("p.s = 1"), 0);
-    assert_eq!(q("p.s < 1"), 0, "a string does not order against a number: null");
-    assert_eq!(q("p.missing = 'x'"), 0, "an absent property compares as null");
+    assert_eq!(
+        q("p.s < 1"),
+        0,
+        "a string does not order against a number: null"
+    );
+    assert_eq!(
+        q("p.missing = 'x'"),
+        0,
+        "an absent property compares as null"
+    );
     assert_eq!(q("NOT (p.missing <> 'x')"), 0, "and stays null under NOT");
     let out = run(&store, &format!("{MATCH} WHERE p.i = 42 RETURN p.s = 'name-000042' AS a, p.s < 'a' AS b, p.missing = 'x' AS c"));
     let rec = &out.records[0];
-    assert_eq!(rec.get("a").and_then(|v| v.as_property()), Some(&PropertyValue::Boolean(true)));
-    assert_eq!(rec.get("b").and_then(|v| v.as_property()), Some(&PropertyValue::Boolean(false)));
-    assert!(rec.get("c").map_or(true, |v| v.is_null()), "null, not false");
+    assert_eq!(
+        rec.get("a").and_then(|v| v.as_property()),
+        Some(&PropertyValue::Boolean(true))
+    );
+    assert_eq!(
+        rec.get("b").and_then(|v| v.as_property()),
+        Some(&PropertyValue::Boolean(false))
+    );
+    assert!(
+        rec.get("c").map_or(true, |v| v.is_null()),
+        "null, not false"
+    );
 
     // A column that stops being all strings falls back, and still answers.
     let (mut mixed, hub) = build();
     let odd = mixed.create_node("P");
     mixed.set_node_property("default", odd, "s", 7i64).unwrap();
     mixed.create_edge(hub, odd, "KNOWS").unwrap();
-    let q = |w: &str| count(&mixed, &format!("MATCH (h:Hub)-[:KNOWS]->(p:P) WHERE {w} RETURN p.i"));
+    let q = |w: &str| {
+        count(
+            &mixed,
+            &format!("MATCH (h:Hub)-[:KNOWS]->(p:P) WHERE {w} RETURN p.i"),
+        )
+    };
     assert_eq!(q("p.s < 'name-000010'"), 10);
     assert_eq!(q("p.s = 7"), 1);
 }

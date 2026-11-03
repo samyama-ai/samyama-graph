@@ -44,7 +44,11 @@ fn check(q: &str, rows: &[(&str, &str, Option<bool>)]) {
                     Some(b) => b.to_string(),
                     None => "null".to_string(),
                 };
-                format!("  {q}(x IN {list} WHERE {pred}) -> {}, want {}", show(&got), show(want))
+                format!(
+                    "  {q}(x IN {list} WHERE {pred}) -> {}, want {}",
+                    show(&got),
+                    show(want)
+                )
             })
         })
         .collect();
@@ -75,21 +79,39 @@ fn table(q: &str, expected: [Option<bool>; 8]) {
 #[test]
 fn all_is_three_valued() {
     use Some as S;
-    table("all", [None, None, S(false), None, None, S(false), S(false), None]);
+    table(
+        "all",
+        [None, None, S(false), None, None, S(false), S(false), None],
+    );
 }
 
 /// A single `true` settles it.
 #[test]
 fn any_is_three_valued() {
     use Some as S;
-    table("any", [None, None, None, S(true), S(true), S(true), None, S(true)]);
+    table(
+        "any",
+        [None, None, None, S(true), S(true), S(true), None, S(true)],
+    );
 }
 
 /// A single `true` settles it — to `false`.
 #[test]
 fn none_is_three_valued() {
     use Some as S;
-    table("none", [None, None, None, S(false), S(false), S(false), None, S(false)]);
+    table(
+        "none",
+        [
+            None,
+            None,
+            None,
+            S(false),
+            S(false),
+            S(false),
+            None,
+            S(false),
+        ],
+    );
 }
 
 /// **Two** trues settle it, which no other quantifier does: they rule out
@@ -98,7 +120,10 @@ fn none_is_three_valued() {
 #[test]
 fn single_is_settled_by_a_count_not_by_one_element() {
     use Some as S;
-    table("single", [None, None, None, None, None, S(false), None, S(false)]);
+    table(
+        "single",
+        [None, None, None, None, None, S(false), None, S(false)],
+    );
 }
 
 /// Without nulls the four keep their ordinary two-valued answers, including on
@@ -113,7 +138,11 @@ fn null_free_lists_are_unaffected() {
     ] {
         assert_eq!(quantify(q, "[]", "x = 2"), Some(empty), "{q} on []");
         // Two matches: `single` must say false where `all` and `any` say true.
-        assert_eq!(quantify(q, "[2, 2, 3]", "x = 2"), Some(some), "{q} on [2, 2, 3]");
+        assert_eq!(
+            quantify(q, "[2, 2, 3]", "x = 2"),
+            Some(some),
+            "{q} on [2, 2, 3]"
+        );
         assert_eq!(quantify(q, "[2]", "x = 2"), Some(one), "{q} on [2]");
     }
 }

@@ -11,8 +11,7 @@ pub struct BWRSolver {
 
 impl BWRSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self {
-            seed: None, config }
+        Self { seed: None, config }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -44,7 +43,10 @@ impl BWRSolver {
                 break;
             }
             if iter % 10 == 0 {
-                println!("BWR Solver: Iteration {}/{}", iter, self.config.max_iterations);
+                println!(
+                    "BWR Solver: Iteration {}/{}",
+                    iter, self.config.max_iterations
+                );
             }
             let (best_idx, worst_idx) = self.find_best_worst(&population);
             let best_vars = population[best_idx].variables.clone();
@@ -65,7 +67,7 @@ impl BWRSolver {
                     let r3: f64 = local_rng.gen();
                     let r4: f64 = local_rng.gen();
                     let t: f64 = local_rng.gen_range(1..3) as f64;
-                    
+
                     let mut rand_vars = Array1::zeros(dim);
                     for j in 0..dim {
                         rand_vars[j] = local_rng.gen_range(lower[j]..upper[j]);
@@ -73,12 +75,14 @@ impl BWRSolver {
 
                     if r4 > 0.5 {
                         for j in 0..dim {
-                            let delta = r1 * (best_vars[j] - t * rand_vars[j]) - r2 * (worst_vars[j] - rand_vars[j]);
+                            let delta = r1 * (best_vars[j] - t * rand_vars[j])
+                                - r2 * (worst_vars[j] - rand_vars[j]);
                             new_vars[j] = (ind.variables[j] + delta).clamp(lower[j], upper[j]);
                         }
                     } else {
                         for j in 0..dim {
-                            new_vars[j] = (upper[j] - (upper[j] - lower[j]) * r3).clamp(lower[j], upper[j]);
+                            new_vars[j] =
+                                (upper[j] - (upper[j] - lower[j]) * r3).clamp(lower[j], upper[j]);
                         }
                     }
 

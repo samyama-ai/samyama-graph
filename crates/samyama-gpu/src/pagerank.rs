@@ -219,8 +219,7 @@ mod tests {
             tolerance: 0.0,
             check_interval: 0,
         };
-        let scores =
-            gpu_page_rank(3, &in_offsets, &in_sources, &out_offsets, &config).unwrap();
+        let scores = gpu_page_rank(3, &in_offsets, &in_sources, &out_offsets, &config).unwrap();
 
         assert_eq!(scores.len(), 3);
         // Node 2 (sink) should have highest score

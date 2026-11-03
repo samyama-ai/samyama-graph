@@ -37,8 +37,12 @@ fn count(store: &GraphStore, cypher: &str) -> i64 {
     }
 }
 
-fn nodes(store: &GraphStore) -> i64 { count(store, "MATCH (n) RETURN count(n) AS c") }
-fn edges(store: &GraphStore) -> i64 { count(store, "MATCH ()-[r]->() RETURN count(r) AS c") }
+fn nodes(store: &GraphStore) -> i64 {
+    count(store, "MATCH (n) RETURN count(n) AS c")
+}
+fn edges(store: &GraphStore) -> i64 {
+    count(store, "MATCH ()-[r]->() RETURN count(r) AS c")
+}
 
 /// `(x:X)` with three outgoing `:R` relationships.
 fn hub() -> GraphStore {

@@ -22,8 +22,13 @@ use samyama::query::parser::parse_query;
 fn graph() -> GraphStore {
     let mut store = GraphStore::new();
     for labels in [
-        vec!["A", "B", "C"], vec!["A", "B"], vec!["A", "C"], vec!["B", "C"],
-        vec!["A"], vec!["B"], vec!["C"],
+        vec!["A", "B", "C"],
+        vec!["A", "B"],
+        vec!["A", "C"],
+        vec!["B", "C"],
+        vec!["A"],
+        vec!["B"],
+        vec!["C"],
     ] {
         store.create_node_with_labels(labels.iter().map(|l| Label::new(*l)));
     }
@@ -61,7 +66,10 @@ fn matched(store: &GraphStore, cypher: &str) -> Vec<String> {
 #[test]
 fn two_labels_mean_both() {
     let store = graph();
-    assert_eq!(matched(&store, "MATCH (a:A:B) RETURN a"), vec!["A:B", "A:B:C"]);
+    assert_eq!(
+        matched(&store, "MATCH (a:A:B) RETURN a"),
+        vec!["A:B", "A:B:C"]
+    );
 }
 
 #[test]
@@ -88,8 +96,14 @@ fn adding_a_label_never_widens_the_result() {
     let one = matched(&store, "MATCH (a:A) RETURN a");
     let two = matched(&store, "MATCH (a:A:B) RETURN a");
     let three = matched(&store, "MATCH (a:A:B:C) RETURN a");
-    assert!(two.len() <= one.len() && three.len() <= two.len(), "{one:?} {two:?} {three:?}");
-    assert!(two.iter().all(|x| one.contains(x)), "each is a subset of the last");
+    assert!(
+        two.len() <= one.len() && three.len() <= two.len(),
+        "{one:?} {two:?} {three:?}"
+    );
+    assert!(
+        two.iter().all(|x| one.contains(x)),
+        "each is a subset of the last"
+    );
     assert!(three.iter().all(|x| two.contains(x)));
 }
 

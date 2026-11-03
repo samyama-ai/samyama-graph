@@ -47,20 +47,28 @@ fn store(n: u64) -> GraphStore {
     let mut s = GraphStore::new();
     let ids: Vec<_> = (0..=n).map(|_| s.create_node("P")).collect();
     for i in 0..n as usize {
-        s.create_edge(ids[i], ids[i + 1], "KNOWS").expect("create_edge");
+        s.create_edge(ids[i], ids[i + 1], "KNOWS")
+            .expect("create_edge");
     }
     s
 }
 
 fn edge_ids(s: &GraphStore, t: &str) -> Vec<u64> {
-    s.get_edges_by_type(&EdgeType::new(t)).iter().map(|e| e.id.as_u64()).collect()
+    s.get_edges_by_type(&EdgeType::new(t))
+        .iter()
+        .map(|e| e.id.as_u64())
+        .collect()
 }
 
 #[test]
 fn the_scan_is_ascending_by_edge_id() {
     let ids = edge_ids(&store(200), "KNOWS");
     assert_eq!(ids.len(), 200);
-    assert!(ids.windows(2).all(|w| w[0] < w[1]), "not ascending: {:?}", &ids[..8.min(ids.len())]);
+    assert!(
+        ids.windows(2).all(|w| w[0] < w[1]),
+        "not ascending: {:?}",
+        &ids[..8.min(ids.len())]
+    );
 }
 
 #[test]
@@ -71,7 +79,12 @@ fn the_order_is_the_same_on_every_store() {
     for _ in 0..12 {
         seen.insert(edge_ids(&store(64), "KNOWS"));
     }
-    assert_eq!(seen.len(), 1, "12 identical stores gave {} distinct edge orders", seen.len());
+    assert_eq!(
+        seen.len(),
+        1,
+        "12 identical stores gave {} distinct edge orders",
+        seen.len()
+    );
 }
 
 #[test]
@@ -87,9 +100,15 @@ fn deleting_edges_leaves_the_survivors_ascending() {
         s.delete_edge(*id).expect("delete_edge");
     }
     let left = edge_ids(&s, "KNOWS");
-    assert!(left.windows(2).all(|w| w[0] < w[1]), "survivors are not ascending");
+    assert!(
+        left.windows(2).all(|w| w[0] < w[1]),
+        "survivors are not ascending"
+    );
     for id in &victims {
-        assert!(!left.contains(&id.as_u64()), "deleted edge {id:?} is still in the scan");
+        assert!(
+            !left.contains(&id.as_u64()),
+            "deleted edge {id:?} is still in the scan"
+        );
     }
 }
 
@@ -115,12 +134,17 @@ fn what_the_sort_costs() {
     let mut s = GraphStore::new();
     let ids: Vec<_> = (0..=n).map(|_| s.create_node("P")).collect();
     for i in 0..n as usize {
-        s.create_edge(ids[i], ids[i + 1], "KNOWS").expect("create_edge");
+        s.create_edge(ids[i], ids[i + 1], "KNOWS")
+            .expect("create_edge");
     }
     let t = EdgeType::new("KNOWS");
     for _ in 0..3 {
         let start = Instant::now();
         let got = s.get_edges_by_type(&t);
-        println!("get_edges_by_type over {} edges: {:?}", got.len(), start.elapsed());
+        println!(
+            "get_edges_by_type over {} edges: {:?}",
+            got.len(),
+            start.elapsed()
+        );
     }
 }

@@ -24,7 +24,9 @@ fn write(s: &mut GraphStore, q: &str) {
 /// The named columns of every row `q` returns, sorted, `None` where absent.
 fn rows(s: &GraphStore, q: &str, columns: &[&str]) -> Vec<Vec<Option<String>>> {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(s)
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let mut v: Vec<Vec<Option<String>>> = out
         .records
         .iter()
@@ -54,35 +56,65 @@ const COLS: &[&str] = &["email", "name", "k", "x"];
 #[test]
 fn on_create_keeps_a_property_written_after_a_replace() {
     let mut s = GraphStore::new();
-    write(&mut s, "MERGE (n:P {email: 'a@x'}) ON CREATE SET n = {email: 'a@x', name: 'A'}, n.k = 7");
-    assert_eq!(rows(&s, NODE, COLS), vec![vec![some("a@x"), some("A"), some("7"), None]]);
+    write(
+        &mut s,
+        "MERGE (n:P {email: 'a@x'}) ON CREATE SET n = {email: 'a@x', name: 'A'}, n.k = 7",
+    );
+    assert_eq!(
+        rows(&s, NODE, COLS),
+        vec![vec![some("a@x"), some("A"), some("7"), None]]
+    );
 }
 
 #[test]
 fn on_create_replaces_a_property_written_before_it() {
     let mut s = GraphStore::new();
-    write(&mut s, "MERGE (n:P {email: 'a@x'}) ON CREATE SET n.k = 7, n = {email: 'a@x', name: 'A'}");
-    assert_eq!(rows(&s, NODE, COLS), vec![vec![some("a@x"), some("A"), None, None]]);
+    write(
+        &mut s,
+        "MERGE (n:P {email: 'a@x'}) ON CREATE SET n.k = 7, n = {email: 'a@x', name: 'A'}",
+    );
+    assert_eq!(
+        rows(&s, NODE, COLS),
+        vec![vec![some("a@x"), some("A"), None, None]]
+    );
 }
 
 #[test]
 fn on_match_keeps_the_order_too() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:P {email: 'a@x', x: 1})");
-    write(&mut s, "MERGE (n:P {email: 'a@x'}) ON MATCH SET n = {email: 'a@x', name: 'A'}, n.k = 7");
-    assert_eq!(rows(&s, NODE, COLS), vec![vec![some("a@x"), some("A"), some("7"), None]]);
+    write(
+        &mut s,
+        "MERGE (n:P {email: 'a@x'}) ON MATCH SET n = {email: 'a@x', name: 'A'}, n.k = 7",
+    );
+    assert_eq!(
+        rows(&s, NODE, COLS),
+        vec![vec![some("a@x"), some("A"), some("7"), None]]
+    );
 
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:P {email: 'a@x', x: 1})");
-    write(&mut s, "MERGE (n:P {email: 'a@x'}) ON MATCH SET n.k = 7, n = {email: 'a@x', name: 'A'}");
-    assert_eq!(rows(&s, NODE, COLS), vec![vec![some("a@x"), some("A"), None, None]]);
+    write(
+        &mut s,
+        "MERGE (n:P {email: 'a@x'}) ON MATCH SET n.k = 7, n = {email: 'a@x', name: 'A'}",
+    );
+    assert_eq!(
+        rows(&s, NODE, COLS),
+        vec![vec![some("a@x"), some("A"), None, None]]
+    );
 }
 
 #[test]
 fn on_match_applies_in_order_to_every_match() {
     let mut s = GraphStore::new();
-    write(&mut s, "CREATE (:P {email: 'a@x', x: 1}), (:P {email: 'a@x', x: 2})");
-    write(&mut s, "MERGE (n:P {email: 'a@x'}) ON MATCH SET n = {email: 'a@x', name: 'A'}, n.k = 7");
+    write(
+        &mut s,
+        "CREATE (:P {email: 'a@x', x: 1}), (:P {email: 'a@x', x: 2})",
+    );
+    write(
+        &mut s,
+        "MERGE (n:P {email: 'a@x'}) ON MATCH SET n = {email: 'a@x', name: 'A'}, n.k = 7",
+    );
     assert_eq!(
         rows(&s, NODE, COLS),
         vec![
@@ -101,7 +133,10 @@ fn the_bulk_upsert_shape_keeps_its_source_id() {
          MERGE (n:P {email: row.email}) \
          ON CREATE SET n = row.props, n.k = row.id",
     );
-    assert_eq!(rows(&s, NODE, COLS), vec![vec![some("a@x"), some("A"), some("7"), None]]);
+    assert_eq!(
+        rows(&s, NODE, COLS),
+        vec![vec![some("a@x"), some("A"), some("7"), None]]
+    );
     assert_eq!(
         rows(&s, "MATCH (n:P {k: 7}) RETURN n.name AS name", &["name"]),
         vec![vec![some("A")]],
@@ -119,7 +154,10 @@ fn a_second_merge_in_a_pipeline_keeps_the_order() {
         "MERGE (c:C {id: 1}) \
          MERGE (n:P {email: 'a@x'}) ON CREATE SET n = {email: 'a@x', name: 'A'}, n.k = 7",
     );
-    assert_eq!(rows(&s, NODE, COLS), vec![vec![some("a@x"), some("A"), some("7"), None]]);
+    assert_eq!(
+        rows(&s, NODE, COLS),
+        vec![vec![some("a@x"), some("A"), some("7"), None]]
+    );
 }
 
 #[test]
@@ -157,8 +195,14 @@ fn a_relationship_merge_keeps_the_order() {
 fn labels_and_plus_equals_still_apply() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:P {email: 'a@x', x: 1})");
-    write(&mut s, "MERGE (n:P {email: 'a@x'}) ON MATCH SET n += {name: 'A'}, n.k = 7, n:Seen");
-    assert_eq!(rows(&s, NODE, COLS), vec![vec![some("a@x"), some("A"), some("7"), some("1")]]);
+    write(
+        &mut s,
+        "MERGE (n:P {email: 'a@x'}) ON MATCH SET n += {name: 'A'}, n.k = 7, n:Seen",
+    );
+    assert_eq!(
+        rows(&s, NODE, COLS),
+        vec![vec![some("a@x"), some("A"), some("7"), some("1")]]
+    );
     assert_eq!(
         rows(&s, "MATCH (n:Seen) RETURN n.email AS email", &["email"]),
         vec![vec![some("a@x")]]
@@ -176,7 +220,10 @@ fn on_match_set_to_null_removes_the_property() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:P {email: 'a@x', k: 7})");
     write(&mut s, "MERGE (n:P {email: 'a@x'}) ON MATCH SET n.k = null");
-    assert_eq!(rows(&s, NODE, COLS), vec![vec![some("a@x"), None, None, None]]);
+    assert_eq!(
+        rows(&s, NODE, COLS),
+        vec![vec![some("a@x"), None, None, None]]
+    );
     assert_eq!(
         rows(&s, "MATCH (n:P) RETURN size(keys(n)) AS c", &["c"]),
         vec![vec![some("1")]],
@@ -194,12 +241,25 @@ fn on_match_set_to_null_removes_the_property() {
 fn on_create_set_writes_to_a_variable_bound_before_the_merge() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:A {id: 1})");
-    write(&mut s, "MATCH (a:A {id: 1}) MERGE (n:P {email: 'b@x'}) ON CREATE SET a.x = 1");
+    write(
+        &mut s,
+        "MATCH (a:A {id: 1}) MERGE (n:P {email: 'b@x'}) ON CREATE SET a.x = 1",
+    );
     let a = "MATCH (a:A) RETURN a.x AS x";
-    assert_eq!(rows(&s, a, &["x"]), vec![vec![some("1")]], "the ON CREATE write to `a` was dropped");
-    assert_eq!(rows(&s, "MATCH (n:P) RETURN n.email AS e", &["e"]), vec![vec![some("b@x")]]);
+    assert_eq!(
+        rows(&s, a, &["x"]),
+        vec![vec![some("1")]],
+        "the ON CREATE write to `a` was dropped"
+    );
+    assert_eq!(
+        rows(&s, "MATCH (n:P) RETURN n.email AS e", &["e"]),
+        vec![vec![some("b@x")]]
+    );
 
     // Matched this time: ON CREATE does not run, so `a.x` keeps the 1.
-    write(&mut s, "MATCH (a:A {id: 1}) MERGE (n:P {email: 'b@x'}) ON CREATE SET a.x = 2");
+    write(
+        &mut s,
+        "MATCH (a:A {id: 1}) MERGE (n:P {email: 'b@x'}) ON CREATE SET a.x = 2",
+    );
     assert_eq!(rows(&s, a, &["x"]), vec![vec![some("1")]]);
 }

@@ -89,9 +89,9 @@ const MEDIUM_CONFIDENCE_MODIFIERS: &[&str] = &["positive", "negative", "expressi
 /// biomarker. Discovered via real-data smoke v3 (top-genes report showed
 /// WAS at 616 trials, an obvious false positive).
 const ENGLISH_FALSE_POSITIVE_SYMBOLS: &[&str] = &[
-    "WAS", "IS", "HAS", "OR", "AND", "NOT", "ALL", "ANY", "ARE", "BE", "DO",
-    "GO", "HE", "IF", "IN", "IT", "ME", "MY", "NO", "OF", "ON", "SO", "THE",
-    "TO", "UP", "WE", "AS", "AT", "BY", "FOR", "OUT",
+    "WAS", "IS", "HAS", "OR", "AND", "NOT", "ALL", "ANY", "ARE", "BE", "DO", "GO", "HE", "IF",
+    "IN", "IT", "ME", "MY", "NO", "OF", "ON", "SO", "THE", "TO", "UP", "WE", "AS", "AT", "BY",
+    "FOR", "OUT",
 ];
 
 /// Normalise a raw modifier string to a canonical form for the
@@ -141,10 +141,7 @@ pub fn split_inclusion_exclusion(text: &str) -> Vec<(Requirement, String)> {
     }
     for i in 0..markers.len() {
         let (start, req) = markers[i];
-        let end = markers
-            .get(i + 1)
-            .map(|(j, _)| *j)
-            .unwrap_or(text.len());
+        let end = markers.get(i + 1).map(|(j, _)| *j).unwrap_or(text.len());
         // Skip past the header itself — find the colon then advance.
         let body_start = text[start..end]
             .find(':')
@@ -295,9 +292,7 @@ pub fn build_trial_index(graph: &GraphStore) -> HashMap<String, NodeId> {
 
 /// Walk all :Gene nodes and collect upper-cased symbols into a set, plus a
 /// symbol -> NodeId map for TARGETS_GENE edge creation.
-pub fn build_gene_set_and_index(
-    graph: &GraphStore,
-) -> (HashSet<String>, HashMap<String, NodeId>) {
+pub fn build_gene_set_and_index(graph: &GraphStore) -> (HashSet<String>, HashMap<String, NodeId>) {
     let mut set = HashSet::new();
     let mut map = HashMap::new();
     let label: Label = "Gene".into();
@@ -441,10 +436,12 @@ mod tests {
     fn known_oncogenes() -> HashSet<String> {
         // Includes WAS deliberately so blocklist tests have a real
         // overlap with `known_genes`.
-        ["BRCA1", "BRCA2", "TP53", "EGFR", "KRAS", "HER2", "PD-L1", "PDL1", "ALK", "BRAF", "WAS"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        [
+            "BRCA1", "BRCA2", "TP53", "EGFR", "KRAS", "HER2", "PD-L1", "PDL1", "ALK", "BRAF", "WAS",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 
     #[test]
@@ -547,7 +544,9 @@ mod tests {
             &p,
             &genes,
         );
-        assert!(m.iter().any(|x| x.gene_symbol == "PD-L1" && x.modifier == "positive"));
+        assert!(m
+            .iter()
+            .any(|x| x.gene_symbol == "PD-L1" && x.modifier == "positive"));
         assert!(m.iter().all(|x| x.confidence < 0.99));
     }
 
@@ -578,7 +577,10 @@ mod tests {
             &genes,
         );
         // Both mentions are EGFR + mutation — second is dropped by the seen-set.
-        let count = m.iter().filter(|x| x.gene_symbol == "EGFR" && x.modifier == "mutation").count();
+        let count = m
+            .iter()
+            .filter(|x| x.gene_symbol == "EGFR" && x.modifier == "mutation")
+            .count();
         assert_eq!(count, 1);
     }
 
@@ -588,8 +590,12 @@ mod tests {
         let genes = known_oncogenes();
         let txt = "Inclusion Criteria:\nEGFR mutation positive.\n\nExclusion Criteria:\nPrior KRAS mutation therapy.";
         let mentions = extract_biomarkers(txt, &p, &genes);
-        let egfr = mentions.iter().find(|m| m.gene_symbol == "EGFR" && m.modifier == "mutation");
-        let kras = mentions.iter().find(|m| m.gene_symbol == "KRAS" && m.modifier == "mutation");
+        let egfr = mentions
+            .iter()
+            .find(|m| m.gene_symbol == "EGFR" && m.modifier == "mutation");
+        let kras = mentions
+            .iter()
+            .find(|m| m.gene_symbol == "KRAS" && m.modifier == "mutation");
         assert_eq!(egfr.map(|m| m.requirement), Some(Requirement::Inclusion));
         assert_eq!(kras.map(|m| m.requirement), Some(Requirement::Exclusion));
     }

@@ -49,7 +49,10 @@ fn a_leading_optional_match_that_finds_nothing_returns_one_null_row() {
     let store = graph();
     let rows = run(&store, "OPTIONAL MATCH (a:DoesNotExist) RETURN a AS x");
     assert_eq!(rows.len(), 1, "the row exists even though nothing matched");
-    assert!(matches!(rows[0], Some(Value::Null) | None), "and `a` is null: {rows:?}");
+    assert!(
+        matches!(rows[0], Some(Value::Null) | None),
+        "and `a` is null: {rows:?}"
+    );
 }
 
 #[test]
@@ -57,7 +60,10 @@ fn a_leading_optional_match_that_finds_something_is_unchanged() {
     let store = graph();
     let rows = run(&store, "OPTIONAL MATCH (a:A) RETURN a AS x");
     assert_eq!(rows.len(), 1);
-    assert!(matches!(rows[0], Some(Value::Node(..)) | Some(Value::NodeRef(_))));
+    assert!(matches!(
+        rows[0],
+        Some(Value::Node(..)) | Some(Value::NodeRef(_))
+    ));
 }
 
 #[test]
@@ -66,7 +72,11 @@ fn expanding_from_a_null_binding_yields_no_rows_rather_than_an_error() {
     // became reachable only once the leading OPTIONAL MATCH produced a null
     // row to expand from.
     let store = graph();
-    assert!(run(&store, "OPTIONAL MATCH (a:Nope) WITH a MATCH (a)-->(b) RETURN b AS x").is_empty());
+    assert!(run(
+        &store,
+        "OPTIONAL MATCH (a:Nope) WITH a MATCH (a)-->(b) RETURN b AS x"
+    )
+    .is_empty());
 }
 
 #[test]
@@ -75,7 +85,11 @@ fn expanding_from_a_real_node_after_an_optional_match_still_works() {
     // after an OPTIONAL MATCH yields nothing".
     let store = graph();
     assert_eq!(
-        run(&store, "OPTIONAL MATCH (a:A) WITH a MATCH (a)-->(b) RETURN b AS x").len(),
+        run(
+            &store,
+            "OPTIONAL MATCH (a:A) WITH a MATCH (a)-->(b) RETURN b AS x"
+        )
+        .len(),
         1
     );
 }
@@ -101,7 +115,9 @@ fn a_parenthesised_property_target_is_the_same_as_a_bare_one() {
     let mut store = GraphStore::new();
     for cypher in ["CREATE (:A {name: 'orig'})"] {
         let q = parse_query(cypher).expect("setup should parse");
-        MutQueryExecutor::new(&mut store, "default".to_string()).execute(&q).expect("setup");
+        MutQueryExecutor::new(&mut store, "default".to_string())
+            .execute(&q)
+            .expect("setup");
     }
     let q = parse_query("MATCH (n:A) SET (n).name = 'neo4j' RETURN (n).name AS x")
         .expect("`(n).name` should parse");
@@ -110,7 +126,9 @@ fn a_parenthesised_property_target_is_the_same_as_a_bare_one() {
         .expect("should run");
     assert_eq!(
         out.records[0].get("x"),
-        Some(&Value::Property(samyama::graph::PropertyValue::String("neo4j".into())))
+        Some(&Value::Property(samyama::graph::PropertyValue::String(
+            "neo4j".into()
+        )))
     );
 }
 

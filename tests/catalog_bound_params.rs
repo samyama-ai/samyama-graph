@@ -29,14 +29,21 @@ fn seeded() -> GraphStore {
 }
 
 fn param(name: &str, kind: &str, sample: serde_json::Value) -> ParamSpec {
-    ParamSpec { name: name.into(), kind: kind.into(), sample, enum_values: None }
+    ParamSpec {
+        name: name.into(),
+        kind: kind.into(),
+        sample,
+        enum_values: None,
+    }
 }
 
 #[test]
 fn a_bound_parameter_round_trips_through_build_and_verify() {
     let store = seeded();
     let q = vec![QuerySpec {
-        question: String::new(), paraphrases: vec![], difficulty: String::new(),
+        question: String::new(),
+        paraphrases: vec![],
+        difficulty: String::new(),
         id: "by_age".into(),
         cypher: "MATCH (n:P) WHERE n.age = $age RETURN n.name".into(),
         unanswerable: false,
@@ -57,7 +64,9 @@ fn a_bound_parameter_round_trips_through_build_and_verify() {
 fn a_type_mismatch_is_refused_at_build_rather_than_returning_nothing() {
     let store = seeded();
     let q = vec![QuerySpec {
-        question: String::new(), paraphrases: vec![], difficulty: String::new(),
+        question: String::new(),
+        paraphrases: vec![],
+        difficulty: String::new(),
         id: "by_age".into(),
         cypher: "MATCH (n:P) WHERE n.age = $age RETURN n.name".into(),
         unanswerable: false,
@@ -66,7 +75,10 @@ fn a_type_mismatch_is_refused_at_build_rather_than_returning_nothing() {
     }];
     let err = build_catalog(&store, &q, &[]).expect_err("a silent zero-row match must be refused");
     assert!(err.contains("0 rows"), "{err}");
-    assert!(err.contains("type mismatch"), "the error should name the likely cause: {err}");
+    assert!(
+        err.contains("type mismatch"),
+        "the error should name the likely cause: {err}"
+    );
 }
 
 /// Numeric coercion does work, so the issue's stated worst case -- a float
@@ -75,7 +87,9 @@ fn a_type_mismatch_is_refused_at_build_rather_than_returning_nothing() {
 fn a_float_parameter_matches_an_integer_property() {
     let store = seeded();
     let q = vec![QuerySpec {
-        question: String::new(), paraphrases: vec![], difficulty: String::new(),
+        question: String::new(),
+        paraphrases: vec![],
+        difficulty: String::new(),
         id: "by_age".into(),
         cypher: "MATCH (n:P) WHERE n.age = $age RETURN n.name".into(),
         unanswerable: false,
@@ -117,17 +131,22 @@ fn an_undeclared_parameter_is_refused() {
 #[test]
 fn a_declared_parameter_the_query_never_uses_is_refused() {
     let err = validate_entry_shape(
-        "t", "MATCH (n:P) RETURN n.name", &[param("age", "int", json!(1))],
-    ).expect_err("unused parameter");
+        "t",
+        "MATCH (n:P) RETURN n.name",
+        &[param("age", "int", json!(1))],
+    )
+    .expect_err("unused parameter");
     assert!(err.contains("never uses"), "{err}");
 }
 
 #[test]
 fn a_mis_declared_type_is_refused() {
     let err = validate_entry_shape(
-        "t", "MATCH (n:P) WHERE n.age = $age RETURN n",
+        "t",
+        "MATCH (n:P) WHERE n.age = $age RETURN n",
         &[param("age", "int", json!("not a number"))],
-    ).expect_err("type/sample mismatch");
+    )
+    .expect_err("type/sample mismatch");
     assert!(err.contains("declared type"), "{err}");
 }
 
@@ -152,7 +171,9 @@ fn hostile_parameter_values_cannot_add_a_clause_or_write() {
 
     for v in HOSTILE {
         let q = vec![QuerySpec {
-            question: String::new(), paraphrases: vec![], difficulty: String::new(),
+            question: String::new(),
+            paraphrases: vec![],
+            difficulty: String::new(),
             id: "hostile".into(),
             cypher: "MATCH (n:P) WHERE n.name = $name RETURN n.name".into(),
             unanswerable: true,
@@ -161,11 +182,15 @@ fn hostile_parameter_values_cannot_add_a_clause_or_write() {
         // The value is bound, so it is compared as a string and matches nothing.
         // What must not happen is that any of it becomes syntax.
         let catalog = build_catalog(&store, &q, &[]).expect(v);
-        assert_eq!(catalog.entries[0].rows, 0, "hostile value matched a node: {v}");
+        assert_eq!(
+            catalog.entries[0].rows, 0,
+            "hostile value matched a node: {v}"
+        );
     }
 
     assert_eq!(
-        store.node_count(), before_nodes,
+        store.node_count(),
+        before_nodes,
         "the store changed while running hostile values through a read query"
     );
 }
@@ -178,7 +203,10 @@ fn hostile_parameter_values_cannot_add_a_clause_or_write() {
 #[test]
 fn a_catalog_refuses_a_row_count_parameter_and_the_grammar_a_var_length_one() {
     assert!(samyama::query::parse_query("MATCH (n:P) RETURN n.name LIMIT $k").is_ok());
-    for q in ["MATCH (n:P) RETURN n.name LIMIT $k", "MATCH (n:P) RETURN n.name SKIP $k"] {
+    for q in [
+        "MATCH (n:P) RETURN n.name LIMIT $k",
+        "MATCH (n:P) RETURN n.name SKIP $k",
+    ] {
         let err = validate_entry_shape("q", q, &[param("k", "integer", json!(3))])
             .expect_err("a catalog entry with a row-count parameter was accepted");
         assert!(err.contains("SKIP/LIMIT"), "{err}");

@@ -58,7 +58,10 @@ fn fixture() -> GraphStore {
         "MATCH (p:Person) WITH p LIMIT 1 SET p.nickname = 'ace'",
         &mut store,
     );
-    run("CREATE (:Person:Employee {name: 'dual', city: 'Delhi'})", &mut store);
+    run(
+        "CREATE (:Person:Employee {name: 'dual', city: 'Delhi'})",
+        &mut store,
+    );
     run("CREATE (:Company {name: 'Acme'})", &mut store);
     run(
         "MATCH (p:Person), (c:Company) WITH p, c LIMIT 20 CREATE (p)-[:WORKS_AT]->(c)",
@@ -80,7 +83,10 @@ fn fixture() -> GraphStore {
         store.create_edge(a, l, "AUDITS").expect("bulk");
     }
     let mut props = PropertyMap::new();
-    props.insert("audited_by".to_string(), PropertyValue::String("cag".into()));
+    props.insert(
+        "audited_by".to_string(),
+        PropertyValue::String("cag".into()),
+    );
     store
         .create_edge_with_properties(a, l, "AUDITS", props)
         .expect("rare");
@@ -168,9 +174,7 @@ fn main() {
         .collect();
     let triples_found: Vec<String> = EXPECTED_TRIPLES
         .iter()
-        .filter(|(s, t, d)| {
-            triples.contains(&(s.to_string(), t.to_string(), d.to_string()))
-        })
+        .filter(|(s, t, d)| triples.contains(&(s.to_string(), t.to_string(), d.to_string())))
         .map(|(s, t, d)| format!("(:{s})-[:{t}]->(:{d})"))
         .collect();
     let all_keys: Vec<&str> = EXPECTED_NODE_KEYS
@@ -188,7 +192,10 @@ fn main() {
 
     let one_call = for_llm(&mut store, "");
     let present = one_call.is_some();
-    let text = one_call.as_ref().map(|(t, _, _)| t.clone()).unwrap_or_default();
+    let text = one_call
+        .as_ref()
+        .map(|(t, _, _)| t.clone())
+        .unwrap_or_default();
 
     // The six things AI-05 names, each checked in the one-call answer.
     let has_labels = EXPECTED_LABELS.iter().any(|l| text.contains(l));

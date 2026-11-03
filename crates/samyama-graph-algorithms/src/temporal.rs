@@ -799,20 +799,14 @@ mod tests {
         // causally chainable. `>` rather than `>=` here would silently drop
         // every simultaneous hop, which is the common case in a trace.
         let (v, t) = view(3, &[(0, 1, 7), (1, 2, 7)]);
-        assert_eq!(
-            reach(&v, &t, &[0], 7),
-            vec![(1, 7), (2, 7)]
-        );
+        assert_eq!(reach(&v, &t, &[0], 7), vec![(1, 7), (2, 7)]);
     }
 
     #[test]
     fn a_start_time_after_the_edge_blocks_it() {
         let (v, t) = view(2, &[(0, 1, 5)]);
         assert!(reach(&v, &t, &[0], 6).is_empty());
-        assert_eq!(
-            reach(&v, &t, &[0], 5),
-            vec![(1, 5)]
-        );
+        assert_eq!(reach(&v, &t, &[0], 5), vec![(1, 5)]);
     }
 
     #[test]
@@ -854,7 +848,11 @@ mod tests {
     fn propagation_is_ranked_by_when_not_by_distance() {
         // 3 is two hops away but arrives before 1's other neighbour.
         let (v, t) = view(4, &[(0, 1, 1), (1, 3, 2), (0, 2, 9)]);
-        let r = propagation_ranking(&v, &t, &[0], 0).unwrap().into_iter().map(|r| (r.node, r.arrival)).collect::<Vec<_>>();
+        let r = propagation_ranking(&v, &t, &[0], 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.node, r.arrival))
+            .collect::<Vec<_>>();
         assert_eq!(r, vec![(1, 1), (3, 2), (2, 9)]);
     }
 
@@ -936,14 +934,8 @@ mod tests {
         // Two edges 0->1, at 2 and at 8. From start=5 only the later one is
         // available, so the arrival is 8 rather than unreachable.
         let (v, t) = view(2, &[(0, 1, 2), (0, 1, 8)]);
-        assert_eq!(
-            reach(&v, &t, &[0], 5),
-            vec![(1, 8)]
-        );
-        assert_eq!(
-            reach(&v, &t, &[0], 0),
-            vec![(1, 2)]
-        );
+        assert_eq!(reach(&v, &t, &[0], 5), vec![(1, 8)]);
+        assert_eq!(reach(&v, &t, &[0], 0), vec![(1, 2)]);
     }
 
     /// A rotated times array is exactly what `new` cannot see, and exactly what

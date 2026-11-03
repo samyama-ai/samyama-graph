@@ -62,9 +62,7 @@ const PART_OF: &[(&str, &str)] = &[
 ];
 
 /// Pathways implicated in T2D (used to compute coverage).
-const IMPLICATED_IN: &[(&str, &str)] = &[
-    ("glucose_homeostasis", DISEASE_ID),
-];
+const IMPLICATED_IN: &[(&str, &str)] = &[("glucose_homeostasis", DISEASE_ID)];
 
 /// (drug_a, drug_b, severity_score in [0,1])
 /// 0.1 = mild, 0.3 = moderate, 0.7 = severe, 1.0 = contraindicated.
@@ -74,7 +72,7 @@ const INTERACTIONS: &[(&str, &str, f64)] = &[
     ("D1", "D2", 0.1),
     ("D0", "D3", 0.3),
     ("D3", "D5", 0.7),
-    ("D3", "D4", 1.0),  // simvastatin + clarithromycin — contraindicated (CYP3A4)
+    ("D3", "D4", 1.0), // simvastatin + clarithromycin — contraindicated (CYP3A4)
     ("D4", "D5", 0.3),
 ];
 
@@ -104,7 +102,9 @@ impl MultiObjectiveProblem for ComboDosingProblem {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Active set: drugs with normalised dose >= 5% of max.
-        let active_idx: Vec<usize> = (0..self.drug_dids.len()).filter(|&i| x[i] >= 0.05).collect();
+        let active_idx: Vec<usize> = (0..self.drug_dids.len())
+            .filter(|&i| x[i] >= 0.05)
+            .collect();
         if active_idx.is_empty() {
             // No drug taken — zero efficacy, zero risk, zero dose. Strongly dominated.
             return vec![0.0, 0.0, 0.0];
@@ -170,7 +170,11 @@ impl MultiObjectiveProblem for ComboDosingProblem {
         let total_dose: f64 = (0..self.drug_dids.len()).map(|i| x[i]).sum();
 
         // Hard constraint: contraindicated-pair penalty pushes plan off the Pareto front.
-        let penalty = if contraindicated_pair_active { 1e6 } else { 0.0 };
+        let penalty = if contraindicated_pair_active {
+            1e6
+        } else {
+            0.0
+        };
 
         // Minimise: -efficacy, +risk, +total_dose. All three add penalty equally
         // so the dominated plan is dominated on every objective.
@@ -252,9 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(" ");
         println!(
             "  {:>9.2}  {:>6.2}  {:>10.2}   {plan}",
-            -ind.fitness[0],
-            ind.fitness[1],
-            ind.fitness[2]
+            -ind.fitness[0], ind.fitness[1], ind.fitness[2]
         );
     }
     if rows.len() > 12 {
@@ -266,9 +268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .filter(|ind| ind.variables[3] >= 0.05 && ind.variables[4] >= 0.05)
         .count();
-    println!(
-        "\n[check] Pareto plans with active contraindicated pair (D3+D4): {bad} (must be 0)"
-    );
+    println!("\n[check] Pareto plans with active contraindicated pair (D3+D4): {bad} (must be 0)");
 
     Ok(())
 }
@@ -318,17 +318,27 @@ async fn load_fixture(client: &EmbeddedClient) {
     disease_id.insert(DISEASE_ID, did_node);
 
     for (drug, gene) in TARGETS {
-        store.create_edge(drug_id[drug], gene_id[gene], "TARGETS").unwrap();
+        store
+            .create_edge(drug_id[drug], gene_id[gene], "TARGETS")
+            .unwrap();
     }
     for (gene, pathway) in PART_OF {
-        store.create_edge(gene_id[gene], pathway_id[pathway], "PART_OF").unwrap();
+        store
+            .create_edge(gene_id[gene], pathway_id[pathway], "PART_OF")
+            .unwrap();
     }
     for (pathway, disease) in IMPLICATED_IN {
-        store.create_edge(pathway_id[pathway], disease_id[disease], "IMPLICATED_IN").unwrap();
+        store
+            .create_edge(pathway_id[pathway], disease_id[disease], "IMPLICATED_IN")
+            .unwrap();
     }
     for (a, b, sev) in INTERACTIONS {
-        let eid = store.create_edge(drug_id[a], drug_id[b], "INTERACTS_WITH").unwrap();
-        store.set_edge_property(eid, "severity_score", *sev).unwrap();
+        let eid = store
+            .create_edge(drug_id[a], drug_id[b], "INTERACTS_WITH")
+            .unwrap();
+        store
+            .set_edge_property(eid, "severity_score", *sev)
+            .unwrap();
     }
 
     println!(

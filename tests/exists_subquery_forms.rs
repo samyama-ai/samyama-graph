@@ -51,9 +51,15 @@ fn rows(store: &GraphStore, cypher: &str) -> usize {
 fn a_bare_pattern_needs_no_match_keyword() {
     let s = store();
     assert_eq!(rows(&s, "MATCH (n) WHERE exists { (n)-->() } RETURN n"), 1);
-    assert_eq!(rows(&s, "MATCH (n) WHERE exists { MATCH (n)-->() } RETURN n"), 1);
+    assert_eq!(
+        rows(&s, "MATCH (n) WHERE exists { MATCH (n)-->() } RETURN n"),
+        1
+    );
     // A relationship type nothing has.
-    assert_eq!(rows(&s, "MATCH (n) WHERE exists { (n)-[:NA]->() } RETURN n"), 0);
+    assert_eq!(
+        rows(&s, "MATCH (n) WHERE exists { (n)-[:NA]->() } RETURN n"),
+        0
+    );
 }
 
 /// The optional `WHERE` filters the subquery, not the outer match.
@@ -61,15 +67,24 @@ fn a_bare_pattern_needs_no_match_keyword() {
 fn a_bare_pattern_may_carry_a_where() {
     let s = store();
     assert_eq!(
-        rows(&s, "MATCH (n) WHERE exists { (n)-->(m) WHERE n.prop = m.prop } RETURN n"),
+        rows(
+            &s,
+            "MATCH (n) WHERE exists { (n)-->(m) WHERE n.prop = m.prop } RETURN n"
+        ),
         1
     );
     assert_eq!(
-        rows(&s, "MATCH (n) WHERE exists { (n)-->(m) WHERE n.prop <> m.prop } RETURN n"),
+        rows(
+            &s,
+            "MATCH (n) WHERE exists { (n)-->(m) WHERE n.prop <> m.prop } RETURN n"
+        ),
         0
     );
     assert_eq!(
-        rows(&s, "MATCH (n) WHERE exists { (n)-[r]->() WHERE type(r) = 'NA' } RETURN n"),
+        rows(
+            &s,
+            "MATCH (n) WHERE exists { (n)-[r]->() WHERE type(r) = 'NA' } RETURN n"
+        ),
         0
     );
 }
@@ -81,7 +96,12 @@ fn returns_the_same_answer_whatever_the_projection() {
     let s = store();
     for projection in ["true", "false", "n", "1 + 1", "*"] {
         assert_eq!(
-            rows(&s, &format!("MATCH (n) WHERE exists {{ MATCH (n)-->() RETURN {projection} }} RETURN n")),
+            rows(
+                &s,
+                &format!(
+                    "MATCH (n) WHERE exists {{ MATCH (n)-->() RETURN {projection} }} RETURN n"
+                )
+            ),
             1,
             "RETURN {projection}"
         );
@@ -94,7 +114,10 @@ fn returns_the_same_answer_whatever_the_projection() {
 fn subqueries_nest() {
     let s = store();
     assert_eq!(
-        rows(&s, "MATCH (n) WHERE exists { MATCH (m) WHERE exists { (n)-[]->(m) } RETURN m } RETURN n"),
+        rows(
+            &s,
+            "MATCH (n) WHERE exists { MATCH (m) WHERE exists { (n)-[]->(m) } RETURN m } RETURN n"
+        ),
         1
     );
 }

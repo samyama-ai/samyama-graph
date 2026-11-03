@@ -22,9 +22,7 @@ use samyama_sdk::{EmbeddedClient, SamyamaClient};
 
 #[path = "common/aact_biomarker_common.rs"]
 mod aact_biomarker_common;
-use aact_biomarker_common::{
-    build_gene_set_and_index, build_trial_index, load_eligibilities,
-};
+use aact_biomarker_common::{build_gene_set_and_index, build_trial_index, load_eligibilities};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -86,7 +84,10 @@ async fn main() -> Result<(), Error> {
         let trials = build_trial_index(&graph);
         let (gene_set, gene_index) = build_gene_set_and_index(&graph);
         eprintln!("  :ClinicalTrial bridge: {} NCT IDs", fmt_num(trials.len()));
-        eprintln!("  :Gene set:             {} symbols", fmt_num(gene_set.len()));
+        eprintln!(
+            "  :Gene set:             {} symbols",
+            fmt_num(gene_set.len())
+        );
         if trials.is_empty() {
             eprintln!(
                 "WARN: no :ClinicalTrial nodes in store. Run aact_loader first or import its snapshot."
@@ -97,18 +98,40 @@ async fn main() -> Result<(), Error> {
                 "WARN: no :Gene nodes in store. Run hgnc_ensembl_loader first or import its snapshot."
             );
         }
-        load_eligibilities(&mut graph, &elig_path, &trials, &gene_set, &gene_index, max_rows)?
+        load_eligibilities(
+            &mut graph,
+            &elig_path,
+            &trials,
+            &gene_set,
+            &gene_index,
+            max_rows,
+        )?
     };
 
     let elapsed = start.elapsed();
     eprintln!();
     eprintln!("========================================");
     eprintln!("Biomarker extraction complete.");
-    eprintln!("  Trials processed:        {}", fmt_num(result.trials_processed));
-    eprintln!("  Trials with biomarkers:  {}", fmt_num(result.trials_with_biomarkers));
-    eprintln!("  Biomarker nodes:         {}", fmt_num(result.biomarker_nodes));
-    eprintln!("  REQUIRES_BIOMARKER edges:{}", fmt_num(result.requires_edges));
-    eprintln!("  TARGETS_GENE edges:      {}", fmt_num(result.targets_gene_edges));
+    eprintln!(
+        "  Trials processed:        {}",
+        fmt_num(result.trials_processed)
+    );
+    eprintln!(
+        "  Trials with biomarkers:  {}",
+        fmt_num(result.trials_with_biomarkers)
+    );
+    eprintln!(
+        "  Biomarker nodes:         {}",
+        fmt_num(result.biomarker_nodes)
+    );
+    eprintln!(
+        "  REQUIRES_BIOMARKER edges:{}",
+        fmt_num(result.requires_edges)
+    );
+    eprintln!(
+        "  TARGETS_GENE edges:      {}",
+        fmt_num(result.targets_gene_edges)
+    );
     eprintln!("  Time:                    {:.1}s", elapsed.as_secs_f64());
     eprintln!("========================================");
 

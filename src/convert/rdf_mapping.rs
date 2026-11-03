@@ -598,6 +598,12 @@ pub struct RdfMapReport {
     /// text parses as one (#1954 review).
     #[serde(default)]
     pub term_kinds_mixed: usize,
+    /// Keys holding a language map on some subjects and an inlined blank node
+    /// on others. Both are maps in the graph, and the names record language
+    /// maps per key, so written back every one of them is a language map:
+    /// `ex:b ex:p [ ex:de "x" ]` becomes `ex:b ex:p "x"@de` (#1912 review).
+    #[serde(default)]
+    pub language_maps_ambiguous: usize,
     /// Blank nodes inlined under more than one parent, which write back as
     /// one blank node per parent (#1954 review).
     #[serde(default)]
@@ -798,6 +804,13 @@ impl RdfMapReport {
                 .to_string(),
         );
         push(
+            "rdf_language_maps_ambiguous",
+            self.language_maps_ambiguous as u64,
+            "Properties holding a language map on some subjects and an inlined blank node \
+             on others; written back, the blank nodes become language-tagged literals."
+                .to_string(),
+        );
+        push(
             "rdf_merge_chains_flattened",
             self.merge_chains_flattened as u64,
             "Merge links that formed a chain; written back, every alias links straight to \
@@ -870,6 +883,10 @@ struct Applier<'a> {
     /// Keys that received a plain untagged string anywhere, nodes and inlined
     /// maps alike, to find keys whose language tagging is mixed.
     untagged_keys: BTreeSet<String>,
+    /// Keys that hold an inlined blank node as a value of their own, outside
+    /// a language map, on a node or in an inlined map. With `language_maps`,
+    /// the keys whose maps cannot be told apart when written back.
+    inlined_map_keys: BTreeSet<String>,
     /// Triples read into inlined maps so far, across every copy, for the
     /// expansion bound.
     inline_values: usize,
@@ -887,6 +904,7 @@ impl<'a> Applier<'a> {
             edge_names: HashMap::new(),
             literal_keys: BTreeSet::new(),
             untagged_keys: BTreeSet::new(),
+            inlined_map_keys: BTreeSet::new(),
             inline_values: 0,
         }
     }
@@ -1339,6 +1357,9 @@ impl<'a> Applier<'a> {
                 map.entry("@none".to_string()).or_default().extend(vs);
                 continue;
             }
+            if vs.iter().any(|v| matches!(v, PropertyValue::Map(_))) {
+                self.inlined_map_keys.insert(key.clone());
+            }
             // Reserved on every node while merging is on, not only on nodes
             // that acquired aliases: a value under this key would otherwise be
             // read back as a merge alias (#1954 review).
@@ -1390,6 +1411,15 @@ impl<'a> Applier<'a> {
             .names
             .iri_values
             .intersection(&self.literal_keys)
+            .count();
+        // Inside a language map an inlined node sits under `@none` and writes
+        // back as a blank node; outside one, under a key that is a language
+        // map elsewhere, it writes back as one (#1912 review).
+        self.report.language_maps_ambiguous = self
+            .report
+            .names
+            .language_maps
+            .intersection(&self.inlined_map_keys)
             .count();
         if let Some(rule) = &m.merge {
             for (node, list) in alias_lists {
@@ -1658,6 +1688,9 @@ impl<'a> Applier<'a> {
                 l.entry("@none".to_string()).or_default().extend(vs);
                 continue;
             }
+            if vs.iter().any(|v| matches!(v, PropertyValue::Map(_))) {
+                self.inlined_map_keys.insert(key.clone());
+            }
             let v = self.collapse(vs, subject, &key)?;
             map.insert(key, v);
         }
@@ -1834,6 +1867,17 @@ pub struct RdfWriteReport {
     pub values_as_json: usize,
     /// Triples the graph said twice, written once: RDF is a set.
     pub duplicates_collapsed: usize,
+    /// Values with no RDF object at all, and so not written: nulls, as a
+    /// property, an array item or an entry of an inlined map, and values in a
+    /// language map or a `key@de` key that are not text (#1912 review).
+    #[serde(default)]
+    pub values_not_written: usize,
+    /// Sources in the header that recorded a mapping other than the one the
+    /// graph was written under. Only one mapping can be undone, the last
+    /// recorded; nodes read under another come back in that one's names
+    /// (#1912 review).
+    #[serde(default)]
+    pub mappings_not_used: usize,
 }
 
 impl RdfWriteReport {
@@ -1864,6 +1908,19 @@ impl RdfWriteReport {
             "rdf_duplicates_collapsed",
             self.duplicates_collapsed,
             "Triples the graph said more than once were written once; RDF is a set.",
+        );
+        push(
+            "rdf_values_not_written",
+            self.values_not_written,
+            "Null values, and values in a language map that are not text, have no RDF \
+             object and were not written.",
+        );
+        push(
+            "rdf_mappings_not_used",
+            self.mappings_not_used,
+            "The graph was read from RDF under more than one mapping; it was written \
+             under the last one recorded, so what the others mapped may not come back \
+             as it was read.",
         );
         out
     }
@@ -2136,6 +2193,8 @@ impl Writer<'_> {
                         let lit = Literal::new_language_tagged_literal(s.clone(), lang)
                             .map_err(engine_err)?;
                         self.add(subject.clone(), &predicate, RdfObject::Literal(lit))?;
+                    } else {
+                        self.report.values_not_written += 1;
                     }
                 }
                 return Ok(());
@@ -2158,6 +2217,8 @@ impl Writer<'_> {
                         let lit = Literal::new_language_tagged_literal(s.clone(), lang.as_str())
                             .map_err(engine_err)?;
                         self.add(subject.clone(), &predicate, RdfObject::Literal(lit))?;
+                    } else {
+                        self.report.values_not_written += 1;
                     }
                 }
             }
@@ -2178,7 +2239,10 @@ impl Writer<'_> {
         v: &PropertyValue,
     ) -> Result<Option<RdfObject>, MappingFileError> {
         Ok(Some(match v {
-            PropertyValue::Null => return Ok(None),
+            PropertyValue::Null => {
+                self.report.values_not_written += 1;
+                return Ok(None);
+            }
             PropertyValue::Map(map) => {
                 self.blanks += 1;
                 let b = crate::rdf::BlankNode::from_str(&format!("inline{}", self.blanks))

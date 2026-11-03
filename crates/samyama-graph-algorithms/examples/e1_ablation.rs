@@ -133,11 +133,8 @@ fn main() {
 
     for &n in &[100_000usize, 250_000, 500_000, 1_000_000] {
         let v = build_graph(n, 10);
-        let ops: [(&str, &dyn Fn(&GraphView)); 3] = [
-            ("PageRank", &pr),
-            ("LCC", &lc),
-            ("CDLP", &cd),
-        ];
+        let ops: [(&str, &dyn Fn(&GraphView)); 3] =
+            [("PageRank", &pr), ("LCC", &lc), ("CDLP", &cd)];
         for (name, f) in ops {
             set_gpu(false);
             let cpu = median_ms(|| f(&v), reps);
@@ -152,9 +149,19 @@ fn main() {
     for &n in &[20_000usize, 50_000, 100_000] {
         let v = build_graph(n, 10);
         set_gpu(false);
-        let cpu = median_ms(|| { let _ = count_triangles(&v); }, reps);
+        let cpu = median_ms(
+            || {
+                let _ = count_triangles(&v);
+            },
+            reps,
+        );
         set_gpu(true);
-        let gpu = median_ms(|| { let _ = count_triangles(&v); }, reps);
+        let gpu = median_ms(
+            || {
+                let _ = count_triangles(&v);
+            },
+            reps,
+        );
         row("TriangleCount", &label(n), cpu, gpu);
         drop(v);
     }

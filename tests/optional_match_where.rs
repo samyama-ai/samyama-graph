@@ -52,7 +52,12 @@ fn pairs(store: &GraphStore, cypher: &str) -> Vec<(i64, Option<i64>)> {
     let mut rows: Vec<(i64, Option<i64>)> = out
         .records
         .iter()
-        .map(|r| (int(r.get("a")).expect("x.val is never null"), int(r.get("b"))))
+        .map(|r| {
+            (
+                int(r.get("a")).expect("x.val is never null"),
+                int(r.get("b")),
+            )
+        })
         .collect();
     rows.sort();
     rows
@@ -89,7 +94,10 @@ fn a_predicate_spanning_both_sides_is_a_join_condition() {
 fn an_optional_match_without_a_where_is_unchanged() {
     let store = graph();
     assert_eq!(
-        pairs(&store, "MATCH (x:X) OPTIONAL MATCH (x)-[:E1]->(y:Y) RETURN x.val AS a, y.val AS b"),
+        pairs(
+            &store,
+            "MATCH (x:X) OPTIONAL MATCH (x)-[:E1]->(y:Y) RETURN x.val AS a, y.val AS b"
+        ),
         vec![(1, Some(2)), (4, Some(5)), (6, None)]
     );
 }

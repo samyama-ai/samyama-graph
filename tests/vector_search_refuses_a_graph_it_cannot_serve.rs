@@ -77,7 +77,10 @@ async fn search(graph: Option<&str>) -> (StatusCode, serde_json::Value) {
         .unwrap();
     let status = res.status();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({})))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({})),
+    )
 }
 
 use tower::ServiceExt;

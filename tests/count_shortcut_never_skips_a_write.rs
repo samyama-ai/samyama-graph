@@ -29,7 +29,9 @@ fn two_a_nodes() -> GraphStore {
     let mut store = GraphStore::new();
     for n in [1i64, 2] {
         let id = store.create_node_with_labels([Label::new("A")]);
-        store.set_node_property("default", id, "num", PropertyValue::Integer(n)).unwrap();
+        store
+            .set_node_property("default", id, "num", PropertyValue::Integer(n))
+            .unwrap();
     }
     store
 }
@@ -52,7 +54,11 @@ fn a_delete_with_an_aggregate_return_actually_deletes() {
     ] {
         let mut store = two_a_nodes();
         assert_eq!(run(&mut store, q), 1, "{q} should return one aggregate row");
-        assert_eq!(store.node_count(), 0, "{q} reported a count and deleted nothing");
+        assert_eq!(
+            store.node_count(),
+            0,
+            "{q} reported a count and deleted nothing"
+        );
     }
 }
 
@@ -62,7 +68,8 @@ fn a_set_with_an_aggregate_return_actually_sets() {
     run(&mut store, "MATCH (a:A) SET a.num = 9 RETURN count(*) AS n");
     let all = store.all_nodes();
     assert!(
-        all.iter().all(|n| store.node_property(n.id, "num") == Some(PropertyValue::Integer(9))),
+        all.iter()
+            .all(|n| store.node_property(n.id, "num") == Some(PropertyValue::Integer(9))),
         "SET was discarded by the shortcut",
     );
 }
@@ -72,7 +79,10 @@ fn a_remove_with_an_aggregate_return_actually_removes() {
     let mut store = two_a_nodes();
     run(&mut store, "MATCH (a:A) REMOVE a.num RETURN count(*) AS n");
     let all = store.all_nodes();
-    assert!(all.iter().all(|n| n.properties.get("num").is_none()), "REMOVE was discarded");
+    assert!(
+        all.iter().all(|n| n.properties.get("num").is_none()),
+        "REMOVE was discarded"
+    );
 }
 
 #[test]

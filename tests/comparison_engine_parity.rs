@@ -56,20 +56,19 @@ fn truth(store: &GraphStore, cypher: &str) -> Option<bool> {
 #[test]
 fn an_entity_predicate_means_the_same_in_every_clause() {
     let s = store();
-    for pred in [
-        "a = a",
-        "a <> a",
-        "a = b",
-        "id(a) = id(b)",
-    ] {
-        let in_where =
-            truth(&s, &format!("MATCH ()-[a]->() MATCH ()-[b]->() WHERE {pred} RETURN true AS r"));
+    for pred in ["a = a", "a <> a", "a = b", "id(a) = id(b)"] {
+        let in_where = truth(
+            &s,
+            &format!("MATCH ()-[a]->() MATCH ()-[b]->() WHERE {pred} RETURN true AS r"),
+        );
         let after_with = truth(
             &s,
             &format!("MATCH ()-[a]->() MATCH ()-[b]->() WITH a, b WHERE {pred} RETURN true AS r"),
         );
-        let in_return =
-            truth(&s, &format!("MATCH ()-[a]->() MATCH ()-[b]->() RETURN {pred} AS r"));
+        let in_return = truth(
+            &s,
+            &format!("MATCH ()-[a]->() MATCH ()-[b]->() RETURN {pred} AS r"),
+        );
         assert_eq!(
             in_where == Some(true),
             in_return == Some(true),
@@ -97,7 +96,10 @@ fn a_scalar_predicate_means_the_same_in_every_clause() {
         "2 ^ 3 = 8.0",
         "1 IN [1.0]",
     ] {
-        let in_where = truth(&s, &format!("MATCH (x) WHERE {pred} RETURN true AS r LIMIT 1"));
+        let in_where = truth(
+            &s,
+            &format!("MATCH (x) WHERE {pred} RETURN true AS r LIMIT 1"),
+        );
         let in_return = truth(&s, &format!("RETURN {pred} AS r"));
         assert_eq!(
             in_where == Some(true),
@@ -128,13 +130,22 @@ fn an_integer_equals_an_equal_float() {
 fn every_entity_kind_has_identity() {
     let s = store();
     assert_eq!(truth(&s, "MATCH ()-[r]->() RETURN r = r AS r"), Some(true));
-    assert_eq!(truth(&s, "MATCH ()-[r]->() RETURN r <> r AS r"), Some(false));
+    assert_eq!(
+        truth(&s, "MATCH ()-[r]->() RETURN r <> r AS r"),
+        Some(false)
+    );
     assert_eq!(truth(&s, "MATCH (a)-[]->() RETURN a = a AS r"), Some(true));
     assert_eq!(
-        truth(&s, "MATCH p1 = ()-->() MATCH p2 = ()-->() RETURN p1 = p2 AS r"),
+        truth(
+            &s,
+            "MATCH p1 = ()-->() MATCH p2 = ()-->() RETURN p1 = p2 AS r"
+        ),
         Some(true)
     );
-    assert_eq!(truth(&s, "MATCH (a), ()-[r]->() RETURN a = r AS r"), Some(false));
+    assert_eq!(
+        truth(&s, "MATCH (a), ()-[r]->() RETURN a = r AS r"),
+        Some(false)
+    );
 }
 
 /// The shape the TCK scenario uses, which the filter engine could not run.

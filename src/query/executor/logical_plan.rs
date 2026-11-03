@@ -3,9 +3,9 @@
 //! Separates plan structure from physical operators. Direction reversal is a
 //! logical-level decision made before physical operator selection.
 
+use crate::graph::types::{EdgeType, Label};
+use crate::query::ast::{Expression, MatchClause};
 use std::collections::{HashMap, HashSet};
-use crate::graph::types::{Label, EdgeType};
-use crate::query::ast::{MatchClause, Expression};
 
 /// Direction of an Expand operation in the logical plan
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,7 +145,13 @@ impl LogicalPlanNode {
                 s.insert(variable.clone());
                 s
             }
-            LogicalPlanNode::Expand { input, source_var, target_var, edge_var, .. } => {
+            LogicalPlanNode::Expand {
+                input,
+                source_var,
+                target_var,
+                edge_var,
+                ..
+            } => {
                 let mut s = input.bound_variables();
                 s.insert(source_var.clone());
                 s.insert(target_var.clone());
@@ -154,7 +160,13 @@ impl LogicalPlanNode {
                 }
                 s
             }
-            LogicalPlanNode::ExpandInto { input, source_var, target_var, edge_var, .. } => {
+            LogicalPlanNode::ExpandInto {
+                input,
+                source_var,
+                target_var,
+                edge_var,
+                ..
+            } => {
                 let mut s = input.bound_variables();
                 s.insert(source_var.clone());
                 s.insert(target_var.clone());
@@ -163,7 +175,12 @@ impl LogicalPlanNode {
                 }
                 s
             }
-            LogicalPlanNode::TrieJoin { input, target_var, constraints, .. } => {
+            LogicalPlanNode::TrieJoin {
+                input,
+                target_var,
+                constraints,
+                ..
+            } => {
                 let mut s = input.bound_variables();
                 s.insert(target_var.clone());
                 for c in constraints {
@@ -207,46 +224,118 @@ impl LogicalPlanNode {
         let connector = if indent > 0 { "+- " } else { "" };
         match self {
             LogicalPlanNode::LabelScan { variable, label } => {
-                let lbl = label.as_ref().map(|l| format!("\"{}\"", l.as_str())).unwrap_or_else(|| "*".to_string());
-                format!("{}{}NodeScan (var={}, labels=[{}])", prefix, connector, variable, lbl)
+                let lbl = label
+                    .as_ref()
+                    .map(|l| format!("\"{}\"", l.as_str()))
+                    .unwrap_or_else(|| "*".to_string());
+                format!(
+                    "{}{}NodeScan (var={}, labels=[{}])",
+                    prefix, connector, variable, lbl
+                )
             }
-            LogicalPlanNode::IndexLookup { variable, label, property, .. } => {
-                format!("{}{}IndexScan (var={}, label=\"{}\", prop={})", prefix, connector, variable, label.as_str(), property)
+            LogicalPlanNode::IndexLookup {
+                variable,
+                label,
+                property,
+                ..
+            } => {
+                format!(
+                    "{}{}IndexScan (var={}, label=\"{}\", prop={})",
+                    prefix,
+                    connector,
+                    variable,
+                    label.as_str(),
+                    property
+                )
             }
-            LogicalPlanNode::Expand { input, source_var, target_var, edge_types, direction, .. } => {
+            LogicalPlanNode::Expand {
+                input,
+                source_var,
+                target_var,
+                edge_types,
+                direction,
+                ..
+            } => {
                 let dir_str = match direction {
-                    ExpandDirection::Forward => format!("({})-[:{}]->({})", source_var, Self::fmt_etypes(edge_types), target_var),
-                    ExpandDirection::Reverse => format!("({})<-[:{}]-({})", source_var, Self::fmt_etypes(edge_types), target_var),
+                    ExpandDirection::Forward => format!(
+                        "({})-[:{}]->({})",
+                        source_var,
+                        Self::fmt_etypes(edge_types),
+                        target_var
+                    ),
+                    ExpandDirection::Reverse => format!(
+                        "({})<-[:{}]-({})",
+                        source_var,
+                        Self::fmt_etypes(edge_types),
+                        target_var
+                    ),
                 };
                 let child = input.display_plan(indent + 1);
                 format!("{}{}Expand ({})\n{}", prefix, connector, dir_str, child)
             }
-            LogicalPlanNode::ExpandInto { input, source_var, target_var, edge_types, .. } => {
+            LogicalPlanNode::ExpandInto {
+                input,
+                source_var,
+                target_var,
+                edge_types,
+                ..
+            } => {
                 let types = Self::fmt_etypes(edge_types);
                 let child = input.display_plan(indent + 1);
-                format!("{}{}ExpandInto ({}<-[:{}]->{})\n{}", prefix, connector, source_var, types, target_var, child)
+                format!(
+                    "{}{}ExpandInto ({}<-[:{}]->{})\n{}",
+                    prefix, connector, source_var, types, target_var, child
+                )
             }
-            LogicalPlanNode::TrieJoin { input, target_var, constraints } => {
-                let edges: Vec<String> = constraints.iter().map(|c| {
-                    let dir = match c.direction {
-                        ExpandDirection::Forward => format!("N_out({})", c.bound_var),
-                        ExpandDirection::Reverse => format!("N_in({})", c.bound_var),
-                    };
-                    if c.edge_types.is_empty() { dir } else {
-                        format!("{}[:{}]", dir, Self::fmt_etypes(&c.edge_types))
-                    }
-                }).collect();
+            LogicalPlanNode::TrieJoin {
+                input,
+                target_var,
+                constraints,
+            } => {
+                let edges: Vec<String> = constraints
+                    .iter()
+                    .map(|c| {
+                        let dir = match c.direction {
+                            ExpandDirection::Forward => format!("N_out({})", c.bound_var),
+                            ExpandDirection::Reverse => format!("N_in({})", c.bound_var),
+                        };
+                        if c.edge_types.is_empty() {
+                            dir
+                        } else {
+                            format!("{}[:{}]", dir, Self::fmt_etypes(&c.edge_types))
+                        }
+                    })
+                    .collect();
                 let child = input.display_plan(indent + 1);
-                format!("{}{}TrieJoin ({} ∈ {})\n{}", prefix, connector, target_var, edges.join(" ∩ "), child)
+                format!(
+                    "{}{}TrieJoin ({} ∈ {})\n{}",
+                    prefix,
+                    connector,
+                    target_var,
+                    edges.join(" ∩ "),
+                    child
+                )
             }
             LogicalPlanNode::Filter { input, predicate } => {
                 let child = input.display_plan(indent + 1);
                 format!("{}{}Filter ({:?})\n{}", prefix, connector, predicate, child)
             }
-            LogicalPlanNode::Join { left, right, join_keys, .. } => {
+            LogicalPlanNode::Join {
+                left,
+                right,
+                join_keys,
+                ..
+            } => {
                 let l = left.display_plan(indent + 1);
                 let r = right.display_plan(indent + 1);
-                format!("{}{}Join (on=[{}])\n{}\n{}", prefix, connector, join_keys.join(", "), l, r)
+                format!(
+                    "{}{}Join (on=[{}])\n{}\n{}",
+                    prefix,
+                    connector,
+                    join_keys.join(", "),
+                    l,
+                    r
+                )
             }
             LogicalPlanNode::CartesianProduct { left, right } => {
                 let l = left.display_plan(indent + 1);
@@ -294,7 +383,11 @@ impl LogicalPlanNode {
         if edge_types.is_empty() {
             "*".to_string()
         } else {
-            edge_types.iter().map(|e| e.as_str()).collect::<Vec<_>>().join("|")
+            edge_types
+                .iter()
+                .map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join("|")
         }
     }
 }
@@ -329,9 +422,9 @@ pub struct PatternEdge {
 /// Direction as parsed from the Cypher AST
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AstDirection {
-    Outgoing,   // (a)-[]->(b)
-    Incoming,   // (a)<-[]-(b)
-    Both,       // (a)-[]-(b)
+    Outgoing, // (a)-[]->(b)
+    Incoming, // (a)<-[]-(b)
+    Both,     // (a)-[]-(b)
 }
 
 /// A pattern graph extracted from a MATCH clause
@@ -352,15 +445,19 @@ impl PatternGraph {
             let start_var = path_pattern.start.variable.clone().unwrap_or_default();
             if !start_var.is_empty() {
                 let labels: Vec<Label> = path_pattern.start.labels.iter().cloned().collect();
-                let properties: Vec<(String, crate::graph::PropertyValue)> = path_pattern.start.properties
+                let properties: Vec<(String, crate::graph::PropertyValue)> = path_pattern
+                    .start
+                    .properties
                     .as_ref()
                     .map(|p| p.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                     .unwrap_or_default();
-                nodes.entry(start_var.clone()).or_insert_with(|| PatternNode {
-                    variable: start_var.clone(),
-                    labels,
-                    properties,
-                });
+                nodes
+                    .entry(start_var.clone())
+                    .or_insert_with(|| PatternNode {
+                        variable: start_var.clone(),
+                        labels,
+                        properties,
+                    });
             }
 
             // Process segments (edge + node pairs)
@@ -369,15 +466,19 @@ impl PatternGraph {
                 let next_var = segment.node.variable.clone().unwrap_or_default();
                 if !next_var.is_empty() {
                     let labels: Vec<Label> = segment.node.labels.iter().cloned().collect();
-                    let properties: Vec<(String, crate::graph::PropertyValue)> = segment.node.properties
+                    let properties: Vec<(String, crate::graph::PropertyValue)> = segment
+                        .node
+                        .properties
                         .as_ref()
                         .map(|p| p.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                         .unwrap_or_default();
-                    nodes.entry(next_var.clone()).or_insert_with(|| PatternNode {
-                        variable: next_var.clone(),
-                        labels,
-                        properties,
-                    });
+                    nodes
+                        .entry(next_var.clone())
+                        .or_insert_with(|| PatternNode {
+                            variable: next_var.clone(),
+                            labels,
+                            properties,
+                        });
                 }
 
                 let edge_types: Vec<EdgeType> = segment.edge.types.iter().cloned().collect();
@@ -411,17 +512,27 @@ impl PatternGraph {
 
     /// Get all neighbor edges for a node variable
     pub fn neighbors(&self, variable: &str) -> Vec<(usize, &PatternEdge)> {
-        self.edges.iter().enumerate()
+        self.edges
+            .iter()
+            .enumerate()
             .filter(|(_, e)| e.source_var == variable || e.target_var == variable)
             .collect()
     }
 
     /// Get neighbor edges that connect to unvisited nodes
-    pub fn unvisited_neighbors(&self, variable: &str, visited: &HashSet<String>) -> Vec<(usize, &PatternEdge)> {
+    pub fn unvisited_neighbors(
+        &self,
+        variable: &str,
+        visited: &HashSet<String>,
+    ) -> Vec<(usize, &PatternEdge)> {
         self.neighbors(variable)
             .into_iter()
             .filter(|(_, e)| {
-                let other = if e.source_var == variable { &e.target_var } else { &e.source_var };
+                let other = if e.source_var == variable {
+                    &e.target_var
+                } else {
+                    &e.source_var
+                };
                 !visited.contains(other)
             })
             .collect()
@@ -440,7 +551,11 @@ mod tests {
         }
     }
 
-    fn make_path(start_var: &str, start_labels: Vec<Label>, segments: Vec<PathSegment>) -> PathPattern {
+    fn make_path(
+        start_var: &str,
+        start_labels: Vec<Label>,
+        segments: Vec<PathSegment>,
+    ) -> PathPattern {
         PathPattern {
             restrictor: Default::default(),
             restrictor_explicit: false,
@@ -457,7 +572,13 @@ mod tests {
         }
     }
 
-    fn make_segment(edge_var: Option<&str>, edge_types: Vec<EdgeType>, dir: Direction, node_var: &str, node_labels: Vec<Label>) -> PathSegment {
+    fn make_segment(
+        edge_var: Option<&str>,
+        edge_types: Vec<EdgeType>,
+        dir: Direction,
+        node_var: &str,
+        node_labels: Vec<Label>,
+    ) -> PathSegment {
         PathSegment {
             edge: EdgePattern {
                 variable: edge_var.map(|s| s.to_string()),
@@ -510,8 +631,14 @@ mod tests {
     #[test]
     fn test_bound_variables_expand_into() {
         let inner = LogicalPlanNode::Join {
-            left: Box::new(LogicalPlanNode::LabelScan { variable: "a".to_string(), label: Some(Label::new("Person")) }),
-            right: Box::new(LogicalPlanNode::LabelScan { variable: "b".to_string(), label: Some(Label::new("Person")) }),
+            left: Box::new(LogicalPlanNode::LabelScan {
+                variable: "a".to_string(),
+                label: Some(Label::new("Person")),
+            }),
+            right: Box::new(LogicalPlanNode::LabelScan {
+                variable: "b".to_string(),
+                label: Some(Label::new("Person")),
+            }),
             join_keys: vec![],
         };
         let plan = LogicalPlanNode::ExpandInto {
@@ -530,8 +657,15 @@ mod tests {
     fn test_pattern_graph_from_match_simple() {
         // MATCH (a:Person)-[:KNOWS]->(b:Person)
         let clause = make_match_clause(vec![make_path(
-            "a", vec![Label::new("Person")],
-            vec![make_segment(Some("r"), vec![EdgeType::new("KNOWS")], Direction::Outgoing, "b", vec![Label::new("Person")])],
+            "a",
+            vec![Label::new("Person")],
+            vec![make_segment(
+                Some("r"),
+                vec![EdgeType::new("KNOWS")],
+                Direction::Outgoing,
+                "b",
+                vec![Label::new("Person")],
+            )],
         )]);
 
         let pg = PatternGraph::from_match_clause(&clause);
@@ -548,8 +682,15 @@ mod tests {
     fn test_pattern_graph_incoming_direction() {
         // MATCH (a:Person)<-[:FOLLOWS]-(b:Person)
         let clause = make_match_clause(vec![make_path(
-            "a", vec![Label::new("Person")],
-            vec![make_segment(None, vec![EdgeType::new("FOLLOWS")], Direction::Incoming, "b", vec![Label::new("Person")])],
+            "a",
+            vec![Label::new("Person")],
+            vec![make_segment(
+                None,
+                vec![EdgeType::new("FOLLOWS")],
+                Direction::Incoming,
+                "b",
+                vec![Label::new("Person")],
+            )],
         )]);
 
         let pg = PatternGraph::from_match_clause(&clause);
@@ -562,10 +703,23 @@ mod tests {
     fn test_pattern_graph_chain() {
         // MATCH (a)-[:KNOWS]->(b)-[:WORKS_AT]->(c)
         let clause = make_match_clause(vec![make_path(
-            "a", vec![],
+            "a",
+            vec![],
             vec![
-                make_segment(None, vec![EdgeType::new("KNOWS")], Direction::Outgoing, "b", vec![]),
-                make_segment(None, vec![EdgeType::new("WORKS_AT")], Direction::Outgoing, "c", vec![]),
+                make_segment(
+                    None,
+                    vec![EdgeType::new("KNOWS")],
+                    Direction::Outgoing,
+                    "b",
+                    vec![],
+                ),
+                make_segment(
+                    None,
+                    vec![EdgeType::new("WORKS_AT")],
+                    Direction::Outgoing,
+                    "c",
+                    vec![],
+                ),
             ],
         )]);
 
@@ -586,7 +740,10 @@ mod tests {
     }
 
     fn scan(var: &str, label: Option<&str>) -> LogicalPlanNode {
-        LogicalPlanNode::LabelScan { variable: var.to_string(), label: label.map(Label::new) }
+        LogicalPlanNode::LabelScan {
+            variable: var.to_string(),
+            label: label.map(Label::new),
+        }
     }
 
     fn vars(plan: &LogicalPlanNode) -> Vec<String> {
@@ -595,7 +752,11 @@ mod tests {
         v
     }
 
-    fn adjacency(direction: ExpandDirection, neighbor_label: Option<&str>, distinct: bool) -> LogicalPlanNode {
+    fn adjacency(
+        direction: ExpandDirection,
+        neighbor_label: Option<&str>,
+        distinct: bool,
+    ) -> LogicalPlanNode {
         LogicalPlanNode::AdjacencyCountAggregate {
             input: Box::new(scan("j", Some("Journal"))),
             grouped_var: "j".to_string(),
@@ -681,8 +842,14 @@ mod tests {
 
     #[test]
     fn test_display_label_scan_with_and_without_label() {
-        assert_eq!(scan("n", Some("Person")).display_plan(0), "NodeScan (var=n, labels=[\"Person\"])");
-        assert_eq!(scan("n", None).display_plan(1), "   +- NodeScan (var=n, labels=[*])");
+        assert_eq!(
+            scan("n", Some("Person")).display_plan(0),
+            "NodeScan (var=n, labels=[\"Person\"])"
+        );
+        assert_eq!(
+            scan("n", None).display_plan(1),
+            "   +- NodeScan (var=n, labels=[*])"
+        );
     }
 
     #[test]
@@ -694,7 +861,10 @@ mod tests {
             op: BinaryOp::Gt,
             value: Expression::Literal(crate::graph::PropertyValue::Integer(1)),
         };
-        assert_eq!(plan.display_plan(0), "IndexScan (var=n, label=\"Person\", prop=age)");
+        assert_eq!(
+            plan.display_plan(0),
+            "IndexScan (var=n, label=\"Person\", prop=age)"
+        );
     }
 
     #[test]
@@ -708,7 +878,11 @@ mod tests {
             direction: ExpandDirection::Forward,
         };
         let text = fwd.display_plan(0);
-        assert!(text.starts_with("Expand ((a)-[:KNOWS|LIKES]->(b))\n"), "{}", text);
+        assert!(
+            text.starts_with("Expand ((a)-[:KNOWS|LIKES]->(b))\n"),
+            "{}",
+            text
+        );
         assert!(text.contains("   +- NodeScan (var=a"), "{}", text);
 
         let rev = LogicalPlanNode::Expand {
@@ -719,7 +893,11 @@ mod tests {
             edge_types: vec![],
             direction: ExpandDirection::Reverse,
         };
-        assert!(rev.display_plan(0).starts_with("Expand ((a)<-[:*]-(b))"), "{}", rev.display_plan(0));
+        assert!(
+            rev.display_plan(0).starts_with("Expand ((a)<-[:*]-(b))"),
+            "{}",
+            rev.display_plan(0)
+        );
     }
 
     #[test]
@@ -731,7 +909,9 @@ mod tests {
             edge_types: vec![EdgeType::new("KNOWS")],
             edge_var: None,
         };
-        assert!(plan.display_plan(0).starts_with("ExpandInto (a<-[:KNOWS]->b)\n"));
+        assert!(plan
+            .display_plan(0)
+            .starts_with("ExpandInto (a<-[:KNOWS]->b)\n"));
     }
 
     #[test]
@@ -740,12 +920,26 @@ mod tests {
             input: Box::new(scan("a", None)),
             target_var: "c".to_string(),
             constraints: vec![
-                TrieJoinConstraint { bound_var: "b".to_string(), direction: ExpandDirection::Forward, edge_types: vec![], edge_var: None },
-                TrieJoinConstraint { bound_var: "a".to_string(), direction: ExpandDirection::Reverse, edge_types: vec![EdgeType::new("E")], edge_var: None },
+                TrieJoinConstraint {
+                    bound_var: "b".to_string(),
+                    direction: ExpandDirection::Forward,
+                    edge_types: vec![],
+                    edge_var: None,
+                },
+                TrieJoinConstraint {
+                    bound_var: "a".to_string(),
+                    direction: ExpandDirection::Reverse,
+                    edge_types: vec![EdgeType::new("E")],
+                    edge_var: None,
+                },
             ],
         };
         let text = plan.display_plan(0);
-        assert!(text.starts_with("TrieJoin (c ∈ N_out(b) ∩ N_in(a)[:E])\n"), "{}", text);
+        assert!(
+            text.starts_with("TrieJoin (c ∈ N_out(b) ∩ N_in(a)[:E])\n"),
+            "{}",
+            text
+        );
     }
 
     #[test]
@@ -771,20 +965,28 @@ mod tests {
             right: Box::new(scan("b", None)),
         };
         let text = cp.display_plan(2);
-        assert!(text.starts_with("      +- CartesianProduct\n"), "{:?}", text);
+        assert!(
+            text.starts_with("      +- CartesianProduct\n"),
+            "{:?}",
+            text
+        );
     }
 
     #[test]
     fn test_display_adjacency_count_aggregate() {
         let text = adjacency(ExpandDirection::Reverse, Some("Article"), true).display_plan(0);
         assert!(
-            text.starts_with("AdjacencyCountAggregate (j[:PUBLISHED_IN]<- :Article(DISTINCT a) AS articles)\n"),
-            "{}", text
+            text.starts_with(
+                "AdjacencyCountAggregate (j[:PUBLISHED_IN]<- :Article(DISTINCT a) AS articles)\n"
+            ),
+            "{}",
+            text
         );
         let text = adjacency(ExpandDirection::Forward, None, false).display_plan(0);
         assert!(
             text.starts_with("AdjacencyCountAggregate (j[:PUBLISHED_IN]-> (a) AS articles)\n"),
-            "{}", text
+            "{}",
+            text
         );
     }
 
@@ -797,15 +999,28 @@ mod tests {
         end_props.insert("age".to_string(), PropertyValue::Integer(3));
 
         let mut path = make_path(
-            "a", vec![Label::new("Person")],
-            vec![make_segment(Some("r"), vec![], Direction::Both, "b", vec![])],
+            "a",
+            vec![Label::new("Person")],
+            vec![make_segment(
+                Some("r"),
+                vec![],
+                Direction::Both,
+                "b",
+                vec![],
+            )],
         );
         path.start.properties = Some(start_props);
         path.segments[0].node.properties = Some(end_props);
         let pg = PatternGraph::from_match_clause(&make_match_clause(vec![path]));
 
-        assert_eq!(pg.nodes["a"].properties, vec![("name".to_string(), PropertyValue::String("Alice".into()))]);
-        assert_eq!(pg.nodes["b"].properties, vec![("age".to_string(), PropertyValue::Integer(3))]);
+        assert_eq!(
+            pg.nodes["a"].properties,
+            vec![("name".to_string(), PropertyValue::String("Alice".into()))]
+        );
+        assert_eq!(
+            pg.nodes["b"].properties,
+            vec![("age".to_string(), PropertyValue::Integer(3))]
+        );
         assert_eq!(pg.edges[0].ast_direction, AstDirection::Both);
         assert_eq!(pg.edges[0].source_var, "a");
         assert_eq!(pg.edges[0].target_var, "b");
@@ -815,26 +1030,39 @@ mod tests {
     #[test]
     fn test_pattern_graph_skips_anonymous_nodes_and_keeps_first_labels() {
         // (a:Person)-->(), (a:Other)-->(b)
-        let mut anon = make_path("a", vec![Label::new("Person")], vec![make_segment(None, vec![], Direction::Outgoing, "x", vec![])]);
+        let mut anon = make_path(
+            "a",
+            vec![Label::new("Person")],
+            vec![make_segment(None, vec![], Direction::Outgoing, "x", vec![])],
+        );
         anon.segments[0].node.variable = None;
-        let second = make_path("a", vec![Label::new("Other")], vec![make_segment(None, vec![], Direction::Outgoing, "b", vec![])]);
+        let second = make_path(
+            "a",
+            vec![Label::new("Other")],
+            vec![make_segment(None, vec![], Direction::Outgoing, "b", vec![])],
+        );
         let mut unnamed_start = make_path("z", vec![], vec![]);
         unnamed_start.start.variable = None;
 
-        let pg = PatternGraph::from_match_clause(&make_match_clause(vec![anon, second, unnamed_start]));
+        let pg =
+            PatternGraph::from_match_clause(&make_match_clause(vec![anon, second, unnamed_start]));
         let mut names: Vec<_> = pg.nodes.keys().cloned().collect();
         names.sort();
         assert_eq!(names, vec!["a", "b"]);
         // The first occurrence of `a` wins.
         assert_eq!(pg.nodes["a"].labels, vec![Label::new("Person")]);
         assert_eq!(pg.edges.len(), 2);
-        assert_eq!(pg.edges[0].target_var, "", "anonymous endpoint is recorded as empty");
+        assert_eq!(
+            pg.edges[0].target_var, "",
+            "anonymous endpoint is recorded as empty"
+        );
     }
 
     #[test]
     fn test_unvisited_neighbors_from_target_side() {
         let clause = make_match_clause(vec![make_path(
-            "a", vec![],
+            "a",
+            vec![],
             vec![make_segment(None, vec![], Direction::Outgoing, "b", vec![])],
         )]);
         let pg = PatternGraph::from_match_clause(&clause);

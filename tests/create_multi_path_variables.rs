@@ -21,7 +21,11 @@ fn write(store: &mut GraphStore, cypher: &str) -> Vec<Vec<(String, Value)>> {
     let cols = out.columns.clone();
     out.records
         .iter()
-        .map(|r| cols.iter().map(|c| (c.clone(), r.get(c).cloned().unwrap_or(Value::Null))).collect())
+        .map(|r| {
+            cols.iter()
+                .map(|c| (c.clone(), r.get(c).cloned().unwrap_or(Value::Null)))
+                .collect()
+        })
         .collect()
 }
 
@@ -36,7 +40,10 @@ fn count(store: &GraphStore, cypher: &str) -> i64 {
 #[test]
 fn two_comma_separated_paths_bind_both_variables() {
     let mut store = GraphStore::new();
-    let rows = write(&mut store, "CREATE (a:X {n:1}), (b:Y {n:2}) RETURN a.n, b.n");
+    let rows = write(
+        &mut store,
+        "CREATE (a:X {n:1}), (b:Y {n:2}) RETURN a.n, b.n",
+    );
     assert_eq!(rows.len(), 1, "one row, got {rows:?}");
     let vals: Vec<&Value> = rows[0].iter().map(|(_, v)| v).collect();
     assert_eq!(vals[0], &Value::Property(PropertyValue::Integer(1)), "a.n");
@@ -77,7 +84,9 @@ fn the_nodes_are_created_regardless() {
     // fix to the binding cannot quietly change what gets written.
     let mut store = GraphStore::new();
     let q = parse_query("CREATE (a:X {n:1}), (b:Y {n:2})").unwrap();
-    MutQueryExecutor::new(&mut store, "default".to_string()).execute(&q).unwrap();
+    MutQueryExecutor::new(&mut store, "default".to_string())
+        .execute(&q)
+        .unwrap();
     assert_eq!(count(&store, "MATCH (n:X) RETURN count(n) AS c"), 1);
     assert_eq!(count(&store, "MATCH (n:Y) RETURN count(n) AS c"), 1);
 }

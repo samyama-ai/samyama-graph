@@ -13,8 +13,8 @@
 
 use samyama::graph::{GraphStore, Label};
 use samyama::query::QueryEngine;
-use samyama::snapshot::format::Dropped;
 use samyama::snapshot::export_tenant;
+use samyama::snapshot::format::Dropped;
 
 fn export(store: &GraphStore) -> Vec<Dropped> {
     let mut buf = Vec::new();
@@ -45,7 +45,11 @@ fn edges_carry_no_creation_time_and_the_report_says_so() {
     let rows = export(&store);
     let d = find(&rows, "edge_creation_timestamps").expect("{rows:?}");
     assert_eq!(d.count, 1);
-    assert!(d.detail.contains("Node timestamps do survive"), "{}", d.detail);
+    assert!(
+        d.detail.contains("Node timestamps do survive"),
+        "{}",
+        d.detail
+    );
 }
 
 #[test]
@@ -54,7 +58,10 @@ fn a_graph_of_nodes_only_reports_no_edge_loss() {
     let mut store = GraphStore::new();
     store.create_node_with_labels([Label::new("A")]);
     let rows = export(&store);
-    assert!(find(&rows, "edge_creation_timestamps").is_none(), "{rows:?}");
+    assert!(
+        find(&rows, "edge_creation_timestamps").is_none(),
+        "{rows:?}"
+    );
 }
 
 #[test]
@@ -77,8 +84,15 @@ fn index_declarations_are_no_longer_reported_as_lost() {
         "CREATE VECTOR INDEX vidx FOR (n:Doc) ON (n.embedding) OPTIONS {dimensions: 3}",
     );
     let rows = export(&store);
-    for what in ["property_indexes", "unique_constraints", "vector_index_declarations"] {
-        assert!(find(&rows, what).is_none(), "{what} reported as lost: {rows:?}");
+    for what in [
+        "property_indexes",
+        "unique_constraints",
+        "vector_index_declarations",
+    ] {
+        assert!(
+            find(&rows, what).is_none(),
+            "{what} reported as lost: {rows:?}"
+        );
     }
 }
 

@@ -107,7 +107,10 @@ fn integers_of_both_signs_sort_numerically() {
 #[test]
 fn descending_integers_reverse_the_ascending_order() {
     let store = empty();
-    let asc = ints(&run(&store, "UNWIND [3, -1, 0, 2, -7] AS x RETURN x ORDER BY x"));
+    let asc = ints(&run(
+        &store,
+        "UNWIND [3, -1, 0, 2, -7] AS x RETURN x ORDER BY x",
+    ));
     let desc = ints(&run(
         &store,
         "UNWIND [3, -1, 0, 2, -7] AS x RETURN x ORDER BY x DESC",
@@ -136,7 +139,10 @@ fn mixed_integer_and_float_keys_compare_across_the_two() {
 #[test]
 fn null_sorts_after_every_integer_ascending_and_first_descending() {
     let store = empty();
-    let asc = run(&store, "UNWIND [3, null, -1, null, 0] AS x RETURN x ORDER BY x");
+    let asc = run(
+        &store,
+        "UNWIND [3, null, -1, null, 0] AS x RETURN x ORDER BY x",
+    );
     assert_eq!(shown(&asc), vec!["i-1", "i0", "i3", "null", "null"]);
     let desc = run(
         &store,
@@ -226,10 +232,7 @@ fn three_integer_keys_do_not_fit_inline_and_still_order() {
 #[test]
 fn ties_keep_every_row_and_group_the_equal_keys_together() {
     let store = empty();
-    let rows = run(
-        &store,
-        "UNWIND [2, 1, 2, 1, 2, 3] AS x RETURN x ORDER BY x",
-    );
+    let rows = run(&store, "UNWIND [2, 1, 2, 1, 2, 3] AS x RETURN x ORDER BY x");
     // The multiset, not the arrangement within a tie: nothing here distinguishes
     // two rows whose key is 2.
     assert_eq!(
@@ -286,7 +289,10 @@ fn distinct_above_the_sort_still_orders_every_row() {
         &store,
         "UNWIND [5, 1, 5, 3, 1, 9, -2] AS x RETURN DISTINCT x ORDER BY x",
     );
-    assert_eq!(ints(&rows), vec![Some(-2), Some(1), Some(3), Some(5), Some(9)]);
+    assert_eq!(
+        ints(&rows),
+        vec![Some(-2), Some(1), Some(3), Some(5), Some(9)]
+    );
 }
 
 #[test]
@@ -316,10 +322,18 @@ fn a_boolean_key_outranks_an_integer_and_is_not_an_integer() {
     // `Boolean` sits between `String` and `Number`, and is not an integer, so
     // a typed integer path must decline the key.
     let store = empty();
-    let rows = run(&store, "UNWIND [1, true, 0, false] AS x RETURN x ORDER BY x");
+    let rows = run(
+        &store,
+        "UNWIND [1, true, 0, false] AS x RETURN x ORDER BY x",
+    );
     assert_eq!(
         shown(&rows),
-        vec!["Property(Boolean(false))", "Property(Boolean(true))", "i0", "i1"]
+        vec![
+            "Property(Boolean(false))",
+            "Property(Boolean(true))",
+            "i0",
+            "i1"
+        ]
     );
 }
 
@@ -328,9 +342,7 @@ fn a_larger_input_orders_the_same_as_a_sorted_copy() {
     // 2,000 rows, past the batch and head thresholds a small fixture never
     // reaches, against an order computed here rather than by the engine.
     let store = empty();
-    let values: Vec<i64> = (0..2000)
-        .map(|i: i64| ((i * 7919) % 4001) - 2000)
-        .collect();
+    let values: Vec<i64> = (0..2000).map(|i: i64| ((i * 7919) % 4001) - 2000).collect();
     let list = values
         .iter()
         .map(|v| v.to_string())

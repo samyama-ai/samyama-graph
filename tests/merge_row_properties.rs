@@ -46,7 +46,11 @@ fn count(store: &GraphStore, cypher: &str) -> usize {
 fn merge_keyed_on_an_unwound_value_creates_one_node_per_distinct_key() {
     let mut store = GraphStore::new();
     run(&mut store, "UNWIND ['a', 'b', 'a'] AS x MERGE (n:N {v: x})");
-    assert_eq!(count(&store, "MATCH (n:N) RETURN n"), 2, "'a' twice is still one node");
+    assert_eq!(
+        count(&store, "MATCH (n:N) RETURN n"),
+        2,
+        "'a' twice is still one node"
+    );
     assert_eq!(count(&store, "MATCH (n:N {v: 'a'}) RETURN n"), 1);
     assert_eq!(count(&store, "MATCH (n:N {v: 'b'}) RETURN n"), 1);
 }
@@ -80,13 +84,23 @@ fn a_whole_pattern_merge_can_key_on_the_row() {
     // than the "wire an edge between two bound nodes" shape. Routing it to the
     // latter created nothing at all and reported success.
     let mut store = GraphStore::new();
-    run(&mut store, "UNWIND [1, 2, 1] AS i MERGE (a:A {id: i})-[:R {w: i}]->(b:B {id: i})");
+    run(
+        &mut store,
+        "UNWIND [1, 2, 1] AS i MERGE (a:A {id: i})-[:R {w: i}]->(b:B {id: i})",
+    );
     assert_eq!(count(&store, "MATCH (n:A) RETURN n"), 2);
     assert_eq!(count(&store, "MATCH (n:B) RETURN n"), 2);
     assert_eq!(count(&store, "MATCH ()-[r:R]->() RETURN r"), 2);
 
-    run(&mut store, "UNWIND [1, 2, 1] AS i MERGE (a:A {id: i})-[:R {w: i}]->(b:B {id: i})");
-    assert_eq!(count(&store, "MATCH ()-[r:R]->() RETURN r"), 2, "still idempotent");
+    run(
+        &mut store,
+        "UNWIND [1, 2, 1] AS i MERGE (a:A {id: i})-[:R {w: i}]->(b:B {id: i})",
+    );
+    assert_eq!(
+        count(&store, "MATCH ()-[r:R]->() RETURN r"),
+        2,
+        "still idempotent"
+    );
 }
 
 #[test]
@@ -97,7 +111,11 @@ fn merge_between_two_bound_nodes_still_reuses_them() {
     let mut store = GraphStore::new();
     run(&mut store, "CREATE (:A {id: 1}), (:B {id: 1})");
     run(&mut store, "MATCH (a:A), (b:B) MERGE (a)-[:R]->(b)");
-    assert_eq!(count(&store, "MATCH (n:A) RETURN n"), 1, "no second A was created");
+    assert_eq!(
+        count(&store, "MATCH (n:A) RETURN n"),
+        1,
+        "no second A was created"
+    );
     assert_eq!(count(&store, "MATCH (n:B) RETURN n"), 1);
     assert_eq!(count(&store, "MATCH ()-[r:R]->() RETURN r"), 1);
 }
@@ -125,12 +143,24 @@ fn an_edge_keyed_on_the_row_is_one_edge_per_distinct_key_between_bound_nodes() {
     let upsert = "UNWIND [{id: 't1'}, {id: 't2'}, {id: 't1'}] AS r \
                   MATCH (a:A {id: 1}), (b:B {id: 1}) MERGE (a)-[:T {id: r.id}]->(b)";
     run(&mut store, upsert);
-    assert_eq!(count(&store, "MATCH ()-[t:T]->() RETURN t"), 2, "'t1' twice is still one edge");
-    assert_eq!(count(&store, "MATCH ()-[t:T {id: 't1'}]->() RETURN t"), 1, "the key was written");
+    assert_eq!(
+        count(&store, "MATCH ()-[t:T]->() RETURN t"),
+        2,
+        "'t1' twice is still one edge"
+    );
+    assert_eq!(
+        count(&store, "MATCH ()-[t:T {id: 't1'}]->() RETURN t"),
+        1,
+        "the key was written"
+    );
     assert_eq!(count(&store, "MATCH ()-[t:T {id: 't2'}]->() RETURN t"), 1);
 
     run(&mut store, upsert);
-    assert_eq!(count(&store, "MATCH ()-[t:T]->() RETURN t"), 2, "still idempotent");
+    assert_eq!(
+        count(&store, "MATCH ()-[t:T]->() RETURN t"),
+        2,
+        "still idempotent"
+    );
 }
 
 #[test]
@@ -138,21 +168,34 @@ fn an_edge_with_a_different_key_is_not_a_match() {
     // The silent half of the defect: the existing edge was "matched" whatever
     // its key, so a later SET overwrote it instead of creating a second.
     let mut store = GraphStore::new();
-    run(&mut store, "CREATE (a:A {id: 1})-[:T {id: 'old', amount: 1}]->(b:B {id: 1})");
+    run(
+        &mut store,
+        "CREATE (a:A {id: 1})-[:T {id: 'old', amount: 1}]->(b:B {id: 1})",
+    );
     run(
         &mut store,
         "UNWIND [{id: 'new', amount: 2}] AS r MATCH (a:A {id: 1}), (b:B {id: 1}) \
          MERGE (a)-[t:T {id: r.id}]->(b) SET t.amount = r.amount",
     );
     assert_eq!(count(&store, "MATCH ()-[t:T]->() RETURN t"), 2);
-    assert_eq!(count(&store, "MATCH ()-[t:T {id: 'old', amount: 1}]->() RETURN t"), 1, "untouched");
-    assert_eq!(count(&store, "MATCH ()-[t:T {id: 'new', amount: 2}]->() RETURN t"), 1);
+    assert_eq!(
+        count(&store, "MATCH ()-[t:T {id: 'old', amount: 1}]->() RETURN t"),
+        1,
+        "untouched"
+    );
+    assert_eq!(
+        count(&store, "MATCH ()-[t:T {id: 'new', amount: 2}]->() RETURN t"),
+        1
+    );
 }
 
 #[test]
 fn an_edge_can_key_on_a_property_of_another_bound_node() {
     let mut store = GraphStore::new();
-    run(&mut store, "CREATE (:A {id: 1}), (:B {id: 1}), (:Src {k: 'x'}), (:Src {k: 'y'})");
+    run(
+        &mut store,
+        "CREATE (:A {id: 1}), (:B {id: 1}), (:Src {k: 'x'}), (:Src {k: 'y'})",
+    );
     let merge = "MATCH (s:Src) MATCH (a:A {id: 1}), (b:B {id: 1}) MERGE (a)-[:T {k: s.k}]->(b)";
     run(&mut store, merge);
     run(&mut store, merge);
@@ -164,13 +207,26 @@ fn an_edge_can_key_on_a_property_of_another_bound_node() {
 #[test]
 fn literal_and_row_properties_on_one_edge_must_both_match() {
     let mut store = GraphStore::new();
-    run(&mut store, "CREATE (a:A {id: 1})-[:T {kind: 'other', id: 't1'}]->(b:B {id: 1})");
+    run(
+        &mut store,
+        "CREATE (a:A {id: 1})-[:T {kind: 'other', id: 't1'}]->(b:B {id: 1})",
+    );
     let merge = "UNWIND ['t1'] AS x MATCH (a:A {id: 1}), (b:B {id: 1}) \
                  MERGE (a)-[:T {kind: 'wire', id: x}]->(b)";
     run(&mut store, merge);
     run(&mut store, merge);
-    assert_eq!(count(&store, "MATCH ()-[t:T]->() RETURN t"), 2, "kind differs, so no match");
-    assert_eq!(count(&store, "MATCH ()-[t:T {kind: 'wire', id: 't1'}]->() RETURN t"), 1);
+    assert_eq!(
+        count(&store, "MATCH ()-[t:T]->() RETURN t"),
+        2,
+        "kind differs, so no match"
+    );
+    assert_eq!(
+        count(
+            &store,
+            "MATCH ()-[t:T {kind: 'wire', id: 't1'}]->() RETURN t"
+        ),
+        1
+    );
 }
 
 #[test]
@@ -180,19 +236,45 @@ fn on_create_and_on_match_see_the_row_keyed_edge() {
     let merge = "UNWIND ['t1'] AS x MATCH (a:A {id: 1}), (b:B {id: 1}) \
                  MERGE (a)-[t:T {id: x}]->(b) ON CREATE SET t.created = true ON MATCH SET t.matched = true";
     run(&mut store, merge);
-    assert_eq!(count(&store, "MATCH ()-[t:T {id: 't1', created: true}]->() RETURN t"), 1);
-    assert_eq!(count(&store, "MATCH ()-[t:T]->() WHERE t.matched IS NULL RETURN t"), 1);
+    assert_eq!(
+        count(
+            &store,
+            "MATCH ()-[t:T {id: 't1', created: true}]->() RETURN t"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &store,
+            "MATCH ()-[t:T]->() WHERE t.matched IS NULL RETURN t"
+        ),
+        1
+    );
     run(&mut store, merge);
-    assert_eq!(count(&store, "MATCH ()-[t:T {id: 't1', matched: true}]->() RETURN t"), 1);
+    assert_eq!(
+        count(
+            &store,
+            "MATCH ()-[t:T {id: 't1', matched: true}]->() RETURN t"
+        ),
+        1
+    );
     assert_eq!(count(&store, "MATCH ()-[t:T]->() RETURN t"), 1);
 }
 
 #[test]
 fn an_undirected_edge_keyed_on_the_row_matches_either_way_round() {
     let mut store = GraphStore::new();
-    run(&mut store, "CREATE (a:A {id: 1})<-[:T {id: 't1'}]-(b:B {id: 1})");
-    let merge = "UNWIND ['t1', 't2'] AS x MATCH (a:A {id: 1}), (b:B {id: 1}) MERGE (a)-[:T {id: x}]-(b)";
+    run(
+        &mut store,
+        "CREATE (a:A {id: 1})<-[:T {id: 't1'}]-(b:B {id: 1})",
+    );
+    let merge =
+        "UNWIND ['t1', 't2'] AS x MATCH (a:A {id: 1}), (b:B {id: 1}) MERGE (a)-[:T {id: x}]-(b)";
     run(&mut store, merge);
     run(&mut store, merge);
-    assert_eq!(count(&store, "MATCH ()-[t:T]->() RETURN t"), 2, "t1 existed reversed; only t2 is new");
+    assert_eq!(
+        count(&store, "MATCH ()-[t:T]->() RETURN t"),
+        2,
+        "t1 existed reversed; only t2 is new"
+    );
 }

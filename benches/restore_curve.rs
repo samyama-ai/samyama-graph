@@ -48,12 +48,11 @@ fn build(nodes: usize, edges: usize) -> GraphStore {
     for i in 0..nodes {
         let mut props = PropertyMap::new();
         props.insert("id".to_string(), PropertyValue::Integer(i as i64));
-        props.insert("name".to_string(), PropertyValue::String(format!("n{i:09}")));
-        ids.push(store.create_node_with_properties(
-            "default",
-            vec![Label::new("N")],
-            props,
-        ));
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String(format!("n{i:09}")),
+        );
+        ids.push(store.create_node_with_properties("default", vec![Label::new("N")], props));
     }
     // A deterministic spread rather than a chain, so adjacency is not one long
     // path -- a path is the cheapest possible shape to build and would flatter
@@ -98,7 +97,13 @@ fn measure(nodes: usize, edges: usize) -> Row {
     let query_s = t.elapsed().as_secs_f64();
     assert_eq!(n, 1, "the probe query must return a row");
 
-    Row { nodes, edges, bytes, restore_s, first_answer_s: restore_s + query_s }
+    Row {
+        nodes,
+        edges,
+        bytes,
+        restore_s,
+        first_answer_s: restore_s + query_s,
+    }
 }
 
 fn print_series(title: &str, rows: &[Row]) {
@@ -128,7 +133,11 @@ fn print_series(title: &str, rows: &[Row]) {
 fn slope(xs: &[f64], ys: &[f64]) -> f64 {
     let num: f64 = xs.iter().zip(ys).map(|(x, y)| x * y).sum();
     let den: f64 = xs.iter().map(|x| x * x).sum();
-    if den == 0.0 { f64::NAN } else { num / den }
+    if den == 0.0 {
+        f64::NAN
+    } else {
+        num / den
+    }
 }
 
 fn main() {
@@ -153,7 +162,10 @@ fn main() {
         b.push(measure(fixed_nodes, e));
         e *= 2;
     }
-    print_series(&format!("B — nodes fixed at {fixed_nodes}, edges growing"), &b);
+    print_series(
+        &format!("B — nodes fixed at {fixed_nodes}, edges growing"),
+        &b,
+    );
 
     // --- which term is it -------------------------------------------------
     let per_node = slope(
@@ -161,8 +173,12 @@ fn main() {
         &a.iter().map(|r| r.restore_s).collect::<Vec<_>>(),
     ) * 1e6;
     let per_edge = slope(
-        &b.iter().map(|r| (r.edges - 1_000) as f64).collect::<Vec<_>>(),
-        &b.iter().map(|r| r.restore_s - a[0].restore_s).collect::<Vec<_>>(),
+        &b.iter()
+            .map(|r| (r.edges - 1_000) as f64)
+            .collect::<Vec<_>>(),
+        &b.iter()
+            .map(|r| r.restore_s - a[0].restore_s)
+            .collect::<Vec<_>>(),
     ) * 1e6;
 
     println!("\nwhich term dominates");

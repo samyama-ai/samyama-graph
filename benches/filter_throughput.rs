@@ -41,8 +41,18 @@ fn fixture(rows: usize) -> GraphStore {
     let _ = store.set_node_property("default", hub, "fid", PropertyValue::Integer(0));
     for i in 0..rows {
         let item = store.create_node("Item");
-        let _ = store.set_node_property("default", item, "v", PropertyValue::Integer((i % 977) as i64));
-        let _ = store.set_node_property("default", item, "w", PropertyValue::Integer((i % 13) as i64));
+        let _ = store.set_node_property(
+            "default",
+            item,
+            "v",
+            PropertyValue::Integer((i % 977) as i64),
+        );
+        let _ = store.set_node_property(
+            "default",
+            item,
+            "w",
+            PropertyValue::Integer((i % 13) as i64),
+        );
         let _ = store.set_node_property(
             "default",
             item,
@@ -61,11 +71,15 @@ fn fixture(rows: usize) -> GraphStore {
 fn time(store: &GraphStore, cypher: &str, runs: usize, threshold: &str) -> f64 {
     std::env::set_var("SAMYAMA_FILTER_PARALLEL_COST", threshold);
     let query = parse_query(cypher).expect("query should parse");
-    let _ = QueryExecutor::new(store).execute(&query).expect("query should run");
+    let _ = QueryExecutor::new(store)
+        .execute(&query)
+        .expect("query should run");
     (0..runs)
         .map(|_| {
             let started = Instant::now();
-            let _ = QueryExecutor::new(store).execute(&query).expect("query should run");
+            let _ = QueryExecutor::new(store)
+                .execute(&query)
+                .expect("query should run");
             started.elapsed().as_secs_f64() * 1000.0
         })
         .fold(f64::INFINITY, f64::min)
@@ -101,7 +115,10 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| -> Option<usize> {
-        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok())
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse().ok())
     };
     let rows = arg("--rows").unwrap_or(1_000_000);
     let runs = arg("--runs").unwrap_or(3);
@@ -126,16 +143,25 @@ fn main() {
         ),
     ];
 
-    println!("{rows} rows, minimum of {runs}, interleaved. Baseline (no WHERE): {baseline:.1} ms\n");
+    println!(
+        "{rows} rows, minimum of {runs}, interleaved. Baseline (no WHERE): {baseline:.1} ms\n"
+    );
     println!(
         "{:<28} {:>7} {:>12} {:>12} {:>9}  {}",
         "predicate", "cost", "parallel", "sequential", "ratio", "ships as"
     );
-    println!("{:-<28} {:->7} {:->12} {:->12} {:->9}  {:-<10}", "", "", "", "", "", "");
+    println!(
+        "{:-<28} {:->7} {:->12} {:->12} {:->9}  {:-<10}",
+        "", "", "", "", "", ""
+    );
 
     for (label, where_clause) in cases {
         let cypher = format!("MATCH (f:Forum)<-[:IN]-(i:Item) {where_clause} RETURN count(i) AS c");
-        let predicate = parse_query(&cypher).unwrap().where_clause.unwrap().predicate;
+        let predicate = parse_query(&cypher)
+            .unwrap()
+            .where_clause
+            .unwrap()
+            .predicate;
 
         // Alternate, so a host that drifts during the run drifts through both.
         let mut par = f64::INFINITY;
@@ -169,7 +195,11 @@ fn main() {
             par_ns,
             seq_ns,
             ratio,
-            if ships_parallel { "parallel" } else { "sequential" },
+            if ships_parallel {
+                "parallel"
+            } else {
+                "sequential"
+            },
         );
     }
 

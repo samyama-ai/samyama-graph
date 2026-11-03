@@ -45,7 +45,9 @@ fn is_null(cypher: &str) -> bool {
 fn indexing_a_non_list_raises() {
     for expr in ["true", "123", "4.7", "'1'"] {
         assert!(
-            raises(&format!("WITH {expr} AS list, 0 AS idx RETURN list[idx] AS r")),
+            raises(&format!(
+                "WITH {expr} AS list, 0 AS idx RETURN list[idx] AS r"
+            )),
             "indexing {expr} should raise"
         );
     }
@@ -56,7 +58,9 @@ fn indexing_a_non_list_raises() {
 fn a_non_integer_index_raises() {
     for idx in ["true", "4.7", "'x'", "[1]", "{a: 1}"] {
         assert!(
-            raises(&format!("WITH [1, 2, 3] AS list, {idx} AS idx RETURN list[idx] AS r")),
+            raises(&format!(
+                "WITH [1, 2, 3] AS list, {idx} AS idx RETURN list[idx] AS r"
+            )),
             "index {idx} should raise"
         );
     }
@@ -93,7 +97,9 @@ fn ordinary_indexing_still_works() {
     ];
     for (q, want) in cases {
         match run(q) {
-            Ok(Value::Property(samyama::graph::PropertyValue::Integer(i))) => assert_eq!(i, want, "{q}"),
+            Ok(Value::Property(samyama::graph::PropertyValue::Integer(i))) => {
+                assert_eq!(i, want, "{q}")
+            }
             other => panic!("{q}\n  got {other:?}"),
         }
     }

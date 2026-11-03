@@ -47,7 +47,8 @@ fn a_date_ignores_the_sub_day_part_of_a_duration() {
     assert_eq!(rendered(&format!("{D} + {mixed}")), "1984-10-28");
     assert_eq!(rendered(&format!("{D} - {mixed}")), "1984-09-25");
 
-    let plain = "duration({years:12, months:5, days:14, hours:16, minutes:12, seconds:70, nanoseconds:2})";
+    let plain =
+        "duration({years:12, months:5, days:14, hours:16, minutes:12, seconds:70, nanoseconds:2})";
     assert_eq!(rendered(&format!("{D} + {plain}")), "1997-03-25");
     assert_eq!(rendered(&format!("{D} - {plain}")), "1972-04-27");
 }
@@ -55,7 +56,11 @@ fn a_date_ignores_the_sub_day_part_of_a_duration() {
 /// A sub-day-only duration moves a date not at all, in either direction.
 #[test]
 fn a_sub_day_duration_does_not_move_a_date() {
-    for dur in ["duration({hours: 23})", "duration({hours: 1})", "duration({seconds: 1})"] {
+    for dur in [
+        "duration({hours: 23})",
+        "duration({hours: 1})",
+        "duration({seconds: 1})",
+    ] {
         assert_eq!(rendered(&format!("{D} + {dur}")), "1984-10-11", "{dur}");
         assert_eq!(rendered(&format!("{D} - {dur}")), "1984-10-11", "{dur}");
     }
@@ -78,9 +83,18 @@ fn a_datetime_still_applies_the_sub_day_part() {
 /// Whole-day components still move a date, and months still clamp.
 #[test]
 fn whole_day_and_month_components_still_apply() {
-    assert_eq!(rendered(&format!("{D} + duration({{days: 1}})")), "1984-10-12");
-    assert_eq!(rendered(&format!("{D} - duration({{days: 1}})")), "1984-10-10");
-    assert_eq!(rendered(&format!("{D} + duration({{months: 1}})")), "1984-11-11");
+    assert_eq!(
+        rendered(&format!("{D} + duration({{days: 1}})")),
+        "1984-10-12"
+    );
+    assert_eq!(
+        rendered(&format!("{D} - duration({{days: 1}})")),
+        "1984-10-10"
+    );
+    assert_eq!(
+        rendered(&format!("{D} + duration({{months: 1}})")),
+        "1984-11-11"
+    );
     // 31 January plus one month clamps to the end of February.
     assert_eq!(
         rendered("date({year:2018,month:1,day:31}) + duration({months: 1})"),

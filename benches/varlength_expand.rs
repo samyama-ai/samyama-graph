@@ -90,10 +90,14 @@ fn scrambled_regular(nodes: usize, degree: usize, noise: usize) -> GraphStore {
 fn run(store: &GraphStore, cypher: &str) -> (usize, f64) {
     let query = parse_query(cypher).expect("query should parse");
     // Warm, so the first depth does not pay for statistics the others skip.
-    let _ = QueryExecutor::new(store).execute(&query).expect("query should run");
+    let _ = QueryExecutor::new(store)
+        .execute(&query)
+        .expect("query should run");
 
     let started = Instant::now();
-    let batch = QueryExecutor::new(store).execute(&query).expect("query should run");
+    let batch = QueryExecutor::new(store)
+        .execute(&query)
+        .expect("query should run");
     let ms = started.elapsed().as_secs_f64() * 1000.0;
     (batch.records.len(), ms)
 }
@@ -147,13 +151,15 @@ fn main() {
         "{:<10} {:>10} {:>12} {:>14} {:>16} {:>12}",
         "pattern", "reached", "expand ms", "µs per row", "edges visited", "ns per edge"
     );
-    println!("{:-<10} {:->10} {:->12} {:->14} {:->16} {:->12}", "", "", "", "", "", "");
+    println!(
+        "{:-<10} {:->10} {:->12} {:->14} {:->16} {:->12}",
+        "", "", "", "", "", ""
+    );
 
     let mut previous_reached = 0usize;
     for depth in 1..=max_depth {
-        let cypher = format!(
-            "MATCH (p:N)-[:KNOWS*1..{depth}]-(f:N) WHERE id(p) = {anchor} RETURN f"
-        );
+        let cypher =
+            format!("MATCH (p:N)-[:KNOWS*1..{depth}]-(f:N) WHERE id(p) = {anchor} RETURN f");
         let (reached, _wall_ms) = run(&store, &cypher);
         let expand_ms = expand_self_ms(&store, &cypher).unwrap_or(f64::NAN);
 

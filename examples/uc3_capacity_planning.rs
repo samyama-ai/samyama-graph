@@ -23,9 +23,7 @@
 #[global_allocator]
 static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
 
-use samyama_sdk::{
-    Array1, BMRSolver, EmbeddedClient, Problem, SamyamaClient, SolverConfig,
-};
+use samyama_sdk::{Array1, BMRSolver, EmbeddedClient, Problem, SamyamaClient, SolverConfig};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -34,19 +32,19 @@ use tokio::runtime::Handle;
 
 /// (fid, current_beds, current_nurses, current_doctors, quarterly_admissions)
 const FACILITIES: &[(&str, f64, f64, f64, f64)] = &[
-    ("H0", 120.0, 150.0,  20.0, 2400.0),
-    ("H1",  80.0,  96.0,  13.0, 1800.0),
-    ("H2", 200.0, 260.0,  34.0, 4200.0),
-    ("H3",  60.0,  75.0,  10.0, 1500.0),
-    ("H4", 150.0, 180.0,  24.0, 3100.0),
+    ("H0", 120.0, 150.0, 20.0, 2400.0),
+    ("H1", 80.0, 96.0, 13.0, 1800.0),
+    ("H2", 200.0, 260.0, 34.0, 4200.0),
+    ("H3", 60.0, 75.0, 10.0, 1500.0),
+    ("H4", 150.0, 180.0, 24.0, 3100.0),
 ];
-const MEAN_SERVICE_DAYS: f64 = 4.0;           // avg length-of-stay
+const MEAN_SERVICE_DAYS: f64 = 4.0; // avg length-of-stay
 const QUARTER_DAYS: f64 = 90.0;
-const DEMAND_SURGE: f64 = 1.20;               // 20 % growth forecast
+const DEMAND_SURGE: f64 = 1.20; // 20 % growth forecast
 const COST_BED: f64 = 80_000.0;
 const COST_NURSE: f64 = 120_000.0;
 const COST_DOCTOR: f64 = 280_000.0;
-const BUDGET_DEFAULT: f64 = 15_000_000.0;     // 15 M USD
+const BUDGET_DEFAULT: f64 = 15_000_000.0; // 15 M USD
 const NURSE_BED_FLOOR: f64 = 1.2;
 const DOCTOR_BED_FLOOR: f64 = 0.15;
 
@@ -152,7 +150,8 @@ impl Problem for CapacityProblem {
         let mut nonneg_penalty = 0.0_f64;
 
         for (i, fid) in self.facility_fids.iter().enumerate() {
-            let (beds, nurses, doctors, adm) = state.get(*fid).copied().unwrap_or((0.0, 0.0, 0.0, 0.0));
+            let (beds, nurses, doctors, adm) =
+                state.get(*fid).copied().unwrap_or((0.0, 0.0, 0.0, 0.0));
             let d_beds = x[3 * i];
             let d_nurses = x[3 * i + 1];
             let d_doctors = x[3 * i + 2];
@@ -165,9 +164,15 @@ impl Problem for CapacityProblem {
                 + COST_NURSE * d_nurses.max(0.0)
                 + COST_DOCTOR * d_doctors.max(0.0);
 
-            if new_beds <= 0.0 { nonneg_penalty += (-new_beds + 1.0) * 1e6; }
-            if new_nurses < 0.0 { nonneg_penalty += (-new_nurses) * 1e6; }
-            if new_doctors < 0.0 { nonneg_penalty += (-new_doctors) * 1e6; }
+            if new_beds <= 0.0 {
+                nonneg_penalty += (-new_beds + 1.0) * 1e6;
+            }
+            if new_nurses < 0.0 {
+                nonneg_penalty += (-new_nurses) * 1e6;
+            }
+            if new_doctors < 0.0 {
+                nonneg_penalty += (-new_doctors) * 1e6;
+            }
 
             // Post-change ratios.
             if new_beds > 0.0 {
@@ -256,7 +261,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
         println!(
             "[done] {} cypher evaluations, wall {} ms ({:.2} ms/eval)",
-            calls, wall_ms, wall_ms as f64 / calls.max(1) as f64
+            calls,
+            wall_ms,
+            wall_ms as f64 / calls.max(1) as f64
         );
 
         // Report cost / wait for the best plan.
@@ -275,7 +282,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (i, fid) in fids.iter().enumerate() {
             println!(
                 "   {fid}: Δbeds={:+.1} Δnurses={:+.1} Δdoctors={:+.1}",
-                plan[3 * i], plan[3 * i + 1], plan[3 * i + 2]
+                plan[3 * i],
+                plan[3 * i + 1],
+                plan[3 * i + 2]
             );
         }
         summary.push((budget, best.best_fitness, total_cost, plan));
@@ -284,8 +293,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sanity: higher budget → better (lower) fitness.
     println!("\n[sweep] budget → best fitness");
     for (b, f, c, _) in &summary {
-        println!("  ${:>5.1}M budget → fitness {:>10.0} (spent ${:.2}M)",
-            b / 1e6, f, c / 1e6);
+        println!(
+            "  ${:>5.1}M budget → fitness {:>10.0} (spent ${:.2}M)",
+            b / 1e6,
+            f,
+            c / 1e6
+        );
     }
     let fits: Vec<f64> = summary.iter().map(|s| s.1).collect();
     println!(

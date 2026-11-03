@@ -6,14 +6,14 @@ pub mod property_index;
 // Not beside `hierarchy`: samyama-graph#1397 inserts `pub mod fulltext;` at
 // that anchor, and two insertions at one line conflict for no reason either
 // change is about.
-pub mod sketch;
-pub mod manager;
-pub mod fulltext;
-pub mod point;
-pub mod hierarchy;
-pub mod structure;
 pub mod catalog;
+pub mod fulltext;
+pub mod hierarchy;
+pub mod manager;
+pub mod point;
+pub mod sketch;
+pub mod structure;
 
-pub use property_index::PropertyIndex;
-pub use manager::{IndexManager, IndexMemory, PropertyIndexKey};
 pub use catalog::{IndexCatalog, IndexDefinition, RestoredIndexes};
+pub use manager::{IndexManager, IndexMemory, PropertyIndexKey};
+pub use property_index::PropertyIndex;

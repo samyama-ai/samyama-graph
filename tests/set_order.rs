@@ -25,7 +25,9 @@ fn write(s: &mut GraphStore, q: &str) {
 /// The named columns of the single row `q` returns, `None` where absent.
 fn row(s: &GraphStore, q: &str, columns: &[&str]) -> Vec<Option<String>> {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(s)
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     assert_eq!(out.records.len(), 1, "`{q}` should return one row");
     let r = &out.records[0];
     columns
@@ -49,7 +51,10 @@ const READ: &str = "MATCH (n:T) RETURN n.name AS name, n.k AS k, n.x AS x";
 fn a_property_after_a_replace_is_kept() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (n:T) SET n = {name: 'A'}, n.k = 7");
-    assert_eq!(row(&s, READ, &["name", "k", "x"]), vec![some("A"), some("7"), None]);
+    assert_eq!(
+        row(&s, READ, &["name", "k", "x"]),
+        vec![some("A"), some("7"), None]
+    );
 }
 
 #[test]
@@ -57,7 +62,10 @@ fn a_property_before_a_replace_is_replaced() {
     // The order the old executor got right. It must stay right.
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (n:T) SET n.k = 7, n = {name: 'A'}");
-    assert_eq!(row(&s, READ, &["name", "k", "x"]), vec![some("A"), None, None]);
+    assert_eq!(
+        row(&s, READ, &["name", "k", "x"]),
+        vec![some("A"), None, None]
+    );
 }
 
 #[test]
@@ -66,11 +74,17 @@ fn a_later_set_clause_runs_after_an_earlier_one() {
     // because every clause was flattened into one list.
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (n:T) SET n = {name: 'A'} SET n.k = 7");
-    assert_eq!(row(&s, READ, &["name", "k", "x"]), vec![some("A"), some("7"), None]);
+    assert_eq!(
+        row(&s, READ, &["name", "k", "x"]),
+        vec![some("A"), some("7"), None]
+    );
 
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (n:T) SET n.k = 7 SET n = {name: 'A'}");
-    assert_eq!(row(&s, READ, &["name", "k", "x"]), vec![some("A"), None, None]);
+    assert_eq!(
+        row(&s, READ, &["name", "k", "x"]),
+        vec![some("A"), None, None]
+    );
 }
 
 #[test]
@@ -81,9 +95,15 @@ fn the_bulk_import_shape_keeps_its_source_id() {
         "UNWIND [{props: {name: 'A'}, fid: 7}] AS row \
          CREATE (n:T) SET n = row.props, n.k = row.fid",
     );
-    assert_eq!(row(&s, READ, &["name", "k", "x"]), vec![some("A"), some("7"), None]);
+    assert_eq!(
+        row(&s, READ, &["name", "k", "x"]),
+        vec![some("A"), some("7"), None]
+    );
     // The point of keeping it: a later MATCH on it finds the node.
-    assert_eq!(row(&s, "MATCH (n:T {k: 7}) RETURN n.name AS name", &["name"]), vec![some("A")]);
+    assert_eq!(
+        row(&s, "MATCH (n:T {k: 7}) RETURN n.name AS name", &["name"]),
+        vec![some("A")]
+    );
 }
 
 #[test]
@@ -91,7 +111,10 @@ fn a_replace_on_a_matched_node_removes_what_came_before_it_only() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:T {x: 1, name: 'old'})");
     write(&mut s, "MATCH (n:T) SET n.x = 2, n = {name: 'A'}, n.k = 7");
-    assert_eq!(row(&s, READ, &["name", "k", "x"]), vec![some("A"), some("7"), None]);
+    assert_eq!(
+        row(&s, READ, &["name", "k", "x"]),
+        vec![some("A"), some("7"), None]
+    );
 }
 
 #[test]
@@ -99,7 +122,10 @@ fn merge_is_unaffected_by_order() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:T {x: 1})");
     write(&mut s, "MATCH (n:T) SET n += {name: 'A'}, n.k = 7");
-    assert_eq!(row(&s, READ, &["name", "k", "x"]), vec![some("A"), some("7"), some("1")]);
+    assert_eq!(
+        row(&s, READ, &["name", "k", "x"]),
+        vec![some("A"), some("7"), some("1")]
+    );
 }
 
 #[test]
@@ -109,7 +135,10 @@ fn property_values_are_still_read_before_any_write() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:T {k: 1, x: 2})");
     write(&mut s, "MATCH (n:T) SET n.k = n.x, n.x = n.k");
-    assert_eq!(row(&s, READ, &["name", "k", "x"]), vec![None, some("2"), some("1")]);
+    assert_eq!(
+        row(&s, READ, &["name", "k", "x"]),
+        vec![None, some("2"), some("1")]
+    );
 }
 
 #[test]
@@ -117,11 +146,16 @@ fn a_set_after_merge_applies_whole_entity_and_label_items() {
     // This path kept only `n.prop = v` items, so the replace and the label
     // were dropped without an error.
     let mut s = GraphStore::new();
-    write(&mut s, "MERGE (n:T {x: 1}) SET n = {name: 'A'}, n.k = 7, n:Extra");
-    assert_eq!(row(&s, READ, &["name", "k", "x"]), vec![some("A"), some("7"), None]);
+    write(
+        &mut s,
+        "MERGE (n:T {x: 1}) SET n = {name: 'A'}, n.k = 7, n:Extra",
+    );
+    assert_eq!(
+        row(&s, READ, &["name", "k", "x"]),
+        vec![some("A"), some("7"), None]
+    );
     assert_eq!(
         row(&s, "MATCH (n:Extra) RETURN n.name AS name", &["name"]),
         vec![some("A")]
     );
 }
-

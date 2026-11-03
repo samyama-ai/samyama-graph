@@ -38,7 +38,13 @@ fn list(items: &[i64]) -> PropertyValue {
 /// Every position a null can occupy.
 #[test]
 fn a_null_bound_makes_the_whole_slice_null() {
-    for expr in ["[..null]", "[1..null]", "[null..3]", "[null..]", "[null..null]"] {
+    for expr in [
+        "[..null]",
+        "[1..null]",
+        "[null..3]",
+        "[null..]",
+        "[null..null]",
+    ] {
         assert_eq!(slice(expr), PropertyValue::Null, "list{expr}");
     }
 }

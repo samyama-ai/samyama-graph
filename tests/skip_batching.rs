@@ -25,7 +25,9 @@ fn numbered(n: i64) -> GraphStore {
 
 fn values(store: &GraphStore, cypher: &str) -> Vec<i64> {
     let query = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store).execute(&query).expect("query should execute");
+    let batch = QueryExecutor::new(store)
+        .execute(&query)
+        .expect("query should execute");
     batch
         .records
         .iter()
@@ -40,7 +42,10 @@ fn values(store: &GraphStore, cypher: &str) -> Vec<i64> {
 fn skip_alone_returns_the_tail() {
     // Was `[]`.
     let store = numbered(5);
-    assert_eq!(values(&store, "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP 2"), vec![2, 3, 4]);
+    assert_eq!(
+        values(&store, "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP 2"),
+        vec![2, 3, 4]
+    );
 }
 
 #[test]
@@ -71,11 +76,17 @@ fn skip_with_limit_is_correct_when_the_boundary_does_not_align() {
     // evenly into the requested batch is the case that actually tests it.
     let store = numbered(10);
     assert_eq!(
-        values(&store, "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP 3 LIMIT 4"),
+        values(
+            &store,
+            "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP 3 LIMIT 4"
+        ),
         vec![3, 4, 5, 6]
     );
     assert_eq!(
-        values(&store, "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP 1 LIMIT 7"),
+        values(
+            &store,
+            "MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP 1 LIMIT 7"
+        ),
         vec![1, 2, 3, 4, 5, 6, 7]
     );
 }
@@ -106,8 +117,16 @@ fn every_prefix_length_is_skippable() {
     // arithmetic, which a single hand-picked value does not.
     let store = numbered(37);
     for skip in 0..=37usize {
-        let rows = values(&store, &format!("MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP {skip}"));
-        assert_eq!(rows.len(), 37 - skip, "SKIP {skip} returned {} rows", rows.len());
+        let rows = values(
+            &store,
+            &format!("MATCH (n:N) RETURN n.v AS c ORDER BY c SKIP {skip}"),
+        );
+        assert_eq!(
+            rows.len(),
+            37 - skip,
+            "SKIP {skip} returned {} rows",
+            rows.len()
+        );
         if let Some(first) = rows.first() {
             assert_eq!(*first, skip as i64, "SKIP {skip} started at {first}");
         }

@@ -97,18 +97,9 @@ async fn main() -> Result<(), Error> {
     eprintln!();
     eprintln!("========================================");
     eprintln!("AACT load complete.");
-    eprintln!(
-        "  Nodes: {}",
-        format_num(result.total_nodes)
-    );
-    eprintln!(
-        "  Edges: {}",
-        format_num(result.total_edges)
-    );
-    eprintln!(
-        "  Time:  {}",
-        format_duration(total_elapsed)
-    );
+    eprintln!("  Nodes: {}", format_num(result.total_nodes));
+    eprintln!("  Edges: {}", format_num(result.total_edges));
+    eprintln!("  Time:  {}", format_duration(total_elapsed));
     eprintln!("========================================");
 
     // ========================================================================
@@ -165,8 +156,7 @@ async fn main() -> Result<(), Error> {
                         eprintln!("{}", "-".repeat(result.columns.len() * 20));
                         // Print rows
                         for row in &result.records {
-                            let vals: Vec<String> =
-                                row.iter().map(|v| format!("{}", v)).collect();
+                            let vals: Vec<String> = row.iter().map(|v| format!("{}", v)).collect();
                             eprintln!("{}", vals.join(" | "));
                         }
                         eprintln!("({} rows)", result.records.len());

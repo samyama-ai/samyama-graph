@@ -55,25 +55,43 @@ fn count(store: &GraphStore, query: &str) -> i64 {
 fn a_single_edge_type_count_is_answered_from_metadata() {
     let store = fixture();
 
-    assert_eq!(count(&store, "MATCH ()-[r:CITES]->() RETURN count(r) AS c"), 15);
-    assert_eq!(count(&store, "MATCH ()-[r:LIKES]->() RETURN count(r) AS c"), 3);
+    assert_eq!(
+        count(&store, "MATCH ()-[r:CITES]->() RETURN count(r) AS c"),
+        15
+    );
+    assert_eq!(
+        count(&store, "MATCH ()-[r:LIKES]->() RETURN count(r) AS c"),
+        3
+    );
     assert_eq!(count(&store, "MATCH ()-[r]->() RETURN count(r) AS c"), 18);
-    assert_eq!(count(&store, "MATCH ()-[r:CITES]->() RETURN count(*) AS c"), 15);
+    assert_eq!(
+        count(&store, "MATCH ()-[r:CITES]->() RETURN count(*) AS c"),
+        15
+    );
 
     // an edge type nobody has used is 0, not an error and not the total
-    assert_eq!(count(&store, "MATCH ()-[r:NOSUCH]->() RETURN count(r) AS c"), 0);
+    assert_eq!(
+        count(&store, "MATCH ()-[r:NOSUCH]->() RETURN count(r) AS c"),
+        0
+    );
 
     // and it really is the shortcut
     let engine = QueryEngine::new();
     let plan = format!(
         "{:?}",
         engine
-            .execute("EXPLAIN MATCH ()-[r:CITES]->() RETURN count(r) AS c", &store)
+            .execute(
+                "EXPLAIN MATCH ()-[r:CITES]->() RETURN count(r) AS c",
+                &store
+            )
             .unwrap()
             .records[0]
             .get("plan")
     );
-    assert!(plan.contains("EdgeCount"), "expected the O(1) path, plan was: {plan}");
+    assert!(
+        plan.contains("EdgeCount"),
+        "expected the O(1) path, plan was: {plan}"
+    );
 }
 
 #[test]
@@ -83,14 +101,26 @@ fn the_shortcut_declines_when_the_pattern_says_more_than_the_metadata_knows() {
     // the timeout it replaces.
     let store = fixture();
 
-    assert_eq!(count(&store, "MATCH ()-[r:CITES]->(:B) RETURN count(r) AS c"), 5);
-    assert_eq!(count(&store, "MATCH (:A)-[r:CITES]->(:A) RETURN count(r) AS c"), 10);
     assert_eq!(
-        count(&store, "MATCH (x)-[r:CITES]->() WHERE x.i = 0 RETURN count(r) AS c"),
+        count(&store, "MATCH ()-[r:CITES]->(:B) RETURN count(r) AS c"),
+        5
+    );
+    assert_eq!(
+        count(&store, "MATCH (:A)-[r:CITES]->(:A) RETURN count(r) AS c"),
+        10
+    );
+    assert_eq!(
+        count(
+            &store,
+            "MATCH (x)-[r:CITES]->() WHERE x.i = 0 RETURN count(r) AS c"
+        ),
         2
     );
     assert_eq!(
-        count(&store, "MATCH (x {i: 0})-[r:CITES]->() RETURN count(r) AS c"),
+        count(
+            &store,
+            "MATCH (x {i: 0})-[r:CITES]->() RETURN count(r) AS c"
+        ),
         2
     );
 
@@ -99,7 +129,10 @@ fn the_shortcut_declines_when_the_pattern_says_more_than_the_metadata_knows() {
         "EXPLAIN MATCH ()-[r:CITES]->(:B) RETURN count(r) AS c",
         "EXPLAIN MATCH (x)-[r:CITES]->() WHERE x.i = 0 RETURN count(r) AS c",
     ] {
-        let plan = format!("{:?}", engine.execute(query, &store).unwrap().records[0].get("plan"));
+        let plan = format!(
+            "{:?}",
+            engine.execute(query, &store).unwrap().records[0].get("plan")
+        );
         assert!(
             !plan.contains("EdgeCount"),
             "shortcut must not fire for {query}, plan was: {plan}"
@@ -113,7 +146,10 @@ fn the_grouped_form_and_label_counts_are_unaffected() {
     let engine = QueryEngine::new();
 
     let grouped = engine
-        .execute("MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c", &store)
+        .execute(
+            "MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c",
+            &store,
+        )
         .unwrap();
     assert_eq!(grouped.records.len(), 2, "one row per edge type");
 

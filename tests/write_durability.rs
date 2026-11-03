@@ -31,7 +31,12 @@ impl Db {
             .ok();
         let mut store = GraphStore::new();
         store.enable_write_log();
-        Db { _dir: dir, pm, engine: QueryEngine::new(), store }
+        Db {
+            _dir: dir,
+            pm,
+            engine: QueryEngine::new(),
+            store,
+        }
     }
 
     /// One statement, persisted the way the server persists it.
@@ -99,7 +104,12 @@ fn an_edge_and_its_properties_survive() {
     assert_eq!(edges.len(), 1, "the edge reached storage");
     assert_eq!(edges[0].edge_type.as_str(), "KNOWS");
     assert!(
-        edges[0].properties.get("since").unwrap().to_string().contains("1843"),
+        edges[0]
+            .properties
+            .get("since")
+            .unwrap()
+            .to_string()
+            .contains("1843"),
         "edge properties: {:?}",
         edges[0].properties
     );
@@ -129,7 +139,12 @@ fn a_node_created_and_deleted_in_the_same_session_leaves_nothing() {
 
     let (nodes, _) = db.restart();
     assert_eq!(nodes.len(), 1);
-    assert!(nodes[0].properties.get("name").unwrap().to_string().contains("grace"));
+    assert!(nodes[0]
+        .properties
+        .get("name")
+        .unwrap()
+        .to_string()
+        .contains("grace"));
 }
 
 #[test]
@@ -144,7 +159,11 @@ fn repeated_writes_to_one_node_do_not_inflate_the_tenant_count() {
     }
 
     let usage = db.pm.tenants().get_usage(T).unwrap();
-    assert_eq!(usage.node_count, 1, "five SETs on one node counted as {} nodes", usage.node_count);
+    assert_eq!(
+        usage.node_count, 1,
+        "five SETs on one node counted as {} nodes",
+        usage.node_count
+    );
     assert_eq!(db.restart().0.len(), 1);
 }
 
@@ -167,16 +186,27 @@ fn a_partial_failure_leaves_nothing_in_memory_or_on_disk() {
         T,
     );
     assert!(result.is_err(), "the statement is supposed to fail");
-    assert_eq!(db.store.node_count(), 0, "the rows before the failure stayed in memory");
+    assert_eq!(
+        db.store.node_count(),
+        0,
+        "the rows before the failure stayed in memory"
+    );
 
     // Persisted the way the server persists it: on the outcome of the *store*, not
     // the outcome of the statement.
     let muts = db.store.take_write_log();
-    assert!(muts.is_empty(), "the failed statement's writes were left to persist: {muts:?}");
+    assert!(
+        muts.is_empty(),
+        "the failed statement's writes were left to persist: {muts:?}"
+    );
     db.pm.apply_mutations(T, &db.store, &muts).expect("persist");
 
     let (nodes, _) = db.restart();
-    assert!(nodes.is_empty(), "restart found {} rows of a failed statement", nodes.len());
+    assert!(
+        nodes.is_empty(),
+        "restart found {} rows of a failed statement",
+        nodes.len()
+    );
 }
 
 /// Restore a snapshot, change one property, restart: everything else survives.
@@ -198,7 +228,11 @@ fn an_imported_node_keeps_the_properties_a_later_write_did_not_touch() {
     let engine = QueryEngine::new();
     let mut source = GraphStore::new();
     engine
-        .execute_mut("CREATE (:P {name: \"ada\", age: 36, city: \"London\"})", &mut source, T)
+        .execute_mut(
+            "CREATE (:P {name: \"ada\", age: 36, city: \"London\"})",
+            &mut source,
+            T,
+        )
         .unwrap();
     let mut bytes = Vec::new();
     export_tenant(&source, &mut bytes).unwrap();
@@ -217,7 +251,9 @@ fn an_imported_node_keeps_the_properties_a_later_write_did_not_touch() {
          was written for"
     );
 
-    engine.execute_mut("MATCH (p:P) SET p.age = 37", &mut live, T).unwrap();
+    engine
+        .execute_mut("MATCH (p:P) SET p.age = 37", &mut live, T)
+        .unwrap();
     let muts = live.take_write_log();
     db.pm.apply_mutations(T, &live, &muts).expect("persist");
     db.pm.checkpoint().unwrap();

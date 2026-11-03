@@ -36,9 +36,24 @@ const T: &str = "localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876
 /// A calendar override replaces only the field it names.
 #[test]
 fn a_date_override_replaces_only_that_field() {
-    assert_eq!(rendered(&format!("WITH {D} AS o RETURN date({{date: o, day: 28}}) AS r")), "1984-11-28");
-    assert_eq!(rendered(&format!("WITH {D} AS o RETURN date({{date: o, month: 1}}) AS r")), "1984-01-11");
-    assert_eq!(rendered(&format!("WITH {D} AS o RETURN date({{date: o, year: 2000}}) AS r")), "2000-11-11");
+    assert_eq!(
+        rendered(&format!(
+            "WITH {D} AS o RETURN date({{date: o, day: 28}}) AS r"
+        )),
+        "1984-11-28"
+    );
+    assert_eq!(
+        rendered(&format!(
+            "WITH {D} AS o RETURN date({{date: o, month: 1}}) AS r"
+        )),
+        "1984-01-11"
+    );
+    assert_eq!(
+        rendered(&format!(
+            "WITH {D} AS o RETURN date({{date: o, year: 2000}}) AS r"
+        )),
+        "2000-11-11"
+    );
 }
 
 /// **`ordinalDay` replaces the whole day-of-year**, so it moves the month too.
@@ -49,7 +64,9 @@ fn a_date_override_replaces_only_that_field() {
 #[test]
 fn an_ordinal_override_moves_the_month() {
     assert_eq!(
-        rendered(&format!("WITH {D} AS o RETURN date({{date: o, ordinalDay: 28}}) AS r")),
+        rendered(&format!(
+            "WITH {D} AS o RETURN date({{date: o, ordinalDay: 28}}) AS r"
+        )),
         "1984-01-28"
     );
 }
@@ -57,19 +74,29 @@ fn an_ordinal_override_moves_the_month() {
 /// With no override the selected value comes back unchanged.
 #[test]
 fn selection_without_an_override_is_unchanged() {
-    assert_eq!(rendered(&format!("WITH {D} AS o RETURN date({{date: o}}) AS r")), "1984-11-11");
-    assert_eq!(rendered(&format!("WITH {T} AS o RETURN localtime({{time: o}}) AS r")), "12:31:14.645876123");
+    assert_eq!(
+        rendered(&format!("WITH {D} AS o RETURN date({{date: o}}) AS r")),
+        "1984-11-11"
+    );
+    assert_eq!(
+        rendered(&format!("WITH {T} AS o RETURN localtime({{time: o}}) AS r")),
+        "12:31:14.645876123"
+    );
 }
 
 /// Clock overrides layer the same way, keeping the fraction.
 #[test]
 fn a_time_override_keeps_the_rest_of_the_clock() {
     assert_eq!(
-        rendered(&format!("WITH {T} AS o RETURN localtime({{time: o, second: 42}}) AS r")),
+        rendered(&format!(
+            "WITH {T} AS o RETURN localtime({{time: o, second: 42}}) AS r"
+        )),
         "12:31:42.645876123"
     );
     assert_eq!(
-        rendered(&format!("WITH {T} AS o RETURN localtime({{time: o, hour: 1}}) AS r")),
+        rendered(&format!(
+            "WITH {T} AS o RETURN localtime({{time: o, hour: 1}}) AS r"
+        )),
         "01:31:14.645876123"
     );
 }
@@ -79,7 +106,9 @@ fn a_time_override_keeps_the_rest_of_the_clock() {
 #[test]
 fn a_sub_second_override_replaces_the_fraction() {
     assert_eq!(
-        rendered(&format!("WITH {T} AS o RETURN localtime({{time: o, millisecond: 5}}) AS r")),
+        rendered(&format!(
+            "WITH {T} AS o RETURN localtime({{time: o, millisecond: 5}}) AS r"
+        )),
         "12:31:14.005"
     );
     assert_eq!(
@@ -105,9 +134,18 @@ fn a_zoned_time_override_keeps_the_offset() {
 /// not have displaced it.
 #[test]
 fn component_only_construction_still_works() {
-    assert_eq!(rendered("RETURN date({year: 1984, month: 11, day: 11}) AS r"), "1984-11-11");
-    assert_eq!(rendered("RETURN localtime({hour: 12, minute: 31}) AS r"), "12:31");
-    assert_eq!(rendered("RETURN date({year: 1984, ordinalDay: 202}) AS r"), "1984-07-20");
+    assert_eq!(
+        rendered("RETURN date({year: 1984, month: 11, day: 11}) AS r"),
+        "1984-11-11"
+    );
+    assert_eq!(
+        rendered("RETURN localtime({hour: 12, minute: 31}) AS r"),
+        "12:31"
+    );
+    assert_eq!(
+        rendered("RETURN date({year: 1984, ordinalDay: 202}) AS r"),
+        "1984-07-20"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +185,9 @@ fn an_unzoned_source_is_local_time_in_the_target_zone() {
     );
     // And plain component construction is unaffected.
     assert_eq!(
-        rendered("RETURN datetime({year: 1984, month: 10, day: 28, hour: 12, timezone: '+02:00'}) AS r"),
+        rendered(
+            "RETURN datetime({year: 1984, month: 10, day: 28, hour: 12, timezone: '+02:00'}) AS r"
+        ),
         "1984-10-28T12:00+02:00"
     );
 }
@@ -157,7 +197,9 @@ fn an_unzoned_source_is_local_time_in_the_target_zone() {
 fn selecting_without_a_target_zone_keeps_the_source_zone() {
     let src = "datetime({year: 1984, month: 10, day: 28, hour: 12, timezone: '+02:00'})";
     assert_eq!(
-        rendered(&format!("WITH {src} AS s RETURN datetime({{datetime: s}}) AS r")),
+        rendered(&format!(
+            "WITH {src} AS s RETURN datetime({{datetime: s}}) AS r"
+        )),
         "1984-10-28T12:00+02:00"
     );
 }

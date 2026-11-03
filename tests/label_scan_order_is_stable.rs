@@ -24,7 +24,14 @@ use samyama::graph::GraphStore;
 use samyama::query::QueryEngine;
 
 const NAMES: [&str; 8] = [
-    "Acme", "Globex", "Initech", "Umbrella", "Soylent", "Tyrell", "Wayne", "Cyberdyne",
+    "Acme",
+    "Globex",
+    "Initech",
+    "Umbrella",
+    "Soylent",
+    "Tyrell",
+    "Wayne",
+    "Cyberdyne",
 ];
 
 fn store() -> GraphStore {
@@ -118,7 +125,10 @@ fn a_limit_larger_than_the_label_returns_everything() {
         names(&s, "MATCH (c:Company) RETURN c.name AS name LIMIT 1000").len(),
         NAMES.len()
     );
-    assert_eq!(names(&s, "MATCH (c:Company) RETURN c.name AS name LIMIT 0").len(), 0);
+    assert_eq!(
+        names(&s, "MATCH (c:Company) RETURN c.name AS name LIMIT 0").len(),
+        0
+    );
 }
 
 #[test]

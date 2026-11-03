@@ -64,15 +64,22 @@ fn a_geographic_point_carries_both_spellings_and_its_crs() {
 #[test]
 fn a_cartesian_point_is_not_geographic() {
     let v = eval("RETURN point({x: 1.0, y: 2.0})").expect("point");
-    let Value::Property(PropertyValue::Map(m)) = v else { panic!("{v:?}") };
+    let Value::Property(PropertyValue::Map(m)) = v else {
+        panic!("{v:?}")
+    };
     assert_eq!(m.get("srid"), Some(&PropertyValue::Integer(7203)));
-    assert!(m.get("latitude").is_none(), "a cartesian point has no latitude");
+    assert!(
+        m.get("latitude").is_none(),
+        "a cartesian point has no latitude"
+    );
 }
 
 #[test]
 fn a_three_dimensional_point_gets_the_three_dimensional_crs() {
     let v = eval("RETURN point({latitude: 12.9, longitude: 77.6, height: 100.0})").expect("point");
-    let Value::Property(PropertyValue::Map(m)) = v else { panic!("{v:?}") };
+    let Value::Property(PropertyValue::Map(m)) = v else {
+        panic!("{v:?}")
+    };
     assert_eq!(m.get("z"), Some(&PropertyValue::Float(100.0)));
     assert_eq!(m.get("srid"), Some(&PropertyValue::Integer(4979)));
 }
@@ -102,7 +109,10 @@ fn new_york_to_london_is_about_5570_km() {
 
 #[test]
 fn a_cartesian_distance_is_euclidean() {
-    assert_eq!(float("RETURN distance(point({x: 0.0, y: 0.0}), point({x: 3.0, y: 4.0}))"), 5.0);
+    assert_eq!(
+        float("RETURN distance(point({x: 0.0, y: 0.0}), point({x: 3.0, y: 4.0}))"),
+        5.0
+    );
 }
 
 #[test]
@@ -112,7 +122,10 @@ fn distance_is_symmetric_and_zero_to_itself() {
     let there = float(&format!("RETURN point.distance({LONDON}, {PARIS})"));
     let back = float(&format!("RETURN point.distance({PARIS}, {LONDON})"));
     assert_eq!(there, back);
-    assert_eq!(float(&format!("RETURN point.distance({LONDON}, {LONDON})")), 0.0);
+    assert_eq!(
+        float(&format!("RETURN point.distance({LONDON}, {LONDON})")),
+        0.0
+    );
 }
 
 #[test]
@@ -129,8 +142,12 @@ fn a_bounding_box_includes_and_excludes() {
     let outside = "point({latitude: 20.0, longitude: 77.6})";
     let ll = "point({latitude: 12.0, longitude: 77.0})";
     let ur = "point({latitude: 14.0, longitude: 78.0})";
-    assert!(boolean(&format!("RETURN point.withinBBox({inside}, {ll}, {ur})")));
-    assert!(!boolean(&format!("RETURN point.withinBBox({outside}, {ll}, {ur})")));
+    assert!(boolean(&format!(
+        "RETURN point.withinBBox({inside}, {ll}, {ur})"
+    )));
+    assert!(!boolean(&format!(
+        "RETURN point.withinBBox({outside}, {ll}, {ur})"
+    )));
 }
 
 #[test]
@@ -139,8 +156,12 @@ fn a_point_on_the_boundary_is_inside() {
     // tiles a map. Closed, matching the usual reading of "within".
     let ll = "point({latitude: 12.0, longitude: 77.0})";
     let ur = "point({latitude: 14.0, longitude: 78.0})";
-    assert!(boolean(&format!("RETURN point.withinBBox({ll}, {ll}, {ur})")));
-    assert!(boolean(&format!("RETURN point.withinBBox({ur}, {ll}, {ur})")));
+    assert!(boolean(&format!(
+        "RETURN point.withinBBox({ll}, {ll}, {ur})"
+    )));
+    assert!(boolean(&format!(
+        "RETURN point.withinBBox({ur}, {ll}, {ur})"
+    )));
 }
 
 #[test]
@@ -202,7 +223,10 @@ fn a_point_stored_on_a_node_reads_back_as_a_point() {
 fn distance_filters_a_stored_point() {
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
-    for (name, lat, lon) in [("London", 51.5074, -0.1278), ("New York", 40.7128, -74.0060)] {
+    for (name, lat, lon) in [
+        ("London", 51.5074, -0.1278),
+        ("New York", 40.7128, -74.0060),
+    ] {
         engine
             .execute_mut(
                 &format!(
@@ -223,5 +247,9 @@ fn distance_filters_a_stored_point() {
             "default",
         )
         .expect("query");
-    assert_eq!(batch.records.len(), 1, "only London is within 500 km of Paris");
+    assert_eq!(
+        batch.records.len(),
+        1,
+        "only London is within 500 km of Paris"
+    );
 }

@@ -56,7 +56,10 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| -> Option<usize> {
-        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok())
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse().ok())
     };
     let n = arg("--rows").unwrap_or(400_000);
     let limit = arg("--limit").unwrap_or(20);
@@ -70,11 +73,15 @@ fn main() {
         let store = build(order, n);
         let cypher = format!("MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT {limit}");
         let q = parse_query(&cypher).expect("query should parse");
-        let _ = QueryExecutor::new(&store).execute(&q).expect("query should run");
+        let _ = QueryExecutor::new(&store)
+            .execute(&q)
+            .expect("query should run");
         let mut best = f64::INFINITY;
         for _ in 0..runs {
             let t = Instant::now();
-            let out = QueryExecutor::new(&store).execute(&q).expect("query should run");
+            let out = QueryExecutor::new(&store)
+                .execute(&q)
+                .expect("query should run");
             assert_eq!(out.records.len(), limit.min(n));
             best = best.min(t.elapsed().as_secs_f64() * 1000.0);
         }

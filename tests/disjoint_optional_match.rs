@@ -28,14 +28,17 @@ fn graph() -> GraphStore {
     let mut store = GraphStore::new();
     for n in [42i64, 43, 44] {
         let id = store.create_node_with_labels([Label::new("DoesExist")]);
-        let _ = store.set_node_property("default", id, "num".to_string(), PropertyValue::Integer(n));
+        let _ =
+            store.set_node_property("default", id, "num".to_string(), PropertyValue::Integer(n));
     }
     store
 }
 
 fn int(store: &GraphStore, cypher: &str, col: &str) -> i64 {
     let q = parse_query(cypher).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
-    let batch = QueryExecutor::new(store).execute(&q).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
+    let batch = QueryExecutor::new(store)
+        .execute(&q)
+        .unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
     match batch.records[0].get(col) {
         Some(Value::Property(PropertyValue::Integer(n))) => *n,
         other => panic!("{cypher}: {other:?}"),
@@ -51,7 +54,11 @@ fn rows(store: &GraphStore, cypher: &str) -> usize {
 fn a_failing_optional_match_does_not_delete_the_rows_before_it() {
     let store = graph();
     assert_eq!(
-        int(&store, "MATCH (f:DoesExist) OPTIONAL MATCH (n:DoesNotExist) RETURN count(f) AS c", "c"),
+        int(
+            &store,
+            "MATCH (f:DoesExist) OPTIONAL MATCH (n:DoesNotExist) RETURN count(f) AS c",
+            "c"
+        ),
         3
     );
 }
@@ -75,14 +82,15 @@ fn the_collected_values_survive_too() {
 #[test]
 fn the_missing_variable_is_null_not_absent() {
     let store = graph();
-    let q = parse_query(
-        "MATCH (f:DoesExist) OPTIONAL MATCH (n:DoesNotExist) RETURN f, n",
-    )
-    .unwrap();
+    let q = parse_query("MATCH (f:DoesExist) OPTIONAL MATCH (n:DoesNotExist) RETURN f, n").unwrap();
     let batch = QueryExecutor::new(&store).execute(&q).unwrap();
     assert_eq!(batch.records.len(), 3);
     for r in &batch.records {
-        assert!(matches!(r.get("n"), Some(Value::Null) | None), "{:?}", r.get("n"));
+        assert!(
+            matches!(r.get("n"), Some(Value::Null) | None),
+            "{:?}",
+            r.get("n")
+        );
         assert!(r.get("f").is_some());
     }
 }
@@ -97,7 +105,10 @@ fn a_disjoint_optional_that_does_match_still_gives_the_cross_product() {
         store.create_node_with_labels([Label::new("Other")]);
     }
     assert_eq!(
-        rows(&store, "MATCH (f:DoesExist) OPTIONAL MATCH (o:Other) RETURN f, o"),
+        rows(
+            &store,
+            "MATCH (f:DoesExist) OPTIONAL MATCH (o:Other) RETURN f, o"
+        ),
         6
     );
 }
@@ -110,8 +121,20 @@ fn a_correlated_optional_match_is_unchanged() {
     let a = store.create_node_with_labels([Label::new("Src")]);
     let b = store.create_node_with_labels([Label::new("Dst")]);
     store.create_edge(a, b, "R").unwrap();
-    assert_eq!(rows(&store, "MATCH (s:Src) OPTIONAL MATCH (s)-[:R]->(d) RETURN s, d"), 1);
-    assert_eq!(rows(&store, "MATCH (s:Src) OPTIONAL MATCH (s)-[:NOPE]->(d) RETURN s, d"), 1);
+    assert_eq!(
+        rows(
+            &store,
+            "MATCH (s:Src) OPTIONAL MATCH (s)-[:R]->(d) RETURN s, d"
+        ),
+        1
+    );
+    assert_eq!(
+        rows(
+            &store,
+            "MATCH (s:Src) OPTIONAL MATCH (s)-[:NOPE]->(d) RETURN s, d"
+        ),
+        1
+    );
 }
 
 #[test]
@@ -125,5 +148,11 @@ fn a_leading_optional_match_that_finds_nothing_still_gives_one_row() {
 fn an_ordinary_match_that_finds_nothing_still_gives_no_rows() {
     // The distinction the whole fix turns on: MATCH is not OPTIONAL MATCH.
     let store = graph();
-    assert_eq!(rows(&store, "MATCH (f:DoesExist) MATCH (n:DoesNotExist) RETURN f"), 0);
+    assert_eq!(
+        rows(
+            &store,
+            "MATCH (f:DoesExist) MATCH (n:DoesNotExist) RETURN f"
+        ),
+        0
+    );
 }

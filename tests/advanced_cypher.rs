@@ -1,4 +1,4 @@
-use samyama::{GraphStore, QueryEngine, PropertyValue};
+use samyama::{GraphStore, PropertyValue, QueryEngine};
 use std::sync::Arc;
 
 fn setup_social_graph() -> GraphStore {
@@ -15,7 +15,10 @@ fn setup_social_graph() -> GraphStore {
     ];
 
     for (name, age, city) in users {
-        let query = format!("CREATE (n:Person {{name: '{}', age: {}, city: '{}'}})", name, age, city);
+        let query = format!(
+            "CREATE (n:Person {{name: '{}', age: {}, city: '{}'}})",
+            name, age, city
+        );
         engine.execute_mut(&query, &mut store, "default").unwrap();
     }
 
@@ -53,12 +56,22 @@ fn test_filter_and_projection() {
 
     // Should be Alice (30) and Charlie (35)
     assert_eq!(result.len(), 2);
-    
+
     // Check results (order not guaranteed without ORDER BY)
-    let names: Vec<String> = result.records.iter()
-        .map(|r| r.get("n.name").unwrap().as_property().unwrap().as_string().unwrap().to_string())
+    let names: Vec<String> = result
+        .records
+        .iter()
+        .map(|r| {
+            r.get("n.name")
+                .unwrap()
+                .as_property()
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_string()
+        })
         .collect();
-    
+
     assert!(names.contains(&"Alice".to_string()));
     assert!(names.contains(&"Charlie".to_string()));
 }
@@ -74,9 +87,21 @@ fn test_order_by_limit() {
     let result = engine.execute(query, &store).unwrap();
 
     assert_eq!(result.len(), 2);
-    
-    let first = result.records[0].get("n.name").unwrap().as_property().unwrap().as_string().unwrap();
-    let second = result.records[1].get("n.name").unwrap().as_property().unwrap().as_string().unwrap();
+
+    let first = result.records[0]
+        .get("n.name")
+        .unwrap()
+        .as_property()
+        .unwrap()
+        .as_string()
+        .unwrap();
+    let second = result.records[1]
+        .get("n.name")
+        .unwrap()
+        .as_property()
+        .unwrap()
+        .as_string()
+        .unwrap();
 
     // Bob (25), Eve (28)
     assert_eq!(first, "Bob");
@@ -95,7 +120,11 @@ fn test_aggregations() {
     let result = engine.execute(query, &store).unwrap();
 
     assert_eq!(result.len(), 1);
-    let count_val = result.records[0].get("count(n)").unwrap().as_property().unwrap();
+    let count_val = result.records[0]
+        .get("count(n)")
+        .unwrap()
+        .as_property()
+        .unwrap();
     if let PropertyValue::Integer(count) = count_val {
         assert_eq!(*count, 5);
     } else {
@@ -115,11 +144,21 @@ fn test_multi_hop_pattern() {
     let result = engine.execute(query, &store).unwrap();
 
     assert_eq!(result.len(), 2);
-    
-    let names: Vec<String> = result.records.iter()
-        .map(|r| r.get("c.name").unwrap().as_property().unwrap().as_string().unwrap().to_string())
+
+    let names: Vec<String> = result
+        .records
+        .iter()
+        .map(|r| {
+            r.get("c.name")
+                .unwrap()
+                .as_property()
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_string()
+        })
         .collect();
-        
+
     assert!(names.contains(&"David".to_string()));
     assert!(names.contains(&"Eve".to_string()));
 }

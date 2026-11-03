@@ -54,20 +54,24 @@
 
 pub mod catalog;
 pub mod edge;
+pub mod event;
 pub mod node;
 pub mod projection;
 pub mod property;
+pub mod storage;
 pub mod store;
 pub mod types;
-pub mod event;
-pub mod storage;
 
 // Re-export main types
+pub use catalog::GraphCatalog;
 pub use edge::{Edge, EdgeView};
+pub use event::{IndexEvent, Mutation};
 pub use node::Node;
 pub use property::{PropertyMap, PropertyValue};
-pub use store::{IntegrityViolation, GraphError, GraphResult, GraphStore, GraphStatistics, PropertyStats, Histogram, HistogramAxis, IsolationLevel, TxnId, TxnStatus, Transaction, TypeAdjacency, WriteAdmission};
-pub use types::{EdgeId, EdgeType, Label, NodeId};
-pub use catalog::GraphCatalog;
-pub use event::{IndexEvent, Mutation};
 pub use storage::{Column, ColumnStore};
+pub use store::{
+    GraphError, GraphResult, GraphStatistics, GraphStore, Histogram, HistogramAxis,
+    IntegrityViolation, IsolationLevel, PropertyStats, Transaction, TxnId, TxnStatus,
+    TypeAdjacency, WriteAdmission,
+};
+pub use types::{EdgeId, EdgeType, Label, NodeId};

@@ -172,7 +172,8 @@ fn one_run_env() -> f64 {
     }
     let mutations = store.take_write_log();
     let started = Instant::now();
-    pm.apply_mutations("default", &store, &mutations).expect("apply");
+    pm.apply_mutations("default", &store, &mutations)
+        .expect("apply");
     BATCH as f64 / started.elapsed().as_secs_f64()
 }
 

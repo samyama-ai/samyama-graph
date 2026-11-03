@@ -15,7 +15,10 @@
 use samyama::pii::{classify, luhn_ok, redact, scan_snapshot, verhoeff_ok, Scanner};
 
 fn digits(s: &str) -> Vec<u8> {
-    s.chars().filter_map(|c| c.to_digit(10)).map(|d| d as u8).collect()
+    s.chars()
+        .filter_map(|c| c.to_digit(10))
+        .map(|d| d as u8)
+        .collect()
 }
 
 // ─────────────────────────────────────────────────────────────── checksums
@@ -65,11 +68,11 @@ fn a_string_with_an_at_sign_is_not_an_email() {
         "@handle",
         "user@",
         "@",
-        "a@b",                  // no dot in the domain
-        "a@b.c",                // single-character TLD
-        "cost@2x",              // the domain is not a hostname
-        "see note@page 4",      // a space
-        "a@b@example.com",      // two at-signs
+        "a@b",             // no dot in the domain
+        "a@b.c",           // single-character TLD
+        "cost@2x",         // the domain is not a hostname
+        "see note@page 4", // a space
+        "a@b@example.com", // two at-signs
     ] {
         assert_eq!(classify(s), None, "{s:?} should not be an email");
     }
@@ -106,7 +109,13 @@ fn an_aadhaar_is_found_and_a_twelve_digit_id_is_not() {
 #[test]
 fn a_pan_is_found_and_a_similar_looking_code_is_not() {
     assert_eq!(classify("ABCDE1234F"), Some("pan"));
-    for s in ["ABCD1234F", "ABCDE1234", "abcde1234f", "ABCDE12345", "ABCDEF234F"] {
+    for s in [
+        "ABCD1234F",
+        "ABCDE1234",
+        "abcde1234f",
+        "ABCDE12345",
+        "ABCDEF234F",
+    ] {
         assert_eq!(classify(s), None, "{s:?} should not be a PAN");
     }
 }
@@ -117,7 +126,13 @@ fn an_ssn_is_found_only_in_its_written_form() {
     // Bare nine-digit numbers are far too common to call an SSN.
     assert_eq!(classify("123456789"), None);
     // Ranges the SSA does not issue.
-    for s in ["000-45-6789", "666-45-6789", "900-45-6789", "123-00-6789", "123-45-0000"] {
+    for s in [
+        "000-45-6789",
+        "666-45-6789",
+        "900-45-6789",
+        "123-00-6789",
+        "123-45-0000",
+    ] {
         assert_eq!(classify(s), None, "{s:?} is not an issued SSN range");
     }
 }
@@ -171,13 +186,25 @@ fn an_ip_address_is_deliberately_not_reported() {
 fn an_identifier_inside_free_text_is_found() {
     // The case the scan exists for. A value is classified whole and then by
     // token, so a note carrying an address is a finding.
-    assert_eq!(classify("contact alice@example.com for access"), Some("email"));
-    assert_eq!(classify("card on file: 4539578763621486 (visa)"), Some("payment_card"));
+    assert_eq!(
+        classify("contact alice@example.com for access"),
+        Some("email")
+    );
+    assert_eq!(
+        classify("card on file: 4539578763621486 (visa)"),
+        Some("payment_card")
+    );
     assert_eq!(classify("ssn 123-45-6789 on file"), Some("ssn"));
     // And the token split does not create matches that were not there: a
     // sentence of ordinary words is still nothing.
-    assert_eq!(classify("the judgment was delivered on 12 January 2016"), None);
-    assert_eq!(classify("values 4539578763621487 and 1234567812345670"), None);
+    assert_eq!(
+        classify("the judgment was delivered on 12 January 2016"),
+        None
+    );
+    assert_eq!(
+        classify("values 4539578763621487 and 1234567812345670"),
+        None
+    );
 }
 
 #[test]
@@ -202,7 +229,10 @@ fn the_weak_checksum_detectors_do_not_run_inside_free_text() {
     assert_eq!(classify("ref ABCDE1234F filed 2016"), None);
 
     assert_eq!(classify("DE89370400440532013000"), Some("iban"));
-    assert_eq!(classify("arm BI 1234567 versus DE89370400440532013000"), None);
+    assert_eq!(
+        classify("arm BI 1234567 versus DE89370400440532013000"),
+        None
+    );
 
     // The four that stay on, because their shape is improbable without the
     // checksum doing the work.
@@ -277,7 +307,10 @@ fn a_snapshot_is_scanned_including_nested_and_edge_values() {
 
     let kinds: Vec<&str> = report.findings.iter().map(|f| f.kind).collect();
     assert!(kinds.contains(&"email"), "{kinds:?}");
-    assert!(kinds.contains(&"phone"), "a value inside an array must be reached");
+    assert!(
+        kinds.contains(&"phone"),
+        "a value inside an array must be reached"
+    );
     assert!(
         kinds.contains(&"payment_card"),
         "a value two maps deep must be reached: that is where this hides"
@@ -285,14 +318,24 @@ fn a_snapshot_is_scanned_including_nested_and_edge_values() {
 
     // The header line is not a record and must not be scanned as one.
     assert!(
-        !report.findings.iter().any(|f| f.location.contains("format")),
+        !report
+            .findings
+            .iter()
+            .any(|f| f.location.contains("format")),
         "the header was scanned as a node: {:?}",
         report.findings
     );
 
-    let card = report.findings.iter().find(|f| f.kind == "payment_card").unwrap();
+    let card = report
+        .findings
+        .iter()
+        .find(|f| f.kind == "payment_card")
+        .unwrap();
     assert_eq!(card.location, "Account.meta.nested.card");
-    assert!(!card.samples[0].contains("39578763621"), "the sample is redacted");
+    assert!(
+        !card.samples[0].contains("39578763621"),
+        "the sample is redacted"
+    );
     assert!(!report.is_clean());
 }
 
@@ -421,7 +464,11 @@ fn the_same_kind_in_a_different_field_is_not_covered() {
              "why":"registry contact","decided_in":"#1439"}]"##,
     );
     let t = triage(&report, &w);
-    assert_eq!(t.unwaived.len(), 1, "a waiver names one field, not a pattern");
+    assert_eq!(
+        t.unwaived.len(),
+        1,
+        "a waiver names one field, not a pattern"
+    );
     assert_eq!(t.unused.len(), 1, "and the unused waiver is reported");
 }
 
@@ -455,7 +502,10 @@ fn a_waiver_without_a_reason_is_refused() {
         let path = dir.join(format!("bad-{i}.json"));
         std::fs::write(&path, body).expect("write");
         let err = read_waivers(&path).expect_err("a waiver with no reason must be refused");
-        assert!(err.contains("mute button"), "the error should say why: {err}");
+        assert!(
+            err.contains("mute button"),
+            "the error should say why: {err}"
+        );
     }
 }
 

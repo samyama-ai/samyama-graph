@@ -32,8 +32,12 @@ fn store_with_items() -> GraphStore {
     for (name, cost) in [("a", 3.0_f64), ("b", 2.0), ("c", 5.0)] {
         let n = store.create_node("Item");
         store.set_node_property("default", n, "name", name).unwrap();
-        store.set_node_property("default", n, "cost", PropertyValue::Float(cost)).unwrap();
-        store.set_node_property("default", n, "alloc", PropertyValue::Float(0.0)).unwrap();
+        store
+            .set_node_property("default", n, "cost", PropertyValue::Float(cost))
+            .unwrap();
+        store
+            .set_node_property("default", n, "alloc", PropertyValue::Float(0.0))
+            .unwrap();
     }
     store
 }
@@ -74,8 +78,11 @@ fn a_read_only_call_after_a_clause_still_answers() {
     let engine = QueryEngine::new();
     let mut store = store_with_items();
     let out = engine
-        .execute_mut("WITH 1 AS x CALL algo.pageRank() YIELD node RETURN count(*)",
-                     &mut store, "default")
+        .execute_mut(
+            "WITH 1 AS x CALL algo.pageRank() YIELD node RETURN count(*)",
+            &mut store,
+            "default",
+        )
         .expect("a read-only CALL after a WITH must still run");
     assert_eq!(out.len(), 1, "one aggregate row");
 }
@@ -87,9 +94,16 @@ fn a_cartesian_read_is_unchanged() {
     let engine = QueryEngine::new();
     let mut store = store_with_items();
     let out = engine
-        .execute_mut("MATCH (a:Item), (b:Item) RETURN count(*)", &mut store, "default")
+        .execute_mut(
+            "MATCH (a:Item), (b:Item) RETURN count(*)",
+            &mut store,
+            "default",
+        )
         .expect("cartesian read");
-    let n = out.records[0].get("count(*)").and_then(|v| v.as_property())
-        .and_then(|p| p.as_integer()).expect("a count");
+    let n = out.records[0]
+        .get("count(*)")
+        .and_then(|v| v.as_property())
+        .and_then(|p| p.as_integer())
+        .expect("a count");
     assert_eq!(n, 9, "3 items x 3 items");
 }

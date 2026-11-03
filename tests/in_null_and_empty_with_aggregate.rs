@@ -17,7 +17,9 @@ use samyama::query::parser::parse_query;
 /// Every value of column `c`, one per row.
 fn rows(s: &GraphStore, q: &str) -> Vec<String> {
     let parsed = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(s).execute(&parsed).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(s)
+        .execute(&parsed)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     out.records
         .iter()
         .map(|r| match r.get("c") {
@@ -38,7 +40,10 @@ fn in_a_null_list_is_null() {
 #[test]
 fn with_aggregate_over_nothing_is_one_row() {
     let s = GraphStore::new();
-    assert_eq!(rows(&s, "MATCH (p) WITH avg(p.age) AS c RETURN c"), vec!["null"]);
+    assert_eq!(
+        rows(&s, "MATCH (p) WITH avg(p.age) AS c RETURN c"),
+        vec!["null"]
+    );
     assert_eq!(rows(&s, "MATCH (p) WITH count(p) AS c RETURN c"), vec!["0"]);
 }
 
@@ -46,7 +51,10 @@ fn with_aggregate_over_nothing_is_one_row() {
 #[test]
 fn with_nested_aggregate_over_nothing_is_one_row() {
     let s = GraphStore::new();
-    assert_eq!(rows(&s, "MATCH (p) WITH 38 + avg(p.age) - 1000 AS c RETURN c"), vec!["null"]);
+    assert_eq!(
+        rows(&s, "MATCH (p) WITH 38 + avg(p.age) - 1000 AS c RETURN c"),
+        vec!["null"]
+    );
 }
 
 /// TCK WithOrderBy4 [16].
@@ -54,7 +62,10 @@ fn with_nested_aggregate_over_nothing_is_one_row() {
 fn with_aggregate_ordered_by_an_aggregate_over_nothing_is_one_row() {
     let s = GraphStore::new();
     assert_eq!(
-        rows(&s, "MATCH (p) WITH avg(p.age) AS c ORDER BY 38 + avg(p.age) - 1000 RETURN c"),
+        rows(
+            &s,
+            "MATCH (p) WITH avg(p.age) AS c ORDER BY 38 + avg(p.age) - 1000 RETURN c"
+        ),
         vec!["null"]
     );
 }

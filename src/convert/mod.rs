@@ -478,20 +478,30 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 /// The mapping a graph was read from RDF under, and the names it applied:
 /// the last source in its header that recorded one. A graph that never was
-/// RDF gets the `samyama` preset, which is Samyama's own RDF form.
+/// RDF gets the `samyama` preset, which is Samyama's own RDF form. The count
+/// is how many other sources recorded a different mapping, which the write
+/// cannot undo and so reports.
 fn recorded_mapping(
     store: &GraphStore,
-) -> Result<(rdf_mapping::Mapping, rdf_mapping::AppliedNames), ConvertError> {
+) -> Result<(rdf_mapping::Mapping, rdf_mapping::AppliedNames, usize), ConvertError> {
     let recorded = store.snapshot_sources().iter().rev().find_map(|s| {
-        s.mapping
-            .as_ref()
-            .and_then(rdf_mapping::Mapping::from_recorded)
+        let json = s.mapping.as_ref()?;
+        rdf_mapping::Mapping::from_recorded(json).map(|pair| (pair, json))
     });
     match recorded {
-        Some(pair) => Ok(pair),
+        Some(((mapping, names), used)) => {
+            let others = store
+                .snapshot_sources()
+                .iter()
+                .filter_map(|s| s.mapping.as_ref())
+                .filter(|m| *m != used)
+                .count();
+            Ok((mapping, names, others))
+        }
         None => Ok((
             rdf_mapping::Mapping::preset("samyama").map_err(message)?,
             rdf_mapping::AppliedNames::default(),
+            0,
         )),
     }
 }
@@ -500,8 +510,9 @@ fn recorded_mapping(
 /// the mapping's prefixes as `@prefix` lines.
 fn rdf_text(store: &GraphStore, format: Format) -> Result<(String, FormatReport), ConvertError> {
     let rdf_format = format.rdf().ok_or(ConvertError::CannotWrite(format))?;
-    let (mapping, names) = recorded_mapping(store)?;
-    let (triples, report) = mapping.write_rdf(&names, store).map_err(message)?;
+    let (mapping, names, mappings_not_used) = recorded_mapping(store)?;
+    let (triples, mut report) = mapping.write_rdf(&names, store).map_err(message)?;
+    report.mappings_not_used = mappings_not_used;
     let body = crate::rdf::RdfSerializer::serialize(&triples, rdf_format).map_err(message)?;
     let text = if format == Format::Turtle {
         let mut head: String = mapping

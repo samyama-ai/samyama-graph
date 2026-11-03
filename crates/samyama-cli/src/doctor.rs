@@ -49,7 +49,11 @@ pub struct Check {
 
 impl Check {
     fn new(name: &'static str, verdict: Verdict, detail: impl Into<String>) -> Self {
-        Check { name, verdict, detail: detail.into() }
+        Check {
+            name,
+            verdict,
+            detail: detail.into(),
+        }
     }
 }
 
@@ -65,8 +69,16 @@ impl Report {
     fn new(checks: Vec<Check>) -> Self {
         let failed = checks.iter().filter(|c| c.verdict == Verdict::Fail).count();
         let warned = checks.iter().filter(|c| c.verdict == Verdict::Warn).count();
-        let skipped = checks.iter().filter(|c| c.verdict == Verdict::Skipped).count();
-        Report { checks, failed, warned, skipped }
+        let skipped = checks
+            .iter()
+            .filter(|c| c.verdict == Verdict::Skipped)
+            .count();
+        Report {
+            checks,
+            failed,
+            warned,
+            skipped,
+        }
     }
 
     /// Non-zero exactly when a check failed. A warning is information, and a
@@ -97,13 +109,24 @@ fn check_url(url: &str) -> Check {
         Ok(u) if u.scheme() == "http" || u.scheme() == "https" => Check::new(
             "server url",
             Verdict::Pass,
-            format!("{url} (host {}, port {})",
+            format!(
+                "{url} (host {}, port {})",
                 u.host_str().unwrap_or("?"),
-                u.port_or_known_default().map(|p| p.to_string()).unwrap_or_else(|| "?".into())),
+                u.port_or_known_default()
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".into())
+            ),
         ),
-        Ok(u) => Check::new("server url", Verdict::Fail,
-            format!("{url} has scheme '{}'; expected http or https", u.scheme())),
-        Err(e) => Check::new("server url", Verdict::Fail, format!("{url} is not a URL: {e}")),
+        Ok(u) => Check::new(
+            "server url",
+            Verdict::Fail,
+            format!("{url} has scheme '{}'; expected http or https", u.scheme()),
+        ),
+        Err(e) => Check::new(
+            "server url",
+            Verdict::Fail,
+            format!("{url} is not a URL: {e}"),
+        ),
     }
 }
 
@@ -113,13 +136,20 @@ fn check_memory() -> Check {
         // whether a load succeeds. 1 GiB is a floor for anything non-trivial,
         // not a recommendation.
         Some((total, avail)) if avail < 1024 => Check::new(
-            "memory", Verdict::Warn,
+            "memory",
+            Verdict::Warn,
             format!("{avail} MiB available of {total} MiB; under 1 GiB free"),
         ),
         Some((total, avail)) => Check::new(
-            "memory", Verdict::Pass, format!("{avail} MiB available of {total} MiB"),
+            "memory",
+            Verdict::Pass,
+            format!("{avail} MiB available of {total} MiB"),
         ),
-        None => Check::new("memory", Verdict::Skipped, "no /proc/meminfo on this platform"),
+        None => Check::new(
+            "memory",
+            Verdict::Skipped,
+            "no /proc/meminfo on this platform",
+        ),
     }
 }
 
@@ -130,15 +160,28 @@ fn check_data_dir(dir: &std::path::Path) -> Check {
         let parent = dir.parent().unwrap_or(std::path::Path::new("."));
         return match std::fs::metadata(parent) {
             Ok(m) if m.permissions().readonly() => Check::new(
-                "data directory", Verdict::Fail,
-                format!("{} does not exist and its parent {} is read-only",
-                        dir.display(), parent.display()),
+                "data directory",
+                Verdict::Fail,
+                format!(
+                    "{} does not exist and its parent {} is read-only",
+                    dir.display(),
+                    parent.display()
+                ),
             ),
-            Ok(_) => Check::new("data directory", Verdict::Pass,
-                format!("{} does not exist yet; parent {} is writable",
-                        dir.display(), parent.display())),
-            Err(e) => Check::new("data directory", Verdict::Skipped,
-                format!("cannot stat parent {}: {e}", parent.display())),
+            Ok(_) => Check::new(
+                "data directory",
+                Verdict::Pass,
+                format!(
+                    "{} does not exist yet; parent {} is writable",
+                    dir.display(),
+                    parent.display()
+                ),
+            ),
+            Err(e) => Check::new(
+                "data directory",
+                Verdict::Skipped,
+                format!("cannot stat parent {}: {e}", parent.display()),
+            ),
         };
     }
     // `PermissionsExt::readonly` reports the owner bit, which is not the same
@@ -147,11 +190,17 @@ fn check_data_dir(dir: &std::path::Path) -> Check {
     match std::fs::write(&probe, b"") {
         Ok(()) => {
             let _ = std::fs::remove_file(&probe);
-            Check::new("data directory", Verdict::Pass,
-                format!("{} exists and is writable", dir.display()))
+            Check::new(
+                "data directory",
+                Verdict::Pass,
+                format!("{} exists and is writable", dir.display()),
+            )
         }
-        Err(e) => Check::new("data directory", Verdict::Fail,
-            format!("{} exists but is not writable: {e}", dir.display())),
+        Err(e) => Check::new(
+            "data directory",
+            Verdict::Fail,
+            format!("{} exists but is not writable: {e}", dir.display()),
+        ),
     }
 }
 
@@ -171,22 +220,38 @@ pub fn server_checks(status: Result<String, String>, client_version: &str) -> Ve
     match status {
         Err(e) => vec![
             Check::new("server reachable", Verdict::Fail, e),
-            Check::new("version match", Verdict::Skipped,
-                "no server answered, so its version is unknown"),
+            Check::new(
+                "version match",
+                Verdict::Skipped,
+                "no server answered, so its version is unknown",
+            ),
         ],
         Ok(server_version) => {
-            let reachable = Check::new("server reachable", Verdict::Pass,
-                format!("answered, version {server_version}"));
+            let reachable = Check::new(
+                "server reachable",
+                Verdict::Pass,
+                format!("answered, version {server_version}"),
+            );
             // A mismatched patch level is ordinary; a mismatched major or minor
             // is the cause of "that query works on my machine".
-            fn same(v: &str) -> Vec<&str> { v.split('.').take(2).collect() }
+            fn same(v: &str) -> Vec<&str> {
+                v.split('.').take(2).collect()
+            }
             let m = if same(&server_version) == same(client_version) {
-                Check::new("version match", Verdict::Pass,
-                    format!("client {client_version}, server {server_version}"))
+                Check::new(
+                    "version match",
+                    Verdict::Pass,
+                    format!("client {client_version}, server {server_version}"),
+                )
             } else {
-                Check::new("version match", Verdict::Warn,
-                    format!("client {client_version} and server {server_version} differ before \
-                             the patch level; behaviour may not match the client's docs"))
+                Check::new(
+                    "version match",
+                    Verdict::Warn,
+                    format!(
+                        "client {client_version} and server {server_version} differ before \
+                             the patch level; behaviour may not match the client's docs"
+                    ),
+                )
             };
             vec![reachable, m]
         }
@@ -275,10 +340,15 @@ mod tests {
 
     #[test]
     fn verdicts_print_as_their_short_labels() {
-        let shown: Vec<String> = [Verdict::Pass, Verdict::Warn, Verdict::Fail, Verdict::Skipped]
-            .iter()
-            .map(|v| v.to_string())
-            .collect();
+        let shown: Vec<String> = [
+            Verdict::Pass,
+            Verdict::Warn,
+            Verdict::Fail,
+            Verdict::Skipped,
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
         assert_eq!(shown, vec!["ok", "warn", "FAIL", "skip"]);
     }
 
@@ -343,7 +413,13 @@ mod tests {
     #[test]
     fn local_checks_never_return_an_empty_report() {
         let cs = local_checks("http://localhost:8080", std::path::Path::new("."));
-        assert!(cs.len() >= 4, "a doctor that checks nothing reports a clean bill of health");
-        assert!(cs.iter().all(|c| !c.detail.is_empty()), "every check must show what it saw");
+        assert!(
+            cs.len() >= 4,
+            "a doctor that checks nothing reports a clean bill of health"
+        );
+        assert!(
+            cs.iter().all(|c| !c.detail.is_empty()),
+            "every check must show what it saw"
+        );
     }
 }

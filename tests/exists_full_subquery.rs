@@ -15,7 +15,9 @@ use samyama::query::parser::parse_query;
 
 fn graph(create: &str) -> GraphStore {
     let mut s = GraphStore::new();
-    MutQueryExecutor::new(&mut s, "default".into()).execute(&parse_query(create).unwrap()).unwrap();
+    MutQueryExecutor::new(&mut s, "default".into())
+        .execute(&parse_query(create).unwrap())
+        .unwrap();
     s
 }
 
@@ -30,16 +32,30 @@ fn tck2() -> GraphStore {
 /// The `prop` of every returned `n`, sorted, as `Label:prop`.
 fn nodes(store: &GraphStore, q: &str) -> Vec<String> {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(store).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(store)
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let mut got: Vec<String> = out
         .records
         .iter()
         .map(|r| match r.get("n") {
             Some(Value::NodeRef(id)) | Some(Value::Node(id, _)) => {
                 let node = store.get_node(*id).expect("returned node exists");
-                let label = node.labels.iter().next().map(|l| l.as_str().to_string()).unwrap_or_default();
-                let prop = match store.node_columns.get_property(id.as_u64() as usize, "prop") {
-                    PropertyValue::Null => node.properties.get("prop").cloned().unwrap_or(PropertyValue::Null),
+                let label = node
+                    .labels
+                    .iter()
+                    .next()
+                    .map(|l| l.as_str().to_string())
+                    .unwrap_or_default();
+                let prop = match store
+                    .node_columns
+                    .get_property(id.as_u64() as usize, "prop")
+                {
+                    PropertyValue::Null => node
+                        .properties
+                        .get("prop")
+                        .cloned()
+                        .unwrap_or(PropertyValue::Null),
                     p => p,
                 };
                 format!("{label}:{prop:?}")
@@ -57,7 +73,10 @@ fn tck_1_full_existential_subquery() {
         "CREATE (a:A {prop: 1})-[:R]->(b:B {prop: 1}), (a)-[:R]->(:C {prop: 2}), (a)-[:R]->(:D {prop: 3})",
     );
     assert_eq!(
-        nodes(&s, "MATCH (n) WHERE exists { MATCH (n)-->() RETURN true } RETURN n"),
+        nodes(
+            &s,
+            "MATCH (n) WHERE exists { MATCH (n)-->() RETURN true } RETURN n"
+        ),
         ["A:Integer(1)"],
     );
 }
@@ -79,7 +98,11 @@ fn tck_2_full_existential_subquery_with_aggregation() {
 fn tck_3_an_update_inside_is_refused() {
     let s = tck2();
     let q = "MATCH (n) WHERE exists { MATCH (n)-->(m) SET m.prop = 'fail' } RETURN n";
-    let r = parse_query(q).map_err(|e| e.to_string()).and_then(|p| QueryExecutor::new(&s).execute(&p).map_err(|e| e.to_string()));
+    let r = parse_query(q).map_err(|e| e.to_string()).and_then(|p| {
+        QueryExecutor::new(&s)
+            .execute(&p)
+            .map_err(|e| e.to_string())
+    });
     assert!(r.is_err(), "`{q}` should be refused");
 }
 
@@ -108,7 +131,10 @@ fn a_body_threshold_keeps_each_outer_row_once() {
     );
     // A full body with a plain RETURN of the inner variable, and no WITH.
     assert_eq!(
-        nodes(&s, "MATCH (n) WHERE exists { MATCH (n)-->(m) WHERE m.prop = 3 RETURN m } RETURN n"),
+        nodes(
+            &s,
+            "MATCH (n) WHERE exists { MATCH (n)-->(m) WHERE m.prop = 3 RETURN m } RETURN n"
+        ),
         ["A:Integer(1)", "B:Integer(1)"],
     );
 }
@@ -116,6 +142,9 @@ fn a_body_threshold_keeps_each_outer_row_once() {
 #[test]
 fn the_pattern_form_is_unchanged() {
     let s = tck2();
-    assert_eq!(nodes(&s, "MATCH (n) WHERE exists { (n)-->(:D) } RETURN n"), ["A:Integer(1)", "B:Integer(1)"]);
+    assert_eq!(
+        nodes(&s, "MATCH (n) WHERE exists { (n)-->(:D) } RETURN n"),
+        ["A:Integer(1)", "B:Integer(1)"]
+    );
     // The function form `exists((n)-->())` is #1255, fixed and tested in #1256.
 }

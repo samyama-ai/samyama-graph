@@ -14,11 +14,17 @@ use ndarray::{Array1, Array2};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy)]
-pub enum CecSuite { Cec2017, Cec2022 }
+pub enum CecSuite {
+    Cec2017,
+    Cec2022,
+}
 
 impl CecSuite {
     fn dir(&self) -> &'static str {
-        match self { CecSuite::Cec2017 => "cec2017", CecSuite::Cec2022 => "cec2022" }
+        match self {
+            CecSuite::Cec2017 => "cec2017",
+            CecSuite::Cec2022 => "cec2022",
+        }
     }
 }
 
@@ -29,16 +35,31 @@ pub fn data_root() -> PathBuf {
 }
 
 pub fn load_shift(suite: CecSuite, fn_id: u32, dim: usize) -> Option<Array1<f64>> {
-    let path = data_root().join(suite.dir()).join(format!("shift_data_{}.txt", fn_id));
+    let path = data_root()
+        .join(suite.dir())
+        .join(format!("shift_data_{}.txt", fn_id));
     let txt = std::fs::read_to_string(&path).ok()?;
-    let vals: Vec<f64> = txt.split_whitespace().filter_map(|s| s.parse().ok()).take(dim).collect();
-    if vals.len() == dim { Some(Array1::from(vals)) } else { None }
+    let vals: Vec<f64> = txt
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .take(dim)
+        .collect();
+    if vals.len() == dim {
+        Some(Array1::from(vals))
+    } else {
+        None
+    }
 }
 
 pub fn load_rotation(suite: CecSuite, fn_id: u32, dim: usize) -> Option<Array2<f64>> {
-    let path = data_root().join(suite.dir()).join(format!("M_{}_D{}.txt", fn_id, dim));
+    let path = data_root()
+        .join(suite.dir())
+        .join(format!("M_{}_D{}.txt", fn_id, dim));
     let txt = std::fs::read_to_string(&path).ok()?;
-    let vals: Vec<f64> = txt.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+    let vals: Vec<f64> = txt
+        .split_whitespace()
+        .filter_map(|s| s.parse().ok())
+        .collect();
     if vals.len() == dim * dim {
         Some(Array2::from_shape_vec((dim, dim), vals).ok()?)
     } else {

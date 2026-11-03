@@ -63,7 +63,9 @@ fn build(edges: &[(&str, &str)]) -> GraphStore {
 fn ends(store: &GraphStore, pattern: &str) -> Vec<String> {
     let engine = QueryEngine::new();
     let q = format!("MATCH (x:N {{eid: \"a\"}})-[:E{pattern}]->(y) RETURN y.eid");
-    let batch = engine.execute(&q, store).unwrap_or_else(|e| panic!("{q}: {e}"));
+    let batch = engine
+        .execute(&q, store)
+        .unwrap_or_else(|e| panic!("{q}: {e}"));
     let mut out: Vec<String> = batch
         .records
         .iter()
@@ -82,7 +84,11 @@ fn zero_lower_bound_is_the_zero_length_match_plus_the_one_bounded_form() {
     ] {
         let store = build(edges);
         let zero = ends(&store, "*0..0");
-        assert_eq!(zero.len(), 1, "{name}: *0..0 is the source and nothing else");
+        assert_eq!(
+            zero.len(),
+            1,
+            "{name}: *0..0 is the source and nothing else"
+        );
 
         for n in 1..=4 {
             let actual = ends(&store, &format!("*0..{n}"));
@@ -90,7 +96,8 @@ fn zero_lower_bound_is_the_zero_length_match_plus_the_one_bounded_form() {
             expected.extend(ends(&store, &format!("*1..{n}")));
             expected.sort();
             assert_eq!(
-                actual, expected,
+                actual,
+                expected,
                 "{name}: *0..{n} must be *0..0 plus *1..{n} as a multiset. \
                  Got {} rows, expected {}. A lower bound of 0 taking a different \
                  traversal from a lower bound of 1 is how these diverge.",

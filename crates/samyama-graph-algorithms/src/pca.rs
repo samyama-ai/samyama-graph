@@ -74,7 +74,6 @@ pub struct PcaConfig {
 /// runs agree.
 pub const DEFAULT_PCA_SEED: u64 = 0x5A_4D_59_4D_41; // "SAMYA"
 
-
 impl Default for PcaConfig {
     fn default() -> Self {
         Self {
@@ -127,26 +126,35 @@ impl PcaResult {
         let k = self.components.len();
 
         // Build component matrix (k × d)
-        let comp_flat: Vec<f64> = self.components.iter().flat_map(|r| r.iter().copied()).collect();
+        let comp_flat: Vec<f64> = self
+            .components
+            .iter()
+            .flat_map(|r| r.iter().copied())
+            .collect();
         let comp_mat = Array2::from_shape_vec((k, d), comp_flat).unwrap();
 
         // Build centered data matrix (n × d)
-        let data_flat: Vec<f64> = data.iter().flat_map(|row| {
-            row.iter().enumerate().map(|(j, &val)| {
-                let mut v = val - self.mean[j];
-                if self.std_dev[j] > 0.0 && self.std_dev[j] != 1.0 {
-                    v /= self.std_dev[j];
-                }
-                v
+        let data_flat: Vec<f64> = data
+            .iter()
+            .flat_map(|row| {
+                row.iter().enumerate().map(|(j, &val)| {
+                    let mut v = val - self.mean[j];
+                    if self.std_dev[j] > 0.0 && self.std_dev[j] != 1.0 {
+                        v /= self.std_dev[j];
+                    }
+                    v
+                })
             })
-        }).collect();
+            .collect();
         let data_mat = Array2::from_shape_vec((n, d), data_flat).unwrap();
 
         // projected = data_mat @ comp_mat^T → (n × k)
         let projected = data_mat.dot(&comp_mat.t());
 
         // Convert back to Vec<Vec<f64>>
-        projected.rows().into_iter()
+        projected
+            .rows()
+            .into_iter()
             .map(|row| row.to_vec())
             .collect()
     }
@@ -189,10 +197,17 @@ pub fn pca(data: &[Vec<f64>], config: PcaConfig) -> PcaResult {
     let k = config.n_components.min(d).min(n);
 
     // Build ndarray matrix from flat data (cache-friendly)
-    let flat: Vec<f64> = data.iter().flat_map(|row| {
-        assert_eq!(row.len(), d, "All rows must have the same number of features");
-        row.iter().copied()
-    }).collect();
+    let flat: Vec<f64> = data
+        .iter()
+        .flat_map(|row| {
+            assert_eq!(
+                row.len(),
+                d,
+                "All rows must have the same number of features"
+            );
+            row.iter().copied()
+        })
+        .collect();
     let mut mat = Array2::from_shape_vec((n, d), flat).unwrap();
 
     // Compute column means and center using ndarray operations
@@ -228,7 +243,10 @@ pub fn pca(data: &[Vec<f64>], config: PcaConfig) -> PcaResult {
     };
 
     let (n_oversamples, n_power_iters) = match &config.solver {
-        PcaSolver::Randomized { n_oversamples, n_power_iters } => (*n_oversamples, *n_power_iters),
+        PcaSolver::Randomized {
+            n_oversamples,
+            n_power_iters,
+        } => (*n_oversamples, *n_power_iters),
         _ => (10, 4),
     };
 
@@ -246,7 +264,13 @@ pub fn pca(data: &[Vec<f64>], config: PcaConfig) -> PcaResult {
 
         let explained_variance_ratio: Vec<f64> = eigenvalues
             .iter()
-            .map(|&ev| if total_variance > 0.0 { ev / total_variance } else { 0.0 })
+            .map(|&ev| {
+                if total_variance > 0.0 {
+                    ev / total_variance
+                } else {
+                    0.0
+                }
+            })
             .collect();
 
         PcaResult {
@@ -273,7 +297,8 @@ pub fn pca(data: &[Vec<f64>], config: PcaConfig) -> PcaResult {
         let mut last_iters = 0;
 
         for _ in 0..k {
-            let (eigvec, _eigval, iters) = power_iteration(&cov, config.max_iterations, config.tolerance);
+            let (eigvec, _eigval, iters) =
+                power_iteration(&cov, config.max_iterations, config.tolerance);
             last_iters = iters;
 
             // Gram-Schmidt re-orthogonalization against previous components
@@ -310,7 +335,13 @@ pub fn pca(data: &[Vec<f64>], config: PcaConfig) -> PcaResult {
 
         let explained_variance_ratio: Vec<f64> = eigenvalues
             .iter()
-            .map(|&ev| if total_variance > 0.0 { ev / total_variance } else { 0.0 })
+            .map(|&ev| {
+                if total_variance > 0.0 {
+                    ev / total_variance
+                } else {
+                    0.0
+                }
+            })
             .collect();
 
         PcaResult {
@@ -353,11 +384,11 @@ fn compute_total_variance(mat: &Array2<f64>, denom: f64) -> f64 {
 /// 6. SVD of B via eigendecomposition of B @ B^T
 /// 7. Return top-k right singular vectors and singular values
 fn randomized_svd(
-    mat: &Array2<f64>,       // n × d, already centered
-    k: usize,                // number of components
-    n_oversamples: usize,    // oversampling parameter
-    n_power_iters: usize,    // power iterations for accuracy
-    seed: u64,               // fixes the projection so two runs agree
+    mat: &Array2<f64>,    // n × d, already centered
+    k: usize,             // number of components
+    n_oversamples: usize, // oversampling parameter
+    n_power_iters: usize, // power iterations for accuracy
+    seed: u64,            // fixes the projection so two runs agree
 ) -> (Vec<Vec<f64>>, Vec<f64>) {
     let n = mat.nrows();
     let d = mat.ncols();
@@ -368,7 +399,9 @@ fn randomized_svd(
     // rows, so an unseeded draw is deterministic in every small fixture and
     // nondeterministic in production -- the tests cannot see it.
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed);
-    let omega_flat: Vec<f64> = (0..d * l).map(|_| rng.sample::<f64, _>(rand::distributions::Standard)).collect();
+    let omega_flat: Vec<f64> = (0..d * l)
+        .map(|_| rng.sample::<f64, _>(rand::distributions::Standard))
+        .collect();
     let omega = Array2::from_shape_vec((d, l), omega_flat).unwrap();
 
     // Y = X @ Omega  (n × l)
@@ -381,7 +414,7 @@ fn randomized_svd(
         qr_modified_gram_schmidt(&mut y);
         // Y = X @ (X^T @ Y)
         let xty = mat.t().dot(&y); // d × l
-        y = mat.dot(&xty);         // n × l
+        y = mat.dot(&xty); // n × l
     }
 
     // Final QR to get orthonormal basis Q
@@ -528,8 +561,16 @@ fn power_iteration(
         let v_new = &w / w_norm;
 
         // Check convergence: |v_new - v| or |v_new + v| (sign may flip)
-        let diff_pos: f64 = v_new.iter().zip(v.iter()).map(|(a, b)| (a - b).powi(2)).sum();
-        let diff_neg: f64 = v_new.iter().zip(v.iter()).map(|(a, b)| (a + b).powi(2)).sum();
+        let diff_pos: f64 = v_new
+            .iter()
+            .zip(v.iter())
+            .map(|(a, b)| (a - b).powi(2))
+            .sum();
+        let diff_neg: f64 = v_new
+            .iter()
+            .zip(v.iter())
+            .map(|(a, b)| (a + b).powi(2))
+            .sum();
         let diff = diff_pos.min(diff_neg).sqrt();
 
         v = v_new;
@@ -554,12 +595,20 @@ mod determinism_tests {
     /// data's.
     fn data(n: usize, d: usize) -> Vec<Vec<f64>> {
         (0..n)
-            .map(|i| (0..d).map(|j| ((i * 31 + j * 17) % 97) as f64 + (i as f64) * 0.01).collect())
+            .map(|i| {
+                (0..d)
+                    .map(|j| ((i * 31 + j * 17) % 97) as f64 + (i as f64) * 0.01)
+                    .collect()
+            })
             .collect()
     }
 
     fn first_component(n: usize, seed: u64) -> Vec<f64> {
-        let cfg = PcaConfig { n_components: 3, seed, ..Default::default() };
+        let cfg = PcaConfig {
+            n_components: 3,
+            seed,
+            ..Default::default()
+        };
         pca(&data(n, 20), cfg).components[0].clone()
     }
 
@@ -569,8 +618,14 @@ mod determinism_tests {
     /// PCA test was under the threshold and passed.
     #[test]
     fn randomized_solver_gives_the_same_answer_twice() {
-        assert!(600 > 500, "n must cross the Auto threshold or this tests power iteration");
-        assert_eq!(first_component(600, DEFAULT_PCA_SEED), first_component(600, DEFAULT_PCA_SEED));
+        assert!(
+            600 > 500,
+            "n must cross the Auto threshold or this tests power iteration"
+        );
+        assert_eq!(
+            first_component(600, DEFAULT_PCA_SEED),
+            first_component(600, DEFAULT_PCA_SEED)
+        );
     }
 
     /// Without this, the test above would still pass if `seed` were dropped on
@@ -580,7 +635,10 @@ mod determinism_tests {
     fn a_different_seed_draws_a_different_projection() {
         let a = first_component(600, DEFAULT_PCA_SEED);
         let b = first_component(600, DEFAULT_PCA_SEED ^ 0xFFFF);
-        assert_ne!(a, b, "seed is ignored: two seeds gave byte-identical output");
+        assert_ne!(
+            a, b,
+            "seed is ignored: two seeds gave byte-identical output"
+        );
     }
 }
 
@@ -599,23 +657,32 @@ mod tests {
             })
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 2,
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 2,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(result.components.len(), 2);
         assert_eq!(result.explained_variance.len(), 2);
 
         // First component should capture most variance
-        assert!(result.explained_variance_ratio[0] > 0.9,
+        assert!(
+            result.explained_variance_ratio[0] > 0.9,
             "First component should explain >90% variance, got {}",
-            result.explained_variance_ratio[0]);
+            result.explained_variance_ratio[0]
+        );
 
         // First component should be roughly along [1, 1] / sqrt(2) direction
         let c0 = &result.components[0];
         let angle = (c0[0].abs() - c0[1].abs()).abs();
-        assert!(angle < 0.2, "First component should be near diagonal, got {:?}", c0);
+        assert!(
+            angle < 0.2,
+            "First component should be near diagonal, got {:?}",
+            c0
+        );
     }
 
     #[test]
@@ -631,14 +698,20 @@ mod tests {
             })
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 3,
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 3,
+                ..Default::default()
+            },
+        );
 
         let total: f64 = result.explained_variance_ratio.iter().sum();
-        assert!((total - 1.0).abs() < 0.01,
-            "Total explained variance ratio should be ~1.0, got {}", total);
+        assert!(
+            (total - 1.0).abs() < 0.01,
+            "Total explained variance ratio should be ~1.0, got {}",
+            total
+        );
     }
 
     #[test]
@@ -646,23 +719,38 @@ mod tests {
         let data: Vec<Vec<f64>> = (0..200)
             .map(|i| {
                 let x = i as f64 * 0.1;
-                vec![x, x * 2.0 + 1.0, x.sin(), x.cos(), (x * 0.3).exp().min(100.0)]
+                vec![
+                    x,
+                    x * 2.0 + 1.0,
+                    x.sin(),
+                    x.cos(),
+                    (x * 0.3).exp().min(100.0),
+                ]
             })
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 5,
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 5,
+                ..Default::default()
+            },
+        );
 
         let total: f64 = result.explained_variance_ratio.iter().sum();
-        assert!((total - 1.0).abs() < 0.05,
-            "Ratios should sum to ~1.0, got {}", total);
+        assert!(
+            (total - 1.0).abs() < 0.05,
+            "Ratios should sum to ~1.0, got {}",
+            total
+        );
 
         // Ratios should be in descending order
         for i in 1..result.explained_variance_ratio.len() {
-            assert!(result.explained_variance_ratio[i] <= result.explained_variance_ratio[i - 1] + 1e-10,
-                "Ratios should be descending");
+            assert!(
+                result.explained_variance_ratio[i]
+                    <= result.explained_variance_ratio[i - 1] + 1e-10,
+                "Ratios should be descending"
+            );
         }
     }
 
@@ -676,10 +764,13 @@ mod tests {
             })
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 1,
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 1,
+                ..Default::default()
+            },
+        );
 
         // Project and check that reconstructing from 1 component preserves most info
         let projected = result.transform(&data);
@@ -687,9 +778,11 @@ mod tests {
         assert_eq!(projected[0].len(), 1);
 
         // First component should explain nearly all variance (perfectly correlated data)
-        assert!(result.explained_variance_ratio[0] > 0.99,
+        assert!(
+            result.explained_variance_ratio[0] > 0.99,
             "Should explain >99% variance for perfectly correlated data, got {}",
-            result.explained_variance_ratio[0]);
+            result.explained_variance_ratio[0]
+        );
     }
 
     #[test]
@@ -700,11 +793,14 @@ mod tests {
             .map(|i| vec![i as f64 + offset, (i as f64 * 2.0) + offset])
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 2,
-            center: true,
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 2,
+                center: true,
+                ..Default::default()
+            },
+        );
 
         // Mean should be approximately offset + 24.5 for x, offset + 49 for y
         assert!((result.mean[0] - (offset + 24.5)).abs() < 0.01);
@@ -717,26 +813,34 @@ mod tests {
     #[test]
     fn test_pca_convergence() {
         // Simple data that should converge quickly
-        let data: Vec<Vec<f64>> = (0..20)
-            .map(|i| vec![i as f64, 0.0])
-            .collect();
+        let data: Vec<Vec<f64>> = (0..20).map(|i| vec![i as f64, 0.0]).collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 1,
-            max_iterations: 100,
-            tolerance: 1e-10,
-            solver: PcaSolver::PowerIteration,
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 1,
+                max_iterations: 100,
+                tolerance: 1e-10,
+                solver: PcaSolver::PowerIteration,
+                ..Default::default()
+            },
+        );
 
         // Should converge well before 100 iterations for such simple data
-        assert!(result.iterations_used < 50,
-            "Should converge quickly, used {} iterations", result.iterations_used);
+        assert!(
+            result.iterations_used < 50,
+            "Should converge quickly, used {} iterations",
+            result.iterations_used
+        );
 
         // First component should be [1, 0] (all variance along x)
         let c0 = &result.components[0];
         assert!(c0[0].abs() > 0.99, "Should be along x axis, got {:?}", c0);
-        assert!(c0[1].abs() < 0.1, "Should have near-zero y component, got {:?}", c0);
+        assert!(
+            c0[1].abs() < 0.1,
+            "Should have near-zero y component, got {:?}",
+            c0
+        );
     }
 
     #[test]
@@ -747,24 +851,33 @@ mod tests {
             .collect();
 
         // Without scaling, second feature dominates
-        let result_no_scale = pca(&data, PcaConfig {
-            n_components: 2,
-            scale: false,
-            ..Default::default()
-        });
+        let result_no_scale = pca(
+            &data,
+            PcaConfig {
+                n_components: 2,
+                scale: false,
+                ..Default::default()
+            },
+        );
         // First component should align with second feature (larger variance)
         assert!(result_no_scale.components[0][1].abs() > result_no_scale.components[0][0].abs());
 
         // With scaling, features are treated equally
-        let result_scaled = pca(&data, PcaConfig {
-            n_components: 2,
-            scale: true,
-            ..Default::default()
-        });
+        let result_scaled = pca(
+            &data,
+            PcaConfig {
+                n_components: 2,
+                scale: true,
+                ..Default::default()
+            },
+        );
         // Both features should contribute roughly equally to first component
         let ratio = result_scaled.components[0][0].abs() / result_scaled.components[0][1].abs();
-        assert!(ratio > 0.5 && ratio < 2.0,
-            "Scaled components should be balanced, ratio = {}", ratio);
+        assert!(
+            ratio > 0.5 && ratio < 2.0,
+            "Scaled components should be balanced, ratio = {}",
+            ratio
+        );
     }
 
     // ── New tests for randomized SVD ──
@@ -779,17 +892,25 @@ mod tests {
             })
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 2,
-            solver: PcaSolver::Randomized { n_oversamples: 10, n_power_iters: 4 },
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 2,
+                solver: PcaSolver::Randomized {
+                    n_oversamples: 10,
+                    n_power_iters: 4,
+                },
+                ..Default::default()
+            },
+        );
 
         assert_eq!(result.components.len(), 2);
         // First component should capture most variance (x and 2x dominate)
-        assert!(result.explained_variance_ratio[0] > 0.8,
+        assert!(
+            result.explained_variance_ratio[0] > 0.8,
             "Randomized SVD: first component should explain >80% variance, got {}",
-            result.explained_variance_ratio[0]);
+            result.explained_variance_ratio[0]
+        );
     }
 
     #[test]
@@ -798,25 +919,43 @@ mod tests {
         let data: Vec<Vec<f64>> = (0..600)
             .map(|i| {
                 let x = i as f64 * 0.1;
-                vec![x, x * 2.0 + 1.0, x.sin() * 10.0, x.cos() * 5.0, (x * 0.3).exp().min(100.0)]
+                vec![
+                    x,
+                    x * 2.0 + 1.0,
+                    x.sin() * 10.0,
+                    x.cos() * 5.0,
+                    (x * 0.3).exp().min(100.0),
+                ]
             })
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 4,
-            solver: PcaSolver::Randomized { n_oversamples: 10, n_power_iters: 4 },
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 4,
+                solver: PcaSolver::Randomized {
+                    n_oversamples: 10,
+                    n_power_iters: 4,
+                },
+                ..Default::default()
+            },
+        );
 
         // Check pairwise orthogonality
         for i in 0..result.components.len() {
             for j in (i + 1)..result.components.len() {
-                let dot: f64 = result.components[i].iter()
+                let dot: f64 = result.components[i]
+                    .iter()
                     .zip(result.components[j].iter())
                     .map(|(a, b)| a * b)
                     .sum();
-                assert!(dot.abs() < 0.05,
-                    "Components {} and {} should be orthogonal, dot product = {}", i, j, dot);
+                assert!(
+                    dot.abs() < 0.05,
+                    "Components {} and {} should be orthogonal, dot product = {}",
+                    i,
+                    j,
+                    dot
+                );
             }
         }
     }
@@ -831,16 +970,22 @@ mod tests {
             })
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 2,
-            solver: PcaSolver::Auto,
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 2,
+                solver: PcaSolver::Auto,
+                ..Default::default()
+            },
+        );
 
         // iterations_used should be the n_power_iters (4) for randomized, not >4
         // (Power iteration would use many more iterations)
-        assert!(result.iterations_used <= 10,
-            "Auto should select randomized (iters={})", result.iterations_used);
+        assert!(
+            result.iterations_used <= 10,
+            "Auto should select randomized (iters={})",
+            result.iterations_used
+        );
         assert_eq!(result.components.len(), 2);
     }
 
@@ -854,24 +999,33 @@ mod tests {
             })
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 2,
-            solver: PcaSolver::PowerIteration,
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 2,
+                solver: PcaSolver::PowerIteration,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(result.components.len(), 2);
-        assert!(result.explained_variance_ratio[0] > 0.99,
+        assert!(
+            result.explained_variance_ratio[0] > 0.99,
             "PowerIteration should explain >99% on correlated data, got {}",
-            result.explained_variance_ratio[0]);
+            result.explained_variance_ratio[0]
+        );
 
         // Verify orthogonality of components (improved by Gram-Schmidt)
-        let dot: f64 = result.components[0].iter()
+        let dot: f64 = result.components[0]
+            .iter()
             .zip(result.components[1].iter())
             .map(|(a, b)| a * b)
             .sum();
-        assert!(dot.abs() < 0.01,
-            "PowerIteration components should be orthogonal, dot = {}", dot);
+        assert!(
+            dot.abs() < 0.01,
+            "PowerIteration components should be orthogonal, dot = {}",
+            dot
+        );
     }
 
     #[test]
@@ -884,15 +1038,24 @@ mod tests {
             })
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 3,
-            solver: PcaSolver::Randomized { n_oversamples: 10, n_power_iters: 4 },
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 3,
+                solver: PcaSolver::Randomized {
+                    n_oversamples: 10,
+                    n_power_iters: 4,
+                },
+                ..Default::default()
+            },
+        );
 
         let total: f64 = result.explained_variance_ratio.iter().sum();
-        assert!((total - 1.0).abs() < 0.1,
-            "Randomized SVD ratios should sum close to 1.0, got {}", total);
+        assert!(
+            (total - 1.0).abs() < 0.1,
+            "Randomized SVD ratios should sum close to 1.0, got {}",
+            total
+        );
     }
 
     #[test]
@@ -905,17 +1068,26 @@ mod tests {
             })
             .collect();
 
-        let result = pca(&data, PcaConfig {
-            n_components: 2,
-            ..Default::default()
-        });
+        let result = pca(
+            &data,
+            PcaConfig {
+                n_components: 2,
+                ..Default::default()
+            },
+        );
 
         let batch = result.transform(&data);
         for (i, row) in data.iter().enumerate() {
             let single = result.transform_one(row);
             for (j, (&b, &s)) in batch[i].iter().zip(single.iter()).enumerate() {
-                assert!((b - s).abs() < 1e-10,
-                    "Batch[{}][{}]={} != single={}", i, j, b, s);
+                assert!(
+                    (b - s).abs() < 1e-10,
+                    "Batch[{}][{}]={} != single={}",
+                    i,
+                    j,
+                    b,
+                    s
+                );
             }
         }
     }

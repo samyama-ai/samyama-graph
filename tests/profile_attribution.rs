@@ -17,7 +17,12 @@ fn fixture() -> GraphStore {
     let people: Vec<_> = (0..200)
         .map(|i| {
             let id = store.create_node("Person");
-            let _ = store.set_node_property("default", id, "age".to_string(), PropertyValue::Integer(i % 60));
+            let _ = store.set_node_property(
+                "default",
+                id,
+                "age".to_string(),
+                PropertyValue::Integer(i % 60),
+            );
             let _ = store.set_node_property(
                 "default",
                 id,
@@ -39,9 +44,15 @@ fn profile_text(store: &GraphStore, cypher: &str) -> String {
     let query = parse_query(cypher).expect("query should parse");
     let executor = QueryExecutor::new(store);
     let batch = executor.execute(&query).expect("PROFILE should execute");
-    assert_eq!(batch.records.len(), 1, "PROFILE returns one row of plan text");
+    assert_eq!(
+        batch.records.len(),
+        1,
+        "PROFILE returns one row of plan text"
+    );
     match batch.records[0].get("plan") {
-        Some(samyama::query::executor::Value::Property(PropertyValue::String(text))) => text.clone(),
+        Some(samyama::query::executor::Value::Property(PropertyValue::String(text))) => {
+            text.clone()
+        }
         other => panic!("expected a plan string, got {other:?}"),
     }
 }
@@ -69,10 +80,16 @@ fn the_report_states_how_much_of_the_wall_clock_it_attributed() {
     // Without this line the report cannot be checked against the gate, which
     // is written as a percentage rather than as a list of operators.
     let store = fixture();
-    let text = profile_text(&store, "PROFILE MATCH (p:Person)-[:KNOWS]->(f:Person) RETURN f.name LIMIT 50");
+    let text = profile_text(
+        &store,
+        "PROFILE MATCH (p:Person)-[:KNOWS]->(f:Person) RETURN f.name LIMIT 50",
+    );
 
     assert!(text.contains("attributed to operators"), "{text}");
-    assert!(text.contains("Hottest operators by exclusive time"), "{text}");
+    assert!(
+        text.contains("Hottest operators by exclusive time"),
+        "{text}"
+    );
 
     let line = text
         .lines()
@@ -99,7 +116,11 @@ fn profiling_reports_the_same_rows_the_plain_query_returns() {
 
     let plain = {
         let query = parse_query(cypher).unwrap();
-        QueryExecutor::new(&store).execute(&query).unwrap().records.len()
+        QueryExecutor::new(&store)
+            .execute(&query)
+            .unwrap()
+            .records
+            .len()
     };
 
     let text = profile_text(&store, &format!("PROFILE {cypher}"));
@@ -119,7 +140,10 @@ fn the_instrumentation_cost_is_reported_rather_than_hidden() {
     // profile that presents its own inflated total as the query's latency is
     // how an optimisation gets chosen against a number that does not exist.
     let store = fixture();
-    let text = profile_text(&store, "PROFILE MATCH (p:Person)-[:KNOWS]->(f:Person) RETURN f.name");
+    let text = profile_text(
+        &store,
+        "PROFILE MATCH (p:Person)-[:KNOWS]->(f:Person) RETURN f.name",
+    );
 
     assert!(
         text.contains("Uninstrumented execution of the same plan"),

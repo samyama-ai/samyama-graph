@@ -98,7 +98,9 @@ fn single_solvers() -> Vec<(&'static str, Single)> {
         ("itlbo", |c, p| ITLBOSolver::new(c).with_seed(SEED).solve(p)),
         ("pso", |c, p| PSOSolver::new(c).with_seed(SEED).solve(p)),
         ("de", |c, p| DESolver::new(c).with_seed(SEED).solve(p)),
-        ("lshade", |c, p| LSHADESolver::new(c).with_seed(SEED).solve(p)),
+        ("lshade", |c, p| {
+            LSHADESolver::new(c).with_seed(SEED).solve(p)
+        }),
         ("gotlbo", |c, p| {
             GOTLBOSolver::new(c).with_seed(SEED).solve(p)
         }),

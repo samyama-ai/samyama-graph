@@ -33,7 +33,11 @@ fn run(store: &mut GraphStore, cypher: &str) -> usize {
 
 fn count(store: &GraphStore, cypher: &str) -> usize {
     let q = parse_query(cypher).expect("query should parse");
-    QueryExecutor::new(store).execute(&q).expect("query should run").records.len()
+    QueryExecutor::new(store)
+        .execute(&q)
+        .expect("query should run")
+        .records
+        .len()
 }
 
 #[test]

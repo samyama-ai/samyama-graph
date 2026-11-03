@@ -17,7 +17,9 @@ fn graph() -> GraphStore {
     let q = "CREATE (a:N {n: 'a'}), (b:N {n: 'b'}), (c:N {n: 'c'}), (d:N {n: 'd'}), (e:N {n: 'e'}), \
              (a)-[:T {w: 1}]->(b), (b)-[:T {w: 2}]->(c), (c)-[:T {w: 3}]->(d), (a)-[:T {w: 9}]->(d), \
              (d)-[:T {w: 4}]->(e), (e)-[:U {w: 5}]->(a)";
-    MutQueryExecutor::new(&mut s, "default".into()).execute(&parse_query(q).unwrap()).unwrap();
+    MutQueryExecutor::new(&mut s, "default".into())
+        .execute(&parse_query(q).unwrap())
+        .unwrap();
     s
 }
 
@@ -34,11 +36,19 @@ fn cell(v: Option<&Value>) -> String {
 fn check(q: &str, expected: &[&str]) {
     let s = graph();
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(&s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(&s)
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let mut got: Vec<String> = out
         .records
         .iter()
-        .map(|r| out.columns.iter().map(|c| cell(r.get(c))).collect::<Vec<_>>().join("|"))
+        .map(|r| {
+            out.columns
+                .iter()
+                .map(|c| cell(r.get(c)))
+                .collect::<Vec<_>>()
+                .join("|")
+        })
         .collect();
     got.sort();
     assert_eq!(got, expected, "{q}");
@@ -55,7 +65,10 @@ fn no_cycle_over_the_type_means_no_rows() {
 #[test]
 fn cycles_are_counted_per_start_node() {
     check("MATCH (x:N)-[*]->(x) RETURN x.n, count(*) AS c", PER_NODE);
-    check("MATCH (x:N)-[*1..5]->(x) RETURN x.n, count(*) AS c", PER_NODE);
+    check(
+        "MATCH (x:N)-[*1..5]->(x) RETURN x.n, count(*) AS c",
+        PER_NODE,
+    );
     check("MATCH (x)-[*]->(x) RETURN count(*) AS c", &["8"]);
     check("MATCH (x:N)<-[*]-(x) RETURN count(*) AS c", &["8"]);
     check("MATCH (x:N)-[*]-(x) RETURN count(*) AS c", &["24"]);
@@ -69,21 +82,39 @@ fn the_path_ends_where_it_started() {
     );
     // Every node lies on a cycle, so a walk that never returns to its start
     // (a BFS that marks it visited) would find none of them.
-    check("MATCH (x:N)-[*]->(x) RETURN DISTINCT x.n", &["a", "b", "c", "d", "e"]);
+    check(
+        "MATCH (x:N)-[*]->(x) RETURN DISTINCT x.n",
+        &["a", "b", "c", "d", "e"],
+    );
 }
 
 #[test]
 fn a_start_bound_by_an_earlier_clause() {
-    check("MATCH (x:N) MATCH (x)-[*]->(x) RETURN x.n, count(*) AS c", PER_NODE);
-    check("MATCH (x:N) OPTIONAL MATCH (x)-[:T*]->(x) RETURN x.n, count(*) AS c", &["a|1", "b|1", "c|1", "d|1", "e|1"]);
+    check(
+        "MATCH (x:N) MATCH (x)-[*]->(x) RETURN x.n, count(*) AS c",
+        PER_NODE,
+    );
+    check(
+        "MATCH (x:N) OPTIONAL MATCH (x)-[:T*]->(x) RETURN x.n, count(*) AS c",
+        &["a|1", "b|1", "c|1", "d|1", "e|1"],
+    );
 }
 
 /// Right before and after: the WHERE form, a start pinned by a property, and a
 /// fixed-length cycle.
 #[test]
 fn controls() {
-    check("MATCH (x:N)-[*]->(y) WHERE x = y RETURN x.n, count(*) AS c", PER_NODE);
+    check(
+        "MATCH (x:N)-[*]->(y) WHERE x = y RETURN x.n, count(*) AS c",
+        PER_NODE,
+    );
     check("MATCH (x:N {n: 'a'})-[*]->(x) RETURN count(*) AS c", &["2"]);
-    check("MATCH (x:N)-[:T]->()-[:T]->(x) RETURN count(*) AS c", &["0"]);
-    check("MATCH (a:N {n: 'a'})-[:T*]->(x) RETURN x.n, count(*) AS c", &["b|1", "c|1", "d|2", "e|2"]);
+    check(
+        "MATCH (x:N)-[:T]->()-[:T]->(x) RETURN count(*) AS c",
+        &["0"],
+    );
+    check(
+        "MATCH (a:N {n: 'a'})-[:T*]->(x) RETURN x.n, count(*) AS c",
+        &["b|1", "c|1", "d|2", "e|2"],
+    );
 }

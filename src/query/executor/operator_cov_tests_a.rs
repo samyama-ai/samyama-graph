@@ -994,8 +994,12 @@ fn size_and_list_accessors() {
         Value::NodeRef(NodeId::new(1)),
         Value::NodeRef(NodeId::new(2)),
     ]);
-    assert!(matches!(call("head", std::slice::from_ref(&l)), Ok(Value::NodeRef(id)) if id == NodeId::new(1)));
-    assert!(matches!(call("last", std::slice::from_ref(&l)), Ok(Value::NodeRef(id)) if id == NodeId::new(2)));
+    assert!(
+        matches!(call("head", std::slice::from_ref(&l)), Ok(Value::NodeRef(id)) if id == NodeId::new(1))
+    );
+    assert!(
+        matches!(call("last", std::slice::from_ref(&l)), Ok(Value::NodeRef(id)) if id == NodeId::new(2))
+    );
     assert!(matches!(call("tail", &[l]), Ok(Value::List(v)) if v.len() == 1));
     assert!(matches!(
         call("head", &[Value::List(vec![])]),
@@ -1147,15 +1151,24 @@ fn meta_functions_on_entities() {
         PropertyValue::String("R".into())
     );
     assert!(err_msg(call("type", &[pv(1i64)])).contains("type() requires"));
-    assert!(matches!(call("startNode", std::slice::from_ref(&full_edge)), Ok(Value::NodeRef(id)) if id == a));
-    assert!(matches!(call("endNode", std::slice::from_ref(&full_edge)), Ok(Value::NodeRef(id)) if id == b2));
-    assert!(matches!(call("endNode", std::slice::from_ref(&edge)), Ok(Value::NodeRef(id)) if id == b2));
+    assert!(
+        matches!(call("startNode", std::slice::from_ref(&full_edge)), Ok(Value::NodeRef(id)) if id == a)
+    );
+    assert!(
+        matches!(call("endNode", std::slice::from_ref(&full_edge)), Ok(Value::NodeRef(id)) if id == b2)
+    );
+    assert!(
+        matches!(call("endNode", std::slice::from_ref(&edge)), Ok(Value::NodeRef(id)) if id == b2)
+    );
     assert!(err_msg(call("startNode", &[pv(1i64)])).contains("startNode()"));
     assert!(err_msg(call("endNode", &[pv(1i64)])).contains("endNode()"));
 
     // keys
     let keys = PropertyValue::Array(vec!["n".into(), "name".into()]);
-    assert_eq!(prop(call_on(&store, "keys", std::slice::from_ref(&full_node))), keys);
+    assert_eq!(
+        prop(call_on(&store, "keys", std::slice::from_ref(&full_node))),
+        keys
+    );
     // Without a store only the node's row-storage map is consulted.
     let mut row_keys: Vec<String> = store
         .get_node(a)
@@ -1169,7 +1182,10 @@ fn meta_functions_on_entities() {
         prop(call("keys", std::slice::from_ref(&full_node))),
         PropertyValue::Array(row_keys.into_iter().map(PropertyValue::String).collect())
     );
-    assert_eq!(prop(call_on(&store, "keys", std::slice::from_ref(&node))), keys);
+    assert_eq!(
+        prop(call_on(&store, "keys", std::slice::from_ref(&node))),
+        keys
+    );
     assert!(err_msg(call("keys", std::slice::from_ref(&node))).contains("requires store"));
     assert!(
         err_msg(call_on(&store, "keys", &[Value::NodeRef(NodeId::new(999))])).contains("not found")
@@ -1192,7 +1208,11 @@ fn meta_functions_on_entities() {
     );
 
     // properties
-    let props = prop(call_on(&store, "properties", std::slice::from_ref(&full_node)));
+    let props = prop(call_on(
+        &store,
+        "properties",
+        std::slice::from_ref(&full_node),
+    ));
     assert_eq!(
         props.as_map().unwrap().get("name"),
         Some(&PropertyValue::String("x".into()))

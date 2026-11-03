@@ -704,7 +704,7 @@ async fn run_benchmark(
                 return BenchResult {
                     id: query.id,
                     name: query.name,
-        
+
                     rows: 0,
                     min: Duration::ZERO,
                     median: Duration::ZERO,
@@ -757,17 +757,38 @@ async fn main() -> Result<(), Error> {
     // against parameters nobody chose is not a measurement, and nothing in the
     // output said so (#660).
     const KNOWN: &[&str] = &[
-        "--data-dir", "--deletes", "--derive-params", "--explain", "--params-file",
-        "--print-runs", "--profile", "--query", "--runs", "--updates", "--warmup", "--write-params",
+        "--data-dir",
+        "--deletes",
+        "--derive-params",
+        "--explain",
+        "--params-file",
+        "--print-runs",
+        "--profile",
+        "--query",
+        "--runs",
+        "--updates",
+        "--warmup",
+        "--write-params",
         // cargo passes this to bench targets.
-        "--bench", "--nocapture", "--test-threads", "--color", "--format",
+        "--bench",
+        "--nocapture",
+        "--test-threads",
+        "--color",
+        "--format",
     ];
     let unknown: Vec<&String> = args[1..]
         .iter()
         .filter(|a| a.starts_with("--") && !KNOWN.contains(&a.as_str()))
         .collect();
     if !unknown.is_empty() {
-        eprintln!("unknown option(s): {}", unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "));
+        eprintln!(
+            "unknown option(s): {}",
+            unknown
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
         eprintln!("known options: {}", KNOWN[..10].join(" "));
         eprintln!("\nRefusing to run: an ignored flag produces a number measured under\nsettings nobody chose, and the output cannot tell you that happened.");
         std::process::exit(64);
@@ -790,13 +811,19 @@ async fn main() -> Result<(), Error> {
     let default_dir = "data/ldbc-sf1/social_network-sf1-CsvBasic-LongDateFormatter";
     let explicit_data_dir = args.iter().any(|a| a == "--data-dir");
     let data_dir = if let Some(pos) = args.iter().position(|a| a == "--data-dir") {
-        PathBuf::from(args.get(pos + 1).expect("--data-dir requires a path argument"))
+        PathBuf::from(
+            args.get(pos + 1)
+                .expect("--data-dir requires a path argument"),
+        )
     } else {
         PathBuf::from(default_dir)
     };
 
     let runs: usize = if let Some(pos) = args.iter().position(|a| a == "--runs") {
-        args.get(pos + 1).expect("--runs requires a number").parse().expect("--runs must be a positive integer")
+        args.get(pos + 1)
+            .expect("--runs requires a number")
+            .parse()
+            .expect("--runs must be a positive integer")
     } else {
         5
     };
@@ -871,15 +898,17 @@ async fn main() -> Result<(), Error> {
     //
     // `--write-params <path>` dumps whatever was derived, so a run can be
     // repeated later without re-deriving and the file records its own origin.
-    let derive_percentile: Option<u8> = args.iter().position(|a| a == "--derive-params").map(|pos| {
+    let derive_percentile: Option<u8> =
+        args.iter().position(|a| a == "--derive-params").map(|pos| {
+            args.get(pos + 1)
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(50)
+        });
+    let write_params: Option<String> = args.iter().position(|a| a == "--write-params").map(|pos| {
         args.get(pos + 1)
-            .and_then(|v| v.parse::<u8>().ok())
-            .unwrap_or(50)
+            .expect("--write-params requires a path")
+            .clone()
     });
-    let write_params: Option<String> = args
-        .iter()
-        .position(|a| a == "--write-params")
-        .map(|pos| args.get(pos + 1).expect("--write-params requires a path").clone());
 
     if !data_dir.exists() {
         // An explicitly requested directory that does not exist is a mistake worth failing
@@ -890,9 +919,14 @@ async fn main() -> Result<(), Error> {
             eprintln!("ERROR: Data directory not found: {}", data_dir.display());
             std::process::exit(1);
         }
-        eprintln!("SKIP: LDBC SF1 dataset not present at {}", data_dir.display());
+        eprintln!(
+            "SKIP: LDBC SF1 dataset not present at {}",
+            data_dir.display()
+        );
         eprintln!("      Download and extract it there, or pass --data-dir PATH.");
-        eprintln!("      Skipping rather than failing: the benchmark did not run, it did not break.");
+        eprintln!(
+            "      Skipping rather than failing: the benchmark did not run, it did not break."
+        );
         return Ok(());
     }
 
@@ -914,7 +948,9 @@ async fn main() -> Result<(), Error> {
         }
         (derived.into(), provenance)
     } else if let Some(pos) = args.iter().position(|a| a == "--params-file") {
-        let p = args.get(pos + 1).expect("--params-file requires a path argument");
+        let p = args
+            .get(pos + 1)
+            .expect("--params-file requires a path argument");
         let loaded = Params::load(p).unwrap_or_else(|e| {
             eprintln!("ERROR loading params file: {}", e);
             std::process::exit(1);
@@ -949,10 +985,12 @@ async fn main() -> Result<(), Error> {
     let load_time = load_start.elapsed();
 
     eprintln!();
-    eprintln!("Dataset: {} nodes, {} edges (loaded in {})",
+    eprintln!(
+        "Dataset: {} nodes, {} edges (loaded in {})",
         format_num(load_result.total_nodes),
         format_num(load_result.total_edges),
-        format_duration(load_time));
+        format_duration(load_time)
+    );
 
     // Build property indexes on `id` for the labels the bench queries
     // anchor on. Without these, `MATCH (m:Post {id: ...})` triggers a
@@ -1014,7 +1052,10 @@ Place/Organisation/Tag/TagClass .name -- the properties the 21 queries filter on
     // `run_benchmark` always warms up at least once, so report what it does
     // rather than what was asked for: `--warmup 0` still runs one.
     let effective_warmup = warmup_runs.max(1);
-    eprintln!("Runs per query: {} ({} warm-up, discarded)", runs, effective_warmup);
+    eprintln!(
+        "Runs per query: {} ({} warm-up, discarded)",
+        runs, effective_warmup
+    );
     if effective_warmup < 3 {
         // Disclose the cold-run bias up front: a log read without it takes a
         // warm-up ramp for variance (#752).
@@ -1027,8 +1068,12 @@ first run; pass --warmup 3 for steady state",
     }
     eprintln!(
         "Params: personId={} person2Id={} postId={} messageId={} firstName=\"{}\" tagName=\"{}\"",
-        params.person_id, params.person2_id, params.post_id, params.message_id,
-        params.first_name, params.tag_name
+        params.person_id,
+        params.person2_id,
+        params.post_id,
+        params.message_id,
+        params.first_name,
+        params.tag_name
     );
     eprintln!(
         "        countryX=\"{}\" countryY=\"{}\" tagClass=\"{}\" org=\"{}\" window=[{}, {}) maxDate={}",
@@ -1060,20 +1105,35 @@ first run; pass --warmup 3 for steady state",
     let queries: Vec<&LdbcQuery> = if filter_queries.is_empty() {
         all_queries.iter().collect()
     } else {
-        all_queries.iter().filter(|q| filter_queries.iter().any(|f| f == q.id)).collect()
+        all_queries
+            .iter()
+            .filter(|q| filter_queries.iter().any(|f| f == q.id))
+            .collect()
     };
 
     if queries.is_empty() {
         eprintln!("ERROR: no query selected");
-        eprintln!("Available: IS1-IS7, IC1-IC14, INS1-INS8 (with --updates), DEL1-DEL8 (with --deletes)");
+        eprintln!(
+            "Available: IS1-IS7, IC1-IC14, INS1-INS8 (with --updates), DEL1-DEL8 (with --deletes)"
+        );
         std::process::exit(1);
     }
 
     // Print header
-    println!("{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  {}",
-        "ID", "Name", "Rows", "Min", "Median", "Max", "Status");
-    println!("{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  {}",
-        "----", "------------------------------", "------", "----------", "----------", "----------", "------");
+    println!(
+        "{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  {}",
+        "ID", "Name", "Rows", "Min", "Median", "Max", "Status"
+    );
+    println!(
+        "{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  {}",
+        "----",
+        "------------------------------",
+        "------",
+        "----------",
+        "----------",
+        "----------",
+        "------"
+    );
 
     let mut passed = 0usize;
     let mut errors = 0usize;
@@ -1089,13 +1149,15 @@ first run; pass --warmup 3 for steady state",
     for query in &queries {
         // Print section separator when category changes
         if query.category != last_category {
-            if !last_category.is_empty() { println!(); }
+            if !last_category.is_empty() {
+                println!();
+            }
             let label = match query.category {
-                "short"   => "--- Short Reads ---",
+                "short" => "--- Short Reads ---",
                 "complex" => "--- Complex Reads ---",
-                "update"  => "--- Update Operations ---",
-                "delete"  => "--- Delete Operations ---",
-                other     => other,
+                "update" => "--- Update Operations ---",
+                "delete" => "--- Delete Operations ---",
+                other => other,
             };
             println!("{}", label);
             last_category = query.category;
@@ -1105,12 +1167,17 @@ first run; pass --warmup 3 for steady state",
 
         let cypher = params.apply(query.cypher);
 
-
         if explain_mode {
-            println!("\n================ {} — {} ================", query.id, query.name);
+            println!(
+                "\n================ {} — {} ================",
+                query.id, query.name
+            );
             println!("{}", cypher);
             println!();
-            match client.query("default", &format!("EXPLAIN {}", cypher)).await {
+            match client
+                .query("default", &format!("EXPLAIN {}", cypher))
+                .await
+            {
                 Ok(batch) => {
                     for record in &batch.records {
                         for cell in record {
@@ -1130,9 +1197,15 @@ first run; pass --warmup 3 for steady state",
         }
 
         if profile_mode {
-            match client.query("default", &format!("PROFILE {}", cypher)).await {
+            match client
+                .query("default", &format!("PROFILE {}", cypher))
+                .await
+            {
                 Ok(batch) => {
-                    println!("\n================ {} — {} ================", query.id, query.name);
+                    println!(
+                        "\n================ {} — {} ================",
+                        query.id, query.name
+                    );
                     println!("{}", cypher);
                     println!();
                     // PROFILE returns a single row whose one column holds the
@@ -1149,7 +1222,10 @@ first run; pass --warmup 3 for steady state",
                     }
                 }
                 Err(e) => {
-                    println!("\n================ {} — {} ================", query.id, query.name);
+                    println!(
+                        "\n================ {} — {} ================",
+                        query.id, query.name
+                    );
                     println!("ERROR: {}", e);
                     errors += 1;
                 }
@@ -1172,8 +1248,10 @@ first run; pass --warmup 3 for steady state",
         }
 
         if let Some(ref err) = result.error {
-            println!("{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  ERROR",
-                result.id, result.name, "-", "-", "-", "-");
+            println!(
+                "{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  ERROR",
+                result.id, result.name, "-", "-", "-", "-"
+            );
             eprintln!("       {}", err);
             errors += 1;
         } else {
@@ -1182,16 +1260,22 @@ first run; pass --warmup 3 for steady state",
             // 0 rows means the parameters missed the data -- and a 0.03 ms "OK" for a query
             // that traversed nothing is the most flattering possible wrong answer. Say so
             // in the status rather than reporting it as a pass (#449).
-            let empty = result.rows == 0
-                && matches!(query.category, "short" | "complex");
-            println!("{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  {}",
-                result.id, result.name,
+            let empty = result.rows == 0 && matches!(query.category, "short" | "complex");
+            println!(
+                "{:<6}{:<32}{:>8}{:>12}{:>12}{:>12}  {}",
+                result.id,
+                result.name,
                 result.rows,
                 format_ms(result.min),
                 format_ms(result.median),
                 format_ms(result.max),
-                if empty { "EMPTY" } else { "OK" });
-            if empty { empty_reads += 1; } else { passed += 1; }
+                if empty { "EMPTY" } else { "OK" }
+            );
+            if empty {
+                empty_reads += 1;
+            } else {
+                passed += 1;
+            }
         }
     }
 
@@ -1199,7 +1283,11 @@ first run; pass --warmup 3 for steady state",
 
     if profile_mode {
         println!();
-        println!("Profiled {} query/queries in {}.", queries.len(), format_duration(bench_time));
+        println!(
+            "Profiled {} query/queries in {}.",
+            queries.len(),
+            format_duration(bench_time)
+        );
         bench_setup::report_drift(calibration);
         // Same rule as the summary path below: a short or complex read that
         // returned nothing did not measure a traversal, and a profile of it is
@@ -1210,7 +1298,6 @@ first run; pass --warmup 3 for steady state",
         }
         return Ok(());
     }
-
 
     // ========================================================================
     // Summary
@@ -1238,14 +1325,30 @@ first run; pass --warmup 3 for steady state",
             // and a line beginning `  IS3   …` is one format change away from
             // being ingested as a result row. A leading word that is not
             // `Running` and not a query id cannot match at all.
-            let mark = if first_run_slowest(&r.series) { "  <- run 1 slowest" } else { "" };
-            println!("  runs {:<6} spread {:>5.2}x  {}{}", r.id, spread, runs.join(" "), mark);
+            let mark = if first_run_slowest(&r.series) {
+                "  <- run 1 slowest"
+            } else {
+                ""
+            };
+            println!(
+                "  runs {:<6} spread {:>5.2}x  {}{}",
+                r.id,
+                spread,
+                runs.join(" "),
+                mark
+            );
         }
     }
 
     println!();
-    println!("Summary: {}/{} passed, {} empty, {} errors (total benchmark time: {})",
-        passed, queries.len(), empty_reads, errors, format_duration(bench_time));
+    println!(
+        "Summary: {}/{} passed, {} empty, {} errors (total benchmark time: {})",
+        passed,
+        queries.len(),
+        empty_reads,
+        errors,
+        format_duration(bench_time)
+    );
     // Starts with a word that is neither `Running` nor a query id, so the
     // result-row regex in `ch_bench_ldbc.py` / `analyse_noise.py` cannot match it.
     if multi_run > 0 {
@@ -1274,7 +1377,11 @@ re-run with --warmup 3 before reading spread (#752)"
 
     // Cache stats
     let stats = client.cache_stats();
-    println!("AST cache: {} hits, {} misses", stats.hits(), stats.misses());
+    println!(
+        "AST cache: {} hits, {} misses",
+        stats.hits(),
+        stats.misses()
+    );
 
     bench_setup::report_drift(calibration);
 

@@ -88,10 +88,7 @@ impl MultiObjectiveProblem for TrialSiteProblem {
         };
         let region_v = (REQUIRED_REGIONS.saturating_sub(regions)) as f64;
         let penalty = (count_v + region_v) * 1e5;
-        vec![
-            TARGET_ENROLMENT / rate.max(1e-6) + penalty,
-            cost + penalty,
-        ]
+        vec![TARGET_ENROLMENT / rate.max(1e-6) + penalty, cost + penalty]
     }
 }
 

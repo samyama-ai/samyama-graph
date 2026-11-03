@@ -31,8 +31,12 @@ fn chain() -> GraphStore {
     let c = store.create_node_with_labels([Label::new("C")]);
     let e1 = store.create_edge(a, b, "T").unwrap();
     let e2 = store.create_edge(b, c, "T").unwrap();
-    store.set_edge_property(e1, "name", PropertyValue::String("r1".into())).unwrap();
-    store.set_edge_property(e2, "name", PropertyValue::String("r2".into())).unwrap();
+    store
+        .set_edge_property(e1, "name", PropertyValue::String("r1".into()))
+        .unwrap();
+    store
+        .set_edge_property(e2, "name", PropertyValue::String("r2".into()))
+        .unwrap();
     store
 }
 
@@ -44,7 +48,11 @@ fn rows(store: &GraphStore, cypher: &str) -> Vec<Vec<Value>> {
     let cols = r.columns.clone();
     r.records
         .iter()
-        .map(|rec| cols.iter().map(|c| rec.get(c).cloned().unwrap_or(Value::Null)).collect())
+        .map(|rec| {
+            cols.iter()
+                .map(|c| rec.get(c).cloned().unwrap_or(Value::Null))
+                .collect()
+        })
         .collect()
 }
 
@@ -77,6 +85,9 @@ fn a_row_with_no_surviving_match_still_emits_nulls() {
 fn an_optional_match_with_no_predicate_still_pushes_down() {
     let store = chain();
     // The #726 pushdown must survive: no WHERE, so nothing to lose.
-    let got = rows(&store, "MATCH (a)-[r {name: 'r1'}]-(b) OPTIONAL MATCH (b)-[r2]-(c) RETURN a, b, c");
+    let got = rows(
+        &store,
+        "MATCH (a)-[r {name: 'r1'}]-(b) OPTIONAL MATCH (b)-[r2]-(c) RETURN a, b, c",
+    );
     assert_eq!(got.len(), 3, "got {got:?}");
 }

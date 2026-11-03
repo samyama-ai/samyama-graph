@@ -99,13 +99,22 @@ fn main() {
             if let Err(e) = parse_query(stmt) {
                 failed += 1;
                 file_failures += 1;
-                let first = format!("{e}").lines().next().unwrap_or("").trim().to_string();
+                let first = format!("{e}")
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 eprintln!("FAIL  {path}:{line}");
                 eprintln!("      {first}");
                 // Echo the statement so a mis-split is visible rather than
                 // looking like a grammar bug.
                 let preview: String = stmt.chars().take(120).collect();
-                eprintln!("      {}{}", preview.replace('\n', " "), if stmt.len() > 120 { " ..." } else { "" });
+                eprintln!(
+                    "      {}{}",
+                    preview.replace('\n', " "),
+                    if stmt.len() > 120 { " ..." } else { "" }
+                );
             }
         }
         if file_failures > 0 {

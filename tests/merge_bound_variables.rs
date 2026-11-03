@@ -37,9 +37,20 @@ fn count(store: &GraphStore, cypher: &str) -> usize {
 #[test]
 fn a_relationship_merge_reuses_its_bound_endpoints() {
     let mut store = GraphStore::new();
-    run(&mut store, "CREATE (a) WITH a MERGE (x) MERGE (y) MERGE (x)-[:T]->(y)");
-    assert_eq!(count(&store, "MATCH (n) RETURN n"), 1, "the one node the pattern names");
-    assert_eq!(count(&store, "MATCH ()-[r:T]->() RETURN r"), 1, "a self-relationship on it");
+    run(
+        &mut store,
+        "CREATE (a) WITH a MERGE (x) MERGE (y) MERGE (x)-[:T]->(y)",
+    );
+    assert_eq!(
+        count(&store, "MATCH (n) RETURN n"),
+        1,
+        "the one node the pattern names"
+    );
+    assert_eq!(
+        count(&store, "MATCH ()-[r:T]->() RETURN r"),
+        1,
+        "a self-relationship on it"
+    );
 }
 
 /// Only the unbound end is created, and the bound end keeps its identity.
@@ -64,7 +75,11 @@ fn an_unbound_merge_still_matches_what_exists() {
     let mut store = GraphStore::new();
     run(&mut store, "CREATE (:X {p: 1})");
     run(&mut store, "MERGE (n:X {p: 1})");
-    assert_eq!(count(&store, "MATCH (n:X) RETURN n"), 1, "matched, not created");
+    assert_eq!(
+        count(&store, "MATCH (n:X) RETURN n"),
+        1,
+        "matched, not created"
+    );
 }
 
 /// A MERGE whose endpoints are **not** all bound must still run.

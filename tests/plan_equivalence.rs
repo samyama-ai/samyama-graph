@@ -90,7 +90,9 @@ const CORPUS: &[&str] = &[
 
 fn run(s: &GraphStore, q: &str) -> Result<Vec<String>, String> {
     let query = parse_query(q).map_err(|e| e.to_string())?;
-    let batch = QueryExecutor::new(s).execute(&query).map_err(|e| e.to_string())?;
+    let batch = QueryExecutor::new(s)
+        .execute(&query)
+        .map_err(|e| e.to_string())?;
     let mut rows: Vec<String> = batch
         .records
         .iter()
@@ -111,7 +113,9 @@ fn run(s: &GraphStore, q: &str) -> Result<Vec<String>, String> {
 }
 
 fn explain(s: &GraphStore, q: &str) -> String {
-    let batch = QueryExecutor::new(s).execute(&parse_query(&format!("EXPLAIN {q}")).unwrap()).unwrap();
+    let batch = QueryExecutor::new(s)
+        .execute(&parse_query(&format!("EXPLAIN {q}")).unwrap())
+        .unwrap();
     match batch.records[0].get("plan") {
         Some(Value::Property(PropertyValue::String(t))) => t.clone(),
         other => panic!("{other:?}"),
@@ -131,7 +135,11 @@ fn every_plan_of_every_query_returns_the_default_planners_answer() {
     let mut distinct_trees = 0;
     for q in CORPUS {
         let want = run(&s, q).unwrap_or_else(|e| panic!("{q}: {e}"));
-        assert_eq!(run(&s, &format!("CYPHER planner=cost {q}")).unwrap(), want, "planner=cost: {q}");
+        assert_eq!(
+            run(&s, &format!("CYPHER planner=cost {q}")).unwrap(),
+            want,
+            "planner=cost: {q}"
+        );
         let mut trees = std::collections::HashSet::new();
         let mut n = 1;
         loop {
@@ -155,8 +163,15 @@ fn every_plan_of_every_query_returns_the_default_planners_answer() {
         distinct_trees += trees.len();
     }
     // The comparison could not fail if every query had one plan.
-    assert!(queries_with_alternatives >= CORPUS.len() / 2, "{queries_with_alternatives} of {}", CORPUS.len());
-    assert!(distinct_trees > CORPUS.len(), "{distinct_trees} distinct operator trees over {plans_run} plans");
+    assert!(
+        queries_with_alternatives >= CORPUS.len() / 2,
+        "{queries_with_alternatives} of {}",
+        CORPUS.len()
+    );
+    assert!(
+        distinct_trees > CORPUS.len(),
+        "{distinct_trees} distinct operator trees over {plans_run} plans"
+    );
 }
 
 #[test]
@@ -167,11 +182,26 @@ fn explain_numbers_the_plans_as_plan_n_takes_them() {
     assert!(cost.contains("Candidates evaluated: 3"), "{cost}");
     assert!(cost.contains("Chosen plan: #1\n"), "{cost}");
     // Both orders of EXPLAIN and the options.
-    for forced in [format!("CYPHER plan=2 EXPLAIN {q}"), format!("EXPLAIN CYPHER plan=2 {q}")] {
-        let batch = QueryExecutor::new(&s).execute(&parse_query(&forced).unwrap()).unwrap();
-        let Some(Value::Property(PropertyValue::String(text))) = batch.records[0].get("plan") else { panic!() };
-        assert!(text.contains("Chosen plan: #2, forced by CYPHER plan=N"), "{text}");
-        assert_ne!(tree(text), tree(&cost), "plan 2 is a different tree from plan 1");
+    for forced in [
+        format!("CYPHER plan=2 EXPLAIN {q}"),
+        format!("EXPLAIN CYPHER plan=2 {q}"),
+    ] {
+        let batch = QueryExecutor::new(&s)
+            .execute(&parse_query(&forced).unwrap())
+            .unwrap();
+        let Some(Value::Property(PropertyValue::String(text))) = batch.records[0].get("plan")
+        else {
+            panic!()
+        };
+        assert!(
+            text.contains("Chosen plan: #2, forced by CYPHER plan=N"),
+            "{text}"
+        );
+        assert_ne!(
+            tree(text),
+            tree(&cost),
+            "plan 2 is a different tree from plan 1"
+        );
     }
     // The default planner prints no candidates; a forced plan leaves none behind.
     run(&s, &format!("CYPHER plan=2 {q}")).unwrap();
@@ -187,19 +217,40 @@ fn an_option_that_cannot_be_honoured_is_an_error() {
         assert!(e.contains(why), "{q}: {e}");
     };
     let q = "MATCH (a:P)-[:R]->(b:P) RETURN a.id";
-    refused(&format!("CYPHER plan=3 {q}"), "this MATCH has 2 candidate plans");
+    refused(
+        &format!("CYPHER plan=3 {q}"),
+        "this MATCH has 2 candidate plans",
+    );
     refused(&format!("CYPHER plan=0 {q}"), "numbered from 1");
     refused(&format!("CYPHER planner=idp {q}"), "planner=cost");
     refused(&format!("CYPHER runtime=slotted {q}"), "one runtime");
-    refused(&format!("CYPHER planner=legacy plan=2 {q}"), "planner=legacy");
+    refused(
+        &format!("CYPHER planner=legacy plan=2 {q}"),
+        "planner=legacy",
+    );
     refused(&format!("CYPHER plan=1 plan=2 {q}"), "given twice");
-    refused(&format!("CYPHER join_order=ab {q}"), "unknown CYPHER option");
+    refused(
+        &format!("CYPHER join_order=ab {q}"),
+        "unknown CYPHER option",
+    );
     // A pattern the enumerator does not plan has one plan, and says why.
     let varlen = "MATCH (a:P {id: 1})-[:R*1..3]->(b:P) RETURN b.id";
-    refused(&format!("CYPHER plan=2 {varlen}"), "variable-length relationship");
-    assert_eq!(run(&s, &format!("CYPHER plan=1 {varlen}")).unwrap(), run(&s, varlen).unwrap());
-    refused("CYPHER plan=2 MATCH (a:P)-[:R]-(b:P) RETURN a.id", "undirected relationship");
-    refused("CYPHER plan=2 MATCH p = (a:P)-[:R]->(b:P) RETURN a.id", "named path");
+    refused(
+        &format!("CYPHER plan=2 {varlen}"),
+        "variable-length relationship",
+    );
+    assert_eq!(
+        run(&s, &format!("CYPHER plan=1 {varlen}")).unwrap(),
+        run(&s, varlen).unwrap()
+    );
+    refused(
+        "CYPHER plan=2 MATCH (a:P)-[:R]-(b:P) RETURN a.id",
+        "undirected relationship",
+    );
+    refused(
+        "CYPHER plan=2 MATCH p = (a:P)-[:R]->(b:P) RETURN a.id",
+        "named path",
+    );
     // What is accepted: the runtime that exists, and the probe's spellings.
     assert!(run(&s, &format!("CYPHER runtime=volcano {q}")).is_ok());
     assert!(run(&s, "CYPHER planner=cost MATCH (p:P) RETURN p.id").is_ok());

@@ -29,8 +29,7 @@ pub struct BMWRSolver {
 
 impl BMWRSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self {
-            seed: None, config }
+        Self { seed: None, config }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -63,7 +62,10 @@ impl BMWRSolver {
                 break;
             }
             if iter % 10 == 0 {
-                println!("BMWR Solver: Iteration {}/{}", iter, self.config.max_iterations);
+                println!(
+                    "BMWR Solver: Iteration {}/{}",
+                    iter, self.config.max_iterations
+                );
             }
             let (best_idx, worst_idx) = find_best_worst(&population);
             let best_vars = population[best_idx].variables.clone();

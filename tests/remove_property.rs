@@ -22,10 +22,20 @@ use samyama::query::parser::parse_query;
 fn graph() -> (GraphStore, samyama::graph::NodeId, samyama::graph::EdgeId) {
     let mut store = GraphStore::new();
     let a = store.create_node("P");
-    let _ = store.set_node_property("default", a, "name".to_string(), PropertyValue::String("Ada".into()));
+    let _ = store.set_node_property(
+        "default",
+        a,
+        "name".to_string(),
+        PropertyValue::String("Ada".into()),
+    );
     let _ = store.set_node_property("default", a, "age".to_string(), PropertyValue::Integer(36));
     let b = store.create_node("P");
-    let _ = store.set_node_property("default", b, "name".to_string(), PropertyValue::String("Bob".into()));
+    let _ = store.set_node_property(
+        "default",
+        b,
+        "name".to_string(),
+        PropertyValue::String("Bob".into()),
+    );
     let e = store.create_edge(a, b, "KNOWS").unwrap();
     let _ = store.set_edge_property(e, "since", PropertyValue::Integer(2020));
     (store, a, e)
@@ -34,7 +44,9 @@ fn graph() -> (GraphStore, samyama::graph::NodeId, samyama::graph::EdgeId) {
 fn run(store: &mut GraphStore, cypher: &str) {
     let query = parse_query(cypher).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
     let mut mutating = MutQueryExecutor::new(store, "default".to_string());
-    mutating.execute(&query).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
+    mutating
+        .execute(&query)
+        .unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
 }
 
 fn read(store: &GraphStore, cypher: &str) -> PropertyValue {
@@ -49,7 +61,10 @@ fn read(store: &GraphStore, cypher: &str) -> PropertyValue {
 #[test]
 fn removing_a_node_property_clears_both_stores() {
     let (mut store, a, _) = graph();
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age");
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age",
+    );
 
     assert_eq!(
         store.node_columns.get_property(a.as_u64() as usize, "age"),
@@ -57,11 +72,17 @@ fn removing_a_node_property_clears_both_stores() {
         "the column still holds the value — this is the bug"
     );
     assert!(
-        store.get_node(a).and_then(|n| n.get_property("age")).is_none(),
+        store
+            .get_node(a)
+            .and_then(|n| n.get_property("age"))
+            .is_none(),
         "the row still holds the value"
     );
     assert_eq!(
-        read(&store, "MATCH (p:P) WHERE p.name = \"Ada\" RETURN p.age AS r"),
+        read(
+            &store,
+            "MATCH (p:P) WHERE p.name = \"Ada\" RETURN p.age AS r"
+        ),
         PropertyValue::Null
     );
 }
@@ -71,9 +92,15 @@ fn the_removed_property_disappears_from_keys() {
     // `keys()` reads the merged view, so it is the user-visible symptom that
     // does not depend on which store answered.
     let (mut store, _, _) = graph();
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age");
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age",
+    );
 
-    match read(&store, "MATCH (p:P) WHERE p.name = \"Ada\" RETURN keys(p) AS r") {
+    match read(
+        &store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" RETURN keys(p) AS r",
+    ) {
         PropertyValue::Array(keys) => {
             let names: Vec<String> = keys
                 .iter()
@@ -91,7 +118,10 @@ fn the_removed_property_disappears_from_keys() {
 #[test]
 fn other_properties_survive() {
     let (mut store, a, _) = graph();
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age");
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age",
+    );
     assert_eq!(
         store.node_columns.get_property(a.as_u64() as usize, "name"),
         PropertyValue::String("Ada".into()),
@@ -107,7 +137,10 @@ fn other_nodes_survive() {
     let c = store.create_node("P");
     let _ = store.set_node_property("default", c, "age".to_string(), PropertyValue::Integer(7));
 
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age");
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age",
+    );
     assert_eq!(
         store.node_columns.get_property(c.as_u64() as usize, "age"),
         PropertyValue::Integer(7),
@@ -121,7 +154,9 @@ fn removing_an_edge_property_clears_both_stores() {
     run(&mut store, "MATCH ()-[r:KNOWS]->() REMOVE r.since");
 
     assert_eq!(
-        store.edge_columns.get_property(e.as_u64() as usize, "since"),
+        store
+            .edge_columns
+            .get_property(e.as_u64() as usize, "since"),
         PropertyValue::Null
     );
     assert_eq!(
@@ -133,7 +168,10 @@ fn removing_an_edge_property_clears_both_stores() {
 #[test]
 fn removing_a_property_that_was_never_set_is_a_no_op() {
     let (mut store, a, _) = graph();
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.nonexistent");
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.nonexistent",
+    );
     // And nothing else was disturbed.
     assert_eq!(
         store.node_columns.get_property(a.as_u64() as usize, "age"),
@@ -144,10 +182,19 @@ fn removing_a_property_that_was_never_set_is_a_no_op() {
 #[test]
 fn removing_twice_is_a_no_op() {
     let (mut store, _, _) = graph();
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age");
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age");
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age",
+    );
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age",
+    );
     assert_eq!(
-        read(&store, "MATCH (p:P) WHERE p.name = \"Ada\" RETURN p.age AS r"),
+        read(
+            &store,
+            "MATCH (p:P) WHERE p.name = \"Ada\" RETURN p.age AS r"
+        ),
         PropertyValue::Null
     );
 }
@@ -155,14 +202,23 @@ fn removing_twice_is_a_no_op() {
 #[test]
 fn a_removed_property_can_be_set_again() {
     let (mut store, a, _) = graph();
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age");
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" SET p.age = 40");
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age",
+    );
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" SET p.age = 40",
+    );
     assert_eq!(
         store.node_columns.get_property(a.as_u64() as usize, "age"),
         PropertyValue::Integer(40)
     );
     assert_eq!(
-        read(&store, "MATCH (p:P) WHERE p.name = \"Ada\" RETURN p.age AS r"),
+        read(
+            &store,
+            "MATCH (p:P) WHERE p.name = \"Ada\" RETURN p.age AS r"
+        ),
         PropertyValue::Integer(40)
     );
 }
@@ -176,7 +232,10 @@ fn a_removed_property_no_longer_matches_a_filter() {
         read(&store, "MATCH (p:P) WHERE p.age = 36 RETURN count(p) AS r"),
         PropertyValue::Integer(1)
     );
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age");
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" REMOVE p.age",
+    );
     assert_eq!(
         read(&store, "MATCH (p:P) WHERE p.age = 36 RETURN count(p) AS r"),
         PropertyValue::Integer(0),
@@ -190,10 +249,19 @@ fn set_to_null_still_behaves_as_before() {
     // must keep working; it leaves an explicit null rather than removing the
     // key, which is a different thing from REMOVE and stays different.
     let (mut store, a, _) = graph();
-    run(&mut store, "MATCH (p:P) WHERE p.name = \"Ada\" SET p.age = null");
+    run(
+        &mut store,
+        "MATCH (p:P) WHERE p.name = \"Ada\" SET p.age = null",
+    );
     assert_eq!(
-        read(&store, "MATCH (p:P) WHERE p.name = \"Ada\" RETURN p.age AS r"),
+        read(
+            &store,
+            "MATCH (p:P) WHERE p.name = \"Ada\" RETURN p.age AS r"
+        ),
         PropertyValue::Null
     );
-    assert_eq!(store.node_columns.get_property(a.as_u64() as usize, "age"), PropertyValue::Null);
+    assert_eq!(
+        store.node_columns.get_property(a.as_u64() as usize, "age"),
+        PropertyValue::Null
+    );
 }

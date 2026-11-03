@@ -24,7 +24,9 @@ const N: usize = 3000;
 
 fn rows(store: &GraphStore, cypher: &str) -> Vec<Vec<(String, String)>> {
     let query = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store).execute(&query).expect("query should run");
+    let batch = QueryExecutor::new(store)
+        .execute(&query)
+        .expect("query should run");
     batch
         .records
         .iter()
@@ -45,7 +47,12 @@ fn gappy_graph() -> GraphStore {
     let mut store = GraphStore::new();
     for i in 0..N {
         let id = store.create_node("Person");
-        let _ = store.set_node_property("default", id, "seq".to_string(), PropertyValue::Integer(i as i64));
+        let _ = store.set_node_property(
+            "default",
+            id,
+            "seq".to_string(),
+            PropertyValue::Integer(i as i64),
+        );
         if i % 3 != 1 {
             let _ = store.set_node_property(
                 "default",
@@ -65,10 +72,16 @@ fn a_property_that_was_never_set_is_null_not_a_default() {
     // IS NULL must find exactly the third of nodes that never got one. If a
     // dense column returned an empty string for an absent slot, this returns
     // zero rows and the graph looks like every node has a nickname.
-    let missing = rows(&store, "MATCH (p:Person) WHERE p.nickname IS NULL RETURN p.seq AS s");
+    let missing = rows(
+        &store,
+        "MATCH (p:Person) WHERE p.nickname IS NULL RETURN p.seq AS s",
+    );
     assert_eq!(missing.len(), N / 3, "one in three nodes has no nickname");
 
-    let present = rows(&store, "MATCH (p:Person) WHERE p.nickname IS NOT NULL RETURN p.seq AS s");
+    let present = rows(
+        &store,
+        "MATCH (p:Person) WHERE p.nickname IS NOT NULL RETURN p.seq AS s",
+    );
     assert_eq!(present.len(), N - N / 3);
 }
 
@@ -79,11 +92,22 @@ fn a_stored_zero_is_not_mistaken_for_an_absent_row() {
     let mut store = GraphStore::new();
     for _ in 0..N {
         let id = store.create_node("Item");
-        let _ = store.set_node_property("default", id, "count".to_string(), PropertyValue::Integer(0));
+        let _ = store.set_node_property(
+            "default",
+            id,
+            "count".to_string(),
+            PropertyValue::Integer(0),
+        );
     }
-    let zeros = rows(&store, "MATCH (i:Item) WHERE i.count = 0 RETURN i.count AS c");
+    let zeros = rows(
+        &store,
+        "MATCH (i:Item) WHERE i.count = 0 RETURN i.count AS c",
+    );
     assert_eq!(zeros.len(), N);
-    let nulls = rows(&store, "MATCH (i:Item) WHERE i.count IS NULL RETURN i.count AS c");
+    let nulls = rows(
+        &store,
+        "MATCH (i:Item) WHERE i.count IS NULL RETURN i.count AS c",
+    );
     assert!(nulls.is_empty(), "a stored zero is not a missing value");
 }
 
@@ -99,8 +123,14 @@ fn an_empty_string_is_not_mistaken_for_an_absent_row() {
             PropertyValue::String(String::new()),
         );
     }
-    let nulls = rows(&store, "MATCH (i:Item) WHERE i.note IS NULL RETURN i.note AS n");
-    assert!(nulls.is_empty(), "a stored empty string is not a missing value");
+    let nulls = rows(
+        &store,
+        "MATCH (i:Item) WHERE i.note IS NULL RETURN i.note AS n",
+    );
+    assert!(
+        nulls.is_empty(),
+        "a stored empty string is not a missing value"
+    );
 }
 
 #[test]
@@ -110,11 +140,15 @@ fn a_recycled_node_id_does_not_inherit_the_previous_occupants_properties() {
     // dense one the presence bit has to be cleared. Both are #364.
     let mut store = gappy_graph();
 
-    let victim = rows(&store, "MATCH (p:Person) WHERE p.seq = 7 RETURN p.nickname AS n");
+    let victim = rows(
+        &store,
+        "MATCH (p:Person) WHERE p.seq = 7 RETURN p.nickname AS n",
+    );
     assert_eq!(victim.len(), 1);
 
     let query = parse_query("MATCH (p:Person) WHERE p.seq = 7 DETACH DELETE p").unwrap();
-    let mut mutating = samyama::query::executor::MutQueryExecutor::new(&mut store, "default".to_string());
+    let mut mutating =
+        samyama::query::executor::MutQueryExecutor::new(&mut store, "default".to_string());
     mutating.execute(&query).expect("delete should run");
 
     // The next node created takes the freed id.
@@ -145,17 +179,32 @@ fn a_dense_graph_round_trips_through_a_snapshot() {
     assert_eq!(restored.node_count(), store.node_count());
 
     // Values survive…
-    let before = rows(&store, "MATCH (p:Person) WHERE p.seq = 42 RETURN p.nickname AS n");
-    let after = rows(&restored, "MATCH (p:Person) WHERE p.seq = 42 RETURN p.nickname AS n");
+    let before = rows(
+        &store,
+        "MATCH (p:Person) WHERE p.seq = 42 RETURN p.nickname AS n",
+    );
+    let after = rows(
+        &restored,
+        "MATCH (p:Person) WHERE p.seq = 42 RETURN p.nickname AS n",
+    );
     assert_eq!(before, after);
 
     // …and so do the gaps. A round trip that filled absent slots with a
     // default would pass every value check and still be wrong.
-    let missing_before =
-        rows(&store, "MATCH (p:Person) WHERE p.nickname IS NULL RETURN p.seq AS s").len();
-    let missing_after =
-        rows(&restored, "MATCH (p:Person) WHERE p.nickname IS NULL RETURN p.seq AS s").len();
-    assert_eq!(missing_after, missing_before, "the gaps did not survive the round trip");
+    let missing_before = rows(
+        &store,
+        "MATCH (p:Person) WHERE p.nickname IS NULL RETURN p.seq AS s",
+    )
+    .len();
+    let missing_after = rows(
+        &restored,
+        "MATCH (p:Person) WHERE p.nickname IS NULL RETURN p.seq AS s",
+    )
+    .len();
+    assert_eq!(
+        missing_after, missing_before,
+        "the gaps did not survive the round trip"
+    );
     assert_eq!(missing_after, N / 3);
 }
 
@@ -185,7 +234,9 @@ fn a_sparse_property_on_a_large_graph_does_not_blow_up_memory() {
         "one property on one node grew RSS by {growth} bytes — the column went dense over the id space"
     );
     assert_eq!(
-        store.node_columns.get_property(tagged.as_u64() as usize, "rare"),
+        store
+            .node_columns
+            .get_property(tagged.as_u64() as usize, "rare"),
         PropertyValue::String("only one of me".to_string())
     );
 }
@@ -199,7 +250,12 @@ fn queries_over_a_dense_column_return_the_same_rows_as_a_sparse_one() {
         let mut store = GraphStore::new();
         for i in 0..50 {
             let id = store.create_node("P");
-            let _ = store.set_node_property("default", id, "v".to_string(), PropertyValue::Integer(i % 10));
+            let _ = store.set_node_property(
+                "default",
+                id,
+                "v".to_string(),
+                PropertyValue::Integer(i % 10),
+            );
         }
         store
     };
@@ -207,7 +263,12 @@ fn queries_over_a_dense_column_return_the_same_rows_as_a_sparse_one() {
         let mut store = GraphStore::new();
         for i in 0..5000 {
             let id = store.create_node("P");
-            let _ = store.set_node_property("default", id, "v".to_string(), PropertyValue::Integer(i % 10));
+            let _ = store.set_node_property(
+                "default",
+                id,
+                "v".to_string(),
+                PropertyValue::Integer(i % 10),
+            );
         }
         store
     };

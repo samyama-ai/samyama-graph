@@ -44,8 +44,10 @@ fn dates_parse_in_every_iso_spelling() {
         ("2015202", "2015-07-21"),
     ] {
         assert_eq!(
-            PropertyValue::Date(tmp::parse_iso_date(input).unwrap_or_else(|e| panic!("{input}: {e}")))
-                .to_cypher_string(),
+            PropertyValue::Date(
+                tmp::parse_iso_date(input).unwrap_or_else(|e| panic!("{input}: {e}"))
+            )
+            .to_cypher_string(),
             want,
             "date({input})"
         );
@@ -66,8 +68,10 @@ fn times_parse_in_every_iso_spelling() {
         ("21:40:32,142", "21:40:32.142"),
     ] {
         assert_eq!(
-            PropertyValue::LocalTime(tmp::parse_iso_time(input).unwrap_or_else(|e| panic!("{input}: {e}")))
-                .to_cypher_string(),
+            PropertyValue::LocalTime(
+                tmp::parse_iso_time(input).unwrap_or_else(|e| panic!("{input}: {e}"))
+            )
+            .to_cypher_string(),
             want,
             "time({input})"
         );
@@ -121,7 +125,11 @@ fn compact_and_extended_forms_compose() {
         ("2015-W30-2T214032.142", "2015-07-21T21:40:32.142"),
         ("2015-202T21:40:32", "2015-07-21T21:40:32"),
     ] {
-        assert_eq!(rendered(&format!("RETURN localdatetime('{input}') AS r")), want, "{input}");
+        assert_eq!(
+            rendered(&format!("RETURN localdatetime('{input}') AS r")),
+            want,
+            "{input}"
+        );
     }
 }
 
@@ -144,7 +152,9 @@ fn duration_components_share_a_sign() {
     ];
     for (lhs, rhs, want) in cases {
         assert_eq!(
-            rendered(&format!("RETURN duration.inSeconds(localtime('{lhs}'), localtime('{rhs}')) AS r")),
+            rendered(&format!(
+                "RETURN duration.inSeconds(localtime('{lhs}'), localtime('{rhs}')) AS r"
+            )),
             want,
             "duration.inSeconds({lhs}, {rhs})"
         );

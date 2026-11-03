@@ -19,7 +19,9 @@ fn restore(src: &GraphStore) -> GraphStore {
 
 fn built(setup: &str) -> GraphStore {
     let mut s = GraphStore::new();
-    QueryEngine::new().execute_mut(setup, &mut s, "default").expect(setup);
+    QueryEngine::new()
+        .execute_mut(setup, &mut s, "default")
+        .expect(setup);
     s
 }
 
@@ -36,8 +38,14 @@ fn agree(q: &str) {
     let b = built(GRAPH);
     let r = restore(&b);
     let (nb, nr) = (count(&b, q), count(&r, q));
-    assert!(nb > 0, "control: the query should match on the built store: {q}");
-    assert_eq!(nr, nb, "restored store answered {nr} rows where its source answered {nb}: {q}");
+    assert!(
+        nb > 0,
+        "control: the query should match on the built store: {q}"
+    );
+    assert_eq!(
+        nr, nb,
+        "restored store answered {nr} rows where its source answered {nb}: {q}"
+    );
 }
 
 #[test]
@@ -61,12 +69,21 @@ fn a_single_hop_inline_target_agrees_after_restore() {
 #[test]
 fn a_unique_constraint_on_a_restored_graph_refuses_a_duplicate() {
     let engine = QueryEngine::new();
-    for (name, mut s) in [("built", built(r#"CREATE (:K {id: 7})"#)),
-                          ("restored", restore(&built(r#"CREATE (:K {id: 7})"#)))] {
-        engine.execute_mut("CREATE CONSTRAINT FOR (n:K) REQUIRE n.id IS UNIQUE", &mut s, "default")
+    for (name, mut s) in [
+        ("built", built(r#"CREATE (:K {id: 7})"#)),
+        ("restored", restore(&built(r#"CREATE (:K {id: 7})"#))),
+    ] {
+        engine
+            .execute_mut(
+                "CREATE CONSTRAINT FOR (n:K) REQUIRE n.id IS UNIQUE",
+                &mut s,
+                "default",
+            )
             .expect("constraint");
         assert!(
-            engine.execute_mut(r#"CREATE (:K {id: 7})"#, &mut s, "default").is_err(),
+            engine
+                .execute_mut(r#"CREATE (:K {id: 7})"#, &mut s, "default")
+                .is_err(),
             "{name}: a duplicate of an existing value was accepted under a unique constraint"
         );
     }
@@ -78,10 +95,20 @@ fn a_unique_constraint_on_a_restored_graph_refuses_a_duplicate() {
 #[test]
 fn a_unique_constraint_over_existing_duplicates_is_refused_after_restore() {
     let engine = QueryEngine::new();
-    for (name, mut s) in [("built", built(r#"CREATE (:K {id: 7}), (:K {id: 7})"#)),
-                          ("restored", restore(&built(r#"CREATE (:K {id: 7}), (:K {id: 7})"#)))] {
+    for (name, mut s) in [
+        ("built", built(r#"CREATE (:K {id: 7}), (:K {id: 7})"#)),
+        (
+            "restored",
+            restore(&built(r#"CREATE (:K {id: 7}), (:K {id: 7})"#)),
+        ),
+    ] {
         assert!(
-            engine.execute_mut("CREATE CONSTRAINT FOR (n:K) REQUIRE n.id IS UNIQUE", &mut s, "default")
+            engine
+                .execute_mut(
+                    "CREATE CONSTRAINT FOR (n:K) REQUIRE n.id IS UNIQUE",
+                    &mut s,
+                    "default"
+                )
                 .is_err(),
             "{name}: a unique constraint was created over two nodes that already share id 7"
         );
@@ -100,25 +127,41 @@ fn or_solve_reads_costs_the_same_after_restore() {
     let mut src = GraphStore::new();
     for _ in 0..10 {
         let n = src.create_node("Resource");
-        src.set_node_property("default", n, "cost", PropertyValue::Float(10.0)).unwrap();
-        src.set_node_property("default", n, "allocation", PropertyValue::Float(0.0)).unwrap();
+        src.set_node_property("default", n, "cost", PropertyValue::Float(10.0))
+            .unwrap();
+        src.set_node_property("default", n, "allocation", PropertyValue::Float(0.0))
+            .unwrap();
     }
     let mut restored = restore(&src);
 
-    let q = parse_query(r#"
+    let q = parse_query(
+        r#"
         CALL algo.or.solve({
             algorithm: 'GWO', label: 'Resource', property: 'allocation',
             min: 5.0, max: 100.0, cost_property: 'cost',
             population_size: 20, max_iterations: 50
         }) YIELD fitness, algorithm
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
     let fitness = |store: &mut GraphStore| -> f64 {
-        let r = MutQueryExecutor::new(store, "default".to_string()).execute(&q).unwrap();
-        r.records[0].get("fitness").unwrap().as_property().unwrap().as_float().unwrap()
+        let r = MutQueryExecutor::new(store, "default".to_string())
+            .execute(&q)
+            .unwrap();
+        r.records[0]
+            .get("fitness")
+            .unwrap()
+            .as_property()
+            .unwrap()
+            .as_float()
+            .unwrap()
     };
     let (fb, fr) = (fitness(&mut src), fitness(&mut restored));
     // 10 nodes x allocation 5.0 x cost 10.0 = 500 at the optimum.
-    assert!((500.0..505.0).contains(&fb), "control: built-store fitness {fb}");
+    assert!(
+        (500.0..505.0).contains(&fb),
+        "control: built-store fitness {fb}"
+    );
     assert!(
         (fr - fb).abs() < 10.0,
         "restored fitness {fr} against built {fb}: the costs were not read"

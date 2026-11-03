@@ -41,11 +41,17 @@ fn merge_matches_an_existing_node_after_a_snapshot_round_trip() {
         .first()
         .map(|n| n.properties.len())
         .expect("one P node");
-    assert_eq!(row_len, 0, "import filled the row copy; this test no longer covers the bug");
-
-    engine.execute_mut("MERGE (n:P {k: 1}) RETURN n", &mut store, "default").unwrap();
     assert_eq!(
-        count(&engine, &store, "MATCH (n:P) RETURN count(n) AS c"), 1,
+        row_len, 0,
+        "import filled the row copy; this test no longer covers the bug"
+    );
+
+    engine
+        .execute_mut("MERGE (n:P {k: 1}) RETURN n", &mut store, "default")
+        .unwrap();
+    assert_eq!(
+        count(&engine, &store, "MATCH (n:P) RETURN count(n) AS c"),
+        1,
         "MERGE created a duplicate of a node that exists"
     );
 }
@@ -78,9 +84,14 @@ fn merge_on_a_path_behaves_the_same_after_a_snapshot_round_trip() {
     let mut store = restored(SETUP);
     engine.execute_mut(MERGE, &mut store, "default").unwrap();
 
-    assert_eq!(counts(&original), (1, 1, 1), "control: the path existed, so MERGE should match it");
     assert_eq!(
-        counts(&store), counts(&original),
+        counts(&original),
+        (1, 1, 1),
+        "control: the path existed, so MERGE should match it"
+    );
+    assert_eq!(
+        counts(&store),
+        counts(&original),
         "a restored store answered a path MERGE differently from its source"
     );
 }
@@ -91,6 +102,11 @@ fn merge_on_a_path_behaves_the_same_after_a_snapshot_round_trip() {
 fn merge_still_creates_when_the_value_differs() {
     let engine = QueryEngine::new();
     let mut store = restored(r#"CREATE (:P {k: 1})"#);
-    engine.execute_mut("MERGE (n:P {k: 2}) RETURN n", &mut store, "default").unwrap();
-    assert_eq!(count(&engine, &store, "MATCH (n:P) RETURN count(n) AS c"), 2);
+    engine
+        .execute_mut("MERGE (n:P {k: 2}) RETURN n", &mut store, "default")
+        .unwrap();
+    assert_eq!(
+        count(&engine, &store, "MATCH (n:P) RETURN count(n) AS c"),
+        2
+    );
 }

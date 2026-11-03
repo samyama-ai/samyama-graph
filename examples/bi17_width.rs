@@ -102,7 +102,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
+            eprintln!(
+                "--data-dir <path> is required (this example needs input; see the header comment)"
+            );
             std::process::exit(2)
         });
     let pct: Vec<u32> = args
@@ -137,7 +139,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect()
     };
     ids.sort_unstable();
-    println!("{} persons, id range {}..={}\n", ids.len(), ids[0], ids[ids.len() - 1]);
+    println!(
+        "{} persons, id range {}..={}\n",
+        ids.len(),
+        ids[0],
+        ids[ids.len() - 1]
+    );
 
     for p in &pct {
         let idx = ((ids.len() as u64 * *p as u64 / 100) as usize).min(ids.len() - 1);
@@ -147,18 +154,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("two hops", two_hop as fn(usize, u64) -> String),
         ] {
             println!("--- {label}  p{p} of persons (a.id < {limit}) ---");
-            println!("{:>8}  {:>12}  {:>10}  {:>12}", "carried", "rows", "median s", "ns/row");
+            println!(
+                "{:>8}  {:>12}  {:>10}  {:>12}",
+                "carried", "rows", "median s", "ns/row"
+            );
             let mut baseline: Option<f64> = None;
             for n in [0usize, 4, 8] {
                 let (secs, rows) = run(&graph, &build(n, limit));
-                let per_row = if rows > 0 { secs * 1e9 / rows as f64 } else { f64::NAN };
+                let per_row = if rows > 0 {
+                    secs * 1e9 / rows as f64
+                } else {
+                    f64::NAN
+                };
                 let delta = match baseline {
                     None => {
                         baseline = Some(per_row);
                         String::new()
                     }
-                    Some(b) => format!("   {:+.1} ns/row vs 0 carried  ({:+.1}/column)",
-                                       per_row - b, (per_row - b) / n as f64),
+                    Some(b) => format!(
+                        "   {:+.1} ns/row vs 0 carried  ({:+.1}/column)",
+                        per_row - b,
+                        (per_row - b) / n as f64
+                    ),
                 };
                 println!("{n:>8}  {rows:>12}  {secs:>10.3}  {per_row:>12.1}{delta}");
             }

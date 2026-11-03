@@ -104,9 +104,7 @@ fn the_aggregator_waits_for_every_suite() {
 
     let unguarded: Vec<&String> = all
         .iter()
-        .filter(|j| {
-            j.as_str() != AGGREGATOR && !needs.contains(j) && !exempt.contains(&j.as_str())
-        })
+        .filter(|j| j.as_str() != AGGREGATOR && !needs.contains(j) && !exempt.contains(&j.as_str()))
         .collect();
     let phantom: Vec<&String> = needs.iter().filter(|n| !all.contains(n)).collect();
 
@@ -132,8 +130,7 @@ fn the_aggregator_waits_for_every_suite() {
     // reports the first, hides the second, and converges over two runs. A gate that
     // tells you half of what is wrong is a gate you run twice.
     assert!(
-        unguarded.is_empty() && phantom.is_empty() && contradictory.is_empty()
-            && stale.is_empty(),
+        unguarded.is_empty() && phantom.is_empty() && contradictory.is_empty() && stale.is_empty(),
         "{AGGREGATOR}'s `needs:` does not match the jobs in this workflow.\n  \
          these jobs run but {AGGREGATOR} does not wait for them, so a failure in \
          them cannot block a merge: {unguarded:?}\n  \

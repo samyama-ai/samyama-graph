@@ -30,8 +30,8 @@
 //!
 //! So: this is the cheap half, it is measured, and it does not close #531.
 
-use crate::graph::PropertyValue;
 use crate::graph::types::NodeId;
+use crate::graph::PropertyValue;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
@@ -94,9 +94,7 @@ pub fn dense_is_smaller(span: usize, entries: usize, elem_bytes: usize) -> bool 
     // Scaled by 8 throughout to stay in integer arithmetic: a floating-point
     // threshold in a storage decision invites a platform-dependent layout.
     let dense_bits = span.saturating_mul(elem_bytes.saturating_mul(8) + 1);
-    let sparse_bits = entries
-        .saturating_mul((8 + elem_bytes + 1) * 8 * 8)
-        / 7;
+    let sparse_bits = entries.saturating_mul((8 + elem_bytes + 1) * 8 * 8) / 7;
     dense_bits < sparse_bits
 }
 
@@ -110,7 +108,9 @@ impl<T> ColumnData<T> {
                 m.capacity() * (std::mem::size_of::<usize>() + elem + 1)
                     + m.values().map(&owned).sum::<usize>()
             }
-            ColumnData::Dense { values, present, .. } => {
+            ColumnData::Dense {
+                values, present, ..
+            } => {
                 values.capacity() * elem
                     + present.capacity() * std::mem::size_of::<u64>()
                     + values.iter().map(&owned).sum::<usize>()
@@ -127,7 +127,12 @@ impl<T: Clone + Default> ColumnData<T> {
     fn get(&self, idx: usize) -> Option<&T> {
         match self {
             ColumnData::Sparse(m) => m.get(&idx),
-            ColumnData::Dense { base, values, present, .. } => {
+            ColumnData::Dense {
+                base,
+                values,
+                present,
+                ..
+            } => {
                 let slot = idx.checked_sub(*base)?;
                 if slot >= values.len() || !bit(present, slot) {
                     return None;
@@ -153,7 +158,12 @@ impl<T: Clone + Default> ColumnData<T> {
             ColumnData::Sparse(m) => {
                 m.remove(&idx);
             }
-            ColumnData::Dense { base, values, present, count } => {
+            ColumnData::Dense {
+                base,
+                values,
+                present,
+                count,
+            } => {
                 // Clear the presence bit and the value. Node ids are recycled
                 // through a free list, so a deleted node's slot goes to the
                 // next `create_node`; leaving the old value behind is how
@@ -177,7 +187,12 @@ impl<T: Clone + Default> ColumnData<T> {
                 m.insert(idx, value);
                 self.maybe_promote();
             }
-            ColumnData::Dense { base, values, present, count } => {
+            ColumnData::Dense {
+                base,
+                values,
+                present,
+                count,
+            } => {
                 if idx >= *base && idx - *base < values.len() {
                     let slot = idx - *base;
                     if !bit(present, slot) {
@@ -219,7 +234,13 @@ impl<T: Clone + Default> ColumnData<T> {
                     let new_span = *base + values.len() - new_base;
                     if dense_is_smaller(new_span, entries, elem) {
                         self.rebase(new_base, new_span);
-                        let ColumnData::Dense { base, values, present, count } = self else {
+                        let ColumnData::Dense {
+                            base,
+                            values,
+                            present,
+                            count,
+                        } = self
+                        else {
                             unreachable!("rebase leaves the column dense")
                         };
                         let slot = idx - *base;
@@ -245,7 +266,13 @@ impl<T: Clone + Default> ColumnData<T> {
     /// below everything already stored, which properties loaded in id order
     /// never do.
     fn rebase(&mut self, new_base: usize, new_span: usize) {
-        let ColumnData::Dense { base, values, present, count } = self else {
+        let ColumnData::Dense {
+            base,
+            values,
+            present,
+            count,
+        } = self
+        else {
             return;
         };
         let shift = *base - new_base;
@@ -266,7 +293,13 @@ impl<T: Clone + Default> ColumnData<T> {
     }
 
     fn demote_to_sparse(&mut self) {
-        let ColumnData::Dense { base, values, present, .. } = self else {
+        let ColumnData::Dense {
+            base,
+            values,
+            present,
+            ..
+        } = self
+        else {
             return;
         };
         let mut m = FxHashMap::default();
@@ -287,7 +320,12 @@ impl<T: Clone + Default> ColumnData<T> {
                     visit(*idx, value);
                 }
             }
-            ColumnData::Dense { base, values, present, .. } => {
+            ColumnData::Dense {
+                base,
+                values,
+                present,
+                ..
+            } => {
                 for slot in 0..values.len() {
                     if bit(present, slot) {
                         visit(base + slot, &values[slot]);
@@ -332,7 +370,12 @@ impl<T: Clone + Default> ColumnData<T> {
             values[slot] = value;
             set_bit(&mut present, slot);
         }
-        *self = ColumnData::Dense { base: min, values, present, count: len };
+        *self = ColumnData::Dense {
+            base: min,
+            values,
+            present,
+            count: len,
+        };
     }
 }
 
@@ -437,8 +480,11 @@ fn property_value_heap(v: &PropertyValue) -> usize {
         }
         PropertyValue::Vector(v) => v.capacity() * std::mem::size_of::<f32>(),
         PropertyValue::Map(m) => {
-            m.capacity() * (std::mem::size_of::<String>() + std::mem::size_of::<PropertyValue>() + 1)
-                + m.iter().map(|(k, v)| k.len() + property_value_heap(v)).sum::<usize>()
+            m.capacity()
+                * (std::mem::size_of::<String>() + std::mem::size_of::<PropertyValue>() + 1)
+                + m.iter()
+                    .map(|(k, v)| k.len() + property_value_heap(v))
+                    .sum::<usize>()
         }
         PropertyValue::ZonedDateTime { zone: Some(z), .. } => z.len(),
         _ => 0,
@@ -446,11 +492,21 @@ fn property_value_heap(v: &PropertyValue) -> usize {
 }
 
 impl Column {
-    pub fn new_int() -> Self { Column::Int(ColumnData::new()) }
-    pub fn new_datetime() -> Self { Column::DateTime(ColumnData::new()) }
-    pub fn new_float() -> Self { Column::Float(ColumnData::new()) }
-    pub fn new_string() -> Self { Column::String(ColumnData::new()) }
-    pub fn new_bool() -> Self { Column::Bool(ColumnData::new()) }
+    pub fn new_int() -> Self {
+        Column::Int(ColumnData::new())
+    }
+    pub fn new_datetime() -> Self {
+        Column::DateTime(ColumnData::new())
+    }
+    pub fn new_float() -> Self {
+        Column::Float(ColumnData::new())
+    }
+    pub fn new_string() -> Self {
+        Column::String(ColumnData::new())
+    }
+    pub fn new_bool() -> Self {
+        Column::Bool(ColumnData::new())
+    }
 
     /// A column that can hold every `PropertyValue`, chosen from the first
     /// value written to it.
@@ -495,11 +551,21 @@ impl Column {
         }
         let mut spilled: FxHashMap<usize, PropertyValue> = FxHashMap::default();
         match self {
-            Column::Int(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::Integer(*v)); }),
-            Column::DateTime(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::DateTime(*v)); }),
-            Column::Float(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::Float(*v)); }),
-            Column::Bool(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::Boolean(*v)); }),
-            Column::String(m) => m.for_each(|idx, v| { spilled.insert(idx, PropertyValue::String(v.clone())); }),
+            Column::Int(m) => m.for_each(|idx, v| {
+                spilled.insert(idx, PropertyValue::Integer(*v));
+            }),
+            Column::DateTime(m) => m.for_each(|idx, v| {
+                spilled.insert(idx, PropertyValue::DateTime(*v));
+            }),
+            Column::Float(m) => m.for_each(|idx, v| {
+                spilled.insert(idx, PropertyValue::Float(*v));
+            }),
+            Column::Bool(m) => m.for_each(|idx, v| {
+                spilled.insert(idx, PropertyValue::Boolean(*v));
+            }),
+            Column::String(m) => m.for_each(|idx, v| {
+                spilled.insert(idx, PropertyValue::String(v.clone()));
+            }),
             Column::Other(_) => unreachable!("checked above"),
         }
         *self = Column::Other(spilled);
@@ -522,11 +588,26 @@ impl Column {
         #[cfg(test)]
         COLUMN_READS.with(|c| c.set(c.get() + 1));
         match self {
-            Column::Int(m) => m.get(idx).map(|&v| PropertyValue::Integer(v)).unwrap_or(PropertyValue::Null),
-            Column::DateTime(m) => m.get(idx).map(|&v| PropertyValue::DateTime(v)).unwrap_or(PropertyValue::Null),
-            Column::Float(m) => m.get(idx).map(|&v| PropertyValue::Float(v)).unwrap_or(PropertyValue::Null),
-            Column::Bool(m) => m.get(idx).map(|&v| PropertyValue::Boolean(v)).unwrap_or(PropertyValue::Null),
-            Column::String(m) => m.get(idx).map(|s| PropertyValue::String(s.clone())).unwrap_or(PropertyValue::Null),
+            Column::Int(m) => m
+                .get(idx)
+                .map(|&v| PropertyValue::Integer(v))
+                .unwrap_or(PropertyValue::Null),
+            Column::DateTime(m) => m
+                .get(idx)
+                .map(|&v| PropertyValue::DateTime(v))
+                .unwrap_or(PropertyValue::Null),
+            Column::Float(m) => m
+                .get(idx)
+                .map(|&v| PropertyValue::Float(v))
+                .unwrap_or(PropertyValue::Null),
+            Column::Bool(m) => m
+                .get(idx)
+                .map(|&v| PropertyValue::Boolean(v))
+                .unwrap_or(PropertyValue::Null),
+            Column::String(m) => m
+                .get(idx)
+                .map(|s| PropertyValue::String(s.clone()))
+                .unwrap_or(PropertyValue::Null),
             Column::Other(m) => m.get(&idx).cloned().unwrap_or(PropertyValue::Null),
         }
     }
@@ -620,8 +701,13 @@ impl ColumnStore {
     /// property is currently written here *and* to the row `Node.properties`, and a
     /// duplication nobody can see the size of is one nobody removes.
     pub fn heap_bytes(&self) -> usize {
-        let mut total = self.names.iter().map(|n| n.len() + std::mem::size_of::<String>()).sum::<usize>();
-        total += self.index.capacity() * (std::mem::size_of::<String>() + std::mem::size_of::<ColumnId>() + 1);
+        let mut total = self
+            .names
+            .iter()
+            .map(|n| n.len() + std::mem::size_of::<String>())
+            .sum::<usize>();
+        total += self.index.capacity()
+            * (std::mem::size_of::<String>() + std::mem::size_of::<ColumnId>() + 1);
         for (name, col) in self.names.iter().zip(self.columns.iter()) {
             total += name.len();
             total += col.heap_bytes();
@@ -712,13 +798,16 @@ impl ColumnStore {
 
     /// Optimized batch read for a single property
     pub fn get_column(&self, key: &str) -> Option<&Column> {
-        self.index.get(key).and_then(|&ColumnId(slot)| self.columns.get(slot as usize))
+        self.index
+            .get(key)
+            .and_then(|&ColumnId(slot)| self.columns.get(slot as usize))
     }
 
     /// Get all property keys that have a non-null value for a given node index.
     /// Used by `keys()` function to discover column-store-only properties.
     pub fn get_property_keys(&self, idx: usize) -> Vec<String> {
-        self.names.iter()
+        self.names
+            .iter()
             .zip(self.columns.iter())
             .filter(|(_, col)| col.has(idx))
             .map(|(key, _)| key.clone())
@@ -779,7 +868,10 @@ mod tests {
     #[test]
     fn a_contiguous_run_becomes_dense_and_reads_back_identically() {
         let col = dense_int_column(0);
-        assert!(col.is_dense(), "a fully packed run should be stored densely");
+        assert!(
+            col.is_dense(),
+            "a fully packed run should be stored densely"
+        );
         assert_eq!(col.len(), DENSE_N);
         for i in 0..DENSE_N {
             assert_eq!(col.get(i), PropertyValue::Integer(i as i64), "row {i}");
@@ -794,7 +886,10 @@ mod tests {
         let col = dense_int_column(base);
         assert!(col.is_dense());
         assert_eq!(col.get(base), PropertyValue::Integer(0));
-        assert_eq!(col.get(base + DENSE_N - 1), PropertyValue::Integer(DENSE_N as i64 - 1));
+        assert_eq!(
+            col.get(base + DENSE_N - 1),
+            PropertyValue::Integer(DENSE_N as i64 - 1)
+        );
         assert_eq!(col.get(0), PropertyValue::Null, "nothing below the base");
         assert_eq!(col.get(base - 1), PropertyValue::Null);
         assert_eq!(col.get(base + DENSE_N), PropertyValue::Null);
@@ -861,11 +956,17 @@ mod tests {
         let mut col = dense_int_column(0);
         assert!(col.is_dense());
         col.set(50_000_000, PropertyValue::Integer(7));
-        assert!(!col.is_dense(), "extending to 50M slots for one row is the wrong trade");
+        assert!(
+            !col.is_dense(),
+            "extending to 50M slots for one row is the wrong trade"
+        );
         // And nothing was lost on the way out.
         assert_eq!(col.get(50_000_000), PropertyValue::Integer(7));
         assert_eq!(col.get(0), PropertyValue::Integer(0));
-        assert_eq!(col.get(DENSE_N - 1), PropertyValue::Integer(DENSE_N as i64 - 1));
+        assert_eq!(
+            col.get(DENSE_N - 1),
+            PropertyValue::Integer(DENSE_N as i64 - 1)
+        );
         assert_eq!(col.len(), DENSE_N + 1);
     }
 
@@ -886,8 +987,15 @@ mod tests {
         col.set(base - 1, PropertyValue::Integer(-1));
         assert!(col.is_dense());
         assert_eq!(col.get(base - 1), PropertyValue::Integer(-1));
-        assert_eq!(col.get(base), PropertyValue::Integer(0), "the old base survived the shift");
-        assert_eq!(col.get(base + DENSE_N - 1), PropertyValue::Integer(DENSE_N as i64 - 1));
+        assert_eq!(
+            col.get(base),
+            PropertyValue::Integer(0),
+            "the old base survived the shift"
+        );
+        assert_eq!(
+            col.get(base + DENSE_N - 1),
+            PropertyValue::Integer(DENSE_N as i64 - 1)
+        );
         assert_eq!(col.get(base - 2), PropertyValue::Null);
         assert_eq!(col.len(), DENSE_N + 1);
     }
@@ -902,7 +1010,11 @@ mod tests {
         assert_eq!(col.get(10), PropertyValue::Null);
         assert!(!col.has(10));
         assert_eq!(col.len(), DENSE_N - 1);
-        assert_eq!(col.get(9), PropertyValue::Integer(9), "neighbours untouched");
+        assert_eq!(
+            col.get(9),
+            PropertyValue::Integer(9),
+            "neighbours untouched"
+        );
         assert_eq!(col.get(11), PropertyValue::Integer(11));
 
         // And the slot is reusable.
@@ -955,7 +1067,11 @@ mod tests {
         col.set(1, PropertyValue::String("high".to_string()));
 
         assert_eq!(col.get(1), PropertyValue::String("high".to_string()));
-        assert_eq!(col.get(0), PropertyValue::Integer(1), "the earlier value survived promotion");
+        assert_eq!(
+            col.get(0),
+            PropertyValue::Integer(1),
+            "the earlier value survived promotion"
+        );
         assert_eq!(col.len(), 2);
     }
 
@@ -966,14 +1082,27 @@ mod tests {
         // presence bitmap, not in a map.
         let mut col = dense_int_column(0);
         assert!(col.is_dense());
-        col.set(DENSE_N + 1, PropertyValue::String("odd one out".to_string()));
+        col.set(
+            DENSE_N + 1,
+            PropertyValue::String("odd one out".to_string()),
+        );
 
         assert!(!col.is_dense(), "an untyped column is never dense");
         assert_eq!(col.len(), DENSE_N + 1);
         assert_eq!(col.get(0), PropertyValue::Integer(0));
-        assert_eq!(col.get(DENSE_N - 1), PropertyValue::Integer(DENSE_N as i64 - 1));
-        assert_eq!(col.get(DENSE_N + 1), PropertyValue::String("odd one out".to_string()));
-        assert_eq!(col.get(DENSE_N), PropertyValue::Null, "the gap is still a gap");
+        assert_eq!(
+            col.get(DENSE_N - 1),
+            PropertyValue::Integer(DENSE_N as i64 - 1)
+        );
+        assert_eq!(
+            col.get(DENSE_N + 1),
+            PropertyValue::String("odd one out".to_string())
+        );
+        assert_eq!(
+            col.get(DENSE_N),
+            PropertyValue::Null,
+            "the gap is still a gap"
+        );
     }
 
     #[test]
@@ -989,13 +1118,23 @@ mod tests {
             typed.set(i, v.clone());
             spilled.set(i, v);
         }
-        assert!(matches!(typed, Column::DateTime(_)), "a date must get the typed column");
-        assert!(typed.is_dense(), "{N} contiguous dates should be stored densely");
+        assert!(
+            matches!(typed, Column::DateTime(_)),
+            "a date must get the typed column"
+        );
+        assert!(
+            typed.is_dense(),
+            "{N} contiguous dates should be stored densely"
+        );
         assert_eq!(typed.len(), N);
         for i in [0, 1, N / 2, N - 1] {
             assert_eq!(typed.get(i), spilled.get(i), "row {i} reads differently");
         }
-        assert_eq!(typed.get(N), PropertyValue::Null, "an unset row is still null");
+        assert_eq!(
+            typed.get(N),
+            PropertyValue::Null,
+            "an unset row is still null"
+        );
         let (t, o) = (typed.heap_bytes(), spilled.heap_bytes());
         assert!(
             t * 4 < o,
@@ -1029,12 +1168,21 @@ mod tests {
             PropertyValue::DateTime(1_700_000_000_000),
             PropertyValue::Array(vec![PropertyValue::Integer(1), PropertyValue::Integer(2)]),
             PropertyValue::Vector(vec![0.5, 0.25]),
-            PropertyValue::Duration { months: 1, days: 2, seconds: 3, nanos: 4 },
+            PropertyValue::Duration {
+                months: 1,
+                days: 2,
+                seconds: 3,
+                nanos: 4,
+            },
         ];
         for value in cases {
             let mut store = ColumnStore::new();
             store.set_property(3, "p", value.clone());
-            assert_eq!(store.get_property(3, "p"), value, "round trip failed for {value:?}");
+            assert_eq!(
+                store.get_property(3, "p"),
+                value,
+                "round trip failed for {value:?}"
+            );
             assert_eq!(store.get_property(4, "p"), PropertyValue::Null);
         }
 
@@ -1050,7 +1198,11 @@ mod tests {
         // #364 applies to the spill column too: a deleted node's slot goes to
         // the next create_node.
         let mut store = ColumnStore::new();
-        store.set_property(5, "tags", PropertyValue::Array(vec![PropertyValue::Integer(1)]));
+        store.set_property(
+            5,
+            "tags",
+            PropertyValue::Array(vec![PropertyValue::Integer(1)]),
+        );
         assert!(store.get_property(5, "tags") != PropertyValue::Null);
         store.clear_row(5);
         assert_eq!(store.get_property(5, "tags"), PropertyValue::Null);
@@ -1071,7 +1223,10 @@ mod tests {
         let mut col = Column::new_string();
         // Set at index 1_000_000 — should NOT allocate 1M entries
         col.set(1_000_000, PropertyValue::String("hello".to_string()));
-        assert_eq!(col.get(1_000_000), PropertyValue::String("hello".to_string()));
+        assert_eq!(
+            col.get(1_000_000),
+            PropertyValue::String("hello".to_string())
+        );
         assert_eq!(col.get(0), PropertyValue::Null);
         assert_eq!(col.get(999_999), PropertyValue::Null);
         assert_eq!(col.len(), 1);
@@ -1092,7 +1247,11 @@ mod tests {
     fn test_column_store_sparse() {
         let mut store = ColumnStore::new();
         // Set property at high index — should not waste memory
-        store.set_property(10_000_000, "name", PropertyValue::String("test".to_string()));
+        store.set_property(
+            10_000_000,
+            "name",
+            PropertyValue::String("test".to_string()),
+        );
         assert_eq!(
             store.get_property(10_000_000, "name"),
             PropertyValue::String("test".to_string())

@@ -96,8 +96,7 @@ async fn main() -> Result<(), Error> {
 
     let akas_path = if let Some(pos) = args.iter().position(|a| a == "--akas") {
         Some(PathBuf::from(
-            args.get(pos + 1)
-                .expect("--akas requires a path argument"),
+            args.get(pos + 1).expect("--akas requires a path argument"),
         ))
     } else {
         None
@@ -139,7 +138,10 @@ async fn main() -> Result<(), Error> {
 
     eprintln!("Data directory:      {}", data_dir.display());
     eprintln!("Min votes (movies):  {}", format_num(min_votes as usize));
-    eprintln!("Min votes (series):  {}", format_num(min_votes_series as usize));
+    eprintln!(
+        "Min votes (series):  {}",
+        format_num(min_votes_series as usize)
+    );
     eprintln!("Min year:            {}", min_year);
     eprintln!();
 
@@ -228,8 +230,7 @@ async fn main() -> Result<(), Error> {
                         eprintln!("{}", result.columns.join(" | "));
                         eprintln!("{}", "-".repeat(result.columns.len() * 20));
                         for row in &result.records {
-                            let vals: Vec<String> =
-                                row.iter().map(|v| format!("{v}")).collect();
+                            let vals: Vec<String> = row.iter().map(|v| format!("{v}")).collect();
                             eprintln!("{}", vals.join(" | "));
                         }
                         eprintln!("({} rows)", result.records.len());

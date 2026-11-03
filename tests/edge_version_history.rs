@@ -195,6 +195,8 @@ fn setting_a_property_on_a_missing_edge_is_an_error() {
     let (mut store, e) = one_edge();
     let missing = EdgeId::new(e.as_u64() + 1000);
     assert!(store.set_edge_property(missing, "w", 1i64).is_err());
-    assert!(store.set_edge_property(missing, "w", PropertyValue::Null).is_err());
+    assert!(store
+        .set_edge_property(missing, "w", PropertyValue::Null)
+        .is_err());
     assert_eq!(store.edge_property(missing, "w"), None);
 }

@@ -41,7 +41,12 @@ async fn memory_of(setup: &[&str]) -> serde_json::Value {
     }
     let res = server
         .router()
-        .oneshot(Request::builder().uri("/api/memory").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/memory")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .expect("memory");
     assert!(res.status().is_success());
@@ -54,14 +59,16 @@ fn u(v: &serde_json::Value, path: &[&str]) -> u64 {
     for p in path {
         cur = cur.get(p).unwrap_or_else(|| panic!("no {p} in {cur}"));
     }
-    cur.as_u64().unwrap_or_else(|| panic!("not a number: {cur}"))
+    cur.as_u64()
+        .unwrap_or_else(|| panic!("not a number: {cur}"))
 }
 
 #[tokio::test]
 async fn the_figure_grows_with_the_graph() {
     // The property that makes it a measurement rather than a field. A constant
     // passes "is the key present"; it does not pass this.
-    let small = memory_of(&["UNWIND range(1, 10) AS i CREATE (:P {name: 'n' + toString(i)})"]).await;
+    let small =
+        memory_of(&["UNWIND range(1, 10) AS i CREATE (:P {name: 'n' + toString(i)})"]).await;
     let large =
         memory_of(&["UNWIND range(1, 2000) AS i CREATE (:P {name: 'n' + toString(i)})"]).await;
     let a = u(&small, &["graph", "attributed_bytes"]);
@@ -167,7 +174,12 @@ async fn metrics_of(setup: &[&str]) -> String {
     }
     let res = server
         .router()
-        .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .expect("metrics");
     assert_eq!(
@@ -177,10 +189,7 @@ async fn metrics_of(setup: &[&str]) -> String {
         Some("text/plain; version=0.0.4"),
         "Prometheus refuses a body it cannot recognise by content type"
     );
-    String::from_utf8(
-        res.into_body().collect().await.unwrap().to_bytes().to_vec(),
-    )
-    .expect("utf-8")
+    String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).expect("utf-8")
 }
 
 #[tokio::test]
@@ -194,8 +203,14 @@ async fn metrics_carry_help_and_type_for_every_series() {
         "samyama_index_memory_bytes",
         "samyama_query_cache_entries",
     ] {
-        assert!(body.contains(&format!("# HELP {name} ")), "no HELP for {name}");
-        assert!(body.contains(&format!("# TYPE {name} gauge")), "no TYPE for {name}");
+        assert!(
+            body.contains(&format!("# HELP {name} ")),
+            "no HELP for {name}"
+        );
+        assert!(
+            body.contains(&format!("# TYPE {name} gauge")),
+            "no TYPE for {name}"
+        );
         assert!(
             body.lines().any(|l| l.starts_with(&format!("{name} "))),
             "no sample for {name}"

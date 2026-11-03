@@ -43,7 +43,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
+            eprintln!(
+                "--data-dir <path> is required (this example needs input; see the header comment)"
+            );
             std::process::exit(2)
         });
 

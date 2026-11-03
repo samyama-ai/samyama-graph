@@ -49,7 +49,10 @@ fn one_edge() -> GraphStore {
     let mut store = GraphStore::new();
     run(&mut store, "CREATE (:S {id: 1})");
     run(&mut store, "CREATE (:S {id: 2})");
-    run(&mut store, "MATCH (x:S {id:1}), (y:S {id:2}) CREATE (x)-[:R]->(y)");
+    run(
+        &mut store,
+        "MATCH (x:S {id:1}), (y:S {id:2}) CREATE (x)-[:R]->(y)",
+    );
     store
 }
 
@@ -58,7 +61,10 @@ fn an_edge_cannot_be_reused_to_return_to_the_start() {
     // Neo4j 5: 0. We returned 2 — the edge walked out and back, once from each end.
     let store = one_edge();
     assert_eq!(
-        count(&store, "MATCH (a:S)-[:R]-(b:S)-[:R]-(a) RETURN count(a) AS c"),
+        count(
+            &store,
+            "MATCH (a:S)-[:R]-(b:S)-[:R]-(a) RETURN count(a) AS c"
+        ),
         0,
         "the pattern needs two relationships and the graph has one"
     );
@@ -70,7 +76,10 @@ fn an_edge_cannot_be_reused_even_without_a_repeated_variable() {
     // it is the edge that may not be reused. Neo4j 5: 0.
     let store = one_edge();
     assert_eq!(
-        count(&store, "MATCH (a:S)-[:R]-(b:S)-[:R]-(c:S) RETURN count(*) AS c"),
+        count(
+            &store,
+            "MATCH (a:S)-[:R]-(b:S)-[:R]-(c:S) RETURN count(*) AS c"
+        ),
         0
     );
 }
@@ -80,7 +89,10 @@ fn separate_match_clauses_may_reuse_an_edge() {
     // The other half of the rule, and the one a too-broad fix breaks. Neo4j 5: 2.
     let store = one_edge();
     assert_eq!(
-        count(&store, "MATCH (a:S)-[:R]-(b:S) MATCH (b)-[:R]-(c:S) RETURN count(*) AS c"),
+        count(
+            &store,
+            "MATCH (a:S)-[:R]-(b:S) MATCH (b)-[:R]-(c:S) RETURN count(*) AS c"
+        ),
         2,
         "isomorphism is per-clause; a second MATCH starts fresh"
     );
@@ -93,10 +105,19 @@ fn a_genuine_two_edge_path_still_matches() {
     for i in 1..=3 {
         run(&mut store, &format!("CREATE (:T {{id: {i}}})"));
     }
-    run(&mut store, "MATCH (x:T {id:1}), (y:T {id:2}) CREATE (x)-[:R]->(y)");
-    run(&mut store, "MATCH (x:T {id:2}), (y:T {id:3}) CREATE (x)-[:R]->(y)");
+    run(
+        &mut store,
+        "MATCH (x:T {id:1}), (y:T {id:2}) CREATE (x)-[:R]->(y)",
+    );
+    run(
+        &mut store,
+        "MATCH (x:T {id:2}), (y:T {id:3}) CREATE (x)-[:R]->(y)",
+    );
     assert_eq!(
-        count(&store, "MATCH (a:T)-[:R]-(b:T)-[:R]-(c:T) RETURN count(*) AS c"),
+        count(
+            &store,
+            "MATCH (a:T)-[:R]-(b:T)-[:R]-(c:T) RETURN count(*) AS c"
+        ),
         2,
         "1-2-3 and 3-2-1 use two distinct edges each"
     );
@@ -110,14 +131,17 @@ fn a_triangle_is_still_found() {
         run(&mut store, &format!("CREATE (:P {{id: {i}}})"));
     }
     for (x, y) in [(1, 2), (2, 3), (3, 1)] {
-        run(&mut store, &format!(
-            "MATCH (x:P {{id: {x}}}), (y:P {{id: {y}}}) CREATE (x)-[:R]->(y)"
-        ));
+        run(
+            &mut store,
+            &format!("MATCH (x:P {{id: {x}}}), (y:P {{id: {y}}}) CREATE (x)-[:R]->(y)"),
+        );
     }
     assert_eq!(
-        count(&store,
+        count(
+            &store,
             "MATCH (a:P)-[:R]-(b:P)-[:R]-(c:P)-[:R]-(a) \
-             WHERE a.id < b.id AND b.id < c.id RETURN count(a) AS c"),
+             WHERE a.id < b.id AND b.id < c.id RETURN count(a) AS c"
+        ),
         1
     );
 }
@@ -128,5 +152,8 @@ fn a_self_loop_is_unaffected() {
     let mut store = GraphStore::new();
     run(&mut store, "CREATE (:L {id: 1})");
     run(&mut store, "MATCH (x:L {id:1}) CREATE (x)-[:R]->(x)");
-    assert_eq!(count(&store, "MATCH (a:L)-[:R]->(a) RETURN count(a) AS c"), 1);
+    assert_eq!(
+        count(&store, "MATCH (a:L)-[:R]->(a) RETURN count(a) AS c"),
+        1
+    );
 }

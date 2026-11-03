@@ -80,8 +80,11 @@ async fn main() -> Result<(), Error> {
         return Err(format!("no such extract: {}", data_dir.display()).into());
     }
 
-    eprintln!("Samyama {} — serving {} over HTTP",
-        env!("CARGO_PKG_VERSION"), data_dir.display());
+    eprintln!(
+        "Samyama {} — serving {} over HTTP",
+        env!("CARGO_PKG_VERSION"),
+        data_dir.display()
+    );
 
     let client = EmbeddedClient::new();
     let load_start = Instant::now();
@@ -106,8 +109,11 @@ async fn main() -> Result<(), Error> {
             eprintln!("  WARN: index {}({}) failed: {}", label, prop, e);
         }
     }
-    eprintln!("Indexes built in {} ({} of them)",
-        format_duration(idx_start.elapsed()), INDEXES.len());
+    eprintln!(
+        "Indexes built in {} ({} of them)",
+        format_duration(idx_start.elapsed()),
+        INDEXES.len()
+    );
 
     // The store the HTTP layer serves is the very one just loaded — not a copy,
     // and not a second load with its own timing.

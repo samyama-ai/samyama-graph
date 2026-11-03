@@ -42,7 +42,11 @@ fn run(store: &mut GraphStore, cypher: &str) -> Vec<Option<i64>> {
 
 fn count(store: &GraphStore, cypher: &str) -> usize {
     let q = parse_query(cypher).expect("query should parse");
-    QueryExecutor::new(store).execute(&q).expect("should run").records.len()
+    QueryExecutor::new(store)
+        .execute(&q)
+        .expect("should run")
+        .records
+        .len()
 }
 
 #[test]
@@ -52,7 +56,11 @@ fn a_created_relationship_keeps_the_property_that_came_from_the_row() {
         &mut store,
         "UNWIND [1, 2, 3] AS x CREATE ()-[r:R {num: x}]->() RETURN r.num AS num",
     );
-    assert_eq!(got, vec![Some(1), Some(2), Some(3)], "each edge keeps its own value");
+    assert_eq!(
+        got,
+        vec![Some(1), Some(2), Some(3)],
+        "each edge keeps its own value"
+    );
     assert_eq!(count(&store, "MATCH ()-[r:R]->() RETURN r"), 3);
     assert_eq!(count(&store, "MATCH ()-[r:R {num: 2}]->() RETURN r"), 1);
 }
@@ -96,5 +104,9 @@ fn skip_and_limit_above_a_write_do_not_reduce_the_writes() {
         "UNWIND [42, 42, 42, 42, 42] AS x CREATE (n:N {num: x}) RETURN n.num AS num SKIP 2 LIMIT 2",
     );
     assert_eq!(got.len(), 2, "two rows survive SKIP 2 LIMIT 2");
-    assert_eq!(count(&store, "MATCH (n:N) RETURN n"), 5, "all five were created");
+    assert_eq!(
+        count(&store, "MATCH (n:N) RETURN n"),
+        5,
+        "all five were created"
+    );
 }

@@ -14,9 +14,9 @@ pub mod encryption;
 pub mod format;
 pub mod keys;
 pub mod persist;
-pub mod verify;
-pub mod results;
 pub mod publish_gate;
+pub mod results;
+pub mod verify;
 
 use std::collections::{HashMap, HashSet};
 
@@ -32,8 +32,8 @@ use crate::graph::store::GraphStore;
 use crate::graph::types::NodeId;
 use codec::{json_to_property, property_to_json};
 use format::{
-    ExportStats, ImportStats, PropertyConflict, UnusedDedupKey, SnapshotEdge, SnapshotHeader, SnapshotHierarchyIndex,
-    SnapshotIndexCatalog, SnapshotNode, SNAPSHOT_VERSION,
+    ExportStats, ImportStats, PropertyConflict, SnapshotEdge, SnapshotHeader,
+    SnapshotHierarchyIndex, SnapshotIndexCatalog, SnapshotNode, UnusedDedupKey, SNAPSHOT_VERSION,
 };
 
 /// Export all nodes and edges from the store into a gzip-compressed .sgsnap stream.
@@ -103,7 +103,9 @@ pub struct WriteOptions {
 
 impl Default for WriteOptions {
     fn default() -> Self {
-        Self { compression_level: DEFAULT_SNAPSHOT_COMPRESSION }
+        Self {
+            compression_level: DEFAULT_SNAPSHOT_COMPRESSION,
+        }
     }
 }
 
@@ -222,7 +224,9 @@ fn write_in_parallel<T: Sync, W: Write>(
         Ok(parts.concat())
     };
     let mut batches = items.chunks(EXPORT_BATCH_RECORDS);
-    let Some(first) = batches.next() else { return Ok(()) };
+    let Some(first) = batches.next() else {
+        return Ok(());
+    };
     let mut ready = serialize_batch(first)?;
     for batch in batches {
         // Serialize the next batch on the pool while this thread compresses
@@ -278,7 +282,9 @@ pub fn export_tenant_with_compression(
                 // A frozen entry whose type misses is a relationship deleted
                 // after compaction, kept only behind its tombstone. It is not
                 // in the graph, so it is not counted or written (#1096).
-                let Some(et) = store.get_edge_type(eid) else { continue };
+                let Some(et) = store.get_edge_type(eid) else {
+                    continue;
+                };
                 adjacency_edge_count += 1;
                 edge_type_set.insert(et.as_str().to_string());
             }
@@ -287,7 +293,9 @@ pub fn export_tenant_with_compression(
         let buf = store.get_outgoing_neighbor_slice(node.id);
         for &(_nid, eid) in buf {
             if !full_edge_ids.contains(eid.as_u64()) {
-                let Some(et) = store.get_edge_type(eid) else { continue };
+                let Some(et) = store.get_edge_type(eid) else {
+                    continue;
+                };
                 adjacency_edge_count += 1;
                 edge_type_set.insert(et.as_str().to_string());
             }
@@ -403,10 +411,15 @@ pub fn export_tenant_with_compression(
         }
 
         // 2. ColumnStore properties (from set_column_property / create_node_stub path)
-        let col_keys = store.node_columns.get_property_keys(node.id.as_u64() as usize);
+        let col_keys = store
+            .node_columns
+            .get_property_keys(node.id.as_u64() as usize);
         for key in col_keys {
-            if !props.contains_key(&key) { // Don't override HashMap props
-                let val = store.node_columns.get_property(node.id.as_u64() as usize, &key);
+            if !props.contains_key(&key) {
+                // Don't override HashMap props
+                let val = store
+                    .node_columns
+                    .get_property(node.id.as_u64() as usize, &key);
                 if !val.is_null() {
                     props.insert(key, property_to_json(&val));
                 }
@@ -450,7 +463,10 @@ pub fn export_tenant_with_compression(
     write_in_parallel(&mut gz, &nodes, |node, out| {
         let src_id = node.id.as_u64();
         let idx = src_id as usize;
-        let one = |tgt_nid: NodeId, eid: crate::graph::EdgeId, out: &mut Vec<u8>| -> serde_json::Result<()> {
+        let one = |tgt_nid: NodeId,
+                   eid: crate::graph::EdgeId,
+                   out: &mut Vec<u8>|
+         -> serde_json::Result<()> {
             if full_edge_ids.contains(eid.as_u64()) {
                 return Ok(());
             }
@@ -587,9 +603,7 @@ pub fn import_tenant_maybe_encrypted(
     if !encryption::looks_encrypted(head) {
         return import_tenant_with_dedup(store, head.chain(reader), &[]);
     }
-    let key = key.ok_or(
-        "this snapshot is encrypted and no key was given: pass --snapshot-key",
-    )?;
+    let key = key.ok_or("this snapshot is encrypted and no key was given: pass --snapshot-key")?;
     let dec = encryption::DecryptingReader::new(reader, key, head)?;
     import_tenant_with_dedup(store, dec, &[])
 }
@@ -643,9 +657,7 @@ pub fn peek_header_maybe_encrypted(
     if !encryption::looks_encrypted(head) {
         return peek_header(head.chain(reader));
     }
-    let key = key.ok_or(
-        "this snapshot is encrypted and no key was given: pass --snapshot-key",
-    )?;
+    let key = key.ok_or("this snapshot is encrypted and no key was given: pass --snapshot-key")?;
     peek_header(encryption::DecryptingReader::new(reader, key, head)?)
 }
 
@@ -783,7 +795,9 @@ fn existing_dedup_entries(
 ) -> Vec<(String, String)> {
     let normalize_dedup = |s: &str| -> String { s.trim().to_lowercase() };
     let mut out = Vec::new();
-    let Some(node) = store.get_node(id) else { return out };
+    let Some(node) = store.get_node(id) else {
+        return out;
+    };
     let labels: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
     for &key in dedup_keys {
         for property in dedup_properties(key, &labels) {
@@ -792,7 +806,10 @@ fn existing_dedup_entries(
                 Some(PropertyValue::Integer(i)) => out.push((key.to_string(), i.to_string())),
                 _ => {}
             }
-            match store.node_columns.get_property(id.as_u64() as usize, property) {
+            match store
+                .node_columns
+                .get_property(id.as_u64() as usize, property)
+            {
                 PropertyValue::String(s) if !s.is_empty() => {
                     out.push((key.to_string(), normalize_dedup(&s)))
                 }
@@ -867,8 +884,14 @@ impl DedupPrepopulate {
         if self.before_merge.contains_key(&eid) {
             return;
         }
-        let Some(node) = store.get_node(eid) else { return };
-        if node.labels.iter().all(|l| self.indexed.contains(l.as_str())) {
+        let Some(node) = store.get_node(eid) else {
+            return;
+        };
+        if node
+            .labels
+            .iter()
+            .all(|l| self.indexed.contains(l.as_str()))
+        {
             return;
         }
         let entries = existing_dedup_entries(store, eid, dedup_keys);
@@ -889,7 +912,10 @@ impl DedupPrepopulate {
             for label in &node.labels {
                 self.indexed.insert(label.as_str().to_string());
                 for (key, val) in &entries {
-                    dedup_index.insert((label.as_str().to_string(), key.clone(), val.clone()), node.id);
+                    dedup_index.insert(
+                        (label.as_str().to_string(), key.clone(), val.clone()),
+                        node.id,
+                    );
                 }
             }
         }
@@ -922,7 +948,13 @@ pub fn import_tenant_with_dedup_options(
     dedup_keys: &[&str],
     allow_conflicts: bool,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
-    import_tenant_with_merge_policy(store, reader, dedup_keys, allow_conflicts, MergeEdges::default())
+    import_tenant_with_merge_policy(
+        store,
+        reader,
+        dedup_keys,
+        allow_conflicts,
+        MergeEdges::default(),
+    )
 }
 
 /// Import with explicit node-conflict and parallel-edge policies.
@@ -941,7 +973,15 @@ pub fn import_tenant_with_merge_policy(
     // What a dedup merge added to nodes that existed before this import, undone
     // too: a refused import must leave existing nodes as it found them (#1604).
     let mut merged: Vec<MergeUndo> = Vec::new();
-    match import_tenant_inner(store, reader, dedup_keys, allow_conflicts, merge_edges, &mut created_nodes, &mut merged) {
+    match import_tenant_inner(
+        store,
+        reader,
+        dedup_keys,
+        allow_conflicts,
+        merge_edges,
+        &mut created_nodes,
+        &mut merged,
+    ) {
         Ok(stats) => Ok(stats),
         Err(e) => {
             for undo in merged.into_iter().rev() {
@@ -992,7 +1032,10 @@ fn import_tenant_inner(
         let parsed = parse_dedup_rule(rule);
         if let Some(label) = parsed.label {
             if label.is_empty() || !header.labels.iter().any(|l| l == label) {
-                return Err(format!("unknown snapshot label or empty property in dedup rule {rule:?}").into());
+                return Err(format!(
+                    "unknown snapshot label or empty property in dedup rule {rule:?}"
+                )
+                .into());
             }
         }
         if parsed.names.iter().any(|name| name.is_empty()) {
@@ -1143,7 +1186,9 @@ fn import_tenant_inner(
             }
             'dedup: for &key in dedup_keys.iter() {
                 for property in dedup_properties(key, &snap_labels) {
-                    let Some(json_val) = snap_node.props.get(property) else { continue };
+                    let Some(json_val) = snap_node.props.get(property) else {
+                        continue;
+                    };
                     let val_str = match json_val {
                         serde_json::Value::String(s) => normalize_dedup(s),
                         serde_json::Value::Number(n) => n.to_string(),
@@ -1174,16 +1219,18 @@ fn import_tenant_inner(
                         else {
                             return false;
                         };
-                        let Some(existing) = properties
-                            .iter()
-                            .find_map(|p| store.node_property(eid, p).filter(|v| *v != PropertyValue::Null))
-                        else {
+                        let Some(existing) = properties.iter().find_map(|p| {
+                            store
+                                .node_property(eid, p)
+                                .filter(|v| *v != PropertyValue::Null)
+                        }) else {
                             return false;
                         };
                         let old = existing.to_json();
                         match (&old, incoming) {
-                            (serde_json::Value::String(a), serde_json::Value::String(b)) =>
-                                normalize_dedup(a) != normalize_dedup(b),
+                            (serde_json::Value::String(a), serde_json::Value::String(b)) => {
+                                normalize_dedup(a) != normalize_dedup(b)
+                            }
                             _ => old != *incoming,
                         }
                     });
@@ -1236,10 +1283,13 @@ fn import_tenant_inner(
                     }
                     let pv = json_to_property(json_val);
                     match &pv {
-                        PropertyValue::String(_) | PropertyValue::Integer(_)
-                        | PropertyValue::Float(_) | PropertyValue::Boolean(_) => {
+                        PropertyValue::String(_)
+                        | PropertyValue::Integer(_)
+                        | PropertyValue::Float(_)
+                        | PropertyValue::Boolean(_) => {
                             // Only set if not already present in ColumnStore
-                            let existing = store.node_columns.get_property(eid.as_u64() as usize, key);
+                            let existing =
+                                store.node_columns.get_property(eid.as_u64() as usize, key);
                             match existing {
                                 PropertyValue::Null => {
                                     store.set_column_property(eid, key, pv);
@@ -1353,8 +1403,10 @@ fn import_tenant_inner(
                     // narrowing that is #545's decision, not this fix's.
                     if !matches!(
                         pv,
-                        PropertyValue::String(_) | PropertyValue::Integer(_)
-                            | PropertyValue::Float(_) | PropertyValue::Boolean(_)
+                        PropertyValue::String(_)
+                            | PropertyValue::Integer(_)
+                            | PropertyValue::Float(_)
+                            | PropertyValue::Boolean(_)
                     ) {
                         if let Some(node) = store.get_node_mut(new_id) {
                             node.set_property(key.clone(), pv);
@@ -1364,17 +1416,17 @@ fn import_tenant_inner(
                 // Register in dedup index
                 for &key in dedup_keys {
                     for property in dedup_properties(key, &snap_labels) {
-                        let Some(json_val) = snap_node.props.get(property) else { continue };
+                        let Some(json_val) = snap_node.props.get(property) else {
+                            continue;
+                        };
                         let val_str = match json_val {
                             serde_json::Value::String(s) => normalize_dedup(s),
                             serde_json::Value::Number(n) => n.to_string(),
                             _ => continue,
                         };
                         for label in &snap_labels {
-                            dedup_index.insert(
-                                (label.clone(), key.to_string(), val_str.clone()),
-                                new_id,
-                            );
+                            dedup_index
+                                .insert((label.clone(), key.to_string(), val_str.clone()), new_id);
                         }
                     }
                 }
@@ -1393,7 +1445,10 @@ fn import_tenant_inner(
                 // Register in dedup index
                 for &key in dedup_keys {
                     for property in dedup_properties(key, &snap_labels) {
-                        let Some(pv) = store.get_node(new_id).and_then(|n| n.get_property(property)) else {
+                        let Some(pv) = store
+                            .get_node(new_id)
+                            .and_then(|n| n.get_property(property))
+                        else {
                             continue;
                         };
                         let val_str = match pv {
@@ -1402,10 +1457,8 @@ fn import_tenant_inner(
                             _ => continue,
                         };
                         for label in &snap_labels {
-                            dedup_index.insert(
-                                (label.clone(), key.to_string(), val_str.clone()),
-                                new_id,
-                            );
+                            dedup_index
+                                .insert((label.clone(), key.to_string(), val_str.clone()), new_id);
                         }
                     }
                 }
@@ -1429,16 +1482,10 @@ fn import_tenant_inner(
             let snap_edge: SnapshotEdge = serde_json::from_str(&line)?;
 
             let new_src = id_remap.get(&snap_edge.src).ok_or_else(|| {
-                format!(
-                    "edge references unknown source node ID {}",
-                    snap_edge.src
-                )
+                format!("edge references unknown source node ID {}", snap_edge.src)
             })?;
             let new_tgt = id_remap.get(&snap_edge.tgt).ok_or_else(|| {
-                format!(
-                    "edge references unknown target node ID {}",
-                    snap_edge.tgt
-                )
+                format!("edge references unknown target node ID {}", snap_edge.tgt)
             })?;
 
             // Ordinary multigraph writes are unchanged. Only endpoints reused
@@ -1448,12 +1495,16 @@ fn import_tenant_inner(
                     for edge in store.get_outgoing_edges(*new_src) {
                         if merged_targets.contains(&edge.target) {
                             let unpropertied = store.edge_properties_merged(edge.id).is_empty();
-                            merge_edge_index.entry((*new_src, edge.target, edge.edge_type.as_str().to_string()))
-                                .and_modify(|empty| *empty |= unpropertied).or_insert(unpropertied);
+                            merge_edge_index
+                                .entry((*new_src, edge.target, edge.edge_type.as_str().to_string()))
+                                .and_modify(|empty| *empty |= unpropertied)
+                                .or_insert(unpropertied);
                         }
                     }
                 }
-                if let Some(&has_unpropertied) = merge_edge_index.get(&(*new_src, *new_tgt, snap_edge.edge_type.clone())) {
+                if let Some(&has_unpropertied) =
+                    merge_edge_index.get(&(*new_src, *new_tgt, snap_edge.edge_type.clone()))
+                {
                     let collapse = match merge_edges {
                         MergeEdges::Never => false,
                         MergeEdges::Always => true,
@@ -1491,7 +1542,8 @@ fn import_tenant_inner(
 
             imported_edge_types.insert(snap_edge.edge_type.clone());
             if indexed_edge_sources.contains(new_src) && merged_targets.contains(new_tgt) {
-                merge_edge_index.entry((*new_src, *new_tgt, snap_edge.edge_type.clone()))
+                merge_edge_index
+                    .entry((*new_src, *new_tgt, snap_edge.edge_type.clone()))
                     .and_modify(|empty| *empty |= snap_edge.props.is_empty())
                     .or_insert(snap_edge.props.is_empty());
             }
@@ -1526,10 +1578,15 @@ fn import_tenant_inner(
     let merge_groups = merge_group_sizes.len() as u64;
     // Group size counts the node that first claimed the value, so a duplicate
     // pair is 2.
-    let largest_merge_group = merge_group_sizes.values().copied().max().map_or(0, |m| m + 1);
+    let largest_merge_group = merge_group_sizes
+        .values()
+        .copied()
+        .max()
+        .map_or(0, |m| m + 1);
     let mut merges_by_key_sorted: Vec<(String, u64)> = merges_by_key.into_iter().collect();
     merges_by_key_sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let mut property_conflicts_by_key: Vec<(String, u64)> = property_conflicts.into_iter().collect();
+    let mut property_conflicts_by_key: Vec<(String, u64)> =
+        property_conflicts.into_iter().collect();
     property_conflicts_by_key.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let dedup_keys_unused: Vec<UnusedDedupKey> = dedup_keys
         .iter()
@@ -1765,9 +1822,9 @@ fn same_merged_value(kept: &serde_json::Value, incoming: &serde_json::Value) -> 
 fn sample_value(value: serde_json::Value) -> serde_json::Value {
     const MAX_CHARS: usize = 200;
     match value {
-        serde_json::Value::String(s) if s.chars().count() > MAX_CHARS => {
-            serde_json::Value::String(format!("{}…", s.chars().take(MAX_CHARS).collect::<String>()))
-        }
+        serde_json::Value::String(s) if s.chars().count() > MAX_CHARS => serde_json::Value::String(
+            format!("{}…", s.chars().take(MAX_CHARS).collect::<String>()),
+        ),
         other => other,
     }
 }
@@ -1789,12 +1846,19 @@ fn conflicting_definition<'a>(
         match (ours, incoming) {
             (D::FullText { name: a, .. }, D::FullText { name: b, .. }) => a == b,
             (
-                D::Vector { name: na, label: la, property: pa, .. },
-                D::Vector { name: nb, label: lb, property: pb, .. },
-            ) => {
-                (la == lb && pa == pb)
-                    || (na.is_some() && na == nb)
-            }
+                D::Vector {
+                    name: na,
+                    label: la,
+                    property: pa,
+                    ..
+                },
+                D::Vector {
+                    name: nb,
+                    label: lb,
+                    property: pb,
+                    ..
+                },
+            ) => (la == lb && pa == pb) || (na.is_some() && na == nb),
             _ => false,
         }
     })
@@ -1843,9 +1907,15 @@ mod tests {
 
         let mut restored = GraphStore::new();
         let stats = import_tenant(&mut restored, Cursor::new(buf)).unwrap();
-        assert_eq!(stats.hierarchy_count, 1, "declaration must survive the round trip");
+        assert_eq!(
+            stats.hierarchy_count, 1,
+            "declaration must survive the round trip"
+        );
 
-        let entry = restored.hierarchy_index.get("atc").expect("index rebuilt on import");
+        let entry = restored
+            .hierarchy_index
+            .get("atc")
+            .expect("index rebuilt on import");
         let guard = entry.read().unwrap();
         assert!(guard.usable(), "a freshly rebuilt index is not stale");
         let idx = guard.index.as_ref().unwrap();
@@ -1854,8 +1924,14 @@ mod tests {
         let root_idx = (0..idx.poset().n() as u32)
             .find(|&i| idx.descendant_count(i) == 5)
             .expect("the root subsumes all five nodes");
-        assert_eq!(idx.rollup(root_idx, RollupOp::Sum), Some(RollupValue::Int(10)));
-        assert_eq!(idx.rollup(root_idx, RollupOp::Count), Some(RollupValue::Int(5)));
+        assert_eq!(
+            idx.rollup(root_idx, RollupOp::Sum),
+            Some(RollupValue::Int(10))
+        );
+        assert_eq!(
+            idx.rollup(root_idx, RollupOp::Count),
+            Some(RollupValue::Int(5))
+        );
     }
 
     #[test]
@@ -1977,8 +2053,14 @@ mod tests {
 
         // Verify edge connectivity via adjacency (works for both full and stub edges)
         // Find the two imported nodes (not the "Existing" one)
-        let imported: Vec<_> = store2.all_nodes().iter()
-            .filter(|n| n.labels.iter().any(|l| l.as_str() == "A" || l.as_str() == "B"))
+        let imported: Vec<_> = store2
+            .all_nodes()
+            .iter()
+            .filter(|n| {
+                n.labels
+                    .iter()
+                    .any(|l| l.as_str() == "A" || l.as_str() == "B")
+            })
             .map(|n| n.id)
             .collect();
         assert_eq!(imported.len(), 2, "Should have 2 imported nodes (A, B)");
@@ -2402,7 +2484,10 @@ mod tests {
         let mut buf = Vec::new();
         let export_stats = export_tenant(&store, &mut buf).unwrap();
         assert_eq!(export_stats.node_count, 3);
-        assert_eq!(export_stats.edge_count, 2, "v2 export should capture stub edges");
+        assert_eq!(
+            export_stats.edge_count, 2,
+            "v2 export should capture stub edges"
+        );
 
         // Import into fresh store
         let mut store2 = GraphStore::new();
@@ -2414,17 +2499,24 @@ mod tests {
 
         // Verify column properties survived
         // Node IDs are remapped, find them by label
-        let articles: Vec<_> = store2.get_nodes_by_label(&crate::graph::types::Label::new("Article"))
-            .into_iter().collect();
+        let articles: Vec<_> = store2
+            .get_nodes_by_label(&crate::graph::types::Label::new("Article"))
+            .into_iter()
+            .collect();
         assert_eq!(articles.len(), 2);
 
         // Check column property on first article (remapped ID)
         let aid = articles[0].id.as_u64() as usize;
         let pmid = store2.node_columns.get_property(aid, "pmid");
-        assert!(!pmid.is_null(), "Column property 'pmid' should survive v2 roundtrip");
+        assert!(
+            !pmid.is_null(),
+            "Column property 'pmid' should survive v2 roundtrip"
+        );
 
-        let authors: Vec<_> = store2.get_nodes_by_label(&crate::graph::types::Label::new("Author"))
-            .into_iter().collect();
+        let authors: Vec<_> = store2
+            .get_nodes_by_label(&crate::graph::types::Label::new("Author"))
+            .into_iter()
+            .collect();
         assert_eq!(authors.len(), 1);
         let author_id = authors[0].id.as_u64() as usize;
         let name = store2.node_columns.get_property(author_id, "name");
@@ -2438,11 +2530,14 @@ mod tests {
         // Verify traversal works
         let article_id = articles[0].id;
         let targets = store2.get_outgoing_edge_targets_owned(article_id);
-        assert!(!targets.is_empty() || {
-            // Second article might be the one with outgoing edges
-            let targets2 = store2.get_outgoing_edge_targets_owned(articles[1].id);
-            !targets2.is_empty()
-        }, "At least one article should have outgoing edges after v2 import");
+        assert!(
+            !targets.is_empty() || {
+                // Second article might be the one with outgoing edges
+                let targets2 = store2.get_outgoing_edge_targets_owned(articles[1].id);
+                !targets2.is_empty()
+            },
+            "At least one article should have outgoing edges after v2 import"
+        );
     }
 
     #[test]
@@ -2473,8 +2568,14 @@ mod tests {
         assert_eq!(consumer.edge_type_count(&EdgeType::new("KNOWS")), 2);
         assert_eq!(consumer.edge_type_count(&EdgeType::new("LIVES_IN")), 1);
         let stats = consumer.compute_statistics();
-        assert_eq!(stats.edge_type_counts.get(&EdgeType::new("KNOWS")), Some(&2));
-        assert_eq!(stats.edge_type_counts.get(&EdgeType::new("LIVES_IN")), Some(&1));
+        assert_eq!(
+            stats.edge_type_counts.get(&EdgeType::new("KNOWS")),
+            Some(&2)
+        );
+        assert_eq!(
+            stats.edge_type_counts.get(&EdgeType::new("LIVES_IN")),
+            Some(&1)
+        );
     }
 }
 
@@ -2501,16 +2602,39 @@ mod stub_cypher_tests {
         let engine = QueryEngine::new();
 
         // 1-hop forward
-        let r = engine.execute("MATCH (a:Article)-[:AUTHORED_BY]->(au:Author) RETURN au.name", &g).unwrap();
-        assert_eq!(r.records.len(), 1, "Should find 1 author via stub edge, got {}", r.records.len());
+        let r = engine
+            .execute(
+                "MATCH (a:Article)-[:AUTHORED_BY]->(au:Author) RETURN au.name",
+                &g,
+            )
+            .unwrap();
+        assert_eq!(
+            r.records.len(),
+            1,
+            "Should find 1 author via stub edge, got {}",
+            r.records.len()
+        );
 
         // 1-hop with filter
         let r = engine.execute("MATCH (a:Article)-[:ANNOTATED_WITH]->(m:MeSHTerm) WHERE a.pmid = '12345' RETURN m.name", &g).unwrap();
-        assert_eq!(r.records.len(), 1, "Should find 1 MeSH via filtered stub edge");
+        assert_eq!(
+            r.records.len(),
+            1,
+            "Should find 1 MeSH via filtered stub edge"
+        );
 
         // Reverse traversal
-        let r = engine.execute("MATCH (au:Author)<-[:AUTHORED_BY]-(a:Article) RETURN a.pmid", &g).unwrap();
-        assert_eq!(r.records.len(), 1, "Should find 1 article via reverse stub edge");
+        let r = engine
+            .execute(
+                "MATCH (au:Author)<-[:AUTHORED_BY]-(a:Article) RETURN a.pmid",
+                &g,
+            )
+            .unwrap();
+        assert_eq!(
+            r.records.len(),
+            1,
+            "Should find 1 article via reverse stub edge"
+        );
     }
 }
 
@@ -2527,9 +2651,13 @@ mod mixed_edge_tests {
 
         // v1 edges: full create_edge (like Clinical Trials import)
         let t = g.create_node("ClinicalTrial");
-        g.get_node_mut(t).unwrap().set_property("nct_id", PropertyValue::String("NCT001".to_string()));
+        g.get_node_mut(t)
+            .unwrap()
+            .set_property("nct_id", PropertyValue::String("NCT001".to_string()));
         let i = g.create_node("Intervention");
-        g.get_node_mut(i).unwrap().set_property("name", PropertyValue::String("Aspirin".to_string()));
+        g.get_node_mut(i)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Aspirin".to_string()));
         g.create_edge(t, i, "TESTS").unwrap();
         g.compact_adjacency();
 
@@ -2544,11 +2672,26 @@ mod mixed_edge_tests {
         let engine = QueryEngine::new();
 
         // v1 edges should still be traversable
-        let r = engine.execute("MATCH (t:ClinicalTrial)-[:TESTS]->(i:Intervention) RETURN i.name", &g).unwrap();
-        assert_eq!(r.records.len(), 1, "v1 full edge should be traversable after v2 stubs added, got {}", r.records.len());
+        let r = engine
+            .execute(
+                "MATCH (t:ClinicalTrial)-[:TESTS]->(i:Intervention) RETURN i.name",
+                &g,
+            )
+            .unwrap();
+        assert_eq!(
+            r.records.len(),
+            1,
+            "v1 full edge should be traversable after v2 stubs added, got {}",
+            r.records.len()
+        );
 
         // v2 stub edges should also work
-        let r = engine.execute("MATCH (a:Article)-[:AUTHORED_BY]->(au:Author) RETURN au.name", &g).unwrap();
+        let r = engine
+            .execute(
+                "MATCH (a:Article)-[:AUTHORED_BY]->(au:Author) RETURN au.name",
+                &g,
+            )
+            .unwrap();
         assert_eq!(r.records.len(), 1, "v2 stub edge should be traversable");
     }
 }
@@ -2556,21 +2699,30 @@ mod mixed_edge_tests {
 #[cfg(test)]
 mod v1_v2_import_order_tests {
     use super::*;
-    use std::io::Cursor;
     use crate::graph::GraphStore;
     use crate::graph::PropertyValue;
     use crate::query::QueryEngine;
+    use std::io::Cursor;
 
     #[test]
     fn test_v1_snapshot_then_v2_snapshot_edges_traversable() {
         // Step 1: Create a v1 snapshot (full edges, like Clinical Trials)
         let mut store1 = GraphStore::new();
         let t = store1.create_node("ClinicalTrial");
-        store1.get_node_mut(t).unwrap().set_property("nct_id", PropertyValue::String("NCT001".to_string()));
+        store1
+            .get_node_mut(t)
+            .unwrap()
+            .set_property("nct_id", PropertyValue::String("NCT001".to_string()));
         let i = store1.create_node("Intervention");
-        store1.get_node_mut(i).unwrap().set_property("name", PropertyValue::String("Aspirin".to_string()));
+        store1
+            .get_node_mut(i)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Aspirin".to_string()));
         let s = store1.create_node("Site");
-        store1.get_node_mut(s).unwrap().set_property("country", PropertyValue::String("USA".to_string()));
+        store1
+            .get_node_mut(s)
+            .unwrap()
+            .set_property("country", PropertyValue::String("USA".to_string()));
         store1.create_edge(t, i, "TESTS").unwrap();
         store1.create_edge(t, s, "CONDUCTED_AT").unwrap();
 
@@ -2597,32 +2749,56 @@ mod v1_v2_import_order_tests {
         let s2 = import_tenant(&mut combined, Cursor::new(&v2_buf)).unwrap();
         assert_eq!(s2.edge_count, 1, "v2 import should have 1 edge");
 
-        assert!(combined.node_count() >= 5, "Should have at least 5 nodes, got {}", combined.node_count());
+        assert!(
+            combined.node_count() >= 5,
+            "Should have at least 5 nodes, got {}",
+            combined.node_count()
+        );
 
         let engine = QueryEngine::new();
 
         // v1 edges should be traversable
-        let r = engine.execute(
-            "MATCH (t:ClinicalTrial)-[:TESTS]->(i:Intervention) RETURN i.name", &combined
-        ).unwrap();
-        assert!(r.records.len() > 0,
+        let r = engine
+            .execute(
+                "MATCH (t:ClinicalTrial)-[:TESTS]->(i:Intervention) RETURN i.name",
+                &combined,
+            )
+            .unwrap();
+        assert!(
+            r.records.len() > 0,
             "v1 TESTS edge should be traversable after v2 import. Got {} rows. \
              Trial nodes: {}, Intervention nodes: {}",
             r.records.len(),
-            combined.get_nodes_by_label(&crate::graph::types::Label::new("ClinicalTrial")).len(),
-            combined.get_nodes_by_label(&crate::graph::types::Label::new("Intervention")).len(),
+            combined
+                .get_nodes_by_label(&crate::graph::types::Label::new("ClinicalTrial"))
+                .len(),
+            combined
+                .get_nodes_by_label(&crate::graph::types::Label::new("Intervention"))
+                .len(),
         );
 
-        let r = engine.execute(
-            "MATCH (t:ClinicalTrial)-[:CONDUCTED_AT]->(s:Site) RETURN s.country", &combined
-        ).unwrap();
-        assert!(r.records.len() > 0, "v1 CONDUCTED_AT edge should be traversable");
+        let r = engine
+            .execute(
+                "MATCH (t:ClinicalTrial)-[:CONDUCTED_AT]->(s:Site) RETURN s.country",
+                &combined,
+            )
+            .unwrap();
+        assert!(
+            r.records.len() > 0,
+            "v1 CONDUCTED_AT edge should be traversable"
+        );
 
         // v2 stub edges should also work
-        let r = engine.execute(
-            "MATCH (a:Article)-[:AUTHORED_BY]->(au:Author) RETURN au.name", &combined
-        ).unwrap();
-        assert!(r.records.len() > 0, "v2 stub AUTHORED_BY edge should be traversable");
+        let r = engine
+            .execute(
+                "MATCH (a:Article)-[:AUTHORED_BY]->(au:Author) RETURN au.name",
+                &combined,
+            )
+            .unwrap();
+        assert!(
+            r.records.len() > 0,
+            "v2 stub AUTHORED_BY edge should be traversable"
+        );
     }
 }
 
@@ -2639,7 +2815,11 @@ mod nct_bridge_edge_tests {
         // Create Article stubs (PubMed)
         let a1 = g.create_node_stub("Article");
         g.set_column_property(a1, "pmid", PropertyValue::String("111".to_string()));
-        g.set_column_property(a1, "title", PropertyValue::String("Cancer study".to_string()));
+        g.set_column_property(
+            a1,
+            "title",
+            PropertyValue::String("Cancer study".to_string()),
+        );
         let a2 = g.create_node_stub("Article");
         g.set_column_property(a2, "pmid", PropertyValue::String("222".to_string()));
 
@@ -2650,9 +2830,13 @@ mod nct_bridge_edge_tests {
 
         // Create ClinicalTrial (v1 full edge style)
         let t = g.create_node("ClinicalTrial");
-        g.get_node_mut(t).unwrap().set_property("nct_id", PropertyValue::String("NCT001".to_string()));
+        g.get_node_mut(t)
+            .unwrap()
+            .set_property("nct_id", PropertyValue::String("NCT001".to_string()));
         let i = g.create_node("Intervention");
-        g.get_node_mut(i).unwrap().set_property("name", PropertyValue::String("Chemo".to_string()));
+        g.get_node_mut(i)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Chemo".to_string()));
         g.create_edge(t, i, "TESTS").unwrap();
 
         // Create REFERENCED_IN edge (the NCT bridge)
@@ -2662,40 +2846,53 @@ mod nct_bridge_edge_tests {
         let engine = QueryEngine::new();
 
         // Simple cross-KG: Article → Trial
-        let r = engine.execute(
-            "MATCH (a:Article)-[:REFERENCED_IN]->(t:ClinicalTrial) RETURN a.pmid, t.nct_id", &g
-        ).unwrap();
-        assert_eq!(r.records.len(), 1, "Should find Article→Trial via REFERENCED_IN");
+        let r = engine
+            .execute(
+                "MATCH (a:Article)-[:REFERENCED_IN]->(t:ClinicalTrial) RETURN a.pmid, t.nct_id",
+                &g,
+            )
+            .unwrap();
+        assert_eq!(
+            r.records.len(),
+            1,
+            "Should find Article→Trial via REFERENCED_IN"
+        );
 
         // Deep cross-KG: MeSH → Article → Trial → Intervention
         let r = engine.execute(
             "MATCH (m:MeSHTerm)<-[:ANNOTATED_WITH]-(a:Article)-[:REFERENCED_IN]->(t:ClinicalTrial)-[:TESTS]->(i:Intervention) WHERE m.name = 'Neoplasms' RETURN i.name", &g
         ).unwrap();
-        assert_eq!(r.records.len(), 1, "Should traverse MeSH→Article→Trial→Intervention");
+        assert_eq!(
+            r.records.len(),
+            1,
+            "Should traverse MeSH→Article→Trial→Intervention"
+        );
     }
 }
 
 #[cfg(test)]
 mod dedup_tests {
     use super::*;
-    use std::io::Cursor;
     use crate::graph::store::GraphStore;
     use crate::graph::PropertyValue;
-    use crate::query::{parser::parse_query, executor::QueryExecutor};
+    use crate::query::{executor::QueryExecutor, parser::parse_query};
+    use std::io::Cursor;
 
     #[test]
     fn test_index_backfill_on_imported_snapshot() {
         // Create a store, add a node via stub + column property, create index, query via index
         let mut store = GraphStore::new();
-        
+
         // Simulate snapshot import: stub node + column property
         let nid = store.create_node_stub("Country");
         store.set_column_property(nid, "iso_code", PropertyValue::String("IND".to_string()));
         store.set_column_property(nid, "name", PropertyValue::String("India".to_string()));
-        
+
         // Create index (simulates CREATE INDEX ON :Country(iso_code))
-        store.property_index.create_index("Country".into(), "iso_code".to_string());
-        
+        store
+            .property_index
+            .create_index("Country".into(), "iso_code".to_string());
+
         // Backfill (same logic as CreateIndexOperator)
         let nodes = store.get_nodes_by_label(&"Country".into());
         let mut entries = Vec::new();
@@ -2703,25 +2900,39 @@ mod dedup_tests {
             if let Some(val) = node.get_property("iso_code") {
                 entries.push((node.id, val.clone()));
             } else {
-                let col_val = store.node_columns.get_property(node.id.as_u64() as usize, "iso_code");
+                let col_val = store
+                    .node_columns
+                    .get_property(node.id.as_u64() as usize, "iso_code");
                 if !col_val.is_null() {
                     entries.push((node.id, col_val));
                 }
             }
         }
         for (node_id, val) in &entries {
-            store.property_index.index_insert(&"Country".into(), &"iso_code".to_string(), val.clone(), *node_id);
+            store.property_index.index_insert(
+                &"Country".into(),
+                &"iso_code".to_string(),
+                val.clone(),
+                *node_id,
+            );
         }
-        
+
         // Now query via index
-        let index_lock = store.property_index.get_index(&"Country".into(), &"iso_code".to_string()).unwrap();
+        let index_lock = store
+            .property_index
+            .get_index(&"Country".into(), &"iso_code".to_string())
+            .unwrap();
         let index = index_lock.read().unwrap();
         let results = index.get(&PropertyValue::String("IND".to_string()));
-        
-        assert_eq!(results.len(), 1, "Index should find 1 Country with iso_code='IND'");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Index should find 1 Country with iso_code='IND'"
+        );
         assert_eq!(results[0], nid);
     }
-    
+
     #[test]
     fn test_snapshot_import_then_index_then_query() {
         // Full round-trip: export → import → create index → query via Cypher
@@ -2731,42 +2942,62 @@ mod dedup_tests {
             n.set_property("iso_code", PropertyValue::String("IND".to_string()));
             n.set_property("name", PropertyValue::String("India".to_string()));
         }
-        
+
         // Export
         let mut buf = Vec::new();
         export_tenant(&store1, &mut buf).unwrap();
-        
+
         // Import into new store
         let mut store2 = GraphStore::new();
         let stats = import_tenant(&mut store2, &buf[..]).unwrap();
         assert_eq!(stats.node_count, 1);
-        
+
         // Create index on imported store
-        store2.property_index.create_index("Country".into(), "iso_code".to_string());
-        
+        store2
+            .property_index
+            .create_index("Country".into(), "iso_code".to_string());
+
         // Backfill
         let nodes = store2.get_nodes_by_label(&"Country".into());
         let mut found = false;
         for node in &nodes {
             // Check HashMap
             if let Some(val) = node.get_property("iso_code") {
-                store2.property_index.index_insert(&"Country".into(), &"iso_code".to_string(), val.clone(), node.id);
+                store2.property_index.index_insert(
+                    &"Country".into(),
+                    &"iso_code".to_string(),
+                    val.clone(),
+                    node.id,
+                );
                 found = true;
             }
             // Check ColumnStore
             if !found {
-                let col_val = store2.node_columns.get_property(node.id.as_u64() as usize, "iso_code");
+                let col_val = store2
+                    .node_columns
+                    .get_property(node.id.as_u64() as usize, "iso_code");
                 if !col_val.is_null() {
-                    store2.property_index.index_insert(&"Country".into(), &"iso_code".to_string(), col_val, node.id);
+                    store2.property_index.index_insert(
+                        &"Country".into(),
+                        &"iso_code".to_string(),
+                        col_val,
+                        node.id,
+                    );
                     found = true;
                 }
             }
         }
-        
-        assert!(found, "Should have found iso_code in either HashMap or ColumnStore");
-        
+
+        assert!(
+            found,
+            "Should have found iso_code in either HashMap or ColumnStore"
+        );
+
         // Query via index
-        let index_lock = store2.property_index.get_index(&"Country".into(), &"iso_code".to_string()).unwrap();
+        let index_lock = store2
+            .property_index
+            .get_index(&"Country".into(), &"iso_code".to_string())
+            .unwrap();
         let index = index_lock.read().unwrap();
         let results = index.get(&PropertyValue::String("IND".to_string()));
         assert_eq!(results.len(), 1, "Index should find Country after import");
@@ -2774,9 +3005,9 @@ mod dedup_tests {
 
     #[test]
     fn test_cypher_query_after_snapshot_import() {
-        use crate::query::parser::parse_query;
         use crate::query::executor::MutQueryExecutor;
         use crate::query::executor::QueryExecutor;
+        use crate::query::parser::parse_query;
 
         // Create original store with Country node
         let mut store1 = GraphStore::new();
@@ -2814,10 +3045,19 @@ mod dedup_tests {
         // Snapshot 1: Drug "Methotrexate" with source=faers
         let mut store1 = GraphStore::new();
         let d1 = store1.create_node("Drug");
-        store1.get_node_mut(d1).unwrap().set_property("name", PropertyValue::String("Methotrexate".to_string()));
-        store1.get_node_mut(d1).unwrap().set_property("source", PropertyValue::String("faers".to_string()));
+        store1
+            .get_node_mut(d1)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Methotrexate".to_string()));
+        store1
+            .get_node_mut(d1)
+            .unwrap()
+            .set_property("source", PropertyValue::String("faers".to_string()));
         let ae = store1.create_node("AdverseEvent");
-        store1.get_node_mut(ae).unwrap().set_property("name", PropertyValue::String("Nausea".to_string()));
+        store1
+            .get_node_mut(ae)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Nausea".to_string()));
         store1.create_edge(ae, d1, "REPORTED_DRUG").unwrap();
 
         let mut buf1 = Vec::new();
@@ -2826,10 +3066,19 @@ mod dedup_tests {
         // Snapshot 2: Drug "Methotrexate" with source=clinicaltrials (same name, different case)
         let mut store2 = GraphStore::new();
         let d2 = store2.create_node("Drug");
-        store2.get_node_mut(d2).unwrap().set_property("name", PropertyValue::String("methotrexate".to_string()));
-        store2.get_node_mut(d2).unwrap().set_property("source", PropertyValue::String("clinicaltrials".to_string()));
+        store2
+            .get_node_mut(d2)
+            .unwrap()
+            .set_property("name", PropertyValue::String("methotrexate".to_string()));
+        store2.get_node_mut(d2).unwrap().set_property(
+            "source",
+            PropertyValue::String("clinicaltrials".to_string()),
+        );
         let ct = store2.create_node("ClinicalTrial");
-        store2.get_node_mut(ct).unwrap().set_property("name", PropertyValue::String("NCT001".to_string()));
+        store2
+            .get_node_mut(ct)
+            .unwrap()
+            .set_property("name", PropertyValue::String("NCT001".to_string()));
         store2.create_edge(ct, d2, "TESTS").unwrap();
 
         let mut buf2 = Vec::new();
@@ -2855,16 +3104,28 @@ mod dedup_tests {
     fn test_dedup_properties_merged_additively() {
         let mut store1 = GraphStore::new();
         let d = store1.create_node("Drug");
-        store1.get_node_mut(d).unwrap().set_property("name", PropertyValue::String("Aspirin".to_string()));
-        store1.get_node_mut(d).unwrap().set_property("source", PropertyValue::String("faers".to_string()));
+        store1
+            .get_node_mut(d)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Aspirin".to_string()));
+        store1
+            .get_node_mut(d)
+            .unwrap()
+            .set_property("source", PropertyValue::String("faers".to_string()));
 
         let mut buf1 = Vec::new();
         export_tenant(&store1, &mut buf1).unwrap();
 
         let mut store2 = GraphStore::new();
         let d2 = store2.create_node("Drug");
-        store2.get_node_mut(d2).unwrap().set_property("name", PropertyValue::String("aspirin".to_string()));
-        store2.get_node_mut(d2).unwrap().set_property("mechanism", PropertyValue::String("COX inhibitor".to_string()));
+        store2
+            .get_node_mut(d2)
+            .unwrap()
+            .set_property("name", PropertyValue::String("aspirin".to_string()));
+        store2.get_node_mut(d2).unwrap().set_property(
+            "mechanism",
+            PropertyValue::String("COX inhibitor".to_string()),
+        );
 
         let mut buf2 = Vec::new();
         export_tenant(&store2, &mut buf2).unwrap();
@@ -2894,9 +3155,15 @@ mod dedup_tests {
         // Build two KGs with shared Drug, import with dedup, run cross-domain query
         let mut store1 = GraphStore::new();
         let d1 = store1.create_node("Drug");
-        store1.get_node_mut(d1).unwrap().set_property("name", PropertyValue::String("Methotrexate".to_string()));
+        store1
+            .get_node_mut(d1)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Methotrexate".to_string()));
         let ae = store1.create_node("AdverseEventCase");
-        store1.get_node_mut(ae).unwrap().set_property("case_id", PropertyValue::String("AE001".to_string()));
+        store1
+            .get_node_mut(ae)
+            .unwrap()
+            .set_property("case_id", PropertyValue::String("AE001".to_string()));
         store1.create_edge(ae, d1, "REPORTED_DRUG").unwrap();
 
         let mut buf1 = Vec::new();
@@ -2904,9 +3171,15 @@ mod dedup_tests {
 
         let mut store2 = GraphStore::new();
         let d2 = store2.create_node("Drug");
-        store2.get_node_mut(d2).unwrap().set_property("name", PropertyValue::String("  Methotrexate  ".to_string()));
+        store2.get_node_mut(d2).unwrap().set_property(
+            "name",
+            PropertyValue::String("  Methotrexate  ".to_string()),
+        );
         let ct = store2.create_node("ClinicalTrial");
-        store2.get_node_mut(ct).unwrap().set_property("nct_id", PropertyValue::String("NCT001".to_string()));
+        store2
+            .get_node_mut(ct)
+            .unwrap()
+            .set_property("nct_id", PropertyValue::String("NCT001".to_string()));
         store2.create_edge(ct, d2, "TESTS").unwrap();
 
         let mut buf2 = Vec::new();
@@ -2923,7 +3196,11 @@ mod dedup_tests {
         let exec = QueryExecutor::new(&combined);
         let result = exec.execute(&query).unwrap();
 
-        assert_eq!(result.records.len(), 1, "Cross-domain query should return 1 result");
+        assert_eq!(
+            result.records.len(),
+            1,
+            "Cross-domain query should return 1 result"
+        );
     }
 
     #[test]
@@ -2931,7 +3208,10 @@ mod dedup_tests {
         // Without dedup_keys, same-name nodes should NOT be merged
         let mut store1 = GraphStore::new();
         let d = store1.create_node("Drug");
-        store1.get_node_mut(d).unwrap().set_property("name", PropertyValue::String("Aspirin".to_string()));
+        store1
+            .get_node_mut(d)
+            .unwrap()
+            .set_property("name", PropertyValue::String("Aspirin".to_string()));
         let mut buf1 = Vec::new();
         export_tenant(&store1, &mut buf1).unwrap();
 
@@ -2964,16 +3244,30 @@ mod temporal_snapshot_tests {
             P::Date(16637),
             P::Date(-25567),
             P::LocalTime(45_074_645_876_123),
-            P::Time { nanos: 45_074_645_876_123, offset_seconds: 19_800 },
-            P::Time { nanos: 0, offset_seconds: -18_000 },
-            P::LocalDateTime { secs: 1_437_514_832, nanos: 142_000_000 },
+            P::Time {
+                nanos: 45_074_645_876_123,
+                offset_seconds: 19_800,
+            },
+            P::Time {
+                nanos: 0,
+                offset_seconds: -18_000,
+            },
+            P::LocalDateTime {
+                secs: 1_437_514_832,
+                nanos: 142_000_000,
+            },
             P::ZonedDateTime {
                 secs: 1_437_514_832,
                 nanos: 999_999_999,
                 offset_seconds: 3600,
                 zone: Some("Europe/London".to_string()),
             },
-            P::ZonedDateTime { secs: 0, nanos: 0, offset_seconds: 0, zone: None },
+            P::ZonedDateTime {
+                secs: 0,
+                nanos: 0,
+                offset_seconds: 0,
+                zone: None,
+            },
             // Nested, because properties can be arrays and maps of temporals
             // and the recursion is a separate thing to get wrong.
             P::Array(vec![P::Date(1), P::LocalTime(2)]),
@@ -2981,7 +3275,10 @@ mod temporal_snapshot_tests {
         for v in values {
             let encoded = property_to_json(&v);
             let back = json_to_property(&encoded);
-            assert_eq!(back, v, "{v:?} did not survive the snapshot encoding: {encoded}");
+            assert_eq!(
+                back, v,
+                "{v:?} did not survive the snapshot encoding: {encoded}"
+            );
         }
     }
 
@@ -3000,8 +3297,12 @@ mod temporal_snapshot_tests {
     /// missing property rather than a corrupt one.
     #[test]
     fn a_malformed_temporal_tag_does_not_become_a_plausible_value() {
-        let broken = serde_json::json!({"__type": "Date"});          // no `days`
-        assert_ne!(json_to_property(&broken), P::Date(0), "must not default to the epoch");
+        let broken = serde_json::json!({"__type": "Date"}); // no `days`
+        assert_ne!(
+            json_to_property(&broken),
+            P::Date(0),
+            "must not default to the epoch"
+        );
 
         // What it does become (#1311): nothing refuses it. The object is kept
         // as the map it is, `__type` and all, so the corrupt value is still
@@ -3066,14 +3367,17 @@ mod dedup_scoped_scan_tests {
     fn snapshot(store: &GraphStore, header_labels: Option<&[&str]>) -> Vec<u8> {
         let mut buf = Vec::new();
         export_tenant(store, &mut buf).unwrap();
-        let Some(labels) = header_labels else { return buf };
+        let Some(labels) = header_labels else {
+            return buf;
+        };
         let mut plain = String::new();
         GzDecoder::new(&buf[..]).read_to_string(&mut plain).unwrap();
         let (head, rest) = plain.split_once('\n').unwrap();
         let mut header: serde_json::Value = serde_json::from_str(head).unwrap();
         header["labels"] = serde_json::json!(labels);
         let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-        enc.write_all(format!("{header}\n{rest}").as_bytes()).unwrap();
+        enc.write_all(format!("{header}\n{rest}").as_bytes())
+            .unwrap();
         enc.finish().unwrap()
     }
 
@@ -3092,7 +3396,12 @@ mod dedup_scoped_scan_tests {
             }
             out.push(format!("n{} {labels:?} {props:?}", n.id.as_u64()));
             for (_, src, tgt, ty) in store.get_outgoing_edge_targets(n.id) {
-                out.push(format!("e{}-{}->{}", src.as_u64(), ty.as_str(), tgt.as_u64()));
+                out.push(format!(
+                    "e{}-{}->{}",
+                    src.as_u64(),
+                    ty.as_str(),
+                    tgt.as_u64()
+                ));
             }
         }
         out.sort();
@@ -3104,22 +3413,41 @@ mod dedup_scoped_scan_tests {
         test_hooks::PREPOPULATE_VISITS.with(|c| c.set(0));
         let stats = import_tenant_with_dedup(store, snap, keys).unwrap();
         test_hooks::FORCE_FULL_SCAN.with(|f| f.set(false));
-        (stats.merged_count, test_hooks::PREPOPULATE_VISITS.with(|c| c.get()))
+        (
+            stats.merged_count,
+            test_hooks::PREPOPULATE_VISITS.with(|c| c.get()),
+        )
     }
 
     /// The target store: Proteins, a dual-labelled target, a Gene sharing an accession,
     /// and a pile of unrelated Articles that also carry the dedup keys.
     fn base() -> GraphStore {
         let mut st = GraphStore::new();
-        node(&mut st, &["Protein"], &[("k1", s("P1")), ("src", s("uniprot"))]);
-        node(&mut st, &["Protein", "ChemblTarget"], &[("k1", s(" p2 ")), ("src", s("chembl"))]);
+        node(
+            &mut st,
+            &["Protein"],
+            &[("k1", s("P1")), ("src", s("uniprot"))],
+        );
+        node(
+            &mut st,
+            &["Protein", "ChemblTarget"],
+            &[("k1", s(" p2 ")), ("src", s("chembl"))],
+        );
         // Has k1 but no k2: a merge through :Protein gives it a k2, which the :Target index
         // must not see, because the full scan would not have (see `DedupPrepopulate`).
         node(&mut st, &["Protein", "Target"], &[("k1", s("P3"))]);
-        node(&mut st, &["Gene"], &[("k1", s("P1")), ("k2", PropertyValue::Integer(7))]);
+        node(
+            &mut st,
+            &["Gene"],
+            &[("k1", s("P1")), ("k2", PropertyValue::Integer(7))],
+        );
         node(&mut st, &["Country"], &[("name", s("India"))]);
         for i in 0..200 {
-            node(&mut st, &["Article"], &[("k1", s(&format!("P{i}"))), ("name", s("India"))]);
+            node(
+                &mut st,
+                &["Article"],
+                &[("k1", s(&format!("P{i}"))), ("name", s("India"))],
+            );
         }
         st
     }
@@ -3127,7 +3455,11 @@ mod dedup_scoped_scan_tests {
     /// The incoming snapshot, exercising every label shape the scoping could get wrong.
     fn incoming() -> GraphStore {
         let mut st = GraphStore::new();
-        let a = node(&mut st, &["Protein"], &[("k1", s("p1")), ("src", s("snap"))]);
+        let a = node(
+            &mut st,
+            &["Protein"],
+            &[("k1", s("p1")), ("src", s("snap"))],
+        );
         let b = node(&mut st, &["ChemblTarget"], &[("k1", s("P2"))]);
         node(&mut st, &["Protein"], &[("k1", s("P3")), ("k2", s("v"))]);
         node(&mut st, &["Target"], &[("k2", s("v"))]);
@@ -3145,13 +3477,29 @@ mod dedup_scoped_scan_tests {
     #[test]
     fn scoped_prepopulate_merges_exactly_like_the_full_scan() {
         let src = incoming();
-        let all = ["Protein", "ChemblTarget", "Target", "Gene", "Country", "Disease"];
+        let all = [
+            "Protein",
+            "ChemblTarget",
+            "Target",
+            "Gene",
+            "Country",
+            "Disease",
+        ];
         let headers: [(&str, Option<&[&str]>); 5] = [
             ("as exported", None),
             ("empty (foreign writer)", Some(&[])),
-            ("missing the dual-labelled side", Some(&["Protein", "Gene", "Country", "Disease"])),
-            ("missing :Target", Some(&["Protein", "ChemblTarget", "Gene", "Country", "Disease"])),
-            ("over-inclusive", Some(&[&all[..], &["Article", "Nope"]].concat())),
+            (
+                "missing the dual-labelled side",
+                Some(&["Protein", "Gene", "Country", "Disease"]),
+            ),
+            (
+                "missing :Target",
+                Some(&["Protein", "ChemblTarget", "Gene", "Country", "Disease"]),
+            ),
+            (
+                "over-inclusive",
+                Some(&[&all[..], &["Article", "Nope"]].concat()),
+            ),
         ];
         let key_sets: [&[&str]; 3] = [&["k1"], &["k1", "k2"], &KEYS];
         for (what, header) in headers {
@@ -3161,13 +3509,27 @@ mod dedup_scoped_scan_tests {
                 let mut full = base();
                 let (m_scoped, _) = import(&mut scoped, &snap, keys, false);
                 let (m_full, _) = import(&mut full, &snap, keys, true);
-                assert_eq!(m_scoped, m_full, "header {what}, keys {keys:?}: merged count");
-                assert_eq!(canon(&scoped), canon(&full), "header {what}, keys {keys:?}: graph");
+                assert_eq!(
+                    m_scoped, m_full,
+                    "header {what}, keys {keys:?}: merged count"
+                );
+                assert_eq!(
+                    canon(&scoped),
+                    canon(&full),
+                    "header {what}, keys {keys:?}: graph"
+                );
                 // and a second import on top, as federation does
                 let (m_scoped, _) = import(&mut scoped, &snap, keys, false);
                 let (m_full, _) = import(&mut full, &snap, keys, true);
-                assert_eq!(m_scoped, m_full, "header {what}, keys {keys:?}: re-import merges");
-                assert_eq!(canon(&scoped), canon(&full), "header {what}, keys {keys:?}: re-import");
+                assert_eq!(
+                    m_scoped, m_full,
+                    "header {what}, keys {keys:?}: re-import merges"
+                );
+                assert_eq!(
+                    canon(&scoped),
+                    canon(&full),
+                    "header {what}, keys {keys:?}: re-import"
+                );
             }
         }
     }
@@ -3185,7 +3547,11 @@ mod dedup_scoped_scan_tests {
         assert_eq!(m_scoped, m_full);
         let targets = |st: &GraphStore| st.get_nodes_by_label(&Label::new("Target")).len();
         assert_eq!(targets(&scoped), targets(&full));
-        assert_eq!(targets(&scoped), 2, "the incoming :Target {{k2:v}} must not merge");
+        assert_eq!(
+            targets(&scoped),
+            2,
+            "the incoming :Target {{k2:v}} must not merge"
+        );
     }
 
     #[test]
@@ -3212,7 +3578,10 @@ mod dedup_scoped_scan_tests {
 
         assert_eq!(merged, 1);
         assert_eq!(full_visits, total, "the reference walks the whole store");
-        assert_eq!(visits, 1, "only the one existing :Country should be visited");
+        assert_eq!(
+            visits, 1,
+            "only the one existing :Country should be visited"
+        );
 
         // Same bound when the header does not name the label and it is found in the body.
         let mut st2 = base();

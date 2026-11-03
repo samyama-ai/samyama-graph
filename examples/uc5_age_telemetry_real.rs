@@ -37,8 +37,8 @@
 static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
 
 use async_trait::async_trait;
-use samyama::agent::{AgentRuntime, Tool, ToolCall, ToolPlan};
 use samyama::agent::tools::CypherTool;
+use samyama::agent::{AgentRuntime, Tool, ToolCall, ToolPlan};
 use samyama::graph::{GraphStore, Label};
 use samyama::persistence::tenant::{AgentConfig, LLMProvider};
 use samyama::query::QueryEngine;
@@ -66,16 +66,26 @@ struct StaticCypherTool {
 
 #[async_trait]
 impl Tool for StaticCypherTool {
-    fn name(&self) -> &str { self.name }
-    fn description(&self) -> &str { self.description }
-    fn parameters(&self) -> Value { json!({"type": "object", "properties": {}}) }
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        self.description
+    }
+    fn parameters(&self) -> Value {
+        json!({"type": "object", "properties": {}})
+    }
     async fn execute(&self, _args: Value) -> samyama::agent::AgentResult<Value> {
         let store = self.store.read().await;
-        let batch = self.engine.execute(&self.query, &*store)
+        let batch = self
+            .engine
+            .execute(&self.query, &*store)
             .map_err(|e| samyama::agent::AgentError::ToolError(format!("cypher: {e}")))?;
         // Wrap as `{records: [[...]]}` so the executor's hit-rate heuristic
         // (which looks for `records`) scores empty batches as 0.5.
-        let records: Vec<Vec<Value>> = batch.records.iter()
+        let records: Vec<Vec<Value>> = batch
+            .records
+            .iter()
             .map(|_| vec![json!("_")]) // rows exist, content not relevant here
             .collect();
         Ok(json!({ "columns": batch.columns, "records": records }))
@@ -125,14 +135,22 @@ fn load_fixture(store: &mut GraphStore) {
         store.create_edge(d, g2, "TARGETS").unwrap();
     }
     for (i, &g) in genes.iter().enumerate() {
-        store.create_edge(g, pathways[i % N_PATHWAYS], "PART_OF").unwrap();
+        store
+            .create_edge(g, pathways[i % N_PATHWAYS], "PART_OF")
+            .unwrap();
     }
 }
 
 // ── Problem: read telemetry from the live graph ────────────────────────
 
 const PLAN_LEN: usize = 5;
-const TOOLS: &[&str] = &["count_nodes", "list_labels", "sample_drugs", "drug_neighbours", "rare_probe"];
+const TOOLS: &[&str] = &[
+    "count_nodes",
+    "list_labels",
+    "sample_drugs",
+    "drug_neighbours",
+    "rare_probe",
+];
 const SKIP: usize = 5;
 const QUESTION_ID: &str = "uc5_plan_probe";
 
@@ -142,8 +160,12 @@ struct TelemetryProblem {
 }
 
 impl MultiObjectiveProblem for TelemetryProblem {
-    fn dim(&self) -> usize { 2 * PLAN_LEN }
-    fn num_objectives(&self) -> usize { 3 }
+    fn dim(&self) -> usize {
+        2 * PLAN_LEN
+    }
+    fn num_objectives(&self) -> usize {
+        3
+    }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         let mut lo = Array1::zeros(2 * PLAN_LEN);
         let mut hi = Array1::zeros(2 * PLAN_LEN);
@@ -164,15 +186,25 @@ impl MultiObjectiveProblem for TelemetryProblem {
         let mut seen: Vec<usize> = Vec::new();
         let mut dup = false;
         for (t, _) in &plan {
-            if *t == SKIP { continue; }
-            if seen.contains(t) { dup = true; break; }
+            if *t == SKIP {
+                continue;
+            }
+            if seen.contains(t) {
+                dup = true;
+                break;
+            }
             seen.push(*t);
         }
         let active: Vec<&str> = seen.iter().map(|&i| TOOLS[i]).collect();
-        if active.is_empty() { return vec![0.0, 0.0, 0.0]; }
+        if active.is_empty() {
+            return vec![0.0, 0.0, 0.0];
+        }
 
-        let id_list = active.iter().map(|t| format!("\"{t}\""))
-            .collect::<Vec<_>>().join(", ");
+        let id_list = active
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         // Telemetry is written on any graph the executor was bound to; here
         // the same EmbeddedClient owns it.
         let q = format!(
@@ -182,7 +214,8 @@ impl MultiObjectiveProblem for TelemetryProblem {
                     avg(r.token_cost) AS tok, avg(r.hit_rate) AS acc"
         );
         let client = self.client.clone();
-        let r = self.handle
+        let r = self
+            .handle
             .block_on(async move { client.query_readonly("default", &q).await })
             .expect("telemetry cypher");
 
@@ -190,7 +223,11 @@ impl MultiObjectiveProblem for TelemetryProblem {
         for row in &r.records {
             stats.insert(
                 row[0].as_str().unwrap_or("").to_string(),
-                (row[1].as_f64().unwrap_or(0.0), row[2].as_f64().unwrap_or(0.0), row[3].as_f64().unwrap_or(0.0)),
+                (
+                    row[1].as_f64().unwrap_or(0.0),
+                    row[2].as_f64().unwrap_or(0.0),
+                    row[3].as_f64().unwrap_or(0.0),
+                ),
             );
         }
 
@@ -200,7 +237,9 @@ impl MultiObjectiveProblem for TelemetryProblem {
         let mut first = true;
         let mut miss = 1.0;
         for (t, par) in &plan {
-            if *t == SKIP { continue; }
+            if *t == SKIP {
+                continue;
+            }
             let (lat, tok, acc) = stats.get(TOOLS[*t]).copied().unwrap_or((0.0, 0.0, 0.0));
             total_tok += tok;
             miss *= 1.0 - acc.clamp(0.0, 1.0);
@@ -228,11 +267,16 @@ fn random_plan(rng: &mut impl rand::Rng, n_tools: usize) -> ToolPlan {
         picks.swap(i, rng.gen_range(0..=i));
     }
     let take = rng.gen_range(2..=4).min(picks.len());
-    let calls = picks.into_iter().take(take).enumerate().map(|(i, idx)| ToolCall {
-        tool: TOOLS[idx].to_string(),
-        args: json!({}),
-        parallel_with_prev: i > 0 && rng.gen_bool(0.3),
-    }).collect();
+    let calls = picks
+        .into_iter()
+        .take(take)
+        .enumerate()
+        .map(|(i, idx)| ToolCall {
+            tool: TOOLS[idx].to_string(),
+            args: json!({}),
+            parallel_with_prev: i > 0 && rng.gen_bool(0.3),
+        })
+        .collect();
     ToolPlan { calls }
 }
 
@@ -259,34 +303,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         system_prompt: None,
         tools: vec![],
         policies: std::collections::HashMap::new(),
-    }).with_store(store.clone());
+    })
+    .with_store(store.clone());
 
     // 4 real Cypher tools — different query templates → different real latencies.
     rt.register_tool(Arc::new(StaticCypherTool {
         name: "count_nodes",
         description: "Count all nodes",
         query: "MATCH (n) RETURN count(n) AS c".into(),
-        engine: engine.clone(), store: store.clone(),
+        engine: engine.clone(),
+        store: store.clone(),
     }));
     rt.register_tool(Arc::new(StaticCypherTool {
         name: "list_labels",
         description: "Aggregate nodes by label",
         query: "MATCH (n) RETURN labels(n) AS l, count(n) AS c".into(),
-        engine: engine.clone(), store: store.clone(),
+        engine: engine.clone(),
+        store: store.clone(),
     }));
     rt.register_tool(Arc::new(StaticCypherTool {
         name: "sample_drugs",
         description: "List drug names",
         query: "MATCH (d:Drug) RETURN d.name AS n".into(),
-        engine: engine.clone(), store: store.clone(),
+        engine: engine.clone(),
+        store: store.clone(),
     }));
     rt.register_tool(Arc::new(StaticCypherTool {
         name: "drug_neighbours",
         description: "Drugs that share a pathway (4-hop scan — intentionally slow)",
         query: "MATCH (d1:Drug)-[:TARGETS]->(:Gene)-[:PART_OF]->(p:Pathway)\
                 <-[:PART_OF]-(:Gene)<-[:TARGETS]-(d2:Drug) \
-                WHERE d1 <> d2 RETURN d1.name AS a, d2.name AS b".into(),
-        engine: engine.clone(), store: store.clone(),
+                WHERE d1 <> d2 RETURN d1.name AS a, d2.name AS b"
+            .into(),
+        engine: engine.clone(),
+        store: store.clone(),
     }));
     // Probes a drug name that doesn't exist — always returns empty, so the
     // executor's hit_rate heuristic scores it 0.5. Introduces real variance
@@ -295,7 +345,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "rare_probe",
         description: "Look up a specific rare drug by exact name",
         query: "MATCH (d:Drug {name: \"drug_99999\"}) RETURN d.name AS n".into(),
-        engine: engine.clone(), store: store.clone(),
+        engine: engine.clone(),
+        store: store.clone(),
     }));
 
     // Also register CypherTool under "cypher" for completeness (unused in plans
@@ -306,9 +357,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::seed_from_u64(42);
     let prompts = [
-        "list drugs", "count things", "drug graph shape", "pathway overview",
-        "sample of drugs", "how many genes", "drug neighbours for pathway",
-        "nodes by label", "all drugs", "show graph structure",
+        "list drugs",
+        "count things",
+        "drug graph shape",
+        "pathway overview",
+        "sample of drugs",
+        "how many genes",
+        "drug neighbours for pathway",
+        "nodes by label",
+        "all drugs",
+        "show graph structure",
     ];
     let mut total_edges = 0;
     for i in 0..40 {
@@ -319,7 +377,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let r = rt.execute_plan(&seeded_prompt, &plan).await?;
         total_edges += r.records.len();
     }
-    println!("[telemetry] ran 40 plans, wrote {} USED_TOOL edges", total_edges);
+    println!(
+        "[telemetry] ran 40 plans, wrote {} USED_TOOL edges",
+        total_edges
+    );
 
     // Inspect telemetry before optimising.
     {
@@ -330,19 +391,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let client = Arc::new(EmbeddedClient::with_store(store.clone()));
-    let probe_summary = client.query_readonly("default",
-        "MATCH (q:Question)-[r:USED_TOOL]->(t:Tool) \
+    let probe_summary = client
+        .query_readonly(
+            "default",
+            "MATCH (q:Question)-[r:USED_TOOL]->(t:Tool) \
          RETURN t.tid AS tid, avg(r.latency_ms) AS lat, avg(r.token_cost) AS tok, \
-                avg(r.hit_rate) AS acc, count(r) AS n").await?;
+                avg(r.hit_rate) AS acc, count(r) AS n",
+        )
+        .await?;
     println!("\n[per-tool real-world stats]");
-    println!("  {:>16}  {:>8}  {:>8}  {:>8}  {:>4}", "tool", "lat_ms", "tokens", "hit", "n");
+    println!(
+        "  {:>16}  {:>8}  {:>8}  {:>8}  {:>4}",
+        "tool", "lat_ms", "tokens", "hit", "n"
+    );
     for row in &probe_summary.records {
-        println!("  {:>16}  {:>8.2}  {:>8.1}  {:>8.3}  {:>4}",
+        println!(
+            "  {:>16}  {:>8.2}  {:>8.1}  {:>8.3}  {:>4}",
             row[0].as_str().unwrap_or(""),
             row[1].as_f64().unwrap_or(0.0),
             row[2].as_f64().unwrap_or(0.0),
             row[3].as_f64().unwrap_or(0.0),
-            row[4].as_i64().unwrap_or(0));
+            row[4].as_i64().unwrap_or(0)
+        );
     }
 
     // Run UC5's NSGA-II on the real telemetry.
@@ -360,32 +430,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let t0 = std::time::Instant::now();
         let res = solver.solve(&*p);
         (res.pareto_front, t0.elapsed().as_millis())
-    }).await?;
+    })
+    .await?;
     println!("[done] Pareto has {} plans, wall {wall_ms} ms", front.len());
 
     let mut rows: Vec<_> = front.iter().collect();
     rows.sort_by(|a, b| a.fitness[0].partial_cmp(&b.fitness[0]).unwrap());
     println!("\n[pareto] top 10 by accuracy:");
-    println!("  {:>8}  {:>8}  {:>8}   plan", "accuracy", "lat_ms", "tokens");
+    println!(
+        "  {:>8}  {:>8}  {:>8}   plan",
+        "accuracy", "lat_ms", "tokens"
+    );
     for ind in rows.iter().take(10) {
         let mut repr = Vec::new();
         for i in 0..PLAN_LEN {
             let t = (ind.variables[2 * i].floor() as usize).min(TOOLS.len());
-            if t == SKIP { continue; }
+            if t == SKIP {
+                continue;
+            }
             let par = ind.variables[2 * i + 1] >= 0.5;
-            let arrow = if repr.is_empty() { "" } else if par { " ∥ " } else { " → " };
+            let arrow = if repr.is_empty() {
+                ""
+            } else if par {
+                " ∥ "
+            } else {
+                " → "
+            };
             repr.push(format!("{arrow}{}", TOOLS[t]));
         }
-        println!("  {:>8.3}  {:>8.1}  {:>8.1}   {}",
-            -ind.fitness[0], ind.fitness[1], ind.fitness[2], repr.join(""));
+        println!(
+            "  {:>8.3}  {:>8.1}  {:>8.1}   {}",
+            -ind.fitness[0],
+            ind.fitness[1],
+            ind.fitness[2],
+            repr.join("")
+        );
     }
 
     let any_dup = rows.iter().any(|ind| {
         let mut seen: Vec<usize> = Vec::new();
         for i in 0..PLAN_LEN {
             let t = (ind.variables[2 * i].floor() as usize).min(TOOLS.len());
-            if t == SKIP { continue; }
-            if seen.contains(&t) { return true; }
+            if t == SKIP {
+                continue;
+            }
+            if seen.contains(&t) {
+                return true;
+            }
             seen.push(t);
         }
         false

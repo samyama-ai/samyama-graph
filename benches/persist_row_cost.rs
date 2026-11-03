@@ -35,7 +35,10 @@ use samyama::graph::{GraphStore, Label, PropertyMap, PropertyValue};
 use samyama::persistence::PersistenceManager;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 fn pct(v: &mut [f64], p: f64) -> f64 {
@@ -48,7 +51,9 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let rows: usize = arg(&args, "--rows").and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+    let rows: usize = arg(&args, "--rows")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1_000_000);
 
     let dir = tempfile::tempdir().expect("tempdir");
     let pm = match PersistenceManager::new(dir.path()) {
@@ -69,7 +74,10 @@ fn main() {
     for i in 0..rows {
         let mut props = PropertyMap::new();
         props.insert("id".to_string(), PropertyValue::Integer(i as i64));
-        props.insert("name".to_string(), PropertyValue::String(format!("row{i:08}")));
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String(format!("row{i:08}")),
+        );
         props.insert("score".to_string(), PropertyValue::Float(i as f64 * 0.5));
         ids.push(store.create_node_with_properties(tenant, vec![Label::new("Row")], props));
     }
@@ -82,16 +90,27 @@ fn main() {
         .collect();
 
     let t_persist = Instant::now();
-    let written = pm.apply_mutations(tenant, &store, &mutations).expect("apply");
+    let written = pm
+        .apply_mutations(tenant, &store, &mutations)
+        .expect("apply");
     let persist_s = t_persist.elapsed().as_secs_f64();
     assert_eq!(written, rows, "not every row was written");
 
     let total = build_s + persist_s;
     println!("\nwhere the time goes, {rows} rows");
     println!("{}", "-".repeat(64));
-    println!("build in memory   {build_s:8.2} s   {:5.1}%", 100.0 * build_s / total);
-    println!("apply_mutations   {persist_s:8.2} s   {:5.1}%", 100.0 * persist_s / total);
-    println!("                  {:8.2} us/row persisted", persist_s * 1e6 / rows as f64);
+    println!(
+        "build in memory   {build_s:8.2} s   {:5.1}%",
+        100.0 * build_s / total
+    );
+    println!(
+        "apply_mutations   {persist_s:8.2} s   {:5.1}%",
+        100.0 * persist_s / total
+    );
+    println!(
+        "                  {:8.2} us/row persisted",
+        persist_s * 1e6 / rows as f64
+    );
 
     // --- 3. the parts #1109 names, timed over a fresh sample of the same rows
     //
@@ -134,17 +153,33 @@ fn main() {
 
     println!("\nper-row parts (median of {sample}, us)");
     println!("{}", "-".repeat(64));
-    println!("existence probe   {probe_p50:8.3}   {:5.1}% of the row",
-             100.0 * probe_p50 / per_row);
-    println!("serialize props   {ser_p50:8.3}   {:5.1}%", 100.0 * ser_p50 / per_row);
-    println!("put_node          {put_p50:8.3}   {:5.1}%", 100.0 * put_p50 / per_row);
-    println!("WAL append + rest {rest:8.3}   {:5.1}%  (by difference)",
-             100.0 * rest / per_row);
+    println!(
+        "existence probe   {probe_p50:8.3}   {:5.1}% of the row",
+        100.0 * probe_p50 / per_row
+    );
+    println!(
+        "serialize props   {ser_p50:8.3}   {:5.1}%",
+        100.0 * ser_p50 / per_row
+    );
+    println!(
+        "put_node          {put_p50:8.3}   {:5.1}%",
+        100.0 * put_p50 / per_row
+    );
+    println!(
+        "WAL append + rest {rest:8.3}   {:5.1}%  (by difference)",
+        100.0 * rest / per_row
+    );
 
     let probe_share = pct(&mut probe_us, 0.5) * rows as f64 / 1e6 / persist_s * 100.0;
-    println!("\nThe existence probe is {probe_share:.1}% of apply_mutations, and \
-              apply_mutations is {:.1}% of the import.", 100.0 * persist_s / total);
-    println!("An upper bound on removing it entirely is therefore {:.2}% of the \
-              import — before any of it is written.", probe_share * persist_s / total);
+    println!(
+        "\nThe existence probe is {probe_share:.1}% of apply_mutations, and \
+              apply_mutations is {:.1}% of the import.",
+        100.0 * persist_s / total
+    );
+    println!(
+        "An upper bound on removing it entirely is therefore {:.2}% of the \
+              import — before any of it is written.",
+        probe_share * persist_s / total
+    );
     println!("\n#1109 asks for this number before the work, not after.");
 }

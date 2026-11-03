@@ -53,7 +53,9 @@ async fn test_all_phases_comprehensive() {
     graph_store.set_edge_property_sparse(knows_edge, "since", 2020i64);
     graph_store.set_edge_property_sparse(knows_edge, "strength", 0.9);
 
-    let works_at_edge = graph_store.create_edge(alice_id, company_id, "WORKS_AT").unwrap();
+    let works_at_edge = graph_store
+        .create_edge(alice_id, company_id, "WORKS_AT")
+        .unwrap();
     graph_store.set_edge_property_sparse(works_at_edge, "position", "Senior Engineer");
     graph_store.set_edge_property_sparse(works_at_edge, "since", 2018i64);
 
@@ -79,34 +81,36 @@ async fn test_all_phases_comprehensive() {
     let query_engine = QueryEngine::new();
 
     // Test 1: Simple MATCH
-    let result = query_engine.execute(
-        "MATCH (n:Person) RETURN n",
-        &graph_store
-    ).unwrap();
+    let result = query_engine
+        .execute("MATCH (n:Person) RETURN n", &graph_store)
+        .unwrap();
     assert_eq!(result.records.len(), 2);
     println!("  ✓ MATCH query returned {} persons", result.records.len());
 
     // Test 2: WHERE clause
-    let result = query_engine.execute(
-        "MATCH (n:Person) WHERE n.age > 27 RETURN n.name",
-        &graph_store
-    ).unwrap();
+    let result = query_engine
+        .execute(
+            "MATCH (n:Person) WHERE n.age > 27 RETURN n.name",
+            &graph_store,
+        )
+        .unwrap();
     assert_eq!(result.records.len(), 1);
     println!("  ✓ WHERE clause filtered correctly");
 
     // Test 3: Edge traversal
-    let result = query_engine.execute(
-        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name",
-        &graph_store
-    ).unwrap();
+    let result = query_engine
+        .execute(
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name",
+            &graph_store,
+        )
+        .unwrap();
     assert_eq!(result.records.len(), 1);
     println!("  ✓ Edge traversal query works");
 
     // Test 4: LIMIT
-    let result = query_engine.execute(
-        "MATCH (n) RETURN n LIMIT 2",
-        &graph_store
-    ).unwrap();
+    let result = query_engine
+        .execute("MATCH (n) RETURN n LIMIT 2", &graph_store)
+        .unwrap();
     assert_eq!(result.records.len(), 2);
     println!("  ✓ LIMIT clause works");
 
@@ -123,12 +127,16 @@ async fn test_all_phases_comprehensive() {
     node1.set_property("username", "user1");
     node1.set_property("email", "user1@example.com");
 
-    persistence_mgr.persist_create_node("default", &node1).unwrap();
+    persistence_mgr
+        .persist_create_node("default", &node1)
+        .unwrap();
 
     let mut node2 = Node::new(NodeId::new(2), Label::new("User"));
     node2.set_property("username", "user2");
 
-    persistence_mgr.persist_create_node("default", &node2).unwrap();
+    persistence_mgr
+        .persist_create_node("default", &node2)
+        .unwrap();
 
     // Create edge
     let mut edge1 = Edge::new(
@@ -139,7 +147,9 @@ async fn test_all_phases_comprehensive() {
     );
     edge1.set_property("since", 2024i64);
 
-    persistence_mgr.persist_create_edge("default", &edge1).unwrap();
+    persistence_mgr
+        .persist_create_edge("default", &edge1)
+        .unwrap();
 
     println!("  ✓ Persisted 2 nodes and 1 edge");
 
@@ -148,11 +158,22 @@ async fn test_all_phases_comprehensive() {
     let recovered_edges = persistence_mgr.storage().scan_edges("default").unwrap();
 
     // The important thing is we have AT LEAST the nodes we created
-    assert!(recovered_nodes.len() >= 2, "Expected at least 2 nodes, got {}", recovered_nodes.len());
-    assert!(recovered_edges.len() >= 1, "Expected at least 1 edge, got {}", recovered_edges.len());
+    assert!(
+        recovered_nodes.len() >= 2,
+        "Expected at least 2 nodes, got {}",
+        recovered_nodes.len()
+    );
+    assert!(
+        recovered_edges.len() >= 1,
+        "Expected at least 1 edge, got {}",
+        recovered_edges.len()
+    );
 
-    println!("  ✓ Recovery from storage successful ({} nodes, {} edges)",
-        recovered_nodes.len(), recovered_edges.len());
+    println!(
+        "  ✓ Recovery from storage successful ({} nodes, {} edges)",
+        recovered_nodes.len(),
+        recovered_edges.len()
+    );
 
     // Test checkpoint
     persistence_mgr.checkpoint().unwrap();
@@ -199,9 +220,15 @@ async fn test_all_phases_comprehensive() {
     cluster_mgr.mark_active(2).await;
     cluster_mgr.mark_active(3).await;
 
-    cluster_mgr.update_node_role(1, raft::cluster::NodeRole::Leader).await;
-    cluster_mgr.update_node_role(2, raft::cluster::NodeRole::Follower).await;
-    cluster_mgr.update_node_role(3, raft::cluster::NodeRole::Follower).await;
+    cluster_mgr
+        .update_node_role(1, raft::cluster::NodeRole::Leader)
+        .await;
+    cluster_mgr
+        .update_node_role(2, raft::cluster::NodeRole::Follower)
+        .await;
+    cluster_mgr
+        .update_node_role(3, raft::cluster::NodeRole::Follower)
+        .await;
 
     println!("  ✓ Node 1 elected as leader");
 
@@ -222,7 +249,10 @@ async fn test_all_phases_comprehensive() {
     };
 
     let response = raft_node1.write(raft_request).await.unwrap();
-    assert!(matches!(response, RaftResponse::NodeCreated { node_id: 100 }));
+    assert!(matches!(
+        response,
+        RaftResponse::NodeCreated { node_id: 100 }
+    ));
 
     println!("  ✓ Write through Raft consensus successful");
 
@@ -242,7 +272,10 @@ async fn test_all_phases_comprehensive() {
     println!("  ✓ Cluster remains healthy after 1 node failure (2/3 quorum)");
 
     // Add learner node
-    cluster_mgr.add_node(4, "127.0.0.1:7003".to_string(), false).await.unwrap();
+    cluster_mgr
+        .add_node(4, "127.0.0.1:7003".to_string(), false)
+        .await
+        .unwrap();
     let config = cluster_mgr.get_config().await;
     assert_eq!(config.learners().len(), 1);
 
@@ -264,7 +297,8 @@ async fn test_all_phases_comprehensive() {
     println!("✓ Persistence layer operational");
 
     // Verify graph store state
-    println!("✓ Graph store has {} nodes, {} edges",
+    println!(
+        "✓ Graph store has {} nodes, {} edges",
         graph_store.node_count(),
         graph_store.edge_count()
     );

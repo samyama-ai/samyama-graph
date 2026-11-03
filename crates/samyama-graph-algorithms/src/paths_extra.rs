@@ -219,7 +219,11 @@ mod tests {
     fn view(n: usize, edges: &[(usize, usize, f64)]) -> GraphView {
         let index_to_node: Vec<NodeId> = (0..n).map(|i| i as NodeId).collect();
         let node_to_index: HashMap<NodeId, usize> = (0..n).map(|i| (i as NodeId, i)).collect();
-        let (mut out, mut inc, mut w) = (vec![Vec::new(); n], vec![Vec::new(); n], vec![Vec::new(); n]);
+        let (mut out, mut inc, mut w) = (
+            vec![Vec::new(); n],
+            vec![Vec::new(); n],
+            vec![Vec::new(); n],
+        );
         for &(a, b, x) in edges {
             out[a].push(b);
             w[a].push(x);
@@ -250,7 +254,10 @@ mod tests {
         let g = view(3, &[(0, 1, 1.0)]);
         let d = all_pairs_hops(&g);
         assert_eq!(d.get(&(0, 1)), Some(&1));
-        assert!(!d.contains_key(&(0, 2)), "unreachable pair must not be stored");
+        assert!(
+            !d.contains_key(&(0, 2)),
+            "unreachable pair must not be stored"
+        );
     }
 
     #[test]
@@ -260,8 +267,17 @@ mod tests {
         let g = view(3, &[(0, 1, 1.0)]);
         assert!(wiener_index(&g).is_none());
         // A complete directed triangle has all 6 ordered pairs at distance 1.
-        let t = view(3, &[(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0),
-                          (1, 0, 1.0), (2, 1, 1.0), (0, 2, 1.0)]);
+        let t = view(
+            3,
+            &[
+                (0, 1, 1.0),
+                (1, 2, 1.0),
+                (2, 0, 1.0),
+                (1, 0, 1.0),
+                (2, 1, 1.0),
+                (0, 2, 1.0),
+            ],
+        );
         assert_eq!(wiener_index(&t), Some(6.0));
     }
 

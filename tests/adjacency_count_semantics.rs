@@ -100,7 +100,10 @@ fn plan(store: &GraphStore, cypher: &str) -> String {
 fn the_neighbours_label_is_honoured() {
     let store = fixture();
     assert_eq!(
-        rows(&store, "MATCH (p:P)-[:KNOWS]->(f:P) RETURN p.name AS g, count(f) AS c"),
+        rows(
+            &store,
+            "MATCH (p:P)-[:KNOWS]->(f:P) RETURN p.name AS g, count(f) AS c"
+        ),
         vec![("Ada".to_string(), 1)],
         "Rex is an :Animal and must not be counted for (f:P)"
     );
@@ -112,7 +115,10 @@ fn an_unlabelled_neighbour_counts_everything() {
     // about. It must not have been broken by making the label case correct.
     let store = fixture();
     assert_eq!(
-        rows(&store, "MATCH (p:P)-[:KNOWS]->(f) RETURN p.name AS g, count(f) AS c"),
+        rows(
+            &store,
+            "MATCH (p:P)-[:KNOWS]->(f) RETURN p.name AS g, count(f) AS c"
+        ),
         vec![("Ada".to_string(), 2)]
     );
 }
@@ -122,7 +128,10 @@ fn a_source_matching_zero_times_yields_no_row() {
     // Bob and Cy know nobody. A *required* MATCH drops them; only
     // OPTIONAL MATCH would keep them with a zero.
     let store = fixture();
-    let got = rows(&store, "MATCH (p:P)-[:KNOWS]->(f) RETURN p.name AS g, count(f) AS c");
+    let got = rows(
+        &store,
+        "MATCH (p:P)-[:KNOWS]->(f) RETURN p.name AS g, count(f) AS c",
+    );
     assert!(!got.iter().any(|(n, _)| n == "Bob" || n == "Cy"), "{got:?}");
 }
 
@@ -131,10 +140,13 @@ fn the_grouped_and_ungrouped_forms_agree() {
     // The tell that found this. Two ways of asking the same question must not
     // give different totals.
     let store = fixture();
-    let grouped: i64 = rows(&store, "MATCH (p:P)-[:KNOWS]->(f:P) RETURN p.name AS g, count(f) AS c")
-        .iter()
-        .map(|(_, n)| n)
-        .sum();
+    let grouped: i64 = rows(
+        &store,
+        "MATCH (p:P)-[:KNOWS]->(f:P) RETURN p.name AS g, count(f) AS c",
+    )
+    .iter()
+    .map(|(_, n)| n)
+    .sum();
 
     let query = parse_query("MATCH (p:P)-[:KNOWS]->(f:P) RETURN count(f) AS c").unwrap();
     let batch = QueryExecutor::new(&store).execute(&query).unwrap();
@@ -143,7 +155,10 @@ fn the_grouped_and_ungrouped_forms_agree() {
         other => panic!("{other:?}"),
     };
 
-    assert_eq!(grouped, ungrouped, "grouped {grouped} vs ungrouped {ungrouped}");
+    assert_eq!(
+        grouped, ungrouped,
+        "grouped {grouped} vs ungrouped {ungrouped}"
+    );
     assert_eq!(grouped, 1);
 }
 
@@ -168,7 +183,10 @@ fn the_rewrite_is_still_taken() {
 fn an_incoming_pattern_is_filtered_too() {
     let store = fixture();
     assert_eq!(
-        rows(&store, "MATCH (f:P)<-[:KNOWS]-(p:P) RETURN f.name AS g, count(p) AS c"),
+        rows(
+            &store,
+            "MATCH (f:P)<-[:KNOWS]-(p:P) RETURN f.name AS g, count(p) AS c"
+        ),
         vec![("Bob".to_string(), 1)],
         "Rex is not a :P, and Ada has no incoming KNOWS"
     );
@@ -177,7 +195,10 @@ fn an_incoming_pattern_is_filtered_too() {
 #[test]
 fn an_undirected_pattern_is_filtered_too() {
     let store = fixture();
-    let got = rows(&store, "MATCH (p:P)-[:KNOWS]-(f:P) RETURN p.name AS g, count(f) AS c");
+    let got = rows(
+        &store,
+        "MATCH (p:P)-[:KNOWS]-(f:P) RETURN p.name AS g, count(f) AS c",
+    );
     assert_eq!(
         got,
         vec![("Ada".to_string(), 1), ("Bob".to_string(), 1)],
@@ -189,7 +210,10 @@ fn an_undirected_pattern_is_filtered_too() {
 fn a_label_no_node_carries_counts_nothing() {
     // `label_index` has no entry, which is not the same as an empty one.
     let store = fixture();
-    let got = rows(&store, "MATCH (p:P)-[:KNOWS]->(f:Ghost) RETURN p.name AS g, count(f) AS c");
+    let got = rows(
+        &store,
+        "MATCH (p:P)-[:KNOWS]->(f:Ghost) RETURN p.name AS g, count(f) AS c",
+    );
     assert!(got.is_empty(), "{got:?}");
 }
 
@@ -199,7 +223,10 @@ fn the_answer_matches_expanding_the_pattern_by_hand() {
     // eligible for the rewrite, so it goes through the ordinary aggregate and
     // is the independent answer.
     let store = fixture();
-    let by_rewrite = rows(&store, "MATCH (p:P)-[:KNOWS]->(f:P) RETURN p.name AS g, count(f) AS c");
+    let by_rewrite = rows(
+        &store,
+        "MATCH (p:P)-[:KNOWS]->(f:P) RETURN p.name AS g, count(f) AS c",
+    );
     let by_aggregate = rows(
         &store,
         "MATCH (p:P)-[:KNOWS]->(f:P) RETURN p.name AS g, count(f.name) AS c",
@@ -349,7 +376,11 @@ fn the_catalog_path_does_not_pay_for_nodes_it_never_reads() {
         best
     };
 
-    assert!(plan(&store, cypher).contains("source=catalog"), "{}", plan(&store, cypher));
+    assert!(
+        plan(&store, cypher).contains("source=catalog"),
+        "{}",
+        plan(&store, cypher)
+    );
     let answer = rows(&store, cypher);
     let small = best(&store);
 
@@ -361,7 +392,11 @@ fn the_catalog_path_does_not_pay_for_nodes_it_never_reads() {
 
     // Still the catalog, still the same ten rows: a ratio over two plans or
     // two answers would be measuring something else.
-    assert!(plan(&store, cypher).contains("source=catalog"), "{}", plan(&store, cypher));
+    assert!(
+        plan(&store, cypher).contains("source=catalog"),
+        "{}",
+        plan(&store, cypher)
+    );
     assert_eq!(rows(&store, cypher), answer);
     let large = best(&store);
 

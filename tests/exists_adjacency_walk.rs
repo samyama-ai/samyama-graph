@@ -39,8 +39,14 @@ fn weighted() -> GraphStore {
     for n in ["a", "b", "c"] {
         run(&mut store, &format!("CREATE (:N {{name: \"{n}\"}})"));
     }
-    run(&mut store, "MATCH (x:N {name:\"a\"}), (y:N {name:\"b\"}) CREATE (x)-[:R {w: 1}]->(y)");
-    run(&mut store, "MATCH (x:N {name:\"a\"}), (y:N {name:\"c\"}) CREATE (x)-[:R {w: 2}]->(y)");
+    run(
+        &mut store,
+        "MATCH (x:N {name:\"a\"}), (y:N {name:\"b\"}) CREATE (x)-[:R {w: 1}]->(y)",
+    );
+    run(
+        &mut store,
+        "MATCH (x:N {name:\"a\"}), (y:N {name:\"c\"}) CREATE (x)-[:R {w: 2}]->(y)",
+    );
     store
 }
 
@@ -52,11 +58,17 @@ fn weighted() -> GraphStore {
 fn an_edge_property_predicate_inside_exists_still_filters() {
     let store = weighted();
     assert_eq!(
-        flags(&store, "MATCH (a:N {name:\"a\"}) RETURN EXISTS { MATCH (a)-[:R {w: 2}]->() } AS x"),
+        flags(
+            &store,
+            "MATCH (a:N {name:\"a\"}) RETURN EXISTS { MATCH (a)-[:R {w: 2}]->() } AS x"
+        ),
         vec![true],
     );
     assert_eq!(
-        flags(&store, "MATCH (a:N {name:\"a\"}) RETURN EXISTS { MATCH (a)-[:R {w: 9}]->() } AS x"),
+        flags(
+            &store,
+            "MATCH (a:N {name:\"a\"}) RETURN EXISTS { MATCH (a)-[:R {w: 9}]->() } AS x"
+        ),
         vec![false],
     );
 }
@@ -91,7 +103,10 @@ fn an_edge_variable_bound_inside_exists_is_readable() {
 fn an_unknown_relationship_type_matches_nothing() {
     let store = weighted();
     assert_eq!(
-        flags(&store, "MATCH (a:N {name:\"a\"}) RETURN EXISTS { MATCH (a)-[:NOPE]->() } AS x"),
+        flags(
+            &store,
+            "MATCH (a:N {name:\"a\"}) RETURN EXISTS { MATCH (a)-[:NOPE]->() } AS x"
+        ),
         vec![false],
     );
 }
@@ -101,15 +116,24 @@ fn an_unknown_relationship_type_matches_nothing() {
 fn direction_is_honoured_in_both_walks() {
     let store = weighted();
     assert_eq!(
-        flags(&store, "MATCH (b:N {name:\"b\"}) RETURN EXISTS { MATCH (b)-[:R]->() } AS x"),
+        flags(
+            &store,
+            "MATCH (b:N {name:\"b\"}) RETURN EXISTS { MATCH (b)-[:R]->() } AS x"
+        ),
         vec![false],
     );
     assert_eq!(
-        flags(&store, "MATCH (b:N {name:\"b\"}) RETURN EXISTS { MATCH (b)<-[:R]-() } AS x"),
+        flags(
+            &store,
+            "MATCH (b:N {name:\"b\"}) RETURN EXISTS { MATCH (b)<-[:R]-() } AS x"
+        ),
         vec![true],
     );
     assert_eq!(
-        flags(&store, "MATCH (b:N {name:\"b\"}) RETURN EXISTS { MATCH (b)-[:R]-() } AS x"),
+        flags(
+            &store,
+            "MATCH (b:N {name:\"b\"}) RETURN EXISTS { MATCH (b)-[:R]-() } AS x"
+        ),
         vec![true],
     );
 }
@@ -121,9 +145,15 @@ fn direction_is_honoured_in_both_walks() {
 fn a_self_relationship_is_walked_once_by_an_undirected_pattern() {
     let mut store = GraphStore::new();
     run(&mut store, "CREATE (:N {name: \"a\"})");
-    run(&mut store, "MATCH (x:N {name:\"a\"}) CREATE (x)-[:LOOP]->(x)");
+    run(
+        &mut store,
+        "MATCH (x:N {name:\"a\"}) CREATE (x)-[:LOOP]->(x)",
+    );
     assert_eq!(
-        flags(&store, "MATCH (a:N {name:\"a\"}) RETURN EXISTS { MATCH (a)-[:LOOP]-() } AS x"),
+        flags(
+            &store,
+            "MATCH (a:N {name:\"a\"}) RETURN EXISTS { MATCH (a)-[:LOOP]-() } AS x"
+        ),
         vec![true],
     );
     assert_eq!(

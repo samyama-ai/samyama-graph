@@ -38,9 +38,15 @@ fn store_of(values: &[Option<i64>]) -> GraphStore {
     let mut store = GraphStore::new();
     for (i, v) in values.iter().enumerate() {
         let id = store.create_node("N");
-        let _ = store.set_node_property("default", id, "seq".to_string(), PropertyValue::Integer(i as i64));
+        let _ = store.set_node_property(
+            "default",
+            id,
+            "seq".to_string(),
+            PropertyValue::Integer(i as i64),
+        );
         if let Some(v) = v {
-            let _ = store.set_node_property("default", id, "v".to_string(), PropertyValue::Integer(*v));
+            let _ =
+                store.set_node_property("default", id, "v".to_string(), PropertyValue::Integer(*v));
         }
     }
     store
@@ -76,7 +82,11 @@ fn reference(values: &[Option<i64>], k: usize, descending: bool) -> Vec<Option<i
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => std::cmp::Ordering::Equal,
         };
-        if descending { ord.reverse() } else { ord }
+        if descending {
+            ord.reverse()
+        } else {
+            ord
+        }
     });
     sorted.into_iter().take(k).collect()
 }
@@ -92,9 +102,16 @@ fn the_winners_are_found_when_they_arrive_last() {
     // that failed to improve, or that rejected on the wrong side, loses them.
     let values: Vec<Option<i64>> = (0..N as i64).map(Some).collect();
     let store = store_of(&values);
-    let got = run(&store, "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20");
+    let got = run(
+        &store,
+        "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20",
+    );
     assert_eq!(got, reference(&values, 20, true));
-    assert_eq!(got[0], Some(N as i64 - 1), "the largest value arrived last: {got:?}");
+    assert_eq!(
+        got[0],
+        Some(N as i64 - 1),
+        "the largest value arrived last: {got:?}"
+    );
 }
 
 #[test]
@@ -103,7 +120,10 @@ fn the_winners_are_found_when_they_arrive_first() {
     // subsequent row is rejected. This is the path the optimisation is for.
     let values: Vec<Option<i64>> = (0..N as i64).rev().map(Some).collect();
     let store = store_of(&values);
-    let got = run(&store, "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20");
+    let got = run(
+        &store,
+        "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20",
+    );
     assert_eq!(got, reference(&values, 20, true));
 }
 
@@ -117,10 +137,20 @@ fn a_scattered_order_agrees_with_sorting_everything() {
         .collect();
     let store = store_of(&values);
     for (cypher, desc) in [
-        ("MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20", true),
-        ("MATCH (n:N) RETURN n.v AS v ORDER BY n.v ASC LIMIT 20", false),
+        (
+            "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20",
+            true,
+        ),
+        (
+            "MATCH (n:N) RETURN n.v AS v ORDER BY n.v ASC LIMIT 20",
+            false,
+        ),
     ] {
-        assert_eq!(run(&store, cypher), reference(&values, 20, desc), "{cypher}");
+        assert_eq!(
+            run(&store, cypher),
+            reference(&values, 20, desc),
+            "{cypher}"
+        );
     }
 }
 
@@ -130,7 +160,10 @@ fn ties_at_the_threshold_are_not_dropped() {
     // on `>=` instead of `>` would return nothing after the first trim.
     let values: Vec<Option<i64>> = std::iter::repeat(Some(7)).take(N).collect();
     let store = store_of(&values);
-    let got = run(&store, "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20");
+    let got = run(
+        &store,
+        "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20",
+    );
     assert_eq!(got.len(), 20, "{got:?}");
     assert!(got.iter().all(|v| *v == Some(7)), "{got:?}");
 }
@@ -141,7 +174,10 @@ fn a_tie_spanning_the_cut_still_returns_k_rows() {
     let mut values: Vec<Option<i64>> = std::iter::repeat(Some(100)).take(N / 2).collect();
     values.extend(std::iter::repeat(Some(1)).take(N / 2));
     let store = store_of(&values);
-    let got = run(&store, "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20");
+    let got = run(
+        &store,
+        "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20",
+    );
     assert_eq!(got.len(), 20);
     assert!(got.iter().all(|v| *v == Some(100)), "{got:?}");
 }
@@ -158,20 +194,39 @@ fn a_handful_of_values_among_many_nulls_is_still_found() {
     }
     let store = store_of(&values);
 
-    let ascending = run(&store, "MATCH (n:N) RETURN n.v AS v ORDER BY n.v ASC LIMIT 5");
-    assert_eq!(ascending[..3].to_vec(), vec![Some(1), Some(5), Some(9)], "{ascending:?}");
-    assert!(ascending[3].is_none() && ascending[4].is_none(), "nulls fill the rest: {ascending:?}");
+    let ascending = run(
+        &store,
+        "MATCH (n:N) RETURN n.v AS v ORDER BY n.v ASC LIMIT 5",
+    );
+    assert_eq!(
+        ascending[..3].to_vec(),
+        vec![Some(1), Some(5), Some(9)],
+        "{ascending:?}"
+    );
+    assert!(
+        ascending[3].is_none() && ascending[4].is_none(),
+        "nulls fill the rest: {ascending:?}"
+    );
 
     // And the other direction, where nulls win outright.
-    let descending = run(&store, "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 5");
-    assert!(descending.iter().all(|v| v.is_none()), "null sorts greatest: {descending:?}");
+    let descending = run(
+        &store,
+        "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 5",
+    );
+    assert!(
+        descending.iter().all(|v| v.is_none()),
+        "null sorts greatest: {descending:?}"
+    );
 }
 
 #[test]
 fn a_limit_larger_than_the_input_returns_everything_sorted() {
     let values: Vec<Option<i64>> = (0..50i64).map(Some).collect();
     let store = store_of(&values);
-    let got = run(&store, "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 500");
+    let got = run(
+        &store,
+        "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 500",
+    );
     assert_eq!(got, reference(&values, 500, true));
     assert_eq!(got.len(), 50);
 }
@@ -182,7 +237,10 @@ fn skip_is_accounted_for_in_the_bound() {
     // alone would discard exactly the rows SKIP is meant to step over.
     let values: Vec<Option<i64>> = (0..N as i64).map(Some).collect();
     let store = store_of(&values);
-    let got = run(&store, "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC SKIP 10 LIMIT 5");
+    let got = run(
+        &store,
+        "MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC SKIP 10 LIMIT 5",
+    );
     let full = reference(&values, 15, true);
     assert_eq!(got, full[10..15].to_vec(), "{got:?}");
 }
@@ -206,8 +264,18 @@ fn a_two_key_sort_agrees_with_sorting_everything() {
         let id = store.create_node("N");
         // `major` has only 5 distinct values, so ties on it are constant and
         // `minor` decides — which is exactly where a truncated compare fails.
-        let _ = store.set_node_property("default", id, "major".to_string(), PropertyValue::Integer(i % 5));
-        let _ = store.set_node_property("default", id, "minor".to_string(), PropertyValue::Integer(i));
+        let _ = store.set_node_property(
+            "default",
+            id,
+            "major".to_string(),
+            PropertyValue::Integer(i % 5),
+        );
+        let _ = store.set_node_property(
+            "default",
+            id,
+            "minor".to_string(),
+            PropertyValue::Integer(i),
+        );
     }
     let query = parse_query(
         "MATCH (n:N) RETURN n.major AS a, n.minor AS b ORDER BY n.major DESC, n.minor DESC LIMIT 10",
@@ -238,8 +306,7 @@ fn a_bounded_sort_does_not_scale_with_the_rows_it_discards() {
     let time = |n: usize| -> f64 {
         let values: Vec<Option<i64>> = (0..n as i64).map(Some).collect();
         let store = store_of(&values);
-        let query =
-            parse_query("MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20").unwrap();
+        let query = parse_query("MATCH (n:N) RETURN n.v AS v ORDER BY n.v DESC LIMIT 20").unwrap();
         let _ = QueryExecutor::new(&store).execute(&query).unwrap();
         let started = std::time::Instant::now();
         let out = QueryExecutor::new(&store).execute(&query).unwrap();

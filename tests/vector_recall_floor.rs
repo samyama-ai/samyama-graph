@@ -42,7 +42,9 @@ const FLOOR: f64 = 0.90;
 /// A fixed generator, so the corpus is the same on every run and the only
 /// thing that varies is the index's own randomness.
 fn lcg(seed: &mut u64) -> f32 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     ((*seed >> 33) as f32 / (1u64 << 31) as f32) - 1.0
 }
 
@@ -76,14 +78,25 @@ fn hnsw_recall_stays_above_the_floor() {
         // Exact top-K by brute force. The index is compared against the answer,
         // not against its previous self: a reference the index also produces
         // would agree with it however wrong both were.
-        let mut exact: Vec<(usize, f32)> =
-            vectors.iter().enumerate().map(|(i, v)| (i, cosine(&q, v))).collect();
+        let mut exact: Vec<(usize, f32)> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, cosine(&q, v)))
+            .collect();
         exact.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("no NaNs in a fixed corpus"));
         let truth: HashSet<usize> = exact.iter().take(K).map(|(i, _)| *i).collect();
 
         let got = index.search(&q, K).expect("search");
-        assert_eq!(got.len(), K, "the index returned {} of {K} asked for", got.len());
-        hit += got.iter().filter(|(id, _)| truth.contains(&(id.0 as usize))).count();
+        assert_eq!(
+            got.len(),
+            K,
+            "the index returned {} of {K} asked for",
+            got.len()
+        );
+        hit += got
+            .iter()
+            .filter(|(id, _)| truth.contains(&(id.0 as usize)))
+            .count();
         total += K;
     }
 
@@ -105,7 +118,9 @@ const BUILDS: usize = 20;
 
 fn corpus(n: usize, seed: u64) -> Vec<Vec<f32>> {
     let mut seed = seed;
-    (0..n).map(|_| (0..DIM).map(|_| lcg(&mut seed)).collect()).collect()
+    (0..n)
+        .map(|_| (0..DIM).map(|_| lcg(&mut seed)).collect())
+        .collect()
 }
 
 fn assert_every_vector_finds_itself(quantization: Quantization) {

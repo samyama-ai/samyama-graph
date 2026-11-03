@@ -37,7 +37,12 @@ fn count(store: &GraphStore, label: &str) -> usize {
     store.get_nodes_by_label(&Label::new(label)).len()
 }
 
-fn write(engine: &QueryEngine, store: &mut GraphStore, q: &str, limit: Option<Duration>) -> Result<(), String> {
+fn write(
+    engine: &QueryEngine,
+    store: &mut GraphStore,
+    q: &str,
+    limit: Option<Duration>,
+) -> Result<(), String> {
     engine
         .execute_mut_with_params_within(q, store, "default", &BoundParams::new(), limit)
         .map(|_| ())
@@ -47,8 +52,13 @@ fn write(engine: &QueryEngine, store: &mut GraphStore, q: &str, limit: Option<Du
 fn seeded() -> (QueryEngine, GraphStore) {
     let engine = QueryEngine::new();
     let mut store = GraphStore::new();
-    write(&engine, &mut store, &format!("UNWIND range(1, {ROWS}) AS i CREATE (:P {{i: i, x: 1}})"), None)
-        .expect("seed");
+    write(
+        &engine,
+        &mut store,
+        &format!("UNWIND range(1, {ROWS}) AS i CREATE (:P {{i: i, x: 1}})"),
+        None,
+    )
+    .expect("seed");
     (engine, store)
 }
 
@@ -69,7 +79,11 @@ fn a_create_past_its_deadline_creates_nothing() {
         &format!("UNWIND range(1, {ROWS}) AS i CREATE (:N {{i: i}})"),
         NOW,
     ));
-    assert_eq!(count(&store, "N"), 0, "the first batch of a timed-out CREATE stayed");
+    assert_eq!(
+        count(&store, "N"),
+        0,
+        "the first batch of a timed-out CREATE stayed"
+    );
     assert_eq!(store.node_count(), 0);
 }
 
@@ -83,7 +97,10 @@ fn a_set_past_its_deadline_changes_nothing() {
         .execute("MATCH (n:P) WHERE n.x <> 1 RETURN count(n) AS c", &store)
         .unwrap();
     assert_eq!(
-        changed.records[0].get("c").and_then(|v| v.as_property()).and_then(|p| p.as_integer()),
+        changed.records[0]
+            .get("c")
+            .and_then(|v| v.as_property())
+            .and_then(|p| p.as_integer()),
         Some(0),
         "a timed-out SET left some of its writes"
     );
@@ -93,14 +110,27 @@ fn a_set_past_its_deadline_changes_nothing() {
 fn a_delete_past_its_deadline_deletes_nothing() {
     let (engine, mut store) = seeded();
     write(&engine, &mut store, "CREATE INDEX ON :P(i)", None).expect("index");
-    assert_timed_out(write(&engine, &mut store, "MATCH (n:P) DETACH DELETE n", NOW));
+    assert_timed_out(write(
+        &engine,
+        &mut store,
+        "MATCH (n:P) DETACH DELETE n",
+        NOW,
+    ));
 
-    assert_eq!(count(&store, "P"), ROWS as usize, "a timed-out DELETE removed nodes");
+    assert_eq!(
+        count(&store, "P"),
+        ROWS as usize,
+        "a timed-out DELETE removed nodes"
+    );
     // Restored into the index as well as the label scan.
     let found = engine
         .execute("MATCH (n:P) WHERE n.i = 2500 RETURN n.x AS x", &store)
         .unwrap();
-    assert_eq!(found.records.len(), 1, "a restored node is missing from the property index");
+    assert_eq!(
+        found.records.len(),
+        1,
+        "a restored node is missing from the property index"
+    );
 }
 
 #[test]
@@ -112,9 +142,16 @@ fn a_tenant_limit_shorter_than_the_servers_wins() {
     write(&engine, &mut store, "MATCH (n:P) SET n.x = 3", None).expect("the server's limit alone");
 
     // Reads take the tenant's limit too.
-    let read = engine.execute_with_params_within("MATCH (n:P) RETURN n.i", &store, &BoundParams::new(), NOW);
+    let read = engine.execute_with_params_within(
+        "MATCH (n:P) RETURN n.i",
+        &store,
+        &BoundParams::new(),
+        NOW,
+    );
     assert!(
-        read.as_ref().err().is_some_and(|e| e.to_string().contains("timed out")),
+        read.as_ref()
+            .err()
+            .is_some_and(|e| e.to_string().contains("timed out")),
         "a read ignored the tenant's limit: {:?}",
         read.map(|b| b.records.len())
     );
@@ -126,15 +163,36 @@ fn a_tenant_limit_shorter_than_the_servers_wins() {
 fn a_statement_that_fails_part_way_is_undone() {
     let engine = QueryEngine::new();
     let mut store = GraphStore::new();
-    write(&engine, &mut store, "CREATE CONSTRAINT ON (n:U) ASSERT n.k IS UNIQUE", None).expect("constraint");
-    let err = write(&engine, &mut store, "UNWIND [1, 2, 3, 2] AS k CREATE (:U {k: k})", None)
-        .expect_err("the duplicate key was admitted");
+    write(
+        &engine,
+        &mut store,
+        "CREATE CONSTRAINT ON (n:U) ASSERT n.k IS UNIQUE",
+        None,
+    )
+    .expect("constraint");
+    let err = write(
+        &engine,
+        &mut store,
+        "UNWIND [1, 2, 3, 2] AS k CREATE (:U {k: k})",
+        None,
+    )
+    .expect_err("the duplicate key was admitted");
     assert!(!err.contains("timed out"), "{err}");
-    assert_eq!(count(&store, "U"), 0, "the rows before the duplicate stayed");
+    assert_eq!(
+        count(&store, "U"),
+        0,
+        "the rows before the duplicate stayed"
+    );
 
     // And the store is usable afterwards: the keys the failed statement had
     // taken are free again.
-    write(&engine, &mut store, "UNWIND [1, 2, 3] AS k CREATE (:U {k: k})", None).expect("retry");
+    write(
+        &engine,
+        &mut store,
+        "UNWIND [1, 2, 3] AS k CREATE (:U {k: k})",
+        None,
+    )
+    .expect("retry");
     assert_eq!(count(&store, "U"), 3);
 }
 
@@ -147,7 +205,11 @@ fn a_failed_statement_leaves_nothing_to_persist() {
     write(&engine, &mut store, "CREATE (:Before)", None).expect("write");
     assert_timed_out(write(&engine, &mut store, "MATCH (n:P) SET n.x = 9", NOW));
     let log = store.take_write_log();
-    assert_eq!(log.len(), 1, "the journal kept the failed statement's writes: {log:?}");
+    assert_eq!(
+        log.len(),
+        1,
+        "the journal kept the failed statement's writes: {log:?}"
+    );
 }
 
 /// Inside a transaction the caller opened, the transaction is the unit: the
@@ -158,8 +220,15 @@ fn inside_a_transaction_the_transaction_decides() {
     store.begin_session_transaction().unwrap();
     write(&engine, &mut store, "CREATE (:InTxn)", None).expect("first statement");
     assert_timed_out(write(&engine, &mut store, "MATCH (n:P) SET n.x = 5", NOW));
-    assert!(store.session_transaction_version().is_some(), "the caller's transaction was closed");
-    assert_eq!(count(&store, "InTxn"), 1, "the earlier statement was undone by the later one");
+    assert!(
+        store.session_transaction_version().is_some(),
+        "the caller's transaction was closed"
+    );
+    assert_eq!(
+        count(&store, "InTxn"),
+        1,
+        "the earlier statement was undone by the later one"
+    );
 
     store.rollback_session_transaction().unwrap();
     assert_eq!(count(&store, "InTxn"), 0);
@@ -167,7 +236,10 @@ fn inside_a_transaction_the_transaction_decides() {
         .execute("MATCH (n:P) WHERE n.x <> 1 RETURN count(n) AS c", &store)
         .unwrap();
     assert_eq!(
-        changed.records[0].get("c").and_then(|v| v.as_property()).and_then(|p| p.as_integer()),
+        changed.records[0]
+            .get("c")
+            .and_then(|v| v.as_property())
+            .and_then(|p| p.as_integer()),
         Some(0)
     );
 }
@@ -176,12 +248,29 @@ fn inside_a_transaction_the_transaction_decides() {
 fn successful_writes_leave_the_store_as_before() {
     // The statement transaction must not change what a plain write does.
     let (engine, mut store) = seeded();
-    write(&engine, &mut store, "MATCH (n:P) WHERE n.i <= 10 SET n.x = 7", None).unwrap();
-    write(&engine, &mut store, "MATCH (n:P) WHERE n.i > 2990 DETACH DELETE n", None).unwrap();
+    write(
+        &engine,
+        &mut store,
+        "MATCH (n:P) WHERE n.i <= 10 SET n.x = 7",
+        None,
+    )
+    .unwrap();
+    write(
+        &engine,
+        &mut store,
+        "MATCH (n:P) WHERE n.i > 2990 DETACH DELETE n",
+        None,
+    )
+    .unwrap();
     let r = engine
         .execute("MATCH (n:P) RETURN count(n) AS c, sum(n.x) AS s", &store)
         .unwrap();
-    let get = |k: &str| r.records[0].get(k).and_then(|v| v.as_property()).and_then(|p| p.as_integer());
+    let get = |k: &str| {
+        r.records[0]
+            .get(k)
+            .and_then(|v| v.as_property())
+            .and_then(|p| p.as_integer())
+    };
     assert_eq!(get("c"), Some(2990));
     assert_eq!(get("s"), Some(2990 + 10 * 6));
 }
@@ -190,7 +279,10 @@ fn successful_writes_leave_the_store_as_before() {
 
 fn tenants_with_no_time() -> Arc<TenantManager> {
     let tm = Arc::new(TenantManager::new());
-    let quotas = ResourceQuotas { max_query_time_ms: Some(0), ..ResourceQuotas::unlimited() };
+    let quotas = ResourceQuotas {
+        max_query_time_ms: Some(0),
+        ..ResourceQuotas::unlimited()
+    };
     tm.update_quotas("default", quotas).unwrap();
     tm
 }
@@ -223,7 +315,10 @@ async fn resp_returns_the_timeout_error_and_keeps_the_store() {
         .execute("MATCH (n:P) WHERE n.x <> 1 RETURN count(n) AS c", &guard)
         .unwrap();
     assert_eq!(
-        changed.records[0].get("c").and_then(|v| v.as_property()).and_then(|p| p.as_integer()),
+        changed.records[0]
+            .get("c")
+            .and_then(|v| v.as_property())
+            .and_then(|p| p.as_integer()),
         Some(0)
     );
 }
@@ -233,7 +328,8 @@ async fn resp_without_a_tenant_limit_runs_the_same_write() {
     let (_, seeded) = seeded();
     let store = Arc::new(RwLock::new(seeded));
     let tm = Arc::new(TenantManager::new());
-    tm.update_quotas("default", ResourceQuotas::unlimited()).unwrap();
+    tm.update_quotas("default", ResourceQuotas::unlimited())
+        .unwrap();
     let h = CommandHandler::new_with_tenants(None, tm);
     let reply = resp(&h, &store, "MATCH (n:P) SET n.x = 2").await;
     assert!(!matches!(reply, RespValue::Error(_)), "{reply:?}");
@@ -250,8 +346,13 @@ async fn post(app: &axum::Router, body: Value) -> (StatusCode, Value) {
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 #[tokio::test]
@@ -264,7 +365,11 @@ async fn http_returns_the_timeout_error_and_keeps_the_store() {
 
     for q in ["MATCH (n:P) SET n.x = 2", "MATCH (n:P) RETURN n.i"] {
         let (status, body) = post(&app, json!({ "query": q })).await;
-        assert_ne!(status, StatusCode::OK, "{q:?} past the tenant's limit succeeded over HTTP");
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "{q:?} past the tenant's limit succeeded over HTTP"
+        );
         let err = body["error"].as_str().unwrap_or_default();
         assert!(err.contains("timed out"), "{q:?}: {body}");
     }
@@ -273,7 +378,10 @@ async fn http_returns_the_timeout_error_and_keeps_the_store() {
         .execute("MATCH (n:P) WHERE n.x <> 1 RETURN count(n) AS c", &guard)
         .unwrap();
     assert_eq!(
-        changed.records[0].get("c").and_then(|v| v.as_property()).and_then(|p| p.as_integer()),
+        changed.records[0]
+            .get("c")
+            .and_then(|v| v.as_property())
+            .and_then(|p| p.as_integer()),
         Some(0)
     );
 }

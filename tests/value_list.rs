@@ -45,7 +45,9 @@ fn a_variable_length_relationship_variable_is_a_list_of_relationships() {
         Value::List(items) => {
             assert_eq!(items.len(), 2, "one element per hop");
             assert!(
-                items.iter().all(|i| matches!(i, Value::EdgeRef(..) | Value::Edge(..))),
+                items
+                    .iter()
+                    .all(|i| matches!(i, Value::EdgeRef(..) | Value::Edge(..))),
                 "elements are relationships, not ids: {items:?}"
             );
         }
@@ -87,17 +89,29 @@ fn size_counts_a_list_of_relationships() {
 #[test]
 fn nodes_and_relationships_return_entities_rather_than_ids() {
     let store = chain();
-    match one(&store, "MATCH p = (a:A)-[:T*2]->(x) RETURN nodes(p) AS v", "v") {
+    match one(
+        &store,
+        "MATCH p = (a:A)-[:T*2]->(x) RETURN nodes(p) AS v",
+        "v",
+    ) {
         Value::List(items) => {
             assert_eq!(items.len(), 3, "three nodes across two hops");
-            assert!(items.iter().all(|i| matches!(i, Value::NodeRef(_) | Value::Node(..))));
+            assert!(items
+                .iter()
+                .all(|i| matches!(i, Value::NodeRef(_) | Value::Node(..))));
         }
         other => panic!("nodes() should be a list of nodes, got {other:?}"),
     }
-    match one(&store, "MATCH p = (a:A)-[:T*2]->(x) RETURN relationships(p) AS v", "v") {
+    match one(
+        &store,
+        "MATCH p = (a:A)-[:T*2]->(x) RETURN relationships(p) AS v",
+        "v",
+    ) {
         Value::List(items) => {
             assert_eq!(items.len(), 2);
-            assert!(items.iter().all(|i| matches!(i, Value::EdgeRef(..) | Value::Edge(..))));
+            assert!(items
+                .iter()
+                .all(|i| matches!(i, Value::EdgeRef(..) | Value::Edge(..))));
         }
         other => panic!("relationships() should be a list of relationships, got {other:?}"),
     }

@@ -9,10 +9,8 @@
 //! No API keys required. All data is hardcoded and deterministic.
 
 use samyama_sdk::{
-    EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
-    Label, PropertyValue, NodeId, EdgeType,
-    DistanceMetric, PageRankConfig,
-    LLMProvider, NLQConfig, AgentConfig,
+    AgentConfig, AlgorithmClient, DistanceMetric, EdgeType, EmbeddedClient, LLMProvider, Label,
+    NLQConfig, NodeId, PageRankConfig, PropertyValue, SamyamaClient, VectorClient,
 };
 use std::collections::HashMap;
 
@@ -44,10 +42,7 @@ fn query_embedding(seed: usize) -> Vec<f32> {
 
 /// Helper to print a horizontal rule.
 fn separator() {
-    println!(
-        "{}",
-        "─".repeat(90)
-    );
+    println!("{}", "─".repeat(90));
 }
 
 fn is_claude_available() -> bool {
@@ -315,600 +310,616 @@ async fn main() {
     ];
 
     {
-    let mut store = client.store_write().await;
+        let mut store = client.store_write().await;
 
-    // -- Create vector index for document embeddings --
-    store
-        .create_vector_index("Document", "embedding", 128, DistanceMetric::Cosine)
-        .unwrap();
-
-    for (i, (title, dept, _author, date, summary)) in documents.iter().enumerate() {
-        let nid = store.create_node("Document");
-        if let Some(node) = store.get_node_mut(nid) {
-            node.set_property("title", *title);
-            node.set_property("department", *dept);
-            node.set_property("date", *date);
-            node.set_property("content_summary", *summary);
-        }
-        // Set embedding via store method (required for vector index)
-        let emb = mock_embedding(i);
+        // -- Create vector index for document embeddings --
         store
-            .set_node_property("default", nid, "embedding", PropertyValue::Vector(emb))
+            .create_vector_index("Document", "embedding", 128, DistanceMetric::Cosine)
             .unwrap();
-        doc_ids.push(nid.as_u64());
-        doc_titles.insert(nid.as_u64(), title.to_string());
-    }
 
-    println!(
-        "  Created {} documents across {} departments",
-        documents.len(),
-        ["Engineering", "Product", "Security", "HR", "Legal", "Data Science", "DevOps", "Architecture"].len()
-    );
-
-    // ── Employees ──────────────────────────────────────────────────────────────────────────
-    let employees: Vec<(&str, &str, &str)> = vec![
-        // (name, title, department)
-        ("Sarah Chen", "Principal Engineer", "Engineering"),
-        ("Marcus Johnson", "Staff Engineer", "Engineering"),
-        ("James Liu", "Senior Architect", "Engineering"),
-        ("Priya Sharma", "Database Lead", "Engineering"),
-        ("Derek Williams", "DevOps Manager", "Engineering"),
-        ("Alex Rivera", "Security Engineer", "Engineering"),
-        ("Emily Tran", "Frontend Lead", "Engineering"),
-        ("Kevin Park", "Backend Engineer", "Engineering"),
-        ("Natasha Volkov", "SRE Lead", "Engineering"),
-        ("Omar Hassan", "Platform Engineer", "Engineering"),
-        ("Lisa Park", "VP Product", "Product"),
-        ("Michael Torres", "Senior PM", "Product"),
-        ("Rachel Green", "Growth PM", "Product"),
-        ("Daniel Kim", "Product Analyst", "Product"),
-        ("Sofia Martinez", "UX Researcher", "Product"),
-        ("David Kim", "CISO", "Security"),
-        ("Jennifer Walsh", "Security Architect", "Security"),
-        ("Ryan Foster", "Security Analyst", "Security"),
-        ("Mia Chen", "AppSec Engineer", "Security"),
-        ("Tyler Brooks", "Compliance Analyst", "Security"),
-        ("Angela Foster", "VP People", "HR"),
-        ("Tom Bradley", "HR Business Partner", "HR"),
-        ("Jessica Huang", "Talent Acquisition Lead", "HR"),
-        ("Robert Nguyen", "General Counsel", "Legal"),
-        ("Patricia Hernandez", "Privacy Counsel", "Legal"),
-        ("Andrew Thompson", "Contract Attorney", "Legal"),
-        ("Wei Zhang", "Principal Data Scientist", "Data Science"),
-        ("Aisha Okafor", "ML Engineer", "Data Science"),
-        ("Chris Taylor", "Data Analyst", "Data Science"),
-        ("Lauren Mitchell", "Data Engineer", "Data Science"),
-        ("Carlos Mendez", "Infrastructure Lead", "DevOps"),
-        ("Nina Petrov", "SRE Manager", "DevOps"),
-        ("Jason Lee", "Cloud Engineer", "DevOps"),
-        ("Amanda Ross", "Release Engineer", "DevOps"),
-        ("Benjamin Cole", "Staff Architect", "Architecture"),
-        ("Stephanie Wright", "Solutions Architect", "Architecture"),
-        ("Nathan Brooks", "Enterprise Architect", "Architecture"),
-        ("Diana Lopez", "Technical Writer", "Engineering"),
-        ("Samuel Osei", "QA Lead", "Engineering"),
-        ("Victoria Patel", "Engineering Manager", "Engineering"),
-        ("Thomas Wright", "CTO", "Engineering"),
-        ("Hannah Kim", "Product Designer", "Product"),
-        ("Jack Robinson", "API Product Manager", "Product"),
-        ("Olivia Stone", "Content Strategist", "Product"),
-        ("Grace Liu", "Threat Intelligence", "Security"),
-        ("Ethan Cooper", "Network Security", "Security"),
-        ("Isabella Russo", "Learning & Development", "HR"),
-        ("Matthew Day", "Benefits Specialist", "HR"),
-        ("Sophia Anderson", "Regulatory Counsel", "Legal"),
-        ("Lucas Chen", "Research Scientist", "Data Science"),
-    ];
-
-    for (name, title, dept) in &employees {
-        let nid = store.create_node("Employee");
-        if let Some(node) = store.get_node_mut(nid) {
-            node.set_property("name", *name);
-            node.set_property("title", *title);
-            node.set_property("department", *dept);
+        for (i, (title, dept, _author, date, summary)) in documents.iter().enumerate() {
+            let nid = store.create_node("Document");
+            if let Some(node) = store.get_node_mut(nid) {
+                node.set_property("title", *title);
+                node.set_property("department", *dept);
+                node.set_property("date", *date);
+                node.set_property("content_summary", *summary);
+            }
+            // Set embedding via store method (required for vector index)
+            let emb = mock_embedding(i);
+            store
+                .set_node_property("default", nid, "embedding", PropertyValue::Vector(emb))
+                .unwrap();
+            doc_ids.push(nid.as_u64());
+            doc_titles.insert(nid.as_u64(), title.to_string());
         }
-        emp_ids.push(nid.as_u64());
-        emp_names.insert(nid.as_u64(), name.to_string());
-        name_to_emp_id.insert(name.to_string(), nid.as_u64());
-    }
 
-    num_employees = employees.len();
-    println!("  Created {} employees across departments", num_employees);
+        println!(
+            "  Created {} documents across {} departments",
+            documents.len(),
+            [
+                "Engineering",
+                "Product",
+                "Security",
+                "HR",
+                "Legal",
+                "Data Science",
+                "DevOps",
+                "Architecture"
+            ]
+            .len()
+        );
 
-    // ── Projects ───────────────────────────────────────────────────────────────────────────
-    let projects: Vec<(&str, &str, &str)> = vec![
-        // (name, status, lead_department)
-        ("Atlas Platform", "Active", "Engineering"),
-        ("Phoenix Migration", "Active", "Engineering"),
-        ("Quantum ML Pipeline", "Active", "Data Science"),
-        ("Sentinel Security Suite", "Active", "Security"),
-        ("Horizon Mobile App", "Active", "Product"),
-        ("Titan Infrastructure", "Active", "DevOps"),
-        ("Nebula Analytics", "Active", "Data Science"),
-        ("Guardian Compliance", "Active", "Legal"),
-        ("Pulse Employee Experience", "Active", "HR"),
-        ("Apex API Platform", "Active", "Engineering"),
-        ("Catalyst Data Mesh", "Active", "Architecture"),
-        ("Forge CI/CD Pipeline", "Active", "DevOps"),
-        ("Prism Observability", "Active", "Engineering"),
-        ("Shield Zero Trust", "Active", "Security"),
-        ("Echo Event Platform", "Active", "Engineering"),
-        ("Compass Navigation", "Active", "Product"),
-        ("Bridge Integration Hub", "Active", "Architecture"),
-        ("Lighthouse Monitoring", "Active", "DevOps"),
-        ("Orbit Multi-Region", "Active", "Architecture"),
-        ("Vertex Graph Platform", "Active", "Engineering"),
-        ("Aurora AI Features", "Active", "Data Science"),
-        ("Bastion Access Control", "Active", "Security"),
-        ("Crystal Reports Engine", "Active", "Product"),
-        ("Delta Data Lake", "Active", "Engineering"),
-        ("Ember Feature Flags", "Active", "Product"),
-        ("Falcon Threat Detection", "Active", "Security"),
-        ("Genesis Onboarding", "Active", "HR"),
-        ("Helix Search Platform", "Active", "Engineering"),
-        ("Iron Cache Layer", "Active", "Engineering"),
-        ("Jade Documentation", "Active", "Engineering"),
-    ];
+        // ── Employees ──────────────────────────────────────────────────────────────────────────
+        let employees: Vec<(&str, &str, &str)> = vec![
+            // (name, title, department)
+            ("Sarah Chen", "Principal Engineer", "Engineering"),
+            ("Marcus Johnson", "Staff Engineer", "Engineering"),
+            ("James Liu", "Senior Architect", "Engineering"),
+            ("Priya Sharma", "Database Lead", "Engineering"),
+            ("Derek Williams", "DevOps Manager", "Engineering"),
+            ("Alex Rivera", "Security Engineer", "Engineering"),
+            ("Emily Tran", "Frontend Lead", "Engineering"),
+            ("Kevin Park", "Backend Engineer", "Engineering"),
+            ("Natasha Volkov", "SRE Lead", "Engineering"),
+            ("Omar Hassan", "Platform Engineer", "Engineering"),
+            ("Lisa Park", "VP Product", "Product"),
+            ("Michael Torres", "Senior PM", "Product"),
+            ("Rachel Green", "Growth PM", "Product"),
+            ("Daniel Kim", "Product Analyst", "Product"),
+            ("Sofia Martinez", "UX Researcher", "Product"),
+            ("David Kim", "CISO", "Security"),
+            ("Jennifer Walsh", "Security Architect", "Security"),
+            ("Ryan Foster", "Security Analyst", "Security"),
+            ("Mia Chen", "AppSec Engineer", "Security"),
+            ("Tyler Brooks", "Compliance Analyst", "Security"),
+            ("Angela Foster", "VP People", "HR"),
+            ("Tom Bradley", "HR Business Partner", "HR"),
+            ("Jessica Huang", "Talent Acquisition Lead", "HR"),
+            ("Robert Nguyen", "General Counsel", "Legal"),
+            ("Patricia Hernandez", "Privacy Counsel", "Legal"),
+            ("Andrew Thompson", "Contract Attorney", "Legal"),
+            ("Wei Zhang", "Principal Data Scientist", "Data Science"),
+            ("Aisha Okafor", "ML Engineer", "Data Science"),
+            ("Chris Taylor", "Data Analyst", "Data Science"),
+            ("Lauren Mitchell", "Data Engineer", "Data Science"),
+            ("Carlos Mendez", "Infrastructure Lead", "DevOps"),
+            ("Nina Petrov", "SRE Manager", "DevOps"),
+            ("Jason Lee", "Cloud Engineer", "DevOps"),
+            ("Amanda Ross", "Release Engineer", "DevOps"),
+            ("Benjamin Cole", "Staff Architect", "Architecture"),
+            ("Stephanie Wright", "Solutions Architect", "Architecture"),
+            ("Nathan Brooks", "Enterprise Architect", "Architecture"),
+            ("Diana Lopez", "Technical Writer", "Engineering"),
+            ("Samuel Osei", "QA Lead", "Engineering"),
+            ("Victoria Patel", "Engineering Manager", "Engineering"),
+            ("Thomas Wright", "CTO", "Engineering"),
+            ("Hannah Kim", "Product Designer", "Product"),
+            ("Jack Robinson", "API Product Manager", "Product"),
+            ("Olivia Stone", "Content Strategist", "Product"),
+            ("Grace Liu", "Threat Intelligence", "Security"),
+            ("Ethan Cooper", "Network Security", "Security"),
+            ("Isabella Russo", "Learning & Development", "HR"),
+            ("Matthew Day", "Benefits Specialist", "HR"),
+            ("Sophia Anderson", "Regulatory Counsel", "Legal"),
+            ("Lucas Chen", "Research Scientist", "Data Science"),
+        ];
 
-    let priority_cycle = ["high", "medium", "low", "high", "medium"];
-    for (i, (name, status, dept)) in projects.iter().enumerate() {
-        let nid = store.create_node("Project");
-        if let Some(node) = store.get_node_mut(nid) {
-            node.set_property("name", *name);
-            node.set_property("status", *status);
-            node.set_property("department", *dept);
-            // Apex API Platform (idx 9) uses GraphQL — ensure it's high priority for NLQ demo
-            let priority = if i == 9 { "high" } else { priority_cycle[i % priority_cycle.len()] };
-            node.set_property("priority", priority);
+        for (name, title, dept) in &employees {
+            let nid = store.create_node("Employee");
+            if let Some(node) = store.get_node_mut(nid) {
+                node.set_property("name", *name);
+                node.set_property("title", *title);
+                node.set_property("department", *dept);
+            }
+            emp_ids.push(nid.as_u64());
+            emp_names.insert(nid.as_u64(), name.to_string());
+            name_to_emp_id.insert(name.to_string(), nid.as_u64());
         }
-        proj_ids.push(nid.as_u64());
-        proj_names.insert(nid.as_u64(), name.to_string());
-    }
 
-    num_projects = projects.len();
-    println!("  Created {} projects", num_projects);
+        num_employees = employees.len();
+        println!("  Created {} employees across departments", num_employees);
 
-    // ── Technologies ───────────────────────────────────────────────────────────────────────
-    let technologies: Vec<(&str, &str)> = vec![
-        // (name, category)
-        ("Kubernetes", "Orchestration"),
-        ("PostgreSQL", "Database"),
-        ("Redis", "Cache"),
-        ("Kafka", "Messaging"),
-        ("Terraform", "IaC"),
-        ("React", "Frontend"),
-        ("gRPC", "Communication"),
-        ("Docker", "Container"),
-        ("Prometheus", "Monitoring"),
-        ("Grafana", "Observability"),
-        ("Istio", "Service Mesh"),
-        ("GraphQL", "API"),
-        ("Elasticsearch", "Search"),
-        ("S3", "Storage"),
-        ("Delta Lake", "Data Lake"),
-        ("Spark", "Processing"),
-        ("MLflow", "ML Ops"),
-        ("Vault", "Secrets"),
-        ("Splunk", "SIEM"),
-        ("CloudFront", "CDN"),
-        ("OpenTelemetry", "Tracing"),
-        ("Consul", "Discovery"),
-        ("Feast", "Feature Store"),
-        ("Trivy", "Security Scan"),
-    ];
+        // ── Projects ───────────────────────────────────────────────────────────────────────────
+        let projects: Vec<(&str, &str, &str)> = vec![
+            // (name, status, lead_department)
+            ("Atlas Platform", "Active", "Engineering"),
+            ("Phoenix Migration", "Active", "Engineering"),
+            ("Quantum ML Pipeline", "Active", "Data Science"),
+            ("Sentinel Security Suite", "Active", "Security"),
+            ("Horizon Mobile App", "Active", "Product"),
+            ("Titan Infrastructure", "Active", "DevOps"),
+            ("Nebula Analytics", "Active", "Data Science"),
+            ("Guardian Compliance", "Active", "Legal"),
+            ("Pulse Employee Experience", "Active", "HR"),
+            ("Apex API Platform", "Active", "Engineering"),
+            ("Catalyst Data Mesh", "Active", "Architecture"),
+            ("Forge CI/CD Pipeline", "Active", "DevOps"),
+            ("Prism Observability", "Active", "Engineering"),
+            ("Shield Zero Trust", "Active", "Security"),
+            ("Echo Event Platform", "Active", "Engineering"),
+            ("Compass Navigation", "Active", "Product"),
+            ("Bridge Integration Hub", "Active", "Architecture"),
+            ("Lighthouse Monitoring", "Active", "DevOps"),
+            ("Orbit Multi-Region", "Active", "Architecture"),
+            ("Vertex Graph Platform", "Active", "Engineering"),
+            ("Aurora AI Features", "Active", "Data Science"),
+            ("Bastion Access Control", "Active", "Security"),
+            ("Crystal Reports Engine", "Active", "Product"),
+            ("Delta Data Lake", "Active", "Engineering"),
+            ("Ember Feature Flags", "Active", "Product"),
+            ("Falcon Threat Detection", "Active", "Security"),
+            ("Genesis Onboarding", "Active", "HR"),
+            ("Helix Search Platform", "Active", "Engineering"),
+            ("Iron Cache Layer", "Active", "Engineering"),
+            ("Jade Documentation", "Active", "Engineering"),
+        ];
 
-    for (name, category) in &technologies {
-        let nid = store.create_node("Technology");
-        if let Some(node) = store.get_node_mut(nid) {
-            node.set_property("name", *name);
-            node.set_property("category", *category);
+        let priority_cycle = ["high", "medium", "low", "high", "medium"];
+        for (i, (name, status, dept)) in projects.iter().enumerate() {
+            let nid = store.create_node("Project");
+            if let Some(node) = store.get_node_mut(nid) {
+                node.set_property("name", *name);
+                node.set_property("status", *status);
+                node.set_property("department", *dept);
+                // Apex API Platform (idx 9) uses GraphQL — ensure it's high priority for NLQ demo
+                let priority = if i == 9 {
+                    "high"
+                } else {
+                    priority_cycle[i % priority_cycle.len()]
+                };
+                node.set_property("priority", priority);
+            }
+            proj_ids.push(nid.as_u64());
+            proj_names.insert(nid.as_u64(), name.to_string());
         }
-        tech_ids.push(nid.as_u64());
-        tech_names.insert(nid.as_u64(), name.to_string());
-        name_to_tech_id.insert(name.to_string(), nid.as_u64());
-    }
 
-    num_technologies = technologies.len();
-    println!("  Created {} technologies", num_technologies);
+        num_projects = projects.len();
+        println!("  Created {} projects", num_projects);
 
-    // ── Relationships ──────────────────────────────────────────────────────────────────────
-    // AUTHORED: Employee -> Document (based on author field in document data)
-    for (i, (_title, _dept, author, _date, _summary)) in documents.iter().enumerate() {
-        if let Some(&emp_raw) = name_to_emp_id.get(*author) {
-            let emp_nid = NodeId::new(emp_raw);
-            let doc_nid = NodeId::new(doc_ids[i]);
-            store.create_edge(emp_nid, doc_nid, "AUTHORED").unwrap();
+        // ── Technologies ───────────────────────────────────────────────────────────────────────
+        let technologies: Vec<(&str, &str)> = vec![
+            // (name, category)
+            ("Kubernetes", "Orchestration"),
+            ("PostgreSQL", "Database"),
+            ("Redis", "Cache"),
+            ("Kafka", "Messaging"),
+            ("Terraform", "IaC"),
+            ("React", "Frontend"),
+            ("gRPC", "Communication"),
+            ("Docker", "Container"),
+            ("Prometheus", "Monitoring"),
+            ("Grafana", "Observability"),
+            ("Istio", "Service Mesh"),
+            ("GraphQL", "API"),
+            ("Elasticsearch", "Search"),
+            ("S3", "Storage"),
+            ("Delta Lake", "Data Lake"),
+            ("Spark", "Processing"),
+            ("MLflow", "ML Ops"),
+            ("Vault", "Secrets"),
+            ("Splunk", "SIEM"),
+            ("CloudFront", "CDN"),
+            ("OpenTelemetry", "Tracing"),
+            ("Consul", "Discovery"),
+            ("Feast", "Feature Store"),
+            ("Trivy", "Security Scan"),
+        ];
+
+        for (name, category) in &technologies {
+            let nid = store.create_node("Technology");
+            if let Some(node) = store.get_node_mut(nid) {
+                node.set_property("name", *name);
+                node.set_property("category", *category);
+            }
+            tech_ids.push(nid.as_u64());
+            tech_names.insert(nid.as_u64(), name.to_string());
+            name_to_tech_id.insert(name.to_string(), nid.as_u64());
+        }
+
+        num_technologies = technologies.len();
+        println!("  Created {} technologies", num_technologies);
+
+        // ── Relationships ──────────────────────────────────────────────────────────────────────
+        // AUTHORED: Employee -> Document (based on author field in document data)
+        for (i, (_title, _dept, author, _date, _summary)) in documents.iter().enumerate() {
+            if let Some(&emp_raw) = name_to_emp_id.get(*author) {
+                let emp_nid = NodeId::new(emp_raw);
+                let doc_nid = NodeId::new(doc_ids[i]);
+                store.create_edge(emp_nid, doc_nid, "AUTHORED").unwrap();
+                edge_count += 1;
+            }
+        }
+
+        // REFERENCES: Document -> Document (cross-references between related docs)
+        let reference_pairs: Vec<(usize, usize)> = vec![
+            (0, 3),   // Microservices Migration -> Event-Driven Architecture
+            (0, 11),  // Microservices Migration -> gRPC Service Mesh
+            (1, 14),  // AWS Cost Optimization -> Terraform Module Library
+            (3, 15),  // Event-Driven Architecture -> WebSocket Scaling
+            (4, 18),  // Database Sharding -> PostgreSQL Replication
+            (5, 16),  // CI/CD Pipeline -> Monorepo Build Optimization
+            (6, 11),  // K8s Hardening -> gRPC Service Mesh
+            (7, 2),   // GraphQL Federation -> API Gateway Design
+            (9, 11),  // Observability Stack -> gRPC Service Mesh
+            (10, 5),  // Zero-Downtime -> CI/CD Pipeline
+            (12, 4),  // Data Lake Architecture -> Database Sharding
+            (13, 16), // Frontend Performance -> Monorepo Build
+            (14, 1),  // Terraform Module -> AWS Cost Optimization
+            (19, 6),  // Container Image Security -> K8s Hardening
+            (20, 13), // Q4 Product Roadmap -> Frontend Performance
+            (23, 20), // Product-Led Growth -> Q4 Product Roadmap
+            (25, 20), // API Monetization -> Q4 Product Roadmap
+            (30, 35), // SOC2 Compliance -> Vulnerability Management
+            (31, 30), // Incident Response -> SOC2 Compliance
+            (33, 6),  // Zero Trust Architecture -> K8s Hardening
+            (33, 38), // Zero Trust Architecture -> Secret Management
+            (34, 37), // SIEM Configuration -> Cloud Security
+            (36, 34), // Cloud Security -> SIEM
+            (40, 47), // Remote Work Policy -> Employee Handbook
+            (41, 45), // Career Ladder -> New Hire Onboarding
+            (50, 51), // GDPR Data Deletion -> CCPA Compliance
+            (51, 59), // CCPA -> Privacy Impact Assessment
+            (53, 56), // Open Source License -> AI Ethics
+            (56, 60), // AI Ethics -> ML Model Governance
+            (60, 64), // ML Model Governance -> Recommendation Engine
+            (61, 60), // Feature Store -> ML Model Governance
+            (62, 61), // A/B Testing -> Feature Store
+            (63, 64), // NLP Pipeline -> Recommendation Engine
+            (65, 62), // Data Quality -> A/B Testing
+            (68, 14), // IaC Standards -> Terraform Module
+            (69, 31), // Disaster Recovery -> Incident Response
+            (71, 69), // SRE On-Call -> Disaster Recovery
+            (73, 1),  // Cost Tagging -> AWS Cost Optimization
+            // Cross-department: Engineering -> Legal
+            (94, 53),  // Dependency Management Policy -> Open Source License Compliance
+            (12, 50),  // Data Lake Architecture -> GDPR Data Deletion Policy
+            (112, 55), // API SDK Generation Pipeline -> Intellectual Property Policy
+            (76, 3),   // Platform ADR Index -> Event-Driven Architecture
+            (77, 3),   // Event Mesh -> Event-Driven Architecture
+            (78, 7),   // API Versioning -> GraphQL Federation
+            (79, 3),   // DDD Reference -> Event-Driven Architecture
+            (80, 12),  // Multi-Tenancy Architecture -> Data Lake Architecture
+            (81, 3),   // CQRS -> Event-Driven Architecture
+            (83, 12),  // Data Mesh Governance -> Data Lake Architecture
+            // New document cross-references (indices 84+)
+            (84, 19),  // Memory Safety Audit -> Container Image Security
+            (85, 10),  // Load Testing Framework -> Zero-Downtime Deployment
+            (86, 10),  // Error Budget Policy -> Zero-Downtime Deployment
+            (87, 13),  // Feature Toggle Architecture -> Frontend Performance
+            (88, 3),   // Async Message Processing -> Event-Driven Architecture
+            (89, 4),   // Database Migration Runbook -> Database Sharding
+            (91, 2),   // Rate Limiting Design -> API Gateway Design
+            (92, 9),   // SLO Catalog -> Observability Stack
+            (93, 5),   // Code Review Standards -> CI/CD Pipeline
+            (94, 19),  // Dependency Management -> Container Image Security
+            (95, 9),   // Distributed Tracing -> Observability Stack
+            (96, 78),  // API Pagination Standards -> API Versioning
+            (97, 3),   // State Machine Design -> Event-Driven Architecture
+            (99, 13),  // Image Processing Pipeline -> Frontend Performance
+            (100, 5),  // Internal Developer Portal -> CI/CD Pipeline
+            (101, 15), // Socket.IO Cluster -> WebSocket Scaling
+            (103, 84), // Technical Debt Inventory -> Memory Safety Audit
+            (104, 7),  // GraphQL Schema Design -> GraphQL Federation
+            (105, 10), // Canary Release -> Zero-Downtime Deployment
+            (106, 0),  // Rust Service Template -> Microservices Migration
+            (107, 3),  // Event Schema Registry -> Event-Driven Architecture
+            (108, 18), // Database Connection Pooling -> PostgreSQL Replication
+            (109, 13), // Frontend Testing Strategy -> Frontend Performance
+            (110, 6),  // Network Segmentation -> K8s Hardening
+            (111, 31), // Incident Post-Mortem -> Incident Response Playbook
+            (112, 78), // API SDK Generation -> API Versioning
+            (113, 12), // Search Indexing Architecture -> Data Lake Architecture
+            (114, 20), // Voice of Customer -> Q4 Product Roadmap
+            (115, 25), // Pricing Tier -> API Monetization
+            (118, 20), // Notification System -> Q4 Product Roadmap
+            (120, 13), // Accessibility Report -> Frontend Performance
+            (123, 20), // Customer Success Playbook -> Q4 Product Roadmap
+            (127, 50), // Compliance Dashboard -> GDPR Data Deletion
+            (128, 51), // Customer Data Platform -> CCPA Compliance
+            (129, 30), // Bug Bounty -> SOC2 Compliance
+            (130, 2),  // API Security Assessment -> API Gateway Design
+            (131, 38), // Encryption Standards -> Secret Management
+            (132, 33), // IAM Design -> Zero Trust Architecture
+            (133, 6),  // Container Runtime Security -> K8s Hardening
+            (136, 34), // Network Intrusion Detection -> SIEM Configuration
+            (137, 19), // Supply Chain Security -> Container Image Security
+            (139, 33), // DDoS Protection -> Zero Trust Architecture
+            (140, 47), // Employee Engagement Survey -> Employee Handbook
+            (141, 41), // Technical Interview Rubric -> Career Ladder
+            (146, 45), // Knowledge Transfer Protocol -> New Hire Onboarding
+            (149, 47), // Internal Mobility -> Employee Handbook
+            (150, 56), // Anti-Bribery -> AI Ethics
+            (152, 50), // Incident Notification -> GDPR Data Deletion
+            (153, 51), // Terms of Service -> CCPA Compliance
+            (155, 56), // Regulatory Change Impact -> AI Ethics
+            (159, 50), // Cross-Border Data Transfer -> GDPR Data Deletion
+            (160, 62), // Experiment Platform -> A/B Testing
+            (161, 56), // Bias Detection -> AI Ethics
+            (162, 12), // Data Catalog -> Data Lake Architecture
+            (164, 60), // Customer LTV Model -> ML Model Governance
+            (165, 56), // Data Privacy Engineering -> AI Ethics
+            (166, 64), // Real-Time Scoring -> Recommendation Engine
+            (167, 65), // Anomaly Detection Playbook -> Data Quality
+            (170, 60), // Causal Inference -> ML Model Governance
+            (171, 63), // LLM Fine-Tuning -> NLP Pipeline
+            (172, 68), // Multi-Cloud Strategy -> IaC Standards
+            (173, 6),  // K8s Upgrade Runbook -> K8s Hardening
+            (174, 68), // GitOps Workflow -> IaC Standards
+            (175, 69), // Database Backup -> Disaster Recovery
+            (176, 11), // Service Mesh Perf -> gRPC Service Mesh
+            (177, 1),  // Capacity Planning -> AWS Cost Optimization
+            (178, 31), // Incident Management Tool -> Incident Response
+            (180, 9),  // Platform Health Dashboard -> Observability Stack
+            (181, 1),  // FinOps Assessment -> AWS Cost Optimization
+            (183, 68), // Production Readiness Review -> IaC Standards
+            (184, 0),  // Strangler Fig -> Microservices Migration
+            (185, 3),  // Saga Pattern -> Event-Driven Architecture
+            (186, 2),  // Cache Architecture -> API Gateway Design
+            (187, 11), // Sidecar Pattern -> gRPC Service Mesh
+            (188, 81), // Event Sourcing Ref -> CQRS
+            (189, 0),  // Bulkhead Pattern -> Microservices Migration
+            (190, 7),  // API Composition -> GraphQL Federation
+            (191, 9),  // Observability Ref Arch -> Observability Stack
+            (192, 12), // Data Replication -> Data Lake Architecture
+            (193, 33), // Security Architecture Review -> Zero Trust
+            (194, 12), // Polyglot Persistence -> Data Lake Architecture
+        ];
+
+        for (src_idx, tgt_idx) in &reference_pairs {
+            let src = NodeId::new(doc_ids[*src_idx]);
+            let tgt = NodeId::new(doc_ids[*tgt_idx]);
+            store.create_edge(src, tgt, "REFERENCES").unwrap();
             edge_count += 1;
         }
-    }
 
-    // REFERENCES: Document -> Document (cross-references between related docs)
-    let reference_pairs: Vec<(usize, usize)> = vec![
-        (0, 3),   // Microservices Migration -> Event-Driven Architecture
-        (0, 11),  // Microservices Migration -> gRPC Service Mesh
-        (1, 14),  // AWS Cost Optimization -> Terraform Module Library
-        (3, 15),  // Event-Driven Architecture -> WebSocket Scaling
-        (4, 18),  // Database Sharding -> PostgreSQL Replication
-        (5, 16),  // CI/CD Pipeline -> Monorepo Build Optimization
-        (6, 11),  // K8s Hardening -> gRPC Service Mesh
-        (7, 2),   // GraphQL Federation -> API Gateway Design
-        (9, 11),  // Observability Stack -> gRPC Service Mesh
-        (10, 5),  // Zero-Downtime -> CI/CD Pipeline
-        (12, 4),  // Data Lake Architecture -> Database Sharding
-        (13, 16), // Frontend Performance -> Monorepo Build
-        (14, 1),  // Terraform Module -> AWS Cost Optimization
-        (19, 6),  // Container Image Security -> K8s Hardening
-        (20, 13), // Q4 Product Roadmap -> Frontend Performance
-        (23, 20), // Product-Led Growth -> Q4 Product Roadmap
-        (25, 20), // API Monetization -> Q4 Product Roadmap
-        (30, 35), // SOC2 Compliance -> Vulnerability Management
-        (31, 30), // Incident Response -> SOC2 Compliance
-        (33, 6),  // Zero Trust Architecture -> K8s Hardening
-        (33, 38), // Zero Trust Architecture -> Secret Management
-        (34, 37), // SIEM Configuration -> Cloud Security
-        (36, 34), // Cloud Security -> SIEM
-        (40, 47), // Remote Work Policy -> Employee Handbook
-        (41, 45), // Career Ladder -> New Hire Onboarding
-        (50, 51), // GDPR Data Deletion -> CCPA Compliance
-        (51, 59), // CCPA -> Privacy Impact Assessment
-        (53, 56), // Open Source License -> AI Ethics
-        (56, 60), // AI Ethics -> ML Model Governance
-        (60, 64), // ML Model Governance -> Recommendation Engine
-        (61, 60), // Feature Store -> ML Model Governance
-        (62, 61), // A/B Testing -> Feature Store
-        (63, 64), // NLP Pipeline -> Recommendation Engine
-        (65, 62), // Data Quality -> A/B Testing
-        (68, 14), // IaC Standards -> Terraform Module
-        (69, 31), // Disaster Recovery -> Incident Response
-        (71, 69), // SRE On-Call -> Disaster Recovery
-        (73, 1),  // Cost Tagging -> AWS Cost Optimization
-        // Cross-department: Engineering -> Legal
-        (94, 53),  // Dependency Management Policy -> Open Source License Compliance
-        (12, 50),  // Data Lake Architecture -> GDPR Data Deletion Policy
-        (112, 55), // API SDK Generation Pipeline -> Intellectual Property Policy
-        (76, 3),  // Platform ADR Index -> Event-Driven Architecture
-        (77, 3),  // Event Mesh -> Event-Driven Architecture
-        (78, 7),  // API Versioning -> GraphQL Federation
-        (79, 3),  // DDD Reference -> Event-Driven Architecture
-        (80, 12), // Multi-Tenancy Architecture -> Data Lake Architecture
-        (81, 3),  // CQRS -> Event-Driven Architecture
-        (83, 12), // Data Mesh Governance -> Data Lake Architecture
-        // New document cross-references (indices 84+)
-        (84, 19),  // Memory Safety Audit -> Container Image Security
-        (85, 10),  // Load Testing Framework -> Zero-Downtime Deployment
-        (86, 10),  // Error Budget Policy -> Zero-Downtime Deployment
-        (87, 13),  // Feature Toggle Architecture -> Frontend Performance
-        (88, 3),   // Async Message Processing -> Event-Driven Architecture
-        (89, 4),   // Database Migration Runbook -> Database Sharding
-        (91, 2),   // Rate Limiting Design -> API Gateway Design
-        (92, 9),   // SLO Catalog -> Observability Stack
-        (93, 5),   // Code Review Standards -> CI/CD Pipeline
-        (94, 19),  // Dependency Management -> Container Image Security
-        (95, 9),   // Distributed Tracing -> Observability Stack
-        (96, 78),  // API Pagination Standards -> API Versioning
-        (97, 3),   // State Machine Design -> Event-Driven Architecture
-        (99, 13),  // Image Processing Pipeline -> Frontend Performance
-        (100, 5),  // Internal Developer Portal -> CI/CD Pipeline
-        (101, 15), // Socket.IO Cluster -> WebSocket Scaling
-        (103, 84), // Technical Debt Inventory -> Memory Safety Audit
-        (104, 7),  // GraphQL Schema Design -> GraphQL Federation
-        (105, 10), // Canary Release -> Zero-Downtime Deployment
-        (106, 0),  // Rust Service Template -> Microservices Migration
-        (107, 3),  // Event Schema Registry -> Event-Driven Architecture
-        (108, 18), // Database Connection Pooling -> PostgreSQL Replication
-        (109, 13), // Frontend Testing Strategy -> Frontend Performance
-        (110, 6),  // Network Segmentation -> K8s Hardening
-        (111, 31), // Incident Post-Mortem -> Incident Response Playbook
-        (112, 78), // API SDK Generation -> API Versioning
-        (113, 12), // Search Indexing Architecture -> Data Lake Architecture
-        (114, 20), // Voice of Customer -> Q4 Product Roadmap
-        (115, 25), // Pricing Tier -> API Monetization
-        (118, 20), // Notification System -> Q4 Product Roadmap
-        (120, 13), // Accessibility Report -> Frontend Performance
-        (123, 20), // Customer Success Playbook -> Q4 Product Roadmap
-        (127, 50), // Compliance Dashboard -> GDPR Data Deletion
-        (128, 51), // Customer Data Platform -> CCPA Compliance
-        (129, 30), // Bug Bounty -> SOC2 Compliance
-        (130, 2),  // API Security Assessment -> API Gateway Design
-        (131, 38), // Encryption Standards -> Secret Management
-        (132, 33), // IAM Design -> Zero Trust Architecture
-        (133, 6),  // Container Runtime Security -> K8s Hardening
-        (136, 34), // Network Intrusion Detection -> SIEM Configuration
-        (137, 19), // Supply Chain Security -> Container Image Security
-        (139, 33), // DDoS Protection -> Zero Trust Architecture
-        (140, 47), // Employee Engagement Survey -> Employee Handbook
-        (141, 41), // Technical Interview Rubric -> Career Ladder
-        (146, 45), // Knowledge Transfer Protocol -> New Hire Onboarding
-        (149, 47), // Internal Mobility -> Employee Handbook
-        (150, 56), // Anti-Bribery -> AI Ethics
-        (152, 50), // Incident Notification -> GDPR Data Deletion
-        (153, 51), // Terms of Service -> CCPA Compliance
-        (155, 56), // Regulatory Change Impact -> AI Ethics
-        (159, 50), // Cross-Border Data Transfer -> GDPR Data Deletion
-        (160, 62), // Experiment Platform -> A/B Testing
-        (161, 56), // Bias Detection -> AI Ethics
-        (162, 12), // Data Catalog -> Data Lake Architecture
-        (164, 60), // Customer LTV Model -> ML Model Governance
-        (165, 56), // Data Privacy Engineering -> AI Ethics
-        (166, 64), // Real-Time Scoring -> Recommendation Engine
-        (167, 65), // Anomaly Detection Playbook -> Data Quality
-        (170, 60), // Causal Inference -> ML Model Governance
-        (171, 63), // LLM Fine-Tuning -> NLP Pipeline
-        (172, 68), // Multi-Cloud Strategy -> IaC Standards
-        (173, 6),  // K8s Upgrade Runbook -> K8s Hardening
-        (174, 68), // GitOps Workflow -> IaC Standards
-        (175, 69), // Database Backup -> Disaster Recovery
-        (176, 11), // Service Mesh Perf -> gRPC Service Mesh
-        (177, 1),  // Capacity Planning -> AWS Cost Optimization
-        (178, 31), // Incident Management Tool -> Incident Response
-        (180, 9),  // Platform Health Dashboard -> Observability Stack
-        (181, 1),  // FinOps Assessment -> AWS Cost Optimization
-        (183, 68), // Production Readiness Review -> IaC Standards
-        (184, 0),  // Strangler Fig -> Microservices Migration
-        (185, 3),  // Saga Pattern -> Event-Driven Architecture
-        (186, 2),  // Cache Architecture -> API Gateway Design
-        (187, 11), // Sidecar Pattern -> gRPC Service Mesh
-        (188, 81), // Event Sourcing Ref -> CQRS
-        (189, 0),  // Bulkhead Pattern -> Microservices Migration
-        (190, 7),  // API Composition -> GraphQL Federation
-        (191, 9),  // Observability Ref Arch -> Observability Stack
-        (192, 12), // Data Replication -> Data Lake Architecture
-        (193, 33), // Security Architecture Review -> Zero Trust
-        (194, 12), // Polyglot Persistence -> Data Lake Architecture
-    ];
+        // DEPENDS_ON: Project -> Project
+        let project_deps: Vec<(usize, usize)> = vec![
+            (0, 4),   // Atlas Platform -> Horizon Mobile App
+            (1, 0),   // Phoenix Migration -> Atlas Platform
+            (2, 6),   // Quantum ML -> Nebula Analytics
+            (3, 13),  // Sentinel -> Shield Zero Trust
+            (4, 9),   // Horizon -> Apex API
+            (5, 11),  // Titan Infrastructure -> Forge CI/CD
+            (6, 23),  // Nebula Analytics -> Delta Data Lake
+            (7, 3),   // Guardian Compliance -> Sentinel Security
+            (9, 14),  // Apex API -> Echo Event Platform
+            (10, 14), // Catalyst Data Mesh -> Echo Event Platform
+            (12, 5),  // Prism Observability -> Titan Infrastructure
+            (14, 0),  // Echo Event -> Atlas Platform
+            (16, 9),  // Bridge Integration -> Apex API
+            (17, 12), // Lighthouse -> Prism Observability
+            (18, 5),  // Orbit Multi-Region -> Titan Infrastructure
+            (19, 0),  // Vertex Graph -> Atlas Platform
+            (20, 2),  // Aurora AI -> Quantum ML
+            (21, 13), // Bastion -> Shield Zero Trust
+            (24, 22), // Ember Feature Flags -> Crystal Reports
+            (25, 3),  // Falcon Threat Detection -> Sentinel
+            (27, 19), // Helix Search -> Vertex Graph
+            (28, 8),  // Iron Cache -> Pulse (should be related)
+        ];
 
-    for (src_idx, tgt_idx) in &reference_pairs {
-        let src = NodeId::new(doc_ids[*src_idx]);
-        let tgt = NodeId::new(doc_ids[*tgt_idx]);
-        store.create_edge(src, tgt, "REFERENCES").unwrap();
-        edge_count += 1;
-    }
+        for (src_idx, tgt_idx) in &project_deps {
+            let src = NodeId::new(proj_ids[*src_idx]);
+            let tgt = NodeId::new(proj_ids[*tgt_idx]);
+            store.create_edge(src, tgt, "DEPENDS_ON").unwrap();
+            edge_count += 1;
+        }
 
-    // DEPENDS_ON: Project -> Project
-    let project_deps: Vec<(usize, usize)> = vec![
-        (0, 4),   // Atlas Platform -> Horizon Mobile App
-        (1, 0),   // Phoenix Migration -> Atlas Platform
-        (2, 6),   // Quantum ML -> Nebula Analytics
-        (3, 13),  // Sentinel -> Shield Zero Trust
-        (4, 9),   // Horizon -> Apex API
-        (5, 11),  // Titan Infrastructure -> Forge CI/CD
-        (6, 23),  // Nebula Analytics -> Delta Data Lake
-        (7, 3),   // Guardian Compliance -> Sentinel Security
-        (9, 14),  // Apex API -> Echo Event Platform
-        (10, 14), // Catalyst Data Mesh -> Echo Event Platform
-        (12, 5),  // Prism Observability -> Titan Infrastructure
-        (14, 0),  // Echo Event -> Atlas Platform
-        (16, 9),  // Bridge Integration -> Apex API
-        (17, 12), // Lighthouse -> Prism Observability
-        (18, 5),  // Orbit Multi-Region -> Titan Infrastructure
-        (19, 0),  // Vertex Graph -> Atlas Platform
-        (20, 2),  // Aurora AI -> Quantum ML
-        (21, 13), // Bastion -> Shield Zero Trust
-        (24, 22), // Ember Feature Flags -> Crystal Reports
-        (25, 3),  // Falcon Threat Detection -> Sentinel
-        (27, 19), // Helix Search -> Vertex Graph
-        (28, 8),  // Iron Cache -> Pulse (should be related)
-    ];
+        // WORKS_ON: Employee -> Project
+        let works_on: Vec<(usize, usize)> = vec![
+            (0, 0),   // Sarah Chen -> Atlas Platform
+            (0, 9),   // Sarah Chen -> Apex API
+            (1, 5),   // Marcus Johnson -> Titan Infrastructure
+            (2, 14),  // James Liu -> Echo Event Platform
+            (2, 10),  // James Liu -> Catalyst Data Mesh
+            (3, 23),  // Priya Sharma -> Delta Data Lake
+            (4, 11),  // Derek Williams -> Forge CI/CD
+            (5, 13),  // Alex Rivera -> Shield Zero Trust
+            (6, 4),   // Emily Tran -> Horizon Mobile App
+            (7, 0),   // Kevin Park -> Atlas Platform
+            (8, 12),  // Natasha Volkov -> Prism Observability
+            (9, 18),  // Omar Hassan -> Orbit Multi-Region
+            (10, 4),  // Lisa Park -> Horizon Mobile App
+            (11, 22), // Michael Torres -> Crystal Reports
+            (12, 15), // Rachel Green -> Compass Navigation
+            (15, 3),  // David Kim -> Sentinel Security Suite
+            (16, 13), // Jennifer Walsh -> Shield Zero Trust
+            (17, 25), // Ryan Foster -> Falcon Threat Detection
+            (20, 8),  // Angela Foster -> Pulse Employee Experience
+            (21, 26), // Tom Bradley -> Genesis Onboarding
+            (23, 7),  // Robert Nguyen -> Guardian Compliance
+            (24, 7),  // Patricia Hernandez -> Guardian Compliance
+            (26, 2),  // Wei Zhang -> Quantum ML Pipeline
+            (27, 20), // Aisha Okafor -> Aurora AI Features
+            (28, 6),  // Chris Taylor -> Nebula Analytics
+            (29, 23), // Lauren Mitchell -> Delta Data Lake
+            (30, 5),  // Carlos Mendez -> Titan Infrastructure
+            (31, 17), // Nina Petrov -> Lighthouse Monitoring
+            (32, 18), // Jason Lee -> Orbit Multi-Region
+            (33, 11), // Amanda Ross -> Forge CI/CD
+            (34, 16), // Benjamin Cole -> Bridge Integration Hub
+            (35, 18), // Stephanie Wright -> Orbit Multi-Region
+            (36, 10), // Nathan Brooks -> Catalyst Data Mesh
+            (37, 29), // Diana Lopez -> Jade Documentation
+            (38, 0),  // Samuel Osei -> Atlas Platform
+            (39, 0),  // Victoria Patel -> Atlas Platform
+            (40, 0),  // Thomas Wright -> Atlas Platform (CTO oversight)
+            (26, 20), // Wei Zhang -> Aurora AI Features
+            (27, 2),  // Aisha Okafor -> Quantum ML Pipeline
+            (30, 11), // Carlos Mendez -> Forge CI/CD
+        ];
 
-    for (src_idx, tgt_idx) in &project_deps {
-        let src = NodeId::new(proj_ids[*src_idx]);
-        let tgt = NodeId::new(proj_ids[*tgt_idx]);
-        store.create_edge(src, tgt, "DEPENDS_ON").unwrap();
-        edge_count += 1;
-    }
+        for (emp_idx, proj_idx) in &works_on {
+            let emp = NodeId::new(emp_ids[*emp_idx]);
+            let proj = NodeId::new(proj_ids[*proj_idx]);
+            store.create_edge(emp, proj, "WORKS_ON").unwrap();
+            edge_count += 1;
+        }
 
-    // WORKS_ON: Employee -> Project
-    let works_on: Vec<(usize, usize)> = vec![
-        (0, 0),   // Sarah Chen -> Atlas Platform
-        (0, 9),   // Sarah Chen -> Apex API
-        (1, 5),   // Marcus Johnson -> Titan Infrastructure
-        (2, 14),  // James Liu -> Echo Event Platform
-        (2, 10),  // James Liu -> Catalyst Data Mesh
-        (3, 23),  // Priya Sharma -> Delta Data Lake
-        (4, 11),  // Derek Williams -> Forge CI/CD
-        (5, 13),  // Alex Rivera -> Shield Zero Trust
-        (6, 4),   // Emily Tran -> Horizon Mobile App
-        (7, 0),   // Kevin Park -> Atlas Platform
-        (8, 12),  // Natasha Volkov -> Prism Observability
-        (9, 18),  // Omar Hassan -> Orbit Multi-Region
-        (10, 4),  // Lisa Park -> Horizon Mobile App
-        (11, 22), // Michael Torres -> Crystal Reports
-        (12, 15), // Rachel Green -> Compass Navigation
-        (15, 3),  // David Kim -> Sentinel Security Suite
-        (16, 13), // Jennifer Walsh -> Shield Zero Trust
-        (17, 25), // Ryan Foster -> Falcon Threat Detection
-        (20, 8),  // Angela Foster -> Pulse Employee Experience
-        (21, 26), // Tom Bradley -> Genesis Onboarding
-        (23, 7),  // Robert Nguyen -> Guardian Compliance
-        (24, 7),  // Patricia Hernandez -> Guardian Compliance
-        (26, 2),  // Wei Zhang -> Quantum ML Pipeline
-        (27, 20), // Aisha Okafor -> Aurora AI Features
-        (28, 6),  // Chris Taylor -> Nebula Analytics
-        (29, 23), // Lauren Mitchell -> Delta Data Lake
-        (30, 5),  // Carlos Mendez -> Titan Infrastructure
-        (31, 17), // Nina Petrov -> Lighthouse Monitoring
-        (32, 18), // Jason Lee -> Orbit Multi-Region
-        (33, 11), // Amanda Ross -> Forge CI/CD
-        (34, 16), // Benjamin Cole -> Bridge Integration Hub
-        (35, 18), // Stephanie Wright -> Orbit Multi-Region
-        (36, 10), // Nathan Brooks -> Catalyst Data Mesh
-        (37, 29), // Diana Lopez -> Jade Documentation
-        (38, 0),  // Samuel Osei -> Atlas Platform
-        (39, 0),  // Victoria Patel -> Atlas Platform
-        (40, 0),  // Thomas Wright -> Atlas Platform (CTO oversight)
-        (26, 20), // Wei Zhang -> Aurora AI Features
-        (27, 2),  // Aisha Okafor -> Quantum ML Pipeline
-        (30, 11), // Carlos Mendez -> Forge CI/CD
-    ];
+        // MANAGES: Employee -> Project (management relationships)
+        let manages: Vec<(usize, usize)> = vec![
+            (0, 0),   // Sarah Chen manages Atlas Platform
+            (4, 11),  // Derek Williams manages Forge CI/CD
+            (10, 4),  // Lisa Park manages Horizon Mobile App
+            (15, 3),  // David Kim manages Sentinel Security Suite
+            (20, 8),  // Angela Foster manages Pulse Employee Experience
+            (23, 7),  // Robert Nguyen manages Guardian Compliance
+            (26, 2),  // Wei Zhang manages Quantum ML Pipeline
+            (30, 5),  // Carlos Mendez manages Titan Infrastructure
+            (39, 19), // Victoria Patel manages Vertex Graph Platform
+            (40, 0),  // Thomas Wright manages Atlas Platform (executive sponsor)
+        ];
 
-    for (emp_idx, proj_idx) in &works_on {
-        let emp = NodeId::new(emp_ids[*emp_idx]);
-        let proj = NodeId::new(proj_ids[*proj_idx]);
-        store.create_edge(emp, proj, "WORKS_ON").unwrap();
-        edge_count += 1;
-    }
+        for (emp_idx, proj_idx) in &manages {
+            let emp = NodeId::new(emp_ids[*emp_idx]);
+            let proj = NodeId::new(proj_ids[*proj_idx]);
+            store.create_edge(emp, proj, "MANAGES").unwrap();
+            edge_count += 1;
+        }
 
-    // MANAGES: Employee -> Project (management relationships)
-    let manages: Vec<(usize, usize)> = vec![
-        (0, 0),   // Sarah Chen manages Atlas Platform
-        (4, 11),  // Derek Williams manages Forge CI/CD
-        (10, 4),  // Lisa Park manages Horizon Mobile App
-        (15, 3),  // David Kim manages Sentinel Security Suite
-        (20, 8),  // Angela Foster manages Pulse Employee Experience
-        (23, 7),  // Robert Nguyen manages Guardian Compliance
-        (26, 2),  // Wei Zhang manages Quantum ML Pipeline
-        (30, 5),  // Carlos Mendez manages Titan Infrastructure
-        (39, 19), // Victoria Patel manages Vertex Graph Platform
-        (40, 0),  // Thomas Wright manages Atlas Platform (executive sponsor)
-    ];
+        // USES_TECH: Project -> Technology
+        let uses_tech: Vec<(usize, usize)> = vec![
+            (0, 0),   // Atlas Platform -> Kubernetes
+            (0, 1),   // Atlas Platform -> PostgreSQL
+            (0, 2),   // Atlas Platform -> Redis
+            (0, 3),   // Atlas Platform -> Kafka
+            (0, 6),   // Atlas Platform -> gRPC
+            (1, 0),   // Phoenix Migration -> Kubernetes
+            (1, 7),   // Phoenix Migration -> Docker
+            (2, 16),  // Quantum ML -> MLflow
+            (2, 15),  // Quantum ML -> Spark
+            (2, 22),  // Quantum ML -> Feast
+            (3, 18),  // Sentinel -> Splunk
+            (3, 23),  // Sentinel -> Trivy
+            (4, 5),   // Horizon -> React
+            (5, 4),   // Titan Infrastructure -> Terraform
+            (5, 0),   // Titan Infrastructure -> Kubernetes
+            (5, 7),   // Titan Infrastructure -> Docker
+            (6, 15),  // Nebula Analytics -> Spark
+            (6, 14),  // Nebula Analytics -> Delta Lake
+            (6, 13),  // Nebula Analytics -> S3
+            (9, 11),  // Apex API -> GraphQL
+            (9, 6),   // Apex API -> gRPC
+            (9, 2),   // Apex API -> Redis
+            (10, 3),  // Catalyst Data Mesh -> Kafka
+            (10, 13), // Catalyst Data Mesh -> S3
+            (11, 7),  // Forge CI/CD -> Docker
+            (11, 4),  // Forge CI/CD -> Terraform
+            (12, 8),  // Prism Observability -> Prometheus
+            (12, 9),  // Prism Observability -> Grafana
+            (12, 20), // Prism Observability -> OpenTelemetry
+            (13, 10), // Shield Zero Trust -> Istio
+            (13, 17), // Shield Zero Trust -> Vault
+            (14, 3),  // Echo Event Platform -> Kafka
+            (14, 2),  // Echo Event Platform -> Redis
+            (17, 8),  // Lighthouse -> Prometheus
+            (17, 9),  // Lighthouse -> Grafana
+            (18, 0),  // Orbit Multi-Region -> Kubernetes
+            (18, 4),  // Orbit Multi-Region -> Terraform
+            (19, 1),  // Vertex Graph -> PostgreSQL
+            (19, 2),  // Vertex Graph -> Redis
+            (20, 16), // Aurora AI -> MLflow
+            (20, 15), // Aurora AI -> Spark
+            (21, 17), // Bastion -> Vault
+            (21, 21), // Bastion -> Consul
+            (23, 13), // Delta Data Lake -> S3
+            (23, 14), // Delta Data Lake -> Delta Lake
+            (25, 18), // Falcon Threat Detection -> Splunk
+            (27, 12), // Helix Search -> Elasticsearch
+            (28, 2),  // Iron Cache -> Redis
+        ];
 
-    for (emp_idx, proj_idx) in &manages {
-        let emp = NodeId::new(emp_ids[*emp_idx]);
-        let proj = NodeId::new(proj_ids[*proj_idx]);
-        store.create_edge(emp, proj, "MANAGES").unwrap();
-        edge_count += 1;
-    }
+        for (proj_idx, tech_idx) in &uses_tech {
+            let proj = NodeId::new(proj_ids[*proj_idx]);
+            let tech = NodeId::new(tech_ids[*tech_idx]);
+            store.create_edge(proj, tech, "USES_TECH").unwrap();
+            edge_count += 1;
+        }
 
-    // USES_TECH: Project -> Technology
-    let uses_tech: Vec<(usize, usize)> = vec![
-        (0, 0),   // Atlas Platform -> Kubernetes
-        (0, 1),   // Atlas Platform -> PostgreSQL
-        (0, 2),   // Atlas Platform -> Redis
-        (0, 3),   // Atlas Platform -> Kafka
-        (0, 6),   // Atlas Platform -> gRPC
-        (1, 0),   // Phoenix Migration -> Kubernetes
-        (1, 7),   // Phoenix Migration -> Docker
-        (2, 16),  // Quantum ML -> MLflow
-        (2, 15),  // Quantum ML -> Spark
-        (2, 22),  // Quantum ML -> Feast
-        (3, 18),  // Sentinel -> Splunk
-        (3, 23),  // Sentinel -> Trivy
-        (4, 5),   // Horizon -> React
-        (5, 4),   // Titan Infrastructure -> Terraform
-        (5, 0),   // Titan Infrastructure -> Kubernetes
-        (5, 7),   // Titan Infrastructure -> Docker
-        (6, 15),  // Nebula Analytics -> Spark
-        (6, 14),  // Nebula Analytics -> Delta Lake
-        (6, 13),  // Nebula Analytics -> S3
-        (9, 11),  // Apex API -> GraphQL
-        (9, 6),   // Apex API -> gRPC
-        (9, 2),   // Apex API -> Redis
-        (10, 3),  // Catalyst Data Mesh -> Kafka
-        (10, 13), // Catalyst Data Mesh -> S3
-        (11, 7),  // Forge CI/CD -> Docker
-        (11, 4),  // Forge CI/CD -> Terraform
-        (12, 8),  // Prism Observability -> Prometheus
-        (12, 9),  // Prism Observability -> Grafana
-        (12, 20), // Prism Observability -> OpenTelemetry
-        (13, 10), // Shield Zero Trust -> Istio
-        (13, 17), // Shield Zero Trust -> Vault
-        (14, 3),  // Echo Event Platform -> Kafka
-        (14, 2),  // Echo Event Platform -> Redis
-        (17, 8),  // Lighthouse -> Prometheus
-        (17, 9),  // Lighthouse -> Grafana
-        (18, 0),  // Orbit Multi-Region -> Kubernetes
-        (18, 4),  // Orbit Multi-Region -> Terraform
-        (19, 1),  // Vertex Graph -> PostgreSQL
-        (19, 2),  // Vertex Graph -> Redis
-        (20, 16), // Aurora AI -> MLflow
-        (20, 15), // Aurora AI -> Spark
-        (21, 17), // Bastion -> Vault
-        (21, 21), // Bastion -> Consul
-        (23, 13), // Delta Data Lake -> S3
-        (23, 14), // Delta Data Lake -> Delta Lake
-        (25, 18), // Falcon Threat Detection -> Splunk
-        (27, 12), // Helix Search -> Elasticsearch
-        (28, 2),  // Iron Cache -> Redis
-    ];
+        // TAGGED_WITH: Document -> Technology (based on document content)
+        let tagged_with: Vec<(usize, usize)> = vec![
+            (6, 0),    // K8s Hardening Guide -> Kubernetes
+            (95, 0),   // Distributed Tracing -> Kubernetes (K8s-based tracing)
+            (133, 0),  // Container Runtime Security -> Kubernetes (seccomp/AppArmor for K8s pods)
+            (110, 0),  // Network Segmentation -> Kubernetes (VPC + K8s isolation)
+            (173, 0),  // K8s Upgrade Runbook -> Kubernetes
+            (7, 11),   // GraphQL Federation -> GraphQL
+            (104, 11), // GraphQL Schema Design -> GraphQL
+            (4, 1),    // Database Sharding -> PostgreSQL
+            (18, 1),   // PostgreSQL Replication -> PostgreSQL
+            (8, 2),    // Redis Caching Strategy -> Redis
+            (3, 3),    // Event-Driven Architecture -> Kafka
+            (88, 3),   // Async Message Processing -> Kafka
+            (14, 4),   // Terraform Module Library -> Terraform
+            (13, 5),   // Frontend Performance -> React
+            (11, 6),   // gRPC Service Mesh -> gRPC
+            (2, 6),    // API Gateway Design -> gRPC
+            (19, 7),   // Container Image Security -> Docker
+            (9, 8),    // Observability Stack -> Prometheus
+            (9, 9),    // Observability Stack -> Grafana
+            (11, 10),  // gRPC Service Mesh -> Istio
+            (12, 14),  // Data Lake Architecture -> Delta Lake
+            (12, 13),  // Data Lake Architecture -> S3
+            (34, 18),  // SIEM Configuration -> Splunk
+            (38, 17),  // Secret Management -> Vault
+            (19, 23),  // Container Image Security -> Trivy
+            (95, 20),  // Distributed Tracing -> OpenTelemetry
+            (17, 21),  // Service Discovery with Consul -> Consul
+            (61, 22),  // Feature Store Architecture -> Feast
+        ];
 
-    for (proj_idx, tech_idx) in &uses_tech {
-        let proj = NodeId::new(proj_ids[*proj_idx]);
-        let tech = NodeId::new(tech_ids[*tech_idx]);
-        store.create_edge(proj, tech, "USES_TECH").unwrap();
-        edge_count += 1;
-    }
+        for (doc_idx, tech_idx) in &tagged_with {
+            let doc_nid = NodeId::new(doc_ids[*doc_idx]);
+            let tech_nid = NodeId::new(tech_ids[*tech_idx]);
+            store.create_edge(doc_nid, tech_nid, "TAGGED_WITH").unwrap();
+            edge_count += 1;
+        }
 
-    // TAGGED_WITH: Document -> Technology (based on document content)
-    let tagged_with: Vec<(usize, usize)> = vec![
-        (6, 0),    // K8s Hardening Guide -> Kubernetes
-        (95, 0),   // Distributed Tracing -> Kubernetes (K8s-based tracing)
-        (133, 0),  // Container Runtime Security -> Kubernetes (seccomp/AppArmor for K8s pods)
-        (110, 0),  // Network Segmentation -> Kubernetes (VPC + K8s isolation)
-        (173, 0),  // K8s Upgrade Runbook -> Kubernetes
-        (7, 11),   // GraphQL Federation -> GraphQL
-        (104, 11), // GraphQL Schema Design -> GraphQL
-        (4, 1),    // Database Sharding -> PostgreSQL
-        (18, 1),   // PostgreSQL Replication -> PostgreSQL
-        (8, 2),    // Redis Caching Strategy -> Redis
-        (3, 3),    // Event-Driven Architecture -> Kafka
-        (88, 3),   // Async Message Processing -> Kafka
-        (14, 4),   // Terraform Module Library -> Terraform
-        (13, 5),   // Frontend Performance -> React
-        (11, 6),   // gRPC Service Mesh -> gRPC
-        (2, 6),    // API Gateway Design -> gRPC
-        (19, 7),   // Container Image Security -> Docker
-        (9, 8),    // Observability Stack -> Prometheus
-        (9, 9),    // Observability Stack -> Grafana
-        (11, 10),  // gRPC Service Mesh -> Istio
-        (12, 14),  // Data Lake Architecture -> Delta Lake
-        (12, 13),  // Data Lake Architecture -> S3
-        (34, 18),  // SIEM Configuration -> Splunk
-        (38, 17),  // Secret Management -> Vault
-        (19, 23),  // Container Image Security -> Trivy
-        (95, 20),  // Distributed Tracing -> OpenTelemetry
-        (17, 21),  // Service Discovery with Consul -> Consul
-        (61, 22),  // Feature Store Architecture -> Feast
-    ];
+        // EXPERT_IN: Employee -> Technology
+        let expert_in: Vec<(usize, usize)> = vec![
+            (0, 0),   // Sarah Chen -> Kubernetes
+            (0, 6),   // Sarah Chen -> gRPC
+            (0, 11),  // Sarah Chen -> GraphQL
+            (1, 8),   // Marcus Johnson -> Prometheus
+            (1, 7),   // Marcus Johnson -> Docker
+            (2, 3),   // James Liu -> Kafka
+            (2, 2),   // James Liu -> Redis
+            (3, 1),   // Priya Sharma -> PostgreSQL
+            (3, 14),  // Priya Sharma -> Delta Lake
+            (4, 4),   // Derek Williams -> Terraform
+            (4, 7),   // Derek Williams -> Docker
+            (5, 10),  // Alex Rivera -> Istio
+            (5, 17),  // Alex Rivera -> Vault
+            (5, 21),  // Alex Rivera -> Consul
+            (6, 5),   // Emily Tran -> React
+            (15, 18), // David Kim -> Splunk
+            (16, 18), // Jennifer Walsh -> Splunk
+            (16, 23), // Jennifer Walsh -> Trivy
+            (26, 16), // Wei Zhang -> MLflow
+            (26, 15), // Wei Zhang -> Spark
+            (27, 22), // Aisha Okafor -> Feast
+            (27, 16), // Aisha Okafor -> MLflow
+            (30, 4),  // Carlos Mendez -> Terraform
+            (30, 0),  // Carlos Mendez -> Kubernetes
+            (31, 8),  // Nina Petrov -> Prometheus
+            (31, 9),  // Nina Petrov -> Grafana
+            (32, 0),  // Jason Lee -> Kubernetes
+            (32, 4),  // Jason Lee -> Terraform
+        ];
 
-    for (doc_idx, tech_idx) in &tagged_with {
-        let doc_nid = NodeId::new(doc_ids[*doc_idx]);
-        let tech_nid = NodeId::new(tech_ids[*tech_idx]);
-        store.create_edge(doc_nid, tech_nid, "TAGGED_WITH").unwrap();
-        edge_count += 1;
-    }
-
-    // EXPERT_IN: Employee -> Technology
-    let expert_in: Vec<(usize, usize)> = vec![
-        (0, 0),   // Sarah Chen -> Kubernetes
-        (0, 6),   // Sarah Chen -> gRPC
-        (0, 11),  // Sarah Chen -> GraphQL
-        (1, 8),   // Marcus Johnson -> Prometheus
-        (1, 7),   // Marcus Johnson -> Docker
-        (2, 3),   // James Liu -> Kafka
-        (2, 2),   // James Liu -> Redis
-        (3, 1),   // Priya Sharma -> PostgreSQL
-        (3, 14),  // Priya Sharma -> Delta Lake
-        (4, 4),   // Derek Williams -> Terraform
-        (4, 7),   // Derek Williams -> Docker
-        (5, 10),  // Alex Rivera -> Istio
-        (5, 17),  // Alex Rivera -> Vault
-        (5, 21),  // Alex Rivera -> Consul
-        (6, 5),   // Emily Tran -> React
-        (15, 18), // David Kim -> Splunk
-        (16, 18), // Jennifer Walsh -> Splunk
-        (16, 23), // Jennifer Walsh -> Trivy
-        (26, 16), // Wei Zhang -> MLflow
-        (26, 15), // Wei Zhang -> Spark
-        (27, 22), // Aisha Okafor -> Feast
-        (27, 16), // Aisha Okafor -> MLflow
-        (30, 4),  // Carlos Mendez -> Terraform
-        (30, 0),  // Carlos Mendez -> Kubernetes
-        (31, 8),  // Nina Petrov -> Prometheus
-        (31, 9),  // Nina Petrov -> Grafana
-        (32, 0),  // Jason Lee -> Kubernetes
-        (32, 4),  // Jason Lee -> Terraform
-    ];
-
-    for (emp_idx, tech_idx) in &expert_in {
-        let emp = NodeId::new(emp_ids[*emp_idx]);
-        let tech = NodeId::new(tech_ids[*tech_idx]);
-        store.create_edge(emp, tech, "EXPERT_IN").unwrap();
-        edge_count += 1;
-    }
-
+        for (emp_idx, tech_idx) in &expert_in {
+            let emp = NodeId::new(emp_ids[*emp_idx]);
+            let tech = NodeId::new(tech_ids[*tech_idx]);
+            store.create_edge(emp, tech, "EXPERT_IN").unwrap();
+            edge_count += 1;
+        }
     } // end of store_write block
 
-    println!("  Created {} relationships (AUTHORED, REFERENCES, DEPENDS_ON,", edge_count);
+    println!(
+        "  Created {} relationships (AUTHORED, REFERENCES, DEPENDS_ON,",
+        edge_count
+    );
     println!("    WORKS_ON, MANAGES, USES_TECH, EXPERT_IN)");
     println!();
     println!("  Knowledge Graph Summary:");
@@ -933,17 +944,30 @@ async fn main() {
 
     // Use a seed close to the GDPR/privacy docs (indices 50-59 in legal area)
     let query_vec = query_embedding(52);
-    let search_results = client.vector_search("Document", "embedding", &query_vec, 8).await.unwrap();
+    let search_results = client
+        .vector_search("Document", "embedding", &query_vec, 8)
+        .await
+        .unwrap();
 
-    println!("  ┌────┬────────────────────────────────────────────────────────┬────────────┬──────────┐");
-    println!("  │ #  │ Document Title                                         │ Department │ Score    │");
-    println!("  ├────┼────────────────────────────────────────────────────────┼────────────┼──────────┤");
+    println!(
+        "  ┌────┬────────────────────────────────────────────────────────┬────────────┬──────────┐"
+    );
+    println!(
+        "  │ #  │ Document Title                                         │ Department │ Score    │"
+    );
+    println!(
+        "  ├────┼────────────────────────────────────────────────────────┼────────────┼──────────┤"
+    );
     {
         let store = client.store_read().await;
         for (rank, (nid, score)) in search_results.iter().enumerate() {
             let node = store.get_node(*nid).unwrap();
             let title = node.get_property("title").unwrap().as_string().unwrap();
-            let dept = node.get_property("department").unwrap().as_string().unwrap();
+            let dept = node
+                .get_property("department")
+                .unwrap()
+                .as_string()
+                .unwrap();
             let truncated = if title.len() > 54 {
                 format!("{}...", &title[..51])
             } else {
@@ -958,7 +982,9 @@ async fn main() {
             );
         }
     }
-    println!("  └────┴────────────────────────────────────────────────────────┴────────────┴──────────┘");
+    println!(
+        "  └────┴────────────────────────────────────────────────────────┴────────────┴──────────┘"
+    );
     println!();
 
     // ════════════════════════════════════════════════════════════════════════════════════════
@@ -972,7 +998,10 @@ async fn main() {
 
     // Search for Kubernetes-related docs (use a seed close to K8s docs at index 6)
     let k8s_query = query_embedding(6);
-    let k8s_results = client.vector_search("Document", "embedding", &k8s_query, 5).await.unwrap();
+    let k8s_results = client
+        .vector_search("Document", "embedding", &k8s_query, 5)
+        .await
+        .unwrap();
 
     // Collect authors of top matching documents
     let mut expert_scores: HashMap<String, (f64, Vec<String>)> = HashMap::new();
@@ -1014,13 +1043,23 @@ async fn main() {
     experts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     println!("  Top Experts (by document relevance):");
-    println!("  ┌────┬──────────────────────┬──────────────┬──────────────────────────────────────────┐");
-    println!("  │ #  │ Expert               │ Relevance    │ Key Documents                            │");
-    println!("  ├────┼──────────────────────┼──────────────┼──────────────────────────────────────────┤");
+    println!(
+        "  ┌────┬──────────────────────┬──────────────┬──────────────────────────────────────────┐"
+    );
+    println!(
+        "  │ #  │ Expert               │ Relevance    │ Key Documents                            │"
+    );
+    println!(
+        "  ├────┼──────────────────────┼──────────────┼──────────────────────────────────────────┤"
+    );
     for (i, (name, score, docs)) in experts.iter().take(5).enumerate() {
         let doc_summary = if docs.len() == 1 {
             let d = &docs[0];
-            if d.len() > 38 { format!("{}...", &d[..35]) } else { d.clone() }
+            if d.len() > 38 {
+                format!("{}...", &d[..35])
+            } else {
+                d.clone()
+            }
         } else {
             format!("{} documents authored", docs.len())
         };
@@ -1032,7 +1071,9 @@ async fn main() {
             doc_summary
         );
     }
-    println!("  └────┴──────────────────────┴──────────────┴──────────────────────────────────────────┘");
+    println!(
+        "  └────┴──────────────────────┴──────────────┴──────────────────────────────────────────┘"
+    );
 
     // Check technology expertise for top expert
     {
@@ -1101,10 +1142,19 @@ async fn main() {
             })
             .collect();
 
-        println!("  Documents that REFERENCE this document ({} found):", referencing_docs.len());
-        println!("  ┌────┬──────────────────────────────────────────────────────────┬──────────────┐");
-        println!("  │ #  │ Referencing Document                                     │ Department   │");
-        println!("  ├────┼──────────────────────────────────────────────────────────┼──────────────┤");
+        println!(
+            "  Documents that REFERENCE this document ({} found):",
+            referencing_docs.len()
+        );
+        println!(
+            "  ┌────┬──────────────────────────────────────────────────────────┬──────────────┐"
+        );
+        println!(
+            "  │ #  │ Referencing Document                                     │ Department   │"
+        );
+        println!(
+            "  ├────┼──────────────────────────────────────────────────────────┼──────────────┤"
+        );
         for (i, (title, dept)) in referencing_docs.iter().enumerate() {
             let truncated = if title.len() > 56 {
                 format!("{}...", &title[..53])
@@ -1113,7 +1163,9 @@ async fn main() {
             };
             println!("  │ {:>2} │ {:<56} │ {:<12} │", i + 1, truncated, dept);
         }
-        println!("  └────┴──────────────────────────────────────────────────────────┴──────────────┘");
+        println!(
+            "  └────┴──────────────────────────────────────────────────────────┴──────────────┘"
+        );
 
         // Find documents this document REFERENCES (outgoing REFERENCES edges)
         let outgoing_refs = store.get_outgoing_edges(root_doc_nid);
@@ -1130,10 +1182,19 @@ async fn main() {
             .collect();
 
         println!();
-        println!("  Documents this document REFERENCES ({} found):", referenced_docs.len());
-        println!("  ┌────┬──────────────────────────────────────────────────────────┬──────────────┐");
-        println!("  │ #  │ Referenced Document                                      │ Department   │");
-        println!("  ├────┼──────────────────────────────────────────────────────────┼──────────────┤");
+        println!(
+            "  Documents this document REFERENCES ({} found):",
+            referenced_docs.len()
+        );
+        println!(
+            "  ┌────┬──────────────────────────────────────────────────────────┬──────────────┐"
+        );
+        println!(
+            "  │ #  │ Referenced Document                                      │ Department   │"
+        );
+        println!(
+            "  ├────┼──────────────────────────────────────────────────────────┼──────────────┤"
+        );
         for (i, (title, dept)) in referenced_docs.iter().enumerate() {
             let truncated = if title.len() > 56 {
                 format!("{}...", &title[..53])
@@ -1142,7 +1203,9 @@ async fn main() {
             };
             println!("  │ {:>2} │ {:<56} │ {:<12} │", i + 1, truncated, dept);
         }
-        println!("  └────┴──────────────────────────────────────────────────────────┴──────────────┘");
+        println!(
+            "  └────┴──────────────────────────────────────────────────────────┴──────────────┘"
+        );
         println!();
 
         // Cross-domain insight: use Cypher to find engineering docs referenced by legal docs
@@ -1222,7 +1285,9 @@ async fn main() {
     println!();
 
     // Run WCC via SDK
-    let wcc_result = client.weakly_connected_components(Some("Document"), Some("REFERENCES")).await;
+    let wcc_result = client
+        .weakly_connected_components(Some("Document"), Some("REFERENCES"))
+        .await;
 
     println!(
         "  Found {} document communities (connected components)",
@@ -1307,7 +1372,13 @@ async fn main() {
     println!("  Finding the most referenced and influential documents...");
     println!();
 
-    let pr_scores = client.page_rank(PageRankConfig::default(), Some("Document"), Some("REFERENCES")).await;
+    let pr_scores = client
+        .page_rank(
+            PageRankConfig::default(),
+            Some("Document"),
+            Some("REFERENCES"),
+        )
+        .await;
 
     // Map PageRank scores back to document info
     let mut doc_pr: Vec<(String, String, f64)>;
@@ -1389,7 +1460,13 @@ async fn main() {
 
     // Also run PageRank on projects to find critical infrastructure
     println!("  Project Dependency Analysis (PageRank on DEPENDS_ON):");
-    let proj_pr = client.page_rank(PageRankConfig::default(), Some("Project"), Some("DEPENDS_ON")).await;
+    let proj_pr = client
+        .page_rank(
+            PageRankConfig::default(),
+            Some("Project"),
+            Some("DEPENDS_ON"),
+        )
+        .await;
 
     let mut proj_pr_sorted: Vec<(String, f64)>;
     {
@@ -1415,12 +1492,7 @@ async fn main() {
     println!("  │ #  │ Project                          │ PageRank  │");
     println!("  ├────┼──────────────────────────────────┼───────────┤");
     for (i, (name, score)) in proj_pr_sorted.iter().take(10).enumerate() {
-        println!(
-            "  │ {:>2} │ {:<32} │ {:>9.6} │",
-            i + 1,
-            name,
-            score
-        );
+        println!("  │ {:>2} │ {:<32} │ {:>9.6} │", i + 1, name, score);
     }
     println!("  └────┴──────────────────────────────────┴───────────┘");
     println!();
@@ -1443,7 +1515,9 @@ async fn main() {
             model: String::new(),
             api_key: None,
             api_base_url: None,
-            system_prompt: Some("You are a Cypher query expert for an enterprise knowledge graph.".to_string()),
+            system_prompt: Some(
+                "You are a Cypher query expert for an enterprise knowledge graph.".to_string(),
+            ),
         };
 
         let schema_summary = "Node labels: Document, Employee, Project, Technology\n\
@@ -1486,7 +1560,8 @@ async fn main() {
         let mut policies = HashMap::new();
         policies.insert(
             "Technology".to_string(),
-            "When a Technology entity is missing, enrich with related documents and projects.".to_string(),
+            "When a Technology entity is missing, enrich with related documents and projects."
+                .to_string(),
         );
 
         let agent_config = AgentConfig {
@@ -1511,10 +1586,14 @@ async fn main() {
                                  First CREATE nodes, then MATCH...CREATE edges.\n\
                                  MATCH format: MATCH (a:Label {prop: 'val'}), (b:Label {prop: 'val'}) CREATE (a)-[:REL]->(b)";
 
-        match runtime.process_trigger(enrichment_prompt, "knowledge_nlq").await {
+        match runtime
+            .process_trigger(enrichment_prompt, "knowledge_nlq")
+            .await
+        {
             Ok(response) => {
                 println!("  Claude generated enrichment:");
-                let stmts: Vec<String> = response.lines()
+                let stmts: Vec<String> = response
+                    .lines()
                     .map(|l| l.trim().to_string())
                     .filter(|l| {
                         let u = l.to_uppercase();
@@ -1522,7 +1601,11 @@ async fn main() {
                     })
                     .collect();
                 for stmt in &stmts {
-                    let display = if stmt.len() > 78 { &stmt[..78] } else { stmt.as_str() };
+                    let display = if stmt.len() > 78 {
+                        &stmt[..78]
+                    } else {
+                        stmt.as_str()
+                    };
                     println!("    | {}", display);
                 }
                 println!("  Parsed {} Cypher statements", stmts.len());
@@ -1538,8 +1621,7 @@ async fn main() {
     // ════════════════════════════════════════════════════════════════════════════════════════
     // Summary
     // ════════════════════════════════════════════════════════════════════════════════════════
-    let total_nodes =
-        documents.len() + num_employees + num_projects + num_technologies;
+    let total_nodes = documents.len() + num_employees + num_projects + num_technologies;
 
     separator();
     println!("  Enterprise Knowledge Graph -- Summary");
@@ -1554,10 +1636,7 @@ async fn main() {
         num_technologies,
         total_nodes
     );
-    println!(
-        "    Edges: {} relationships across 7 types",
-        edge_count
-    );
+    println!("    Edges: {} relationships across 7 types", edge_count);
     println!();
     println!("  Capabilities Demonstrated:");
     println!("    1. Property graph model with rich metadata");

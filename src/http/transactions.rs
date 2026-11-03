@@ -123,7 +123,10 @@ fn timed_out(id: &str, limit: Duration) -> Response {
 pub async fn expire(sessions: &TxnSessions, id: &str, limit: Duration) {
     let txn = sessions.lock().await.expire(id, limit);
     if let Some(txn) = txn {
-        tracing::warn!("transaction {id} was open for {}s; rolled back", limit.as_secs());
+        tracing::warn!(
+            "transaction {id} was open for {}s; rolled back",
+            limit.as_secs()
+        );
         roll_back(txn);
     }
 }
@@ -142,11 +145,14 @@ pub async fn begin_handler(State(state): State<AppState>) -> Response {
     }
     let id = uuid::Uuid::new_v4().to_string();
     let limit = GraphStore::session_transaction_timeout();
-    state
-        .transactions
-        .lock()
-        .await
-        .insert(id.clone(), HttpTxn { guard, deadline: Instant::now() + limit, limit });
+    state.transactions.lock().await.insert(
+        id.clone(),
+        HttpTxn {
+            guard,
+            deadline: Instant::now() + limit,
+            limit,
+        },
+    );
 
     // An abandoned transaction would hold the lock for good.
     let sessions = Arc::clone(&state.transactions);
@@ -156,7 +162,8 @@ pub async fn begin_handler(State(state): State<AppState>) -> Response {
         expire(&sessions, &expiring, limit).await;
     });
 
-    Json(json!({ "tx": id, "version": version, "timeout_seconds": limit.as_secs() })).into_response()
+    Json(json!({ "tx": id, "version": version, "timeout_seconds": limit.as_secs() }))
+        .into_response()
 }
 
 pub async fn commit_handler(State(state): State<AppState>, Path(id): Path<String>) -> Response {
@@ -233,7 +240,11 @@ mod tests {
         (router, state)
     }
 
-    async fn post_json(app: &Router, uri: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    async fn post_json(
+        app: &Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
         let response = app
             .clone()
             .oneshot(
@@ -246,7 +257,10 @@ mod tests {
             .unwrap();
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
     }
 
     async fn begin(app: &Router) -> String {
@@ -259,26 +273,43 @@ mod tests {
     async fn a_rolled_back_transaction_leaves_nothing() {
         let (app, state) = app();
         let tx = begin(&app).await;
-        let (status, body) =
-            post_json(&app, "/api/query", json!({ "query": "CREATE (:T {x: 1})", "tx": tx })).await;
+        let (status, body) = post_json(
+            &app,
+            "/api/query",
+            json!({ "query": "CREATE (:T {x: 1})", "tx": tx }),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let (status, _) = post_json(&app, &format!("/api/tx/{tx}/rollback"), json!({})).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(state.store.read().await.node_count(), 0, "a rolled-back CREATE survived");
+        assert_eq!(
+            state.store.read().await.node_count(),
+            0,
+            "a rolled-back CREATE survived"
+        );
     }
 
     #[tokio::test]
     async fn a_committed_transaction_keeps_its_writes_and_reads_them_inside() {
         let (app, state) = app();
         let tx = begin(&app).await;
-        post_json(&app, "/api/query", json!({ "query": "CREATE (:T {x: 1})", "tx": tx })).await;
+        post_json(
+            &app,
+            "/api/query",
+            json!({ "query": "CREATE (:T {x: 1})", "tx": tx }),
+        )
+        .await;
         let (_, inside) = post_json(
             &app,
             "/api/query",
             json!({ "query": "MATCH (t:T) RETURN count(t) AS n", "tx": tx }),
         )
         .await;
-        assert_eq!(inside["records"][0][0], json!(1), "the transaction cannot read its own write: {inside}");
+        assert_eq!(
+            inside["records"][0][0],
+            json!(1),
+            "the transaction cannot read its own write: {inside}"
+        );
         let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(state.store.read().await.node_count(), 1);
@@ -288,7 +319,10 @@ mod tests {
     async fn nobody_else_can_read_while_a_transaction_is_open() {
         let (app, state) = app();
         let tx = begin(&app).await;
-        assert!(state.store.try_read().is_err(), "a reader got in while a transaction held the lock");
+        assert!(
+            state.store.try_read().is_err(),
+            "a reader got in while a transaction held the lock"
+        );
         post_json(&app, &format!("/api/tx/{tx}/rollback"), json!({})).await;
         assert!(state.store.try_read().is_ok(), "the lock was not released");
     }
@@ -301,10 +335,22 @@ mod tests {
         let tx = begin(&app).await;
         post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
         let (status, _) = post_json(&app, &format!("/api/tx/{tx}/rollback"), json!({})).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "a committed transaction was rolled back");
-        let (status, _) =
-            post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "a query ran in a finished transaction");
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a committed transaction was rolled back"
+        );
+        let (status, _) = post_json(
+            &app,
+            "/api/query",
+            json!({ "query": "CREATE (:T)", "tx": tx }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a query ran in a finished transaction"
+        );
     }
 
     /// #1518: the background task used to remove a timed-out transaction
@@ -315,18 +361,34 @@ mod tests {
     async fn a_timed_out_transaction_is_reported_as_timed_out_not_unknown() {
         let (app, state) = app();
         let tx = begin(&app).await;
-        post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
+        post_json(
+            &app,
+            "/api/query",
+            json!({ "query": "CREATE (:T)", "tx": tx }),
+        )
+        .await;
         expire(&state.transactions, &tx, Duration::from_secs(7)).await;
 
-        assert_eq!(state.store.read().await.node_count(), 0, "the expired CREATE survived");
+        assert_eq!(
+            state.store.read().await.node_count(),
+            0,
+            "the expired CREATE survived"
+        );
         let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         let message = body["error"].as_str().unwrap();
-        assert!(message.contains("longer than 7s and was rolled back"), "{message}");
+        assert!(
+            message.contains("longer than 7s and was rolled back"),
+            "{message}"
+        );
         let (status, _) = post_json(&app, &format!("/api/tx/{tx}/rollback"), json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT);
-        let (status, _) =
-            post_json(&app, "/api/query", json!({ "query": "MATCH (n) RETURN n", "tx": tx })).await;
+        let (status, _) = post_json(
+            &app,
+            "/api/query",
+            json!({ "query": "MATCH (n) RETURN n", "tx": tx }),
+        )
+        .await;
         assert_eq!(status, StatusCode::CONFLICT);
 
         // An id that never existed is still 404.
@@ -340,13 +402,27 @@ mod tests {
     async fn a_commit_past_the_deadline_is_refused_as_timed_out() {
         let (app, state) = app();
         let tx = begin(&app).await;
-        post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
-        state.transactions.lock().await.get_mut(&tx).unwrap().deadline =
-            Instant::now() - Duration::from_millis(1);
+        post_json(
+            &app,
+            "/api/query",
+            json!({ "query": "CREATE (:T)", "tx": tx }),
+        )
+        .await;
+        state
+            .transactions
+            .lock()
+            .await
+            .get_mut(&tx)
+            .unwrap()
+            .deadline = Instant::now() - Duration::from_millis(1);
 
         let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert_eq!(state.store.read().await.node_count(), 0, "a late commit kept its write");
+        assert_eq!(
+            state.store.read().await.node_count(),
+            0,
+            "a late commit kept its write"
+        );
         assert!(state.store.try_read().is_ok(), "the lock was not released");
     }
 
@@ -357,7 +433,11 @@ mod tests {
             sessions.remember_expired(&i.to_string(), Duration::from_secs(1));
         }
         assert_eq!(sessions.expired.len(), EXPIRED_REMEMBERED);
-        assert_eq!(sessions.refused("0").status(), StatusCode::NOT_FOUND, "the oldest was kept");
+        assert_eq!(
+            sessions.refused("0").status(),
+            StatusCode::NOT_FOUND,
+            "the oldest was kept"
+        );
         let newest = (EXPIRED_REMEMBERED + 9).to_string();
         assert_eq!(sessions.refused(&newest).status(), StatusCode::CONFLICT);
     }
@@ -384,12 +464,28 @@ mod tests {
             .with_state(state.clone());
 
         let tx = begin(&app).await;
-        post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
+        post_json(
+            &app,
+            "/api/query",
+            json!({ "query": "CREATE (:T)", "tx": tx }),
+        )
+        .await;
         pm.fail_next_apply_for_test();
         let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
-        assert_ne!(status, StatusCode::OK, "a commit that was not persisted reported success: {body}");
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "a commit that was not persisted reported success: {body}"
+        );
         let guard = state.store.read().await;
-        assert_eq!(guard.node_count(), 0, "the refused CREATE is still in memory");
-        assert!(guard.session_transaction_version().is_none(), "the transaction is still open");
+        assert_eq!(
+            guard.node_count(),
+            0,
+            "the refused CREATE is still in memory"
+        );
+        assert!(
+            guard.session_transaction_version().is_none(),
+            "the transaction is still open"
+        );
     }
 }

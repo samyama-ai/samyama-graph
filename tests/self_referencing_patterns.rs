@@ -42,7 +42,11 @@ fn rows(store: &GraphStore, cypher: &str) -> usize {
 #[test]
 fn a_repeated_variable_requires_both_ends_to_be_the_same_node() {
     let store = store_of("CREATE (a), (b), (c) CREATE (a)-[:T]->(b), (b)-[:T]->(c)");
-    assert_eq!(rows(&store, "MATCH (b)-->(b) RETURN b"), 0, "no self-relationships exist");
+    assert_eq!(
+        rows(&store, "MATCH (b)-->(b) RETURN b"),
+        0,
+        "no self-relationships exist"
+    );
     assert_eq!(
         rows(&store, "MATCH (a)-->(b), (b)-->(b) RETURN b"),
         0,
@@ -74,9 +78,17 @@ fn an_undirected_match_still_yields_both_orientations_between_distinct_nodes() {
     // matching being one-way. Suppressing the second orientation here would
     // halve the answer to every undirected query in the engine.
     let store = store_of("CREATE (:A)-[:T]->(:B)");
-    assert_eq!(rows(&store, "MATCH ()--() RETURN 1 AS z"), 2, "A--B and B--A");
+    assert_eq!(
+        rows(&store, "MATCH ()--() RETURN 1 AS z"),
+        2,
+        "A--B and B--A"
+    );
     assert_eq!(rows(&store, "MATCH ()-->() RETURN 1 AS z"), 1);
 
     let two_way = store_of("CREATE (a:A), (b:B) CREATE (a)-[:T]->(b), (b)-[:T]->(a)");
-    assert_eq!(rows(&two_way, "MATCH ()--() RETURN 1 AS z"), 4, "two edges, two ways each");
+    assert_eq!(
+        rows(&two_way, "MATCH ()--() RETURN 1 AS z"),
+        4,
+        "two edges, two ways each"
+    );
 }

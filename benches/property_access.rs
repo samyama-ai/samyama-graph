@@ -78,7 +78,11 @@ fn build(rows: usize, fill: usize) -> Fixture {
         row_nodes.push(id);
     }
 
-    Fixture { store, rows: indices, row_nodes }
+    Fixture {
+        store,
+        rows: indices,
+        row_nodes,
+    }
 }
 
 fn time<F: FnMut() -> u64>(label: &str, count: usize, mut f: F) -> f64 {

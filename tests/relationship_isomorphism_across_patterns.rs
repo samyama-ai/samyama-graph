@@ -17,7 +17,9 @@ fn graph() -> GraphStore {
     let mut s = GraphStore::new();
     let q = "CREATE (a:P {n: 'a', v: 1}), (b:P {n: 'b', v: 2}), (c:P {n: 'c', v: 3}), (d:P {n: 'd', v: 4}), \
              (a)-[:K {w: 1}]->(b), (b)-[:K {w: 2}]->(c), (a)-[:L]->(c), (d)-[:K {w: 3}]->(d)";
-    MutQueryExecutor::new(&mut s, "default".into()).execute(&parse_query(q).unwrap()).unwrap();
+    MutQueryExecutor::new(&mut s, "default".into())
+        .execute(&parse_query(q).unwrap())
+        .unwrap();
     s
 }
 
@@ -34,11 +36,19 @@ fn cell(v: Option<&Value>) -> String {
 fn check(q: &str, expected: &[&str]) {
     let s = graph();
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(&s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(&s)
+        .execute(&p)
+        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let mut got: Vec<String> = out
         .records
         .iter()
-        .map(|r| out.columns.iter().map(|c| cell(r.get(c))).collect::<Vec<_>>().join("|"))
+        .map(|r| {
+            out.columns
+                .iter()
+                .map(|c| cell(r.get(c)))
+                .collect::<Vec<_>>()
+                .join("|")
+        })
         .collect();
     got.sort();
     assert_eq!(got, expected, "{q}");
@@ -46,15 +56,30 @@ fn check(q: &str, expected: &[&str]) {
 
 #[test]
 fn two_patterns_cannot_share_the_self_loop() {
-    check("MATCH (p)-[:K]->(q), (q)-[:K]->(r) RETURN p.n, q.n, r.n", &["a|b|c"]);
-    check("MATCH (p:P {n: 'd'})-[e1]->(x), (x)-[e2]->(y) RETURN count(*)", &["0"]);
+    check(
+        "MATCH (p)-[:K]->(q), (q)-[:K]->(r) RETURN p.n, q.n, r.n",
+        &["a|b|c"],
+    );
+    check(
+        "MATCH (p:P {n: 'd'})-[e1]->(x), (x)-[e2]->(y) RETURN count(*)",
+        &["0"],
+    );
 }
 
 #[test]
 fn named_and_anonymous_relationships() {
-    check("MATCH (p)-[e:K]->(q), (q)-[]->(r) RETURN p.n, e.w, r.n", &["a|1|c"]);
-    check("MATCH (p)-[e:K]->(q), (q)-[f]->(r) RETURN p.n, e.w, f.w", &["a|1|2"]);
-    check("MATCH p1 = (a)-[:K]->(b), (b)-[:K]->(c) RETURN length(p1), c.n", &["1|c"]);
+    check(
+        "MATCH (p)-[e:K]->(q), (q)-[]->(r) RETURN p.n, e.w, r.n",
+        &["a|1|c"],
+    );
+    check(
+        "MATCH (p)-[e:K]->(q), (q)-[f]->(r) RETURN p.n, e.w, f.w",
+        &["a|1|2"],
+    );
+    check(
+        "MATCH p1 = (a)-[:K]->(b), (b)-[:K]->(c) RETURN length(p1), c.n",
+        &["1|c"],
+    );
 }
 
 #[test]
@@ -67,8 +92,14 @@ fn untyped_patterns_count_distinct_pairs() {
 /// than joined; the rule holds there too.
 #[test]
 fn patterns_from_a_bound_start() {
-    check("MATCH (p:P {n: 'd'}) MATCH (p)-[:K]->(x), (p)-[:K]->(y) RETURN count(*)", &["0"]);
-    check("MATCH (p:P {n: 'a'}) MATCH (p)-[]->(x), (p)-[]->(y) RETURN x.n, y.n", &["b|c", "c|b"]);
+    check(
+        "MATCH (p:P {n: 'd'}) MATCH (p)-[:K]->(x), (p)-[:K]->(y) RETURN count(*)",
+        &["0"],
+    );
+    check(
+        "MATCH (p:P {n: 'a'}) MATCH (p)-[]->(x), (p)-[]->(y) RETURN x.n, y.n",
+        &["b|c", "c|b"],
+    );
 }
 
 /// In an OPTIONAL MATCH the whole pattern fails, so the row keeps nulls.
@@ -82,7 +113,10 @@ fn optional_match() {
         "MATCH (p:P) OPTIONAL MATCH (p)-[k1:K]->(q), (q)-[k2:K]->(r) RETURN p.n, k1.w, k2.w",
         &["a|1|2", "b|null|null", "c|null|null", "d|null|null"],
     );
-    check("MATCH (p:P {n: 'd'}) OPTIONAL MATCH (p)-[e1]->(x), (x)-[e2]->(y) RETURN count(e2)", &["0"]);
+    check(
+        "MATCH (p:P {n: 'd'}) OPTIONAL MATCH (p)-[e1]->(x), (x)-[e2]->(y) RETURN count(e2)",
+        &["0"],
+    );
 }
 
 /// Two parallel relationships between the same nodes are two relationships:
@@ -91,14 +125,24 @@ fn optional_match() {
 fn parallel_relationships() {
     let mut s = GraphStore::new();
     let q = "CREATE (x:X {n: 'x'}), (y:Y {n: 'y'}), (x)-[:K]->(y), (x)-[:K]->(y)";
-    MutQueryExecutor::new(&mut s, "default".into()).execute(&parse_query(q).unwrap()).unwrap();
+    MutQueryExecutor::new(&mut s, "default".into())
+        .execute(&parse_query(q).unwrap())
+        .unwrap();
     let count = |q: &str| -> String {
-        let out = QueryExecutor::new(&s).execute(&parse_query(q).unwrap()).unwrap();
+        let out = QueryExecutor::new(&s)
+            .execute(&parse_query(q).unwrap())
+            .unwrap();
         cell(out.records[0].get("c"))
     };
-    assert_eq!(count("MATCH (p:X)-[:K]->(t1), (p)-[:K]->(t2) RETURN count(*) AS c"), "2");
+    assert_eq!(
+        count("MATCH (p:X)-[:K]->(t1), (p)-[:K]->(t2) RETURN count(*) AS c"),
+        "2"
+    );
     // A WHERE that fails when t1 = t2 leaves nothing, with or without the check.
-    assert_eq!(count("MATCH (p:X)-[:K]->(t1), (p)-[:K]->(t2) WHERE t1.n < t2.n RETURN count(*) AS c"), "0");
+    assert_eq!(
+        count("MATCH (p:X)-[:K]->(t1), (p)-[:K]->(t2) WHERE t1.n < t2.n RETURN count(*) AS c"),
+        "0"
+    );
 }
 
 /// The unordered-pairs idiom needs no check: `t1.name < t2.name` already
@@ -112,7 +156,9 @@ fn parallel_relationships() {
 fn a_where_that_keeps_the_endpoints_apart_needs_no_check() {
     let s = graph();
     let plan = |q: &str| -> String {
-        let out = QueryExecutor::new(&s).execute(&parse_query(&format!("EXPLAIN {q}")).unwrap()).unwrap();
+        let out = QueryExecutor::new(&s)
+            .execute(&parse_query(&format!("EXPLAIN {q}")).unwrap())
+            .unwrap();
         match out.records[0].get("plan") {
             Some(Value::Property(PropertyValue::String(t))) => t.clone(),
             other => panic!("no plan: {other:?}"),
@@ -134,11 +180,23 @@ fn a_where_that_keeps_the_endpoints_apart_needs_no_check() {
 /// disjoint types never collide, and one path was already covered by #684.
 #[test]
 fn controls() {
-    check("MATCH (p)-[:K]->(q) MATCH (q)-[:K]->(r) RETURN p.n, q.n, r.n", &["a|b|c", "d|d|d"]);
-    check("MATCH (a)-[:K]->(b), (a)-[:L]->(c) RETURN a.n, b.n, c.n", &["a|b|c"]);
+    check(
+        "MATCH (p)-[:K]->(q) MATCH (q)-[:K]->(r) RETURN p.n, q.n, r.n",
+        &["a|b|c", "d|d|d"],
+    );
+    check(
+        "MATCH (a)-[:K]->(b), (a)-[:L]->(c) RETURN a.n, b.n, c.n",
+        &["a|b|c"],
+    );
     check("MATCH (x)-[:K]->(y), (u)-[:L]->(v) RETURN count(*)", &["3"]);
-    check("MATCH (p)-[:K]->(q)-[:K]->(r) RETURN p.n, q.n, r.n", &["a|b|c"]);
-    check("MATCH (p)-[e1:K]->(q), (q)-[e2:K]->(r) WHERE e1 <> e2 RETURN p.n, q.n, r.n", &["a|b|c"]);
+    check(
+        "MATCH (p)-[:K]->(q)-[:K]->(r) RETURN p.n, q.n, r.n",
+        &["a|b|c"],
+    );
+    check(
+        "MATCH (p)-[e1:K]->(q), (q)-[e2:K]->(r) WHERE e1 <> e2 RETURN p.n, q.n, r.n",
+        &["a|b|c"],
+    );
     check(
         "MATCH (p:P) OPTIONAL MATCH (p)-[:K]->(q), (p)-[:L]->(r) RETURN p.n, q.n, r.n",
         &["a|b|c", "b|null|null", "c|null|null", "d|null|null"],

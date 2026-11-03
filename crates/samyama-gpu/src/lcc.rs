@@ -106,9 +106,8 @@ pub fn gpu_lcc(
     // Try CUDA first
     #[cfg(feature = "cuda")]
     if let Some(cuda_ctx) = crate::runtime::GpuRuntime::get().and_then(|rt| rt.cuda()) {
-        let (merged_offsets, merged_targets) = undirected_adjacency(
-            node_count, out_offsets, out_targets, in_offsets, in_sources,
-        );
+        let (merged_offsets, merged_targets) =
+            undirected_adjacency(node_count, out_offsets, out_targets, in_offsets, in_sources);
         match crate::cuda::lcc::cuda_lcc(
             cuda_ctx,
             &merged_offsets,
@@ -151,9 +150,8 @@ pub fn gpu_lcc(
     }
 
     // The same adjacency the CUDA path above builds, from the same function.
-    let (sorted_offsets, mut sorted_targets) = undirected_adjacency(
-        node_count, out_offsets, out_targets, in_offsets, in_sources,
-    );
+    let (sorted_offsets, mut sorted_targets) =
+        undirected_adjacency(node_count, out_offsets, out_targets, in_offsets, in_sources);
 
     // Check max degree — O(d²) shader loop times out on high-degree nodes
     let max_degree = sorted_offsets
@@ -364,7 +362,11 @@ mod tests {
             undirected_adjacency(4, &out_offsets, &out_targets, &in_offsets, &in_sources);
 
         let n0 = neighbours_of(&offsets, &targets, 0);
-        assert_eq!(n0, vec![1, 3], "sorted, and a parallel edge is one neighbour");
+        assert_eq!(
+            n0,
+            vec![1, 3],
+            "sorted, and a parallel edge is one neighbour"
+        );
         // Sortedness is per node: the ranges are laid out in node order, so a
         // check across the whole flat array would be asserting the wrong thing.
         for node in 0..4 {

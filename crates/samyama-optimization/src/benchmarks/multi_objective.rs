@@ -26,8 +26,12 @@ pub struct ZDT {
 }
 
 impl MultiObjectiveProblem for ZDT {
-    fn dim(&self) -> usize { self.dim }
-    fn num_objectives(&self) -> usize { 2 }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn num_objectives(&self) -> usize {
+        2
+    }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         match self.variant {
             5 => unreachable!("ZDT5 is binary-coded; not supported in this continuous suite"),
@@ -65,8 +69,7 @@ impl MultiObjectiveProblem for ZDT {
             }
             6 => {
                 let f1 = 1.0 - (-4.0 * x[0]).exp() * (6.0 * PI * x[0]).sin().powi(6);
-                let g = 1.0
-                    + 9.0 * (x.iter().skip(1).sum::<f64>() / (n - 1.0)).powf(0.25);
+                let g = 1.0 + 9.0 * (x.iter().skip(1).sum::<f64>() / (n - 1.0)).powf(0.25);
                 vec![f1, g * (1.0 - (f1 / g).powi(2))]
             }
             _ => panic!("ZDT variant {} not supported", self.variant),
@@ -77,12 +80,16 @@ impl MultiObjectiveProblem for ZDT {
 pub struct DTLZ {
     pub variant: u8, // 1..=7
     pub dim: usize,
-    pub m: usize,    // number of objectives
+    pub m: usize, // number of objectives
 }
 
 impl MultiObjectiveProblem for DTLZ {
-    fn dim(&self) -> usize { self.dim }
-    fn num_objectives(&self) -> usize { self.m }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn num_objectives(&self) -> usize {
+        self.m
+    }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (Array1::zeros(self.dim), Array1::ones(self.dim))
     }
@@ -93,14 +100,19 @@ impl MultiObjectiveProblem for DTLZ {
 
         match self.variant {
             1 => {
-                let g = 100.0 * (k as f64
-                    + xm.iter()
-                        .map(|&v| (v - 0.5).powi(2) - (20.0 * PI * (v - 0.5)).cos())
-                        .sum::<f64>());
+                let g = 100.0
+                    * (k as f64
+                        + xm.iter()
+                            .map(|&v| (v - 0.5).powi(2) - (20.0 * PI * (v - 0.5)).cos())
+                            .sum::<f64>());
                 let mut f = vec![0.5 * (1.0 + g); m];
                 for i in 0..m {
-                    for j in 0..(m - 1 - i) { f[i] *= x[j]; }
-                    if i > 0 { f[i] *= 1.0 - x[m - 1 - i]; }
+                    for j in 0..(m - 1 - i) {
+                        f[i] *= x[j];
+                    }
+                    if i > 0 {
+                        f[i] *= 1.0 - x[m - 1 - i];
+                    }
                 }
                 f
             }
@@ -108,20 +120,25 @@ impl MultiObjectiveProblem for DTLZ {
                 // DTLZ2/3/4 share spherical PF; only g and the meta-variable transformation differ.
                 let g = match self.variant {
                     2 | 4 => xm.iter().map(|&v| (v - 0.5).powi(2)).sum::<f64>(),
-                    3 => 100.0 * (k as f64
-                        + xm.iter()
-                            .map(|&v| (v - 0.5).powi(2) - (20.0 * PI * (v - 0.5)).cos())
-                            .sum::<f64>()),
+                    3 => {
+                        100.0
+                            * (k as f64
+                                + xm.iter()
+                                    .map(|&v| (v - 0.5).powi(2) - (20.0 * PI * (v - 0.5)).cos())
+                                    .sum::<f64>())
+                    }
                     _ => unreachable!(),
                 };
                 let alpha = if self.variant == 4 { 100.0 } else { 1.0 };
-                let theta: Vec<f64> = (0..m - 1)
-                    .map(|j| 0.5 * PI * x[j].powf(alpha))
-                    .collect();
+                let theta: Vec<f64> = (0..m - 1).map(|j| 0.5 * PI * x[j].powf(alpha)).collect();
                 let mut f = vec![1.0 + g; m];
                 for i in 0..m {
-                    for j in 0..(m - 1 - i) { f[i] *= theta[j].cos(); }
-                    if i > 0 { f[i] *= theta[m - 1 - i].sin(); }
+                    for j in 0..(m - 1 - i) {
+                        f[i] *= theta[j].cos();
+                    }
+                    if i > 0 {
+                        f[i] *= theta[m - 1 - i].sin();
+                    }
                 }
                 f
             }
@@ -135,8 +152,12 @@ impl MultiObjectiveProblem for DTLZ {
                 }
                 let mut f = vec![1.0 + g; m];
                 for i in 0..m {
-                    for j in 0..(m - 1 - i) { f[i] *= theta[j].cos(); }
-                    if i > 0 { f[i] *= theta[m - 1 - i].sin(); }
+                    for j in 0..(m - 1 - i) {
+                        f[i] *= theta[j].cos();
+                    }
+                    if i > 0 {
+                        f[i] *= theta[m - 1 - i].sin();
+                    }
                 }
                 f
             }
@@ -150,15 +171,21 @@ impl MultiObjectiveProblem for DTLZ {
                 }
                 let mut f = vec![1.0 + g; m];
                 for i in 0..m {
-                    for j in 0..(m - 1 - i) { f[i] *= theta[j].cos(); }
-                    if i > 0 { f[i] *= theta[m - 1 - i].sin(); }
+                    for j in 0..(m - 1 - i) {
+                        f[i] *= theta[j].cos();
+                    }
+                    if i > 0 {
+                        f[i] *= theta[m - 1 - i].sin();
+                    }
                 }
                 f
             }
             7 => {
                 let g = 1.0 + 9.0 / k as f64 * xm.iter().sum::<f64>();
                 let mut f = vec![0.0; m];
-                for i in 0..m - 1 { f[i] = x[i]; }
+                for i in 0..m - 1 {
+                    f[i] = x[i];
+                }
                 let h: f64 = (0..m - 1)
                     .map(|i| f[i] / (1.0 + g) * (1.0 + (3.0 * PI * f[i]).sin()))
                     .sum();
@@ -289,7 +316,14 @@ pub fn moo_suite(zdt_dim: usize, dtlz_dim: usize, dtlz_m: usize) -> Vec<MOProble
     let mut v = Vec::new();
     for variant in [1u8, 2, 3, 4, 6] {
         v.push(MOProblemSpec {
-            name: match variant { 1 => "ZDT1", 2 => "ZDT2", 3 => "ZDT3", 4 => "ZDT4", 6 => "ZDT6", _ => "ZDT?" },
+            name: match variant {
+                1 => "ZDT1",
+                2 => "ZDT2",
+                3 => "ZDT3",
+                4 => "ZDT4",
+                6 => "ZDT6",
+                _ => "ZDT?",
+            },
             dim: zdt_dim,
             num_objectives: 2,
             lower: 0.0,
@@ -300,8 +334,14 @@ pub fn moo_suite(zdt_dim: usize, dtlz_dim: usize, dtlz_m: usize) -> Vec<MOProble
     for variant in 1u8..=7 {
         v.push(MOProblemSpec {
             name: match variant {
-                1 => "DTLZ1", 2 => "DTLZ2", 3 => "DTLZ3", 4 => "DTLZ4",
-                5 => "DTLZ5", 6 => "DTLZ6", 7 => "DTLZ7", _ => "DTLZ?",
+                1 => "DTLZ1",
+                2 => "DTLZ2",
+                3 => "DTLZ3",
+                4 => "DTLZ4",
+                5 => "DTLZ5",
+                6 => "DTLZ6",
+                7 => "DTLZ7",
+                _ => "DTLZ?",
             },
             dim: dtlz_dim,
             num_objectives: dtlz_m,
@@ -317,11 +357,18 @@ pub fn moo_suite(zdt_dim: usize, dtlz_dim: usize, dtlz_m: usize) -> Vec<MOProble
 pub fn build_mo_problem(spec: &MOProblemSpec) -> Box<dyn MultiObjectiveProblem> {
     if let Some(rest) = spec.name.strip_prefix("ZDT") {
         let variant: u8 = rest.parse().expect("ZDT variant");
-        return Box::new(ZDT { variant, dim: spec.dim });
+        return Box::new(ZDT {
+            variant,
+            dim: spec.dim,
+        });
     }
     if let Some(rest) = spec.name.strip_prefix("DTLZ") {
         let variant: u8 = rest.parse().expect("DTLZ variant");
-        return Box::new(DTLZ { variant, dim: spec.dim, m: spec.num_objectives });
+        return Box::new(DTLZ {
+            variant,
+            dim: spec.dim,
+            m: spec.num_objectives,
+        });
     }
     panic!("unknown MO problem {}", spec.name)
 }

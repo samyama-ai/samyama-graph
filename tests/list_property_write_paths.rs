@@ -53,7 +53,11 @@ fn every_node_write_path_stores_the_list() {
     ] {
         let mut store = GraphStore::new();
         exec(&mut store, &write);
-        assert_eq!(stored(&store, "MATCH (n) RETURN n.xs AS r"), expected(), "{write}");
+        assert_eq!(
+            stored(&store, "MATCH (n) RETURN n.xs AS r"),
+            expected(),
+            "{write}"
+        );
     }
 
     // SET was already correct and must stay so.
@@ -79,8 +83,14 @@ fn a_relationship_property_is_not_silently_dropped() {
 #[test]
 fn any_non_literal_element_is_affected() {
     for (list, want) in [
-        ("[1 + 1]", PropertyValue::Array(vec![PropertyValue::Integer(2)])),
-        ("[abs(-1)]", PropertyValue::Array(vec![PropertyValue::Integer(1)])),
+        (
+            "[1 + 1]",
+            PropertyValue::Array(vec![PropertyValue::Integer(2)]),
+        ),
+        (
+            "[abs(-1)]",
+            PropertyValue::Array(vec![PropertyValue::Integer(1)]),
+        ),
         (
             "[toUpper('a'), 'b']",
             PropertyValue::Array(vec![

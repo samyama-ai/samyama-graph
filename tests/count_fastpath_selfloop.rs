@@ -63,8 +63,14 @@ fn count_star_over_a_self_loop_pattern_too() {
 #[test]
 fn a_typed_self_loop_pattern_is_counted_correctly() {
     let store = graph();
-    assert_eq!(count(&store, "MATCH (n)-[r:LOOP]->(n) RETURN count(r) AS c"), 1);
-    assert_eq!(count(&store, "MATCH (n)-[r:T]->(n) RETURN count(r) AS c"), 0);
+    assert_eq!(
+        count(&store, "MATCH (n)-[r:LOOP]->(n) RETURN count(r) AS c"),
+        1
+    );
+    assert_eq!(
+        count(&store, "MATCH (n)-[r:T]->(n) RETURN count(r) AS c"),
+        0
+    );
 }
 
 #[test]
@@ -73,8 +79,14 @@ fn the_ordinary_fast_path_still_answers_the_total() {
     // Distinct endpoints, no labels, no properties: still the store's count.
     let store = graph();
     assert_eq!(count(&store, "MATCH (a)-[r]->(b) RETURN count(r) AS c"), 2);
-    assert_eq!(count(&store, "MATCH (a)-[r:T]->(b) RETURN count(r) AS c"), 1);
-    assert_eq!(count(&store, "MATCH (a)-[r:LOOP]->(b) RETURN count(r) AS c"), 1);
+    assert_eq!(
+        count(&store, "MATCH (a)-[r:T]->(b) RETURN count(r) AS c"),
+        1
+    );
+    assert_eq!(
+        count(&store, "MATCH (a)-[r:LOOP]->(b) RETURN count(r) AS c"),
+        1
+    );
 }
 
 #[test]
@@ -83,7 +95,10 @@ fn the_fast_path_is_still_chosen_for_the_ordinary_shape() {
     // if the optimisation had been silently switched off everywhere.
     let store = graph();
     let q = parse_query("EXPLAIN MATCH (a)-[r]->(b) RETURN count(r) AS c").unwrap();
-    let plan = format!("{:?}", QueryExecutor::new(&store).execute(&q).unwrap().records[0]);
+    let plan = format!(
+        "{:?}",
+        QueryExecutor::new(&store).execute(&q).unwrap().records[0]
+    );
     assert!(plan.contains("EdgeCount"), "{plan}");
 }
 
@@ -91,7 +106,10 @@ fn the_fast_path_is_still_chosen_for_the_ordinary_shape() {
 fn the_self_loop_shape_does_not_use_it() {
     let store = graph();
     let q = parse_query("EXPLAIN MATCH (n)-[r]->(n) RETURN count(r) AS c").unwrap();
-    let plan = format!("{:?}", QueryExecutor::new(&store).execute(&q).unwrap().records[0]);
+    let plan = format!(
+        "{:?}",
+        QueryExecutor::new(&store).execute(&q).unwrap().records[0]
+    );
     assert!(!plan.contains("EdgeCount"), "{plan}");
 }
 

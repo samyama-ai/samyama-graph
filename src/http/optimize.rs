@@ -18,8 +18,8 @@ use futures::stream::Stream;
 use ndarray::Array1;
 use samyama_optimization::algorithms::{
     BMRSolver, BMWRSolver, BWRSolver, DESolver, EHRJayaSolver, GASolver, GOTLBOSolver, ITLBOSolver,
-    JayaSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, NSGA2Solver, PSOSolver, QOJayaSolver,
-    QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver, LSHADESolver,
+    JayaSolver, LSHADESolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, NSGA2Solver, PSOSolver,
+    QOJayaSolver, QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver,
 };
 use samyama_optimization::benchmarks::{DTLZ, DTLZ_FRONT_SAMPLES_PER_AXIS, ZDT, ZDT_FRONT_SAMPLES};
 use samyama_optimization::budget::{Budget, Budgeted, StopReason};

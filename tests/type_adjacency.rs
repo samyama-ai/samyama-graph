@@ -55,18 +55,24 @@ fn mixed() -> (GraphStore, Vec<NodeId>) {
         }
         // The selective type: at most one per node, and only for some nodes.
         if i % 4 == 0 {
-            store.create_edge(p, orgs[i % orgs.len()], "WORKS_AT").unwrap();
+            store
+                .create_edge(p, orgs[i % orgs.len()], "WORKS_AT")
+                .unwrap();
         }
         // A second selective type, to catch an index keyed on the wrong type.
         if i % 5 == 0 {
-            store.create_edge(p, orgs[(i + 1) % orgs.len()], "STUDIES_AT").unwrap();
+            store
+                .create_edge(p, orgs[(i + 1) % orgs.len()], "STUDIES_AT")
+                .unwrap();
         }
     }
     (store, people)
 }
 
 fn tid(store: &GraphStore, name: &str) -> u16 {
-    store.edge_type_id(&EdgeType::new(name)).expect("type exists")
+    store
+        .edge_type_id(&EdgeType::new(name))
+        .expect("type exists")
 }
 
 #[test]
@@ -100,8 +106,16 @@ fn the_index_survives_compaction_because_the_walk_does() {
     store.compact_adjacency();
 
     for (i, &n) in people.iter().enumerate() {
-        assert_eq!(walked(&store, n, t, true), before[i], "walk changed on compaction");
-        assert_eq!(indexed(&store, n, t, true), before[i], "index disagrees after compaction");
+        assert_eq!(
+            walked(&store, n, t, true),
+            before[i],
+            "walk changed on compaction"
+        );
+        assert_eq!(
+            indexed(&store, n, t, true),
+            before[i],
+            "index disagrees after compaction"
+        );
     }
 }
 
@@ -114,11 +128,18 @@ fn adding_an_edge_drops_the_index() {
 
     assert!(store.type_adjacency(t, true).is_some());
     assert!(indexed(&store, target, t, true).is_empty());
-    assert!(store.type_adjacency_cached() > 0, "the index should be cached");
+    assert!(
+        store.type_adjacency_cached() > 0,
+        "the index should be cached"
+    );
 
     let org = store.create_node("O");
     store.create_edge(target, org, "WORKS_AT").unwrap();
-    assert_eq!(store.type_adjacency_cached(), 0, "the index must be dropped on an edge change");
+    assert_eq!(
+        store.type_adjacency_cached(),
+        0,
+        "the index must be dropped on an edge change"
+    );
 
     assert_eq!(
         indexed(&store, target, t, true),
@@ -136,15 +157,27 @@ fn deleting_an_edge_drops_the_index() {
 
     let before = indexed(&store, owner, t, true);
     assert_eq!(before.len(), 1);
-    let (_, eid) = *store.type_adjacency(t, true).unwrap().neighbors(owner).first().unwrap();
+    let (_, eid) = *store
+        .type_adjacency(t, true)
+        .unwrap()
+        .neighbors(owner)
+        .first()
+        .unwrap();
 
     store.delete_edge(eid).unwrap();
-    assert_eq!(store.type_adjacency_cached(), 0, "the index must be dropped on a delete");
+    assert_eq!(
+        store.type_adjacency_cached(),
+        0,
+        "the index must be dropped on a delete"
+    );
     assert!(
         indexed(&store, owner, t, true).is_empty(),
         "a deleted edge must not survive in the rebuilt index"
     );
-    assert_eq!(walked(&store, owner, t, true), indexed(&store, owner, t, true));
+    assert_eq!(
+        walked(&store, owner, t, true),
+        indexed(&store, owner, t, true)
+    );
 }
 
 /// A type nothing carries must not be confused with a declined build.
@@ -157,7 +190,9 @@ fn an_absent_type_indexes_to_nothing_rather_than_declining() {
     let t = tid(&store, "RARE");
     store.delete_edge(e).unwrap();
 
-    let idx = store.type_adjacency(t, true).expect("an empty type is indexable, not declined");
+    let idx = store
+        .type_adjacency(t, true)
+        .expect("an empty type is indexable, not declined");
     assert!(idx.is_empty());
     assert!(idx.neighbors(a).is_empty());
 }
@@ -191,7 +226,11 @@ fn a_stub_loaded_graph_still_indexes_correctly() {
             "a stub-loaded graph must not get a short index for {n:?}"
         );
     }
-    assert_eq!(indexed(&store, a, t, true).len(), 2, "both stub edges must be present");
+    assert_eq!(
+        indexed(&store, a, t, true).len(),
+        2,
+        "both stub edges must be present"
+    );
 
     // And once the index is repaired, the fast path must agree too.
     store.rebuild_edge_type_index();
@@ -210,11 +249,21 @@ use samyama::query::parser::parse_query;
 
 fn rows(store: &GraphStore, cypher: &str) -> Vec<String> {
     let q = parse_query(cypher).unwrap_or_else(|e| panic!("`{cypher}`: {e}"));
-    let out = QueryExecutor::new(store).execute(&q).unwrap_or_else(|e| panic!("`{cypher}`: {e}"));
+    let out = QueryExecutor::new(store)
+        .execute(&q)
+        .unwrap_or_else(|e| panic!("`{cypher}`: {e}"));
     let mut got: Vec<String> = out
         .records
         .iter()
-        .map(|r| format!("{:?}", out.columns.iter().map(|c| r.get(c).cloned()).collect::<Vec<_>>()))
+        .map(|r| {
+            format!(
+                "{:?}",
+                out.columns
+                    .iter()
+                    .map(|c| r.get(c).cloned())
+                    .collect::<Vec<_>>()
+            )
+        })
         .collect();
     got.sort();
     got
@@ -231,13 +280,19 @@ fn wide() -> GraphStore {
     for (i, &p) in people.iter().enumerate() {
         store.create_edge(hub, p, "KNOWS").unwrap();
         for j in 0..4 {
-            store.create_edge(p, people[(i * 5 + j + 1) % people.len()], "LIKES").unwrap();
+            store
+                .create_edge(p, people[(i * 5 + j + 1) % people.len()], "LIKES")
+                .unwrap();
         }
         if i % 3 == 0 {
-            store.create_edge(p, orgs[i % orgs.len()], "WORKS_AT").unwrap();
+            store
+                .create_edge(p, orgs[i % orgs.len()], "WORKS_AT")
+                .unwrap();
         }
         if i % 7 == 0 {
-            store.create_edge(orgs[i % orgs.len()], p, "EMPLOYS").unwrap();
+            store
+                .create_edge(orgs[i % orgs.len()], p, "EMPLOYS")
+                .unwrap();
         }
     }
     // A self-loop, because the undirected arm has to take it exactly once.
@@ -263,7 +318,10 @@ fn a_typed_expand_answers_the_same_with_and_without_the_index() {
         let mixed_run = rows(&store, cypher);
         // Warm: the index is already built, so every row takes the fast path.
         let warm_run = rows(&store, cypher);
-        assert_eq!(mixed_run, warm_run, "index changed the answer for `{cypher}`");
+        assert_eq!(
+            mixed_run, warm_run,
+            "index changed the answer for `{cypher}`"
+        );
         assert!(!mixed_run.is_empty(), "`{cypher}` should match something");
     }
 }
@@ -272,8 +330,14 @@ fn a_typed_expand_answers_the_same_with_and_without_the_index() {
 #[test]
 fn the_indexed_undirected_walk_takes_a_self_loop_once() {
     let store = wide();
-    let n = rows(&store, "MATCH (h:H)-[:KNOWS]->(p:P)-[:WORKS_AT]-(o) RETURN count(o) AS n");
-    let again = rows(&store, "MATCH (h:H)-[:KNOWS]->(p:P)-[:WORKS_AT]-(o) RETURN count(o) AS n");
+    let n = rows(
+        &store,
+        "MATCH (h:H)-[:KNOWS]->(p:P)-[:WORKS_AT]-(o) RETURN count(o) AS n",
+    );
+    let again = rows(
+        &store,
+        "MATCH (h:H)-[:KNOWS]->(p:P)-[:WORKS_AT]-(o) RETURN count(o) AS n",
+    );
     assert_eq!(n, again);
     // 300 people with WORKS_AT, plus one self-loop counted once from each side
     // of the pattern it can satisfy.
@@ -284,7 +348,10 @@ fn the_indexed_undirected_walk_takes_a_self_loop_once() {
 #[test]
 fn an_edge_added_between_queries_is_visible() {
     let mut store = wide();
-    let before = rows(&store, "MATCH (h:H)-[:KNOWS]->(p:P)-[:WORKS_AT]->(o:O) RETURN count(o) AS n");
+    let before = rows(
+        &store,
+        "MATCH (h:H)-[:KNOWS]->(p:P)-[:WORKS_AT]->(o:O) RETURN count(o) AS n",
+    );
     let p = store.create_node("P");
     let o = store.create_node("O");
     let hub = {
@@ -298,8 +365,14 @@ fn an_edge_added_between_queries_is_visible() {
     };
     store.create_edge(hub, p, "KNOWS").unwrap();
     store.create_edge(p, o, "WORKS_AT").unwrap();
-    let after = rows(&store, "MATCH (h:H)-[:KNOWS]->(p:P)-[:WORKS_AT]->(o:O) RETURN count(o) AS n");
-    assert_ne!(before, after, "a new edge must be visible through the index");
+    let after = rows(
+        &store,
+        "MATCH (h:H)-[:KNOWS]->(p:P)-[:WORKS_AT]->(o:O) RETURN count(o) AS n",
+    );
+    assert_ne!(
+        before, after,
+        "a new edge must be visible through the index"
+    );
 }
 
 /// The order is now a promise, and both build paths must keep it.
@@ -316,17 +389,25 @@ fn every_neighbour_list_is_sorted_by_target_then_edge() {
     let mut checked = 0usize;
     let mut nontrivial = 0usize;
     for &type_name in &["LIKES", "WORKS_AT", "STUDIES_AT"] {
-        let Some(t) = store.edge_type_id(&EdgeType::new(type_name)) else { continue };
+        let Some(t) = store.edge_type_id(&EdgeType::new(type_name)) else {
+            continue;
+        };
         for outgoing in [true, false] {
-            let Some(idx) = store.type_adjacency(t, outgoing) else { continue };
+            let Some(idx) = store.type_adjacency(t, outgoing) else {
+                continue;
+            };
             for &n in &people {
                 let list = idx.neighbors(n);
-                let keys: Vec<(u64, u64)> =
-                    list.iter().map(|&(t, e)| (t.as_u64(), e.as_u64())).collect();
+                let keys: Vec<(u64, u64)> = list
+                    .iter()
+                    .map(|&(t, e)| (t.as_u64(), e.as_u64()))
+                    .collect();
                 let mut sorted = keys.clone();
                 sorted.sort_unstable();
-                assert_eq!(keys, sorted,
-                    "{type_name} outgoing={outgoing} node {n:?} is not sorted: {keys:?}");
+                assert_eq!(
+                    keys, sorted,
+                    "{type_name} outgoing={outgoing} node {n:?} is not sorted: {keys:?}"
+                );
                 checked += 1;
                 if keys.len() > 1 {
                     nontrivial += 1;
@@ -337,9 +418,14 @@ fn every_neighbour_list_is_sorted_by_target_then_edge() {
     // A list of length 0 or 1 is sorted for free, so the assertion above would
     // pass on a store where nothing has two neighbours. This is the half that
     // makes the check able to fail.
-    assert!(checked > 0, "no type index was built, so nothing was checked");
-    assert!(nontrivial > 20,
-        "only {nontrivial} lists had more than one entry — the sort assertion is nearly vacuous");
+    assert!(
+        checked > 0,
+        "no type index was built, so nothing was checked"
+    );
+    assert!(
+        nontrivial > 20,
+        "only {nontrivial} lists had more than one entry — the sort assertion is nearly vacuous"
+    );
 }
 
 /// Sorting must not change *what* the index holds.
@@ -352,11 +438,16 @@ fn every_neighbour_list_is_sorted_by_target_then_edge() {
 fn sorting_did_not_change_the_contents() {
     let (store, people) = mixed();
     for &type_name in &["LIKES", "WORKS_AT", "STUDIES_AT"] {
-        let Some(t) = store.edge_type_id(&EdgeType::new(type_name)) else { continue };
+        let Some(t) = store.edge_type_id(&EdgeType::new(type_name)) else {
+            continue;
+        };
         for outgoing in [true, false] {
             for &n in &people {
-                assert_eq!(indexed(&store, n, t, outgoing), walked(&store, n, t, outgoing),
-                    "{type_name} outgoing={outgoing} node {n:?}");
+                assert_eq!(
+                    indexed(&store, n, t, outgoing),
+                    walked(&store, n, t, outgoing),
+                    "{type_name} outgoing={outgoing} node {n:?}"
+                );
             }
         }
     }

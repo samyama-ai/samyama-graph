@@ -34,12 +34,12 @@
 //! }
 //! ```
 
+pub mod algo;
 pub mod client;
 pub mod embedded;
 pub mod error;
 pub mod models;
 pub mod remote;
-pub mod algo;
 pub mod vector_ext;
 
 // ============================================================
@@ -48,9 +48,9 @@ pub mod vector_ext;
 
 pub use client::SamyamaClient;
 pub use embedded::EmbeddedClient;
-pub use remote::{ConnectionConfig, RemoteClient, RowStream};
 pub use error::{SamyamaError, SamyamaResult};
-pub use models::{QueryResult, SdkNode, SdkEdge, ServerStatus, StorageStats};
+pub use models::{QueryResult, SdkEdge, SdkNode, ServerStatus, StorageStats};
+pub use remote::{ConnectionConfig, RemoteClient, RowStream};
 
 // ============================================================
 // Extension traits (EmbeddedClient only)
@@ -64,21 +64,19 @@ pub use vector_ext::VectorClient;
 // ============================================================
 
 pub use samyama::graph::{
-    GraphStore, Node, Edge, NodeId, EdgeId, EdgeType, Label,
-    PropertyValue, PropertyMap,
-    GraphError, GraphResult,
+    Edge, EdgeId, EdgeType, GraphError, GraphResult, GraphStore, Label, Node, NodeId, PropertyMap,
+    PropertyValue,
 };
-pub use samyama::query::{QueryEngine, RecordBatch, CacheStats};
+pub use samyama::query::{CacheStats, QueryEngine, RecordBatch};
 
 // ============================================================
 // Algorithm types (re-exported from samyama-graph-algorithms)
 // ============================================================
 
 pub use samyama::algo::{
-    build_view, page_rank, weakly_connected_components, strongly_connected_components,
-    bfs, dijkstra, edmonds_karp, prim_mst, count_triangles, pca,
-    PageRankConfig, PathResult, WccResult, SccResult, FlowResult, MSTResult,
-    PcaConfig, PcaResult, PcaSolver,
+    bfs, build_view, count_triangles, dijkstra, edmonds_karp, page_rank, pca, prim_mst,
+    strongly_connected_components, weakly_connected_components, FlowResult, MSTResult,
+    PageRankConfig, PathResult, PcaConfig, PcaResult, PcaSolver, SccResult, WccResult,
 };
 pub use samyama_graph_algorithms::GraphView;
 
@@ -87,15 +85,14 @@ pub use samyama_graph_algorithms::GraphView;
 // ============================================================
 
 pub use samyama::vector::{
-    DistanceMetric, VectorIndex, VectorIndexManager, IndexKey,
-    VectorError, VectorResult,
+    DistanceMetric, IndexKey, VectorError, VectorIndex, VectorIndexManager, VectorResult,
 };
 
 // ============================================================
 // NLQ types (re-exported from samyama core)
 // ============================================================
 
-pub use samyama::{NLQPipeline, NLQError, NLQResult};
+pub use samyama::{NLQError, NLQPipeline, NLQResult};
 
 // ============================================================
 // Agent types (re-exported from samyama core)
@@ -107,29 +104,25 @@ pub use samyama::agent::AgentRuntime;
 // Persistence & Multi-Tenancy types (re-exported from samyama core)
 // ============================================================
 
-pub use samyama::{
-    PersistenceManager, PersistenceError, PersistenceResult,
-    PersistentStorage, StorageError, StorageResult,
-    Tenant, TenantManager, ResourceQuotas, ResourceUsage,
-    TenantError, TenantResult,
-    Wal, WalEntry, WalError, WalResult,
-    NLQConfig, LLMProvider, AutoEmbedConfig,
-};
 pub use samyama::persistence::tenant::{AgentConfig, ToolConfig};
+pub use samyama::{
+    AutoEmbedConfig, LLMProvider, NLQConfig, PersistenceError, PersistenceManager,
+    PersistenceResult, PersistentStorage, ResourceQuotas, ResourceUsage, StorageError,
+    StorageResult, Tenant, TenantError, TenantManager, TenantResult, Wal, WalEntry, WalError,
+    WalResult,
+};
 
 // ============================================================
 // Optimization types (re-exported from samyama-optimization)
 // ============================================================
 
-pub use samyama_optimization::{
-    SolverConfig, OptimizationResult, Individual, SimpleProblem,
-    Problem, MultiObjectiveProblem, MultiObjectiveIndividual, MultiObjectiveResult,
-};
 pub use samyama_optimization::algorithms::{
-    JayaSolver, CuckooSolver, NSGA2Solver,
-    RaoSolver, TLBOSolver, PSOSolver, DESolver, GASolver,
-    FireflySolver, GWOSolver, SASolver, BatSolver, ABCSolver,
-    BMRSolver, QOJayaSolver,
+    ABCSolver, BMRSolver, BatSolver, CuckooSolver, DESolver, FireflySolver, GASolver, GWOSolver,
+    JayaSolver, NSGA2Solver, PSOSolver, QOJayaSolver, RaoSolver, SASolver, TLBOSolver,
+};
+pub use samyama_optimization::{
+    Individual, MultiObjectiveIndividual, MultiObjectiveProblem, MultiObjectiveResult,
+    OptimizationResult, Problem, SimpleProblem, SolverConfig,
 };
 
 // ============================================================

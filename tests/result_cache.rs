@@ -34,12 +34,18 @@ fn seeded_store() -> GraphStore {
     for i in 0..25i64 {
         let mut props = samyama::graph::PropertyMap::new();
         props.insert("id".to_string(), PropertyValue::Integer(i));
-        props.insert("name".to_string(), PropertyValue::String(format!("p{i:02}")));
+        props.insert(
+            "name".to_string(),
+            PropertyValue::String(format!("p{i:02}")),
+        );
         props.insert("age".to_string(), PropertyValue::Integer(20 + (i % 7)));
         store.create_node_with_properties("default", vec![Label::new("Person")], props);
     }
-    let people: Vec<_> = store.get_nodes_by_label(&Label::new("Person"))
-        .iter().map(|n| n.id).collect();
+    let people: Vec<_> = store
+        .get_nodes_by_label(&Label::new("Person"))
+        .iter()
+        .map(|n| n.id)
+        .collect();
     for w in people.windows(2) {
         let _ = store.create_edge(w[0], w[1], "KNOWS");
     }
@@ -66,13 +72,24 @@ fn cached_and_uncached_agree_on_every_query() {
         let plain = render(&engine.execute(q, &store).expect(q));
 
         let (first, was_cached) = engine.execute_cached(q, &store).expect(q);
-        assert!(!was_cached, "first call for {q:?} reported a hit on an empty cache");
-        assert_eq!(render(&first), plain, "cached path disagreed on first run: {q}");
+        assert!(
+            !was_cached,
+            "first call for {q:?} reported a hit on an empty cache"
+        );
+        assert_eq!(
+            render(&first),
+            plain,
+            "cached path disagreed on first run: {q}"
+        );
 
         let (second, was_cached) = engine.execute_cached(q, &store).expect(q);
-        assert!(was_cached, "second call for {q:?} missed; the cache never hit");
+        assert!(
+            was_cached,
+            "second call for {q:?} missed; the cache never hit"
+        );
         assert_eq!(
-            render(&second), plain,
+            render(&second),
+            plain,
             "a cached answer differed from a computed one, rows or order: {q}"
         );
     }
@@ -93,7 +110,10 @@ fn a_write_makes_every_entry_unreachable() {
     store.create_node_with_labels([Label::new("Person")]);
 
     let (after_batch, cached) = engine.execute_cached(q, &store).unwrap();
-    assert!(!cached, "a write did not invalidate: the old count was served again");
+    assert!(
+        !cached,
+        "a write did not invalidate: the old count was served again"
+    );
     let after = render(&after_batch);
     assert_ne!(before, after, "count did not change after adding a Person");
 }
@@ -111,15 +131,26 @@ fn a_property_write_that_changes_no_count_still_invalidates() {
     assert!(cached);
     let before = render(&warm);
 
-    let target = store.get_nodes_by_label(&Label::new("Person"))
-        .iter().find(|n| store.node_property(n.id, "id") == Some(PropertyValue::Integer(0)))
+    let target = store
+        .get_nodes_by_label(&Label::new("Person"))
+        .iter()
+        .find(|n| store.node_property(n.id, "id") == Some(PropertyValue::Integer(0)))
         .map(|n| n.id)
         .expect("seeded Person with id 0");
-    store.set_node_property("default", target, "name", PropertyValue::String("renamed".into()))
+    store
+        .set_node_property(
+            "default",
+            target,
+            "name",
+            PropertyValue::String("renamed".into()),
+        )
         .expect("rename");
 
     let (after_batch, cached) = engine.execute_cached(q, &store).unwrap();
-    assert!(!cached, "a property write served a stale name from the cache");
+    assert!(
+        !cached,
+        "a property write served a stale name from the cache"
+    );
     assert_ne!(before, render(&after_batch), "the rename is not visible");
 }
 
@@ -133,7 +164,8 @@ fn the_plain_execute_path_never_touches_the_cache() {
         let _ = engine.execute(q, &store).unwrap();
     }
     assert_eq!(
-        engine.result_cache_len(), 0,
+        engine.result_cache_len(),
+        0,
         "execute() populated the result cache; a benchmark calling it would \
          measure the cache instead of the engine"
     );
@@ -157,8 +189,10 @@ fn a_columnar_property_write_invalidates_too() {
     assert!(cached, "warm-up did not populate the cache");
     let before = render(&warm);
 
-    let target = store.get_nodes_by_label(&Label::new("Person"))
-        .iter().find(|n| store.node_property(n.id, "id") == Some(PropertyValue::Integer(3)))
+    let target = store
+        .get_nodes_by_label(&Label::new("Person"))
+        .iter()
+        .find(|n| store.node_property(n.id, "id") == Some(PropertyValue::Integer(3)))
         .map(|n| n.id)
         .expect("seeded Person with id 3");
     store.set_column_property(target, "name", PropertyValue::String("columnar".into()));
@@ -169,5 +203,9 @@ fn a_columnar_property_write_invalidates_too() {
         "a columnar property write was served from the cache; the epoch did not \
          move, which is what keying on invalidate_statistics_cache() alone would do"
     );
-    assert_ne!(before, render(&after), "the columnar write is not visible to the query");
+    assert_ne!(
+        before,
+        render(&after),
+        "the columnar write is not visible to the query"
+    );
 }

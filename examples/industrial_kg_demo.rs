@@ -16,11 +16,9 @@
 static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
 
 use samyama_sdk::{
-    EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
-    PropertyValue, PageRankConfig, DistanceMetric,
-    NLQConfig, LLMProvider,
-    NSGA2Solver, SolverConfig, MultiObjectiveProblem,
-    Array1,
+    AlgorithmClient, Array1, DistanceMetric, EmbeddedClient, LLMProvider, MultiObjectiveProblem,
+    NLQConfig, NSGA2Solver, PageRankConfig, PropertyValue, SamyamaClient, SolverConfig,
+    VectorClient,
 };
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
@@ -113,20 +111,50 @@ async fn main() {
     {
         let mut store = client.store_write().await;
         site_id = store.create_node("Site");
-        store.set_node_property(tenant, site_id, "name",
-            PropertyValue::String("Riverside Chemical Plant".to_string())).unwrap();
-        store.set_node_property(tenant, site_id, "site_code",
-            PropertyValue::String("RCP-001".to_string())).unwrap();
-        store.set_node_property(tenant, site_id, "isa95_level",
-            PropertyValue::String("Enterprise".to_string())).unwrap();
+        store
+            .set_node_property(
+                tenant,
+                site_id,
+                "name",
+                PropertyValue::String("Riverside Chemical Plant".to_string()),
+            )
+            .unwrap();
+        store
+            .set_node_property(
+                tenant,
+                site_id,
+                "site_code",
+                PropertyValue::String("RCP-001".to_string()),
+            )
+            .unwrap();
+        store
+            .set_node_property(
+                tenant,
+                site_id,
+                "isa95_level",
+                PropertyValue::String("Enterprise".to_string()),
+            )
+            .unwrap();
     }
 
     // --- Locations ---
     let location_defs = vec![
-        LocationDef { name: "Building A - Chiller Plant",  code: "LOC-A" },
-        LocationDef { name: "Building B - HVAC Center",    code: "LOC-B" },
-        LocationDef { name: "Building C - Pump Station",   code: "LOC-C" },
-        LocationDef { name: "Building D - Power House",    code: "LOC-D" },
+        LocationDef {
+            name: "Building A - Chiller Plant",
+            code: "LOC-A",
+        },
+        LocationDef {
+            name: "Building B - HVAC Center",
+            code: "LOC-B",
+        },
+        LocationDef {
+            name: "Building C - Pump Station",
+            code: "LOC-C",
+        },
+        LocationDef {
+            name: "Building D - Power House",
+            code: "LOC-D",
+        },
     ];
 
     let mut location_ids = Vec::new();
@@ -134,12 +162,30 @@ async fn main() {
         let mut store = client.store_write().await;
         for loc in &location_defs {
             let id = store.create_node("Location");
-            store.set_node_property(tenant, id, "name",
-                PropertyValue::String(loc.name.to_string())).unwrap();
-            store.set_node_property(tenant, id, "location_code",
-                PropertyValue::String(loc.code.to_string())).unwrap();
-            store.set_node_property(tenant, id, "isa95_level",
-                PropertyValue::String("Area".to_string())).unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "name",
+                    PropertyValue::String(loc.name.to_string()),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "location_code",
+                    PropertyValue::String(loc.code.to_string()),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "isa95_level",
+                    PropertyValue::String("Area".to_string()),
+                )
+                .unwrap();
             store.create_edge(site_id, id, "CONTAINS_LOCATION").unwrap();
             location_ids.push(id);
         }
@@ -148,30 +194,210 @@ async fn main() {
     // --- Equipment (20 total: 4 types x 4 locations + 4 boilers in Power House) ---
     let equipment_defs: Vec<EquipmentDef> = vec![
         // Building A - Chiller Plant (index 0)
-        EquipmentDef { name: "Chiller-1", iso14224_class: "Compressor/Chiller", isa95_level: "Unit", criticality_score: 9.2, mtbf_hours: 8760.0, install_date: "2019-03-15", manufacturer: "Trane Technologies", location_idx: 0 },
-        EquipmentDef { name: "Chiller-2", iso14224_class: "Compressor/Chiller", isa95_level: "Unit", criticality_score: 9.0, mtbf_hours: 8500.0, install_date: "2019-03-15", manufacturer: "Trane Technologies", location_idx: 0 },
-        EquipmentDef { name: "Chiller-3", iso14224_class: "Compressor/Chiller", isa95_level: "Unit", criticality_score: 7.5, mtbf_hours: 9200.0, install_date: "2021-06-01", manufacturer: "Carrier Global", location_idx: 0 },
-        EquipmentDef { name: "Chiller-4", iso14224_class: "Compressor/Chiller", isa95_level: "Unit", criticality_score: 7.3, mtbf_hours: 9500.0, install_date: "2021-06-01", manufacturer: "Carrier Global", location_idx: 0 },
+        EquipmentDef {
+            name: "Chiller-1",
+            iso14224_class: "Compressor/Chiller",
+            isa95_level: "Unit",
+            criticality_score: 9.2,
+            mtbf_hours: 8760.0,
+            install_date: "2019-03-15",
+            manufacturer: "Trane Technologies",
+            location_idx: 0,
+        },
+        EquipmentDef {
+            name: "Chiller-2",
+            iso14224_class: "Compressor/Chiller",
+            isa95_level: "Unit",
+            criticality_score: 9.0,
+            mtbf_hours: 8500.0,
+            install_date: "2019-03-15",
+            manufacturer: "Trane Technologies",
+            location_idx: 0,
+        },
+        EquipmentDef {
+            name: "Chiller-3",
+            iso14224_class: "Compressor/Chiller",
+            isa95_level: "Unit",
+            criticality_score: 7.5,
+            mtbf_hours: 9200.0,
+            install_date: "2021-06-01",
+            manufacturer: "Carrier Global",
+            location_idx: 0,
+        },
+        EquipmentDef {
+            name: "Chiller-4",
+            iso14224_class: "Compressor/Chiller",
+            isa95_level: "Unit",
+            criticality_score: 7.3,
+            mtbf_hours: 9500.0,
+            install_date: "2021-06-01",
+            manufacturer: "Carrier Global",
+            location_idx: 0,
+        },
         // Building B - HVAC Center (index 1)
-        EquipmentDef { name: "AHU-1", iso14224_class: "Air Handling Unit", isa95_level: "Unit", criticality_score: 8.1, mtbf_hours: 12000.0, install_date: "2020-01-10", manufacturer: "Daikin Industries", location_idx: 1 },
-        EquipmentDef { name: "AHU-2", iso14224_class: "Air Handling Unit", isa95_level: "Unit", criticality_score: 8.0, mtbf_hours: 11500.0, install_date: "2020-01-10", manufacturer: "Daikin Industries", location_idx: 1 },
-        EquipmentDef { name: "AHU-3", iso14224_class: "Air Handling Unit", isa95_level: "Unit", criticality_score: 6.8, mtbf_hours: 13000.0, install_date: "2022-04-20", manufacturer: "Johnson Controls", location_idx: 1 },
-        EquipmentDef { name: "AHU-4", iso14224_class: "Air Handling Unit", isa95_level: "Unit", criticality_score: 6.5, mtbf_hours: 13500.0, install_date: "2022-04-20", manufacturer: "Johnson Controls", location_idx: 1 },
+        EquipmentDef {
+            name: "AHU-1",
+            iso14224_class: "Air Handling Unit",
+            isa95_level: "Unit",
+            criticality_score: 8.1,
+            mtbf_hours: 12000.0,
+            install_date: "2020-01-10",
+            manufacturer: "Daikin Industries",
+            location_idx: 1,
+        },
+        EquipmentDef {
+            name: "AHU-2",
+            iso14224_class: "Air Handling Unit",
+            isa95_level: "Unit",
+            criticality_score: 8.0,
+            mtbf_hours: 11500.0,
+            install_date: "2020-01-10",
+            manufacturer: "Daikin Industries",
+            location_idx: 1,
+        },
+        EquipmentDef {
+            name: "AHU-3",
+            iso14224_class: "Air Handling Unit",
+            isa95_level: "Unit",
+            criticality_score: 6.8,
+            mtbf_hours: 13000.0,
+            install_date: "2022-04-20",
+            manufacturer: "Johnson Controls",
+            location_idx: 1,
+        },
+        EquipmentDef {
+            name: "AHU-4",
+            iso14224_class: "Air Handling Unit",
+            isa95_level: "Unit",
+            criticality_score: 6.5,
+            mtbf_hours: 13500.0,
+            install_date: "2022-04-20",
+            manufacturer: "Johnson Controls",
+            location_idx: 1,
+        },
         // Building C - Pump Station (index 2)
-        EquipmentDef { name: "Pump-1", iso14224_class: "Centrifugal Pump", isa95_level: "Unit", criticality_score: 8.8, mtbf_hours: 6000.0, install_date: "2018-09-01", manufacturer: "Grundfos", location_idx: 2 },
-        EquipmentDef { name: "Pump-2", iso14224_class: "Centrifugal Pump", isa95_level: "Unit", criticality_score: 8.5, mtbf_hours: 6200.0, install_date: "2018-09-01", manufacturer: "Grundfos", location_idx: 2 },
-        EquipmentDef { name: "Pump-3", iso14224_class: "Centrifugal Pump", isa95_level: "Unit", criticality_score: 7.0, mtbf_hours: 7500.0, install_date: "2021-11-15", manufacturer: "Flowserve", location_idx: 2 },
-        EquipmentDef { name: "Pump-4", iso14224_class: "Centrifugal Pump", isa95_level: "Unit", criticality_score: 6.9, mtbf_hours: 7800.0, install_date: "2021-11-15", manufacturer: "Flowserve", location_idx: 2 },
+        EquipmentDef {
+            name: "Pump-1",
+            iso14224_class: "Centrifugal Pump",
+            isa95_level: "Unit",
+            criticality_score: 8.8,
+            mtbf_hours: 6000.0,
+            install_date: "2018-09-01",
+            manufacturer: "Grundfos",
+            location_idx: 2,
+        },
+        EquipmentDef {
+            name: "Pump-2",
+            iso14224_class: "Centrifugal Pump",
+            isa95_level: "Unit",
+            criticality_score: 8.5,
+            mtbf_hours: 6200.0,
+            install_date: "2018-09-01",
+            manufacturer: "Grundfos",
+            location_idx: 2,
+        },
+        EquipmentDef {
+            name: "Pump-3",
+            iso14224_class: "Centrifugal Pump",
+            isa95_level: "Unit",
+            criticality_score: 7.0,
+            mtbf_hours: 7500.0,
+            install_date: "2021-11-15",
+            manufacturer: "Flowserve",
+            location_idx: 2,
+        },
+        EquipmentDef {
+            name: "Pump-4",
+            iso14224_class: "Centrifugal Pump",
+            isa95_level: "Unit",
+            criticality_score: 6.9,
+            mtbf_hours: 7800.0,
+            install_date: "2021-11-15",
+            manufacturer: "Flowserve",
+            location_idx: 2,
+        },
         // Building C also has motors
-        EquipmentDef { name: "Motor-1", iso14224_class: "Electric Motor", isa95_level: "Unit", criticality_score: 7.8, mtbf_hours: 20000.0, install_date: "2018-09-01", manufacturer: "ABB Ltd", location_idx: 2 },
-        EquipmentDef { name: "Motor-2", iso14224_class: "Electric Motor", isa95_level: "Unit", criticality_score: 7.6, mtbf_hours: 19500.0, install_date: "2018-09-01", manufacturer: "ABB Ltd", location_idx: 2 },
-        EquipmentDef { name: "Motor-3", iso14224_class: "Electric Motor", isa95_level: "Unit", criticality_score: 6.2, mtbf_hours: 22000.0, install_date: "2022-02-28", manufacturer: "Siemens AG", location_idx: 2 },
-        EquipmentDef { name: "Motor-4", iso14224_class: "Electric Motor", isa95_level: "Unit", criticality_score: 6.0, mtbf_hours: 23000.0, install_date: "2022-02-28", manufacturer: "Siemens AG", location_idx: 2 },
+        EquipmentDef {
+            name: "Motor-1",
+            iso14224_class: "Electric Motor",
+            isa95_level: "Unit",
+            criticality_score: 7.8,
+            mtbf_hours: 20000.0,
+            install_date: "2018-09-01",
+            manufacturer: "ABB Ltd",
+            location_idx: 2,
+        },
+        EquipmentDef {
+            name: "Motor-2",
+            iso14224_class: "Electric Motor",
+            isa95_level: "Unit",
+            criticality_score: 7.6,
+            mtbf_hours: 19500.0,
+            install_date: "2018-09-01",
+            manufacturer: "ABB Ltd",
+            location_idx: 2,
+        },
+        EquipmentDef {
+            name: "Motor-3",
+            iso14224_class: "Electric Motor",
+            isa95_level: "Unit",
+            criticality_score: 6.2,
+            mtbf_hours: 22000.0,
+            install_date: "2022-02-28",
+            manufacturer: "Siemens AG",
+            location_idx: 2,
+        },
+        EquipmentDef {
+            name: "Motor-4",
+            iso14224_class: "Electric Motor",
+            isa95_level: "Unit",
+            criticality_score: 6.0,
+            mtbf_hours: 23000.0,
+            install_date: "2022-02-28",
+            manufacturer: "Siemens AG",
+            location_idx: 2,
+        },
         // Building D - Power House (index 3)
-        EquipmentDef { name: "Boiler-1", iso14224_class: "Steam Boiler", isa95_level: "Unit", criticality_score: 9.5, mtbf_hours: 5000.0, install_date: "2017-05-20", manufacturer: "Babcock & Wilcox", location_idx: 3 },
-        EquipmentDef { name: "Boiler-2", iso14224_class: "Steam Boiler", isa95_level: "Unit", criticality_score: 9.3, mtbf_hours: 5200.0, install_date: "2017-05-20", manufacturer: "Babcock & Wilcox", location_idx: 3 },
-        EquipmentDef { name: "Boiler-3", iso14224_class: "Steam Boiler", isa95_level: "Unit", criticality_score: 8.0, mtbf_hours: 6500.0, install_date: "2020-08-10", manufacturer: "Cleaver-Brooks", location_idx: 3 },
-        EquipmentDef { name: "Boiler-4", iso14224_class: "Steam Boiler", isa95_level: "Unit", criticality_score: 7.8, mtbf_hours: 6800.0, install_date: "2020-08-10", manufacturer: "Cleaver-Brooks", location_idx: 3 },
+        EquipmentDef {
+            name: "Boiler-1",
+            iso14224_class: "Steam Boiler",
+            isa95_level: "Unit",
+            criticality_score: 9.5,
+            mtbf_hours: 5000.0,
+            install_date: "2017-05-20",
+            manufacturer: "Babcock & Wilcox",
+            location_idx: 3,
+        },
+        EquipmentDef {
+            name: "Boiler-2",
+            iso14224_class: "Steam Boiler",
+            isa95_level: "Unit",
+            criticality_score: 9.3,
+            mtbf_hours: 5200.0,
+            install_date: "2017-05-20",
+            manufacturer: "Babcock & Wilcox",
+            location_idx: 3,
+        },
+        EquipmentDef {
+            name: "Boiler-3",
+            iso14224_class: "Steam Boiler",
+            isa95_level: "Unit",
+            criticality_score: 8.0,
+            mtbf_hours: 6500.0,
+            install_date: "2020-08-10",
+            manufacturer: "Cleaver-Brooks",
+            location_idx: 3,
+        },
+        EquipmentDef {
+            name: "Boiler-4",
+            iso14224_class: "Steam Boiler",
+            isa95_level: "Unit",
+            criticality_score: 7.8,
+            mtbf_hours: 6800.0,
+            install_date: "2020-08-10",
+            manufacturer: "Cleaver-Brooks",
+            location_idx: 3,
+        },
     ];
 
     let mut equipment_ids = Vec::new();
@@ -179,33 +405,101 @@ async fn main() {
         let mut store = client.store_write().await;
         for eq in &equipment_defs {
             let id = store.create_node("Equipment");
-            store.set_node_property(tenant, id, "name",
-                PropertyValue::String(eq.name.to_string())).unwrap();
-            store.set_node_property(tenant, id, "iso14224_class",
-                PropertyValue::String(eq.iso14224_class.to_string())).unwrap();
-            store.set_node_property(tenant, id, "isa95_level",
-                PropertyValue::String(eq.isa95_level.to_string())).unwrap();
-            store.set_node_property(tenant, id, "criticality_score",
-                PropertyValue::Float(eq.criticality_score)).unwrap();
-            store.set_node_property(tenant, id, "mtbf_hours",
-                PropertyValue::Float(eq.mtbf_hours)).unwrap();
-            store.set_node_property(tenant, id, "install_date",
-                PropertyValue::String(eq.install_date.to_string())).unwrap();
-            store.set_node_property(tenant, id, "manufacturer",
-                PropertyValue::String(eq.manufacturer.to_string())).unwrap();
-            store.set_node_property(tenant, id, "status",
-                PropertyValue::String("Operational".to_string())).unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "name",
+                    PropertyValue::String(eq.name.to_string()),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "iso14224_class",
+                    PropertyValue::String(eq.iso14224_class.to_string()),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "isa95_level",
+                    PropertyValue::String(eq.isa95_level.to_string()),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "criticality_score",
+                    PropertyValue::Float(eq.criticality_score),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "mtbf_hours",
+                    PropertyValue::Float(eq.mtbf_hours),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "install_date",
+                    PropertyValue::String(eq.install_date.to_string()),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "manufacturer",
+                    PropertyValue::String(eq.manufacturer.to_string()),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "status",
+                    PropertyValue::String("Operational".to_string()),
+                )
+                .unwrap();
             // Link equipment to location
-            store.create_edge(location_ids[eq.location_idx], id, "CONTAINS_EQUIPMENT").unwrap();
+            store
+                .create_edge(location_ids[eq.location_idx], id, "CONTAINS_EQUIPMENT")
+                .unwrap();
             equipment_ids.push(id);
         }
     }
 
     // --- Sensors (3 per equipment = 60 total) ---
     let sensor_templates: Vec<SensorDef> = vec![
-        SensorDef { name: "Temperature", sensor_type: "temperature", unit: "degC", min_threshold: -10.0, max_threshold: 120.0 },
-        SensorDef { name: "Vibration",   sensor_type: "vibration",   unit: "mm/s", min_threshold: 0.0,   max_threshold: 11.2 },
-        SensorDef { name: "Pressure",    sensor_type: "pressure",    unit: "bar",  min_threshold: 0.5,   max_threshold: 16.0 },
+        SensorDef {
+            name: "Temperature",
+            sensor_type: "temperature",
+            unit: "degC",
+            min_threshold: -10.0,
+            max_threshold: 120.0,
+        },
+        SensorDef {
+            name: "Vibration",
+            sensor_type: "vibration",
+            unit: "mm/s",
+            min_threshold: 0.0,
+            max_threshold: 11.2,
+        },
+        SensorDef {
+            name: "Pressure",
+            sensor_type: "pressure",
+            unit: "bar",
+            min_threshold: 0.5,
+            max_threshold: 16.0,
+        },
     ];
 
     let mut sensor_ids = Vec::new();
@@ -215,17 +509,44 @@ async fn main() {
             for tmpl in &sensor_templates {
                 let id = store.create_node("Sensor");
                 let sensor_name = format!("{}-{}", eq.name, tmpl.name);
-                store.set_node_property(tenant, id, "name",
-                    PropertyValue::String(sensor_name)).unwrap();
-                store.set_node_property(tenant, id, "type",
-                    PropertyValue::String(tmpl.sensor_type.to_string())).unwrap();
-                store.set_node_property(tenant, id, "unit",
-                    PropertyValue::String(tmpl.unit.to_string())).unwrap();
-                store.set_node_property(tenant, id, "min_threshold",
-                    PropertyValue::Float(tmpl.min_threshold)).unwrap();
-                store.set_node_property(tenant, id, "max_threshold",
-                    PropertyValue::Float(tmpl.max_threshold)).unwrap();
-                store.create_edge(equipment_ids[eq_idx], id, "HAS_SENSOR").unwrap();
+                store
+                    .set_node_property(tenant, id, "name", PropertyValue::String(sensor_name))
+                    .unwrap();
+                store
+                    .set_node_property(
+                        tenant,
+                        id,
+                        "type",
+                        PropertyValue::String(tmpl.sensor_type.to_string()),
+                    )
+                    .unwrap();
+                store
+                    .set_node_property(
+                        tenant,
+                        id,
+                        "unit",
+                        PropertyValue::String(tmpl.unit.to_string()),
+                    )
+                    .unwrap();
+                store
+                    .set_node_property(
+                        tenant,
+                        id,
+                        "min_threshold",
+                        PropertyValue::Float(tmpl.min_threshold),
+                    )
+                    .unwrap();
+                store
+                    .set_node_property(
+                        tenant,
+                        id,
+                        "max_threshold",
+                        PropertyValue::Float(tmpl.max_threshold),
+                    )
+                    .unwrap();
+                store
+                    .create_edge(equipment_ids[eq_idx], id, "HAS_SENSOR")
+                    .unwrap();
                 sensor_ids.push(id);
             }
         }
@@ -361,15 +682,35 @@ async fn main() {
         let mut store = client.store_write().await;
         for (fm_idx, fm) in failure_mode_defs.iter().enumerate() {
             let id = store.create_node("FailureMode");
-            store.set_node_property(tenant, id, "name",
-                PropertyValue::String(fm.name.to_string())).unwrap();
-            store.set_node_property(tenant, id, "description",
-                PropertyValue::String(fm.description.to_string())).unwrap();
-            store.set_node_property(tenant, id, "severity",
-                PropertyValue::String(fm.severity.to_string())).unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "name",
+                    PropertyValue::String(fm.name.to_string()),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "description",
+                    PropertyValue::String(fm.description.to_string()),
+                )
+                .unwrap();
+            store
+                .set_node_property(
+                    tenant,
+                    id,
+                    "severity",
+                    PropertyValue::String(fm.severity.to_string()),
+                )
+                .unwrap();
             // MONITORS edges to equipment
             for &eq_idx in &fm.equipment_indices {
-                store.create_edge(id, equipment_ids[eq_idx], "MONITORS").unwrap();
+                store
+                    .create_edge(id, equipment_ids[eq_idx], "MONITORS")
+                    .unwrap();
             }
             failure_mode_ids.push(id);
             failure_embeddings.push(mock_embedding(fm_idx + 100));
@@ -377,24 +718,33 @@ async fn main() {
     }
 
     // Create HNSW vector index and add embeddings
-    client.create_vector_index("FailureMode", "embedding", 128, DistanceMetric::Cosine)
-        .await.unwrap();
+    client
+        .create_vector_index("FailureMode", "embedding", 128, DistanceMetric::Cosine)
+        .await
+        .unwrap();
 
     for (i, fm_id) in failure_mode_ids.iter().enumerate() {
-        client.add_vector("FailureMode", "embedding", *fm_id, &failure_embeddings[i])
-            .await.unwrap();
+        client
+            .add_vector("FailureMode", "embedding", *fm_id, &failure_embeddings[i])
+            .await
+            .unwrap();
     }
 
     // Vector search: find failure modes similar to "compressor overheating"
     // Use the embedding of the first failure mode (Compressor Overheating) with slight perturbation
     let query_vec = query_embedding(100);
 
-    let search_results = client.vector_search("FailureMode", "embedding", &query_vec, 5)
-        .await.unwrap();
+    let search_results = client
+        .vector_search("FailureMode", "embedding", &query_vec, 5)
+        .await
+        .unwrap();
 
     let vs_time = start.elapsed();
 
-    println!("  Created {} failure mode nodes with 128-dim embeddings", failure_mode_ids.len());
+    println!(
+        "  Created {} failure mode nodes with 128-dim embeddings",
+        failure_mode_ids.len()
+    );
     println!("  Vector index built in {:.2?}", vs_time);
     println!();
     println!("  Query: \"Find failure modes similar to compressor overheating\"");
@@ -407,14 +757,21 @@ async fn main() {
         let store = client.store_read().await;
         for (rank, (node_id, distance)) in search_results.iter().enumerate() {
             if let Some(node) = store.get_node(*node_id) {
-                let name = node.get_property("name")
+                let name = node
+                    .get_property("name")
                     .and_then(|v| v.as_string().map(|s| s.to_string()))
                     .unwrap_or_default();
-                let severity = node.get_property("severity")
+                let severity = node
+                    .get_property("severity")
                     .and_then(|v| v.as_string().map(|s| s.to_string()))
                     .unwrap_or_default();
-                println!("  | {:>4} | {:<32} | {:<8} | {:>8.4} |",
-                    rank + 1, &name[..name.len().min(32)], severity, distance);
+                println!(
+                    "  | {:>4} | {:<32} | {:<8} | {:>8.4} |",
+                    rank + 1,
+                    &name[..name.len().min(32)],
+                    severity,
+                    distance
+                );
             }
         }
     }
@@ -433,25 +790,25 @@ async fn main() {
     // Boilers provide steam/hot water to AHUs
     let dependency_edges: Vec<(usize, usize, &str)> = vec![
         // AHU depends on Chiller (chilled water)
-        (4, 0, "DEPENDS_ON"),  // AHU-1 -> Chiller-1
-        (5, 1, "DEPENDS_ON"),  // AHU-2 -> Chiller-2
-        (6, 2, "DEPENDS_ON"),  // AHU-3 -> Chiller-3
-        (7, 3, "DEPENDS_ON"),  // AHU-4 -> Chiller-4
+        (4, 0, "DEPENDS_ON"), // AHU-1 -> Chiller-1
+        (5, 1, "DEPENDS_ON"), // AHU-2 -> Chiller-2
+        (6, 2, "DEPENDS_ON"), // AHU-3 -> Chiller-3
+        (7, 3, "DEPENDS_ON"), // AHU-4 -> Chiller-4
         // Pumps depend on Motors (drive coupling)
-        (8,  12, "DEPENDS_ON"),  // Pump-1 -> Motor-1
-        (9,  13, "DEPENDS_ON"),  // Pump-2 -> Motor-2
-        (10, 14, "DEPENDS_ON"),  // Pump-3 -> Motor-3
-        (11, 15, "DEPENDS_ON"),  // Pump-4 -> Motor-4
+        (8, 12, "DEPENDS_ON"),  // Pump-1 -> Motor-1
+        (9, 13, "DEPENDS_ON"),  // Pump-2 -> Motor-2
+        (10, 14, "DEPENDS_ON"), // Pump-3 -> Motor-3
+        (11, 15, "DEPENDS_ON"), // Pump-4 -> Motor-4
         // Chillers depend on Pumps (condenser water circulation)
-        (0, 8,  "DEPENDS_ON"),  // Chiller-1 -> Pump-1
-        (1, 9,  "DEPENDS_ON"),  // Chiller-2 -> Pump-2
-        (2, 10, "DEPENDS_ON"),  // Chiller-3 -> Pump-3
-        (3, 11, "DEPENDS_ON"),  // Chiller-4 -> Pump-4
+        (0, 8, "DEPENDS_ON"),  // Chiller-1 -> Pump-1
+        (1, 9, "DEPENDS_ON"),  // Chiller-2 -> Pump-2
+        (2, 10, "DEPENDS_ON"), // Chiller-3 -> Pump-3
+        (3, 11, "DEPENDS_ON"), // Chiller-4 -> Pump-4
         // AHUs also depend on Boilers (heating coils)
-        (4, 16, "DEPENDS_ON"),  // AHU-1 -> Boiler-1
-        (5, 17, "DEPENDS_ON"),  // AHU-2 -> Boiler-2
-        (6, 18, "DEPENDS_ON"),  // AHU-3 -> Boiler-3
-        (7, 19, "DEPENDS_ON"),  // AHU-4 -> Boiler-4
+        (4, 16, "DEPENDS_ON"), // AHU-1 -> Boiler-1
+        (5, 17, "DEPENDS_ON"), // AHU-2 -> Boiler-2
+        (6, 18, "DEPENDS_ON"), // AHU-3 -> Boiler-3
+        (7, 19, "DEPENDS_ON"), // AHU-4 -> Boiler-4
     ];
 
     // Add SHARES_SYSTEM_WITH edges (shared infrastructure)
@@ -470,10 +827,14 @@ async fn main() {
     {
         let mut store = client.store_write().await;
         for (src, tgt, edge_type) in &dependency_edges {
-            store.create_edge(equipment_ids[*src], equipment_ids[*tgt], *edge_type).unwrap();
+            store
+                .create_edge(equipment_ids[*src], equipment_ids[*tgt], *edge_type)
+                .unwrap();
         }
         for (src, tgt, edge_type) in &shared_system_edges {
-            store.create_edge(equipment_ids[*src], equipment_ids[*tgt], *edge_type).unwrap();
+            store
+                .create_edge(equipment_ids[*src], equipment_ids[*tgt], *edge_type)
+                .unwrap();
         }
     }
 
@@ -483,9 +844,14 @@ async fn main() {
     let failed_id = equipment_ids[failed_idx];
     let failed_name = equipment_defs[failed_idx].name;
 
-    println!("  ALERT: Simulating failure of {} ({})",
-        failed_name, equipment_defs[failed_idx].iso14224_class);
-    println!("  Tracing reverse dependencies: \"Who depends on {}?\"", failed_name);
+    println!(
+        "  ALERT: Simulating failure of {} ({})",
+        failed_name, equipment_defs[failed_idx].iso14224_class
+    );
+    println!(
+        "  Tracing reverse dependencies: \"Who depends on {}?\"",
+        failed_name
+    );
     println!();
 
     // Build reverse dependency map: for each equipment, who depends on it
@@ -568,27 +934,36 @@ async fn main() {
     println!("  +-------+-----+-------------------+----------------------+------------------+");
     println!("  | Depth | Idx | Equipment         | Class                | Mechanism        |");
     println!("  +-------+-----+-------------------+----------------------+------------------+");
-    println!("  |     0 |   0 | {:<17} | {:<20} | ROOT FAILURE     |",
-        failed_name, equipment_defs[failed_idx].iso14224_class);
+    println!(
+        "  |     0 |   0 | {:<17} | {:<20} | ROOT FAILURE     |",
+        failed_name, equipment_defs[failed_idx].iso14224_class
+    );
 
     cascade_levels.sort_by_key(|(d, _)| *d);
     let mut total_affected = 0;
     for (depth, indices) in &cascade_levels {
         for &idx in indices {
-            let mechanism = if shared_system_edges.iter().any(|(s, t, _)|
-                (*s == failed_idx && *t == idx) || (*t == failed_idx && *s == idx)) {
+            let mechanism = if shared_system_edges
+                .iter()
+                .any(|(s, t, _)| (*s == failed_idx && *t == idx) || (*t == failed_idx && *s == idx))
+            {
                 "SHARED SYSTEM"
             } else {
                 "DEPENDENCY"
             };
-            println!("  |     {} | {:>3} | {:<17} | {:<20} | {:<16} |",
-                depth, idx, equipment_defs[idx].name, equipment_defs[idx].iso14224_class, mechanism);
+            println!(
+                "  |     {} | {:>3} | {:<17} | {:<20} | {:<16} |",
+                depth, idx, equipment_defs[idx].name, equipment_defs[idx].iso14224_class, mechanism
+            );
             total_affected += 1;
         }
     }
     println!("  +-------+-----+-------------------+----------------------+------------------+");
     println!();
-    println!("  Total affected equipment: {} (cascade analysis in {:.2?})", total_affected, cascade_time);
+    println!(
+        "  Total affected equipment: {} (cascade analysis in {:.2?})",
+        total_affected, cascade_time
+    );
 
     // ==================================================================================
     // STEP 4: PageRank Equipment Criticality
@@ -599,21 +974,33 @@ async fn main() {
 
     let start = Instant::now();
     let _view = client.build_view(None, None, None).await;
-    let scores = client.page_rank(PageRankConfig {
-        damping_factor: 0.85,
-        iterations: 30,
-        tolerance: 0.0001,
-        ..Default::default()
-    }, None, None).await;
+    let scores = client
+        .page_rank(
+            PageRankConfig {
+                damping_factor: 0.85,
+                iterations: 30,
+                tolerance: 0.0001,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .await;
     let pr_time = start.elapsed();
 
     // Collect equipment scores
-    let mut eq_scores: Vec<(usize, f64)> = equipment_ids.iter().enumerate()
+    let mut eq_scores: Vec<(usize, f64)> = equipment_ids
+        .iter()
+        .enumerate()
         .map(|(i, eid)| (i, scores.get(&eid.as_u64()).copied().unwrap_or(0.0)))
         .collect();
     eq_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-    println!("\n  PageRank computed in {:.2?} ({} nodes in graph)", pr_time, total_nodes + failure_mode_ids.len());
+    println!(
+        "\n  PageRank computed in {:.2?} ({} nodes in graph)",
+        pr_time,
+        total_nodes + failure_mode_ids.len()
+    );
     println!();
     println!("  Top 10 Equipment by Operational Criticality:");
     println!("  +------+-------------------+----------------------+-----------+----------+");
@@ -622,15 +1009,23 @@ async fn main() {
 
     for (rank, (eq_idx, score)) in eq_scores.iter().take(10).enumerate() {
         let eq = &equipment_defs[*eq_idx];
-        println!("  | {:>4} | {:<17} | {:<20} | {:>9.6} | {:>8.1} |",
-            rank + 1, eq.name, eq.iso14224_class, score, eq.criticality_score);
+        println!(
+            "  | {:>4} | {:<17} | {:<20} | {:>9.6} | {:>8.1} |",
+            rank + 1,
+            eq.name,
+            eq.iso14224_class,
+            score,
+            eq.criticality_score
+        );
     }
     println!("  +------+-------------------+----------------------+-----------+----------+");
 
     // Location criticality
     println!();
     println!("  Location Criticality:");
-    let mut loc_scores: Vec<(usize, f64)> = location_ids.iter().enumerate()
+    let mut loc_scores: Vec<(usize, f64)> = location_ids
+        .iter()
+        .enumerate()
         .map(|(i, lid)| (i, scores.get(&lid.as_u64()).copied().unwrap_or(0.0)))
         .collect();
     loc_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -639,8 +1034,12 @@ async fn main() {
     println!("  | Rank | Location                         | PageRank  |");
     println!("  +------+----------------------------------+-----------+");
     for (rank, (loc_idx, score)) in loc_scores.iter().enumerate() {
-        println!("  | {:>4} | {:<32} | {:>9.6} |",
-            rank + 1, location_defs[*loc_idx].name, score);
+        println!(
+            "  | {:>4} | {:<32} | {:>9.6} |",
+            rank + 1,
+            location_defs[*loc_idx].name,
+            score
+        );
     }
     println!("  +------+----------------------------------+-----------+");
 
@@ -660,12 +1059,18 @@ async fn main() {
     }
 
     impl MultiObjectiveProblem for MaintenanceScheduleProblem {
-        fn dim(&self) -> usize { self.n_equipment }
-        fn num_objectives(&self) -> usize { 2 }
+        fn dim(&self) -> usize {
+            self.n_equipment
+        }
+        fn num_objectives(&self) -> usize {
+            2
+        }
 
         fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
-            (Array1::from_elem(self.n_equipment, 1.0),
-             Array1::from_elem(self.n_equipment, 52.0))
+            (
+                Array1::from_elem(self.n_equipment, 1.0),
+                Array1::from_elem(self.n_equipment, 52.0),
+            )
         }
 
         fn objectives(&self, x: &Array1<f64>) -> Vec<f64> {
@@ -715,7 +1120,10 @@ async fn main() {
     }
 
     let mtbf_vec: Vec<f64> = equipment_defs.iter().map(|eq| eq.mtbf_hours).collect();
-    let crit_vec: Vec<f64> = equipment_defs.iter().map(|eq| eq.criticality_score).collect();
+    let crit_vec: Vec<f64> = equipment_defs
+        .iter()
+        .map(|eq| eq.criticality_score)
+        .collect();
 
     let maint_problem = MaintenanceScheduleProblem {
         n_equipment: equipment_defs.len(),
@@ -732,7 +1140,10 @@ async fn main() {
     let maint_time = start.elapsed();
 
     println!("\n  Optimization complete in {:.2?}", maint_time);
-    println!("  Pareto front: {} non-dominated solutions", maint_result.pareto_front.len());
+    println!(
+        "  Pareto front: {} non-dominated solutions",
+        maint_result.pareto_front.len()
+    );
     println!();
 
     // Display top 8 Pareto solutions
@@ -742,9 +1153,18 @@ async fn main() {
     println!("  | Sol# | Total Cost $  | Max Concurrency  |");
     println!("  +------+---------------+------------------+");
 
-    for (i, sol) in maint_result.pareto_front.iter().take(display_count).enumerate() {
-        println!("  | {:>4} | ${:>11.0} | {:>16.1} |",
-            i + 1, sol.fitness[0], sol.fitness[1]);
+    for (i, sol) in maint_result
+        .pareto_front
+        .iter()
+        .take(display_count)
+        .enumerate()
+    {
+        println!(
+            "  | {:>4} | ${:>11.0} | {:>16.1} |",
+            i + 1,
+            sol.fitness[0],
+            sol.fitness[1]
+        );
     }
     println!("  +------+---------------+------------------+");
 
@@ -760,8 +1180,10 @@ async fn main() {
         for (i, eq) in equipment_defs.iter().enumerate() {
             let week = best_sol.variables[i].round().max(1.0).min(52.0);
             let mtbf_wks = eq.mtbf_hours / 168.0;
-            println!("  | {:<17} | {:<20} | {:>6.0}   | Wk {:>5.0}  |",
-                eq.name, eq.iso14224_class, mtbf_wks, week);
+            println!(
+                "  | {:<17} | {:<20} | {:>6.0}   | Wk {:>5.0}  |",
+                eq.name, eq.iso14224_class, mtbf_wks, week
+            );
         }
         println!("  +-------------------+----------------------+----------+-----------+");
     }
@@ -785,7 +1207,8 @@ async fn main() {
             api_key: None,
             api_base_url: None,
             system_prompt: Some(
-                "You are a Cypher query expert for an industrial asset knowledge graph.".to_string()
+                "You are a Cypher query expert for an industrial asset knowledge graph."
+                    .to_string(),
             ),
         };
 
@@ -832,31 +1255,55 @@ async fn main() {
     println!("===========================================================================");
     println!();
     println!("  Asset Hierarchy (ISO 14224 + ISA-95):");
-    println!("    - 1 site, {} locations, {} equipment, {} sensors",
-        location_ids.len(), equipment_ids.len(), sensor_ids.len());
-    println!("    - {} failure modes with vector embeddings", failure_mode_ids.len());
-    println!("    - Total graph nodes: {}, edges: {}",
+    println!(
+        "    - 1 site, {} locations, {} equipment, {} sensors",
+        location_ids.len(),
+        equipment_ids.len(),
+        sensor_ids.len()
+    );
+    println!(
+        "    - {} failure modes with vector embeddings",
+        failure_mode_ids.len()
+    );
+    println!(
+        "    - Total graph nodes: {}, edges: {}",
         total_nodes + failure_mode_ids.len(),
-        total_edges + failure_mode_defs.iter().map(|fm| fm.equipment_indices.len()).sum::<usize>()
-            + dependency_edges.len() + shared_system_edges.len());
+        total_edges
+            + failure_mode_defs
+                .iter()
+                .map(|fm| fm.equipment_indices.len())
+                .sum::<usize>()
+            + dependency_edges.len()
+            + shared_system_edges.len()
+    );
     println!();
     println!("  Vector Search:");
     println!("    - 128-dim HNSW index on failure mode embeddings");
-    println!("    - Top {} similar failure modes retrieved", search_results.len());
+    println!(
+        "    - Top {} similar failure modes retrieved",
+        search_results.len()
+    );
     println!();
     println!("  Cascade Analysis:");
-    println!("    - {} failure cascades to {} downstream equipment",
-        failed_name, total_affected);
+    println!(
+        "    - {} failure cascades to {} downstream equipment",
+        failed_name, total_affected
+    );
     println!();
     println!("  PageRank Criticality:");
     if let Some((eq_idx, score)) = eq_scores.first() {
-        println!("    - Most critical: {} (score={:.6})",
-            equipment_defs[*eq_idx].name, score);
+        println!(
+            "    - Most critical: {} (score={:.6})",
+            equipment_defs[*eq_idx].name, score
+        );
     }
     println!();
     println!("  NSGA-II Maintenance Scheduling:");
-    println!("    - {} Pareto-optimal schedules for {} equipment",
-        maint_result.pareto_front.len(), equipment_defs.len());
+    println!(
+        "    - {} Pareto-optimal schedules for {} equipment",
+        maint_result.pareto_front.len(),
+        equipment_defs.len()
+    );
     println!();
     println!("===========================================================================");
     println!("   Industrial Knowledge Graph -- Complete");

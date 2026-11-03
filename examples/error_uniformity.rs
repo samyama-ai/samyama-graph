@@ -61,7 +61,10 @@ const CASES: &[(&str, &str)] = &[
     ("type-error", "MATCH (n) RETURN n + 1"),
     ("bad-argument", "RETURN range(1, 10, 0)"),
     ("bad-argument", "RETURN substring('abc')"),
-    ("collection-in-pattern", "WITH [1] AS xs MATCH (xs)-->() RETURN 1"),
+    (
+        "collection-in-pattern",
+        "WITH [1] AS xs MATCH (xs)-->() RETURN 1",
+    ),
     ("aggregate-misuse", "MATCH (n) WHERE count(*) > 1 RETURN n"),
 ];
 
@@ -252,10 +255,8 @@ async fn main() {
             .filter(|(_, m)| m.is_empty())
             .map(|(s, _)| *s)
             .collect();
-        let codes: BTreeMap<&str, Option<String>> = msgs
-            .iter()
-            .map(|(s, m)| (*s, extract_code(m)))
-            .collect();
+        let codes: BTreeMap<&str, Option<String>> =
+            msgs.iter().map(|(s, m)| (*s, extract_code(m))).collect();
         let distinct_codes: std::collections::BTreeSet<_> = codes.values().cloned().collect();
         let distinct_msgs: std::collections::BTreeSet<_> = msgs.values().cloned().collect();
         let no_code_anywhere = codes.values().all(|c| c.is_none());
@@ -277,7 +278,10 @@ async fn main() {
 
     let probed = rows.len();
     let all_errored = rows.iter().filter(|r| r["all_errored"] == true).count();
-    let codeless = rows.iter().filter(|r| r["no_code_anywhere"] == true).count();
+    let codeless = rows
+        .iter()
+        .filter(|r| r["no_code_anywhere"] == true)
+        .count();
     // The denominator for code agreement is the classes where a code exists to
     // agree about. Counting the codeless ones as agreeing would let the score
     // rise by *removing* codes.

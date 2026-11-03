@@ -1,15 +1,26 @@
 //! HTTP server implementation for the Visualizer
 
+use crate::embed::EmbedPipeline;
+use crate::graph::GraphStore;
+use crate::persistence::TenantManager;
 use axum::{
     extract::DefaultBodyLimit,
     response::{Html, IntoResponse},
     routing::{get, post},
     Router,
 };
-use crate::embed::EmbedPipeline;
-use crate::graph::GraphStore;
-use crate::persistence::TenantManager;
 // Re-exported: these lived here before `auth` was split out, and callers name this path.
+use super::handler::{
+    enrich_handler, export_handler, export_snapshot_handler, import_csv_handler,
+    import_json_handler, import_parquet_handler, memory_handler, metrics_handler, nlq_handler,
+    query_handler, restore_snapshot_handler, sample_handler, schema_handler,
+    set_enrich_policy_handler, status_handler, verify_handler,
+};
+use super::structure::{
+    get_structure_handler, hierarchy_cues_handler, list_hierarchies_handler, put_structure_handler,
+    structure_cues_handler,
+};
+use super::vector::{create_index_handler, list_indexes_handler, search_handler};
 pub use crate::auth::{read_credentials, Credential, Secret};
 use crate::query::QueryEngine;
 use std::collections::HashMap;
@@ -17,18 +28,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::info;
-use super::handler::{
-    query_handler, export_handler, import_parquet_handler, status_handler, memory_handler, metrics_handler, schema_handler, sample_handler,
-    import_csv_handler, import_json_handler,
-    export_snapshot_handler, restore_snapshot_handler,
-    set_enrich_policy_handler, enrich_handler, verify_handler,
-    nlq_handler,
-};
-use super::vector::{list_indexes_handler, create_index_handler, search_handler};
-use super::structure::{
-    list_hierarchies_handler, hierarchy_cues_handler,
-    get_structure_handler, put_structure_handler, structure_cues_handler,
-};
 
 /// HA-09: Build the tenant CRUD sub-router backed by the shared `TenantManager`.
 /// Exposed at the crate level so integration tests can mount it in isolation.
@@ -106,7 +105,6 @@ async fn allow_private_network(
 /// against another service if it leaks, and the server never holds the token in
 /// cleartext after start-up.
 
-
 /// Which credential, if any, an `Authorization` header satisfies.
 ///
 /// Two schemes, because the two kinds of caller are different. `Bearer` carries
@@ -139,7 +137,9 @@ fn authenticate(credentials: &[Credential], header: &str) -> Option<Credential> 
         // Verifying against every line would run argon2 once per credential,
         // which turns a login into a way to load the server.
         let c = credentials.iter().find(|c| c.name == user)?;
-        let Secret::Password(phc) = &c.secret else { return None };
+        let Secret::Password(phc) = &c.secret else {
+            return None;
+        };
         let parsed = PasswordHash::new(phc).ok()?;
         argon2::Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
@@ -156,8 +156,7 @@ fn authenticate(credentials: &[Credential], header: &str) -> Option<Credential> 
 /// in the tree transitively, but a direct dependency is a direct commitment,
 /// and this is the only place the engine decodes any.
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = Vec::with_capacity(s.len() * 3 / 4);
     let mut acc: u32 = 0;
     let mut bits = 0u32;
@@ -278,7 +277,9 @@ async fn require_credential(
     // `authenticate` rather than a SHA-256 comparison inline: a credential file
     // now holds password hashes beside machine tokens, and which hash to use is
     // decided by the stored form rather than by the caller.
-    let matched = header.as_deref().and_then(|h| authenticate(&credentials, h));
+    let matched = header
+        .as_deref()
+        .and_then(|h| authenticate(&credentials, h));
 
     if let Some(matched_cred) = matched {
         // The floor each route needs, before the handler runs. Handlers that
@@ -288,7 +289,10 @@ async fn require_credential(
         // open to a read-only credential.
         let needed = required_role(req.method(), req.uri().path());
         if let Err(e) = matched_cred.authorize_role(needed) {
-            return (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": e })))
+            return (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({ "error": e })),
+            )
                 .into_response();
         }
         let mut req = req;
@@ -399,7 +403,9 @@ pub struct AuditLog {
 
 impl std::fmt::Debug for AuditLog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AuditLog").field("path", &self.path).finish()
+        f.debug_struct("AuditLog")
+            .field("path", &self.path)
+            .finish()
     }
 }
 
@@ -407,8 +413,14 @@ impl AuditLog {
     /// Open `path` for appending, creating it if absent.
     pub fn open(path: impl Into<std::path::PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
-        Ok(Self { sink: std::sync::Mutex::new(std::io::BufWriter::new(file)), path })
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        Ok(Self {
+            sink: std::sync::Mutex::new(std::io::BufWriter::new(file)),
+            path,
+        })
     }
 
     /// Record one entry. Failures are reported and do not fail the request:
@@ -480,7 +492,9 @@ async fn audit(
 /// Used for the warning on start-up, so it errs towards warning: anything that
 /// does not parse as a loopback IP is treated as routable.
 fn is_loopback(host: &str) -> bool {
-    host.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
         || host.eq_ignore_ascii_case("localhost")
 }
 
@@ -599,11 +613,7 @@ impl AppState {
         None
     }
 
-    pub async fn mutate<T>(
-        &self,
-        graph: &str,
-        body: impl FnOnce(&mut GraphStore) -> T,
-    ) -> T {
+    pub async fn mutate<T>(&self, graph: &str, body: impl FnOnce(&mut GraphStore) -> T) -> T {
         let mut store = self.store.write().await;
         if let Some(pm) = &self.persistence {
             store.enable_write_log();
@@ -617,7 +627,9 @@ impl AppState {
         if let Some(pm) = &self.persistence {
             let mutations = store.take_write_log();
             match pm.apply_mutations(graph, &store, &mutations) {
-                Ok(n) => tracing::debug!("persisted {n} entities from {} mutations", mutations.len()),
+                Ok(n) => {
+                    tracing::debug!("persisted {n} entities from {} mutations", mutations.len())
+                }
                 Err(e) => {
                     // `mutate` returns the body's own value and has no channel
                     // for an error, so the handler cannot be told here. What it
@@ -881,8 +893,14 @@ impl HttpServer {
             .route("/api/query", post(query_handler))
             .route("/api/query/export", post(export_handler))
             .route("/api/tx/begin", post(super::transactions::begin_handler))
-            .route("/api/tx/:id/commit", post(super::transactions::commit_handler))
-            .route("/api/tx/:id/rollback", post(super::transactions::rollback_handler))
+            .route(
+                "/api/tx/:id/commit",
+                post(super::transactions::commit_handler),
+            )
+            .route(
+                "/api/tx/:id/rollback",
+                post(super::transactions::rollback_handler),
+            )
             .route(
                 "/api/import/parquet",
                 post(import_parquet_handler).layer(DefaultBodyLimit::max(self.import_body_limit)),
@@ -909,18 +927,26 @@ impl HttpServer {
             .route("/api/vector-search", post(search_handler))
             .route("/api/hierarchies", get(list_hierarchies_handler))
             .route("/api/hierarchies/:name/cues", post(hierarchy_cues_handler))
-            .route("/api/structure", get(get_structure_handler).put(put_structure_handler))
+            .route(
+                "/api/structure",
+                get(get_structure_handler).put(put_structure_handler),
+            )
             .route("/api/structure/cues", post(structure_cues_handler))
             .route("/api/snapshot/export", post(export_snapshot_handler))
-            .route("/api/snapshot/import", post(restore_snapshot_handler)
-                .layer(DefaultBodyLimit::max(SNAPSHOT_IMPORT_BODY_LIMIT)))
+            .route(
+                "/api/snapshot/import",
+                post(restore_snapshot_handler)
+                    .layer(DefaultBodyLimit::max(SNAPSHOT_IMPORT_BODY_LIMIT)),
+            )
             .with_state(state);
 
-        let mut app = main_router
-            .merge(super::optimize::router().with_state(optimize_state));
+        let mut app = main_router.merge(super::optimize::router().with_state(optimize_state));
 
         if let Some(tm) = self.tenants.as_ref() {
-            app = app.merge(super::tenants::router(Arc::clone(tm), Arc::clone(&embed_cache)));
+            app = app.merge(super::tenants::router(
+                Arc::clone(tm),
+                Arc::clone(&embed_cache),
+            ));
         }
 
         // Authentication goes on *before* CORS, which makes it the inner layer:
@@ -951,12 +977,12 @@ impl HttpServer {
 
         let cors = cors_layer(&self.allowed_origins);
         let origins = Arc::new(self.allowed_origins.clone());
-        app = app.layer(cors).layer(axum::middleware::from_fn(
-            move |req, next| {
+        app = app
+            .layer(cors)
+            .layer(axum::middleware::from_fn(move |req, next| {
                 let origins = Arc::clone(&origins);
                 async move { allow_private_network(origins, req, next).await }
-            },
-        ));
+            }));
 
         // Added last, which makes it the **outermost** layer: layers apply
         // outermost-last, so the most recent `.layer()` call is the one a
@@ -1118,11 +1144,16 @@ mod tests {
     fn test_static_handler_returns_html() {
         // Assets::get("index.html") should return Some for the embedded file
         let asset = Assets::get("index.html");
-        assert!(asset.is_some(), "index.html should be embedded via RustEmbed");
+        assert!(
+            asset.is_some(),
+            "index.html should be embedded via RustEmbed"
+        );
         let content = asset.unwrap();
         let html = std::str::from_utf8(content.data.as_ref()).unwrap();
-        assert!(html.contains("<html") || html.contains("<!DOCTYPE") || html.contains("<body"),
-            "Embedded file should contain HTML content");
+        assert!(
+            html.contains("<html") || html.contains("<!DOCTYPE") || html.contains("<body"),
+            "Embedded file should contain HTML content"
+        );
     }
 
     #[tokio::test]
@@ -1182,8 +1213,10 @@ mod tests {
 
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let html = std::str::from_utf8(&bytes).unwrap();
-        assert!(html.contains("<html") || html.contains("<!DOCTYPE") || html.contains("<body"),
-            "Static handler should return HTML content");
+        assert!(
+            html.contains("<html") || html.contains("<!DOCTYPE") || html.contains("<body"),
+            "Static handler should return HTML content"
+        );
     }
 }
 

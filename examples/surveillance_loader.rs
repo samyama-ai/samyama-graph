@@ -38,7 +38,9 @@ async fn main() -> Result<(), Error> {
     };
 
     let query_mode = args.iter().any(|a| a == "--query");
-    let snapshot_path = args.iter().position(|a| a == "--snapshot")
+    let snapshot_path = args
+        .iter()
+        .position(|a| a == "--snapshot")
         .map(|pos| PathBuf::from(args.get(pos + 1).expect("--snapshot requires a path")));
 
     eprintln!("Disease Surveillance KG Loader — Samyama Graph Database");
@@ -60,9 +62,18 @@ async fn main() -> Result<(), Error> {
     eprintln!("  Countries:         {}", format_num(result.country_nodes));
     eprintln!("  Regions:           {}", format_num(result.region_nodes));
     eprintln!("  Diseases:          {}", format_num(result.disease_nodes));
-    eprintln!("  Disease Reports:   {}", format_num(result.disease_report_nodes));
-    eprintln!("  Vaccine Coverage:  {}", format_num(result.vaccine_coverage_nodes));
-    eprintln!("  Health Indicators: {}", format_num(result.health_indicator_nodes));
+    eprintln!(
+        "  Disease Reports:   {}",
+        format_num(result.disease_report_nodes)
+    );
+    eprintln!(
+        "  Vaccine Coverage:  {}",
+        format_num(result.vaccine_coverage_nodes)
+    );
+    eprintln!(
+        "  Health Indicators: {}",
+        format_num(result.health_indicator_nodes)
+    );
     eprintln!("  ─────────────────────");
     eprintln!("  Total nodes:       {}", format_num(result.total_nodes));
     eprintln!("  Total edges:       {}", format_num(result.total_edges));
@@ -92,10 +103,16 @@ async fn main() -> Result<(), Error> {
             eprint!("cypher> ");
             io::stderr().flush()?;
             let mut input = String::new();
-            if stdin.lock().read_line(&mut input)? == 0 { break; }
+            if stdin.lock().read_line(&mut input)? == 0 {
+                break;
+            }
             let query = input.trim();
-            if query.is_empty() { continue; }
-            if query == "quit" || query == "exit" { break; }
+            if query.is_empty() {
+                continue;
+            }
+            if query == "quit" || query == "exit" {
+                break;
+            }
             match client.query("default", query).await {
                 Ok(result) => {
                     if result.columns.is_empty() {

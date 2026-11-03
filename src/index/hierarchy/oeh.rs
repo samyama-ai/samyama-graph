@@ -21,8 +21,8 @@
 //! an engine aggregation the index merely filters — is the property that turns O(subtree)
 //! into O(log n), and is what distinguishes this from an index-assisted hierarchy index.
 
-use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 
 use super::monoid::{Fenwick, RollupOp, RollupValue, SegmentTree};
 use super::poset::{HierarchyError, HierarchyResult, Poset};
@@ -350,7 +350,10 @@ impl OehIndex {
                 }
             }
         }
-        debug_assert_eq!(counter as usize, n, "the spanning forest must cover every node");
+        debug_assert_eq!(
+            counter as usize, n,
+            "the spanning forest must cover every node"
+        );
 
         exceptions.sort_unstable_by_key(|&(c, _)| tin[c as usize]);
         Ok(OehIndex {
@@ -595,7 +598,12 @@ impl OehIndex {
                 let (lo, hi) = (tin[y as usize] as usize, tout[y as usize] as usize);
                 inv[lo..=hi].to_vec()
             }
-            EncodingData::NearTree { tin, tout, inv, exceptions } => {
+            EncodingData::NearTree {
+                tin,
+                tout,
+                inv,
+                exceptions,
+            } => {
                 // The forest subtree, plus the subtree of every exception child whose
                 // parent is reachable from y. Collected through a set because the two can
                 // overlap — a node may sit under y both in the forest and through an
@@ -721,7 +729,11 @@ impl OehIndex {
     ///
     /// Returns `false` if the node is not in this hierarchy, so the caller can fall back to
     /// invalidation rather than silently ignoring the write.
-    pub fn update_measure(&mut self, node: crate::graph::types::NodeId, value: Option<RollupValue>) -> bool {
+    pub fn update_measure(
+        &mut self,
+        node: crate::graph::types::NodeId,
+        value: Option<RollupValue>,
+    ) -> bool {
         let Some(idx) = self.poset.idx(node) else {
             return false;
         };
@@ -742,7 +754,9 @@ impl OehIndex {
             match data {
                 RollupData::Fenwick(f) => {
                     // SUM is invertible, so the difference is enough.
-                    let (Some(rank), true) = (rank, op.is_invertible()) else { continue };
+                    let (Some(rank), true) = (rank, op.is_invertible()) else {
+                        continue;
+                    };
                     let delta = match (value, old) {
                         (Some(RollupValue::Int(n)), Some(RollupValue::Int(o))) => {
                             RollupValue::Int(n - o)
@@ -764,7 +778,10 @@ impl OehIndex {
                 RollupData::ChainSuffix(suffixes) => {
                     // Per-chain suffix folds have no inverse: refold this chain's suffix
                     // from the updated position. O(chain length), still far below a rebuild.
-                    if let EncodingData::Chain { chain_of, chains, .. } = &self.data {
+                    if let EncodingData::Chain {
+                        chain_of, chains, ..
+                    } = &self.data
+                    {
                         let (cid, pos) = chain_of[idx as usize];
                         let chain = &chains[cid as usize];
                         let suf = &mut suffixes[cid as usize];
@@ -985,10 +1002,7 @@ impl OehIndex {
         let nf = n as f64;
 
         let mut candidate_indices: Vec<u32> = match filter_nodes {
-            Some(ids) => ids
-                .iter()
-                .filter_map(|&id| self.poset.idx(id))
-                .collect(),
+            Some(ids) => ids.iter().filter_map(|&id| self.poset.idx(id)).collect(),
             None => (0..n as u32).collect(),
         };
 
@@ -1034,7 +1048,14 @@ impl OehIndex {
                     } else {
                         0.15 + 0.85 * (depth as f64 / max_depth)
                     };
-                    (ti, to, ti_n, to_n, radius * theta.cos(), radius * theta.sin())
+                    (
+                        ti,
+                        to,
+                        ti_n,
+                        to_n,
+                        radius * theta.cos(),
+                        radius * theta.sin(),
+                    )
                 }
                 EncodingData::Chain {
                     chain_of, chains, ..
@@ -1049,7 +1070,14 @@ impl OehIndex {
                     let to_n = (cid as f64 + 1.0) / num_chains;
                     let theta = std::f64::consts::TAU * ((cid as f64 + 0.5) / num_chains);
                     let radius = 0.35 + 0.65 * (pos as f64 / chain_len);
-                    (cid, pos, ti_n, to_n, radius * theta.cos(), radius * theta.sin())
+                    (
+                        cid,
+                        pos,
+                        ti_n,
+                        to_n,
+                        radius * theta.cos(),
+                        radius * theta.sin(),
+                    )
                 }
             };
 
@@ -1275,8 +1303,9 @@ mod tests {
             let d = idx.descendants(y);
             let uniq: std::collections::HashSet<u32> = d.iter().copied().collect();
             assert_eq!(d.len(), uniq.len(), "descendants({y}) had duplicates");
-            let mut want: Vec<u32> =
-                oracle::descendants(&oracle_poset, y, true).into_iter().collect();
+            let mut want: Vec<u32> = oracle::descendants(&oracle_poset, y, true)
+                .into_iter()
+                .collect();
             want.sort_unstable();
             assert_eq!(d, want, "descendants({y})");
         }

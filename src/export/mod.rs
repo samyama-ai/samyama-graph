@@ -278,9 +278,14 @@ pub fn resolve_nodes(batch: &mut RecordBatch, store: &crate::graph::GraphStore) 
                 Some(full) => Value::Node(id, Box::new(full)),
                 None => Value::NodeRef(id),
             },
-            Value::List(items) => Value::List(items.into_iter().map(|i| resolve(i, store)).collect()),
+            Value::List(items) => {
+                Value::List(items.into_iter().map(|i| resolve(i, store)).collect())
+            }
             Value::Map(entries) => Value::Map(
-                entries.into_iter().map(|(k, v)| (k, resolve(v, store))).collect(),
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k, resolve(v, store)))
+                    .collect(),
             ),
             other => other,
         }
@@ -310,7 +315,10 @@ fn json_of(v: &Value) -> serde_json::Value {
         Value::Property(p) => p.to_json(),
         Value::List(items) => serde_json::Value::Array(items.iter().map(json_of).collect()),
         Value::Map(entries) => serde_json::Value::Object(
-            entries.iter().map(|(k, v)| (k.clone(), json_of(v))).collect(),
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), json_of(v)))
+                .collect(),
         ),
         Value::Node(id, node) => json!({
             "id": id.as_u64(),
@@ -469,8 +477,7 @@ pub fn to_arrow(batch: &RecordBatch) -> Result<ArrowBatch, ExportError> {
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(batch.columns.len());
 
     for name in &batch.columns {
-        let values: Vec<Option<&Value>> =
-            batch.records.iter().map(|r| r.get(name)).collect();
+        let values: Vec<Option<&Value>> = batch.records.iter().map(|r| r.get(name)).collect();
         let kind = values
             .iter()
             .map(|v| v.map(kind_of).unwrap_or(Kind::Null))
@@ -533,6 +540,9 @@ pub fn to_parquet(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
     Ok(buf)
 }
 
+#[cfg(test)]
+#[path = "export_cov_tests.rs"]
+mod cov_tests;
 /// Reading Parquet back in.
 ///
 /// Deliberately the node direction only. Edges need identity resolution — a
@@ -542,7 +552,6 @@ pub fn to_parquet(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
 /// where that belongs, with the mapping written in the query.
 pub mod csv;
 pub mod graphml;
-#[cfg(test)] #[path = "export_cov_tests.rs"] mod cov_tests;
 
 pub mod import {
     use std::collections::HashMap;

@@ -50,8 +50,7 @@ const DIAMOND: &[&str] = &[
     "MATCH (l:T {code:'L'}), (b:T {code:'B'}) CREATE (l)-[:MAPS_TO]->(b)",
 ];
 
-const ROLLUP: &str =
-    "MATCH (d)-[:MAPS_TO*0..]->(r:T {code:'R'}) RETURN sum(d.units) AS v";
+const ROLLUP: &str = "MATCH (d)-[:MAPS_TO*0..]->(r:T {code:'R'}) RETURN sum(d.units) AS v";
 const SCAN: &str = "MATCH (d)-[:MAPS_TO*0..]->(r:T {code:'R'}) RETURN d.code AS c";
 
 fn scalar(store: &GraphStore, query: &str) -> String {
@@ -148,7 +147,10 @@ fn the_rewrite_still_fires_on_a_single_parent_subtree_of_the_same_index() {
     );
     let plain = store_from(DIAMOND);
     assert_eq!(
-        scalar(&plain, "MATCH (d)-[:MAPS_TO*0..]->(r:T {code:'A'}) RETURN sum(d.units) AS v"),
+        scalar(
+            &plain,
+            "MATCH (d)-[:MAPS_TO*0..]->(r:T {code:'A'}) RETURN sum(d.units) AS v"
+        ),
         scalar(
             &indexed,
             "MATCH (d)-[:MAPS_TO*0..]->(r:T {code:'A'}) RETURN sum(d.units) AS v"
@@ -185,7 +187,10 @@ fn a_pure_tree_keeps_its_rewrite() {
         "CREATE HIERARCHY INDEX h ON ()-[:MAPS_TO]->() MEASURE units AGGREGATE sum",
     );
     let plan = plan_description(ROLLUP, &indexed);
-    assert!(plan.contains("Hierarchy"), "a tree lost its rewrite: {plan}");
+    assert!(
+        plan.contains("Hierarchy"),
+        "a tree lost its rewrite: {plan}"
+    );
     assert_eq!(scalar(&store_from(tree), ROLLUP), scalar(&indexed, ROLLUP));
 }
 

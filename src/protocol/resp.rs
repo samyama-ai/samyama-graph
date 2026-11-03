@@ -200,7 +200,8 @@ impl RespValue {
         if let Some(line) = Self::read_line(buf)? {
             let s = String::from_utf8(line[1..].to_vec())
                 .map_err(|e| RespError::InvalidEncoding(e.to_string()))?;
-            let i = s.parse::<i64>()
+            let i = s
+                .parse::<i64>()
                 .map_err(|e| RespError::Protocol(format!("Invalid integer: {}", e)))?;
             Ok(Some(RespValue::Integer(i)))
         } else {
@@ -213,7 +214,8 @@ impl RespValue {
         if let Some(len_line) = Self::read_line(buf)? {
             let len_str = String::from_utf8(len_line[1..].to_vec())
                 .map_err(|e| RespError::InvalidEncoding(e.to_string()))?;
-            let len = len_str.parse::<i64>()
+            let len = len_str
+                .parse::<i64>()
                 .map_err(|e| RespError::Protocol(format!("Invalid bulk string length: {}", e)))?;
 
             if len == -1 {
@@ -234,7 +236,9 @@ impl RespValue {
 
             // Verify and consume \r\n
             if buf.len() < 2 || &buf[..2] != b"\r\n" {
-                return Err(RespError::Protocol("Missing \\r\\n after bulk string".to_string()));
+                return Err(RespError::Protocol(
+                    "Missing \\r\\n after bulk string".to_string(),
+                ));
             }
             buf.advance(2);
 
@@ -249,7 +253,8 @@ impl RespValue {
         if let Some(len_line) = Self::read_line(buf)? {
             let len_str = String::from_utf8(len_line[1..].to_vec())
                 .map_err(|e| RespError::InvalidEncoding(e.to_string()))?;
-            let len = len_str.parse::<usize>()
+            let len = len_str
+                .parse::<usize>()
                 .map_err(|e| RespError::Protocol(format!("Invalid array length: {}", e)))?;
 
             // Read array elements
@@ -284,8 +289,8 @@ impl RespValue {
     /// Converts to Array of BulkStrings for uniform handling
     fn decode_inline_command(buf: &mut &[u8]) -> RespResult<Option<RespValue>> {
         if let Some(line) = Self::read_line(buf)? {
-            let line_str = String::from_utf8(line)
-                .map_err(|e| RespError::InvalidEncoding(e.to_string()))?;
+            let line_str =
+                String::from_utf8(line).map_err(|e| RespError::InvalidEncoding(e.to_string()))?;
 
             // Parse the inline command into tokens, respecting quotes
             let tokens = Self::parse_inline_tokens(&line_str)?;
@@ -352,7 +357,9 @@ impl RespValue {
         }
 
         if in_quotes {
-            return Err(RespError::Protocol("Unclosed quote in inline command".to_string()));
+            return Err(RespError::Protocol(
+                "Unclosed quote in inline command".to_string(),
+            ));
         }
 
         Ok(tokens)
@@ -498,9 +505,7 @@ mod tests {
         let val = RespValue::decode(&mut buf).unwrap().unwrap();
         assert_eq!(
             val,
-            RespValue::Array(vec![
-                RespValue::BulkString(Some(b"PING".to_vec())),
-            ])
+            RespValue::Array(vec![RespValue::BulkString(Some(b"PING".to_vec())),])
         );
     }
 
@@ -538,10 +543,7 @@ mod tests {
     #[test]
     fn test_encode_nested_array() {
         let val = RespValue::Array(vec![
-            RespValue::Array(vec![
-                RespValue::Integer(1),
-                RespValue::Integer(2),
-            ]),
+            RespValue::Array(vec![RespValue::Integer(1), RespValue::Integer(2)]),
             RespValue::SimpleString("ok".to_string()),
         ]);
         let mut buf = Vec::new();
@@ -719,9 +721,7 @@ mod tests {
 
     #[test]
     fn test_encode_large_array() {
-        let items: Vec<RespValue> = (0..100)
-            .map(|i| RespValue::Integer(i))
-            .collect();
+        let items: Vec<RespValue> = (0..100).map(|i| RespValue::Integer(i)).collect();
         let val = RespValue::Array(items);
         let mut buf = Vec::new();
         val.encode(&mut buf).unwrap();
@@ -745,13 +745,8 @@ mod tests {
         assert_eq!(
             val,
             RespValue::Array(vec![
-                RespValue::Array(vec![
-                    RespValue::Integer(1),
-                    RespValue::Integer(2),
-                ]),
-                RespValue::Array(vec![
-                    RespValue::Integer(3),
-                ]),
+                RespValue::Array(vec![RespValue::Integer(1), RespValue::Integer(2),]),
+                RespValue::Array(vec![RespValue::Integer(3),]),
             ])
         );
     }
@@ -839,10 +834,15 @@ mod tests {
 
     #[test]
     fn test_encode_error_message_with_details() {
-        let val = RespValue::Error("WRONGTYPE Operation against a key holding the wrong kind".to_string());
+        let val = RespValue::Error(
+            "WRONGTYPE Operation against a key holding the wrong kind".to_string(),
+        );
         let mut buf = Vec::new();
         val.encode(&mut buf).unwrap();
-        assert_eq!(buf, b"-WRONGTYPE Operation against a key holding the wrong kind\r\n");
+        assert_eq!(
+            buf,
+            b"-WRONGTYPE Operation against a key holding the wrong kind\r\n"
+        );
     }
 
     #[test]
@@ -1034,13 +1034,9 @@ mod tests {
 
     #[test]
     fn test_encode_decode_deeply_nested() {
-        let val = RespValue::Array(vec![
-            RespValue::Array(vec![
-                RespValue::Array(vec![
-                    RespValue::Integer(42),
-                ]),
-            ]),
-        ]);
+        let val = RespValue::Array(vec![RespValue::Array(vec![RespValue::Array(vec![
+            RespValue::Integer(42),
+        ])])]);
         let mut buf = Vec::new();
         val.encode(&mut buf).unwrap();
 

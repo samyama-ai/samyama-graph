@@ -1,8 +1,8 @@
-use samyama::agent::{AgentRuntime, tools::WebSearchTool, Tool};
-use samyama::persistence::tenant::{AgentConfig, LLMProvider, NLQConfig};
+use samyama::agent::{tools::WebSearchTool, AgentRuntime, Tool};
 use samyama::nlq::NLQPipeline;
-use std::sync::Arc;
+use samyama::persistence::tenant::{AgentConfig, LLMProvider, NLQConfig};
 use serde_json::json;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_agent_runtime_tool_execution() {
@@ -20,14 +20,14 @@ async fn test_agent_runtime_tool_execution() {
     // Register WebSearchTool with "mock" key to trigger mock mode
     runtime.register_tool(Arc::new(WebSearchTool::new("mock".to_string())));
 
-    // Simulate LLM calling the tool (skipping LLM part for unit test, directly testing tool via runtime structure if possible, 
+    // Simulate LLM calling the tool (skipping LLM part for unit test, directly testing tool via runtime structure if possible,
     // but runtime.process_trigger calls LLM. So we can't easily test process_trigger without mocking the LLM call inside runtime.)
-    
+
     // Instead, let's test the Tool directly.
     let tool = WebSearchTool::new("mock".to_string());
     let args = json!({ "query": "Samyama Graph" });
     let result = tool.execute(args).await;
-    
+
     assert!(result.is_ok());
     let value = result.unwrap();
     assert!(value.get("results").is_some());

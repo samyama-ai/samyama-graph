@@ -65,7 +65,10 @@ fn restore_skips_partial_write_without_marker() {
 
     let mut store = GraphStore::new();
     let result = persist::restore_persisted_snapshots(&data_path, &mut store).expect("ok");
-    assert!(result.is_none(), "partial snapshot without marker must be ignored");
+    assert!(
+        result.is_none(),
+        "partial snapshot without marker must be ignored"
+    );
     assert_eq!(store.node_count(), 0);
 }
 

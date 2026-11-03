@@ -74,8 +74,13 @@ fn its_components_are_right() {
         ("d.minute", 13),
         ("d.second", 20),
     ] {
-        let cypher = format!("WITH datetime({{epochMillis: 1700000000000}}) AS d RETURN {expr} AS r");
-        assert_eq!(one(&cypher).unwrap(), PropertyValue::Integer(expected), "{expr}");
+        let cypher =
+            format!("WITH datetime({{epochMillis: 1700000000000}}) AS d RETURN {expr} AS r");
+        assert_eq!(
+            one(&cypher).unwrap(),
+            PropertyValue::Integer(expected),
+            "{expr}"
+        );
     }
 }
 
@@ -90,7 +95,8 @@ fn epoch_seconds_works_too() {
 #[test]
 fn the_calendar_form_still_works() {
     // The branch that already existed, and which the new arms sit in front of.
-    let got = one("WITH datetime({year: 2020, month: 2, day: 29}) AS d RETURN d.year AS r").unwrap();
+    let got =
+        one("WITH datetime({year: 2020, month: 2, day: 29}) AS d RETURN d.year AS r").unwrap();
     assert_eq!(got, PropertyValue::Integer(2020));
     let day = one("WITH datetime({year: 2020, month: 2, day: 29}) AS d RETURN d.day AS r").unwrap();
     assert_eq!(day, PropertyValue::Integer(29));
@@ -109,7 +115,10 @@ fn a_map_of_unknown_keys_errors_rather_than_returning_1970() {
     // arm could go unnoticed.
     let err = one("RETURN datetime({nonsense: 1}) AS r").unwrap_err();
     assert!(err.contains("understands none of the keys"), "{err}");
-    assert!(err.contains("nonsense"), "the message should name what was given: {err}");
+    assert!(
+        err.contains("nonsense"),
+        "the message should name what was given: {err}"
+    );
 }
 
 #[test]

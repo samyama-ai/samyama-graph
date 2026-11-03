@@ -63,7 +63,12 @@ pub fn topological_sort(view: &GraphView) -> TopoResult {
     } else {
         // Everything left has an incoming edge from something else left, which
         // is exactly the set the cycles run through.
-        TopoResult::Cyclic((0..n).filter(|&i| !placed[i]).map(|i| view.index_to_node[i]).collect())
+        TopoResult::Cyclic(
+            (0..n)
+                .filter(|&i| !placed[i])
+                .map(|i| view.index_to_node[i])
+                .collect(),
+        )
     }
 }
 
@@ -268,7 +273,8 @@ fn tarjan(view: &GraphView) -> Tarjan {
                     let lv = t.low[v];
                     t.low[parent] = t.low[parent].min(lv);
                     if lv > t.disc[parent] {
-                        t.bridges.push((view.index_to_node[parent], view.index_to_node[v]));
+                        t.bridges
+                            .push((view.index_to_node[parent], view.index_to_node[v]));
                     }
                     // An articulation point, unless the parent is a DFS root
                     // -- a root is one only if it has more than one child,

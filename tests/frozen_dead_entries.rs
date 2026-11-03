@@ -54,14 +54,21 @@ fn a_merge_drops_the_dead_entries_and_releases_their_ids() {
 
     let stats = store.adjacency_stats();
     assert_eq!(stats.frozen_dead_edges, 0);
-    assert_eq!(stats.frozen_edges, 6, "only live edges are left in the frozen tier");
+    assert_eq!(
+        stats.frozen_edges, 6,
+        "only live edges are left in the frozen tier"
+    );
     assert_eq!(stats.frozen_segments, 1);
     // Deleted edges no longer appear in a walk; live ones still do.
     assert_eq!(out_degree(&store, nodes[0]), 0);
     assert_eq!(out_degree(&store, nodes[9]), 1);
     // And their ids can be handed out again.
     let reused = store.create_edge(nodes[0], nodes[1], "R").unwrap();
-    assert!(dead.contains(&reused.as_u64()), "expected a released id, got {}", reused.as_u64());
+    assert!(
+        dead.contains(&reused.as_u64()),
+        "expected a released id, got {}",
+        reused.as_u64()
+    );
 }
 
 #[test]
@@ -70,13 +77,19 @@ fn merge_if_needed_waits_for_the_dead_fraction() {
     for &e in &edges[..10] {
         store.delete_edge(e).unwrap();
     }
-    assert!(!store.merge_frozen_segments_if_needed(8, 0.25), "10% dead is under a 25% threshold");
+    assert!(
+        !store.merge_frozen_segments_if_needed(8, 0.25),
+        "10% dead is under a 25% threshold"
+    );
     assert_eq!(store.adjacency_stats().frozen_dead_edges, 10);
 
     for &e in &edges[10..30] {
         store.delete_edge(e).unwrap();
     }
-    assert!(store.merge_frozen_segments_if_needed(8, 0.25), "30% dead is over it");
+    assert!(
+        store.merge_frozen_segments_if_needed(8, 0.25),
+        "30% dead is over it"
+    );
     let stats = store.adjacency_stats();
     assert_eq!(stats.frozen_dead_edges, 0);
     assert_eq!(stats.frozen_edges, 70);
@@ -86,7 +99,9 @@ fn merge_if_needed_waits_for_the_dead_fraction() {
 fn merge_if_needed_merges_too_many_segments() {
     let (mut store, nodes, _edges) = frozen_chain(10);
     for round in 0..3 {
-        store.create_edge(nodes[round], nodes[round + 2], "R").unwrap();
+        store
+            .create_edge(nodes[round], nodes[round + 2], "R")
+            .unwrap();
         store.compact_adjacency();
     }
     assert_eq!(store.adjacency_stats().frozen_segments, 4);
