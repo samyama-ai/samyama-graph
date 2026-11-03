@@ -202,3 +202,49 @@ fn recall_at_every_selectivity() {
         assert!(recall >= 0.9, "{per_mille}/1000: recall@10 {recall:.2}");
     }
 }
+
+/// `EXPLAIN` text, refusing a plan tree that stops at an operator with no
+/// `describe` (#1826), since an assertion that something is absent would
+/// then pass on the missing half.
+fn plan(s: &GraphStore, q: &str) -> String {
+    let query = parse_query(&format!("EXPLAIN {q}")).unwrap_or_else(|e| panic!("{q}: {e:?}"));
+    let batch = QueryExecutor::new(s).execute(&query).unwrap();
+    let text = match batch.records[0].get("plan") {
+        Some(Value::Property(PropertyValue::String(t))) => t.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(
+        samyama::query::executor::undescribed_plan_lines(&text).is_empty(),
+        "{text}"
+    );
+    text
+}
+
+/// A conjunct that can answer differently each time it is evaluated is left
+/// above the search. Taken into it, `rand()` would be drawn once to decide
+/// that a node counts towards k and again by the WHERE above, which could
+/// then drop it: short results, and a sample skewed towards nodes that
+/// passed twice.
+#[test]
+fn a_volatile_conjunct_is_not_applied_inside_the_search() {
+    let (s, _) = store(200);
+    let q = "CALL db.index.vector.queryNodes('doc_emb', 5, [1.0,2.0,3.0,1.0]) YIELD node, score \
+             WHERE node.cat = 3 AND rand() * 1000 < node.b + 1000 RETURN node.id AS id";
+    let text = plan(&s, q);
+    let search = text
+        .lines()
+        .find(|l| l.contains("VectorSearch"))
+        .unwrap_or_else(|| panic!("no vector search in\n{text}"));
+    assert!(
+        search.contains("filter:") && search.contains("cat"),
+        "the deterministic conjunct should still be pushed:\n{text}"
+    );
+    assert!(
+        !search.to_lowercase().contains("rand"),
+        "rand() was pushed into the search:\n{text}"
+    );
+    // Always true, so with rand() above the search the answer is unchanged.
+    let got = ids(&s, q);
+    assert_eq!(got.len(), 5, "{got:?}");
+    assert!(got.iter().all(|id| id % 10 == 3), "{got:?}");
+}

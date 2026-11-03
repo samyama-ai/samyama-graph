@@ -3764,6 +3764,11 @@ impl QueryPlanner {
     /// sits directly on the CALL, with no MATCH or WITH to share it. The WHERE
     /// is still applied above as before, so taking a conjunct never changes
     /// which rows pass, only how many of the k there are.
+    ///
+    /// That holds only for a conjunct that gives the same answer twice. One
+    /// that calls `rand()` would be drawn once inside the search and again
+    /// above it, so a node could count towards k and then be dropped, giving
+    /// short results and a skewed sample. Those stay above the search.
     fn vector_call_pushdown(query: &Query, call_clause: &CallClause) -> Option<Expression> {
         if call_clause.procedure_name != "db.index.vector.queryNodes"
             || !query.match_clauses.is_empty()
@@ -3783,7 +3788,7 @@ impl QueryPlanner {
             .filter(|conjunct| {
                 let mut vars = HashSet::new();
                 Self::collect_expression_variables(conjunct, &mut vars);
-                vars.len() == 1 && vars.contains(&node_var)
+                vars.len() == 1 && vars.contains(&node_var) && !is_volatile(conjunct)
             })
             .reduce(|left, right| Expression::Binary {
                 left: Box::new(left),
@@ -8423,6 +8428,64 @@ fn choose_anchor_index(
 
 /// Flatten an AND-chain expression into a list of individual predicates.
 /// E.g., `a AND b AND c` → `[a, b, c]`
+
+/// Whether `expr` can give a different answer when evaluated twice for the
+/// same row within one statement (#1969).
+///
+/// `timestamp()` and the temporal constructors read the statement clock, which
+/// is fixed for the statement, so they are not volatile. `rand()`,
+/// `randomUUID()` and the `*.realtime` functions read a fresh value each call.
+fn is_volatile(expr: &Expression) -> bool {
+    match expr {
+        Expression::Function { name, args, .. } => {
+            let name = name.to_ascii_lowercase();
+            name == "rand"
+                || name == "randomuuid"
+                || name.ends_with(".realtime")
+                || args.iter().any(is_volatile)
+        }
+        Expression::Property { .. }
+        | Expression::Literal(_)
+        | Expression::Variable(_)
+        | Expression::PathVariable(_)
+        | Expression::Parameter(_) => false,
+        Expression::Binary { left, right, .. } => is_volatile(left) || is_volatile(right),
+        Expression::Unary { expr, .. } => is_volatile(expr),
+        Expression::Case { operand, when_clauses, else_result } => {
+            operand.as_deref().is_some_and(is_volatile)
+                || when_clauses.iter().any(|(w, t)| is_volatile(w) || is_volatile(t))
+                || else_result.as_deref().is_some_and(is_volatile)
+        }
+        Expression::Index { expr, index } => is_volatile(expr) || is_volatile(index),
+        Expression::ListSlice { expr, start, end } => {
+            is_volatile(expr)
+                || start.as_deref().is_some_and(is_volatile)
+                || end.as_deref().is_some_and(is_volatile)
+        }
+        // A subquery with a body of its own is planned, not evaluated in
+        // place, and is not looked into here: take it as volatile.
+        Expression::ExistsSubquery { where_clause, body, .. } => {
+            body.is_some() || where_clause.as_ref().is_some_and(|w| is_volatile(&w.predicate))
+        }
+        Expression::ListComprehension { list_expr, filter, map_expr, .. } => {
+            is_volatile(list_expr)
+                || filter.as_deref().is_some_and(is_volatile)
+                || is_volatile(map_expr)
+        }
+        Expression::PredicateFunction { list_expr, predicate, .. } => {
+            is_volatile(list_expr) || is_volatile(predicate)
+        }
+        Expression::Reduce { init, list_expr, expression, .. } => {
+            is_volatile(init) || is_volatile(list_expr) || is_volatile(expression)
+        }
+        Expression::PatternComprehension { filter, projection, .. } => {
+            filter.as_deref().is_some_and(is_volatile) || is_volatile(projection)
+        }
+        Expression::ListExpr(items) => items.iter().any(is_volatile),
+        Expression::MapExpr(entries) => entries.iter().any(|(_, e)| is_volatile(e)),
+    }
+}
+
 fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
     match expr {
         Expression::Binary { left, op: BinaryOp::And, right } => {
