@@ -90,6 +90,9 @@ impl LSHADESolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
 
         for generation in 0..self.config.max_iterations {
+            if problem.budget_exhausted() {
+                break;
+            }
             population.sort_by(|a, b| a.fitness.total_cmp(&b.fitness));
             history.push(population[0].fitness);
 

@@ -1465,11 +1465,19 @@ mod tests {
             router: Arc<Router>,
             cluster: Arc<ClusterManager>,
         ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
+            sharded_connection_with(router, cluster, Proxy::new()).await
+        }
+
+        async fn sharded_connection_with(
+            router: Arc<Router>,
+            cluster: Arc<ClusterManager>,
+            proxy: Proxy,
+        ) -> (tokio::net::TcpStream, tokio::task::JoinHandle<()>) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let store = Arc::new(RwLock::new(GraphStore::new()));
             let handler = Arc::new(CommandHandler::new(None));
-            let proxy = Arc::new(Proxy::new());
+            let proxy = Arc::new(proxy);
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let _ = handle_connection(
@@ -1539,6 +1547,50 @@ mod tests {
                 r.starts_with("-ERR routing failed: Failed to connect"),
                 "{r}"
             );
+            drop(s);
+            server.await.unwrap();
+        }
+
+        /// #2002 from the client's side: a peer that takes the command and
+        /// never answers used to leave the client waiting forever, with the
+        /// connection unusable. Now the client gets `routing failed` once the
+        /// proxy's reply limit passes, and the same connection still works.
+        #[tokio::test]
+        async fn a_route_to_a_node_that_never_answers_is_an_error_reply_not_a_hang() {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let hung_addr = l.local_addr().unwrap().to_string();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+            let hung = tokio::spawn(async move {
+                let (mut sock, _) = l.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let _ = sock.read(&mut buf).await.unwrap();
+                let _ = done_rx.await; // never answers, never closes
+            });
+            let router = Arc::new(Router::new(1));
+            router.update_route("remote".into(), 2);
+            let cluster = cluster_with(&[(1, "127.0.0.1:1".into()), (2, hung_addr)]);
+            let limit = std::time::Duration::from_millis(300);
+            let proxy = Proxy::with_timeouts(std::time::Duration::from_secs(1), Some(limit));
+            let (mut s, server) = sharded_connection_with(router, cluster, proxy).await;
+
+            let r = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                ask(&mut s, &resp_cmd(&["GRAPH.QUERY", "remote", "RETURN 1"])),
+            )
+            .await
+            .expect("the client was still waiting after 10s: the forward has no deadline");
+            assert!(
+                r.starts_with("-ERR routing failed: Failed to read from")
+                    && r.contains("no complete reply after"),
+                "{r}"
+            );
+            // The connection is not wedged: a local command is answered next.
+            assert_eq!(
+                ask(&mut s, &resp_cmd(&["ECHO", "still-here"])).await,
+                "$10\r\nstill-here\r\n"
+            );
+            let _ = done_tx.send(());
+            hung.await.unwrap();
             drop(s);
             server.await.unwrap();
         }
