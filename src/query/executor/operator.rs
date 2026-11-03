@@ -123,6 +123,30 @@ fn check_deadline() -> ExecutionResult<()> {
     })
 }
 
+/// Stops a long algorithm at the query deadline (ALGO-12, #1693).
+///
+/// An algorithm runs inside one call, so without this the deadline was only
+/// looked at once that call returned: `algo.pageRank` on a large graph ran
+/// every iteration however long they took, and the query reported
+/// `Query timed out` only afterwards, if at all. Checked between iterations, on
+/// the executor's thread, which is where the deadline is set.
+struct DeadlineProgress;
+
+impl crate::algo::Progress for DeadlineProgress {
+    fn step(&self, _done: usize, _total: usize) -> bool {
+        check_deadline().is_ok()
+    }
+}
+
+/// The error for an algorithm the deadline stopped: still `Query timed out`,
+/// the deadline's message everywhere else, and how far it got.
+fn algorithm_timed_out(call: &str, stopped: crate::algo::Stopped) -> ExecutionError {
+    ExecutionError::RuntimeError(format!(
+        "Query timed out: {call} stopped after {} of {} iterations",
+        stopped.done, stopped.total
+    ))
+}
+
 /// Extract node ID from a Value for identity comparison
 fn node_id_of(v: &Value) -> Option<NodeId> {
     match v {
@@ -17848,7 +17872,12 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         weight_property: Option<&str>,
     ) -> ExecutionResult<AlgoView> {
         let Some(projection) = self.requested_projection(store)? else {
-            return Ok(AlgoView::Built(crate::algo::build_view(store, label, edge_type, weight_property)));
+            let view = crate::algo::build_view_with(store, label, edge_type, weight_property, &DeadlineProgress)
+                .map_err(|stopped| ExecutionError::RuntimeError(format!(
+                    "Query timed out: {} stopped building its graph view after {} of {} nodes",
+                    self.name, stopped.done, stopped.total
+                )))?;
+            return Ok(AlgoView::Built(view));
         };
         let given: Vec<&str> = [("a label", label), ("a relationship type", edge_type), ("a weight", weight_property)]
             .into_iter()
@@ -18156,10 +18185,15 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
         // Build view and run
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
-        let scores = crate::algo::page_rank(&view, config);
+        let scores = crate::algo::page_rank_with(&view, config, &DeadlineProgress)
+            .map_err(|stopped| algorithm_timed_out("algo.pageRank", stopped))?;
 
-        // Convert to records
-        for (algo_id, score) in scores {
+        // Convert to records. One per node, with a copy of the node, so on a
+        // large graph this is not free either: checked like the iterations.
+        for (i, (algo_id, score)) in scores.into_iter().enumerate() {
+            if i % 4096 == 0 {
+                check_deadline()?;
+            }
             let node_id = NodeId::new(algo_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(node_id) {
@@ -18234,8 +18268,13 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     }
 
     fn execute_wcc(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label", "startTime", "timeProperty"])?;
-        // Arguments: (label?, edge_type?)
+        // `startTime` and `timeProperty` were allowed here and read by nothing,
+        // so `{label: ...}` and `{startTime: ...}` both ran on the whole graph
+        // and reported success -- the silent drop `reject_unknown_config_keys`
+        // exists to refuse. The filters are read from the map as well as
+        // positionally, as the centrality procedures read them.
+        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label"])?;
+        // Arguments: (label?, edge_type?) or ({label, edgeType})
         let mut label = None;
         let mut edge_type = None;
 
@@ -18247,6 +18286,16 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         if self.args.len() > 1 {
             if let Expression::Literal(PropertyValue::String(s)) = &self.args[1] {
                 edge_type = Some(s.clone());
+            }
+        }
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::String(v)) = m.get("label") {
+                    label = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("edgeType") {
+                    edge_type = Some(v.clone());
+                }
             }
         }
 
@@ -18811,7 +18860,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// smaller number indistinguishable from a real one, and a caller sizing a
     /// traversal budget from it would under-provision.
     fn execute_metric(&mut self, store: &GraphStore, which: Metric) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, &self.name, &["undirected"])?;
+        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "undirected"])?;
         let view = self.structural_view(store)?;
         // Undirected by default, as every one of these is a statement about
         // graph shape rather than about flow.
@@ -19096,7 +19145,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// reproduce is not a result: someone who sees something surprising in a
     /// walk has to be able to get the same walk back.
     fn execute_random_walk(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "randomWalk", &["seed", "steps"])?;
+        Self::reject_unknown_config_keys(&self.args, "randomWalk", &["edgeType", "label", "seed", "steps"])?;
         let (mut steps, mut seed) = (10usize, 42u64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19124,7 +19173,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.articleRank()` -- PageRank that discounts prolific linkers.
     fn execute_article_rank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "articleRank", &["dampingFactor", "iterations"])?;
+        Self::reject_unknown_config_keys(&self.args, "articleRank", &["dampingFactor", "edgeType", "iterations", "label"])?;
         let (mut damping, mut iters) = (0.85f64, 20usize);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19145,7 +19194,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.katz({alpha, beta, iterations, tolerance})`.
     fn execute_katz(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "katz", &["alpha", "beta", "iterations", "tolerance"])?;
+        Self::reject_unknown_config_keys(&self.args, "katz", &["alpha", "beta", "edgeType", "iterations", "label", "tolerance"])?;
         let (mut alpha, mut beta, mut iters, mut tol) = (0.1f64, 1.0f64, 1000usize, 1e-6f64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19182,7 +19231,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// procedures would run the same fixed point twice and invite a caller to
     /// compare hubs from one run with authorities from another.
     fn execute_hits(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "hits", &["iterations", "tolerance"])?;
+        Self::reject_unknown_config_keys(&self.args, "hits", &["edgeType", "iterations", "label", "tolerance"])?;
         let (mut iters, mut tol) = (500usize, 1e-8f64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19542,7 +19591,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.nodeSimilarity({topK, cutoff})`.
     fn execute_node_similarity(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "nodeSimilarity", &["cutoff"])?;
+        Self::reject_unknown_config_keys(&self.args, "nodeSimilarity", &["cutoff", "edgeType", "label", "topK"])?;
         let k = self.usize_arg("topK", 10);
         let mut cutoff = 0.0f64;
         for arg in &self.args {

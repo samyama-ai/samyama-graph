@@ -53,6 +53,9 @@ impl SASolver {
         let total_steps = self.config.max_iterations;
 
         for _step in 0..total_steps {
+            if problem.budget_exhausted() {
+                break;
+            }
             history.push(best_fitness);
 
             // Generate neighbor
