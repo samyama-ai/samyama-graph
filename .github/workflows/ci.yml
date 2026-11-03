@@ -257,6 +257,19 @@ jobs:
         # disagreeing about what the gate is.
         run: cargo run --release --example doc_check
 
+      # The second gate a documentation-only change can break, and the one
+      # #1854 did not cover. CH-DOC-EXEC parses the Cypher in `*.md`;
+      # `readme_claims_name_their_artifact` asserts on README.md's *prose* --
+      # that the HIER line matches PROVENANCE.json, that every `N/100 queries`
+      # statement carries its measurement date, and that the XK02 headline
+      # agrees with the CSV figure and the table row it quotes. Those tests live
+      # in the `test` job, which a docs-only PR skips, so #1860 and then #2057
+      # each rewrote the README, merged green, and broke `test` on every open PR
+      # on both architectures. Running them here closes that for README prose
+      # the way the step above closed it for README Cypher.
+      - name: The README's claims still match the artifacts they name
+        run: cargo test --release --test readme_claims_name_their_artifact
+
   supply-chain:
     # REL-14 / TRUST-08 (#1042). Known advisories, licences outside the allow
     # list, and crates from unknown sources fail the build. Exceptions live in
