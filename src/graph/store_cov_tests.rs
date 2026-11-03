@@ -183,6 +183,39 @@ fn admit_edge_refuses_through_every_edge_creation_path() {
 }
 
 #[test]
+fn with_write_admission_restores_the_ceiling_and_tally_it_found() {
+    let mut store = GraphStore::new();
+    let outer = Some(WriteAdmission {
+        nodes_used: 0,
+        max_nodes: Some(2),
+        edges_used: 0,
+        max_edges: None,
+    });
+    store.set_write_admission(outer);
+    store.create_node("Before");
+
+    let inner = Some(WriteAdmission {
+        nodes_used: 0,
+        max_nodes: Some(1),
+        edges_used: 0,
+        max_edges: None,
+    });
+    let refused = store.with_write_admission(inner, |st| {
+        // A tally of its own: the node created before does not count here.
+        assert!(st.admit_node().is_ok());
+        st.create_node("Inside");
+        st.admit_node()
+    });
+    assert!(matches!(refused, Err(GraphError::QuotaExceeded(_))));
+
+    // Back to the outer ceiling with its own one birth, not two.
+    assert_eq!(store.write_admission(), outer);
+    assert!(store.admit_node().is_ok());
+    store.create_node("After");
+    assert!(store.admit_node().is_err());
+}
+
+#[test]
 fn admits_bulk_checks_nodes_and_edges_against_the_ceiling() {
     let mut store = GraphStore::new();
     assert!(store.admits_bulk(1_000, 1_000).is_ok(), "no admission");

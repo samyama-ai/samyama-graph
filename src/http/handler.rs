@@ -3003,13 +3003,12 @@ pub async fn restore_snapshot_handler(
         }
     };
 
-    // #1495: this handler takes the store lock directly rather than going
-    // through `AppState::mutate`, so the admission ceiling `mutate` installs
-    // was never set on the store, and the import loop calls `create_node`,
-    // which cannot refuse. Until here nothing on this path had a ceiling of
-    // any kind — a 64 GB body was the only limit on how much a caller could
-    // add. The header declares the counts, so the file is refused whole
-    // before any of it is written.
+    // #1495: a file whose header declares more than the quota allows is
+    // refused whole, before any of it is written. This is only the early
+    // answer. The header is whatever the uploader wrote, so a header declaring
+    // zero over a body of millions passes it; the limit itself is the
+    // admission installed around the import below, which every row is charged
+    // against.
     //
     // A header that cannot be read is left to the import below to report: the
     // peek's checks are a subset of the import's, so anything that fails here
@@ -3034,6 +3033,26 @@ pub async fn restore_snapshot_handler(
     // does not go through the mutation journal -- one journal entry per node of a
     // hundred-million-node snapshot is not the right shape for it.
     let mut store_guard = state.store.write().await;
+
+    // The ceiling every row of the import is charged against. The import takes
+    // the store lock itself rather than going through `AppState::mutate`, so
+    // nothing else installs one, and without it a body longer than its header
+    // was unbounded.
+    //
+    // "Used" is the larger of the quota counter and what the store holds. A
+    // snapshot import is not journalled, so the counter never learns of its
+    // rows; taken alone it would let each upload start again from the count
+    // before the last one.
+    let admission = state
+        .persistence
+        .as_ref()
+        .and_then(|pm| pm.write_admission(&default_graph()))
+        .map(|mut a| {
+            a.nodes_used = a.nodes_used.max(store_guard.node_count() as u64);
+            a.edges_used = a.edges_used.max(store_guard.edge_count() as u64);
+            a
+        });
+
     let cursor = std::io::Cursor::new(&data);
     let dedup_keys: Vec<String> = params
         .dedup_key
@@ -3049,21 +3068,27 @@ pub async fn restore_snapshot_handler(
     // Sniffs the file: an encrypted snapshot needs the key, a plaintext one is
     // read exactly as before. Dedup keys are not threaded through the encrypted
     // path yet and are refused rather than silently ignored.
-    let imported = if crate::snapshot::encryption::looks_encrypted(&data) {
-        match state.snapshot_key.as_deref() {
-            None => Err("this snapshot is encrypted and the server has no --snapshot-key".into()),
-            Some(_) if !dedup_key_refs.is_empty() => Err(
-                "deduplication on an encrypted snapshot is not supported yet".into(),
-            ),
-            Some(k) => crate::snapshot::import_tenant_maybe_encrypted(
-                &mut store_guard,
+    let imported = store_guard.with_write_admission(admission, |store| {
+        if crate::snapshot::encryption::looks_encrypted(&data) {
+            match state.snapshot_key.as_deref() {
+                None => Err(
+                    "this snapshot is encrypted and the server has no --snapshot-key".into(),
+                ),
+                Some(_) if !dedup_key_refs.is_empty() => Err(
+                    "deduplication on an encrypted snapshot is not supported yet".into(),
+                ),
+                Some(k) => crate::snapshot::import_tenant_maybe_encrypted(store, cursor, Some(k)),
+            }
+        } else {
+            crate::snapshot::import_tenant_with_merge_policy(
+                store,
                 cursor,
-                Some(k),
-            ),
+                &dedup_key_refs,
+                params.dedup_allow_conflicts,
+                params.merge_edges,
+            )
         }
-    } else {
-        crate::snapshot::import_tenant_with_merge_policy(&mut store_guard, cursor, &dedup_key_refs, params.dedup_allow_conflicts, params.merge_edges)
-    };
+    });
     match imported {
         Ok(stats) => {
             // HA-08: Persist snapshot atomically (tmp → fsync → rename → marker)
@@ -3137,6 +3162,16 @@ pub async fn restore_snapshot_handler(
             }))
             .into_response()
         }
+        // The import has already been rolled back, so nothing it read is left
+        // in the graph.
+        Err(e) if matches!(
+            e.downcast_ref::<crate::graph::GraphError>(),
+            Some(crate::graph::GraphError::QuotaExceeded(_))
+        ) => (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": e.to_string(), "nodes_imported": 0, "edges_imported": 0 })),
+        )
+            .into_response(),
         Err(e) => (
             axum::http::StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
