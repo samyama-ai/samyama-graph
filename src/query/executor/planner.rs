@@ -3029,7 +3029,8 @@ impl QueryPlanner {
 
         // 2. Handle CALL if present
         if let Some(call_clause) = &query.call_clause {
-            let call_op = self.plan_call(call_clause, store)?;
+            let pushdown = Self::vector_call_pushdown(query, call_clause);
+            let call_op = self.plan_call_filtered(call_clause, store, pushdown)?;
             if let Some(existing_op) = operator {
                 // Check for shared variables to decide between Join and Cartesian Product
                 let mut shared_vars = Vec::new();
@@ -3749,6 +3750,59 @@ impl QueryPlanner {
     }
 
     fn plan_call(&self, call_clause: &CallClause, store: &GraphStore) -> ExecutionResult<OperatorBox> {
+        self.plan_call_filtered(call_clause, store, None)
+    }
+
+    /// The part of `CALL db.index.vector.queryNodes(...) YIELD node WHERE ...`
+    /// that the search itself can apply (#1969).
+    ///
+    /// Applied after the search, the WHERE filters the top k: with a filter
+    /// that passes one node in ten and k = 5, the answer was usually empty.
+    /// Handed to the search, it decides which nodes count towards k. Only the
+    /// conjuncts that name nothing but the yielded node are taken -- one on
+    /// `score` can only be known after the search -- and only when the WHERE
+    /// sits directly on the CALL, with no MATCH or WITH to share it. The WHERE
+    /// is still applied above as before, so taking a conjunct never changes
+    /// which rows pass, only how many of the k there are.
+    ///
+    /// That holds only for a conjunct that gives the same answer twice. One
+    /// that calls `rand()` would be drawn once inside the search and again
+    /// above it, so a node could count towards k and then be dropped, giving
+    /// short results and a skewed sample. Those stay above the search.
+    fn vector_call_pushdown(query: &Query, call_clause: &CallClause) -> Option<Expression> {
+        if call_clause.procedure_name != "db.index.vector.queryNodes"
+            || !query.match_clauses.is_empty()
+            || query.with_clause.is_some()
+        {
+            return None;
+        }
+        let where_clause = query.where_clause.as_ref()?;
+        let node_var = call_clause
+            .yield_items
+            .iter()
+            .find(|item| item.name == "node")
+            .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
+            .unwrap_or_else(|| "node".to_string());
+        flatten_and_predicates(&where_clause.predicate)
+            .into_iter()
+            .filter(|conjunct| {
+                let mut vars = HashSet::new();
+                Self::collect_expression_variables(conjunct, &mut vars);
+                vars.len() == 1 && vars.contains(&node_var) && !is_volatile(conjunct)
+            })
+            .reduce(|left, right| Expression::Binary {
+                left: Box::new(left),
+                op: BinaryOp::And,
+                right: Box::new(right),
+            })
+    }
+
+    fn plan_call_filtered(
+        &self,
+        call_clause: &CallClause,
+        store: &GraphStore,
+        vector_filter: Option<Expression>,
+    ) -> ExecutionResult<OperatorBox> {
         if call_clause.procedure_name == "db.index.fulltext.queryNodes" {
             // Neo4j's signature: (indexName, queryString) with an optional
             // options map. The limit is ours -- Neo4j pages with LIMIT on the
@@ -3951,14 +4005,10 @@ impl QueryPlanner {
                 }
             }
 
-            Ok(Box::new(VectorSearchOperator::new(
-                label,
-                property,
-                query_vector,
-                k,
-                node_var,
-                score_var,
-            )))
+            Ok(Box::new(
+                VectorSearchOperator::new(label, property, query_vector, k, node_var, score_var)
+                    .with_filter(vector_filter),
+            ))
         } else if call_clause.procedure_name == "db.checkIntegrity"
             || call_clause.procedure_name == "db.checkintegrity"
         {
@@ -8374,6 +8424,63 @@ fn choose_anchor_index(
     }
 
     best_idx
+}
+
+/// Whether `expr` can give a different answer when evaluated twice for the
+/// same row within one statement (#1969).
+///
+/// `timestamp()` and the temporal constructors read the statement clock, which
+/// is fixed for the statement, so they are not volatile. `rand()`,
+/// `randomUUID()` and the `*.realtime` functions read a fresh value each call.
+fn is_volatile(expr: &Expression) -> bool {
+    match expr {
+        Expression::Function { name, args, .. } => {
+            let name = name.to_ascii_lowercase();
+            name == "rand"
+                || name == "randomuuid"
+                || name.ends_with(".realtime")
+                || args.iter().any(is_volatile)
+        }
+        Expression::Property { .. }
+        | Expression::Literal(_)
+        | Expression::Variable(_)
+        | Expression::PathVariable(_)
+        | Expression::Parameter(_) => false,
+        Expression::Binary { left, right, .. } => is_volatile(left) || is_volatile(right),
+        Expression::Unary { expr, .. } => is_volatile(expr),
+        Expression::Case { operand, when_clauses, else_result } => {
+            operand.as_deref().is_some_and(is_volatile)
+                || when_clauses.iter().any(|(w, t)| is_volatile(w) || is_volatile(t))
+                || else_result.as_deref().is_some_and(is_volatile)
+        }
+        Expression::Index { expr, index } => is_volatile(expr) || is_volatile(index),
+        Expression::ListSlice { expr, start, end } => {
+            is_volatile(expr)
+                || start.as_deref().is_some_and(is_volatile)
+                || end.as_deref().is_some_and(is_volatile)
+        }
+        // A subquery with a body of its own is planned, not evaluated in
+        // place, and is not looked into here: take it as volatile.
+        Expression::ExistsSubquery { where_clause, body, .. } => {
+            body.is_some() || where_clause.as_ref().is_some_and(|w| is_volatile(&w.predicate))
+        }
+        Expression::ListComprehension { list_expr, filter, map_expr, .. } => {
+            is_volatile(list_expr)
+                || filter.as_deref().is_some_and(is_volatile)
+                || is_volatile(map_expr)
+        }
+        Expression::PredicateFunction { list_expr, predicate, .. } => {
+            is_volatile(list_expr) || is_volatile(predicate)
+        }
+        Expression::Reduce { init, list_expr, expression, .. } => {
+            is_volatile(init) || is_volatile(list_expr) || is_volatile(expression)
+        }
+        Expression::PatternComprehension { filter, projection, .. } => {
+            filter.as_deref().is_some_and(is_volatile) || is_volatile(projection)
+        }
+        Expression::ListExpr(items) => items.iter().any(is_volatile),
+        Expression::MapExpr(entries) => entries.iter().any(|(_, e)| is_volatile(e)),
+    }
 }
 
 /// Flatten an AND-chain expression into a list of individual predicates.
