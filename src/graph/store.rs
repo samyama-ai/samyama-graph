@@ -1348,6 +1348,9 @@ pub struct GraphStore {
     /// Hierarchy (OEH) index registry — subsumption + index-resident roll-up (ADR-035)
     pub hierarchy_index: Arc<HierarchyIndexManager>,
 
+    /// Structural manifold conventions & geometric index registry (#2035, #2036)
+    pub structure_registry: Arc<crate::index::structure::StructureRegistry>,
+
     /// Named graph projections (ALGO-05): views kept for repeated analytics.
     /// In memory only; see `crate::graph::projection`.
     pub graph_projections: Arc<crate::graph::projection::GraphProjections>,
@@ -1494,6 +1497,7 @@ impl GraphStore {
             property_index: Arc::new(IndexManager::new()),
             index_catalog_dirty: std::sync::atomic::AtomicBool::new(false),
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
+            structure_registry: Arc::new(crate::index::structure::StructureRegistry::new()),
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
             node_columns: ColumnStore::new(),
             edge_columns: ColumnStore::new(),
@@ -6573,6 +6577,7 @@ NodeDeleted { id, .. } => {
         self.invalidate_statistics_cache();
         self.snapshot_sources.clear();
         self.snapshot_sources_stale = false;
+        self.structure_registry.clear();
         self.nodes.clear();
         self.edge_type_table.clear();
         self.edge_type_to_id.clear();

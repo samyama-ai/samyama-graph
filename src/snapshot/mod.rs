@@ -355,6 +355,7 @@ pub fn export_tenant_with_compression(
         read_only: false,
         results: None,
         sources,
+        structures: store.structure_registry.list(),
     };
     let header_json = serde_json::to_string(&header)?;
     gz.write_all(header_json.as_bytes())?;
@@ -1784,6 +1785,10 @@ fn import_tenant_inner(
         );
     }
 
+    for convention in &header.structures {
+        store.structure_registry.upsert(convention.clone());
+    }
+
     Ok(ImportStats {
         node_count: imported_node_count,
         edge_count: imported_edge_count,
@@ -2386,6 +2391,7 @@ mod tests {
             read_only: false,
             results: None,
             sources: Vec::new(),
+            structures: Vec::new(),
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();
@@ -2417,6 +2423,7 @@ mod tests {
             read_only: false,
             results: None,
             sources: Vec::new(),
+            structures: Vec::new(),
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();
