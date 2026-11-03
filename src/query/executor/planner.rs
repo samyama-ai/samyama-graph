@@ -8500,8 +8500,6 @@ fn is_volatile(expr: &Expression) -> bool {
     }
 }
 
-/// Flatten an AND-chain expression into a list of individual predicates.
-/// E.g., `a AND b AND c` → `[a, b, c]`
 /// The `ef` of `db.index.vector.queryNodes`'s options map (#1971). Any other
 /// key is refused: an option the search ignored would answer at a width the
 /// caller did not ask for, and say nothing.
@@ -8544,6 +8542,8 @@ fn vector_query_ef(options: &Expression) -> ExecutionResult<Option<usize>> {
     Ok(ef)
 }
 
+/// Flatten an AND-chain expression into a list of individual predicates.
+/// E.g., `a AND b AND c` → `[a, b, c]`
 fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
     match expr {
         Expression::Binary { left, op: BinaryOp::And, right } => {
