@@ -157,15 +157,19 @@ ORDER BY trials DESC LIMIT 5
 | Paclitaxel | 106 |
 | Cyclophosphamide | 98 |
 
-**10.3 seconds.** No ETL between the four sources — they are joined at query
-time on shared identifiers.
+**10.3 seconds.** One query. Four databases. No ETL between the four sources —
+they are joined at query time on shared identifiers.
 
 That is query `XK02`, measured 2026-04-02 on one r6a.8xlarge and not re-measured
-since; 96 of the 100 queries in that suite return real data. Per-row provenance
-is in [`verified-results.csv`](https://graph.samyama.cloud/book/data/benchmark/verified-results.csv)
-and [docs/BENCHMARKS.md](docs/BENCHMARKS.md#biomedical-scale-and-cross-kg-queries).
+since: 10,250.2 ms in [`verified-results.csv`](https://graph.samyama.cloud/book/data/benchmark/verified-results.csv).
+96 of the 100 queries in that suite return real data. Per-row provenance and
+caveats are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md#biomedical-scale-and-cross-kg-queries).
 
-[All 100 queries →](https://graph.samyama.cloud/book/biomedical_benchmark.html)
+[See all 100 benchmark queries →](https://graph.samyama.cloud/book/biomedical_benchmark.html)
+
+| ID | Query | Time | First row |
+|----|-------|------|-----------|
+| XK02 | Cancer → Trial interventions | 10.3s | Placebo (521 trials) |
 
 ### 2. A real knowledge graph in one command
 
@@ -250,9 +254,9 @@ self-contained, LDBC needs a data download.
 | LDBC SNB Interactive (SF1) | 21/21 complete, 21/21 return rows (`CH-BENCH-LDBC`) |
 | LDBC SNB BI (SF1) | 20/20 complete, 0 timeouts (`CH-BENCH-LDBC`) |
 | LDBC Graphalytics | 12/12 agree with the LDBC reference (`CH-BENCH-GALX`) |
-| HIER (subsumption and roll-up) | 108/108 agree — ground LDBC and FinBench do not cover. Provenance records a dirty tree at commit `30d0731`; 4 further corpus queries are specified but uncontrolled and are not in that denominator |
+| HIER (subsumption and roll-up) | Latest: **108/108 agree** — ground LDBC and FinBench do not cover. See `benchmarks/hier/results/PROVENANCE.json`, commit `30d0731` (`"dirty": true`); 4 further corpus queries are specified but uncontrolled and are not in that denominator |
 | Memory | 200 resident bytes per edge on SNB SF10, 176M edges (`CH-MEM-01`, against a 256 B/edge target) |
-| Cross-KG biomedical | 96 / 100 queries return real data — the first demo above |
+| Cross-KG biomedical | 96 / 100 queries return real data, measured 2026-04-02 — the first demo above |
 
 These run in-tree; LDBC certification is a formal third-party process we have not
 been through. Full results, provenance and caveats:
