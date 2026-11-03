@@ -25,9 +25,7 @@ pub fn format_num(n: usize) -> String {
     let s = n.to_string();
     let mut r = String::new();
     for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            r.push(',');
-        }
+        if i > 0 && i % 3 == 0 { r.push(','); }
         r.push(c);
     }
     r.chars().rev().collect()
@@ -35,13 +33,9 @@ pub fn format_num(n: usize) -> String {
 
 pub fn format_duration(d: Duration) -> String {
     let s = d.as_secs_f64();
-    if s < 60.0 {
-        format!("{:.1}s", s)
-    } else if s < 3600.0 {
-        format!("{}m {:.1}s", s as u64 / 60, s % 60.0)
-    } else {
-        format!("{}h {}m", s as u64 / 3600, (s as u64 % 3600) / 60)
-    }
+    if s < 60.0 { format!("{:.1}s", s) }
+    else if s < 3600.0 { format!("{}m {:.1}s", s as u64 / 60, s % 60.0) }
+    else { format!("{}h {}m", s as u64 / 3600, (s as u64 % 3600) / 60) }
 }
 
 fn set_str(g: &mut GraphStore, id: NodeId, k: &str, v: &str) {
@@ -61,44 +55,28 @@ fn set_int(g: &mut GraphStore, id: NodeId, k: &str, v: i64) {
 /// Process a pipe-delimited file line by line, calling handler for each row.
 /// Streaming — never loads entire file into memory.
 fn process_pipe_file<F>(path: &Path, max_rows: usize, mut handler: F) -> usize
-where
-    F: FnMut(&[&str]),
+where F: FnMut(&[&str])
 {
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(e) => {
-            eprintln!("  SKIP {}: {}", path.display(), e);
-            return 0;
-        }
+        Err(e) => { eprintln!("  SKIP {}: {}", path.display(), e); return 0; }
     };
     let reader = BufReader::with_capacity(4 * 1024 * 1024, file);
     let mut first = true;
     let mut count = 0usize;
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        if first {
-            first = false;
-            continue;
-        } // skip header
+        let line = match line { Ok(l) => l, Err(_) => continue };
+        if first { first = false; continue; } // skip header
         let fields: Vec<&str> = line.split('|').collect();
         handler(&fields);
         count += 1;
-        if max_rows > 0 && count >= max_rows {
-            break;
-        }
+        if max_rows > 0 && count >= max_rows { break; }
     }
     count
 }
 
-pub fn load_dataset(
-    graph: &mut GraphStore,
-    data_dir: &str,
-    max_articles: usize,
-) -> Result<LoadResult, Error> {
+pub fn load_dataset(graph: &mut GraphStore, data_dir: &str, max_articles: usize) -> Result<LoadResult, Error> {
     let t0 = Instant::now();
     let mut nc: usize = 0;
     let mut ec: usize = 0;
@@ -117,16 +95,10 @@ pub fn load_dataset(
     eprintln!("Phase 1: Loading articles (streaming 41 GB file)...");
     let t = Instant::now();
     process_pipe_file(&dir.join("articles.txt"), max_articles, |fields| {
-        if fields.len() < 6 {
-            return;
-        }
+        if fields.len() < 6 { return; }
         let pmid = fields[0];
-        if pmid.is_empty() {
-            return;
-        }
-        if pmid_to_node.contains_key(pmid) {
-            return;
-        }
+        if pmid.is_empty() { return; }
+        if pmid_to_node.contains_key(pmid) { return; }
 
         let id = graph.create_node("Article");
         set_str(graph, id, "pmid", pmid);
@@ -134,13 +106,10 @@ pub fn load_dataset(
         // Safe truncation: find char boundary at or before 300 bytes
         let title = {
             let s = fields[1];
-            if s.len() <= 300 {
-                s
-            } else {
+            if s.len() <= 300 { s }
+            else {
                 let mut end = 300;
-                while end > 0 && !s.is_char_boundary(end) {
-                    end -= 1;
-                }
+                while end > 0 && !s.is_char_boundary(end) { end -= 1; }
                 &s[..end]
             }
         };
@@ -168,35 +137,24 @@ pub fn load_dataset(
         nc += 1;
 
         if nc % 2_000_000 == 0 {
-            eprintln!(
-                "  ... {} articles ({:.0}s, {:.0}/sec)",
-                format_num(nc),
-                t.elapsed().as_secs_f64(),
-                nc as f64 / t.elapsed().as_secs_f64()
-            );
+            eprintln!("  ... {} articles ({:.0}s, {:.0}/sec)",
+                format_num(nc), t.elapsed().as_secs_f64(),
+                nc as f64 / t.elapsed().as_secs_f64());
         }
     });
-    eprintln!(
-        "  Article: {} nodes, Journal: {} nodes ({:.1}s)",
-        format_num(pmid_to_node.len()),
-        format_num(journal_to_node.len()),
-        t.elapsed().as_secs_f64()
-    );
+    eprintln!("  Article: {} nodes, Journal: {} nodes ({:.1}s)",
+        format_num(pmid_to_node.len()), format_num(journal_to_node.len()), t.elapsed().as_secs_f64());
 
     // ── Phase 2: Load authors (streaming) ────────────────────────
     eprintln!("Phase 2: Loading authors (streaming 16 GB file)...");
     let t = Instant::now();
     let mut auth_edges = 0usize;
     process_pipe_file(&dir.join("authors.txt"), 0, |fields| {
-        if fields.len() < 3 {
-            return;
-        }
+        if fields.len() < 3 { return; }
         let pmid = fields[0];
         let last_name = fields[1];
         let fore_name = fields[2];
-        if last_name.is_empty() && fore_name.is_empty() {
-            return;
-        }
+        if last_name.is_empty() && fore_name.is_empty() { return; }
 
         let article_nid = match pmid_to_node.get(pmid) {
             Some(&nid) => nid,
@@ -212,38 +170,25 @@ pub fn load_dataset(
         });
 
         let _ = graph.create_edge(article_nid, author_nid, "AUTHORED_BY");
-        ec += 1;
-        auth_edges += 1;
+        ec += 1; auth_edges += 1;
 
         if auth_edges % 10_000_000 == 0 {
-            eprintln!(
-                "  ... {} AUTHORED_BY edges ({:.0}s)",
-                format_num(auth_edges),
-                t.elapsed().as_secs_f64()
-            );
+            eprintln!("  ... {} AUTHORED_BY edges ({:.0}s)", format_num(auth_edges), t.elapsed().as_secs_f64());
         }
     });
-    eprintln!(
-        "  Author: {} nodes, AUTHORED_BY: {} edges ({:.1}s)",
-        format_num(author_to_node.len()),
-        format_num(auth_edges),
-        t.elapsed().as_secs_f64()
-    );
+    eprintln!("  Author: {} nodes, AUTHORED_BY: {} edges ({:.1}s)",
+        format_num(author_to_node.len()), format_num(auth_edges), t.elapsed().as_secs_f64());
 
     // ── Phase 3: Load MeSH terms (streaming) ─────────────────────
     eprintln!("Phase 3: Loading MeSH terms (streaming 11 GB file)...");
     let t = Instant::now();
     let mut mesh_edges = 0usize;
     process_pipe_file(&dir.join("mesh_terms.txt"), 0, |fields| {
-        if fields.len() < 3 {
-            return;
-        }
+        if fields.len() < 3 { return; }
         let pmid = fields[0];
         let desc_id = fields[1];
         let desc_name = fields[2];
-        if desc_name.is_empty() {
-            return;
-        }
+        if desc_name.is_empty() { return; }
 
         let article_nid = match pmid_to_node.get(pmid) {
             Some(&nid) => nid,
@@ -260,38 +205,25 @@ pub fn load_dataset(
         });
 
         let _ = graph.create_edge(article_nid, mesh_nid, "ANNOTATED_WITH");
-        ec += 1;
-        mesh_edges += 1;
+        ec += 1; mesh_edges += 1;
 
         if mesh_edges % 20_000_000 == 0 {
-            eprintln!(
-                "  ... {} ANNOTATED_WITH edges ({:.0}s)",
-                format_num(mesh_edges),
-                t.elapsed().as_secs_f64()
-            );
+            eprintln!("  ... {} ANNOTATED_WITH edges ({:.0}s)", format_num(mesh_edges), t.elapsed().as_secs_f64());
         }
     });
-    eprintln!(
-        "  MeSHTerm: {} nodes, ANNOTATED_WITH: {} edges ({:.1}s)",
-        format_num(mesh_to_node.len()),
-        format_num(mesh_edges),
-        t.elapsed().as_secs_f64()
-    );
+    eprintln!("  MeSHTerm: {} nodes, ANNOTATED_WITH: {} edges ({:.1}s)",
+        format_num(mesh_to_node.len()), format_num(mesh_edges), t.elapsed().as_secs_f64());
 
     // ── Phase 4: Load chemicals (streaming) ──────────────────────
     eprintln!("Phase 4: Loading chemicals (streaming 2 GB file)...");
     let t = Instant::now();
     let mut chem_edges = 0usize;
     process_pipe_file(&dir.join("chemicals.txt"), 0, |fields| {
-        if fields.len() < 3 {
-            return;
-        }
+        if fields.len() < 3 { return; }
         let pmid = fields[0];
         let reg_num = fields[1];
         let substance = fields[2];
-        if substance.is_empty() {
-            return;
-        }
+        if substance.is_empty() { return; }
 
         let article_nid = match pmid_to_node.get(pmid) {
             Some(&nid) => nid,
@@ -308,24 +240,17 @@ pub fn load_dataset(
         });
 
         let _ = graph.create_edge(article_nid, chem_nid, "MENTIONS_CHEMICAL");
-        ec += 1;
-        chem_edges += 1;
+        ec += 1; chem_edges += 1;
     });
-    eprintln!(
-        "  Chemical: {} nodes, MENTIONS_CHEMICAL: {} edges ({:.1}s)",
-        format_num(chemical_to_node.len()),
-        format_num(chem_edges),
-        t.elapsed().as_secs_f64()
-    );
+    eprintln!("  Chemical: {} nodes, MENTIONS_CHEMICAL: {} edges ({:.1}s)",
+        format_num(chemical_to_node.len()), format_num(chem_edges), t.elapsed().as_secs_f64());
 
     // ── Phase 5: Load citations (streaming) ──────────────────────
     eprintln!("Phase 5: Loading citations (streaming 6.6 GB file)...");
     let t = Instant::now();
     let mut cite_edges = 0usize;
     process_pipe_file(&dir.join("citations.txt"), 0, |fields| {
-        if fields.len() < 2 {
-            return;
-        }
+        if fields.len() < 2 { return; }
         let citing = fields[0];
         let cited = fields[1];
 
@@ -339,37 +264,24 @@ pub fn load_dataset(
         };
 
         let _ = graph.create_edge(citing_nid, cited_nid, "CITES");
-        ec += 1;
-        cite_edges += 1;
+        ec += 1; cite_edges += 1;
 
         if cite_edges % 20_000_000 == 0 {
-            eprintln!(
-                "  ... {} CITES edges ({:.0}s)",
-                format_num(cite_edges),
-                t.elapsed().as_secs_f64()
-            );
+            eprintln!("  ... {} CITES edges ({:.0}s)", format_num(cite_edges), t.elapsed().as_secs_f64());
         }
     });
-    eprintln!(
-        "  CITES: {} edges ({:.1}s)",
-        format_num(cite_edges),
-        t.elapsed().as_secs_f64()
-    );
+    eprintln!("  CITES: {} edges ({:.1}s)", format_num(cite_edges), t.elapsed().as_secs_f64());
 
     // ── Phase 6: Load grants (streaming) ─────────────────────────
     eprintln!("Phase 6: Loading grants (streaming 739 MB file)...");
     let t = Instant::now();
     let mut grant_edges = 0usize;
     process_pipe_file(&dir.join("grants.txt"), 0, |fields| {
-        if fields.len() < 3 {
-            return;
-        }
+        if fields.len() < 3 { return; }
         let pmid = fields[0];
         let grant_id = fields[1];
         let agency = fields[2];
-        if grant_id.is_empty() {
-            return;
-        }
+        if grant_id.is_empty() { return; }
 
         let article_nid = match pmid_to_node.get(pmid) {
             Some(&nid) => nid,
@@ -386,15 +298,10 @@ pub fn load_dataset(
         });
 
         let _ = graph.create_edge(article_nid, grant_nid, "FUNDED_BY");
-        ec += 1;
-        grant_edges += 1;
+        ec += 1; grant_edges += 1;
     });
-    eprintln!(
-        "  Grant: {} nodes, FUNDED_BY: {} edges ({:.1}s)",
-        format_num(grant_to_node.len()),
-        format_num(grant_edges),
-        t.elapsed().as_secs_f64()
-    );
+    eprintln!("  Grant: {} nodes, FUNDED_BY: {} edges ({:.1}s)",
+        format_num(grant_to_node.len()), format_num(grant_edges), t.elapsed().as_secs_f64());
 
     // ── Summary ──────────────────────────────────────────────────
     let elapsed = t0.elapsed();
@@ -407,8 +314,5 @@ pub fn load_dataset(
     eprintln!("  Journals:    {}", format_num(journal_to_node.len()));
     eprintln!("  Grants:      {}", format_num(grant_to_node.len()));
 
-    Ok(LoadResult {
-        total_nodes: nc,
-        total_edges: ec,
-    })
+    Ok(LoadResult { total_nodes: nc, total_edges: ec })
 }

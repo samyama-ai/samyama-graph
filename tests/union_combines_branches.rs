@@ -41,10 +41,7 @@ fn column(store: &GraphStore, cypher: &str) -> Vec<i64> {
 #[test]
 fn union_returns_rows_from_both_branches() {
     let store = GraphStore::new();
-    assert_eq!(
-        column(&store, "RETURN 1 AS x UNION RETURN 2 AS x"),
-        vec![1, 2]
-    );
+    assert_eq!(column(&store, "RETURN 1 AS x UNION RETURN 2 AS x"), vec![1, 2]);
 }
 
 #[test]
@@ -52,20 +49,14 @@ fn union_deduplicates_and_union_all_does_not() {
     let store = GraphStore::new();
     // The distinction the two keywords exist for.
     assert_eq!(column(&store, "RETURN 1 AS x UNION RETURN 1 AS x"), vec![1]);
-    assert_eq!(
-        column(&store, "RETURN 1 AS x UNION ALL RETURN 1 AS x"),
-        vec![1, 1]
-    );
+    assert_eq!(column(&store, "RETURN 1 AS x UNION ALL RETURN 1 AS x"), vec![1, 1]);
 }
 
 #[test]
 fn union_chains_past_two_branches() {
     let store = GraphStore::new();
     assert_eq!(
-        column(
-            &store,
-            "RETURN 1 AS x UNION RETURN 2 AS x UNION RETURN 3 AS x"
-        ),
+        column(&store, "RETURN 1 AS x UNION RETURN 2 AS x UNION RETURN 3 AS x"),
         vec![1, 2, 3]
     );
 }
@@ -78,9 +69,5 @@ fn union_over_matches_counts_every_branch() {
     run(&mut store, "CREATE (:P {v: 1})");
     run(&mut store, "CREATE (:P {v: 2})");
     let q = "MATCH (n:P) RETURN n.v AS x UNION ALL MATCH (m:P) RETURN m.v AS x";
-    assert_eq!(
-        column(&store, q),
-        vec![1, 1, 2, 2],
-        "UNION ALL over 2 nodes is 4 rows, not 2"
-    );
+    assert_eq!(column(&store, q), vec![1, 1, 2, 2], "UNION ALL over 2 nodes is 4 rows, not 2");
 }

@@ -57,10 +57,7 @@ async fn a_silent_server_does_not_hang_the_caller() {
     let result = client.query("default", "RETURN 1").await;
     let elapsed = start.elapsed();
 
-    assert!(
-        result.is_err(),
-        "a server that never answers must not return Ok"
-    );
+    assert!(result.is_err(), "a server that never answers must not return Ok");
     // The bound, not an absolute time: a slower machine may take longer to give
     // up, but it may not fail to give up. Without a timeout this never returns
     // and the test hangs rather than failing, which is why the assertion is on
@@ -198,16 +195,10 @@ async fn cancellation_does_not_discard_an_answer_that_arrived() {
     let (url, _) = black_hole().await;
     let client = RemoteClient::with_config(
         &url,
-        ConnectionConfig {
-            timeout: Some(Duration::from_secs(30)),
-            max_retries: 0,
-            ..Default::default()
-        },
+        ConnectionConfig { timeout: Some(Duration::from_secs(30)), max_retries: 0, ..Default::default() },
     );
     let start = Instant::now();
-    let result = client
-        .query_cancellable("default", "RETURN 1", async {})
-        .await;
+    let result = client.query_cancellable("default", "RETURN 1", async {}).await;
     assert!(result.is_err());
     assert!(start.elapsed() < Duration::from_secs(5));
 }

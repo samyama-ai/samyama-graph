@@ -190,17 +190,9 @@ impl Credential {
     /// `is_write` is the engine's classification. An error there counts as a
     /// write: a statement the classifier cannot read is not one to let a
     /// read-only credential run.
-    pub fn authorize_statement<E>(
-        &self,
-        graph: &str,
-        is_write: Result<bool, E>,
-    ) -> Result<(), String> {
+    pub fn authorize_statement<E>(&self, graph: &str, is_write: Result<bool, E>) -> Result<(), String> {
         self.authorize_graph(graph)?;
-        let needed = if is_write.unwrap_or(true) {
-            Role::Write
-        } else {
-            Role::Read
-        };
+        let needed = if is_write.unwrap_or(true) { Role::Write } else { Role::Read };
         self.authorize_role(needed)
     }
 
@@ -281,11 +273,7 @@ pub fn digests_match(a: &[u8; 32], b: &[u8; 32]) -> bool {
 ///
 /// Only the line naming this user is checked, so a failed login runs argon2 at
 /// most once rather than once per credential.
-pub fn authenticate_user(
-    credentials: &[Credential],
-    username: &str,
-    presented: &str,
-) -> Option<Credential> {
+pub fn authenticate_user(credentials: &[Credential], username: &str, presented: &str) -> Option<Credential> {
     credentials
         .iter()
         .find(|c| c.name == username)
@@ -325,15 +313,9 @@ mod tests {
 
     #[test]
     fn an_unknown_or_empty_role_is_an_error_not_a_skipped_word() {
-        assert!(Credential::parse(&format!("bob:{D}:roles=writ"))
-            .unwrap()
-            .is_err());
-        assert!(Credential::parse(&format!("bob:{D}:roles="))
-            .unwrap()
-            .is_err());
-        assert!(Credential::parse(&format!("bob:{D}:tenant="))
-            .unwrap()
-            .is_err());
+        assert!(Credential::parse(&format!("bob:{D}:roles=writ")).unwrap().is_err());
+        assert!(Credential::parse(&format!("bob:{D}:roles=")).unwrap().is_err());
+        assert!(Credential::parse(&format!("bob:{D}:tenant=")).unwrap().is_err());
     }
 
     #[test]
@@ -348,10 +330,7 @@ mod tests {
     fn a_token_verifies_by_its_preimage_never_by_the_stored_digest() {
         let c = parse(&format!("svc:{D}"));
         assert!(c.verify("test"));
-        assert!(
-            !c.verify(D),
-            "the digest in the file must not be a password"
-        );
+        assert!(!c.verify(D), "the digest in the file must not be a password");
         assert!(authenticate_user(&[c.clone()], "svc", "test").is_some());
         assert!(authenticate_user(&[c], "svc", D).is_none());
     }

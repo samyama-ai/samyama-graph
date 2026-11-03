@@ -18,15 +18,12 @@ fn render(v: Option<&Value>) -> String {
             PropertyValue::Null => "null".into(),
             PropertyValue::Array(a) => format!(
                 "[{}]",
-                a.iter()
-                    .map(|x| match x {
-                        PropertyValue::Integer(n) => n.to_string(),
-                        PropertyValue::String(s) => format!("\"{s}\""),
-                        PropertyValue::Float(f) => format!("{f}"),
-                        other => format!("{other:?}"),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                a.iter().map(|x| match x {
+                    PropertyValue::Integer(n) => n.to_string(),
+                    PropertyValue::String(s) => format!("\"{s}\""),
+                    PropertyValue::Float(f) => format!("{f}"),
+                    other => format!("{other:?}"),
+                }).collect::<Vec<_>>().join(", ")
             ),
             other => format!("{other:?}"),
         },
@@ -67,10 +64,7 @@ fn main() {
         ("RETURN single(x IN [1,2,3] WHERE x = 2) AS r", "true"),
         // --- map
         ("WITH {a: 1, b: 2} AS m RETURN m.a AS r", "1"),
-        (
-            "WITH {a: 1, b: 2} AS m RETURN keys(m) AS r",
-            "[\"a\", \"b\"]",
-        ),
+        ("WITH {a: 1, b: 2} AS m RETURN keys(m) AS r", "[\"a\", \"b\"]"),
         ("WITH {a: 1, b: 2} AS m RETURN size(keys(m)) AS r", "2"),
         ("WITH {a: 1} AS m RETURN m[\"a\"] AS r", "1"),
         // --- string functions
@@ -81,10 +75,7 @@ fn main() {
         ("RETURN left(\"abcdef\", 2) AS r", "\"ab\""),
         ("RETURN right(\"abcdef\", 2) AS r", "\"ef\""),
         ("RETURN replace(\"abc\", \"b\", \"X\") AS r", "\"aXc\""),
-        (
-            "RETURN split(\"a,b,c\", \",\") AS r",
-            "[\"a\", \"b\", \"c\"]",
-        ),
+        ("RETURN split(\"a,b,c\", \",\") AS r", "[\"a\", \"b\", \"c\"]"),
         ("RETURN \"abc\" CONTAINS \"b\" AS r", "true"),
         ("RETURN \"abc\" STARTS WITH \"a\" AS r", "true"),
         ("RETURN \"abc\" ENDS WITH \"c\" AS r", "true"),
@@ -105,14 +96,8 @@ fn main() {
         ("RETURN 1 IS NOT NULL AS r", "true"),
         ("RETURN null = null AS r", "null"),
         // --- CASE
-        (
-            "RETURN CASE WHEN 1 > 0 THEN \"y\" ELSE \"n\" END AS r",
-            "\"y\"",
-        ),
-        (
-            "RETURN CASE 2 WHEN 1 THEN \"a\" WHEN 2 THEN \"b\" ELSE \"c\" END AS r",
-            "\"b\"",
-        ),
+        ("RETURN CASE WHEN 1 > 0 THEN \"y\" ELSE \"n\" END AS r", "\"y\""),
+        ("RETURN CASE 2 WHEN 1 THEN \"a\" WHEN 2 THEN \"b\" ELSE \"c\" END AS r", "\"b\""),
         // --- aggregation
         ("UNWIND [1,2,3] AS x RETURN sum(x) AS r", "6"),
         ("UNWIND [1,2,3] AS x RETURN avg(x) AS r", "2"),
@@ -121,28 +106,13 @@ fn main() {
         ("UNWIND [3,1,2] AS x RETURN min(x) AS r", "1"),
         ("UNWIND [3,1,2] AS x RETURN max(x) AS r", "3"),
         // --- graph functions
-        (
-            "MATCH (p:P) WHERE p.name = \"Ada\" RETURN labels(p) AS r",
-            "[\"P\"]",
-        ),
-        (
-            "MATCH (p:P)-[e:KNOWS]->(q) RETURN type(e) AS r",
-            "\"KNOWS\"",
-        ),
-        (
-            "MATCH (p:P) WHERE p.name = \"Ada\" RETURN size(keys(p)) AS r",
-            "2",
-        ),
+        ("MATCH (p:P) WHERE p.name = \"Ada\" RETURN labels(p) AS r", "[\"P\"]"),
+        ("MATCH (p:P)-[e:KNOWS]->(q) RETURN type(e) AS r", "\"KNOWS\""),
+        ("MATCH (p:P) WHERE p.name = \"Ada\" RETURN size(keys(p)) AS r", "2"),
         ("MATCH p = (a:P)-[:KNOWS]->(b:P) RETURN length(p) AS r", "1"),
-        (
-            "MATCH (p:P) WHERE p.name = \"Ada\" RETURN exists(p.age) AS r",
-            "true",
-        ),
+        ("MATCH (p:P) WHERE p.name = \"Ada\" RETURN exists(p.age) AS r", "true"),
         ("MATCH (p:P) RETURN count(p) AS r", "2"),
-        (
-            "MATCH (a:P) WHERE EXISTS { MATCH (a)-[:KNOWS]->() } RETURN count(a) AS r",
-            "1",
-        ),
+        ("MATCH (a:P) WHERE EXISTS { MATCH (a)-[:KNOWS]->() } RETURN count(a) AS r", "1"),
         // --- ordering / distinct
         ("UNWIND [1,1,2] AS x RETURN count(x) AS r", "3"),
         // --- narrowing the three gaps found by the first sweep
@@ -165,8 +135,8 @@ fn main() {
         ("RETURN true XOR false AS r", "true"),
     ];
 
-    let mut wrong: Vec<(String, String, String)> = Vec::new();
-    let mut errored: Vec<(String, String)> = Vec::new();
+    let mut wrong: Vec<(String,String,String)> = Vec::new();
+    let mut errored: Vec<(String,String)> = Vec::new();
 
     for (cypher, expected) in cases {
         match parse_query(cypher) {
@@ -174,11 +144,7 @@ fn main() {
             Ok(q) => match QueryExecutor::new(&store).execute(&q) {
                 Err(e) => errored.push((cypher.to_string(), format!("exec: {e:?}"))),
                 Ok(batch) => {
-                    let got = batch
-                        .records
-                        .first()
-                        .map(|r| render(r.get("r")))
-                        .unwrap_or("<no rows>".into());
+                    let got = batch.records.first().map(|r| render(r.get("r"))).unwrap_or("<no rows>".into());
                     if got != *expected {
                         wrong.push((cypher.to_string(), expected.to_string(), got));
                     }
@@ -187,24 +153,15 @@ fn main() {
         }
     }
 
-    println!(
-        "{} cases: {} ok, {} wrong answer, {} errored",
-        cases.len(),
-        cases.len() - wrong.len() - errored.len(),
-        wrong.len(),
-        errored.len()
-    );
+    println!("{} cases: {} ok, {} wrong answer, {} errored",
+        cases.len(), cases.len()-wrong.len()-errored.len(), wrong.len(), errored.len());
 
     if !wrong.is_empty() {
         println!("\n=== WRONG ANSWER (parses, runs, returns the wrong thing) ===");
-        for (c, e, g) in &wrong {
-            println!("  {c}\n     expected {e}, got {g}");
-        }
+        for (c,e,g) in &wrong { println!("  {c}\n     expected {e}, got {g}"); }
     }
     if !errored.is_empty() {
         println!("\n=== ERRORED (at least it says so) ===");
-        for (c, e) in &errored {
-            println!("  {c}\n     {e}");
-        }
+        for (c,e) in &errored { println!("  {c}\n     {e}"); }
     }
 }

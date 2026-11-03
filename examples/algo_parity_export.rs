@@ -15,26 +15,25 @@
 use std::collections::HashMap;
 
 use samyama_graph_algorithms::{
-    a_star, all_shortest_paths, articulation_points, average_neighbour_degree, bellman_ford,
-    betweenness_centrality, bfs, biconnected_components, bipartite_sets, bridges, cdlp,
-    closeness_centrality,
-    community_detect::louvain,
-    constraint, core_number, cosine_similarity, count_triangles, dag_longest_path,
-    degree_assortativity, degree_centrality, diameter, dijkstra, dominating_set, eccentricity,
-    edmonds_karp, effective_size, eigenvector_centrality, find_cycle, global_efficiency,
-    greedy_colouring, harmonic_centrality, hits, k_truss, katz_centrality,
+    bfs, cdlp, count_triangles, dijkstra, edmonds_karp, local_clustering_coefficient,
+    local_clustering_coefficient_directed, page_rank, prim_mst, strongly_connected_components,
+    weakly_connected_components, CdlpConfig, GraphView, NodeId, PageRankConfig,
+    all_shortest_paths, a_star, yens_k_shortest, modularity,
+    hits, katz_centrality, personalised_page_rank,
+    bellman_ford, dag_longest_path, transitive_closure, wiener_index,
+    biconnected_components, bipartite_sets, dominating_set, global_efficiency, k_truss,
+    greedy_colouring, maximal_matching,
+    rich_club_coefficient, square_clustering, transitivity,
+    constraint, cosine_similarity, effective_size, overlap_coefficient, reciprocity,
+    betweenness_centrality, closeness_centrality, core_number, degree_centrality,
+    eigenvector_centrality, harmonic_centrality, pca, PcaConfig,
     link_prediction::{score_one, LinkScore},
-    local_clustering_coefficient, local_clustering_coefficient_directed, maximal_matching,
-    modularity, overlap_coefficient, page_rank,
+    average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
     pathfinding_extra::article_rank,
+    temporal::{propagation_ranking, symptom_explanation, temporal_reachability, temporal_shortest_path},
     pathfinding_extra::random_walk,
-    pca, personalised_page_rank, prim_mst, radius, reciprocity, rich_club_coefficient,
-    square_clustering, strongly_connected_components,
-    temporal::{
-        propagation_ranking, symptom_explanation, temporal_reachability, temporal_shortest_path,
-    },
-    topological_sort, transitive_closure, transitivity, weakly_connected_components, wiener_index,
-    yens_k_shortest, CdlpConfig, GraphView, NodeId, PageRankConfig, PcaConfig, TopoResult,
+    articulation_points, bridges, find_cycle, topological_sort, TopoResult,
+    community_detect::louvain,
 };
 
 /// How many shortest paths to enumerate per pair before stopping. The count is
@@ -46,10 +45,7 @@ const PATH_ENUM_CAP: usize = 64;
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         self.0 >> 33
     }
     fn below(&mut self, n: u64) -> u64 {
@@ -82,23 +78,14 @@ fn build(name: &str, directed: bool, n: usize, m: usize, seed: u64) -> Reference
         if a == b {
             continue;
         }
-        let key = if directed {
-            (a, b)
-        } else {
-            (a.min(b), a.max(b))
-        };
+        let key = if directed { (a, b) } else { (a.min(b), a.max(b)) };
         if !seen.insert(key) {
             continue;
         }
         let w = 1.0 + (rng.below(9) as f64);
         edges.push((key.0, key.1, w));
     }
-    Reference {
-        name: name.to_string(),
-        directed,
-        n,
-        edges,
-    }
+    Reference { name: name.to_string(), directed, n, edges }
 }
 
 /// The same graph with each edge stored once, weights kept.
@@ -120,12 +107,7 @@ fn view_single(r: &Reference) -> GraphView {
         incoming[b].push(a);
     }
     GraphView::from_adjacency_list(
-        r.n,
-        index_to_node,
-        node_to_index,
-        outgoing,
-        incoming,
-        Some(weights),
+        r.n, index_to_node, node_to_index, outgoing, incoming, Some(weights),
     )
 }
 
@@ -145,14 +127,7 @@ fn view_of(r: &Reference) -> GraphView {
             incoming[a].push(b);
         }
     }
-    GraphView::from_adjacency_list(
-        r.n,
-        index_to_node,
-        node_to_index,
-        outgoing,
-        incoming,
-        Some(weights),
-    )
+    GraphView::from_adjacency_list(r.n, index_to_node, node_to_index, outgoing, incoming, Some(weights))
 }
 
 /// A directed graph that is acyclic by construction: every edge runs from a
@@ -186,18 +161,11 @@ fn build_dag(name: &str, n: usize, m: usize, seed: u64) -> Reference {
         let w = 1.0 + (rng.below(9) as f64);
         edges.push((key.0, key.1, w));
     }
-    Reference {
-        name: name.to_string(),
-        directed: true,
-        n,
-        edges,
-    }
+    Reference { name: name.to_string(), directed: true, n, edges }
 }
 
 fn main() {
-    let out_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "algo-parity.json".to_string());
+    let out_path = std::env::args().nth(1).unwrap_or_else(|| "algo-parity.json".to_string());
 
     let refs = vec![
         build("undirected-40", false, 40, 90, 12345),
@@ -214,14 +182,11 @@ fn main() {
         // one exists to separate "the algorithm is wrong" from "the default
         // stops early", which a single number cannot distinguish.
         let pr = page_rank(&view, PageRankConfig::default());
-        let mut pr_vec: Vec<(String, f64)> = pr.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        let mut pr_vec: Vec<(String, f64)> =
+            pr.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         pr_vec.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let tight = PageRankConfig {
-            iterations: 200,
-            tolerance: 1e-12,
-            ..Default::default()
-        };
+        let tight = PageRankConfig { iterations: 200, tolerance: 1e-12, ..Default::default() };
         let pr_tight = page_rank(&view, tight);
         let mut pr_tight_vec: Vec<(String, f64)> =
             pr_tight.iter().map(|(k, v)| (k.to_string(), *v)).collect();
@@ -236,11 +201,8 @@ fn main() {
         } else {
             local_clustering_coefficient(&view)
         };
-        let mut lcc_vec: Vec<(String, f64)> = lcc
-            .coefficients
-            .iter()
-            .map(|(k, v)| (k.to_string(), *v))
-            .collect();
+        let mut lcc_vec: Vec<(String, f64)> =
+            lcc.coefficients.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         lcc_vec.sort_by(|a, b| a.0.cmp(&b.0));
 
         let wcc = weakly_connected_components(&view);
@@ -254,23 +216,13 @@ fn main() {
         let targets: Vec<usize> = (1..r.n).step_by(r.n / 8 + 1).collect();
         let bfs_costs: Vec<(String, Option<f64>)> = targets
             .iter()
-            .map(|t| {
-                (
-                    (*t).to_string(),
-                    bfs(&view, 0, *t as NodeId).map(|p| p.cost),
-                )
-            })
+            .map(|t| ((*t).to_string(), bfs(&view, 0, *t as NodeId).map(|p| p.cost)))
             .collect();
         let dij_costs: Vec<(String, Option<f64>)> = targets
             .iter()
-            .map(|t| {
-                (
-                    (*t).to_string(),
-                    dijkstra(&view, 0, *t as NodeId)
-                        .expect("the parity graphs are built with non-negative weights")
-                        .map(|p| p.cost),
-                )
-            })
+            .map(|t| ((*t).to_string(), dijkstra(&view, 0, *t as NodeId)
+                .expect("the parity graphs are built with non-negative weights")
+                .map(|p| p.cost)))
             .collect();
 
         let flow = edmonds_karp(&view, 0, (r.n - 1) as NodeId).map(|f| f.max_flow);
@@ -290,17 +242,11 @@ fn main() {
         let single = view_single(r);
         let bidir = !r.directed;
         let idx = |v: &Vec<f64>| -> HashMap<String, f64> {
-            v.iter()
-                .enumerate()
-                .map(|(i, x)| (i.to_string(), *x))
-                .collect()
+            v.iter().enumerate().map(|(i, x)| (i.to_string(), *x)).collect()
         };
 
         let ecc: HashMap<String, Option<i64>> = eccentricity(&single, true)
-            .into_iter()
-            .enumerate()
-            .map(|(i, e)| (i.to_string(), e))
-            .collect();
+            .into_iter().enumerate().map(|(i, e)| (i.to_string(), e)).collect();
 
         // Every unconnected pair, which is what link prediction is for: a
         // ranking whose top entries are pairs already joined answers a
@@ -395,12 +341,7 @@ fn main() {
             .iter()
             .map(|(k, &h)| {
                 let mut it = k.split('-').map(|x| x.parse::<usize>().unwrap());
-                (
-                    std::cmp::Reverse(h),
-                    it.next().unwrap(),
-                    it.next().unwrap(),
-                    k.clone(),
-                )
+                (std::cmp::Reverse(h), it.next().unwrap(), it.next().unwrap(), k.clone())
             })
             .min();
         if let Some((_, _, _, far)) = far {
@@ -410,9 +351,7 @@ fn main() {
                 far.clone(),
                 yens_k_shortest(&view, sv, tv, 5)
                     .expect("the parity graphs are built with non-negative weights")
-                    .into_iter()
-                    .map(|(_, c)| c)
-                    .collect(),
+                    .into_iter().map(|(_, c)| c).collect(),
             );
         }
 
@@ -430,29 +369,20 @@ fn main() {
         // and fail by luck. They are named in `NO_DETERMINISTIC_REFERENCE`
         // there rather than left as a silent hole.
         let idx = |v: &Vec<f64>| -> HashMap<String, f64> {
-            v.iter()
-                .enumerate()
-                .map(|(i, x)| (i.to_string(), *x))
-                .collect()
+            v.iter().enumerate().map(|(i, x)| (i.to_string(), *x)).collect()
         };
         let katz = katz_centrality(&view, 0.05, 1.0, 5000, 1e-12).map(|v| idx(&v));
         let hits_pair = hits(&view, 5000, 1e-12);
         let ppr = idx(&personalised_page_rank(&view, &[0], 0.85, 500, 1e-12));
         let bf: Option<HashMap<String, f64>> = bellman_ford(&view, 0).map(|d| {
-            d.iter()
-                .enumerate()
-                .filter_map(|(i, x)| x.map(|v| (i.to_string(), v)))
-                .collect()
+            d.iter().enumerate().filter_map(|(i, x)| x.map(|v| (i.to_string(), v))).collect()
         });
         let dag_len = dag_longest_path(&view).map(|p| p.len() as i64 - 1);
         // Ordered pairs excluding self, matching what the recorder counts.
         // The self-pairs the engine keeps for nodes on a cycle are a real fact
         // and are checked separately -- folding them into this count would
         // compare two different quantities.
-        let tc_pairs = transitive_closure(&view)
-            .into_iter()
-            .filter(|(a, b)| a != b)
-            .count();
+        let tc_pairs = transitive_closure(&view).into_iter().filter(|(a, b)| a != b).count();
         let sq: HashMap<String, f64> = (0..r.n)
             .filter_map(|i| square_clustering(&single, i, true).map(|v| (i.to_string(), v)))
             .collect();
@@ -529,18 +459,13 @@ fn main() {
                 .collect();
 
         let mut h2 = serde_json::Map::new();
-        let mut put = |k: &str, v: serde_json::Value| {
-            h2.insert(k.to_string(), v);
-        };
+        let mut put = |k: &str, v: serde_json::Value| { h2.insert(k.to_string(), v); };
         put("all_pairs_hops", serde_json::json!(all_pairs_hops_out));
-        put(
-            "node_similarity",
-            serde_json::json!({
-                "top_k": NODE_SIM_TOPK,
-                "cutoff": NODE_SIM_CUTOFF,
-                "pairs": node_similarity_out,
-            }),
-        );
+        put("node_similarity", serde_json::json!({
+            "top_k": NODE_SIM_TOPK,
+            "cutoff": NODE_SIM_CUTOFF,
+            "pairs": node_similarity_out,
+        }));
         // ArticleRank (ALGO-02). Deterministic for a given damping and iteration
         // count, so it has exactly one right answer and belongs in the parity
         // denominator — "no library ships it" is not the same as "no reference can
@@ -564,8 +489,7 @@ fn main() {
         {
             let slots = view.out_targets.len();
             let edge_times: Vec<i64> = (0..slots).map(|i| ((i * 7) % 23) as i64).collect();
-            match samyama_graph_algorithms::temporal::TemporalEdges::new(&view, edge_times.clone())
-            {
+            match samyama_graph_algorithms::temporal::TemporalEdges::new(&view, edge_times.clone()) {
                 Ok(te) => {
                     let sources = [0usize];
                     // `[id, arrival]`, as before. The walk now comes back too
@@ -575,120 +499,72 @@ fn main() {
                     // time-respecting walk, so adding it here would put a
                     // column in the parity corpus that nothing can be compared
                     // against.
-                    let reach = temporal_reachability(&view, &te, &sources, 0).map(|v| {
-                        v.into_iter()
-                            .map(|r| serde_json::json!([r.node, r.arrival]))
-                            .collect::<Vec<_>>()
-                    });
-                    let prop = propagation_ranking(&view, &te, &sources, 0).map(|v| {
-                        v.into_iter()
-                            .map(|r| serde_json::json!([r.node, r.arrival]))
-                            .collect::<Vec<_>>()
-                    });
+                    let reach = temporal_reachability(&view, &te, &sources, 0)
+                        .map(|v| v.into_iter().map(|r| serde_json::json!([r.node, r.arrival])).collect::<Vec<_>>());
+                    let prop = propagation_ranking(&view, &te, &sources, 0)
+                        .map(|v| v.into_iter().map(|r| serde_json::json!([r.node, r.arrival])).collect::<Vec<_>>());
                     let tsp = temporal_shortest_path(&view, &te, 0, r.n - 1, 0).map(|p| {
-                        p.map(|p| {
-                            serde_json::json!({
-                                "nodes": p.nodes,
-                                "edge_times": p.edge_times,
-                                "arrival": p.arrival,
-                            })
-                        })
+                        p.map(|p| serde_json::json!({
+                            "nodes": p.nodes,
+                            "edge_times": p.edge_times,
+                            "arrival": p.arrival,
+                        }))
                     });
                     // Two symptoms at different times: one symptom cannot show
                     // whether the explained-count accumulates across them.
                     let symptoms = [(r.n - 1, 40i64), (r.n / 2, 30i64)];
                     let expl = symptom_explanation(&view, &te, &symptoms).map(|v| {
                         v.into_iter()
-                            .map(|e| {
-                                serde_json::json!({
-                                    "node": e.node,
-                                    "explains": e.symptoms_explained,
-                                    "onset": e.latest_onset,
-                                })
-                            })
+                            .map(|e| serde_json::json!({
+                                "node": e.node,
+                                "explains": e.symptoms_explained,
+                                "onset": e.latest_onset,
+                            }))
                             .collect::<Vec<_>>()
                     });
-                    put(
-                        "temporal",
-                        serde_json::json!({
-                            "edge_times": edge_times,
-                            "start": 0,
-                            "sources": sources,
-                            "target": r.n - 1,
-                            "symptoms": symptoms.iter().map(|(a, b)| serde_json::json!([a, b])).collect::<Vec<_>>(),
-                            "reachability": reach.ok(),
-                            "propagation_ranking": prop.ok(),
-                            "shortest_path": tsp.ok().flatten(),
-                            "symptom_explanation": expl.ok(),
-                        }),
-                    );
+                    put("temporal", serde_json::json!({
+                        "edge_times": edge_times,
+                        "start": 0,
+                        "sources": sources,
+                        "target": r.n - 1,
+                        "symptoms": symptoms.iter().map(|(a, b)| serde_json::json!([a, b])).collect::<Vec<_>>(),
+                        "reachability": reach.ok(),
+                        "propagation_ranking": prop.ok(),
+                        "shortest_path": tsp.ok().flatten(),
+                        "symptom_explanation": expl.ok(),
+                    }));
                 }
                 Err(e) => {
-                    put(
-                        "temporal",
-                        serde_json::json!({ "unavailable": e.to_string() }),
-                    );
+                    put("temporal", serde_json::json!({ "unavailable": e.to_string() }));
                 }
             }
         }
 
-        put(
-            "article_rank",
-            serde_json::json!({
-                "damping": 0.85,
-                "iterations": 40,
-                "scores": idx(&article_rank(&view, 0.85, 40)),
-            }),
-        );
+        put("article_rank", serde_json::json!({
+            "damping": 0.85,
+            "iterations": 40,
+            "scores": idx(&article_rank(&view, 0.85, 40)),
+        }));
         put("katz", serde_json::to_value(&katz).unwrap());
         put("articulation_points", serde_json::to_value(&artic).unwrap());
         put("bridges", serde_json::to_value(&bridge_pairs).unwrap());
         put("topological_order", serde_json::to_value(&topo).unwrap());
         put("cycle_witness", serde_json::to_value(&cycle).unwrap());
-        put(
-            "hits_hubs",
-            serde_json::to_value(hits_pair.as_ref().map(|(h, _)| idx(h))).unwrap(),
-        );
-        put(
-            "hits_authorities",
-            serde_json::to_value(hits_pair.as_ref().map(|(_, a)| idx(a))).unwrap(),
-        );
+        put("hits_hubs", serde_json::to_value(hits_pair.as_ref().map(|(h, _)| idx(h))).unwrap());
+        put("hits_authorities", serde_json::to_value(hits_pair.as_ref().map(|(_, a)| idx(a))).unwrap());
         put("personalised_pagerank", serde_json::to_value(&ppr).unwrap());
         put("bellman_ford_from_0", serde_json::to_value(&bf).unwrap());
-        put(
-            "wiener_index",
-            serde_json::to_value(wiener_index(&view)).unwrap(),
-        );
-        put(
-            "dag_longest_path_length",
-            serde_json::to_value(dag_len).unwrap(),
-        );
-        put(
-            "transitive_closure_pairs",
-            serde_json::to_value(tc_pairs).unwrap(),
-        );
-        put(
-            "is_bipartite",
-            serde_json::to_value(bipartite_sets(&single, true).is_some()).unwrap(),
-        );
+        put("wiener_index", serde_json::to_value(wiener_index(&view)).unwrap());
+        put("dag_longest_path_length", serde_json::to_value(dag_len).unwrap());
+        put("transitive_closure_pairs", serde_json::to_value(tc_pairs).unwrap());
+        put("is_bipartite", serde_json::to_value(bipartite_sets(&single, true).is_some()).unwrap());
         put("k_truss_3_nodes", serde_json::to_value(&truss).unwrap());
-        put(
-            "transitivity",
-            serde_json::to_value(transitivity(&single, true)).unwrap(),
-        );
-        put(
-            "global_efficiency",
-            serde_json::to_value(global_efficiency(&single, true)).unwrap(),
-        );
+        put("transitivity", serde_json::to_value(transitivity(&single, true)).unwrap());
+        put("global_efficiency", serde_json::to_value(global_efficiency(&single, true)).unwrap());
         put("square_clustering", serde_json::to_value(&sq).unwrap());
-        put(
-            "rich_club_1",
-            serde_json::to_value(rich_club_coefficient(&single, 1, true)).unwrap(),
-        );
-        put(
-            "biconnected_component_count",
-            serde_json::to_value(biconnected_components(&single, true).len()).unwrap(),
-        );
+        put("rich_club_1", serde_json::to_value(rich_club_coefficient(&single, 1, true)).unwrap());
+        put("biconnected_component_count",
+            serde_json::to_value(biconnected_components(&single, true).len()).unwrap());
         put("effective_size", serde_json::to_value(&eff).unwrap());
         put("constraint", serde_json::to_value(&cons).unwrap());
         // A seeded algorithm. The other 48 families are unseeded and
@@ -696,18 +572,12 @@ fn main() {
         // *given a seed*, and nothing in this export exercised a seed until
         // this line. It is the clause most likely to rot, because a caller
         // switching to an unseeded RNG breaks nothing that compiles.
-        put(
-            "louvain_partition",
-            serde_json::to_value(&louvain_partition).unwrap(),
-        );
-        put(
-            "random_walk_seeded",
-            serde_json::to_value(random_walk(&view, 0, 32, 0x5A_4D).to_vec()).unwrap(),
-        );
-        put(
-            "reciprocity",
-            serde_json::to_value(if r.directed { reciprocity(&view) } else { None }).unwrap(),
-        );
+        put("louvain_partition", serde_json::to_value(&louvain_partition).unwrap());
+        put("random_walk_seeded",
+            serde_json::to_value(random_walk(&view, 0, 32, 0x5A_4D)
+                .to_vec()).unwrap());
+        put("reciprocity",
+            serde_json::to_value(if r.directed { reciprocity(&view) } else { None }).unwrap());
 
         // PCA, against a matrix this file also exports (benchmarks#199).
         //
@@ -722,30 +592,16 @@ fn main() {
         // check whose two halves each build "the same" input is partly checking
         // two input builders, and when it disagrees you cannot tell which moved
         // -- the same reason the graphs themselves are exported.
-        let features: Vec<Vec<f64>> = (0..r.n)
-            .map(|i| {
-                vec![
-                    view.out_degree(i) as f64,
-                    view.in_degree(i) as f64,
-                    view.weights(i)
-                        .map(|w| w.iter().sum::<f64>())
-                        .unwrap_or(0.0),
-                    view.successors(i).iter().map(|&t| t as f64).sum::<f64>() / (r.n as f64),
-                ]
-            })
-            .collect();
-        let p = pca(
-            &features,
-            PcaConfig {
-                n_components: 3,
-                ..Default::default()
-            },
-        );
+        let features: Vec<Vec<f64>> = (0..r.n).map(|i| vec![
+            view.out_degree(i) as f64,
+            view.in_degree(i) as f64,
+            view.weights(i).map(|w| w.iter().sum::<f64>()).unwrap_or(0.0),
+            view.successors(i).iter().map(|&t| t as f64).sum::<f64>() / (r.n as f64),
+        ]).collect();
+        let p = pca(&features, PcaConfig { n_components: 3, ..Default::default() });
         put("pca_matrix", serde_json::to_value(&features).unwrap());
-        put(
-            "pca_explained_variance_ratio",
-            serde_json::to_value(&p.explained_variance_ratio).unwrap(),
-        );
+        put("pca_explained_variance_ratio",
+            serde_json::to_value(&p.explained_variance_ratio).unwrap());
 
         let mut entry = serde_json::json!({
             "name": r.name,
@@ -899,13 +755,9 @@ fn main() {
                     .iter()
                     .map(|id| {
                         (
-                            store
-                                .node_property(*id, "cost")
-                                .and_then(|v| v.as_float())
+                            store.node_property(*id, "cost").and_then(|v| v.as_float())
                                 .unwrap_or(f64::NAN),
-                            store
-                                .node_property(*id, "qty")
-                                .and_then(|v| v.as_float())
+                            store.node_property(*id, "qty").and_then(|v| v.as_float())
                                 .unwrap_or(f64::NAN),
                         )
                     })

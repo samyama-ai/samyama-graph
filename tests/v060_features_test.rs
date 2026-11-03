@@ -5,8 +5,8 @@
 //!         QP-01, QP-03, QP-04
 
 use samyama::graph::{GraphStore, Label, PropertyValue};
-use samyama::query::executor::Value;
 use samyama::query::QueryEngine;
+use samyama::query::executor::Value;
 
 // ---------------------------------------------------------------------------
 // Helper: build a small social graph for reuse across tests
@@ -32,12 +32,7 @@ fn social_graph() -> (GraphStore, QueryEngine) {
     }
 
     // Edges: Alice->Bob, Bob->Charlie, Charlie->David, Alice->Eve
-    for (src, dst) in &[
-        ("Alice", "Bob"),
-        ("Bob", "Charlie"),
-        ("Charlie", "David"),
-        ("Alice", "Eve"),
-    ] {
+    for (src, dst) in &[("Alice", "Bob"), ("Bob", "Charlie"), ("Charlie", "David"), ("Alice", "Eve")] {
         let q = format!(
             "MATCH (a:Person {{name: '{}'}}), (b:Person {{name: '{}'}}) CREATE (a)-[:KNOWS]->(b)",
             src, dst
@@ -55,9 +50,10 @@ fn test_collect_distinct() {
     let (store, engine) = social_graph();
 
     // All departments (with duplicates)
-    let result = engine
-        .execute("MATCH (n:Person) RETURN collect(n.dept) AS depts", &store)
-        .unwrap();
+    let result = engine.execute(
+        "MATCH (n:Person) RETURN collect(n.dept) AS depts",
+        &store,
+    ).unwrap();
     assert_eq!(result.len(), 1);
     let all_depts = result.records[0].get("depts").unwrap();
     // Should have 5 items (3 Engineering + 2 Marketing)
@@ -69,12 +65,10 @@ fn test_collect_distinct() {
     }
 
     // DISTINCT departments
-    let result = engine
-        .execute(
-            "MATCH (n:Person) RETURN collect(DISTINCT n.dept) AS depts",
-            &store,
-        )
-        .unwrap();
+    let result = engine.execute(
+        "MATCH (n:Person) RETURN collect(DISTINCT n.dept) AS depts",
+        &store,
+    ).unwrap();
     assert_eq!(result.len(), 1);
     let distinct_depts = result.records[0].get("depts").unwrap();
     let arr = distinct_depts.as_property().unwrap();
@@ -106,10 +100,7 @@ fn test_datetime_named_constructor_in_with() {
         PropertyValue::ZonedDateTime { .. } => {
             assert_eq!(dt_val.to_cypher_string(), "2026-03-04T00:00Z");
         }
-        other => panic!(
-            "Expected ZonedDateTime from named constructor, got {:?}",
-            other
-        ),
+        other => panic!("Expected ZonedDateTime from named constructor, got {:?}", other),
     }
 }
 
@@ -118,12 +109,10 @@ fn test_datetime_no_args_returns_now() {
     let (store, engine) = social_graph();
 
     // datetime() with no args returns current timestamp
-    let result = engine
-        .execute(
-            "MATCH (n:Person {name: 'Alice'}) RETURN datetime() AS now",
-            &store,
-        )
-        .unwrap();
+    let result = engine.execute(
+        "MATCH (n:Person {name: 'Alice'}) RETURN datetime() AS now",
+        &store,
+    ).unwrap();
     assert_eq!(result.len(), 1);
     let dt_val = result.records[0].get("now").unwrap().as_property().unwrap();
     match dt_val {
@@ -144,28 +133,18 @@ fn test_datetime_in_set_context() {
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
 
-    engine
-        .execute_mut("CREATE (e:Event {name: 'Launch'})", &mut store, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (e:Event {name: 'Launch'})", &mut store, "default").unwrap();
     engine.execute_mut(
         "MATCH (e:Event {name: 'Launch'}) SET e.date = datetime({year: 2026, month: 3, day: 4})",
         &mut store, "default",
     ).unwrap();
 
-    let result = engine
-        .execute("MATCH (e:Event) RETURN e.date", &store)
-        .unwrap();
-    let date_val = result.records[0]
-        .get("e.date")
-        .unwrap()
-        .as_property()
-        .unwrap();
+    let result = engine.execute("MATCH (e:Event) RETURN e.date", &store).unwrap();
+    let date_val = result.records[0].get("e.date").unwrap().as_property().unwrap();
     // A real temporal value, carrying the components it was built from — not
     // Null, and not an epoch-default 1970 fallback.
     let secs = match date_val {
-        PropertyValue::ZonedDateTime { secs, .. } | PropertyValue::LocalDateTime { secs, .. } => {
-            *secs
-        }
+        PropertyValue::ZonedDateTime { secs, .. } | PropertyValue::LocalDateTime { secs, .. } => *secs,
         PropertyValue::DateTime(ms) => ms / 1000,
         other => panic!("datetime() in SET should store a temporal value, got {other:?}"),
     };
@@ -196,11 +175,7 @@ fn test_datetime_in_where_context() {
         "MATCH (n:Person) WHERE datetime({year: 2025, month: 1, day: 1}) > datetime({year: 2026, month: 1, day: 1}) RETURN n.name",
         &store,
     ).expect("datetime() should resolve in WHERE");
-    assert_eq!(
-        dropped.len(),
-        0,
-        "a false datetime comparison drops every row"
-    );
+    assert_eq!(dropped.len(), 0, "a false datetime comparison drops every row");
 }
 
 // ===== CY-04: Named paths (p = (a)-[]->(b)) =================================
@@ -210,12 +185,10 @@ fn test_named_path_basic() {
     let (store, engine) = social_graph();
 
     // Named path: p = (a)-[:KNOWS]->(b)
-    let result = engine
-        .execute(
-            "MATCH p = (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN p",
-            &store,
-        )
-        .unwrap();
+    let result = engine.execute(
+        "MATCH p = (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN p",
+        &store,
+    ).unwrap();
     // Alice knows Bob and Eve
     assert_eq!(result.len(), 2, "Alice has 2 outgoing KNOWS edges");
 }
@@ -225,21 +198,14 @@ fn test_named_path_multi_hop() {
     let (store, engine) = social_graph();
 
     // 2-hop path
-    let result = engine
-        .execute(
-            "MATCH p = (a:Person {name: 'Alice'})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN p, c.name",
-            &store,
-        )
-        .unwrap();
+    let result = engine.execute(
+        "MATCH p = (a:Person {name: 'Alice'})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN p, c.name",
+        &store,
+    ).unwrap();
     // Alice->Bob->Charlie
     assert_eq!(result.len(), 1);
-    let name = result.records[0]
-        .get("c.name")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    let name = result.records[0].get("c.name").unwrap()
+        .as_property().unwrap().as_string().unwrap();
     assert_eq!(name, "Charlie");
 }
 
@@ -262,9 +228,7 @@ fn test_nodes_function() {
         Value::List(items) => {
             assert_eq!(items.len(), 2, "Path Alice->Bob has 2 nodes");
             assert!(
-                items
-                    .iter()
-                    .all(|i| matches!(i, Value::NodeRef(_) | Value::Node(..))),
+                items.iter().all(|i| matches!(i, Value::NodeRef(_) | Value::Node(..))),
                 "elements are nodes, not ids: {items:?}"
             );
         }
@@ -286,9 +250,7 @@ fn test_relationships_function() {
         Value::List(items) => {
             assert_eq!(items.len(), 1, "Path Alice->Bob has 1 relationship");
             assert!(
-                items
-                    .iter()
-                    .all(|i| matches!(i, Value::EdgeRef(..) | Value::Edge(..))),
+                items.iter().all(|i| matches!(i, Value::EdgeRef(..) | Value::Edge(..))),
                 "elements are relationships, not ids: {items:?}"
             );
         }
@@ -303,26 +265,20 @@ fn test_parameterized_query_where() {
     let (store, _engine) = social_graph();
 
     // Use the lower-level API with params
-    let query =
-        samyama::query::parse_query("MATCH (n:Person) WHERE n.name = $name RETURN n.age").unwrap();
+    let query = samyama::query::parse_query(
+        "MATCH (n:Person) WHERE n.name = $name RETURN n.age"
+    ).unwrap();
 
     let mut params = std::collections::HashMap::new();
-    params.insert(
-        "name".to_string(),
-        PropertyValue::String("Alice".to_string()),
-    );
+    params.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
 
-    let executor = samyama::query::QueryExecutor::new(&store).with_params(params);
+    let executor = samyama::query::QueryExecutor::new(&store)
+        .with_params(params);
     let result = executor.execute(&query).unwrap();
 
     assert_eq!(result.len(), 1);
-    let age = result.records[0]
-        .get("n.age")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_integer()
-        .unwrap();
+    let age = result.records[0].get("n.age").unwrap()
+        .as_property().unwrap().as_integer().unwrap();
     assert_eq!(age, 30);
 }
 
@@ -331,29 +287,21 @@ fn test_parameterized_query_multiple_params() {
     let (store, _) = social_graph();
 
     let query = samyama::query::parse_query(
-        "MATCH (n:Person) WHERE n.age > $min_age AND n.dept = $dept RETURN n.name",
-    )
-    .unwrap();
+        "MATCH (n:Person) WHERE n.age > $min_age AND n.dept = $dept RETURN n.name"
+    ).unwrap();
 
     let mut params = std::collections::HashMap::new();
     params.insert("min_age".to_string(), PropertyValue::Integer(28));
-    params.insert(
-        "dept".to_string(),
-        PropertyValue::String("Engineering".to_string()),
-    );
+    params.insert("dept".to_string(), PropertyValue::String("Engineering".to_string()));
 
-    let executor = samyama::query::QueryExecutor::new(&store).with_params(params);
+    let executor = samyama::query::QueryExecutor::new(&store)
+        .with_params(params);
     let result = executor.execute(&query).unwrap();
 
     // Alice (30, Engineering) and Eve is 28 so NOT > 28
     assert_eq!(result.len(), 1);
-    let name = result.records[0]
-        .get("n.name")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    let name = result.records[0].get("n.name").unwrap()
+        .as_property().unwrap().as_string().unwrap();
     assert_eq!(name, "Alice");
 }
 
@@ -363,17 +311,13 @@ fn test_parameterized_query_multiple_params() {
 fn test_profile_returns_results_and_stats() {
     let (store, engine) = social_graph();
 
-    let result = engine
-        .execute("PROFILE MATCH (n:Person) RETURN n.name", &store)
-        .unwrap();
+    let result = engine.execute(
+        "PROFILE MATCH (n:Person) RETURN n.name",
+        &store,
+    ).unwrap();
 
     // PROFILE should return a single plan record (like EXPLAIN) with timing info
-    assert_eq!(
-        result.len(),
-        1,
-        "PROFILE should return 1 plan record, got {}",
-        result.len()
-    );
+    assert_eq!(result.len(), 1, "PROFILE should return 1 plan record, got {}", result.len());
     assert_eq!(result.columns, vec!["plan".to_string()]);
     let plan_text = result.records[0].get("plan").unwrap();
     let text = match plan_text {
@@ -399,11 +343,7 @@ fn test_shortest_path_cypher_pattern() {
     ).unwrap();
 
     // Should find exactly one shortest path
-    assert!(
-        result.len() >= 1,
-        "Should find at least one shortest path from Alice to David, got {}",
-        result.len()
-    );
+    assert!(result.len() >= 1, "Should find at least one shortest path from Alice to David, got {}", result.len());
 }
 
 #[test]
@@ -427,22 +367,20 @@ fn test_drop_index() {
     let engine = QueryEngine::new();
 
     // Create some data and an index
-    engine
-        .execute_mut("CREATE (n:User {email: 'a@b.com'})", &mut store, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE INDEX ON :User(email)", &mut store, "default")
-        .unwrap();
+    engine.execute_mut(
+        "CREATE (n:User {email: 'a@b.com'})", &mut store, "default"
+    ).unwrap();
+    engine.execute_mut(
+        "CREATE INDEX ON :User(email)", &mut store, "default"
+    ).unwrap();
     assert!(store.property_index.has_index(&Label::new("User"), "email"));
 
     // Drop the index
-    engine
-        .execute_mut("DROP INDEX ON :User(email)", &mut store, "default")
-        .unwrap();
-    assert!(
-        !store.property_index.has_index(&Label::new("User"), "email"),
-        "Index should be removed after DROP INDEX"
-    );
+    engine.execute_mut(
+        "DROP INDEX ON :User(email)", &mut store, "default"
+    ).unwrap();
+    assert!(!store.property_index.has_index(&Label::new("User"), "email"),
+        "Index should be removed after DROP INDEX");
 }
 
 // ===== IX-02: SHOW INDEXES / SHOW CONSTRAINTS ================================
@@ -453,19 +391,11 @@ fn test_show_indexes() {
     let engine = QueryEngine::new();
 
     // Create two indexes
-    engine
-        .execute_mut("CREATE INDEX ON :Person(name)", &mut store, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE INDEX ON :Person(age)", &mut store, "default")
-        .unwrap();
+    engine.execute_mut("CREATE INDEX ON :Person(name)", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE INDEX ON :Person(age)", &mut store, "default").unwrap();
 
     let result = engine.execute("SHOW INDEXES", &store).unwrap();
-    assert!(
-        result.len() >= 2,
-        "SHOW INDEXES should list at least 2 indexes, got {}",
-        result.len()
-    );
+    assert!(result.len() >= 2, "SHOW INDEXES should list at least 2 indexes, got {}", result.len());
 }
 
 #[test]
@@ -473,20 +403,13 @@ fn test_show_constraints() {
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
 
-    engine
-        .execute_mut(
-            "CREATE CONSTRAINT ON (n:User) ASSERT n.email IS UNIQUE",
-            &mut store,
-            "default",
-        )
-        .unwrap();
+    engine.execute_mut(
+        "CREATE CONSTRAINT ON (n:User) ASSERT n.email IS UNIQUE",
+        &mut store, "default"
+    ).unwrap();
 
     let result = engine.execute("SHOW CONSTRAINTS", &store).unwrap();
-    assert!(
-        result.len() >= 1,
-        "SHOW CONSTRAINTS should list at least 1 constraint, got {}",
-        result.len()
-    );
+    assert!(result.len() >= 1, "SHOW CONSTRAINTS should list at least 1 constraint, got {}", result.len());
 }
 
 // ===== IX-04: Composite indexes ==============================================
@@ -499,37 +422,25 @@ fn test_composite_index_creation() {
     for i in 0..20 {
         let q = format!(
             "CREATE (n:Product {{name: 'P{}', category: 'Cat{}', price: {}}})",
-            i,
-            i % 3,
-            i * 10
+            i, i % 3, i * 10
         );
         engine.execute_mut(&q, &mut store, "default").unwrap();
     }
 
     // Create composite index
-    engine
-        .execute_mut(
-            "CREATE INDEX ON :Product(category, price)",
-            &mut store,
-            "default",
-        )
-        .unwrap();
+    engine.execute_mut(
+        "CREATE INDEX ON :Product(category, price)", &mut store, "default"
+    ).unwrap();
 
     // Both properties should have indexes
-    assert!(store
-        .property_index
-        .has_index(&Label::new("Product"), "category"));
-    assert!(store
-        .property_index
-        .has_index(&Label::new("Product"), "price"));
+    assert!(store.property_index.has_index(&Label::new("Product"), "category"));
+    assert!(store.property_index.has_index(&Label::new("Product"), "price"));
 
     // Query using both indexed properties
-    let result = engine
-        .execute(
-            "MATCH (p:Product) WHERE p.category = 'Cat0' AND p.price = 0 RETURN p.name",
-            &store,
-        )
-        .unwrap();
+    let result = engine.execute(
+        "MATCH (p:Product) WHERE p.category = 'Cat0' AND p.price = 0 RETURN p.name",
+        &store,
+    ).unwrap();
     assert_eq!(result.len(), 1);
 }
 
@@ -540,17 +451,12 @@ fn test_unique_constraint_creation() {
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
 
-    engine
-        .execute_mut(
-            "CREATE CONSTRAINT ON (n:User) ASSERT n.email IS UNIQUE",
-            &mut store,
-            "default",
-        )
-        .unwrap();
+    engine.execute_mut(
+        "CREATE CONSTRAINT ON (n:User) ASSERT n.email IS UNIQUE",
+        &mut store, "default"
+    ).unwrap();
 
-    assert!(store
-        .property_index
-        .has_unique_constraint(&Label::new("User"), "email"));
+    assert!(store.property_index.has_unique_constraint(&Label::new("User"), "email"));
     // Should also have a backing index
     assert!(store.property_index.has_index(&Label::new("User"), "email"));
 }
@@ -563,38 +469,26 @@ fn test_and_chain_index_usage() {
     let engine = QueryEngine::new();
 
     // Create index and data
-    engine
-        .execute_mut("CREATE INDEX ON :Employee(dept)", &mut store, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE INDEX ON :Employee(level)", &mut store, "default")
-        .unwrap();
+    engine.execute_mut("CREATE INDEX ON :Employee(dept)", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE INDEX ON :Employee(level)", &mut store, "default").unwrap();
 
     for i in 0..50 {
         let q = format!(
             "CREATE (n:Employee {{name: 'E{}', dept: 'D{}', level: {}}})",
-            i,
-            i % 5,
-            i % 3
+            i, i % 5, i % 3
         );
         engine.execute_mut(&q, &mut store, "default").unwrap();
     }
 
     // AND-chain: planner should use index on dept, filter on level
-    let result = engine
-        .execute(
-            "MATCH (n:Employee) WHERE n.dept = 'D0' AND n.level = 0 RETURN n.name",
-            &store,
-        )
-        .unwrap();
+    let result = engine.execute(
+        "MATCH (n:Employee) WHERE n.dept = 'D0' AND n.level = 0 RETURN n.name",
+        &store,
+    ).unwrap();
 
     // D0: i=0,5,10,15,20,25,30,35,40,45 (10 items)
     // level=0: i%3==0 → i=0,15,30,45 (4 items from D0)
-    assert_eq!(
-        result.len(),
-        4,
-        "AND-chain should return 4 matching employees"
-    );
+    assert_eq!(result.len(), 4, "AND-chain should return 4 matching employees");
 }
 
 // ===== QP-01: Predicate pushdown =============================================
@@ -606,31 +500,19 @@ fn test_predicate_pushdown_reduces_traversal() {
     // Without pushdown, this would scan all persons then filter.
     // With pushdown, filter is applied during scan.
     // We verify correctness — that filters work on both sides of a join.
-    let result = engine
-        .execute(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person) \
+    let result = engine.execute(
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) \
          WHERE a.dept = 'Engineering' AND b.dept = 'Marketing' \
          RETURN a.name, b.name",
-            &store,
-        )
-        .unwrap();
+        &store,
+    ).unwrap();
 
     // Bob (Engineering) -> Charlie (Marketing)
     assert_eq!(result.len(), 1);
-    let a_name = result.records[0]
-        .get("a.name")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
-    let b_name = result.records[0]
-        .get("b.name")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    let a_name = result.records[0].get("a.name").unwrap()
+        .as_property().unwrap().as_string().unwrap();
+    let b_name = result.records[0].get("b.name").unwrap()
+        .as_property().unwrap().as_string().unwrap();
     assert_eq!(a_name, "Bob");
     assert_eq!(b_name, "Charlie");
 }
@@ -643,24 +525,17 @@ fn test_multi_match_join_correctness() {
 
     // Multi-MATCH with different selectivities — join reordering should
     // not affect correctness
-    let result = engine
-        .execute(
-            "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person) \
+    let result = engine.execute(
+        "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person) \
          MATCH (b)-[:KNOWS]->(c:Person) \
          RETURN a.name, b.name, c.name",
-            &store,
-        )
-        .unwrap();
+        &store,
+    ).unwrap();
 
     // Alice->Bob->Charlie
     assert_eq!(result.len(), 1);
-    let c_name = result.records[0]
-        .get("c.name")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    let c_name = result.records[0].get("c.name").unwrap()
+        .as_property().unwrap().as_string().unwrap();
     assert_eq!(c_name, "Charlie");
 }
 
@@ -678,9 +553,10 @@ fn test_limit_with_large_dataset() {
     }
 
     // LIMIT 5 — with early propagation the scan should stop early
-    let result = engine
-        .execute("MATCH (n:Item) RETURN n.id LIMIT 5", &store)
-        .unwrap();
+    let result = engine.execute(
+        "MATCH (n:Item) RETURN n.id LIMIT 5",
+        &store,
+    ).unwrap();
 
     assert_eq!(result.len(), 5, "LIMIT 5 should return exactly 5 records");
 }
@@ -695,21 +571,14 @@ fn test_order_by_with_limit() {
         engine.execute_mut(&q, &mut store, "default").unwrap();
     }
 
-    let result = engine
-        .execute(
-            "MATCH (n:Num) RETURN n.val ORDER BY n.val DESC LIMIT 3",
-            &store,
-        )
-        .unwrap();
+    let result = engine.execute(
+        "MATCH (n:Num) RETURN n.val ORDER BY n.val DESC LIMIT 3",
+        &store,
+    ).unwrap();
 
     assert_eq!(result.len(), 3);
-    let first = result.records[0]
-        .get("n.val")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_integer()
-        .unwrap();
+    let first = result.records[0].get("n.val").unwrap()
+        .as_property().unwrap().as_integer().unwrap();
     assert_eq!(first, 99);
 }
 
@@ -719,18 +588,13 @@ fn test_order_by_with_limit() {
 fn test_explain_shows_plan() {
     let (store, engine) = social_graph();
 
-    let result = engine
-        .execute(
-            "EXPLAIN MATCH (n:Person) WHERE n.age > 30 RETURN n.name",
-            &store,
-        )
-        .unwrap();
+    let result = engine.execute(
+        "EXPLAIN MATCH (n:Person) WHERE n.age > 30 RETURN n.name",
+        &store,
+    ).unwrap();
 
     // EXPLAIN should return plan description, not actual query results
-    assert!(
-        result.len() >= 1,
-        "EXPLAIN should return at least one record"
-    );
+    assert!(result.len() >= 1, "EXPLAIN should return at least one record");
     // Check that the plan text contains operator names
     let plan_text = format!("{:?}", result.records[0]);
     assert!(

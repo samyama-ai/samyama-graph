@@ -5,9 +5,9 @@ use rayon::prelude::*;
 
 pub struct FireflySolver {
     pub config: SolverConfig,
-    pub alpha: f64, // Randomization parameter (0.2)
-    pub beta0: f64, // Attractiveness at r=0 (1.0)
-    pub gamma: f64, // Light absorption coefficient (1.0)
+    pub alpha: f64,      // Randomization parameter (0.2)
+    pub beta0: f64,      // Attractiveness at r=0 (1.0)
+    pub gamma: f64,      // Light absorption coefficient (1.0)
     /// Seed for reproducible runs; `None` draws from entropy (#455).
     pub seed: Option<u64>,
 }
@@ -15,7 +15,7 @@ pub struct FireflySolver {
 impl FireflySolver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
-            seed: None,
+            seed: None, 
             config,
             alpha: 0.2,
             beta0: 1.0,
@@ -30,13 +30,7 @@ impl FireflySolver {
     }
 
     pub fn with_params(config: SolverConfig, alpha: f64, beta0: f64, gamma: f64) -> Self {
-        Self {
-            config,
-            alpha,
-            beta0,
-            gamma,
-            seed: None,
-        }
+        Self { config, alpha, beta0, gamma, seed: None }
     }
 
     pub fn solve<P: Problem>(&self, problem: &P) -> OptimizationResult {
@@ -58,7 +52,7 @@ impl FireflySolver {
 
         let mut history = Vec::with_capacity(self.config.max_iterations);
         let mut best_idx = 0;
-
+        
         // Find initial best
         for (i, ind) in population.iter().enumerate() {
             if ind.fitness < population[best_idx].fitness {
@@ -75,70 +69,63 @@ impl FireflySolver {
             // Firefly algorithm loop: move i towards j if j is brighter (better fitness)
             // Note: Parallelizing this double loop is tricky due to mutable updates.
             // We'll calculate new positions and then update batch-wise.
-
+            
             let old_population = population.clone();
             let pop_size = self.config.population_size;
 
             // We can parallelize the outer loop (i)
-            let new_positions: Vec<Option<Array1<f64>>> = (0..pop_size)
-                .into_par_iter()
-                .map(|i| {
-                    // Each firefly its own stream, derived from (seed, iteration,
-                    // index) as in the other parallel solvers. `solver_rng(seed)`
-                    // here gave every firefly, in every iteration, the same draws.
-                    let mut rng = crate::common::rng::child_rng(self.seed, iter, i);
-                    let mut moved = false;
-                    let mut new_vars = old_population[i].variables.clone();
-                    let fitness_i = old_population[i].fitness;
+            let new_positions: Vec<Option<Array1<f64>>> = (0..pop_size).into_par_iter().map(|i| {
+                // Each firefly its own stream, derived from (seed, iteration,
+                // index) as in the other parallel solvers. `solver_rng(seed)`
+                // here gave every firefly, in every iteration, the same draws.
+                let mut rng = crate::common::rng::child_rng(self.seed, iter, i);
+                let mut moved = false;
+                let mut new_vars = old_population[i].variables.clone();
+                let fitness_i = old_population[i].fitness;
 
-                    for j in 0..pop_size {
-                        if i == j {
-                            continue;
+                for j in 0..pop_size {
+                    if i == j { continue; }
+
+                    let fitness_j = old_population[j].fitness;
+
+                    // For minimization, "brighter" means lower fitness value
+                    if fitness_j < fitness_i {
+                        moved = true;
+                        let vars_j = &old_population[j].variables;
+                        
+                        // Calculate distance r
+                        let mut r_sq = 0.0;
+                        for k in 0..dim {
+                            let diff = new_vars[k] - vars_j[k];
+                            r_sq += diff * diff;
                         }
+                        // Avoid sqrt if possible, or just use r_sq in exp if formula allows
+                        // Standard: exp(-gamma * r^2)
+                        
+                        let beta = self.beta0 * (-self.gamma * r_sq).exp();
 
-                        let fitness_j = old_population[j].fitness;
-
-                        // For minimization, "brighter" means lower fitness value
-                        if fitness_j < fitness_i {
-                            moved = true;
-                            let vars_j = &old_population[j].variables;
-
-                            // Calculate distance r
-                            let mut r_sq = 0.0;
-                            for k in 0..dim {
-                                let diff = new_vars[k] - vars_j[k];
-                                r_sq += diff * diff;
-                            }
-                            // Avoid sqrt if possible, or just use r_sq in exp if formula allows
-                            // Standard: exp(-gamma * r^2)
-
-                            let beta = self.beta0 * (-self.gamma * r_sq).exp();
-
-                            for k in 0..dim {
-                                let random_step =
-                                    self.alpha * (rng.gen::<f64>() - 0.5) * (upper[k] - lower[k]);
-                                let move_step = beta * (vars_j[k] - new_vars[k]);
-
-                                new_vars[k] = (new_vars[k] + move_step + random_step)
-                                    .clamp(lower[k], upper[k]);
-                            }
+                        for k in 0..dim {
+                            let random_step = self.alpha * (rng.gen::<f64>() - 0.5) * (upper[k] - lower[k]);
+                            let move_step = beta * (vars_j[k] - new_vars[k]);
+                            
+                            new_vars[k] = (new_vars[k] + move_step + random_step).clamp(lower[k], upper[k]);
                         }
                     }
+                }
 
-                    if moved {
-                        Some(new_vars)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+                if moved {
+                    Some(new_vars)
+                } else {
+                    None
+                }
+            }).collect();
 
             // Apply updates
             for (i, new_pos) in new_positions.into_iter().enumerate() {
                 if let Some(vars) = new_pos {
                     let new_fitness = crate::common::evaluate(problem, &vars);
                     // Selection: greedy acceptance? Standard FA moves anyway.
-                    // We'll accept if better or just move.
+                    // We'll accept if better or just move. 
                     // Standard FA just moves. But ensuring elitism is good.
                     // Let's adopt standard: simple update.
                     // But we keep track of global best.

@@ -22,17 +22,10 @@ fn both_ways(store: &GraphStore, record: &Record, var: &str, property: &str) -> 
         .unwrap_or(PropertyValue::Null);
     let mut cursor = PropertyCursor::new(var, property);
     let cached = cursor.read(record, store);
-    assert_eq!(
-        cached, direct,
-        "cursor disagreed with resolve_property on {var}.{property}"
-    );
+    assert_eq!(cached, direct, "cursor disagreed with resolve_property on {var}.{property}");
     // Read again: the second read comes from the memoised column id, which is
     // the path every row after the first takes.
-    assert_eq!(
-        cursor.read(record, store),
-        direct,
-        "the memoised read disagreed"
-    );
+    assert_eq!(cursor.read(record, store), direct, "the memoised read disagreed");
     direct
 }
 
@@ -47,10 +40,7 @@ fn a_column_backed_property_reads_the_same_both_ways() {
     let mut store = GraphStore::new();
     let id = store.create_node("N");
     let _ = store.set_node_property("default", id, "v".to_string(), PropertyValue::Integer(42));
-    assert_eq!(
-        both_ways(&store, &record_for(id), "n", "v"),
-        PropertyValue::Integer(42)
-    );
+    assert_eq!(both_ways(&store, &record_for(id), "n", "v"), PropertyValue::Integer(42));
 }
 
 #[test]
@@ -58,10 +48,7 @@ fn a_property_that_does_not_exist_is_null_both_ways() {
     let mut store = GraphStore::new();
     let id = store.create_node("N");
     let _ = store.set_node_property("default", id, "v".to_string(), PropertyValue::Integer(1));
-    assert_eq!(
-        both_ways(&store, &record_for(id), "n", "absent"),
-        PropertyValue::Null
-    );
+    assert_eq!(both_ways(&store, &record_for(id), "n", "absent"), PropertyValue::Null);
 }
 
 #[test]
@@ -75,12 +62,7 @@ fn a_column_created_after_the_cursor_first_missed_is_still_found() {
     let mut cursor = PropertyCursor::new("n", "later");
     assert_eq!(cursor.read(&record, &store), PropertyValue::Null);
 
-    let _ = store.set_node_property(
-        "default",
-        id,
-        "later".to_string(),
-        PropertyValue::Integer(7),
-    );
+    let _ = store.set_node_property("default", id, "later".to_string(), PropertyValue::Integer(7));
     assert_eq!(
         cursor.read(&record, &store),
         PropertyValue::Integer(7),
@@ -104,10 +86,7 @@ fn a_value_that_lives_only_in_row_storage_is_still_found() {
         );
     }
     let got = both_ways(&store, &record_for(id), "n", "tags");
-    assert!(
-        matches!(got, PropertyValue::Array(ref a) if a.len() == 2),
-        "{got:?}"
-    );
+    assert!(matches!(got, PropertyValue::Array(ref a) if a.len() == 2), "{got:?}");
 }
 
 #[test]
@@ -122,10 +101,7 @@ fn a_row_with_no_value_in_a_column_that_exists_falls_back() {
     if let Some(node) = store.get_node_mut(id) {
         node.set_property("v", PropertyValue::Integer(99));
     }
-    assert_eq!(
-        both_ways(&store, &record_for(id), "n", "v"),
-        PropertyValue::Integer(99)
-    );
+    assert_eq!(both_ways(&store, &record_for(id), "n", "v"), PropertyValue::Integer(99));
 }
 
 #[test]
@@ -137,14 +113,8 @@ fn an_edge_property_reads_the_same_both_ways() {
     let _ = store.set_edge_property(e, "weight", PropertyValue::Float(1.5));
 
     let mut record = Record::new();
-    record.bind(
-        "r",
-        Value::EdgeRef(e, a, b, samyama::graph::EdgeType::new("LINK")),
-    );
-    assert_eq!(
-        both_ways(&store, &record, "r", "weight"),
-        PropertyValue::Float(1.5)
-    );
+    record.bind("r", Value::EdgeRef(e, a, b, samyama::graph::EdgeType::new("LINK")));
+    assert_eq!(both_ways(&store, &record, "r", "weight"), PropertyValue::Float(1.5));
 }
 
 #[test]
@@ -160,10 +130,7 @@ fn a_non_graph_value_falls_through_to_the_general_path() {
     // itself, not against any column.
     let store = GraphStore::new();
     let mut record = Record::new();
-    record.bind(
-        "d",
-        Value::Property(PropertyValue::DateTime(1_700_000_000_000)),
-    );
+    record.bind("d", Value::Property(PropertyValue::DateTime(1_700_000_000_000)));
     let got = both_ways(&store, &record, "d", "year");
     assert!(matches!(got, PropertyValue::Integer(_)), "{got:?}");
 }
@@ -174,25 +141,13 @@ fn column_ids_survive_new_columns_being_added() {
     // append and never shift.
     let mut store = GraphStore::new();
     let id = store.create_node("N");
-    let _ = store.set_node_property(
-        "default",
-        id,
-        "first".to_string(),
-        PropertyValue::Integer(1),
-    );
+    let _ = store.set_node_property("default", id, "first".to_string(), PropertyValue::Integer(1));
 
-    let first = store
-        .node_columns
-        .column_id("first")
-        .expect("column exists");
+    let first = store.node_columns.column_id("first").expect("column exists");
     for k in 0..64 {
         let _ = store.set_node_property("default", id, format!("p{k}"), PropertyValue::Integer(k));
     }
-    assert_eq!(
-        store.node_columns.column_id("first"),
-        Some(first),
-        "the id moved"
-    );
+    assert_eq!(store.node_columns.column_id("first"), Some(first), "the id moved");
     assert_eq!(
         store.node_columns.get_by_id(first, id.as_u64() as usize),
         PropertyValue::Integer(1)
@@ -205,12 +160,7 @@ fn a_recycled_row_does_not_read_the_previous_occupants_value() {
     // see the cleared slot, not a stale one.
     let mut store = GraphStore::new();
     let victim = store.create_node("N");
-    let _ = store.set_node_property(
-        "default",
-        victim,
-        "v".to_string(),
-        PropertyValue::Integer(5),
-    );
+    let _ = store.set_node_property("default", victim, "v".to_string(), PropertyValue::Integer(5));
     let column = store.node_columns.column_id("v").unwrap();
 
     let query = parse_query("MATCH (n:N) WHERE n.v = 5 DETACH DELETE n").unwrap();
@@ -220,9 +170,7 @@ fn a_recycled_row_does_not_read_the_previous_occupants_value() {
 
     let fresh = store.create_node("Ghost");
     assert_eq!(
-        store
-            .node_columns
-            .get_by_id(column, fresh.as_u64() as usize),
+        store.node_columns.get_by_id(column, fresh.as_u64() as usize),
         PropertyValue::Null
     );
     let mut cursor = PropertyCursor::new("n", "v");

@@ -86,10 +86,7 @@ fn descending_is_the_exact_reverse() {
     let store = graph();
     let mut want = kinds(&store, &format!("{MIXED} RETURN x ORDER BY x"));
     want.reverse();
-    assert_eq!(
-        kinds(&store, &format!("{MIXED} RETURN x ORDER BY x DESC")),
-        want
-    );
+    assert_eq!(kinds(&store, &format!("{MIXED} RETURN x ORDER BY x DESC")), want);
 }
 
 #[test]
@@ -154,18 +151,10 @@ fn ordinary_property_ordering_is_unchanged() {
     let mut store = GraphStore::new();
     for (i, name) in ["c", "a", "b"].iter().enumerate() {
         let n = store.create_node("P");
-        let _ = store.set_node_property(
-            "default",
-            n,
-            "name".to_string(),
-            PropertyValue::String((*name).into()),
-        );
-        let _ = store.set_node_property(
-            "default",
-            n,
-            "i".to_string(),
-            PropertyValue::Integer(i as i64),
-        );
+        let _ = store.set_node_property("default", n, "name".to_string(),
+                                        PropertyValue::String((*name).into()));
+        let _ = store.set_node_property("default", n, "i".to_string(),
+                                        PropertyValue::Integer(i as i64));
     }
     let query = parse_query("MATCH (p:P) RETURN p.name AS x ORDER BY p.name").unwrap();
     let names: Vec<String> = QueryExecutor::new(&store)

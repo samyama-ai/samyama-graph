@@ -156,7 +156,12 @@ impl ClusterManager {
     }
 
     /// Add a node to the cluster
-    pub async fn add_node(&self, id: RaftNodeId, address: String, voter: bool) -> RaftResult<()> {
+    pub async fn add_node(
+        &self,
+        id: RaftNodeId,
+        address: String,
+        voter: bool,
+    ) -> RaftResult<()> {
         info!("Adding node {} to cluster at {}", id, address);
 
         let mut config = self.config.write().await;
@@ -481,10 +486,7 @@ mod tests {
         config.add_node(1, "127.0.0.1:5000".to_string(), true);
         let manager = ClusterManager::new(config).unwrap();
 
-        manager
-            .add_node(2, "127.0.0.1:5001".to_string(), true)
-            .await
-            .unwrap();
+        manager.add_node(2, "127.0.0.1:5001".to_string(), true).await.unwrap();
 
         let cfg = manager.get_config().await;
         assert_eq!(cfg.nodes.len(), 2);
@@ -503,10 +505,7 @@ mod tests {
         config.add_node(1, "127.0.0.1:5000".to_string(), true);
         let manager = ClusterManager::new(config).unwrap();
 
-        manager
-            .add_node(2, "127.0.0.1:5001".to_string(), false)
-            .await
-            .unwrap();
+        manager.add_node(2, "127.0.0.1:5001".to_string(), false).await.unwrap();
 
         let meta = manager.get_node_metadata(2).await.unwrap();
         assert_eq!(meta.role, NodeRole::Learner);

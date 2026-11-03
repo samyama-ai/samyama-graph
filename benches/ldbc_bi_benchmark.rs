@@ -445,7 +445,11 @@ fn format_ms(d: Duration) -> String {
 /// Per-query timeout to prevent hangs (e.g. BI-7) from blocking the entire benchmark run.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(120);
 
-async fn run_benchmark(client: &EmbeddedClient, query: &LdbcBiQuery, runs: usize) -> BenchResult {
+async fn run_benchmark(
+    client: &EmbeddedClient,
+    query: &LdbcBiQuery,
+    runs: usize,
+) -> BenchResult {
     // Warm-up: 1 run, discard (with timeout guard)
     let warmup = tokio::time::timeout(
         QUERY_TIMEOUT,
@@ -558,10 +562,7 @@ async fn main() -> Result<(), Error> {
     let default_dir = "data/ldbc-sf1/social_network-sf1-CsvBasic-LongDateFormatter";
     let explicit_data_dir = args.iter().any(|a| a == "--data-dir");
     let data_dir = if let Some(pos) = args.iter().position(|a| a == "--data-dir") {
-        PathBuf::from(
-            args.get(pos + 1)
-                .expect("--data-dir requires a path argument"),
-        )
+        PathBuf::from(args.get(pos + 1).expect("--data-dir requires a path argument"))
     } else {
         PathBuf::from(default_dir)
     };
@@ -598,14 +599,9 @@ async fn main() -> Result<(), Error> {
             eprintln!("ERROR: Data directory not found: {}", data_dir.display());
             std::process::exit(1);
         }
-        eprintln!(
-            "SKIP: LDBC SF1 dataset not present at {}",
-            data_dir.display()
-        );
+        eprintln!("SKIP: LDBC SF1 dataset not present at {}", data_dir.display());
         eprintln!("      Download and extract it there, or pass --data-dir PATH.");
-        eprintln!(
-            "      Skipping rather than failing: the benchmark did not run, it did not break."
-        );
+        eprintln!("      Skipping rather than failing: the benchmark did not run, it did not break.");
         return Ok(());
     }
 
@@ -663,13 +659,7 @@ async fn main() -> Result<(), Error> {
     );
     println!(
         "{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  {}",
-        "------",
-        "------------------------------------",
-        "------",
-        "----------",
-        "----------",
-        "----------",
-        "------"
+        "------", "------------------------------------", "------", "----------", "----------", "----------", "------"
     );
 
     let mut passed = 0usize;
@@ -678,16 +668,10 @@ async fn main() -> Result<(), Error> {
 
     for query in &queries {
         if explain_mode {
-            println!(
-                "\n================ {} — {} ================",
-                query.id, query.name
-            );
+            println!("\n================ {} — {} ================", query.id, query.name);
             println!("{}", query.cypher);
             println!();
-            match client
-                .query("default", &format!("EXPLAIN {}", query.cypher))
-                .await
-            {
+            match client.query("default", &format!("EXPLAIN {}", query.cypher)).await {
                 Ok(batch) => {
                     for record in &batch.records {
                         for cell in record {
@@ -746,11 +730,7 @@ async fn main() -> Result<(), Error> {
 
     // Cache stats
     let stats = client.cache_stats();
-    println!(
-        "AST cache: {} hits, {} misses",
-        stats.hits(),
-        stats.misses()
-    );
+    println!("AST cache: {} hits, {} misses", stats.hits(), stats.misses());
 
     // Before the exit below, so a run that ends in errors still reports
     // whether the host it ran on held still.

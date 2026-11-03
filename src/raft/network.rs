@@ -115,7 +115,11 @@ impl RaftNetwork {
 
     /// Add a peer to the network
     pub async fn add_peer(&self, peer_id: RaftNodeId, address: NodeAddress) {
-        info!("Adding peer {} at {}", peer_id, address.to_string());
+        info!(
+            "Adding peer {} at {}",
+            peer_id,
+            address.to_string()
+        );
 
         let mut peers = self.peers.write().await;
         peers.insert(peer_id, address);
@@ -130,7 +134,11 @@ impl RaftNetwork {
     }
 
     /// Send a message to a peer
-    pub async fn send(&self, target: RaftNodeId, message: RaftMessage) -> RaftResult<RaftMessage> {
+    pub async fn send(
+        &self,
+        target: RaftNodeId,
+        message: RaftMessage,
+    ) -> RaftResult<RaftMessage> {
         let peers = self.peers.read().await;
 
         if let Some(address) = peers.get(&target) {
@@ -148,15 +156,19 @@ impl RaftNetwork {
 
             // For now, simulate successful communication
             match message {
-                RaftMessage::AppendEntries { term, .. } => Ok(RaftMessage::AppendEntriesResponse {
-                    term,
-                    success: true,
-                    match_index: Some(0),
-                }),
-                RaftMessage::RequestVote { term, .. } => Ok(RaftMessage::VoteResponse {
-                    term,
-                    vote_granted: true,
-                }),
+                RaftMessage::AppendEntries { term, .. } => {
+                    Ok(RaftMessage::AppendEntriesResponse {
+                        term,
+                        success: true,
+                        match_index: Some(0),
+                    })
+                }
+                RaftMessage::RequestVote { term, .. } => {
+                    Ok(RaftMessage::VoteResponse {
+                        term,
+                        vote_granted: true,
+                    })
+                }
                 RaftMessage::InstallSnapshot { term, .. } => {
                     Ok(RaftMessage::SnapshotResponse { term })
                 }
@@ -275,13 +287,7 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deserialized: RaftMessage = serde_json::from_str(&json).unwrap();
-        if let RaftMessage::AppendEntries {
-            term,
-            leader_id,
-            entries,
-            ..
-        } = deserialized
-        {
+        if let RaftMessage::AppendEntries { term, leader_id, entries, .. } = deserialized {
             assert_eq!(term, 5);
             assert_eq!(leader_id, 1);
             assert_eq!(entries.len(), 2);
@@ -299,12 +305,7 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deserialized: RaftMessage = serde_json::from_str(&json).unwrap();
-        if let RaftMessage::AppendEntriesResponse {
-            term,
-            success,
-            match_index,
-        } = deserialized
-        {
+        if let RaftMessage::AppendEntriesResponse { term, success, match_index } = deserialized {
             assert_eq!(term, 5);
             assert!(success);
             assert_eq!(match_index, Some(10));
@@ -323,10 +324,7 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deserialized: RaftMessage = serde_json::from_str(&json).unwrap();
-        if let RaftMessage::RequestVote {
-            term, candidate_id, ..
-        } = deserialized
-        {
+        if let RaftMessage::RequestVote { term, candidate_id, .. } = deserialized {
             assert_eq!(term, 3);
             assert_eq!(candidate_id, 2);
         } else {
@@ -361,13 +359,7 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deserialized: RaftMessage = serde_json::from_str(&json).unwrap();
-        if let RaftMessage::InstallSnapshot {
-            term,
-            leader_id,
-            data,
-            ..
-        } = deserialized
-        {
+        if let RaftMessage::InstallSnapshot { term, leader_id, data, .. } = deserialized {
             assert_eq!(term, 7);
             assert_eq!(leader_id, 1);
             assert_eq!(data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
@@ -469,15 +461,9 @@ mod tests {
     #[tokio::test]
     async fn test_broadcast() {
         let network = RaftNetwork::new(1);
-        network
-            .add_peer(2, NodeAddress::new("127.0.0.1".to_string(), 5000))
-            .await;
-        network
-            .add_peer(3, NodeAddress::new("127.0.0.1".to_string(), 5001))
-            .await;
-        network
-            .add_peer(4, NodeAddress::new("127.0.0.1".to_string(), 5002))
-            .await;
+        network.add_peer(2, NodeAddress::new("127.0.0.1".to_string(), 5000)).await;
+        network.add_peer(3, NodeAddress::new("127.0.0.1".to_string(), 5001)).await;
+        network.add_peer(4, NodeAddress::new("127.0.0.1".to_string(), 5002)).await;
 
         let message = RaftMessage::AppendEntries {
             term: 1,
@@ -517,12 +503,8 @@ mod tests {
         let network = RaftNetwork::new(1);
         assert!(network.get_peers().await.is_empty());
 
-        network
-            .add_peer(2, NodeAddress::new("127.0.0.1".to_string(), 5000))
-            .await;
-        network
-            .add_peer(3, NodeAddress::new("127.0.0.1".to_string(), 5001))
-            .await;
+        network.add_peer(2, NodeAddress::new("127.0.0.1".to_string(), 5000)).await;
+        network.add_peer(3, NodeAddress::new("127.0.0.1".to_string(), 5001)).await;
 
         let peers = network.get_peers().await;
         assert_eq!(peers.len(), 2);
@@ -536,9 +518,7 @@ mod tests {
 
         assert!(!network.is_reachable(2).await);
 
-        network
-            .add_peer(2, NodeAddress::new("127.0.0.1".to_string(), 5000))
-            .await;
+        network.add_peer(2, NodeAddress::new("127.0.0.1".to_string(), 5000)).await;
         assert!(network.is_reachable(2).await);
 
         network.remove_peer(2).await;

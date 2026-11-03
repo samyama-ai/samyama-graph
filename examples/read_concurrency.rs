@@ -35,10 +35,7 @@ const READS: [&str; 4] = [
 const NODES: i64 = 200_000;
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
 }
 
 fn pct(sorted: &[f64], p: f64) -> f64 {
@@ -70,22 +67,12 @@ fn cpu_seconds(pid: u32) -> Option<f64> {
     Some(days * 86400.0 + secs)
 }
 
-async fn post(
-    client: &reqwest::Client,
-    url: &str,
-    query: &str,
-    k: Option<i64>,
-) -> Result<(), String> {
+async fn post(client: &reqwest::Client, url: &str, query: &str, k: Option<i64>) -> Result<(), String> {
     let body = match k {
         Some(k) => serde_json::json!({ "query": query, "params": { "k": k }, "cache": false }),
         None => serde_json::json!({ "query": query, "cache": false }),
     };
-    let r = client
-        .post(url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let r = client.post(url).json(&body).send().await.map_err(|e| e.to_string())?;
     let status = r.status();
     let text = r.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
@@ -104,24 +91,12 @@ async fn load(client: &reqwest::Client, url: &str) {
         ),
     ] {
         let t = Instant::now();
-        post(client, url, &q, None)
-            .await
-            .unwrap_or_else(|e| panic!("{q}: {e}"));
-        eprintln!(
-            "loaded in {:.1}s: {}",
-            t.elapsed().as_secs_f64(),
-            &q[..q.len().min(60)]
-        );
+        post(client, url, &q, None).await.unwrap_or_else(|e| panic!("{q}: {e}"));
+        eprintln!("loaded in {:.1}s: {}", t.elapsed().as_secs_f64(), &q[..q.len().min(60)]);
     }
 }
 
-async fn phase(
-    url: Arc<str>,
-    clients: usize,
-    seconds: f64,
-    only: Option<usize>,
-    server: Option<u32>,
-) {
+async fn phase(url: Arc<str>, clients: usize, seconds: f64, only: Option<usize>, server: Option<u32>) {
     let stop = Arc::new(AtomicBool::new(false));
     let me = std::process::id();
     let cpu0 = cpu_seconds(me);
@@ -189,18 +164,15 @@ async fn phase(
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let port = arg(&args, "--port").unwrap_or_else(|| "18080".into());
-    let seconds: f64 = arg(&args, "--seconds")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(10.0);
+    let seconds: f64 = arg(&args, "--seconds").and_then(|v| v.parse().ok()).unwrap_or(10.0);
     let clients: Vec<usize> = arg(&args, "--clients")
         .unwrap_or_else(|| "1,16,64".into())
         .split(',')
         .map(|v| v.parse().unwrap())
         .collect();
     let only: Option<usize> = arg(&args, "--only").and_then(|v| v.parse().ok());
-    let client_threads: usize = arg(&args, "--client-threads")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4);
+    let client_threads: usize =
+        arg(&args, "--client-threads").and_then(|v| v.parse().ok()).unwrap_or(4);
     let url: Arc<str> = format!("http://127.0.0.1:{port}/api/query").into();
     // The server's pid, to report the cores it used per phase.
     let server: Option<u32> = arg(&args, "--server-pid").and_then(|v| v.parse().ok());

@@ -81,30 +81,26 @@ impl BatSolver {
 
                 // Update velocity and position
                 for j in 0..dim {
-                    velocities[i][j] +=
-                        (population[i].variables[j] - best_vars[j]) * frequencies[i];
-                    population[i].variables[j] =
-                        (population[i].variables[j] + velocities[i][j]).clamp(lower[j], upper[j]);
+                    velocities[i][j] += (population[i].variables[j] - best_vars[j]) * frequencies[i];
+                    population[i].variables[j] = (population[i].variables[j] + velocities[i][j]).clamp(lower[j], upper[j]);
                 }
 
                 // Local search around best
                 if rng.gen::<f64>() > emission_rates[i] {
                     let mut temp_vars = best_vars.clone();
-                    let avg_loudness: f64 =
-                        loudnesses.iter().sum::<f64>() / (self.config.population_size as f64);
+                    let avg_loudness: f64 = loudnesses.iter().sum::<f64>() / (self.config.population_size as f64);
                     for j in 0..dim {
                         let epsilon = (rng.gen::<f64>() - 0.5) * 2.0;
-                        temp_vars[j] =
-                            (temp_vars[j] + epsilon * avg_loudness).clamp(lower[j], upper[j]);
+                        temp_vars[j] = (temp_vars[j] + epsilon * avg_loudness).clamp(lower[j], upper[j]);
                     }
-
+                    
                     let temp_fitness = crate::common::evaluate(problem, &temp_vars);
-
+                    
                     // Accept new solution
                     if temp_fitness < population[i].fitness && rng.gen::<f64>() < loudnesses[i] {
                         population[i].variables = temp_vars;
                         population[i].fitness = temp_fitness;
-
+                        
                         // Update loudness and emission rate
                         loudnesses[i] *= self.alpha;
                         emission_rates[i] = r0 * (1.0 - (-self.gamma * (iter as f64)).exp());

@@ -13,7 +13,7 @@ pub struct GSASolver {
 impl GSASolver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
-            seed: None,
+            seed: None, 
             config,
             g0: 100.0,
             alpha: 20.0,
@@ -44,10 +44,12 @@ impl GSASolver {
             })
             .collect();
 
-        let mut velocities: Vec<Array1<f64>> = (0..n).map(|_| Array1::zeros(dim)).collect();
+        let mut velocities: Vec<Array1<f64>> = (0..n)
+            .map(|_| Array1::zeros(dim))
+            .collect();
 
         let mut history = Vec::with_capacity(self.config.max_iterations);
-
+        
         let mut best_vars = population[0].variables.clone();
         let mut best_fitness = population[0].fitness;
 
@@ -71,12 +73,11 @@ impl GSASolver {
             // 2. Calculate Masses
             let mut masses = vec![0.0; n];
             let mut total_m = 0.0;
-
+            
             // Normalize fitness to calculate mass
             if (worst_fitness - best_fitness).abs() > 1e-9 {
                 for i in 0..n {
-                    masses[i] =
-                        (population[i].fitness - worst_fitness) / (best_fitness - worst_fitness);
+                    masses[i] = (population[i].fitness - worst_fitness) / (best_fitness - worst_fitness);
                     total_m += masses[i];
                 }
                 for i in 0..n {
@@ -89,16 +90,13 @@ impl GSASolver {
             }
 
             // 3. Calculate Force and Acceleration
-            let g = self.g0
-                * (-(self.alpha * (iter as f64) / (self.config.max_iterations as f64))).exp();
+            let g = self.g0 * (-(self.alpha * (iter as f64) / (self.config.max_iterations as f64))).exp();
             let mut accelerations: Vec<Array1<f64>> = (0..n).map(|_| Array1::zeros(dim)).collect();
 
             for i in 0..n {
                 for j in 0..n {
-                    if i == j {
-                        continue;
-                    }
-
+                    if i == j { continue; }
+                    
                     let mut dist_sq = 0.0;
                     for k in 0..dim {
                         let diff = population[j].variables[k] - population[i].variables[k];
@@ -107,9 +105,7 @@ impl GSASolver {
                     let dist = dist_sq.sqrt() + 1e-6; // avoid zero
 
                     for k in 0..dim {
-                        let force = g
-                            * (masses[i] * masses[j] / dist)
-                            * (population[j].variables[k] - population[i].variables[k]);
+                        let force = g * (masses[i] * masses[j] / dist) * (population[j].variables[k] - population[i].variables[k]);
                         accelerations[i][k] += rng.gen::<f64>() * force;
                     }
                 }
@@ -119,8 +115,7 @@ impl GSASolver {
             for i in 0..n {
                 for k in 0..dim {
                     velocities[i][k] = rng.gen::<f64>() * velocities[i][k] + accelerations[i][k];
-                    population[i].variables[k] =
-                        (population[i].variables[k] + velocities[i][k]).clamp(lower[k], upper[k]);
+                    population[i].variables[k] = (population[i].variables[k] + velocities[i][k]).clamp(lower[k], upper[k]);
                 }
                 population[i].fitness = crate::common::evaluate(problem, &population[i].variables);
             }

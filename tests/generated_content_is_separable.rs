@@ -34,7 +34,7 @@
 //! quarantine are asserted here too rather than assumed.
 
 use samyama::agent::enrich::{
-    quarantine, retract, verify, EnrichConfig, EnrichSpec, Materialize, Outcome,
+    retract, verify, quarantine, EnrichConfig, EnrichSpec, Materialize, Outcome,
     ENRICHMENT_PROPERTY, GENERATED_PROPERTY,
 };
 use samyama::graph::{EdgeType, GraphStore, Label, NodeId, PropertyValue};
@@ -46,12 +46,7 @@ const TENANT: &str = "default";
 fn seed() -> (GraphStore, NodeId) {
     let mut store = GraphStore::new();
     let id = store.create_node(Label::new("Drug"));
-    let _ = store.set_node_property(
-        TENANT,
-        id,
-        "name",
-        PropertyValue::String("Semaglutide".into()),
-    );
+    let _ = store.set_node_property(TENANT, id, "name", PropertyValue::String("Semaglutide".into()));
     (store, id)
 }
 
@@ -68,20 +63,11 @@ fn scalar_outcome(id: NodeId, property: &str, value: &str, confidence: f64) -> O
     }
 }
 
-fn config(
-    label: &str,
-    property: &str,
-    trust_floor: f64,
-    materialize: Option<Materialize>,
-) -> EnrichConfig {
+fn config(label: &str, property: &str, trust_floor: f64, materialize: Option<Materialize>) -> EnrichConfig {
     let mut cfg = EnrichConfig::default();
     cfg.policies.entry(label.to_string()).or_default().insert(
         property.to_string(),
-        EnrichSpec {
-            sources: vec![],
-            trust_floor,
-            materialize,
-        },
+        EnrichSpec { sources: vec![], trust_floor, materialize },
     );
     cfg
 }
@@ -98,10 +84,7 @@ fn ask(store: &GraphStore, cypher: &str) -> Vec<Value> {
         .collect()
 }
 
-fn generated_map(
-    store: &GraphStore,
-    id: NodeId,
-) -> Option<std::collections::HashMap<String, PropertyValue>> {
+fn generated_map(store: &GraphStore, id: NodeId) -> Option<std::collections::HashMap<String, PropertyValue>> {
     match store.node_properties_merged(id).get(GENERATED_PROPERTY) {
         Some(PropertyValue::Map(m)) => Some(m.clone()),
         _ => None,
@@ -112,34 +95,17 @@ fn generated_map(
 fn quarantine_does_not_touch_the_real_property() {
     // The half that already worked, asserted because nothing asserted it.
     let (mut store, id) = seed();
-    quarantine(
-        &mut store,
-        &scalar_outcome(id, "mechanism", "GLP-1 agonist", 0.4),
-    )
-    .unwrap();
+    quarantine(&mut store, &scalar_outcome(id, "mechanism", "GLP-1 agonist", 0.4)).unwrap();
     let props = store.node_properties_merged(id);
-    assert!(
-        props.get("mechanism").is_none(),
-        "the real property stays empty"
-    );
-    assert!(
-        props.get(ENRICHMENT_PROPERTY).is_some(),
-        "the answer is quarantined"
-    );
-    assert!(
-        props.get(GENERATED_PROPERTY).is_none(),
-        "nothing is generated until it is promoted"
-    );
+    assert!(props.get("mechanism").is_none(), "the real property stays empty");
+    assert!(props.get(ENRICHMENT_PROPERTY).is_some(), "the answer is quarantined");
+    assert!(props.get(GENERATED_PROPERTY).is_none(), "nothing is generated until it is promoted");
 }
 
 #[test]
 fn a_value_below_the_trust_floor_is_not_promoted_and_is_not_tagged() {
     let (mut store, id) = seed();
-    quarantine(
-        &mut store,
-        &scalar_outcome(id, "mechanism", "GLP-1 agonist", 0.4),
-    )
-    .unwrap();
+    quarantine(&mut store, &scalar_outcome(id, "mechanism", "GLP-1 agonist", 0.4)).unwrap();
     let rep = verify(&config("Drug", "mechanism", 0.9, None), &mut store, &[id]);
     assert_eq!(rep.promoted, 0);
     assert_eq!(rep.still_pending, 1);
@@ -154,11 +120,7 @@ fn a_value_below_the_trust_floor_is_not_promoted_and_is_not_tagged() {
 #[test]
 fn a_promoted_value_is_tagged_on_the_node_that_carries_it() {
     let (mut store, id) = seed();
-    quarantine(
-        &mut store,
-        &scalar_outcome(id, "mechanism", "GLP-1 agonist", 0.4),
-    )
-    .unwrap();
+    quarantine(&mut store, &scalar_outcome(id, "mechanism", "GLP-1 agonist", 0.4)).unwrap();
     let rep = verify(&config("Drug", "mechanism", 0.0, None), &mut store, &[id]);
     assert_eq!(rep.promoted, 1);
 
@@ -186,19 +148,9 @@ fn one_predicate_excludes_every_node_a_model_touched() {
     // and the node the model *created* have to answer to the same test.
     let mut store = GraphStore::new();
     let drug = store.create_node(Label::new("Drug"));
-    let _ = store.set_node_property(
-        TENANT,
-        drug,
-        "name",
-        PropertyValue::String("Semaglutide".into()),
-    );
+    let _ = store.set_node_property(TENANT, drug, "name", PropertyValue::String("Semaglutide".into()));
     let ingested = store.create_node(Label::new("Drug"));
-    let _ = store.set_node_property(
-        TENANT,
-        ingested,
-        "name",
-        PropertyValue::String("Metformin".into()),
-    );
+    let _ = store.set_node_property(TENANT, ingested, "name", PropertyValue::String("Metformin".into()));
 
     quarantine(
         &mut store,
@@ -239,23 +191,17 @@ fn one_predicate_excludes_every_node_a_model_touched() {
     // is model-made when it is not, and would make an exclusion predicate hide
     // ingested rows. The mark goes on the artifact the model made, which is why
     // it goes on the edge.
-    let mut kept: Vec<String> = ask(
-        &store,
-        "MATCH (n:Drug) WHERE n._generated IS NULL RETURN n.name AS r",
-    )
-    .into_iter()
-    .map(|v| match v {
-        Value::Property(PropertyValue::String(s)) => s,
-        other => panic!("{other:?}"),
-    })
-    .collect();
+    let mut kept: Vec<String> = ask(&store, "MATCH (n:Drug) WHERE n._generated IS NULL RETURN n.name AS r")
+        .into_iter()
+        .map(|v| match v {
+            Value::Property(PropertyValue::String(s)) => s,
+            other => panic!("{other:?}"),
+        })
+        .collect();
     kept.sort();
     assert_eq!(kept, vec!["Metformin", "Semaglutide"]);
 
-    let kept = ask(
-        &store,
-        "MATCH (n:Indication) WHERE n._generated IS NULL RETURN n.name AS r",
-    );
+    let kept = ask(&store, "MATCH (n:Indication) WHERE n._generated IS NULL RETURN n.name AS r");
     assert!(
         kept.is_empty(),
         "both indications were created by the model, so none survives"
@@ -268,14 +214,8 @@ fn one_predicate_excludes_every_node_a_model_touched() {
         &store,
         "MATCH (a:Drug)-[r:TREATS]->(b:Indication) WHERE r._generated IS NULL RETURN b.name AS r",
     );
-    assert!(
-        real.is_empty(),
-        "every TREATS edge here was drawn by the model"
-    );
-    let all = ask(
-        &store,
-        "MATCH (a:Drug)-[r:TREATS]->(b:Indication) RETURN b.name AS r",
-    );
+    assert!(real.is_empty(), "every TREATS edge here was drawn by the model");
+    let all = ask(&store, "MATCH (a:Drug)-[r:TREATS]->(b:Indication) RETURN b.name AS r");
     assert_eq!(all.len(), 2, "and without the predicate both are there");
 }
 
@@ -302,11 +242,7 @@ fn a_materialized_target_and_its_edge_are_both_tagged() {
         },
     )
     .unwrap();
-    verify(
-        &config("Drug", "treats", 0.0, Some(mat)),
-        &mut store,
-        &[drug],
-    );
+    verify(&config("Drug", "treats", 0.0, Some(mat)), &mut store, &[drug]);
 
     let target = store
         .nodes_with_label(&Label::new("Indication"))
@@ -333,17 +269,10 @@ fn a_materialized_target_and_its_edge_are_both_tagged() {
 #[test]
 fn retracting_puts_the_graph_back() {
     let (mut store, drug) = seed();
-    quarantine(
-        &mut store,
-        &scalar_outcome(drug, "mechanism", "GLP-1 agonist", 0.4),
-    )
-    .unwrap();
+    quarantine(&mut store, &scalar_outcome(drug, "mechanism", "GLP-1 agonist", 0.4)).unwrap();
     let cfg = config("Drug", "mechanism", 0.0, None);
     verify(&cfg, &mut store, &[drug]);
-    assert!(store
-        .node_properties_merged(drug)
-        .get("mechanism")
-        .is_some());
+    assert!(store.node_properties_merged(drug).get("mechanism").is_some());
 
     let rep = retract(&mut store, &[drug]);
     assert_eq!(rep.properties_removed, 1);
@@ -365,9 +294,7 @@ fn retracting_puts_the_graph_back() {
     let Some(PropertyValue::Map(root)) = props.get(ENRICHMENT_PROPERTY) else {
         panic!("the quarantine entry survives")
     };
-    let Some(PropertyValue::Map(e)) = root.get("mechanism") else {
-        panic!("entry")
-    };
+    let Some(PropertyValue::Map(e)) = root.get("mechanism") else { panic!("entry") };
     assert_eq!(
         e.get("status"),
         Some(&PropertyValue::String("pending_verification".into()))
@@ -378,22 +305,12 @@ fn retracting_puts_the_graph_back() {
 fn retracting_removes_the_edges_and_the_nodes_the_model_created() {
     let mut store = GraphStore::new();
     let drug = store.create_node(Label::new("Drug"));
-    let _ = store.set_node_property(
-        TENANT,
-        drug,
-        "name",
-        PropertyValue::String("Semaglutide".into()),
-    );
+    let _ = store.set_node_property(TENANT, drug, "name", PropertyValue::String("Semaglutide".into()));
     // An indication that was already in the graph. The model naming it must not
     // put it at risk: retraction removes what the model made, not what it
     // mentioned.
     let known = store.create_node(Label::new("Indication"));
-    let _ = store.set_node_property(
-        TENANT,
-        known,
-        "name",
-        PropertyValue::String("Obesity".into()),
-    );
+    let _ = store.set_node_property(TENANT, known, "name", PropertyValue::String("Obesity".into()));
 
     let mat = Materialize {
         edge_type: "TREATS".into(),
@@ -415,18 +332,11 @@ fn retracting_removes_the_edges_and_the_nodes_the_model_created() {
         },
     )
     .unwrap();
-    verify(
-        &config("Drug", "treats", 0.0, Some(mat)),
-        &mut store,
-        &[drug],
-    );
+    verify(&config("Drug", "treats", 0.0, Some(mat)), &mut store, &[drug]);
 
     let rep = retract(&mut store, &[drug]);
     assert_eq!(rep.edges_removed, 2, "both materialized edges go");
-    assert_eq!(
-        rep.nodes_removed, 1,
-        "only the indication the model invented"
-    );
+    assert_eq!(rep.nodes_removed, 1, "only the indication the model invented");
 
     let left = ask(&store, "MATCH (n:Indication) RETURN n.name AS r");
     assert_eq!(
@@ -435,9 +345,7 @@ fn retracting_removes_the_edges_and_the_nodes_the_model_created() {
         "the pre-existing indication is still there"
     );
     assert!(
-        store
-            .edges_between(drug, known, Some(&EdgeType::new("TREATS")))
-            .is_empty(),
+        store.edges_between(drug, known, Some(&EdgeType::new("TREATS"))).is_empty(),
         "but the edge the model drew to it is gone"
     );
 }

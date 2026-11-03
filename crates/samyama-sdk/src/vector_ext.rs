@@ -55,8 +55,7 @@ impl VectorClient for EmbeddedClient {
         metric: DistanceMetric,
     ) -> SamyamaResult<()> {
         let store = self.store.read().await;
-        store
-            .create_vector_index(label, property, dimensions, metric)
+        store.create_vector_index(label, property, dimensions, metric)
             .map_err(|e| SamyamaError::VectorError(e.to_string()))
     }
 
@@ -68,8 +67,7 @@ impl VectorClient for EmbeddedClient {
         vector: &[f32],
     ) -> SamyamaResult<()> {
         let store = self.store.read().await;
-        store
-            .vector_index
+        store.vector_index
             .add_vector(label, property, node_id, &vector.to_vec())
             .map_err(|e| SamyamaError::VectorError(e.to_string()))
     }
@@ -82,8 +80,7 @@ impl VectorClient for EmbeddedClient {
         k: usize,
     ) -> SamyamaResult<Vec<(NodeId, f32)>> {
         let store = self.store.read().await;
-        store
-            .vector_search(label, property, query_vec, k)
+        store.vector_search(label, property, query_vec, k)
             .map_err(|e| SamyamaError::VectorError(e.to_string()))
     }
 }
@@ -98,42 +95,25 @@ mod tests {
         let client = EmbeddedClient::new();
 
         // Create index
-        client
-            .create_vector_index("Doc", "embedding", 4, DistanceMetric::Cosine)
-            .await
-            .unwrap();
+        client.create_vector_index("Doc", "embedding", 4, DistanceMetric::Cosine)
+            .await.unwrap();
 
         // Create some nodes
-        client
-            .query("default", r#"CREATE (d:Doc {title: "Alpha"})"#)
-            .await
-            .unwrap();
-        client
-            .query("default", r#"CREATE (d:Doc {title: "Beta"})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (d:Doc {title: "Alpha"})"#).await.unwrap();
+        client.query("default", r#"CREATE (d:Doc {title: "Beta"})"#).await.unwrap();
 
         // Add vectors
         let store = client.store().read().await;
         let nodes: Vec<_> = store.all_nodes().iter().map(|n| n.id).collect();
         drop(store);
 
-        client
-            .add_vector("Doc", "embedding", nodes[0], &[1.0, 0.0, 0.0, 0.0])
-            .await
-            .unwrap();
-        client
-            .add_vector("Doc", "embedding", nodes[1], &[0.0, 1.0, 0.0, 0.0])
-            .await
-            .unwrap();
+        client.add_vector("Doc", "embedding", nodes[0], &[1.0, 0.0, 0.0, 0.0]).await.unwrap();
+        client.add_vector("Doc", "embedding", nodes[1], &[0.0, 1.0, 0.0, 0.0]).await.unwrap();
 
         // Search. HNSW recall on a 2-element graph is not an exact contract, so the
         // meaningful assertions are: at least one neighbour comes back, and the
         // nearest is the vector closest to the query.
-        let results = client
-            .vector_search("Doc", "embedding", &[1.0, 0.1, 0.0, 0.0], 2)
-            .await
-            .unwrap();
+        let results = client.vector_search("Doc", "embedding", &[1.0, 0.1, 0.0, 0.0], 2).await.unwrap();
         assert!(!results.is_empty());
         // First result should be closest to query
         assert_eq!(results[0].0, nodes[0]);

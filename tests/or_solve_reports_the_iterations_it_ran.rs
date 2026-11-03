@@ -53,8 +53,7 @@ fn store() -> GraphStore {
     for (name, cost) in [("A", 10.0), ("B", 20.0), ("C", 15.0)] {
         let n = s.create_node("Resource");
         s.set_node_property(T, n, "name", name).unwrap();
-        s.set_node_property(T, n, "cost", PropertyValue::Float(cost))
-            .unwrap();
+        s.set_node_property(T, n, "cost", PropertyValue::Float(cost)).unwrap();
     }
     s
 }
@@ -97,17 +96,9 @@ fn iterations_equals_the_length_of_the_history_it_reports() {
     let r = ex.execute(&q).expect("execute");
 
     let iterations = r.records[0]
-        .get("iterations")
-        .expect("iterations column")
-        .as_property()
-        .expect("property")
-        .as_integer()
-        .expect("integer");
-    let history_len = match r.records[0]
-        .get("history")
-        .expect("history column")
-        .as_property()
-    {
+        .get("iterations").expect("iterations column")
+        .as_property().expect("property").as_integer().expect("integer");
+    let history_len = match r.records[0].get("history").expect("history column").as_property() {
         Some(PropertyValue::Array(v)) => v.len() as i64,
         other => panic!("history was not an array: {other:?}"),
     };
@@ -122,7 +113,10 @@ fn iterations_never_exceeds_the_cap() {
     for cap in [5usize, 25, 60] {
         let v = solve(cap, "Jaya", "iterations, max_iterations");
         let it = v.iter().find(|(n, _)| n == "iterations").unwrap().1;
-        assert!(it <= cap as i64, "ran {it} iterations under a cap of {cap}");
+        assert!(
+            it <= cap as i64,
+            "ran {it} iterations under a cap of {cap}"
+        );
         assert!(it > 0, "a solve that produced a result ran no iterations");
     }
 }

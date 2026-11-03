@@ -19,9 +19,7 @@ fn store(extra: usize) -> GraphStore {
     let mut store = GraphStore::new();
     for i in 0..(3 + extra) {
         let n = store.create_node("A");
-        store
-            .set_node_property("default", n, "x", i as i64)
-            .unwrap();
+        store.set_node_property("default", n, "x", i as i64).unwrap();
     }
     for _ in 0..2 {
         store.create_node("B");
@@ -34,10 +32,7 @@ fn engine() -> QueryEngine {
 }
 
 fn hash(engine: &QueryEngine, store: &GraphStore, q: &str) -> Option<u64> {
-    engine
-        .execute(q, store)
-        .unwrap_or_else(|e| panic!("`{q}`: {e}"))
-        .plan_hash
+    engine.execute(q, store).unwrap_or_else(|e| panic!("`{q}`: {e}")).plan_hash
 }
 
 #[test]
@@ -83,10 +78,7 @@ fn a_cached_result_names_the_plan_that_computed_it() {
     let (first, hit) = e.execute_cached(q, &s).unwrap();
     assert!(!hit);
     let (second, hit) = e.execute_cached(q, &s).unwrap();
-    assert!(
-        hit,
-        "the second call should be served from the result cache"
-    );
+    assert!(hit, "the second call should be served from the result cache");
     assert!(first.plan_hash.is_some());
     assert_eq!(second.plan_hash, first.plan_hash);
 }
@@ -95,9 +87,7 @@ fn a_cached_result_names_the_plan_that_computed_it() {
 fn a_write_names_its_plan_too() {
     let mut s = store(0);
     let e = engine();
-    let batch = e
-        .execute_mut("CREATE (n:C {x: 1}) RETURN n", &mut s, "default")
-        .unwrap();
+    let batch = e.execute_mut("CREATE (n:C {x: 1}) RETURN n", &mut s, "default").unwrap();
     assert!(batch.plan_hash.is_some());
 }
 
@@ -105,44 +95,21 @@ fn a_write_names_its_plan_too() {
 #[test]
 fn off_by_default() {
     let s = store(0);
-    assert_eq!(
-        QueryEngine::new()
-            .execute("MATCH (n:A) RETURN n", &s)
-            .unwrap()
-            .plan_hash,
-        None
-    );
+    assert_eq!(QueryEngine::new().execute("MATCH (n:A) RETURN n", &s).unwrap().plan_hash, None);
 }
 
 /// The one data-dependent detail a description carries is a materialised
 /// operator's row count; it must not change the hash.
 #[test]
 fn a_materialised_row_count_is_not_part_of_the_plan() {
-    let leaf = |details: &str| OperatorDescription {
-        name: "Materialized".into(),
-        details: details.into(),
-        children: vec![],
-    };
+    let leaf = |details: &str| OperatorDescription { name: "Materialized".into(), details: details.into(), children: vec![] };
     let root = |child: OperatorDescription| OperatorDescription {
         name: "Project".into(),
         details: "n".into(),
         children: vec![child],
     };
-    assert_eq!(
-        root(leaf("3 rows")).structural_hash(),
-        root(leaf("4000 rows")).structural_hash()
-    );
-    assert_ne!(
-        root(leaf("3 rows")).structural_hash(),
-        root(leaf("3 cols")).structural_hash()
-    );
-    let other = OperatorDescription {
-        name: "Filter".into(),
-        details: "n".into(),
-        children: vec![leaf("3 rows")],
-    };
-    assert_ne!(
-        root(leaf("3 rows")).structural_hash(),
-        other.structural_hash()
-    );
+    assert_eq!(root(leaf("3 rows")).structural_hash(), root(leaf("4000 rows")).structural_hash());
+    assert_ne!(root(leaf("3 rows")).structural_hash(), root(leaf("3 cols")).structural_hash());
+    let other = OperatorDescription { name: "Filter".into(), details: "n".into(), children: vec![leaf("3 rows")] };
+    assert_ne!(root(leaf("3 rows")).structural_hash(), other.structural_hash());
 }

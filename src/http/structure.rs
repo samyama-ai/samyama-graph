@@ -213,9 +213,7 @@ pub async fn put_structure_handler(
     if payload.structures.len() > 64 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(
-                json!({ "error": "at most 64 structural conventions may be registered per graph" }),
-            ),
+            Json(json!({ "error": "at most 64 structural conventions may be registered per graph" })),
         )
             .into_response();
     }

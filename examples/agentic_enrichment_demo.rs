@@ -34,7 +34,8 @@
 
 use samyama::agent::enrich::{
     detect_gaps, quarantine, retract, verify, EnrichConfig, EnrichSource, EnrichSpec,
-    EnrichmentWorker, GapEvent, Materialize, Outcome, GENERATED_PROPERTY, LLM_DEFAULT_CONFIDENCE,
+    EnrichmentWorker, GapEvent, Materialize, Outcome, GENERATED_PROPERTY,
+    LLM_DEFAULT_CONFIDENCE,
 };
 use samyama::graph::{GraphStore, Label, NodeId, PropertyValue};
 use samyama::nlq::client::NLQClient;
@@ -93,16 +94,9 @@ async fn main() {
     println!();
 
     let config = policy();
-    let surfaced = ask_nodes(
-        &store,
-        &format!("MATCH (d:Drug) WHERE d.name = '{DRUG}' RETURN d"),
-    );
+    let surfaced = ask_nodes(&store, &format!("MATCH (d:Drug) WHERE d.name = '{DRUG}' RETURN d"));
     let gaps = detect_gaps(&config, &store, &surfaced);
-    println!(
-        "  Gaps detected on {} surfaced node(s): {}",
-        surfaced.len(),
-        gaps.len()
-    );
+    println!("  Gaps detected on {} surfaced node(s): {}", surfaced.len(), gaps.len());
     for g in &gaps {
         println!(
             "    {}.{}{}",
@@ -147,28 +141,19 @@ async fn main() {
         }
     }
     println!();
-    println!(
-        "  Quarantined {} answer(s) under `_enrichment`.",
-        outcomes.len()
-    );
+    println!("  Quarantined {} answer(s) under `_enrichment`.", outcomes.len());
     println!("  The real properties are still empty:");
     for o in &outcomes {
         let present = store
             .node_properties_merged(NodeId(o.node_id))
             .contains_key(&o.property);
-        println!(
-            "    {}: {}",
-            o.property,
-            if present { "SET" } else { "absent" }
-        );
+        println!("    {}: {}", o.property, if present { "SET" } else { "absent" });
     }
     println!();
 
     // ── Phase 3: promote what clears the floor ──────────────────────────────
     println!("--- Phase 3: verify against the trust floor ---");
-    println!(
-        "  manufacturer, treats: floor {FLOOR_PROMOTES:.2}   mechanism: floor {FLOOR_REFUSES:.2}"
-    );
+    println!("  manufacturer, treats: floor {FLOOR_PROMOTES:.2}   mechanism: floor {FLOOR_REFUSES:.2}");
     println!("  An unsourced model answer carries {LLM_DEFAULT_CONFIDENCE:.2}.");
     let rep = verify(&config, &mut store, &surfaced);
     println!(
@@ -185,9 +170,7 @@ async fn main() {
         &format!("MATCH (n) WHERE n.{GENERATED_PROPERTY} IS NULL RETURN n AS r"),
     );
     println!("  nodes total                       {all}");
-    println!(
-        "  nodes with `_generated` absent    {ingested_only}   ← one predicate excludes the rest"
-    );
+    println!("  nodes with `_generated` absent    {ingested_only}   ← one predicate excludes the rest");
     let marked = generated_nodes(&store);
     for (id, what) in &marked {
         println!("    id {} marked: {}", id.0, what);
@@ -196,8 +179,7 @@ async fn main() {
     println!("  The marker on each, by node rather than by answer — one node can");
     println!("  carry several generated properties, and a refused answer marks none:");
     for (id, _) in &marked {
-        if let Some(PropertyValue::Map(m)) =
-            store.node_properties_merged(*id).get(GENERATED_PROPERTY)
+        if let Some(PropertyValue::Map(m)) = store.node_properties_merged(*id).get(GENERATED_PROPERTY)
         {
             println!("    id {} _generated = {:?}", id.0, sorted_keys(m));
         }
@@ -206,11 +188,7 @@ async fn main() {
 
     // ── Phase 5: and it is reversible ───────────────────────────────────────
     println!("--- Phase 5: retract ---");
-    let touched: Vec<NodeId> = marked
-        .iter()
-        .map(|(id, _)| *id)
-        .chain(surfaced.clone())
-        .collect();
+    let touched: Vec<NodeId> = marked.iter().map(|(id, _)| *id).chain(surfaced.clone()).collect();
     let rr = retract(&mut store, &touched);
     println!(
         "  properties removed {}, edges removed {}, nodes removed {}",
@@ -227,23 +205,12 @@ async fn main() {
 
     // A machine-readable tail so a test can assert the shipped path rather than
     // a reimplementation of it. Printed in both modes; parsed only in --offline.
-    println!(
-        "GAK-SUMMARY gaps={} filled={} promoted={} pending={} edges={} marked={} \
+    println!("GAK-SUMMARY gaps={} filled={} promoted={} pending={} edges={} marked={} \
               nodes_before_retract={} nodes_after_retract={} props_removed={} \
               edges_removed={} nodes_removed={} ingested_survived={}",
-        gaps.len(),
-        outcomes.len(),
-        rep.promoted,
-        rep.still_pending,
-        rep.edges_materialized,
-        marked.len(),
-        all,
-        after,
-        rr.properties_removed,
-        rr.edges_removed,
-        rr.nodes_removed,
-        ingested_survived
-    );
+        gaps.len(), outcomes.len(), rep.promoted, rep.still_pending, rep.edges_materialized,
+        marked.len(), all, after, rr.properties_removed, rr.edges_removed, rr.nodes_removed,
+        ingested_survived);
 }
 
 /// `Label -> property -> spec`. Two scalar gaps and one relationship gap, so
@@ -375,8 +342,7 @@ fn generated_nodes(store: &GraphStore) -> Vec<(NodeId, String)> {
         let Some(Value::Node(id, _) | Value::NodeRef(id)) = rec.get("r") else {
             continue;
         };
-        if let Some(PropertyValue::Map(m)) =
-            store.node_properties_merged(*id).get(GENERATED_PROPERTY)
+        if let Some(PropertyValue::Map(m)) = store.node_properties_merged(*id).get(GENERATED_PROPERTY)
         {
             let created = matches!(m.get("created"), Some(PropertyValue::Boolean(true)));
             let props = match m.get("properties") {

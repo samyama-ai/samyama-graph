@@ -59,37 +59,19 @@
 //! (`execute_cached`, #1153), which returns the rows and never reaches the
 //! planner at all: 14.8x on that same selective read.
 
-use crate::graph::EdgeType; // Added for CREATE edge support
+use crate::query::executor::operator::{numeric_tie_end, CreateFullTextIndexOperator, DropFullTextIndexOperator, FullTextSearchOperator, OtherEnd, TargetComparison};
 use crate::graph::GraphStore;
-use crate::graph::{Label, PropertyValue}; // Added for CREATE support
+use crate::graph::{Label, PropertyValue};  // Added for CREATE support
 use crate::query::ast::*;
-use crate::query::executor::operator::{
-    numeric_tie_end, CreateFullTextIndexOperator, DropFullTextIndexOperator,
-    FullTextSearchOperator, OtherEnd, TargetComparison,
-};
-use crate::query::executor::{
-    // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
-    operator::{
-        AggregateFunction, AggregateOperator, AggregateType, AlgorithmOperator,
-        AlgorithmOperator as _AlgoOp, CartesianProductOperator, CompositeCreateIndexOperator,
-        CreateConstraintOperator, CreateIndexOperator, CreateNodeOperator,
-        CreateNodesAndEdgesOperator, CreateVectorIndexOperator, DeleteOperator, DistinctOperator,
-        DropIndexOperator, EdgeCountOperator, EdgeTypeCountOperator, ExpandOperator,
-        FilterOperator, ForeachOperator, IndexScanOperator, JoinOperator, LabelCountOperator,
-        LabelMutationOperator, LeftOuterJoinOperator, LimitOperator, MergeOperator,
-        NodeByIdOperator, NodeScanOperator, ProjectOperator, RemovePropertyOperator,
-        SchemaVisualizationOperator, SetPropertyOperator, ShortestPathOperator,
-        ShowConstraintsOperator, ShowIndexesOperator, ShowLabelsOperator, ShowPropertyKeysOperator,
-        ShowRelationshipTypesOperator, SkipOperator, SortOperator, UnwindOperator,
-        VarLengthExpandOperator, VectorSearchOperator, WithBarrierOperator,
-    },
-    ExecutionError,
-    ExecutionResult,
-    OperatorBox,
-};
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet}; // Added for CREATE properties and JOIN logic
 use std::sync::Mutex;
+use crate::query::executor::{
+    ExecutionError, ExecutionResult, OperatorBox,
+    // Added CreateNodeOperator and CreateNodesAndEdgesOperator for CREATE statement support
+    operator::{NodeScanOperator, NodeByIdOperator, FilterOperator, ExpandOperator, ProjectOperator, LimitOperator, SkipOperator, CreateNodeOperator, CreateNodesAndEdgesOperator, CartesianProductOperator, VectorSearchOperator, JoinOperator, LeftOuterJoinOperator, CreateVectorIndexOperator, CreateIndexOperator, CompositeCreateIndexOperator, CreateConstraintOperator, DropIndexOperator, ShowIndexesOperator, ShowConstraintsOperator, DistinctOperator, ShowLabelsOperator, ShowRelationshipTypesOperator, ShowPropertyKeysOperator, SchemaVisualizationOperator, AlgorithmOperator, IndexScanOperator, AggregateOperator, AggregateType, AggregateFunction, AlgorithmOperator as _AlgoOp, SortOperator, DeleteOperator, SetPropertyOperator, RemovePropertyOperator, LabelMutationOperator, UnwindOperator, MergeOperator, ForeachOperator, ShortestPathOperator, VarLengthExpandOperator, WithBarrierOperator, LabelCountOperator, EdgeTypeCountOperator, EdgeCountOperator},
+};
+use crate::graph::EdgeType;  // Added for CREATE edge support
+use std::collections::{HashMap, HashSet};  // Added for CREATE properties and JOIN logic
+use std::cell::RefCell;
 
 /// Diagnostics from the graph-native planner (ADR-015), used by EXPLAIN
 #[derive(Debug, Clone)]
@@ -168,11 +150,7 @@ fn extract_agg_inner(
     aggs: &mut Vec<AggregateFunction>,
 ) -> Expression {
     match expr {
-        Expression::Function {
-            name,
-            args,
-            distinct,
-        } => {
+        Expression::Function { name, args, distinct } => {
             let func_type = match name.to_lowercase().as_str() {
                 "count" => Some(AggregateType::Count),
                 "sum" => Some(AggregateType::Sum),
@@ -200,8 +178,7 @@ fn extract_agg_inner(
                 let arg_expr = if matches!(func, AggregateType::Count) && args.is_empty() {
                     Expression::Literal(PropertyValue::Integer(1))
                 } else {
-                    args.first()
-                        .cloned()
+                    args.first().cloned()
                         .unwrap_or(Expression::Literal(PropertyValue::Null))
                 };
 
@@ -233,44 +210,33 @@ fn extract_agg_inner(
                 // Non-aggregate function — recurse into args
                 Expression::Function {
                     name: name.clone(),
-                    args: args
-                        .iter()
-                        .map(|a| extract_agg_inner(a, counter, aggs))
-                        .collect(),
+                    args: args.iter().map(|a| extract_agg_inner(a, counter, aggs)).collect(),
                     distinct: *distinct,
                 }
             }
         }
-        Expression::Binary { left, op, right } => Expression::Binary {
-            left: Box::new(extract_agg_inner(left, counter, aggs)),
-            op: op.clone(),
-            right: Box::new(extract_agg_inner(right, counter, aggs)),
-        },
-        Expression::Unary { op, expr: inner } => Expression::Unary {
-            op: op.clone(),
-            expr: Box::new(extract_agg_inner(inner, counter, aggs)),
-        },
-        Expression::Case {
-            operand,
-            when_clauses,
-            else_result,
-        } => Expression::Case {
-            operand: operand
-                .as_ref()
-                .map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
-            when_clauses: when_clauses
-                .iter()
-                .map(|(cond, then)| {
-                    (
-                        extract_agg_inner(cond, counter, aggs),
-                        extract_agg_inner(then, counter, aggs),
-                    )
-                })
-                .collect(),
-            else_result: else_result
-                .as_ref()
-                .map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
-        },
+        Expression::Binary { left, op, right } => {
+            Expression::Binary {
+                left: Box::new(extract_agg_inner(left, counter, aggs)),
+                op: op.clone(),
+                right: Box::new(extract_agg_inner(right, counter, aggs)),
+            }
+        }
+        Expression::Unary { op, expr: inner } => {
+            Expression::Unary {
+                op: op.clone(),
+                expr: Box::new(extract_agg_inner(inner, counter, aggs)),
+            }
+        }
+        Expression::Case { operand, when_clauses, else_result } => {
+            Expression::Case {
+                operand: operand.as_ref().map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
+                when_clauses: when_clauses.iter().map(|(cond, then)| {
+                    (extract_agg_inner(cond, counter, aggs), extract_agg_inner(then, counter, aggs))
+                }).collect(),
+                else_result: else_result.as_ref().map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
+            }
+        }
         // An aggregate can appear inside a collection literal or a
         // comprehension's source: `[v IN collect(a.n) | v]`,
         // `{k: collect(a)}`. Not recursing here left those to the scalar
@@ -283,10 +249,7 @@ fn extract_agg_inner(
         // is a different question and is left alone rather than silently
         // hoisted out of the loop.
         Expression::ListExpr(items) => Expression::ListExpr(
-            items
-                .iter()
-                .map(|e| extract_agg_inner(e, counter, aggs))
-                .collect(),
+            items.iter().map(|e| extract_agg_inner(e, counter, aggs)).collect(),
         ),
         Expression::MapExpr(entries) => Expression::MapExpr(
             entries
@@ -294,17 +257,14 @@ fn extract_agg_inner(
                 .map(|(k, e)| (k.clone(), extract_agg_inner(e, counter, aggs)))
                 .collect(),
         ),
-        Expression::ListComprehension {
-            variable,
-            list_expr,
-            filter,
-            map_expr,
-        } => Expression::ListComprehension {
-            variable: variable.clone(),
-            list_expr: Box::new(extract_agg_inner(list_expr, counter, aggs)),
-            filter: filter.clone(),
-            map_expr: map_expr.clone(),
-        },
+        Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
+            Expression::ListComprehension {
+                variable: variable.clone(),
+                list_expr: Box::new(extract_agg_inner(list_expr, counter, aggs)),
+                filter: filter.clone(),
+                map_expr: map_expr.clone(),
+            }
+        }
         // `ALL(ok IN collect(x) WHERE ok)`. The same class as the collection
         // literal above, in the sibling that fix did not reach: the aggregate
         // sits in the *list* a predicate iterates, so leaving it here handed
@@ -316,32 +276,25 @@ fn extract_agg_inner(
         // comprehension's body is: it runs once per element with the loop
         // variable bound, so an aggregate there is a different question and
         // must not be silently hoisted out of the loop.
-        Expression::PredicateFunction {
-            name,
-            variable,
-            list_expr,
-            predicate,
-        } => Expression::PredicateFunction {
-            name: name.clone(),
-            variable: variable.clone(),
-            list_expr: Box::new(extract_agg_inner(list_expr, counter, aggs)),
-            predicate: predicate.clone(),
-        },
+        Expression::PredicateFunction { name, variable, list_expr, predicate } => {
+            Expression::PredicateFunction {
+                name: name.clone(),
+                variable: variable.clone(),
+                list_expr: Box::new(extract_agg_inner(list_expr, counter, aggs)),
+                predicate: predicate.clone(),
+            }
+        }
         // `reduce(t = 0, x IN collect(n.v) | t + x)`. The seed and the list are
         // evaluated once, so both hoist; the body is per-element and does not.
-        Expression::Reduce {
-            accumulator,
-            init,
-            variable,
-            list_expr,
-            expression,
-        } => Expression::Reduce {
-            accumulator: accumulator.clone(),
-            init: Box::new(extract_agg_inner(init, counter, aggs)),
-            variable: variable.clone(),
-            list_expr: Box::new(extract_agg_inner(list_expr, counter, aggs)),
-            expression: expression.clone(),
-        },
+        Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
+            Expression::Reduce {
+                accumulator: accumulator.clone(),
+                init: Box::new(extract_agg_inner(init, counter, aggs)),
+                variable: variable.clone(),
+                list_expr: Box::new(extract_agg_inner(list_expr, counter, aggs)),
+                expression: expression.clone(),
+            }
+        }
         // `collect(x)[0]`, `collect(x)[1..3]` — structurally the same as the
         // binary arm above, and missed for the same reason.
         Expression::Index { expr, index } => Expression::Index {
@@ -350,12 +303,8 @@ fn extract_agg_inner(
         },
         Expression::ListSlice { expr, start, end } => Expression::ListSlice {
             expr: Box::new(extract_agg_inner(expr, counter, aggs)),
-            start: start
-                .as_ref()
-                .map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
-            end: end
-                .as_ref()
-                .map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
+            start: start.as_ref().map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
+            end: end.as_ref().map(|e| Box::new(extract_agg_inner(e, counter, aggs))),
         },
         // Leaf expressions and others — no aggregates possible
         other => other.clone(),
@@ -421,10 +370,7 @@ enum SortPosition {
 /// else.
 fn substitute_aliases(key: &Expression, return_items: &[(Expression, String)]) -> Expression {
     let aliased = |name: &str| -> Option<&Expression> {
-        return_items
-            .iter()
-            .find(|(_, alias)| alias == name)
-            .map(|(expr, _)| expr)
+        return_items.iter().find(|(_, alias)| alias == name).map(|(expr, _)| expr)
     };
     match key {
         Expression::Variable(name) => match aliased(name) {
@@ -447,16 +393,9 @@ fn substitute_aliases(key: &Expression, return_items: &[(Expression, String)]) -
             op: op.clone(),
             expr: Box::new(substitute_aliases(expr, return_items)),
         },
-        Expression::Function {
-            name,
-            args,
-            distinct,
-        } => Expression::Function {
+        Expression::Function { name, args, distinct } => Expression::Function {
             name: name.clone(),
-            args: args
-                .iter()
-                .map(|a| substitute_aliases(a, return_items))
-                .collect(),
+            args: args.iter().map(|a| substitute_aliases(a, return_items)).collect(),
             distinct: *distinct,
         },
         other => other.clone(),
@@ -490,9 +429,7 @@ fn substitute_aliases(key: &Expression, return_items: &[(Expression, String)]) -
 /// contain DISTINCT" test would be unsound.
 fn multiplicity_is_observable(query: &Query) -> bool {
     fn has_aggregate(items: &[crate::query::ast::ReturnItem]) -> bool {
-        items
-            .iter()
-            .any(|i| expression_has_aggregate(&i.expression))
+        items.iter().any(|i| expression_has_aggregate(&i.expression))
     }
 
     // The first WITH in the pipeline, if any, is the first thing that can
@@ -550,12 +487,8 @@ fn has_hoistable_match_properties(q: &Query) -> bool {
         })
     }
     q.match_clauses.iter().any(|m| in_pattern(&m.pattern))
-        || q.extra_with_stages
-            .iter()
-            .any(|(_, _, ms, _)| ms.iter().any(|m| in_pattern(&m.pattern)))
-        || q.clauses
-            .iter()
-            .any(|c| matches!(c, Clause::Match(m) if in_pattern(&m.pattern)))
+        || q.extra_with_stages.iter().any(|(_, _, ms, _)| ms.iter().any(|m| in_pattern(&m.pattern)))
+        || q.clauses.iter().any(|c| matches!(c, Clause::Match(m) if in_pattern(&m.pattern)))
 }
 
 /// The top-level conjuncts of the first WHERE that are full `EXISTS { ... }`
@@ -587,20 +520,9 @@ fn take_exists_bodies(q: &Query) -> Option<(Query, Vec<(Query, bool)>)> {
 /// `EXISTS { <full body> }` or `NOT EXISTS { <full body> }`.
 fn exists_body_of(e: &Expression) -> Option<(&Query, bool)> {
     match e {
-        Expression::ExistsSubquery {
-            body: Some(b),
-            count: false,
-            ..
-        } => Some((b, false)),
-        Expression::Unary {
-            op: crate::query::ast::UnaryOp::Not,
-            expr,
-        } => match expr.as_ref() {
-            Expression::ExistsSubquery {
-                body: Some(b),
-                count: false,
-                ..
-            } => Some((b, true)),
+        Expression::ExistsSubquery { body: Some(b), count: false, .. } => Some((b, false)),
+        Expression::Unary { op: crate::query::ast::UnaryOp::Not, expr } => match expr.as_ref() {
+            Expression::ExistsSubquery { body: Some(b), count: false, .. } => Some((b, true)),
             _ => None,
         },
         _ => None,
@@ -625,10 +547,7 @@ fn exists_body_of(e: &Expression) -> Option<(&Query, bool)> {
 /// An anonymous node (nothing to name) and a variable-length relationship (a
 /// list, not one relationship) keep the refusal.
 fn hoist_match_property_exprs(q: &mut Query) {
-    let split = q
-        .with_split_index
-        .unwrap_or(q.match_clauses.len())
-        .min(q.match_clauses.len());
+    let split = q.with_split_index.unwrap_or(q.match_clauses.len()).min(q.match_clauses.len());
     // `optional_where` records each OPTIONAL MATCH by its pattern as parsed.
     // Hoisting changes that pattern, so the records are moved to the hoisted
     // form, and a conjunct hoisted out of an OPTIONAL MATCH is recorded as that
@@ -637,12 +556,7 @@ fn hoist_match_property_exprs(q: &mut Query) {
     let mut owned: Vec<(Pattern, Expression)> = Vec::new();
     let (pre, post) = q.match_clauses.split_at_mut(split);
     hoist_group(pre, &mut q.where_clause, &mut renamed, &mut owned);
-    hoist_group(
-        post,
-        &mut q.post_with_where_clause,
-        &mut renamed,
-        &mut owned,
-    );
+    hoist_group(post, &mut q.post_with_where_clause, &mut renamed, &mut owned);
     for (_, _, matches, wh) in &mut q.extra_with_stages {
         hoist_group(matches, wh, &mut renamed, &mut owned);
     }
@@ -662,9 +576,7 @@ fn hoist_match_property_exprs(q: &mut Query) {
         if let Some(pred) = pred {
             match q.clauses.get_mut(i + 1) {
                 Some(Clause::Where(w)) => and_into(&mut w.predicate, pred),
-                _ => q
-                    .clauses
-                    .insert(i + 1, Clause::Where(WhereClause { predicate: pred })),
+                _ => q.clauses.insert(i + 1, Clause::Where(WhereClause { predicate: pred })),
             }
         }
         i += 1;
@@ -682,9 +594,7 @@ fn hoist_group(
 ) {
     for m in matches.iter_mut() {
         let as_parsed = m.pattern.clone();
-        let Some(pred) = take_conjuncts(std::slice::from_mut(m)) else {
-            continue;
-        };
+        let Some(pred) = take_conjuncts(std::slice::from_mut(m)) else { continue };
         renamed.push((as_parsed, m.pattern.clone()));
         if m.optional {
             for c in flatten_and_predicates(&pred) {
@@ -700,21 +610,14 @@ fn hoist_group(
 
 /// The `var.key = expr` conjuncts a group's patterns carry, removed from them.
 fn take_conjuncts(matches: &mut [MatchClause]) -> Option<Expression> {
-    fn hoist(
-        var: &Option<String>,
-        exprs: &mut Option<HashMap<String, Expression>>,
-        out: &mut Vec<Expression>,
-    ) {
+    fn hoist(var: &Option<String>, exprs: &mut Option<HashMap<String, Expression>>, out: &mut Vec<Expression>) {
         let Some(v) = var else { return };
         let Some(map) = exprs.take() else { return };
         let mut entries: Vec<(String, Expression)> = map.into_iter().collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         for (k, e) in entries {
             out.push(Expression::Binary {
-                left: Box::new(Expression::Property {
-                    variable: v.clone(),
-                    property: k,
-                }),
+                left: Box::new(Expression::Property { variable: v.clone(), property: k }),
                 op: BinaryOp::Eq,
                 right: Box::new(e),
             });
@@ -723,11 +626,7 @@ fn take_conjuncts(matches: &mut [MatchClause]) -> Option<Expression> {
     let mut conj = Vec::new();
     for m in matches.iter_mut() {
         for path in &mut m.pattern.paths {
-            hoist(
-                &path.start.variable,
-                &mut path.start.property_exprs,
-                &mut conj,
-            );
+            hoist(&path.start.variable, &mut path.start.property_exprs, &mut conj);
             for seg in &mut path.segments {
                 if seg.edge.length.is_none() {
                     hoist(&seg.edge.variable, &mut seg.edge.property_exprs, &mut conj);
@@ -736,36 +635,20 @@ fn take_conjuncts(matches: &mut [MatchClause]) -> Option<Expression> {
             }
         }
     }
-    conj.into_iter().reduce(|l, r| Expression::Binary {
-        left: Box::new(l),
-        op: BinaryOp::And,
-        right: Box::new(r),
-    })
+    conj.into_iter().reduce(|l, r| Expression::Binary { left: Box::new(l), op: BinaryOp::And, right: Box::new(r) })
 }
 
 fn and_into(target: &mut Expression, pred: Expression) {
     let old = std::mem::replace(target, Expression::Literal(PropertyValue::Null));
-    *target = Expression::Binary {
-        left: Box::new(old),
-        op: BinaryOp::And,
-        right: Box::new(pred),
-    };
+    *target = Expression::Binary { left: Box::new(old), op: BinaryOp::And, right: Box::new(pred) };
 }
 
 pub(crate) fn expression_has_aggregate(expr: &Expression) -> bool {
     match expr {
         Expression::Function { name, args, .. } => {
             const AGGREGATES: &[&str] = &[
-                "count",
-                "sum",
-                "avg",
-                "min",
-                "max",
-                "collect",
-                "stdev",
-                "stdevp",
-                "percentilecont",
-                "percentiledisc",
+                "count", "sum", "avg", "min", "max", "collect", "stdev", "stdevp",
+                "percentilecont", "percentiledisc",
             ];
             if AGGREGATES.contains(&name.to_lowercase().as_str()) {
                 return true;
@@ -782,28 +665,24 @@ pub(crate) fn expression_has_aggregate(expr: &Expression) -> bool {
         // given the chance (#997).
         //
         // Loop bodies are excluded on both sides for the same reason.
-        Expression::Case {
-            operand,
-            when_clauses,
-            else_result,
-        } => {
-            operand
-                .as_ref()
-                .is_some_and(|e| expression_has_aggregate(e))
-                || when_clauses
-                    .iter()
-                    .any(|(c, t)| expression_has_aggregate(c) || expression_has_aggregate(t))
-                || else_result
-                    .as_ref()
-                    .is_some_and(|e| expression_has_aggregate(e))
+        Expression::Case { operand, when_clauses, else_result } => {
+            operand.as_ref().is_some_and(|e| expression_has_aggregate(e))
+                || when_clauses.iter().any(|(c, t)| {
+                    expression_has_aggregate(c) || expression_has_aggregate(t)
+                })
+                || else_result.as_ref().is_some_and(|e| expression_has_aggregate(e))
         }
         Expression::ListExpr(items) => items.iter().any(expression_has_aggregate),
-        Expression::MapExpr(entries) => entries.iter().any(|(_, e)| expression_has_aggregate(e)),
+        Expression::MapExpr(entries) => {
+            entries.iter().any(|(_, e)| expression_has_aggregate(e))
+        }
         Expression::ListComprehension { list_expr, .. }
-        | Expression::PredicateFunction { list_expr, .. } => expression_has_aggregate(list_expr),
-        Expression::Reduce {
-            init, list_expr, ..
-        } => expression_has_aggregate(init) || expression_has_aggregate(list_expr),
+        | Expression::PredicateFunction { list_expr, .. } => {
+            expression_has_aggregate(list_expr)
+        }
+        Expression::Reduce { init, list_expr, .. } => {
+            expression_has_aggregate(init) || expression_has_aggregate(list_expr)
+        }
         Expression::Index { expr, index } => {
             expression_has_aggregate(expr) || expression_has_aggregate(index)
         }
@@ -1324,29 +1203,14 @@ impl QueryPlanner {
 
         for mc in &query.match_clauses {
             for path in &mc.pattern.paths {
-                if let Some(key) = path
-                    .start
-                    .property_exprs
-                    .as_ref()
-                    .and_then(|e| e.keys().next())
-                {
+                if let Some(key) = path.start.property_exprs.as_ref().and_then(|e| e.keys().next()) {
                     return Err(complain("MATCH", key));
                 }
                 for seg in &path.segments {
-                    if let Some(key) = seg
-                        .node
-                        .property_exprs
-                        .as_ref()
-                        .and_then(|e| e.keys().next())
-                    {
+                    if let Some(key) = seg.node.property_exprs.as_ref().and_then(|e| e.keys().next()) {
                         return Err(complain("MATCH", key));
                     }
-                    if let Some(key) = seg
-                        .edge
-                        .property_exprs
-                        .as_ref()
-                        .and_then(|e| e.keys().next())
-                    {
+                    if let Some(key) = seg.edge.property_exprs.as_ref().and_then(|e| e.keys().next()) {
                         return Err(complain("MATCH", key));
                     }
                 }
@@ -1368,29 +1232,14 @@ impl QueryPlanner {
                 _ => continue,
             };
             for path in &pattern.paths {
-                if let Some(key) = path
-                    .start
-                    .property_exprs
-                    .as_ref()
-                    .and_then(|e| e.keys().next())
-                {
+                if let Some(key) = path.start.property_exprs.as_ref().and_then(|e| e.keys().next()) {
                     return Err(complain(label, key));
                 }
                 for seg in &path.segments {
-                    if let Some(key) = seg
-                        .node
-                        .property_exprs
-                        .as_ref()
-                        .and_then(|e| e.keys().next())
-                    {
+                    if let Some(key) = seg.node.property_exprs.as_ref().and_then(|e| e.keys().next()) {
                         return Err(complain(label, key));
                     }
-                    if let Some(key) = seg
-                        .edge
-                        .property_exprs
-                        .as_ref()
-                        .and_then(|e| e.keys().next())
-                    {
+                    if let Some(key) = seg.edge.property_exprs.as_ref().and_then(|e| e.keys().next()) {
                         return Err(complain(label, key));
                     }
                 }
@@ -1500,33 +1349,25 @@ impl QueryPlanner {
     /// index that exists. Checked before planning so the error names the hint.
     fn check_hints(&self, query: &Query, store: &GraphStore) -> ExecutionResult<()> {
         let mut bound: HashMap<String, Vec<Label>> = HashMap::new();
-        let clauses = query
-            .match_clauses
-            .iter()
-            .chain(query.clauses.iter().filter_map(|c| match c {
-                crate::query::ast::Clause::Match(m) => Some(m),
-                _ => None,
-            }));
+        let clauses = query.match_clauses.iter().chain(query.clauses.iter().filter_map(|c| match c {
+            crate::query::ast::Clause::Match(m) => Some(m),
+            _ => None,
+        }));
         for mc in clauses {
             for path in &mc.pattern.paths {
-                let nodes =
-                    std::iter::once(&path.start).chain(path.segments.iter().map(|s| &s.node));
+                let nodes = std::iter::once(&path.start).chain(path.segments.iter().map(|s| &s.node));
                 for n in nodes {
                     if let Some(v) = &n.variable {
-                        bound
-                            .entry(v.clone())
-                            .or_default()
-                            .extend(n.labels.iter().cloned());
+                        bound.entry(v.clone()).or_default().extend(n.labels.iter().cloned());
                     }
                 }
             }
         }
         for h in &query.hints {
             let (vars, label): (Vec<&String>, Option<&Label>) = match h {
-                PlanHint::Index {
-                    variable, label, ..
+                PlanHint::Index { variable, label, .. } | PlanHint::Scan { variable, label } => {
+                    (vec![variable], Some(label))
                 }
-                | PlanHint::Scan { variable, label } => (vec![variable], Some(label)),
                 PlanHint::Join { variables } => (variables.iter().collect(), None),
             };
             for v in vars {
@@ -1544,10 +1385,7 @@ impl QueryPlanner {
                     }
                 }
             }
-            if let PlanHint::Index {
-                label, properties, ..
-            } = h
-            {
+            if let PlanHint::Index { label, properties, .. } = h {
                 for p in properties {
                     if !store.property_index.has_index(label, p) {
                         return Err(ExecutionError::PlanningError(format!(
@@ -1565,11 +1403,7 @@ impl QueryPlanner {
 
     /// The hinted position in a path to start from, if a hint names one of its
     /// nodes. `None` leaves the cost-based choice alone.
-    fn hinted_anchor(
-        &self,
-        nodes: &[PathNodeRef],
-        anchor_eligible: bool,
-    ) -> ExecutionResult<Option<usize>> {
+    fn hinted_anchor(&self, nodes: &[PathNodeRef], anchor_eligible: bool) -> ExecutionResult<Option<usize>> {
         let g = self.hints.lock().unwrap();
         for h in &g.0 {
             if let PlanHint::Index { variable, .. } | PlanHint::Scan { variable, .. } = h {
@@ -1602,13 +1436,8 @@ impl QueryPlanner {
         store: &GraphStore,
     ) -> ExecutionResult<Option<OperatorBox>> {
         let mut g = self.hints.lock().unwrap();
-        let hint =
-            g.0.iter()
-                .find(|h| {
-                    matches!(h,
-            PlanHint::Index { variable, .. } | PlanHint::Scan { variable, .. } if variable == var)
-                })
-                .cloned();
+        let hint = g.0.iter().find(|h| matches!(h,
+            PlanHint::Index { variable, .. } | PlanHint::Scan { variable, .. } if variable == var)).cloned();
         let op: OperatorBox = match hint {
             None => return Ok(None),
             Some(PlanHint::Scan { label, .. }) => {
@@ -1618,16 +1447,10 @@ impl QueryPlanner {
                 }
                 Box::new(NodeScanOperator::new(var.to_string(), ls))
             }
-            Some(PlanHint::Index {
-                label, properties, ..
-            }) => {
+            Some(PlanHint::Index { label, properties, .. }) => {
                 let found = preds.iter().find_map(|p| {
-                    let (_, l, prop, op, val) = find_index_predicate(
-                        var,
-                        std::slice::from_ref(&label),
-                        std::slice::from_ref(p),
-                        store,
-                    )?;
+                    let (_, l, prop, op, val) =
+                        find_index_predicate(var, std::slice::from_ref(&label), std::slice::from_ref(p), store)?;
                     properties.contains(&prop).then_some((l, prop, op, val))
                 });
                 let Some((l, prop, op, val)) = found else {
@@ -1709,8 +1532,7 @@ impl QueryPlanner {
     ) -> ExecutionResult<ExecutionPlan> {
         use std::sync::atomic::Ordering::Relaxed;
         let saved = self.trail_enumeration.load(Relaxed);
-        self.trail_enumeration
-            .store(multiplicity_is_observable(query), Relaxed);
+        self.trail_enumeration.store(multiplicity_is_observable(query), Relaxed);
         let hoisted;
         let query = if has_hoistable_match_properties(query) {
             let mut q = query.clone();
@@ -1768,29 +1590,17 @@ impl QueryPlanner {
         if query.show_indexes {
             return Ok(ExecutionPlan {
                 root: Box::new(ShowIndexesOperator::new()),
-                output_columns: vec![
-                    "label".to_string(),
-                    "property".to_string(),
-                    "type".to_string(),
-                ],
-                is_write: false,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                output_columns: vec!["label".to_string(), "property".to_string(), "type".to_string()],
+                is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
         // Handle the graph projection statements (ALGO-05)
         if let Some(ddl) = &query.graph_projection_ddl {
             return Ok(ExecutionPlan {
-                root: Box::new(super::projection_ops::GraphProjectionOperator::new(
-                    ddl.clone(),
-                )),
+                root: Box::new(super::projection_ops::GraphProjectionOperator::new(ddl.clone())),
                 output_columns: super::projection_ops::columns_for(ddl),
-                is_write: ddl.is_write(),
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: ddl.is_write(), candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -1799,10 +1609,7 @@ impl QueryPlanner {
             return Ok(ExecutionPlan {
                 root: Box::new(super::hierarchy_ops::ShowHierarchyIndexesOperator::new()),
                 output_columns: super::hierarchy_ops::hierarchy_info_columns(),
-                is_write: false,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -1825,10 +1632,12 @@ impl QueryPlanner {
                 for name in &clause.aggregates {
                     match crate::index::hierarchy::RollupOp::parse(name) {
                         Some(op) => ops.push(op),
-                        None => return Err(ExecutionError::RuntimeError(format!(
-                            "unsupported hierarchy aggregate '{}': expected sum, count, min or max",
-                            name
-                        ))),
+                        None => {
+                            return Err(ExecutionError::RuntimeError(format!(
+                                "unsupported hierarchy aggregate '{}': expected sum, count, min or max",
+                                name
+                            )))
+                        }
                     }
                 }
                 if ops.is_empty() {
@@ -1844,42 +1653,27 @@ impl QueryPlanner {
                 );
             }
             return Ok(ExecutionPlan {
-                root: Box::new(super::hierarchy_ops::CreateHierarchyIndexOperator::new(
-                    spec,
-                )),
+                root: Box::new(super::hierarchy_ops::CreateHierarchyIndexOperator::new(spec)),
                 output_columns: super::hierarchy_ops::hierarchy_info_columns(),
-                is_write: true,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
         // Handle DROP HIERARCHY INDEX
         if let Some(name) = &query.drop_hierarchy_index {
             return Ok(ExecutionPlan {
-                root: Box::new(super::hierarchy_ops::DropHierarchyIndexOperator::new(
-                    name.clone(),
-                )),
+                root: Box::new(super::hierarchy_ops::DropHierarchyIndexOperator::new(name.clone())),
                 output_columns: vec![],
-                is_write: true,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
         // Handle REBUILD HIERARCHY INDEX
         if let Some(name) = &query.rebuild_hierarchy_index {
             return Ok(ExecutionPlan {
-                root: Box::new(super::hierarchy_ops::RebuildHierarchyIndexOperator::new(
-                    name.clone(),
-                )),
+                root: Box::new(super::hierarchy_ops::RebuildHierarchyIndexOperator::new(name.clone())),
                 output_columns: super::hierarchy_ops::hierarchy_info_columns(),
-                is_write: true,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -1887,15 +1681,8 @@ impl QueryPlanner {
         if query.show_constraints {
             return Ok(ExecutionPlan {
                 root: Box::new(ShowConstraintsOperator::new()),
-                output_columns: vec![
-                    "label".to_string(),
-                    "property".to_string(),
-                    "type".to_string(),
-                ],
-                is_write: false,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                output_columns: vec!["label".to_string(), "property".to_string(), "type".to_string()],
+                is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -1907,10 +1694,7 @@ impl QueryPlanner {
                     clause.property.clone(),
                 )),
                 output_columns: vec![],
-                is_write: true,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -1922,10 +1706,7 @@ impl QueryPlanner {
                     clause.property.clone(),
                 )),
                 output_columns: vec![],
-                is_write: true,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -1938,10 +1719,7 @@ impl QueryPlanner {
                     clause.property_keys.clone(),
                 )),
                 output_columns: vec![],
-                is_write: true,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -1949,10 +1727,7 @@ impl QueryPlanner {
             return Ok(ExecutionPlan {
                 root: Box::new(super::point_ops::PointIndexDdlOperator::new(ddl.clone())),
                 output_columns: vec![],
-                is_write: true,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -1960,31 +1735,22 @@ impl QueryPlanner {
             return Ok(ExecutionPlan {
                 root: Box::new(DropFullTextIndexOperator::new(clause.index_name.clone())),
                 output_columns: vec![],
-                is_write: true,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
         // Handle CREATE VECTOR INDEX
         if let Some(clause) = &query.create_vector_index_clause {
             return Ok(ExecutionPlan {
-                root: Box::new(
-                    CreateVectorIndexOperator::new(
-                        clause.label.clone(),
-                        clause.property_key.clone(),
-                        clause.dimensions,
-                        clause.similarity.clone(),
-                    )
-                    .with_name(clause.index_name.clone())
-                    .with_quantization(clause.quantization),
-                ),
+                root: Box::new(CreateVectorIndexOperator::new(
+                    clause.label.clone(),
+                    clause.property_key.clone(),
+                    clause.dimensions,
+                    clause.similarity.clone(),
+                ).with_name(clause.index_name.clone())
+                 .with_quantization(clause.quantization)),
                 output_columns: vec![],
-                is_write: true,
-                candidates_evaluated: 0,
-                chosen_plan_cost: 0.0,
-                candidate_costs: Vec::new(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }
 
@@ -2000,10 +1766,7 @@ impl QueryPlanner {
                         clause.property.clone(),
                     )),
                     output_columns: vec![],
-                    is_write: true,
-                    candidates_evaluated: 0,
-                    chosen_plan_cost: 0.0,
-                    candidate_costs: Vec::new(),
+                    is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
                 });
             } else {
                 // Composite index: create operator for first property
@@ -2016,10 +1779,7 @@ impl QueryPlanner {
                             .collect(),
                     )),
                     output_columns: vec![],
-                    is_write: true,
-                    candidates_evaluated: 0,
-                    chosen_plan_cost: 0.0,
-                    candidate_costs: Vec::new(),
+                    is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
                 });
             }
         }
@@ -2053,9 +1813,7 @@ impl QueryPlanner {
                 return self.plan_adjacency_count_aggregate_with_binding(query, pat);
             }
             // Phase 4 (PR-P2.8): aggregate-then-expand. CT20 shape.
-            if let Some(pat) =
-                super::adjacency_agg_detector::detect_aggregate_then_expand(query, store)
-            {
+            if let Some(pat) = super::adjacency_agg_detector::detect_aggregate_then_expand(query, store) {
                 return self.plan_aggregate_then_expand(query, pat);
             }
         }
@@ -2125,10 +1883,7 @@ impl QueryPlanner {
                 return Ok(ExecutionPlan {
                     root: operator,
                     output_columns,
-                    is_write: true,
-                    candidates_evaluated: 0,
-                    chosen_plan_cost: 0.0,
-                    candidate_costs: Vec::new(),
+                    is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
                 });
             }
         }
@@ -2188,31 +1943,26 @@ impl QueryPlanner {
                     // result set and not the side effects -- `CREATE (n:N)
                     // RETURN n LIMIT 0` still creates the node (#866).
                     if query.skip.is_some() || query.limit.is_some() {
-                        plan.root = Box::new(crate::query::executor::operator::EagerOperator::new(
-                            plan.root,
-                            query.skip.unwrap_or(0),
-                            query.limit,
-                        ));
+                        plan.root = Box::new(
+                            crate::query::executor::operator::EagerOperator::new(
+                                plan.root,
+                                query.skip.unwrap_or(0),
+                                query.limit,
+                            ),
+                        );
                     }
                 }
                 return Ok(plan);
             }
             // CY-32: Standalone WITH...RETURN (e.g., WITH datetime() AS dt RETURN dt.year)
-            if let (Some(with_clause), Some(return_clause)) =
-                (&query.with_clause, &query.return_clause)
-            {
+            if let (Some(with_clause), Some(return_clause)) = (&query.with_clause, &query.return_clause) {
                 use crate::query::executor::operator::SingleRowOperator;
 
                 // WITH projection: bind expressions to aliases
-                let with_projections: Vec<(Expression, String)> = with_clause
-                    .items
-                    .iter()
-                    .enumerate()
-                    .map(|(i, item)| {
-                        let alias = item.column_name(i);
-                        (item.expression.clone(), alias)
-                    })
-                    .collect();
+                let with_projections: Vec<(Expression, String)> = with_clause.items.iter().enumerate().map(|(i, item)| {
+                    let alias = item.column_name(i);
+                    (item.expression.clone(), alias)
+                }).collect();
 
                 let with_op: OperatorBox = Box::new(ProjectOperator::new(
                     Box::new(SingleRowOperator::new()),
@@ -2221,26 +1971,18 @@ impl QueryPlanner {
 
                 // RETURN projection: project from WITH-bound variables
                 let mut output_columns = Vec::new();
-                let return_projections: Vec<(Expression, String)> = return_clause
-                    .items
-                    .iter()
-                    .enumerate()
-                    .map(|(i, item)| {
-                        let alias = item.column_name(i);
-                        output_columns.push(alias.clone());
-                        (item.expression.clone(), alias)
-                    })
-                    .collect();
+                let return_projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
+                    let alias = item.column_name(i);
+                    output_columns.push(alias.clone());
+                    (item.expression.clone(), alias)
+                }).collect();
 
                 let root: OperatorBox = Box::new(ProjectOperator::new(with_op, return_projections));
 
                 return Ok(ExecutionPlan {
                     root,
                     output_columns,
-                    is_write: false,
-                    candidates_evaluated: 0,
-                    chosen_plan_cost: 0.0,
-                    candidate_costs: Vec::new(),
+                    is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
                 });
             }
 
@@ -2249,35 +1991,27 @@ impl QueryPlanner {
             // it must fall through to the general pipeline so the Unwind, and any
             // aggregation over it, get planned.
             if !Self::has_any_unwind(query) {
-                if let Some(return_clause) = &query.return_clause {
-                    // Single-row operator that emits one empty record for projection
-                    use crate::query::executor::operator::SingleRowOperator;
-                    let mut output_columns = Vec::new();
-                    let projections: Vec<(Expression, String)> = return_clause
-                        .items
-                        .iter()
-                        .enumerate()
-                        .map(|(i, item)| {
-                            let alias = item.column_name(i);
-                            output_columns.push(alias.clone());
-                            (item.expression.clone(), alias)
-                        })
-                        .collect();
+            if let Some(return_clause) = &query.return_clause {
+                // Single-row operator that emits one empty record for projection
+                use crate::query::executor::operator::SingleRowOperator;
+                let mut output_columns = Vec::new();
+                let projections: Vec<(Expression, String)> = return_clause.items.iter().enumerate().map(|(i, item)| {
+                    let alias = item.column_name(i);
+                    output_columns.push(alias.clone());
+                    (item.expression.clone(), alias)
+                }).collect();
 
-                    let root: OperatorBox = Box::new(ProjectOperator::new(
-                        Box::new(SingleRowOperator::new()),
-                        projections,
-                    ));
+                let root: OperatorBox = Box::new(ProjectOperator::new(
+                    Box::new(SingleRowOperator::new()),
+                    projections,
+                ));
 
-                    return Ok(ExecutionPlan {
-                        root,
-                        output_columns,
-                        is_write: false,
-                        candidates_evaluated: 0,
-                        chosen_plan_cost: 0.0,
-                        candidate_costs: Vec::new(),
-                    });
-                }
+                return Ok(ExecutionPlan {
+                    root,
+                    output_columns,
+                    is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+                });
+            }
             }
 
             // A leading FOREACH has no pattern to drive it, so it runs against a
@@ -2304,8 +2038,7 @@ impl QueryPlanner {
 
             if !Self::has_any_unwind(query) {
                 return Err(ExecutionError::PlanningError(
-                    "Query must have at least one MATCH, CALL, CREATE, or RETURN clause"
-                        .to_string(),
+                    "Query must have at least one MATCH, CALL, CREATE, or RETURN clause".to_string()
                 ));
             }
         }
@@ -2331,8 +2064,7 @@ impl QueryPlanner {
         // an unrestricted all-nodes scan even though `m` is already typed (and pinned to
         // one id) earlier in the same query. Same variable = same node, so inheriting
         // constraints declared anywhere in the query is correctness-preserving, not a guess.
-        let enriched_pre_with_clauses =
-            propagate_shared_variable_labels(&query.match_clauses[..split]);
+        let enriched_pre_with_clauses = propagate_shared_variable_labels(&query.match_clauses[..split]);
         let pre_with_clauses: &[MatchClause] = &enriched_pre_with_clauses;
         let post_with_clauses = &query.match_clauses[split..];
 
@@ -2343,9 +2075,7 @@ impl QueryPlanner {
             .collect();
 
         // Decompose WHERE clause: assign predicates to MATCH clauses or cross-MATCH
-        let pre_where_preds = query
-            .where_clause
-            .as_ref()
+        let pre_where_preds = query.where_clause.as_ref()
             .map(|wc| flatten_and_predicates(&wc.predicate))
             .unwrap_or_default();
         let mut per_match_where: Vec<Option<WhereClause>> = vec![None; pre_with_clauses.len()];
@@ -2389,18 +2119,13 @@ impl QueryPlanner {
                     let mut vars = HashSet::new();
                     Self::collect_expression_variables(pred, &mut vars);
                     vars.contains(&u.variable)
-                        && (owner.is_some()
-                            || pre_with_clauses.iter().enumerate().any(|(i, mc)| {
-                                mc.optional && {
-                                    let earlier: HashSet<&String> = pre_match_var_sets[..i]
-                                        .iter()
-                                        .flat_map(|s| s.iter())
-                                        .collect();
-                                    pre_match_var_sets[i]
-                                        .iter()
-                                        .any(|v| !earlier.contains(v) && vars.contains(v))
-                                }
-                            }))
+                        && (owner.is_some() || pre_with_clauses.iter().enumerate().any(|(i, mc)| {
+                            mc.optional && {
+                                let earlier: HashSet<&String> =
+                                    pre_match_var_sets[..i].iter().flat_map(|s| s.iter()).collect();
+                                pre_match_var_sets[i].iter().any(|v| !earlier.contains(v) && vars.contains(v))
+                            }
+                        }))
                 })
             }
             _ => false,
@@ -2472,10 +2197,8 @@ impl QueryPlanner {
             // be scoped by its variables to the outer MATCH and deleted the rows
             // the OPTIONAL MATCH should have kept with nulls.
             if let Some(i) = owners[k] {
-                let earlier: HashSet<&String> = pre_match_var_sets[..i]
-                    .iter()
-                    .flat_map(|s| s.iter())
-                    .collect();
+                let earlier: HashSet<&String> =
+                    pre_match_var_sets[..i].iter().flat_map(|s| s.iter()).collect();
                 if !Self::inside_optional(&pred_vars, &pre_match_var_sets[i], &earlier)
                     && !pred_vars.iter().any(|v| late_bound_pre.contains(v))
                 {
@@ -2504,14 +2227,10 @@ impl QueryPlanner {
             // let `MATCH (p) OPTIONAL MATCH (p)-->(f) MATCH (z) WHERE f.age >
             // p.age` return the rows the WHERE removes, with `f` null (#1557).
             // Such a conjunct goes to a plain MATCH or filters after the join.
-            let target = pre_match_var_sets
-                .iter()
-                .enumerate()
-                .position(|(i, match_vars)| {
-                    (!pre_with_clauses[i].optional || owners[k] == Some(i))
-                        && (pred_vars.is_empty()
-                            || pred_vars.iter().all(|v| match_vars.contains(v)))
-                });
+            let target = pre_match_var_sets.iter().enumerate().position(|(i, match_vars)| {
+                (!pre_with_clauses[i].optional || owners[k] == Some(i))
+                    && (pred_vars.is_empty() || pred_vars.iter().all(|v| match_vars.contains(v)))
+            });
             if let Some(i) = target {
                 match &mut per_match_where[i] {
                     Some(wc) => {
@@ -2600,7 +2319,9 @@ impl QueryPlanner {
                 && per_match_where[match_idx].is_none()
                 && optional_join_predicates[match_idx].is_none()
             {
-                if let Some(null_vars) = Self::optional_pushdown_vars(match_clause, &known_vars) {
+                if let Some(null_vars) =
+                    Self::optional_pushdown_vars(match_clause, &known_vars)
+                {
                     let upstream = operator.take().unwrap();
                     let path = &match_clause.pattern.paths[0];
                     let start_var = path.start.variable.clone().unwrap();
@@ -2617,8 +2338,7 @@ impl QueryPlanner {
                 }
             }
 
-            let match_op =
-                self.dispatch_plan_match(match_clause, per_match_where[match_idx].as_ref(), store)?;
+            let match_op = self.dispatch_plan_match(match_clause, per_match_where[match_idx].as_ref(), store)?;
 
             let clause_vars = pre_match_var_sets[match_idx].clone();
 
@@ -2632,21 +2352,15 @@ impl QueryPlanner {
                     shared.sort();
                     if !shared.is_empty() {
                         if match_clause.optional {
-                            let right_only: Vec<String> =
-                                clause_vars.difference(&known_vars).cloned().collect();
-                            let mut join = LeftOuterJoinOperator::new(
-                                existing,
-                                match_op,
-                                shared.clone(),
-                                right_only,
-                            );
+                            let right_only: Vec<String> = clause_vars.difference(&known_vars).cloned().collect();
+                            let mut join =
+                                LeftOuterJoinOperator::new(existing, match_op, shared.clone(), right_only);
                             if let Some(pred) = optional_join_predicates[match_idx].clone() {
                                 join = join.with_join_predicate(pred);
                             }
                             Box::new(join) as OperatorBox
                         } else {
-                            Box::new(JoinOperator::new(existing, match_op, shared.clone()))
-                                as OperatorBox
+                            Box::new(JoinOperator::new(existing, match_op, shared.clone())) as OperatorBox
                         }
                     } else if match_clause.optional {
                         // A *disjoint* OPTIONAL MATCH -- one sharing no
@@ -2683,15 +2397,9 @@ impl QueryPlanner {
                             store,
                         ) {
                             Ok(lookup) => lookup,
-                            Err(existing) => Self::join_disjoint(
-                                existing,
-                                match_op,
-                                &known_vars,
-                                &clause_vars,
-                                &cross_match_predicates,
-                                query.limit.is_none(),
-                                store,
-                            ),
+                            Err(existing) => {
+                                Self::join_disjoint(existing, match_op, &known_vars, &clause_vars, &cross_match_predicates, query.limit.is_none(), store)
+                            }
                         }
                     }
                 }
@@ -2771,10 +2479,7 @@ impl QueryPlanner {
         // the query is written against, so it goes at the bottom of the pipeline, the
         // same place a leading UNWIND goes.
         if let Some(load) = &query.load_csv_clause {
-            use crate::query::executor::operator::{
-                CreateFullTextIndexOperator, DropFullTextIndexOperator, FullTextSearchOperator,
-                LoadCsvOperator, SingleRowOperator,
-            };
+            use crate::query::executor::operator::{CreateFullTextIndexOperator, DropFullTextIndexOperator, FullTextSearchOperator, LoadCsvOperator, SingleRowOperator};
             let base: OperatorBox = match operator.take() {
                 Some(op) => op,
                 None => Box::new(SingleRowOperator::new()),
@@ -2837,9 +2542,7 @@ impl QueryPlanner {
                 // rows the previous produced, giving the cross product the TCK
                 // uses to enumerate three-variable truth tables.
                 for extra in &query.extra_unwind_clauses {
-                    let base = operator
-                        .take()
-                        .expect("previous UNWIND produced an operator");
+                    let base = operator.take().expect("previous UNWIND produced an operator");
                     operator = Some(Box::new(UnwindOperator::new(
                         base,
                         extra.expression.clone(),
@@ -2872,14 +2575,13 @@ impl QueryPlanner {
         // Apply cross-MATCH predicates after all pre-WITH MATCH clauses are joined
         if !cross_match_predicates.is_empty() {
             if let Some(op) = operator {
-                let filter_expr = cross_match_predicates
-                    .into_iter()
-                    .reduce(|acc, pred| Expression::Binary {
+                let filter_expr = cross_match_predicates.into_iter().reduce(|acc, pred| {
+                    Expression::Binary {
                         left: Box::new(acc),
                         op: BinaryOp::And,
                         right: Box::new(pred),
-                    })
-                    .unwrap();
+                    }
+                }).unwrap();
                 operator = Some(Box::new(FilterOperator::new(op, filter_expr)));
             }
         }
@@ -2906,9 +2608,7 @@ impl QueryPlanner {
             for mc in &query.match_clauses {
                 for path in &mc.pattern.paths {
                     if path.segments.is_empty() && path.path_variable.is_some() {
-                        let single = crate::query::ast::Pattern {
-                            paths: vec![path.clone()],
-                        };
+                        let single = crate::query::ast::Pattern { paths: vec![path.clone()] };
                         zero_length.extend(named_path_handles(&single));
                     }
                 }
@@ -2933,31 +2633,19 @@ impl QueryPlanner {
                 ExecutionError::PlanningError("EXISTS { } needs a MATCH before it".to_string())
             })?;
             let cell = std::sync::Arc::new(std::sync::Mutex::new(None));
-            let body = self.plan_seeded(
-                &body_query,
-                store,
-                Box::new(SeedOperator::new(cell.clone())),
-                known_vars.clone(),
-            )?;
+            let body = self.plan_seeded(&body_query, store, Box::new(SeedOperator::new(cell.clone())), known_vars.clone())?;
             if body.is_write {
                 return Err(ExecutionError::PlanningError(
                     "an EXISTS { } subquery cannot write".to_string(),
                 ));
             }
-            operator = Some(Box::new(SemiApplyOperator::new(
-                outer, body.root, cell, negated,
-            )));
+            operator = Some(Box::new(SemiApplyOperator::new(outer, body.root, cell, negated)));
         }
 
         // 1b. Build ordered list of WITH stages, then apply barriers + post-WITH matches in sequence.
         // extra_with_stages contains earlier WITH stages; query.with_clause is the last one.
         // Each stage: (with_clause, unwind, post_match_clauses, post_where_clause)
-        let mut all_with_stages: Vec<(
-            &WithClause,
-            Option<&UnwindClause>,
-            Vec<&MatchClause>,
-            Option<&WhereClause>,
-        )> = Vec::new();
+        let mut all_with_stages: Vec<(&WithClause, Option<&UnwindClause>, Vec<&MatchClause>, Option<&WhereClause>)> = Vec::new();
 
         for (idx, (wc, uw, mcs, wh)) in query.extra_with_stages.iter().enumerate() {
             // Every stage keeps its own trailing UNWIND. Stage 0 used to be
@@ -2974,17 +2662,10 @@ impl QueryPlanner {
             // twice; applying it only here ran it on the wrong side of the
             // barrier (#927). A post-WITH unwind is a different field.
             let stage_unwind: Option<&UnwindClause> = None;
-            all_with_stages.push((
-                wc,
-                stage_unwind,
-                post_with_clauses.iter().collect(),
-                query.post_with_where_clause.as_ref(),
-            ));
+            all_with_stages.push((wc, stage_unwind, post_with_clauses.iter().collect(), query.post_with_where_clause.as_ref()));
         }
 
-        for (stage_idx, (with_clause, stage_unwind, stage_matches, stage_where)) in
-            all_with_stages.iter().enumerate()
-        {
+        for (stage_idx, (with_clause, stage_unwind, stage_matches, stage_where)) in all_with_stages.iter().enumerate() {
             // Apply the WITH barrier
             if let Some(op) = operator {
                 let barrier = self.build_with_barrier(op, with_clause, store)?;
@@ -2993,16 +2674,13 @@ impl QueryPlanner {
                 // Reset known_vars to only WITH output aliases
                 known_vars.clear();
                 for item in &with_clause.items {
-                    let alias = item
-                        .alias
-                        .clone()
-                        .unwrap_or_else(|| match &item.expression {
+                    let alias = item.alias.clone().unwrap_or_else(|| {
+                        match &item.expression {
                             Expression::Variable(var) => var.clone(),
-                            Expression::Property { variable, property } => {
-                                format!("{}.{}", variable, property)
-                            }
+                            Expression::Property { variable, property } => format!("{}.{}", variable, property),
                             _ => "?".to_string(),
-                        });
+                        }
+                    });
                     known_vars.insert(alias);
                 }
             }
@@ -3038,10 +2716,9 @@ impl QueryPlanner {
 
             // Process post-WITH MATCH clauses for this stage
             // Pre-compute variable sets
-            let match_var_sets: Vec<HashSet<String>> = stage_matches
-                .iter()
-                .map(|mc| self.extract_match_vars(mc))
-                .collect();
+            let match_var_sets: Vec<HashSet<String>> = stage_matches.iter().map(|mc| {
+                self.extract_match_vars(mc)
+            }).collect();
 
             // Decompose WHERE predicates per MATCH clause
             let where_preds = stage_where
@@ -3097,17 +2774,12 @@ impl QueryPlanner {
             for pred in where_preds {
                 let mut pred_vars = HashSet::new();
                 Self::collect_expression_variables(&pred, &mut pred_vars);
-                if pred_vars
-                    .iter()
-                    .any(|v| late_bound.contains(v) && !known_vars.contains(v))
-                {
+                if pred_vars.iter().any(|v| late_bound.contains(v) && !known_vars.contains(v)) {
                     continue;
                 }
                 // Written after an OPTIONAL MATCH: its join condition unless it
                 // can filter inside the clause (#1231), as before the WITH.
-                if let Some(i) =
-                    Self::optional_owner(&mut stage_optional_where_left, &pred, stage_matches)
-                {
+                if let Some(i) = Self::optional_owner(&mut stage_optional_where_left, &pred, stage_matches) {
                     let earlier: HashSet<&String> = match_var_sets[..i]
                         .iter()
                         .flat_map(|s| s.iter())
@@ -3221,31 +2893,22 @@ impl QueryPlanner {
                     known_vars.extend(new_vars);
                 } else {
                     // Fallback: independent plan + join
-                    let match_op = self.dispatch_plan_match(
-                        match_clause,
-                        per_match_where[match_idx].as_ref(),
-                        store,
-                    )?;
+                    let match_op = self.dispatch_plan_match(match_clause, per_match_where[match_idx].as_ref(), store)?;
                     let clause_vars = match_var_sets[match_idx].clone();
 
                     operator = Some(match operator {
                         Some(existing) => {
                             // ALL shared variables form the join key. Taking one of them left the
-                            // rest uncorrelated — a silent cartesian product — and since this comes
-                            // from a HashSet intersection, which one varied between runs (#360).
-                            let mut shared: Vec<String> =
-                                known_vars.intersection(&clause_vars).cloned().collect();
-                            shared.sort();
+                    // rest uncorrelated — a silent cartesian product — and since this comes
+                    // from a HashSet intersection, which one varied between runs (#360).
+                    let mut shared: Vec<String> =
+                        known_vars.intersection(&clause_vars).cloned().collect();
+                    shared.sort();
                             if !shared.is_empty() {
                                 if match_clause.optional {
-                                    let right_only: Vec<String> =
-                                        clause_vars.difference(&known_vars).cloned().collect();
+                                    let right_only: Vec<String> = clause_vars.difference(&known_vars).cloned().collect();
                                     let mut join = LeftOuterJoinOperator::new(
-                                        existing,
-                                        match_op,
-                                        shared.clone(),
-                                        right_only,
-                                    );
+                                        existing, match_op, shared.clone(), right_only);
                                     if let Some(pred) =
                                         stage_optional_join_predicates[match_idx].clone()
                                     {
@@ -3253,8 +2916,7 @@ impl QueryPlanner {
                                     }
                                     Box::new(join) as OperatorBox
                                 } else {
-                                    Box::new(JoinOperator::new(existing, match_op, shared.clone()))
-                                        as OperatorBox
+                                    Box::new(JoinOperator::new(existing, match_op, shared.clone())) as OperatorBox
                                 }
                             } else if match_clause.optional {
                                 // Disjoint OPTIONAL MATCH, post-WITH. Same as
@@ -3285,15 +2947,7 @@ impl QueryPlanner {
                                     store,
                                 ) {
                                     Ok(lookup) => lookup,
-                                    Err(existing) => Self::join_disjoint(
-                                        existing,
-                                        match_op,
-                                        &known_vars,
-                                        &clause_vars,
-                                        &cross_match_preds,
-                                        query.limit.is_none(),
-                                        store,
-                                    ),
+                                    Err(existing) => Self::join_disjoint(existing, match_op, &known_vars, &clause_vars, &cross_match_preds, query.limit.is_none(), store),
                                 }
                             }
                         }
@@ -3306,14 +2960,13 @@ impl QueryPlanner {
             // Apply cross-match predicates
             if !cross_match_preds.is_empty() {
                 if let Some(op) = operator {
-                    let filter_expr = cross_match_preds
-                        .into_iter()
-                        .reduce(|acc, pred| Expression::Binary {
+                    let filter_expr = cross_match_preds.into_iter().reduce(|acc, pred| {
+                        Expression::Binary {
                             left: Box::new(acc),
                             op: BinaryOp::And,
                             right: Box::new(pred),
-                        })
-                        .unwrap();
+                        }
+                    }).unwrap();
                     operator = Some(Box::new(FilterOperator::new(op, filter_expr)));
                 }
             }
@@ -3335,9 +2988,7 @@ impl QueryPlanner {
                 ));
             }
             let outer = operator.take().ok_or_else(|| {
-                ExecutionError::PlanningError(
-                    "CALL { WITH ... } needs a MATCH before it".to_string(),
-                )
+                ExecutionError::PlanningError("CALL { WITH ... } needs a MATCH before it".to_string())
             })?;
             let imported: HashSet<String> = match &cc.imports {
                 Some(vars) => {
@@ -3351,12 +3002,7 @@ impl QueryPlanner {
                 None => known_vars.clone(),
             };
             let cell = std::sync::Arc::new(std::sync::Mutex::new(None));
-            let body = self.plan_seeded(
-                &cc.body,
-                store,
-                Box::new(SeedOperator::new(cell.clone())),
-                imported,
-            )?;
+            let body = self.plan_seeded(&cc.body, store, Box::new(SeedOperator::new(cell.clone())), imported)?;
             if body.is_write {
                 return Err(ExecutionError::PlanningError(
                     "writes inside CALL { WITH ... } are not supported yet".to_string(),
@@ -3378,9 +3024,7 @@ impl QueryPlanner {
                     }
                 }
             }
-            operator = Some(Box::new(CorrelatedCallOperator::new(
-                outer, body.root, cell,
-            )));
+            operator = Some(Box::new(CorrelatedCallOperator::new(outer, body.root, cell)));
         }
 
         // 2. Handle CALL if present
@@ -3389,21 +3033,15 @@ impl QueryPlanner {
             if let Some(existing_op) = operator {
                 // Check for shared variables to decide between Join and Cartesian Product
                 let mut shared_vars = Vec::new();
-
+                
                 // Collect variables from all MATCH clauses
                 let mut match_vars = HashSet::new();
                 for mc in &query.match_clauses {
                     for path in &mc.pattern.paths {
-                        if let Some(v) = &path.start.variable {
-                            match_vars.insert(v.clone());
-                        }
+                        if let Some(v) = &path.start.variable { match_vars.insert(v.clone()); }
                         for seg in &path.segments {
-                            if let Some(v) = &seg.node.variable {
-                                match_vars.insert(v.clone());
-                            }
-                            if let Some(v) = &seg.edge.variable {
-                                match_vars.insert(v.clone());
-                            }
+                            if let Some(v) = &seg.node.variable { match_vars.insert(v.clone()); }
+                            if let Some(v) = &seg.edge.variable { match_vars.insert(v.clone()); }
                         }
                     }
                 }
@@ -3419,17 +3057,10 @@ impl QueryPlanner {
                 if !shared_vars.is_empty() {
                     // Join on every shared variable, not just the first — see #360.
                     shared_vars.sort();
-                    operator = Some(Box::new(JoinOperator::new(
-                        existing_op,
-                        call_op,
-                        shared_vars.clone(),
-                    )));
+                    operator = Some(Box::new(JoinOperator::new(existing_op, call_op, shared_vars.clone())));
                 } else {
                     // Fallback to Cartesian Product
-                    operator = Some(Box::new(CartesianProductOperator::new(
-                        existing_op,
-                        call_op,
-                    )));
+                    operator = Some(Box::new(CartesianProductOperator::new(existing_op, call_op)));
                 }
             } else {
                 operator = Some(call_op);
@@ -3606,28 +3237,23 @@ impl QueryPlanner {
                             .into_iter()
                             .filter(|c| !as_join_conditions.contains(c))
                             .collect();
-                    remaining
-                        .into_iter()
-                        .reduce(|acc, pred| Expression::Binary {
-                            left: Box::new(acc),
-                            op: BinaryOp::And,
-                            right: Box::new(pred),
-                        })
+                    remaining.into_iter().reduce(|acc, pred| Expression::Binary {
+                        left: Box::new(acc),
+                        op: BinaryOp::And,
+                        right: Box::new(pred),
+                    })
                 } else {
                     let mut applied = Vec::new();
                     Self::collect_applied_predicates(&mut operator, &mut applied);
-                    let remaining: Vec<Expression> =
-                        flatten_and_predicates(&where_clause.predicate)
-                            .into_iter()
-                            .filter(|conjunct| !applied.contains(conjunct))
-                            .collect();
-                    remaining
+                    let remaining: Vec<Expression> = flatten_and_predicates(&where_clause.predicate)
                         .into_iter()
-                        .reduce(|acc, pred| Expression::Binary {
-                            left: Box::new(acc),
-                            op: BinaryOp::And,
-                            right: Box::new(pred),
-                        })
+                        .filter(|conjunct| !applied.contains(conjunct))
+                        .collect();
+                    remaining.into_iter().reduce(|acc, pred| Expression::Binary {
+                        left: Box::new(acc),
+                        op: BinaryOp::And,
+                        right: Box::new(pred),
+                    })
                 };
 
                 if let Some(predicate) = predicate {
@@ -3695,7 +3321,9 @@ impl QueryPlanner {
                 }
                 // A MATCH written after the WITH binds on top of what it
                 // projected.
-                let split = query.with_split_index.unwrap_or(query.match_clauses.len());
+                let split = query
+                    .with_split_index
+                    .unwrap_or(query.match_clauses.len());
                 for mc in &query.match_clauses[split..] {
                     for v in Self::clause_variables(&mc.pattern) {
                         matched_vars.insert(v);
@@ -3778,6 +3406,7 @@ impl QueryPlanner {
             is_write
         };
 
+
         // Add RETURN clause if present
         if let Some(return_clause) = &query.return_clause {
             let mut aggregates = Vec::new();
@@ -3804,8 +3433,7 @@ impl QueryPlanner {
                 return_item_aliases.push((item.expression.clone(), alias.clone()));
 
                 // Extract nested aggregates from expressions like round(sum(x) / sum(y))
-                let (rewritten, extracted) =
-                    extract_nested_aggregates(&item.expression, &mut agg_counter);
+                let (rewritten, extracted) = extract_nested_aggregates(&item.expression, &mut agg_counter);
 
                 if !extracted.is_empty() {
                     has_aggregation = true;
@@ -3997,24 +3625,18 @@ impl QueryPlanner {
 
                 // Sort after projection
                 if let Some(order_by) = &query.order_by {
-                    let sort_items: Vec<(Expression, bool)> = order_by
-                        .items
-                        .iter()
-                        .map(|i| {
-                            (
-                                resolve_sort_key(
-                                    &i.expression,
-                                    &return_item_aliases,
-                                    SortPosition::AfterProjection,
-                                ),
-                                i.ascending,
-                            )
-                        })
-                        .collect();
+                    let sort_items: Vec<(Expression, bool)> = order_by.items.iter()
+                        .map(|i| (
+                            resolve_sort_key(&i.expression, &return_item_aliases, SortPosition::AfterProjection),
+                            i.ascending,
+                        )).collect();
                     operator = Box::new(SortOperator::new(operator, sort_items));
                 }
             } else if use_label_count {
-                let labels = query.match_clauses[0].pattern.paths[0].start.labels.clone();
+                let labels = query.match_clauses[0].pattern.paths[0]
+                    .start
+                    .labels
+                    .clone();
                 let alias = aggregates[0].alias.clone();
                 operator = Box::new(LabelCountOperator::new(labels, alias));
                 // Apply post-projection to map __agg_0 -> user alias
@@ -4029,11 +3651,7 @@ impl QueryPlanner {
                     let mut sort_items = Vec::new();
                     for item in &order_by.items {
                         sort_items.push((
-                            resolve_sort_key(
-                                &item.expression,
-                                &return_item_aliases,
-                                SortPosition::AfterProjection,
-                            ),
+                            resolve_sort_key(&item.expression, &return_item_aliases, SortPosition::AfterProjection),
                             item.ascending,
                         ));
                     }
@@ -4045,11 +3663,7 @@ impl QueryPlanner {
                     let mut sort_items = Vec::new();
                     for item in &order_by.items {
                         sort_items.push((
-                            resolve_sort_key(
-                                &item.expression,
-                                &return_item_aliases,
-                                SortPosition::BeforeProjection,
-                            ),
+                            resolve_sort_key(&item.expression, &return_item_aliases, SortPosition::BeforeProjection),
                             item.ascending,
                         ));
                     }
@@ -4072,7 +3686,7 @@ impl QueryPlanner {
                     }
                 }
             }
-
+            
             if let Some(call_clause) = &query.call_clause {
                 for item in &call_clause.yield_items {
                     output_columns.push(item.alias.clone().unwrap_or_else(|| item.name.clone()));
@@ -4130,18 +3744,11 @@ impl QueryPlanner {
         Ok(ExecutionPlan {
             root: operator,
             output_columns,
-            is_write,
-            candidates_evaluated: 0,
-            chosen_plan_cost: 0.0,
-            candidate_costs: Vec::new(),
+            is_write, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
         })
     }
 
-    fn plan_call(
-        &self,
-        call_clause: &CallClause,
-        store: &GraphStore,
-    ) -> ExecutionResult<OperatorBox> {
+    fn plan_call(&self, call_clause: &CallClause, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         if call_clause.procedure_name == "db.index.fulltext.queryNodes" {
             // Neo4j's signature: (indexName, queryString) with an optional
             // options map. The limit is ours -- Neo4j pages with LIMIT on the
@@ -4152,8 +3759,7 @@ impl QueryPlanner {
             if args.len() < 2 || args.len() > 3 {
                 return Err(ExecutionError::PlanningError(
                     "db.index.fulltext.queryNodes takes (indexName, query) or \
-                     (indexName, query, limit)"
-                        .to_string(),
+                     (indexName, query, limit)".to_string(),
                 ));
             }
             let literal_string = |e: &Expression, what: &str| -> ExecutionResult<String> {
@@ -4187,8 +3793,7 @@ impl QueryPlanner {
                     "no full-text index named '{index_name}'. {}",
                     if known.is_empty() {
                         "None has been created; CREATE FULLTEXT INDEX <name> FOR (n:Label) \
-                         ON (n.property) makes one."
-                            .to_string()
+                         ON (n.property) makes one.".to_string()
                     } else {
                         format!("Known index names: {}", known.join(", "))
                     }
@@ -4213,18 +3818,11 @@ impl QueryPlanner {
                 }
             }
             return Ok(Box::new(FullTextSearchOperator::new(
-                index_name,
-                query_text,
-                limit,
-                node_alias,
-                score_alias,
+                index_name, query_text, limit, node_alias, score_alias,
             )));
         }
 
-        if call_clause
-            .procedure_name
-            .eq_ignore_ascii_case("db.index.point.nearest")
-        {
+        if call_clause.procedure_name.eq_ignore_ascii_case("db.index.point.nearest") {
             // (label, property, point, k) YIELD node, distance (#1618).
             let args = &call_clause.arguments;
             if args.len() != 4 {
@@ -4242,22 +3840,19 @@ impl QueryPlanner {
             };
             let label = lit(&args[0], "label")?;
             let property = lit(&args[1], "property")?;
-            let centre =
-                match super::operator::eval_expression(&args[2], &super::Record::new(), store)? {
-                    super::Value::Property(v) => v,
-                    _ => {
-                        return Err(ExecutionError::PlanningError(
-                            "db.index.point.nearest: the third argument must be a point"
-                                .to_string(),
-                        ))
-                    }
-                };
+            let centre = match super::operator::eval_expression(&args[2], &super::Record::new(), store)? {
+                super::Value::Property(v) => v,
+                _ => {
+                    return Err(ExecutionError::PlanningError(
+                        "db.index.point.nearest: the third argument must be a point".to_string(),
+                    ))
+                }
+            };
             let k = match &args[3] {
                 Expression::Literal(PropertyValue::Integer(i)) if *i >= 0 => *i as usize,
                 _ => {
                     return Err(ExecutionError::PlanningError(
-                        "db.index.point.nearest: k must be a non-negative integer literal"
-                            .to_string(),
+                        "db.index.point.nearest: k must be a non-negative integer literal".to_string(),
                     ))
                 }
             };
@@ -4271,12 +3866,7 @@ impl QueryPlanner {
                 }
             }
             return Ok(Box::new(super::point_ops::PointNearestOperator::new(
-                label,
-                property,
-                centre,
-                k,
-                node_var,
-                distance_var,
+                label, property, centre, k, node_var, distance_var,
             )));
         }
 
@@ -4292,20 +3882,13 @@ impl QueryPlanner {
             // both is the fix that does not break the queries already written against ours.
             let args = &call_clause.arguments;
             let neo4j_form = args.len() == 3
-                && matches!(
-                    args.first(),
-                    Some(Expression::Literal(PropertyValue::String(_)))
-                )
-                && matches!(
-                    args.get(1),
-                    Some(Expression::Literal(PropertyValue::Integer(_)))
-                );
+                && matches!(args.first(), Some(Expression::Literal(PropertyValue::String(_))))
+                && matches!(args.get(1), Some(Expression::Literal(PropertyValue::Integer(_))));
 
             if args.len() < 3 || (args.len() == 3 && !neo4j_form) {
                 return Err(ExecutionError::PlanningError(
                     "db.index.vector.queryNodes takes either (label, property, queryVector, k) \
-                     or Neo4j's (indexName, k, queryVector)"
-                        .to_string(),
+                     or Neo4j's (indexName, k, queryVector)".to_string()
                 ));
             }
 
@@ -4320,8 +3903,7 @@ impl QueryPlanner {
                         "no vector index named '{name}'. {}",
                         if known.is_empty() {
                             "No vector index has been created with a name; \
-                             CREATE VECTOR INDEX <name> FOR ... names one."
-                                .to_string()
+                             CREATE VECTOR INDEX <name> FOR ... names one.".to_string()
                         } else {
                             format!("Known index names: {}", known.join(", "))
                         }
@@ -4331,19 +3913,11 @@ impl QueryPlanner {
             } else {
                 let label = match &args[0] {
                     Expression::Literal(PropertyValue::String(s)) => s.clone(),
-                    _ => {
-                        return Err(ExecutionError::PlanningError(
-                            "First argument (label) must be a string literal".to_string(),
-                        ))
-                    }
+                    _ => return Err(ExecutionError::PlanningError("First argument (label) must be a string literal".to_string())),
                 };
                 let property = match &args[1] {
                     Expression::Literal(PropertyValue::String(s)) => s.clone(),
-                    _ => {
-                        return Err(ExecutionError::PlanningError(
-                            "Second argument (property) must be a string literal".to_string(),
-                        ))
-                    }
+                    _ => return Err(ExecutionError::PlanningError("Second argument (property) must be a string literal".to_string())),
                 };
                 (label, property, &args[2], &args[3])
             };
@@ -4358,20 +3932,12 @@ impl QueryPlanner {
                         "the query vector must be a list of numbers".to_string(),
                     )
                 })?,
-                _ => {
-                    return Err(ExecutionError::PlanningError(
-                        "the query vector must be a vector literal".to_string(),
-                    ))
-                }
+                _ => return Err(ExecutionError::PlanningError("the query vector must be a vector literal".to_string())),
             };
 
             let k = match k_arg {
                 Expression::Literal(PropertyValue::Integer(i)) => *i as usize,
-                _ => {
-                    return Err(ExecutionError::PlanningError(
-                        "k must be an integer literal".to_string(),
-                    ))
-                }
+                _ => return Err(ExecutionError::PlanningError("k must be an integer literal".to_string())),
             };
 
             let mut node_var = "node".to_string();
@@ -4396,9 +3962,7 @@ impl QueryPlanner {
         } else if call_clause.procedure_name == "db.checkIntegrity"
             || call_clause.procedure_name == "db.checkintegrity"
         {
-            Ok(Box::new(
-                crate::query::executor::operator::CheckIntegrityOperator::new(),
-            ))
+            Ok(Box::new(crate::query::executor::operator::CheckIntegrityOperator::new()))
         } else if call_clause.procedure_name == "db.labels" {
             Ok(Box::new(ShowLabelsOperator::new()))
         } else if call_clause.procedure_name == "db.relationshipTypes" {
@@ -4524,12 +4088,7 @@ impl QueryPlanner {
 
     /// Plan one MATCH clause, keeping its relationships distinct across its
     /// comma-separated patterns (#1233): see `isolate_relationships`.
-    fn dispatch_plan_match(
-        &self,
-        match_clause: &MatchClause,
-        where_clause: Option<&WhereClause>,
-        store: &GraphStore,
-    ) -> ExecutionResult<OperatorBox> {
+    fn dispatch_plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         let unrolled = Self::unroll_fixed_length_closes(match_clause);
         let match_clause = unrolled.as_ref().unwrap_or(match_clause);
         let stitched = Self::stitch_paths(match_clause);
@@ -4561,17 +4120,10 @@ impl QueryPlanner {
         const MAX_HOPS: usize = 8;
         let occurs_elsewhere = |path: &PathPattern, seg_idx: usize, var: &str| {
             (path.start.variable.as_deref() == Some(var))
-                || path
-                    .segments
-                    .iter()
-                    .enumerate()
-                    .any(|(i, s)| i != seg_idx && s.node.variable.as_deref() == Some(var))
+                || path.segments.iter().enumerate().any(|(i, s)| i != seg_idx && s.node.variable.as_deref() == Some(var))
         };
         let unrollable = |path: &PathPattern, seg_idx: usize, seg: &PathSegment| -> Option<usize> {
-            if !matches!(path.path_type, PathType::Normal)
-                || path.restrictor_explicit
-                || !matches!(path.selector, PathSelector::All)
-            {
+            if !matches!(path.path_type, PathType::Normal) || path.restrictor_explicit || !matches!(path.selector, PathSelector::All) {
                 return None;
             }
             let len = seg.edge.length.as_ref()?;
@@ -4583,10 +4135,7 @@ impl QueryPlanner {
             occurs_elsewhere(path, seg_idx, var).then_some(k)
         };
         let any = match_clause.pattern.paths.iter().any(|p| {
-            p.segments
-                .iter()
-                .enumerate()
-                .any(|(i, s)| unrollable(p, i, s).is_some())
+            p.segments.iter().enumerate().any(|(i, s)| unrollable(p, i, s).is_some())
         });
         if !any {
             return None;
@@ -4603,18 +4152,10 @@ impl QueryPlanner {
                         for _ in 1..k {
                             segments.push(PathSegment {
                                 edge: hop.clone(),
-                                node: NodePattern {
-                                    variable: None,
-                                    labels: Vec::new(),
-                                    properties: None,
-                                    property_exprs: None,
-                                },
+                                node: NodePattern { variable: None, labels: Vec::new(), properties: None, property_exprs: None },
                             });
                         }
-                        segments.push(PathSegment {
-                            edge: hop,
-                            node: seg.node.clone(),
-                        });
+                        segments.push(PathSegment { edge: hop, node: seg.node.clone() });
                     }
                     None => segments.push(seg.clone()),
                 }
@@ -4661,15 +4202,9 @@ impl QueryPlanner {
         /// `dropped` constrains nothing that `kept` does not already.
         fn covered(dropped: &NodePattern, kept: &NodePattern) -> bool {
             dropped.labels.iter().all(|l| kept.labels.contains(l))
-                && dropped
-                    .properties
-                    .iter()
-                    .flat_map(|p| p.iter())
-                    .all(|(k, v)| {
-                        kept.properties
-                            .as_ref()
-                            .is_some_and(|d| d.get(k) == Some(v))
-                    })
+                && dropped.properties.iter().flat_map(|p| p.iter()).all(|(k, v)| {
+                    kept.properties.as_ref().is_some_and(|d| d.get(k) == Some(v))
+                })
                 && dropped.property_exprs.as_ref().is_none_or(|p| p.is_empty())
         }
         fn end_node(p: &PathPattern) -> &NodePattern {
@@ -4686,10 +4221,7 @@ impl QueryPlanner {
             // means the same relationship; as two hops of one path it would
             // mean two distinct ones (#684), so it stays two paths.
             let names = |p: &PathPattern| {
-                p.segments
-                    .iter()
-                    .filter_map(|s| s.edge.variable.clone())
-                    .collect::<HashSet<_>>()
+                p.segments.iter().filter_map(|s| s.edge.variable.clone()).collect::<HashSet<_>>()
             };
             if !names(a).is_disjoint(&names(b)) {
                 return None;
@@ -4762,46 +4294,22 @@ impl QueryPlanner {
         }
         // (path, segment, variable, types, endpoint variables) of every
         // fixed-length relationship.
-        type Rel<'a> = (
-            usize,
-            usize,
-            Option<String>,
-            &'a Vec<EdgeType>,
-            [Option<String>; 2],
-        );
+        type Rel<'a> = (usize, usize, Option<String>, &'a Vec<EdgeType>, [Option<String>; 2]);
         let rels: Vec<Rel> = paths
             .iter()
             .enumerate()
             .flat_map(|(pi, path)| {
-                path.segments
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, s)| s.edge.length.is_none())
-                    .map(move |(si, s)| {
-                        let before = if si == 0 {
-                            &path.start.variable
-                        } else {
-                            &path.segments[si - 1].node.variable
-                        };
-                        (
-                            pi,
-                            si,
-                            s.edge.variable.clone(),
-                            &s.edge.types,
-                            [before.clone(), s.node.variable.clone()],
-                        )
-                    })
+                path.segments.iter().enumerate().filter(|(_, s)| s.edge.length.is_none()).map(move |(si, s)| {
+                    let before = if si == 0 { &path.start.variable } else { &path.segments[si - 1].node.variable };
+                    (pi, si, s.edge.variable.clone(), &s.edge.types, [before.clone(), s.node.variable.clone()])
+                })
             })
             .collect();
-        let conjuncts = where_clause
-            .map(|w| flatten_and_predicates(&w.predicate))
-            .unwrap_or_default();
+        let conjuncts = where_clause.map(|w| flatten_and_predicates(&w.predicate)).unwrap_or_default();
         // The WHERE keeps the pair apart: they share one endpoint variable and
         // the WHERE makes their other endpoints differ.
         let kept_apart = |a: &[Option<String>; 2], b: &[Option<String>; 2]| -> bool {
-            let (Some(a0), Some(a1), Some(b0), Some(b1)) = (&a[0], &a[1], &b[0], &b[1]) else {
-                return false;
-            };
+            let (Some(a0), Some(a1), Some(b0), Some(b1)) = (&a[0], &a[1], &b[0], &b[1]) else { return false };
             if a0 == a1 || b0 == b1 {
                 return false;
             }
@@ -4818,9 +4326,7 @@ impl QueryPlanner {
             };
             conjuncts.iter().any(|c| Self::implies_distinct(c, x, y))
         };
-        let may_share = |a: &[EdgeType], b: &[EdgeType]| {
-            a.is_empty() || b.is_empty() || a.iter().any(|t| b.contains(t))
-        };
+        let may_share = |a: &[EdgeType], b: &[EdgeType]| a.is_empty() || b.is_empty() || a.iter().any(|t| b.contains(t));
         let mut pairs = Vec::new();
         for i in 0..rels.len() {
             for j in i + 1..rels.len() {
@@ -4848,9 +4354,7 @@ impl QueryPlanner {
                         None => {
                             let v = format!("__iso_rel_{minted}");
                             minted += 1;
-                            clause.pattern.paths[rels[k].0].segments[rels[k].1]
-                                .edge
-                                .variable = Some(v.clone());
+                            clause.pattern.paths[rels[k].0].segments[rels[k].1].edge.variable = Some(v.clone());
                             v
                         }
                     });
@@ -4864,11 +4368,7 @@ impl QueryPlanner {
                 op: BinaryOp::Ne,
                 right: Box::new(Expression::Variable(names[j].clone().expect("named above"))),
             })
-            .reduce(|a, b| Expression::Binary {
-                left: Box::new(a),
-                op: BinaryOp::And,
-                right: Box::new(b),
-            })
+            .reduce(|a, b| Expression::Binary { left: Box::new(a), op: BinaryOp::And, right: Box::new(b) })
             .expect("pairs is not empty");
         Some((clause, distinct))
     }
@@ -4878,9 +4378,7 @@ impl QueryPlanner {
     /// renamed to `y`. With `x = y` both sides are one value, and a strict
     /// comparison of a value with itself is false or null.
     fn implies_distinct(c: &Expression, x: &str, y: &str) -> bool {
-        let Expression::Binary { left, op, right } = c else {
-            return false;
-        };
+        let Expression::Binary { left, op, right } = c else { return false };
         if !matches!(op, BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Gt) {
             return false;
         }
@@ -4888,29 +4386,14 @@ impl QueryPlanner {
             // Only the shapes a pair comparison uses: a variable, a property of
             // one, a function over them. Anything else is not claimed.
             match e {
-                Expression::Variable(v) => Some(Expression::Variable(if v == from {
-                    to.to_string()
-                } else {
-                    v.clone()
-                })),
+                Expression::Variable(v) => Some(Expression::Variable(if v == from { to.to_string() } else { v.clone() })),
                 Expression::Property { variable, property } => Some(Expression::Property {
-                    variable: if variable == from {
-                        to.to_string()
-                    } else {
-                        variable.clone()
-                    },
+                    variable: if variable == from { to.to_string() } else { variable.clone() },
                     property: property.clone(),
                 }),
-                Expression::Function {
-                    name,
-                    args,
-                    distinct,
-                } => Some(Expression::Function {
+                Expression::Function { name, args, distinct } => Some(Expression::Function {
                     name: name.clone(),
-                    args: args
-                        .iter()
-                        .map(|a| rename(a, from, to))
-                        .collect::<Option<Vec<_>>>()?,
+                    args: args.iter().map(|a| rename(a, from, to)).collect::<Option<Vec<_>>>()?,
                     distinct: *distinct,
                 }),
                 _ => None,
@@ -4924,12 +4407,7 @@ impl QueryPlanner {
         pairs_up(left, right, x, y) || pairs_up(left, right, y, x)
     }
 
-    fn dispatch_plan_match_inner(
-        &self,
-        match_clause: &MatchClause,
-        where_clause: Option<&WhereClause>,
-        store: &GraphStore,
-    ) -> ExecutionResult<OperatorBox> {
+    fn dispatch_plan_match_inner(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         let (graph_native, forced) = {
             let f = self.forcing.lock().unwrap();
             (f.graph_native.unwrap_or(self.config.graph_native), f.plan)
@@ -5039,23 +4517,16 @@ impl QueryPlanner {
         };
         let mut rels: Vec<(String, Vec<EdgeType>)> = Vec::new();
         for path in clause.pattern.paths.iter_mut() {
-            let nodes = std::iter::once(&mut path.start)
-                .chain(path.segments.iter_mut().map(|s| &mut s.node));
+            let nodes = std::iter::once(&mut path.start).chain(path.segments.iter_mut().map(|s| &mut s.node));
             for node in nodes {
-                let var = node
-                    .variable
-                    .get_or_insert_with(|| mint("enum_node"))
-                    .clone();
+                let var = node.variable.get_or_insert_with(|| mint("enum_node")).clone();
                 if !node.labels.is_empty() {
                     extra.push(Expression::Function {
                         name: "hasLabels".to_string(),
                         args: vec![
                             Expression::Variable(var.clone()),
                             Expression::Literal(PropertyValue::Array(
-                                node.labels
-                                    .iter()
-                                    .map(|l| PropertyValue::String(l.as_str().to_string()))
-                                    .collect(),
+                                node.labels.iter().map(|l| PropertyValue::String(l.as_str().to_string())).collect(),
                             )),
                         ],
                         distinct: false,
@@ -5063,27 +4534,18 @@ impl QueryPlanner {
                 }
                 for (k, v) in node.properties.iter().flatten() {
                     extra.push(Expression::Binary {
-                        left: Box::new(Expression::Property {
-                            variable: var.clone(),
-                            property: k.clone(),
-                        }),
+                        left: Box::new(Expression::Property { variable: var.clone(), property: k.clone() }),
                         op: BinaryOp::Eq,
                         right: Box::new(Expression::Literal(v.clone())),
                     });
                 }
             }
             for seg in path.segments.iter_mut() {
-                let var = seg
-                    .edge
-                    .variable
-                    .get_or_insert_with(|| mint("enum_rel"))
-                    .clone();
+                let var = seg.edge.variable.get_or_insert_with(|| mint("enum_rel")).clone();
                 rels.push((var, seg.edge.types.clone()));
             }
         }
-        let may_share = |a: &[EdgeType], b: &[EdgeType]| {
-            a.is_empty() || b.is_empty() || a.iter().any(|t| b.contains(t))
-        };
+        let may_share = |a: &[EdgeType], b: &[EdgeType]| a.is_empty() || b.is_empty() || a.iter().any(|t| b.contains(t));
         for i in 0..rels.len() {
             for j in i + 1..rels.len() {
                 if rels[i].0 != rels[j].0 && may_share(&rels[i].1, &rels[j].1) {
@@ -5101,32 +4563,20 @@ impl QueryPlanner {
     /// Graph-native planner (ADR-015): enumerate candidate plans and run the
     /// `pick`-th cheapest, counting from 0 -- the cheapest unless `CYPHER
     /// plan=N` forced another (#1616).
-    fn plan_match_native(
-        &self,
-        match_clause: &MatchClause,
-        where_clause: Option<&WhereClause>,
-        store: &GraphStore,
-        pick: usize,
-    ) -> ExecutionResult<OperatorBox> {
+    fn plan_match_native(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore, pick: usize) -> ExecutionResult<OperatorBox> {
         use super::logical_plan::PatternGraph;
-        use super::physical_planner::logical_to_physical;
         use super::plan_enumerator::{enumerate_plans, EnumerationConfig};
+        use super::physical_planner::logical_to_physical;
 
         if let Some(why) = Self::not_enumerable(match_clause) {
-            return Err(ExecutionError::PlanningError(format!(
-                "the cost-based enumerator does not plan {why}"
-            )));
+            return Err(ExecutionError::PlanningError(format!("the cost-based enumerator does not plan {why}")));
         }
         let (clause, extra) = Self::prepare_for_enumeration(match_clause);
         let predicate = where_clause
             .map(|w| w.predicate.clone())
             .into_iter()
             .chain(extra)
-            .reduce(|a, b| Expression::Binary {
-                left: Box::new(a),
-                op: BinaryOp::And,
-                right: Box::new(b),
-            });
+            .reduce(|a, b| Expression::Binary { left: Box::new(a), op: BinaryOp::And, right: Box::new(b) });
         let where_clause = predicate.map(|predicate| WhereClause { predicate });
 
         let pg = PatternGraph::from_match_clause(&clause);
@@ -5135,17 +4585,9 @@ impl QueryPlanner {
             max_candidate_plans: self.config.max_candidate_plans,
         };
 
-        let candidates = enumerate_plans(
-            &pg,
-            where_clause.as_ref(),
-            catalog,
-            &store.property_index,
-            &config,
-        );
+        let candidates = enumerate_plans(&pg, where_clause.as_ref(), catalog, &store.property_index, &config);
         if candidates.is_empty() {
-            return Err(ExecutionError::PlanningError(
-                "No valid plans enumerated".to_string(),
-            ));
+            return Err(ExecutionError::PlanningError("No valid plans enumerated".to_string()));
         }
         if pick >= candidates.len() {
             return Err(ExecutionError::PlanningError(format!(
@@ -5159,13 +4601,10 @@ impl QueryPlanner {
 
         // Collect candidate diagnostics before consuming
         let num_candidates = candidates.len();
-        let candidate_summaries: Vec<(String, f64)> = candidates
-            .iter()
-            .map(|(plan, cost)| {
-                let desc = plan.display_plan(0);
-                (desc, *cost)
-            })
-            .collect();
+        let candidate_summaries: Vec<(String, f64)> = candidates.iter().map(|(plan, cost)| {
+            let desc = plan.display_plan(0);
+            (desc, *cost)
+        }).collect();
         let chosen_cost = candidates[pick].1;
 
         let (chosen_plan, _) = candidates.into_iter().nth(pick).expect("pick is in range");
@@ -5184,35 +4623,23 @@ impl QueryPlanner {
         Ok(physical)
     }
 
-    fn plan_match(
-        &self,
-        match_clause: &MatchClause,
-        where_clause: Option<&WhereClause>,
-        store: &GraphStore,
-    ) -> ExecutionResult<OperatorBox> {
+    fn plan_match(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
         let pattern = &match_clause.pattern;
 
         if pattern.paths.is_empty() {
-            return Err(ExecutionError::PlanningError(
-                "Match pattern has no paths".to_string(),
-            ));
+            return Err(ExecutionError::PlanningError("Match pattern has no paths".to_string()));
         }
 
         // QP-02/QP-03: Cost-based optimization — reorder paths by estimated cardinality (smallest first)
         let stats = store.statistics();
-        let mut paths_with_cost: Vec<(usize, f64)> = pattern
-            .paths
-            .iter()
-            .enumerate()
-            .map(|(i, path)| {
-                let cost = if let Some(label) = path.start.labels.first() {
-                    stats.estimate_label_scan(label) as f64
-                } else {
-                    f64::MAX // All-nodes scan is most expensive
-                };
-                (i, cost)
-            })
-            .collect();
+        let mut paths_with_cost: Vec<(usize, f64)> = pattern.paths.iter().enumerate().map(|(i, path)| {
+            let cost = if let Some(label) = path.start.labels.first() {
+                stats.estimate_label_scan(label) as f64
+            } else {
+                f64::MAX // All-nodes scan is most expensive
+            };
+            (i, cost)
+        }).collect();
         paths_with_cost.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Handle multiple paths — use JoinOperator when paths share variables,
@@ -5221,25 +4648,15 @@ impl QueryPlanner {
         let mut path_vars: Vec<HashSet<String>> = Vec::new();
 
         // Pre-compute variable sets for each path
-        let path_var_sets: Vec<HashSet<String>> = pattern
-            .paths
-            .iter()
-            .map(|path| {
-                let mut vars = HashSet::new();
-                if let Some(v) = &path.start.variable {
-                    vars.insert(v.clone());
-                }
-                for seg in &path.segments {
-                    if let Some(v) = &seg.node.variable {
-                        vars.insert(v.clone());
-                    }
-                    if let Some(v) = &seg.edge.variable {
-                        vars.insert(v.clone());
-                    }
-                }
-                vars
-            })
-            .collect();
+        let path_var_sets: Vec<HashSet<String>> = pattern.paths.iter().map(|path| {
+            let mut vars = HashSet::new();
+            if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
+            for seg in &path.segments {
+                if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
+                if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
+            }
+            vars
+        }).collect();
 
         // Decompose WHERE clause: assign each predicate to the first path that contains
         // all its referenced variables. Cross-path predicates are applied after path join.
@@ -5318,650 +4735,572 @@ impl QueryPlanner {
 
             let (mut path_operator, deferred_predicates): (OperatorBox, Vec<Expression>) =
                 if anchor_eligible && anchor_idx > 0 {
-                    self.build_path_from_anchor(
-                        path,
-                        &path_nodes,
-                        anchor_idx,
-                        &per_path_preds[path_idx],
-                        store,
-                    )?
+                    self.build_path_from_anchor(path, &path_nodes, anchor_idx, &per_path_preds[path_idx], store)?
                 } else {
-                    // Merge inline start node properties into predicates for index selection.
-                    // Without this, {prop: val} in MATCH patterns falls back to NodeScan + Filter
-                    // instead of IndexScan. See ADR-015 for context.
-                    if let Some(ref props) = path.start.properties {
-                        for (prop_name, prop_value) in props {
-                            per_path_preds[path_idx].push(Expression::Binary {
-                                left: Box::new(Expression::Property {
-                                    variable: start_var.clone(),
-                                    property: prop_name.clone(),
-                                }),
-                                op: BinaryOp::Eq,
-                                right: Box::new(Expression::Literal(prop_value.clone())),
-                            });
-                        }
-                    }
+            // Merge inline start node properties into predicates for index selection.
+            // Without this, {prop: val} in MATCH patterns falls back to NodeScan + Filter
+            // instead of IndexScan. See ADR-015 for context.
+            if let Some(ref props) = path.start.properties {
+                for (prop_name, prop_value) in props {
+                    per_path_preds[path_idx].push(Expression::Binary {
+                        left: Box::new(Expression::Property {
+                            variable: start_var.clone(),
+                            property: prop_name.clone(),
+                        }),
+                        op: BinaryOp::Eq,
+                        right: Box::new(Expression::Literal(prop_value.clone())),
+                    });
+                }
+            }
 
-                    // Optimization: Check for index usage (using this path's assigned predicates).
-                    // Recognizes both `n.prop OP literal` and `literal OP n.prop` operand orders.
-                    let mut remaining_predicates: Vec<Expression> =
-                        per_path_preds[path_idx].clone();
-                    let hinted = self.hinted_scan(
-                        &start_var,
-                        &path.start.labels,
-                        &remaining_predicates,
+            // Optimization: Check for index usage (using this path's assigned predicates).
+            // Recognizes both `n.prop OP literal` and `literal OP n.prop` operand orders.
+            let mut remaining_predicates: Vec<Expression> = per_path_preds[path_idx].clone();
+            let hinted = self.hinted_scan(&start_var, &path.start.labels, &remaining_predicates, store)?;
+            let mut path_operator: OperatorBox = if let Some(op) = hinted {
+                op
+            } else if let Some((idx, ids)) =
+                find_id_predicate(&start_var, &remaining_predicates)
+            {
+                // `id()` before any index: it is unique by construction, so
+                // there is nothing for a cost model to weigh. Without this,
+                // `MATCH (n) WHERE id(n) = 5` scanned the whole label and
+                // filtered (#538).
+                //
+                // The label, if the pattern named one, still has to be
+                // checked -- `MATCH (n:Person) WHERE id(n) = 5` must not
+                // match a node of another label that happens to hold that id.
+                remaining_predicates.remove(idx);
+                Box::new(
+                    NodeByIdOperator::new(ids, start_var.clone())
+                        .with_labels(path.start.labels.clone()),
+                )
+            } else if let Some((idx, label, property, op, val)) =
+                find_index_predicate(&start_var, &path.start.labels, &remaining_predicates, store)
+            {
+                // Before the remove, so the index it skips is still the scan's.
+                let other_end =
+                    range_other_end(&start_var, &property, &op, &val, &remaining_predicates, idx);
+                remaining_predicates.remove(idx);
+                // The range conjunct stays in the WHERE filter (a range scan
+                // answers none), so the scan's bounds may be loose.
+                let scan = IndexScanOperator::new(start_var.clone(), label, property, op, val)
+                    .with_loose_bounds();
+                Box::new(match other_end {
+                    Some(end) => scan.with_other_end(end),
+                    None => scan,
+                })
+            } else if let Some(op) = point_index_scan(&start_var, &path.start.labels, &remaining_predicates, store) {
+                // A spatial predicate on an R-tree-indexed property (#1618).
+                // The predicate stays in the filter: the region is a superset.
+                op
+            } else {
+                Box::new(NodeScanOperator::new(
+                    start_var.clone(),
+                    path.start.labels.clone(),
+                ))
+            };
+
+            // Note: start node inline properties are already merged into per_path_preds
+            // above, so they're handled via IndexScan or remaining_predicates Filter.
+            // No separate FilterOperator needed here.
+
+            // Split remaining predicates: those referencing only start_var can be pushed
+            // down now; those referencing later-path variables must be deferred until
+            // after all ExpandOperators have materialized those variables.
+            let mut early_predicates: Vec<Expression> = Vec::new();
+            let mut deferred_predicates: Vec<Expression> = Vec::new();
+            for pred in remaining_predicates {
+                let mut pred_vars = HashSet::new();
+                Self::collect_expression_variables(&pred, &mut pred_vars);
+                // Push down only if predicate references exclusively the start variable
+                // (or no variables at all, e.g., literal expressions)
+                if pred_vars.is_empty() || pred_vars.iter().all(|v| v == &start_var) {
+                    early_predicates.push(pred);
+                } else {
+                    deferred_predicates.push(pred);
+                }
+            }
+            if !early_predicates.is_empty() {
+                let filter_expr = early_predicates.into_iter().reduce(|acc, pred| {
+                    Expression::Binary {
+                        left: Box::new(acc),
+                        op: BinaryOp::And,
+                        right: Box::new(pred),
+                    }
+                }).unwrap();
+                path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+            }
+
+            // Check for shortestPath / allShortestPaths
+            if matches!(path.path_type, PathType::Shortest | PathType::AllShortest) && !path.segments.is_empty() {
+                // shortestPath: use BFS-based ShortestPathOperator
+                let last_segment = path.segments.last().unwrap();
+                let target_var = last_segment.node.variable.as_ref()
+                    .ok_or_else(|| ExecutionError::PlanningError("shortestPath target must have a variable".to_string()))?
+                    .clone();
+                let edge_types: Vec<String> = last_segment.edge.types.iter()
+                    .map(|t| t.as_str().to_string())
+                    .collect();
+                let all_paths = matches!(path.path_type, PathType::AllShortest);
+
+                // We need the target node to be scanned too — create a CartesianProduct with target scan.
+                //
+                // The target gets the same `id()` anchoring the start already
+                // got (#538), because without it only *one* endpoint was
+                // pinned: `WHERE id(a) = 1 AND id(b) = 6` planned as
+                // `NodeById(a) x NodeScan(b)`, so the BFS ran once per node in
+                // the label and a filter above discarded all but one result.
+                // Measured against the same query written with inline
+                // properties, that cost 329x (#584).
+                let target_id_pred = find_id_predicate(&target_var, &deferred_predicates);
+                let target_scan: OperatorBox = match &target_id_pred {
+                    Some((_, ids)) => {
+                        let mut op = NodeByIdOperator::new(ids.clone(), target_var.clone());
+                        if !last_segment.node.labels.is_empty() {
+                            // A scan by id bypasses the label index, so the
+                            // pattern's labels still have to be checked.
+                            op = op.with_labels(last_segment.node.labels.clone());
+                        }
+                        Box::new(op) as OperatorBox
+                    }
+                    // Then an indexed property, for the same reason and by the
+                    // same argument. `WHERE a.seq = 0 AND b.seq = 5` planned as
+                    // `IndexScan(a) x NodeScan(b)` -- the WHERE form of what the
+                    // inline form `(b:N {seq: 5})` already got right, which is
+                    // why this went unnoticed (#584).
+                    None => match find_index_predicate(
+                        &target_var,
+                        &last_segment.node.labels,
+                        &deferred_predicates,
                         store,
-                    )?;
-                    let mut path_operator: OperatorBox = if let Some(op) = hinted {
-                        op
-                    } else if let Some((idx, ids)) =
-                        find_id_predicate(&start_var, &remaining_predicates)
-                    {
-                        // `id()` before any index: it is unique by construction, so
-                        // there is nothing for a cost model to weigh. Without this,
-                        // `MATCH (n) WHERE id(n) = 5` scanned the whole label and
-                        // filtered (#538).
+                    ) {
+                        Some((_, label, property, op, val)) => Box::new(IndexScanOperator::new(
+                            target_var.clone(),
+                            label,
+                            property,
+                            op,
+                            val,
+                        )),
+                        // Then an indexed **inline** property. `#584` taught
+                        // the `WHERE` form to use the index and left this one
+                        // behind, so `shortestPath((a {id: 1})-[*]-(b {id: 2}))`
+                        // -- which is how the pattern is actually written --
+                        // planned `IndexScan(a) x NodeScan(b)`: the source
+                        // seeked and the target scanned the whole label.
                         //
-                        // The label, if the pattern named one, still has to be
-                        // checked -- `MATCH (n:Person) WHERE id(n) = 5` must not
-                        // match a node of another label that happens to hold that id.
-                        remaining_predicates.remove(idx);
-                        Box::new(
-                            NodeByIdOperator::new(ids, start_var.clone())
-                                .with_labels(path.start.labels.clone()),
-                        )
-                    } else if let Some((idx, label, property, op, val)) = find_index_predicate(
-                        &start_var,
-                        &path.start.labels,
-                        &remaining_predicates,
-                        store,
-                    ) {
-                        // Before the remove, so the index it skips is still the scan's.
-                        let other_end = range_other_end(
-                            &start_var,
-                            &property,
-                            &op,
-                            &val,
-                            &remaining_predicates,
-                            idx,
-                        );
-                        remaining_predicates.remove(idx);
-                        // The range conjunct stays in the WHERE filter (a range scan
-                        // answers none), so the scan's bounds may be loose.
-                        let scan =
-                            IndexScanOperator::new(start_var.clone(), label, property, op, val)
-                                .with_loose_bounds();
-                        Box::new(match other_end {
-                            Some(end) => scan.with_other_end(end),
-                            None => scan,
-                        })
-                    } else if let Some(op) = point_index_scan(
-                        &start_var,
-                        &path.start.labels,
-                        &remaining_predicates,
-                        store,
-                    ) {
-                        // A spatial predicate on an R-tree-indexed property (#1618).
-                        // The predicate stays in the filter: the region is a superset.
-                        op
+                        // On FinBench SF10 that scan was the entire cost of
+                        // CR-3. Making the BFS bidirectional first (#1050)
+                        // moved it 541 ms -> 547 ms, because the search was
+                        // never what the query was spending its time on.
+                        None => match inline_index_scan(
+                            &target_var,
+                            &last_segment.node.labels,
+                            last_segment.node.properties.as_ref(),
+                            store,
+                        ) {
+                            Some(op) => op,
+                            None => Box::new(NodeScanOperator::new(
+                                target_var.clone(),
+                                last_segment.node.labels.clone(),
+                            )),
+                        },
+                    },
+                };
+                // Add property filter for target node
+                let target_op = if let Some(ref props) = last_segment.node.properties {
+                    if !props.is_empty() {
+                        let filter_expr = self.build_property_filter(&target_var, props);
+                        Box::new(FilterOperator::new(target_scan, filter_expr)) as OperatorBox
                     } else {
-                        Box::new(NodeScanOperator::new(
-                            start_var.clone(),
-                            path.start.labels.clone(),
-                        ))
-                    };
+                        target_scan
+                    }
+                } else {
+                    target_scan
+                };
 
-                    // Note: start node inline properties are already merged into per_path_preds
-                    // above, so they're handled via IndexScan or remaining_predicates Filter.
-                    // No separate FilterOperator needed here.
+                let combined = Box::new(CartesianProductOperator::new(path_operator, target_op));
+                path_operator = Box::new(ShortestPathOperator::new(
+                    combined,
+                    start_var.clone(),
+                    target_var.clone(),
+                    path.path_variable.clone(),
+                    edge_types,
+                    last_segment.edge.direction.clone(),
+                    all_paths,
+                ));
+            } else {
+                // Normal path: use ExpandOperator for each segment
+                let mut current_var = start_var.clone();
+                // Variables bound so far, so a deferred predicate can be
+                // applied the moment its last variable arrives rather than
+                // after the whole path (#328).
+                let mut bound: HashSet<String> = HashSet::new();
+                bound.insert(start_var.clone());
+                // Relationship isomorphism (#684): a pattern with more than one
+                // segment must not walk the same edge twice. The first expand
+                // built is the first to execute, so it clears history from an
+                // earlier clause — the rule is per-clause.
+                let track_edges = path.segments.len() > 1;
+                let mut first_expand = true;
+                // A closing segment the previous expand has already bound as a
+                // fused cyclic close (#1614). What is left of it is its
+                // bookkeeping: the relationship variable it names, a filter on
+                // that relationship's inline properties, and the walk
+                // continuing from the node it closed onto.
+                let mut fused_close: Option<FusedCloseSegment> = None;
+                for (seg_idx, segment) in path.segments.iter().enumerate() {
+                    let target_var = path_nodes[seg_idx + 1].var.clone();
 
-                    // Split remaining predicates: those referencing only start_var can be pushed
-                    // down now; those referencing later-path variables must be deferred until
-                    // after all ExpandOperators have materialized those variables.
-                    let mut early_predicates: Vec<Expression> = Vec::new();
-                    let mut deferred_predicates: Vec<Expression> = Vec::new();
-                    for pred in remaining_predicates {
-                        let mut pred_vars = HashSet::new();
-                        Self::collect_expression_variables(&pred, &mut pred_vars);
-                        // Push down only if predicate references exclusively the start variable
-                        // (or no variables at all, e.g., literal expressions)
-                        if pred_vars.is_empty() || pred_vars.iter().all(|v| v == &start_var) {
-                            early_predicates.push(pred);
-                        } else {
-                            deferred_predicates.push(pred);
+                    if let Some(close) = fused_close.take() {
+                        if let Some(predicate) = close.edge_predicate {
+                            path_operator = Box::new(FilterOperator::new(path_operator, predicate));
                         }
-                    }
-                    if !early_predicates.is_empty() {
-                        let filter_expr = early_predicates
-                            .into_iter()
-                            .reduce(|acc, pred| Expression::Binary {
-                                left: Box::new(acc),
-                                op: BinaryOp::And,
-                                right: Box::new(pred),
-                            })
-                            .unwrap();
-                        path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+                        if let Some(ev) = &segment.edge.variable {
+                            bound.insert(ev.clone());
+                        }
+                        path_operator = Self::apply_ready_predicates(
+                            path_operator,
+                            &mut deferred_predicates,
+                            &bound,
+                        );
+                        current_var = target_var;
+                        continue;
                     }
 
-                    // Check for shortestPath / allShortestPaths
-                    if matches!(path.path_type, PathType::Shortest | PathType::AllShortest)
-                        && !path.segments.is_empty()
-                    {
-                        // shortestPath: use BFS-based ShortestPathOperator
-                        let last_segment = path.segments.last().unwrap();
-                        let target_var = last_segment
-                            .node
-                            .variable
-                            .as_ref()
-                            .ok_or_else(|| {
-                                ExecutionError::PlanningError(
-                                    "shortestPath target must have a variable".to_string(),
-                                )
-                            })?
-                            .clone();
-                        let edge_types: Vec<String> = last_segment
-                            .edge
-                            .types
-                            .iter()
-                            .map(|t| t.as_str().to_string())
-                            .collect();
-                        let all_paths = matches!(path.path_type, PathType::AllShortest);
+                    // An inline relationship property constraint has to be
+                    // applied; it used to be dropped, so
+                    // `MATCH ()-[r:R {num: 2}]->()` returned every `:R` (#649).
+                    // An anonymous relationship gets a name to filter on.
+                    let edge_filter = self.edge_property_filter(&segment.edge, seg_idx);
+                    let edge_var = match &edge_filter {
+                        Some((var, _)) => Some(var.clone()),
+                        None => segment.edge.variable.clone(),
+                    };
+                    let edge_types: Vec<String> = segment.edge.types.iter()
+                        .map(|t| t.as_str().to_string())
+                        .collect();
 
-                        // We need the target node to be scanned too — create a CartesianProduct with target scan.
+                    if let Some(ref length) = segment.edge.length {
+                        // Variable-length traversal: BFS expand over [min, max] hops.
+                        let min_hops = length.min.unwrap_or(1);
+                        let max_hops = length.max.unwrap_or(usize::MAX);
+                        let mut expand = VarLengthExpandOperator::new(
+                            path_operator,
+                            current_var.clone(),
+                            target_var.clone(),
+                            edge_types,
+                            segment.edge.direction.clone(),
+                            min_hops,
+                            max_hops,
+                        );
+                // Inline relationship properties, e.g. `-[:R* {year: 1988}]->`.
+                // The operator had nowhere to put these and the planner
+                // dropped them, so the pattern matched every path and the
+                // filter failed *open* (#934).
+                if let Some(props) = &segment.edge.properties {
+                    if !props.is_empty() {
+                        expand = expand.with_edge_properties(props.clone());
+                    }
+                }
+                if self
+                    .trail_enumeration
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    expand = expand.with_trail_enumeration();
+                }
+                // The restrictor the query asked for, which overrides the inference
+                // above: `multiplicity_is_observable` guesses at intent from query
+                // shape, and a written `ACYCLIC` is not a guess (#1141).
+                expand = expand.with_restrictor(path.restrictor);
+                expand = expand.with_restrictor_explicit(path.restrictor_explicit);
+                    expand = expand.with_selector(path.selector);
+                        // Relationship isomorphism applies to a var-length segment too: an
+                        // edge an earlier segment of this clause walked is not available to
+                        // it. `ExpandOperator` has done this since #684; this path did not
+                        // inherit it, so `(a)-[:R]-(y)-[:R*1..1]-(z)` over one edge answered
+                        // a row where openCypher answers none (#710).
+                        if track_edges {
+                            expand = expand.with_edge_isolation(first_expand);
+                            first_expand = false;
+                        }
+                        if let Some(ref pv) = path.path_variable {
+                            expand = expand.with_path_variable(pv.clone());
+                        }
+                        // `MATCH (a)-[r:T*]->(b)` binds `r` to the list of
+                        // relationships traversed. Dropping it made the query
+                        // fail with "Variable not found: r" (#652).
+                        if let Some(ref rv) = segment.edge.variable {
+                            expand = expand.with_rel_variable(rv.clone());
+                        }
+                        // If the destination resolves to exactly one node, the
+                        // question is "can each source reach *this* node",
+                        // which one reversed BFS answers for every row. LDBC
+                        // IC6 reaches this operator with thousands of candidate
+                        // friends and one pinned person; without the pin each
+                        // candidate expands its own two-hop neighbourhood.
                         //
-                        // The target gets the same `id()` anchoring the start already
-                        // got (#538), because without it only *one* endpoint was
-                        // pinned: `WHERE id(a) = 1 AND id(b) = 6` planned as
-                        // `NodeById(a) x NodeScan(b)`, so the BFS ran once per node in
-                        // the label and a filter above discarded all but one result.
-                        // Measured against the same query written with inline
-                        // properties, that cost 329x (#584).
-                        let target_id_pred = find_id_predicate(&target_var, &deferred_predicates);
-                        let target_scan: OperatorBox = match &target_id_pred {
-                            Some((_, ids)) => {
-                                let mut op = NodeByIdOperator::new(ids.clone(), target_var.clone());
-                                if !last_segment.node.labels.is_empty() {
-                                    // A scan by id bypasses the label index, so the
-                                    // pattern's labels still have to be checked.
-                                    op = op.with_labels(last_segment.node.labels.clone());
-                                }
-                                Box::new(op) as OperatorBox
-                            }
-                            // Then an indexed property, for the same reason and by the
-                            // same argument. `WHERE a.seq = 0 AND b.seq = 5` planned as
-                            // `IndexScan(a) x NodeScan(b)` -- the WHERE form of what the
-                            // inline form `(b:N {seq: 5})` already got right, which is
-                            // why this went unnoticed (#584).
-                            None => match find_index_predicate(
+                        // `min_hops <= 1` because a set keyed on shortest
+                        // distance cannot answer `*2..n` correctly, and no path
+                        // variable because a membership test yields no path.
+                        if path.path_variable.is_none() && min_hops <= 1 {
+                            if let Some(pinned) = pinned_target_for(
                                 &target_var,
-                                &last_segment.node.labels,
                                 &deferred_predicates,
+                                segment.node.properties.as_ref(),
                                 store,
                             ) {
-                                Some((_, label, property, op, val)) => {
-                                    Box::new(IndexScanOperator::new(
-                                        target_var.clone(),
-                                        label,
-                                        property,
-                                        op,
-                                        val,
-                                    ))
-                                }
-                                // Then an indexed **inline** property. `#584` taught
-                                // the `WHERE` form to use the index and left this one
-                                // behind, so `shortestPath((a {id: 1})-[*]-(b {id: 2}))`
-                                // -- which is how the pattern is actually written --
-                                // planned `IndexScan(a) x NodeScan(b)`: the source
-                                // seeked and the target scanned the whole label.
-                                //
-                                // On FinBench SF10 that scan was the entire cost of
-                                // CR-3. Making the BFS bidirectional first (#1050)
-                                // moved it 541 ms -> 547 ms, because the search was
-                                // never what the query was spending its time on.
-                                None => match inline_index_scan(
-                                    &target_var,
-                                    &last_segment.node.labels,
-                                    last_segment.node.properties.as_ref(),
-                                    store,
-                                ) {
-                                    Some(op) => op,
-                                    None => Box::new(NodeScanOperator::new(
-                                        target_var.clone(),
-                                        last_segment.node.labels.clone(),
-                                    )),
-                                },
-                            },
+                                expand = expand.with_pinned_target(pinned);
+                            }
+                        }
+                        // Prune non-matching endpoints before a record is
+                        // built. The filter below stays: this is pruning, not a
+                        // replacement (#1063).
+                        expand = self.push_varlen_target_props(
+                            expand,
+                            &target_var,
+                            &segment.node.labels,
+                            segment.node.properties.as_ref(),
+                            store,
+                        );
+                        path_operator = if !segment.node.labels.is_empty() {
+                            Box::new(expand.with_target_labels(segment.node.labels.clone()))
+                        } else {
+                            Box::new(expand)
                         };
-                        // Add property filter for target node
-                        let target_op = if let Some(ref props) = last_segment.node.properties {
+                        if let Some(ref props) = segment.node.properties {
                             if !props.is_empty() {
                                 let filter_expr = self.build_property_filter(&target_var, props);
-                                Box::new(FilterOperator::new(target_scan, filter_expr))
-                                    as OperatorBox
-                            } else {
-                                target_scan
+                                path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
                             }
-                        } else {
-                            target_scan
-                        };
+                        }
+                        bound.insert(target_var.clone());
+                        if let Some(ev) = &segment.edge.variable {
+                            bound.insert(ev.clone());
+                        }
+                        path_operator = Self::apply_ready_predicates(
+                            path_operator,
+                            &mut deferred_predicates,
+                            &bound,
+                        );
+                        current_var = target_var;
+                        continue;
+                    }
 
-                        let combined =
-                            Box::new(CartesianProductOperator::new(path_operator, target_op));
-                        path_operator = Box::new(ShortestPathOperator::new(
-                            combined,
-                            start_var.clone(),
-                            target_var.clone(),
-                            path.path_variable.clone(),
-                            edge_types,
-                            last_segment.edge.direction.clone(),
-                            all_paths,
-                        ));
+                    // A variable already bound has to be *matched*, not
+                    // rebound. `ExpandOperator` binds its target
+                    // unconditionally, so `MATCH (b)-->(b)` bound the far end
+                    // of each edge over the near one and every edge matched --
+                    // a graph containing no self-relationships at all returned
+                    // one row per edge (#639). Expanding into a synthetic name
+                    // and requiring the two to be equal is what a repeated
+                    // variable means; the walk then continues from the
+                    // original, which the filter has just proved is the same
+                    // node.
+                    let self_ref = bound.contains(&target_var);
+                    let expand_var = if self_ref {
+                        format!("__self_{target_var}_{seg_idx}")
                     } else {
-                        // Normal path: use ExpandOperator for each segment
-                        let mut current_var = start_var.clone();
-                        // Variables bound so far, so a deferred predicate can be
-                        // applied the moment its last variable arrives rather than
-                        // after the whole path (#328).
-                        let mut bound: HashSet<String> = HashSet::new();
-                        bound.insert(start_var.clone());
-                        // Relationship isomorphism (#684): a pattern with more than one
-                        // segment must not walk the same edge twice. The first expand
-                        // built is the first to execute, so it clears history from an
-                        // earlier clause — the rule is per-clause.
-                        let track_edges = path.segments.len() > 1;
-                        let mut first_expand = true;
-                        // A closing segment the previous expand has already bound as a
-                        // fused cyclic close (#1614). What is left of it is its
-                        // bookkeeping: the relationship variable it names, a filter on
-                        // that relationship's inline properties, and the walk
-                        // continuing from the node it closed onto.
-                        let mut fused_close: Option<FusedCloseSegment> = None;
-                        for (seg_idx, segment) in path.segments.iter().enumerate() {
-                            let target_var = path_nodes[seg_idx + 1].var.clone();
-
-                            if let Some(close) = fused_close.take() {
-                                if let Some(predicate) = close.edge_predicate {
-                                    path_operator =
-                                        Box::new(FilterOperator::new(path_operator, predicate));
-                                }
-                                if let Some(ev) = &segment.edge.variable {
-                                    bound.insert(ev.clone());
-                                }
-                                path_operator = Self::apply_ready_predicates(
-                                    path_operator,
-                                    &mut deferred_predicates,
-                                    &bound,
-                                );
-                                current_var = target_var;
-                                continue;
-                            }
-
-                            // An inline relationship property constraint has to be
-                            // applied; it used to be dropped, so
-                            // `MATCH ()-[r:R {num: 2}]->()` returned every `:R` (#649).
-                            // An anonymous relationship gets a name to filter on.
-                            let edge_filter = self.edge_property_filter(&segment.edge, seg_idx);
-                            let edge_var = match &edge_filter {
-                                Some((var, _)) => Some(var.clone()),
-                                None => segment.edge.variable.clone(),
-                            };
-                            let edge_types: Vec<String> = segment
-                                .edge
-                                .types
-                                .iter()
-                                .map(|t| t.as_str().to_string())
-                                .collect();
-
-                            if let Some(ref length) = segment.edge.length {
-                                // Variable-length traversal: BFS expand over [min, max] hops.
-                                let min_hops = length.min.unwrap_or(1);
-                                let max_hops = length.max.unwrap_or(usize::MAX);
-                                let mut expand = VarLengthExpandOperator::new(
-                                    path_operator,
-                                    current_var.clone(),
-                                    target_var.clone(),
-                                    edge_types,
-                                    segment.edge.direction.clone(),
-                                    min_hops,
-                                    max_hops,
-                                );
-                                // Inline relationship properties, e.g. `-[:R* {year: 1988}]->`.
-                                // The operator had nowhere to put these and the planner
-                                // dropped them, so the pattern matched every path and the
-                                // filter failed *open* (#934).
-                                if let Some(props) = &segment.edge.properties {
-                                    if !props.is_empty() {
-                                        expand = expand.with_edge_properties(props.clone());
-                                    }
-                                }
-                                if self
-                                    .trail_enumeration
-                                    .load(std::sync::atomic::Ordering::Relaxed)
-                                {
-                                    expand = expand.with_trail_enumeration();
-                                }
-                                // The restrictor the query asked for, which overrides the inference
-                                // above: `multiplicity_is_observable` guesses at intent from query
-                                // shape, and a written `ACYCLIC` is not a guess (#1141).
-                                expand = expand.with_restrictor(path.restrictor);
-                                expand = expand.with_restrictor_explicit(path.restrictor_explicit);
-                                expand = expand.with_selector(path.selector);
-                                // Relationship isomorphism applies to a var-length segment too: an
-                                // edge an earlier segment of this clause walked is not available to
-                                // it. `ExpandOperator` has done this since #684; this path did not
-                                // inherit it, so `(a)-[:R]-(y)-[:R*1..1]-(z)` over one edge answered
-                                // a row where openCypher answers none (#710).
-                                if track_edges {
-                                    expand = expand.with_edge_isolation(first_expand);
-                                    first_expand = false;
-                                }
-                                if let Some(ref pv) = path.path_variable {
-                                    expand = expand.with_path_variable(pv.clone());
-                                }
-                                // `MATCH (a)-[r:T*]->(b)` binds `r` to the list of
-                                // relationships traversed. Dropping it made the query
-                                // fail with "Variable not found: r" (#652).
-                                if let Some(ref rv) = segment.edge.variable {
-                                    expand = expand.with_rel_variable(rv.clone());
-                                }
-                                // If the destination resolves to exactly one node, the
-                                // question is "can each source reach *this* node",
-                                // which one reversed BFS answers for every row. LDBC
-                                // IC6 reaches this operator with thousands of candidate
-                                // friends and one pinned person; without the pin each
-                                // candidate expands its own two-hop neighbourhood.
-                                //
-                                // `min_hops <= 1` because a set keyed on shortest
-                                // distance cannot answer `*2..n` correctly, and no path
-                                // variable because a membership test yields no path.
-                                if path.path_variable.is_none() && min_hops <= 1 {
-                                    if let Some(pinned) = pinned_target_for(
-                                        &target_var,
-                                        &deferred_predicates,
-                                        segment.node.properties.as_ref(),
-                                        store,
-                                    ) {
-                                        expand = expand.with_pinned_target(pinned);
-                                    }
-                                }
-                                // Prune non-matching endpoints before a record is
-                                // built. The filter below stays: this is pruning, not a
-                                // replacement (#1063).
-                                expand = self.push_varlen_target_props(
-                                    expand,
-                                    &target_var,
-                                    &segment.node.labels,
-                                    segment.node.properties.as_ref(),
-                                    store,
-                                );
-                                path_operator = if !segment.node.labels.is_empty() {
-                                    Box::new(expand.with_target_labels(segment.node.labels.clone()))
-                                } else {
-                                    Box::new(expand)
-                                };
-                                if let Some(ref props) = segment.node.properties {
-                                    if !props.is_empty() {
-                                        let filter_expr =
-                                            self.build_property_filter(&target_var, props);
-                                        path_operator = Box::new(FilterOperator::new(
-                                            path_operator,
-                                            filter_expr,
-                                        ));
-                                    }
-                                }
-                                bound.insert(target_var.clone());
-                                if let Some(ev) = &segment.edge.variable {
-                                    bound.insert(ev.clone());
-                                }
-                                path_operator = Self::apply_ready_predicates(
-                                    path_operator,
-                                    &mut deferred_predicates,
-                                    &bound,
-                                );
-                                current_var = target_var;
-                                continue;
-                            }
-
-                            // A variable already bound has to be *matched*, not
-                            // rebound. `ExpandOperator` binds its target
-                            // unconditionally, so `MATCH (b)-->(b)` bound the far end
-                            // of each edge over the near one and every edge matched --
-                            // a graph containing no self-relationships at all returned
-                            // one row per edge (#639). Expanding into a synthetic name
-                            // and requiring the two to be equal is what a repeated
-                            // variable means; the walk then continues from the
-                            // original, which the filter has just proved is the same
-                            // node.
-                            let self_ref = bound.contains(&target_var);
-                            let expand_var = if self_ref {
-                                format!("__self_{target_var}_{seg_idx}")
-                            } else {
-                                target_var.clone()
-                            };
-                            let mut expand = ExpandOperator::new(
-                                path_operator,
-                                current_var.clone(),
-                                expand_var.clone(),
-                                edge_var,
-                                edge_types,
-                                segment.edge.direction.clone(),
-                            );
-                            if track_edges {
-                                expand = expand.with_edge_isolation(first_expand);
-                                first_expand = false;
-                            }
-                            // A closing hop back onto an already-bound variable can
-                            // only land on that node. Without this the expand walks
-                            // every neighbour and the `__self_x = x` filter below
-                            // discards all but one — BI-17's triangle close is ~41
-                            // neighbours per person over ~17.8M paths (#195).
-                            if self_ref {
-                                expand = expand.with_target_bound_var(target_var.clone());
-                            }
-                            // If the *next* segment closes the pattern back onto a
-                            // variable already bound, this expand's target must be a
-                            // neighbour of that variable — so test it here, during the
-                            // walk, instead of building a row for every candidate and
-                            // discarding it two operators later.
-                            //
-                            // LDBC BI-17 is the case:
-                            // `(a)-[:KNOWS]-(b)-[:KNOWS]-(c)-[:KNOWS]-(a)`. This
-                            // expand binds `c`, and at SF1 it builds ~3.2M rows for
-                            // the closing hop to reduce to 387,573 triangles. Pruning
-                            // during the walk is the row-count half of #1082, whose
-                            // full form (a sorted-merge intersection) measured a 170x
-                            // ceiling (#1086).
-                            //
-                            // Directions are carried through rather than required to
-                            // be undirected. The closing segment runs
-                            // `target -> next_target`, so an `Outgoing` close is
-                            // proved by `next_target`'s *incoming* list. FinBench CR-4
-                            // -- `(a)-[:TRANSFER]->(b)-[:TRANSFER]->(c)-[:TRANSFER]->(a)`,
-                            // the money-laundering motif -- is exactly this shape, and
-                            // the first version refused it (#1090).
-                            //
-                            // Same edge types on both segments, and neither
-                            // variable-length: the test binary-searches one type's
-                            // sorted list, so it has to be the type the close will
-                            // traverse.
-                            //
-                            // This prunes and never widens: a row it rejects has no
-                            // edge to close on, and a row it keeps still faces the
-                            // closing hop, which also enforces relationship
-                            // isomorphism.
-                            if !self_ref {
-                                if let Some(next) = path.segments.get(seg_idx + 1) {
-                                    let next_target = &path_nodes[seg_idx + 2].var;
-                                    let same_types = !segment.edge.types.is_empty()
-                                        && next.edge.types.len() == segment.edge.types.len()
-                                        && next
-                                            .edge
-                                            .types
-                                            .iter()
-                                            .zip(segment.edge.types.iter())
-                                            .all(|(a, b)| a.as_str() == b.as_str());
-                                    // Not `current_var`: `(a)-[:R]-(b)-[:R]-(c)-[:R]-(b)`
-                                    // closes back onto this expand's *source*, and
-                                    // every `c` it produces is a neighbour of `b` by
-                                    // construction. The test would be satisfied by
-                                    // every candidate and cost a binary search each
-                                    // time to reject none. The closing hop still does
-                                    // the real work there, which is finding a second,
-                                    // distinct `b`-`c` edge.
-                                    let closes_onto_bound = bound.contains(next_target)
-                                        && *next_target != target_var
-                                        && *next_target != current_var;
-                                    if closes_onto_bound
-                                        && same_types
-                                        && next.edge.length.is_none()
-                                        && segment.edge.length.is_none()
-                                    {
-                                        expand = expand.with_co_neighbour(
-                                            next_target.clone(),
-                                            next.edge.direction.clone(),
-                                        );
-                                    }
-                                    // The fused form of the same close (#1614): this
-                                    // expand binds the closing relationship too, so
-                                    // the closing segment needs no expand into a
-                                    // synthetic name and no equality filter. The
-                                    // candidate set is the intersection of the two
-                                    // adjacency lists, and every element of it is a
-                                    // match -- the worst-case-optimal join for a
-                                    // cycle, which PERF-07 asks the planner to pick
-                                    // by itself.
-                                    if let Some((close_edge_var, predicate)) = self.fused_close_for(
-                                        segment,
-                                        next,
-                                        seg_idx + 1,
-                                        next_target,
-                                        &target_var,
-                                        &current_var,
-                                        &bound,
-                                        &path_nodes,
-                                        seg_idx + 2,
-                                    ) {
-                                        if expand.closes_onto().is_none() {
-                                            expand = expand.with_co_neighbour(
-                                                next_target.clone(),
-                                                next.edge.direction.clone(),
-                                            );
-                                        }
-                                        expand = expand.with_fused_close(close_edge_var);
-                                        fused_close = Some(FusedCloseSegment {
-                                            edge_predicate: predicate,
-                                        });
-                                    }
-                                }
-                            }
-                            // A selective equality on the far side of the expansion —
-                            // LDBC IC11's `org.name = "..."` — applied during the walk
-                            // rather than to the rows it produces (#656).
-                            expand = self.push_hop_target_props(
-                                expand,
-                                &target_var,
-                                &segment.node.labels,
-                                segment.node.properties.as_ref(),
-                                &deferred_predicates,
-                                store,
-                            );
-                            // `c.id > b.id` with `b` already bound: the same idea
-                            // against a value that changes per row (#1069). Not for a
-                            // self-reference, whose target is the synthetic name.
-                            if !self_ref {
-                                let compared = Self::target_bound_comparisons(
-                                    &deferred_predicates,
-                                    &target_var,
-                                    &bound,
-                                );
-                                if !compared.is_empty() {
-                                    expand = expand.with_target_comparisons(compared);
-                                }
-                            }
-
-                            // CY-04: Set path variable for named path materialization
-                            if let Some(ref pv) = path.path_variable {
-                                expand = expand.with_path_variable(pv.clone());
-                            }
-
-                            // Add target label filter if labels specified on target node
-                            path_operator = if !segment.node.labels.is_empty() {
-                                Box::new(expand.with_target_labels(segment.node.labels.clone()))
-                            } else {
-                                Box::new(expand)
-                            };
-                            if self_ref {
-                                path_operator = Box::new(FilterOperator::new(
-                                    path_operator,
-                                    Expression::Binary {
-                                        left: Box::new(Expression::Variable(expand_var)),
-                                        op: BinaryOp::Eq,
-                                        right: Box::new(Expression::Variable(target_var.clone())),
-                                    },
-                                ));
-                            }
-
-                            // Add property filter for target node if properties specified
-                            if let Some(ref props) = segment.node.properties {
-                                if !props.is_empty() {
-                                    let filter_expr =
-                                        self.build_property_filter(&target_var, props);
-                                    path_operator =
-                                        Box::new(FilterOperator::new(path_operator, filter_expr));
-                                }
-                            }
-
-                            // Single-hop only; see the note at the other two sites.
-                            // A variable-length segment's inline properties are
-                            // enforced inside the expand (#934).
-                            if let (Some((_, predicate)), None) =
-                                (edge_filter, segment.edge.length.as_ref())
+                        target_var.clone()
+                    };
+                    let mut expand = ExpandOperator::new(
+                        path_operator,
+                        current_var.clone(),
+                        expand_var.clone(),
+                        edge_var,
+                        edge_types,
+                        segment.edge.direction.clone(),
+                    );
+                    if track_edges {
+                        expand = expand.with_edge_isolation(first_expand);
+                        first_expand = false;
+                    }
+                    // A closing hop back onto an already-bound variable can
+                    // only land on that node. Without this the expand walks
+                    // every neighbour and the `__self_x = x` filter below
+                    // discards all but one — BI-17's triangle close is ~41
+                    // neighbours per person over ~17.8M paths (#195).
+                    if self_ref {
+                        expand = expand.with_target_bound_var(target_var.clone());
+                    }
+                    // If the *next* segment closes the pattern back onto a
+                    // variable already bound, this expand's target must be a
+                    // neighbour of that variable — so test it here, during the
+                    // walk, instead of building a row for every candidate and
+                    // discarding it two operators later.
+                    //
+                    // LDBC BI-17 is the case:
+                    // `(a)-[:KNOWS]-(b)-[:KNOWS]-(c)-[:KNOWS]-(a)`. This
+                    // expand binds `c`, and at SF1 it builds ~3.2M rows for
+                    // the closing hop to reduce to 387,573 triangles. Pruning
+                    // during the walk is the row-count half of #1082, whose
+                    // full form (a sorted-merge intersection) measured a 170x
+                    // ceiling (#1086).
+                    //
+                    // Directions are carried through rather than required to
+                    // be undirected. The closing segment runs
+                    // `target -> next_target`, so an `Outgoing` close is
+                    // proved by `next_target`'s *incoming* list. FinBench CR-4
+                    // -- `(a)-[:TRANSFER]->(b)-[:TRANSFER]->(c)-[:TRANSFER]->(a)`,
+                    // the money-laundering motif -- is exactly this shape, and
+                    // the first version refused it (#1090).
+                    //
+                    // Same edge types on both segments, and neither
+                    // variable-length: the test binary-searches one type's
+                    // sorted list, so it has to be the type the close will
+                    // traverse.
+                    //
+                    // This prunes and never widens: a row it rejects has no
+                    // edge to close on, and a row it keeps still faces the
+                    // closing hop, which also enforces relationship
+                    // isomorphism.
+                    if !self_ref {
+                        if let Some(next) = path.segments.get(seg_idx + 1) {
+                            let next_target = &path_nodes[seg_idx + 2].var;
+                            let same_types = !segment.edge.types.is_empty()
+                                && next.edge.types.len() == segment.edge.types.len()
+                                && next.edge.types.iter().zip(segment.edge.types.iter())
+                                    .all(|(a, b)| a.as_str() == b.as_str());
+                            // Not `current_var`: `(a)-[:R]-(b)-[:R]-(c)-[:R]-(b)`
+                            // closes back onto this expand's *source*, and
+                            // every `c` it produces is a neighbour of `b` by
+                            // construction. The test would be satisfied by
+                            // every candidate and cost a binary search each
+                            // time to reject none. The closing hop still does
+                            // the real work there, which is finding a second,
+                            // distinct `b`-`c` edge.
+                            let closes_onto_bound = bound.contains(next_target)
+                                && *next_target != target_var
+                                && *next_target != current_var;
+                            if closes_onto_bound
+                                && same_types
+                                && next.edge.length.is_none()
+                                && segment.edge.length.is_none()
                             {
-                                path_operator =
-                                    Box::new(FilterOperator::new(path_operator, predicate));
+                                expand = expand.with_co_neighbour(
+                                    next_target.clone(),
+                                    next.edge.direction.clone(),
+                                );
                             }
-
-                            bound.insert(target_var.clone());
-                            if let Some(ev) = &segment.edge.variable {
-                                bound.insert(ev.clone());
+                            // The fused form of the same close (#1614): this
+                            // expand binds the closing relationship too, so
+                            // the closing segment needs no expand into a
+                            // synthetic name and no equality filter. The
+                            // candidate set is the intersection of the two
+                            // adjacency lists, and every element of it is a
+                            // match -- the worst-case-optimal join for a
+                            // cycle, which PERF-07 asks the planner to pick
+                            // by itself.
+                            if let Some((close_edge_var, predicate)) = self.fused_close_for(
+                                segment, next, seg_idx + 1, next_target, &target_var, &current_var, &bound,
+                                &path_nodes, seg_idx + 2,
+                            ) {
+                                if expand.closes_onto().is_none() {
+                                    expand = expand.with_co_neighbour(
+                                        next_target.clone(),
+                                        next.edge.direction.clone(),
+                                    );
+                                }
+                                expand = expand.with_fused_close(close_edge_var);
+                                fused_close = Some(FusedCloseSegment { edge_predicate: predicate });
                             }
-                            path_operator = Self::apply_ready_predicates(
-                                path_operator,
-                                &mut deferred_predicates,
-                                &bound,
-                            );
-
-                            current_var = target_var;
                         }
                     }
+                    // A selective equality on the far side of the expansion —
+                    // LDBC IC11's `org.name = "..."` — applied during the walk
+                    // rather than to the rows it produces (#656).
+                    expand = self.push_hop_target_props(
+                        expand,
+                        &target_var,
+                        &segment.node.labels,
+                        segment.node.properties.as_ref(),
+                        &deferred_predicates,
+                        store,
+                    );
+                    // `c.id > b.id` with `b` already bound: the same idea
+                    // against a value that changes per row (#1069). Not for a
+                    // self-reference, whose target is the synthetic name.
+                    if !self_ref {
+                        let compared =
+                            Self::target_bound_comparisons(&deferred_predicates, &target_var, &bound);
+                        if !compared.is_empty() {
+                            expand = expand.with_target_comparisons(compared);
+                        }
+                    }
+
+                    // CY-04: Set path variable for named path materialization
+                    if let Some(ref pv) = path.path_variable {
+                        expand = expand.with_path_variable(pv.clone());
+                    }
+
+                    // Add target label filter if labels specified on target node
+                    path_operator = if !segment.node.labels.is_empty() {
+                        Box::new(expand.with_target_labels(segment.node.labels.clone()))
+                    } else {
+                        Box::new(expand)
+                    };
+                    if self_ref {
+                        path_operator = Box::new(FilterOperator::new(
+                            path_operator,
+                            Expression::Binary {
+                                left: Box::new(Expression::Variable(expand_var)),
+                                op: BinaryOp::Eq,
+                                right: Box::new(Expression::Variable(target_var.clone())),
+                            },
+                        ));
+                    }
+
+                    // Add property filter for target node if properties specified
+                    if let Some(ref props) = segment.node.properties {
+                        if !props.is_empty() {
+                            let filter_expr = self.build_property_filter(&target_var, props);
+                            path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
+                        }
+                    }
+
+                    // Single-hop only; see the note at the other two sites.
+                    // A variable-length segment's inline properties are
+                    // enforced inside the expand (#934).
+                    if let (Some((_, predicate)), None) =
+                        (edge_filter, segment.edge.length.as_ref())
+                    {
+                        path_operator = Box::new(FilterOperator::new(path_operator, predicate));
+                    }
+
+                    bound.insert(target_var.clone());
+                    if let Some(ev) = &segment.edge.variable {
+                        bound.insert(ev.clone());
+                    }
+                    path_operator = Self::apply_ready_predicates(
+                        path_operator,
+                        &mut deferred_predicates,
+                        &bound,
+                    );
+
+                    current_var = target_var;
+                }
+            }
                     (path_operator, deferred_predicates)
                 };
 
             // Apply deferred WHERE predicates after all path expansions
             if !deferred_predicates.is_empty() {
-                let filter_expr = deferred_predicates
-                    .into_iter()
-                    .reduce(|acc, pred| Expression::Binary {
+                let filter_expr = deferred_predicates.into_iter().reduce(|acc, pred| {
+                    Expression::Binary {
                         left: Box::new(acc),
                         op: BinaryOp::And,
                         right: Box::new(pred),
-                    })
-                    .unwrap();
+                    }
+                }).unwrap();
                 path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
             }
 
             // Collect variables used in this path for join detection
             let mut vars = HashSet::new();
-            if let Some(v) = &path.start.variable {
-                vars.insert(v.clone());
-            }
+            if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
             for seg in &path.segments {
-                if let Some(v) = &seg.node.variable {
-                    vars.insert(v.clone());
-                }
-                if let Some(v) = &seg.edge.variable {
-                    vars.insert(v.clone());
-                }
+                if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
+                if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
             }
             path_vars.push(vars);
 
@@ -5983,14 +5322,13 @@ impl QueryPlanner {
 
         // Apply cross-path predicates after all paths are joined
         if !cross_path_predicates.is_empty() {
-            let filter_expr = cross_path_predicates
-                .into_iter()
-                .reduce(|acc, pred| Expression::Binary {
+            let filter_expr = cross_path_predicates.into_iter().reduce(|acc, pred| {
+                Expression::Binary {
                     left: Box::new(acc),
                     op: BinaryOp::And,
                     right: Box::new(pred),
-                })
-                .unwrap();
+                }
+            }).unwrap();
             result = Box::new(FilterOperator::new(result, filter_expr));
         }
 
@@ -6080,9 +5418,7 @@ impl QueryPlanner {
         if std::env::var("SAMYAMA_VARLEN_TARGET_PRUNING").as_deref() == Ok("0") {
             return expand;
         }
-        let Some(props) = properties else {
-            return expand;
-        };
+        let Some(props) = properties else { return expand };
         if props.is_empty() {
             return expand;
         }
@@ -6155,16 +5491,14 @@ impl QueryPlanner {
     /// query returns — only how much is materialised on the way. Getting a
     /// pushdown subtly wrong is a wrong answer; getting this one wrong is a
     /// slow query.
-    fn target_equality_props(deferred: &[Expression], var: &str) -> Vec<(String, PropertyValue)> {
+    fn target_equality_props(
+        deferred: &[Expression],
+        var: &str,
+    ) -> Vec<(String, PropertyValue)> {
         let mut out = Vec::new();
         for pred in deferred {
             for part in flatten_and_predicates(pred) {
-                if let Expression::Binary {
-                    left,
-                    op: BinaryOp::Eq,
-                    right,
-                } = &part
-                {
+                if let Expression::Binary { left, op: BinaryOp::Eq, right } = &part {
                     if let (
                         Expression::Property { variable, property },
                         Expression::Literal(value),
@@ -6301,26 +5635,13 @@ impl QueryPlanner {
                 .zip(segment.edge.types.iter())
                 .all(|(a, b)| a.as_str() == b.as_str());
         let others = || {
-            nodes
-                .iter()
-                .enumerate()
-                .filter(|(i, n)| *i != closing_node_idx && n.var == next_target)
-                .map(|(_, n)| n)
+            nodes.iter().enumerate().filter(|(i, n)| *i != closing_node_idx && n.var == next_target).map(|(_, n)| n)
         };
         let checked_elsewhere = others().count() > 0
-            && next
-                .node
-                .labels
-                .iter()
-                .all(|l| others().all(|n| n.labels.contains(l)))
-            && next
-                .node
-                .properties
-                .iter()
-                .flat_map(|p| p.iter())
-                .all(|(k, v)| {
-                    others().all(|n| n.properties.as_ref().is_some_and(|d| d.get(k) == Some(v)))
-                });
+            && next.node.labels.iter().all(|l| others().all(|n| n.labels.contains(l)))
+            && next.node.properties.iter().flat_map(|p| p.iter()).all(|(k, v)| {
+                others().all(|n| n.properties.as_ref().is_some_and(|d| d.get(k) == Some(v)))
+            });
         if !(closes_onto_bound
             && types_equal
             && next.edge.length.is_none()
@@ -6417,10 +5738,7 @@ impl QueryPlanner {
         if let Some(props) = &anchor.properties {
             for (prop_name, prop_value) in props {
                 candidates.push(Expression::Binary {
-                    left: Box::new(Expression::Property {
-                        variable: anchor_var.clone(),
-                        property: prop_name.clone(),
-                    }),
+                    left: Box::new(Expression::Property { variable: anchor_var.clone(), property: prop_name.clone() }),
                     op: BinaryOp::Eq,
                     right: Box::new(Expression::Literal(prop_value.clone())),
                 });
@@ -6433,10 +5751,13 @@ impl QueryPlanner {
         let hinted = self.hinted_scan(&anchor_var, &anchor.labels, &candidates, store)?;
         let mut path_operator: OperatorBox = if let Some(op) = hinted {
             op
-        } else if let Some((idx, ids)) = find_id_predicate(&anchor_var, &candidates) {
+        } else if let Some((idx, ids)) =
+            find_id_predicate(&anchor_var, &candidates)
+        {
             candidates.remove(idx);
             Box::new(
-                NodeByIdOperator::new(ids, anchor_var.clone()).with_labels(anchor.labels.clone()),
+                NodeByIdOperator::new(ids, anchor_var.clone())
+                    .with_labels(anchor.labels.clone()),
             )
         } else if let Some((idx, label, property, op, val)) =
             find_index_predicate(&anchor_var, &anchor.labels, &candidates, store)
@@ -6452,20 +5773,12 @@ impl QueryPlanner {
         } else if let Some(op) = point_index_scan(&anchor_var, &anchor.labels, &candidates, store) {
             op
         } else {
-            Box::new(NodeScanOperator::new(
-                anchor_var.clone(),
-                anchor.labels.clone(),
-            ))
+            Box::new(NodeScanOperator::new(anchor_var.clone(), anchor.labels.clone()))
         };
         if !candidates.is_empty() {
-            let filter_expr = candidates
-                .into_iter()
-                .reduce(|acc, pred| Expression::Binary {
-                    left: Box::new(acc),
-                    op: BinaryOp::And,
-                    right: Box::new(pred),
-                })
-                .unwrap();
+            let filter_expr = candidates.into_iter().reduce(|acc, pred| {
+                Expression::Binary { left: Box::new(acc), op: BinaryOp::And, right: Box::new(pred) }
+            }).unwrap();
             path_operator = Box::new(FilterOperator::new(path_operator, filter_expr));
         }
 
@@ -6509,12 +5822,7 @@ impl QueryPlanner {
                 Some((var, _)) => Some(var.clone()),
                 None => segment.edge.variable.clone(),
             };
-            let edge_types: Vec<String> = segment
-                .edge
-                .types
-                .iter()
-                .map(|t| t.as_str().to_string())
-                .collect();
+            let edge_types: Vec<String> = segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
             let reversed_dir = match segment.edge.direction {
                 Direction::Outgoing => Direction::Incoming,
                 Direction::Incoming => Direction::Outgoing,
@@ -6564,7 +5872,7 @@ impl QueryPlanner {
                 // shape, and a written `ACYCLIC` is not a guess (#1141).
                 expand = expand.with_restrictor(path.restrictor);
                 expand = expand.with_restrictor_explicit(path.restrictor_explicit);
-                expand = expand.with_selector(path.selector);
+                    expand = expand.with_selector(path.selector);
                 // Relationship isomorphism applies to a var-length segment too: an
                 // edge an earlier segment of this clause walked is not available to
                 // it. `ExpandOperator` has done this since #684; this path did not
@@ -6587,12 +5895,9 @@ impl QueryPlanner {
                 // thousands of candidates expands its own neighbourhood to
                 // discover whether that one person is in it.
                 if path.path_variable.is_none() && length.min.unwrap_or(1) <= 1 {
-                    if let Some(pinned) = pinned_target_for(
-                        &target.var,
-                        path_preds,
-                        target.properties.as_ref(),
-                        store,
-                    ) {
+                    if let Some(pinned) =
+                        pinned_target_for(&target.var, path_preds, target.properties.as_ref(), store)
+                    {
                         expand = expand.with_pinned_target(pinned);
                     }
                 }
@@ -6628,14 +5933,7 @@ impl QueryPlanner {
                 } else {
                     target.var.clone()
                 };
-                let mut expand = ExpandOperator::new(
-                    path_operator,
-                    current_var.clone(),
-                    expand_var.clone(),
-                    edge_var,
-                    edge_types,
-                    reversed_dir,
-                );
+                let mut expand = ExpandOperator::new(path_operator, current_var.clone(), expand_var.clone(), edge_var, edge_types, reversed_dir);
                 if track_edges {
                     expand = expand.with_edge_isolation(first_expand);
                     first_expand = false;
@@ -6646,15 +5944,8 @@ impl QueryPlanner {
                     let next = &path.segments[seg_idx - 1];
                     let next_target = &nodes[seg_idx - 1].var;
                     if let Some((close_edge_var, predicate)) = self.fused_close_for(
-                        segment,
-                        next,
-                        seg_idx - 1,
-                        next_target,
-                        &target.var,
-                        &current_var,
-                        &bound,
-                        nodes,
-                        seg_idx - 1,
+                        segment, next, seg_idx - 1, next_target, &target.var, &current_var, &bound,
+                        nodes, seg_idx - 1,
                     ) {
                         let close_dir = match next.edge.direction {
                             Direction::Outgoing => Direction::Incoming,
@@ -6664,9 +5955,7 @@ impl QueryPlanner {
                         expand = expand
                             .with_co_neighbour(next_target.clone(), close_dir)
                             .with_fused_close(close_edge_var);
-                        fused_close = Some(FusedCloseSegment {
-                            edge_predicate: predicate,
-                        });
+                        fused_close = Some(FusedCloseSegment { edge_predicate: predicate });
                     }
                 }
                 // A selective equality on the far side of the expansion,
@@ -6752,12 +6041,7 @@ impl QueryPlanner {
                 Some((var, _)) => Some(var.clone()),
                 None => segment.edge.variable.clone(),
             };
-            let edge_types: Vec<String> = segment
-                .edge
-                .types
-                .iter()
-                .map(|t| t.as_str().to_string())
-                .collect();
+            let edge_types: Vec<String> = segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
             path_operator = if let Some(length) = &segment.edge.length {
                 let mut expand = VarLengthExpandOperator::new(
                     path_operator,
@@ -6788,7 +6072,7 @@ impl QueryPlanner {
                 // shape, and a written `ACYCLIC` is not a guess (#1141).
                 expand = expand.with_restrictor(path.restrictor);
                 expand = expand.with_restrictor_explicit(path.restrictor_explicit);
-                expand = expand.with_selector(path.selector);
+                    expand = expand.with_selector(path.selector);
                 // Relationship isomorphism applies to a var-length segment too: an
                 // edge an earlier segment of this clause walked is not available to
                 // it. `ExpandOperator` has done this since #684; this path did not
@@ -6836,14 +6120,7 @@ impl QueryPlanner {
                 } else {
                     target.var.clone()
                 };
-                let mut expand = ExpandOperator::new(
-                    path_operator,
-                    current_var.clone(),
-                    expand_var.clone(),
-                    edge_var,
-                    edge_types,
-                    segment.edge.direction.clone(),
-                );
+                let mut expand = ExpandOperator::new(path_operator, current_var.clone(), expand_var.clone(), edge_var, edge_types, segment.edge.direction.clone());
                 if track_edges {
                     expand = expand.with_edge_isolation(first_expand);
                     first_expand = false;
@@ -6852,22 +6129,13 @@ impl QueryPlanner {
                     if let Some(next) = path.segments.get(seg_idx + 1) {
                         let next_target = &nodes[seg_idx + 2].var;
                         if let Some((close_edge_var, predicate)) = self.fused_close_for(
-                            segment,
-                            next,
-                            seg_idx + 1,
-                            next_target,
-                            &target.var,
-                            &current_var,
-                            &bound,
-                            nodes,
-                            seg_idx + 2,
+                            segment, next, seg_idx + 1, next_target, &target.var, &current_var, &bound,
+                            nodes, seg_idx + 2,
                         ) {
                             expand = expand
                                 .with_co_neighbour(next_target.clone(), next.edge.direction.clone())
                                 .with_fused_close(close_edge_var);
-                            fused_close = Some(FusedCloseSegment {
-                                edge_predicate: predicate,
-                            });
+                            fused_close = Some(FusedCloseSegment { edge_predicate: predicate });
                         }
                     }
                 }
@@ -6955,11 +6223,7 @@ impl QueryPlanner {
         Some((var.clone(), self.build_property_filter(&var, props)))
     }
 
-    fn build_property_filter(
-        &self,
-        var: &str,
-        props: &HashMap<String, PropertyValue>,
-    ) -> Expression {
+    fn build_property_filter(&self, var: &str, props: &HashMap<String, PropertyValue>) -> Expression {
         let mut conditions: Vec<Expression> = Vec::new();
 
         for (prop_name, prop_value) in props {
@@ -7038,24 +6302,18 @@ impl QueryPlanner {
         pred: &Expression,
         clauses: &[&MatchClause],
     ) -> Option<usize> {
-        let pos = left.iter().position(|(p, e)| {
-            e == pred && clauses.iter().any(|mc| mc.optional && mc.pattern == *p)
-        })?;
-        let (pattern, _) = left.remove(pos);
-        clauses
+        let pos = left
             .iter()
-            .position(|mc| mc.optional && mc.pattern == pattern)
+            .position(|(p, e)| e == pred && clauses.iter().any(|mc| mc.optional && mc.pattern == *p))?;
+        let (pattern, _) = left.remove(pos);
+        clauses.iter().position(|mc| mc.optional && mc.pattern == pattern)
     }
 
     /// Whether a conjunct owned by the OPTIONAL MATCH `own` names only that
     /// clause's variables and at least one it introduces -- the one kind that
     /// can filter inside the clause. Any other conjunct it owns (one naming
     /// only outer variables, or none) is its join condition (#1231).
-    fn inside_optional(
-        pred_vars: &HashSet<String>,
-        own: &HashSet<String>,
-        earlier: &HashSet<&String>,
-    ) -> bool {
+    fn inside_optional(pred_vars: &HashSet<String>, own: &HashSet<String>, earlier: &HashSet<&String>) -> bool {
         !pred_vars.is_empty()
             && pred_vars.iter().all(|v| own.contains(v))
             && pred_vars.iter().any(|v| !earlier.contains(v))
@@ -7071,21 +6329,10 @@ impl QueryPlanner {
         store: &GraphStore,
     ) -> Option<(usize, String, Expression)> {
         preds.iter().enumerate().find_map(|(i, pred)| {
-            let Expression::Binary {
-                left,
-                op: BinaryOp::Eq,
-                right,
-            } = pred
-            else {
-                return None;
-            };
+            let Expression::Binary { left, op: BinaryOp::Eq, right } = pred else { return None };
             let (property, key) = match (left.as_ref(), right.as_ref()) {
-                (Expression::Property { variable, property }, key) if variable == var => {
-                    (property, key)
-                }
-                (key, Expression::Property { variable, property }) if variable == var => {
-                    (property, key)
-                }
+                (Expression::Property { variable, property }, key) if variable == var => (property, key),
+                (key, Expression::Property { variable, property }) if variable == var => (property, key),
                 _ => return None,
             };
             let mut vars = HashSet::new();
@@ -7129,49 +6376,28 @@ impl QueryPlanner {
         if match_clause.optional || paths.is_empty() {
             return Err(base);
         }
-        let Some(mut pending) = paths
-            .iter()
-            .map(Self::lookup_node)
-            .collect::<Option<Vec<_>>>()
-        else {
+        let Some(mut pending) = paths.iter().map(Self::lookup_node).collect::<Option<Vec<_>>>() else {
             return Err(base);
         };
-        let Some(hops) = paths
-            .iter()
-            .map(Self::lookup_hop)
-            .collect::<Option<Vec<_>>>()
-        else {
+        let Some(hops) = paths.iter().map(Self::lookup_hop).collect::<Option<Vec<_>>>() else {
             return Err(base);
         };
-        let hops: Vec<(String, &PathSegment)> = pending
-            .iter()
-            .zip(hops)
-            .filter_map(|((v, _), h)| h.map(|s| ((*v).clone(), s)))
-            .collect();
+        let hops: Vec<(String, &PathSegment)> =
+            pending.iter().zip(hops).filter_map(|((v, _), h)| h.map(|s| ((*v).clone(), s))).collect();
         if hops.len() > 1 {
             return Err(base);
         }
         let mut seen = HashSet::new();
-        if pending
-            .iter()
-            .any(|(v, _)| bound(v) || !seen.insert(v.as_str()))
-        {
+        if pending.iter().any(|(v, _)| bound(v) || !seen.insert(v.as_str())) {
             return Err(base);
         }
         // A hop binds its target and relationship; neither may already be bound
         // or be a name the clause binds elsewhere, which would make the expand
         // a match against it rather than a new binding.
         for (_, seg) in &hops {
-            let target = seg
-                .node
-                .variable
-                .as_deref()
-                .expect("lookup_hop requires a named target");
+            let target = seg.node.variable.as_deref().expect("lookup_hop requires a named target");
             let edge = seg.edge.variable.as_deref();
-            if bound(target)
-                || !seen.insert(target)
-                || edge.is_some_and(|e| bound(e) || !seen.insert(e))
-            {
+            if bound(target) || !seen.insert(target) || edge.is_some_and(|e| bound(e) || !seen.insert(e)) {
                 return Err(base);
             }
         }
@@ -7187,9 +6413,7 @@ impl QueryPlanner {
             let found = pending.iter().enumerate().find_map(|(pos, (v, l))| {
                 Self::lookup_key(v, l, &candidates, is_bound, store).map(|k| (pos, k))
             });
-            let Some((pos, (i, property, key))) = found else {
-                return Err(base);
-            };
+            let Some((pos, (i, property, key))) = found else { return Err(base) };
             let (v, l) = pending.remove(pos);
             if i < preds.len() {
                 used.push(i);
@@ -7202,25 +6426,10 @@ impl QueryPlanner {
             op = Box::new(CorrelatedIndexLookupOperator::new(op, v, l, property, key));
         }
         for (start, seg) in hops {
-            let target = seg
-                .node
-                .variable
-                .clone()
-                .expect("lookup_hop requires a named target");
-            let types = seg
-                .edge
-                .types
-                .iter()
-                .map(|t| t.as_str().to_string())
-                .collect();
-            let mut expand = ExpandOperator::new(
-                op,
-                start,
-                target.clone(),
-                seg.edge.variable.clone(),
-                types,
-                seg.edge.direction.clone(),
-            );
+            let target = seg.node.variable.clone().expect("lookup_hop requires a named target");
+            let types = seg.edge.types.iter().map(|t| t.as_str().to_string()).collect();
+            let mut expand =
+                ExpandOperator::new(op, start, target.clone(), seg.edge.variable.clone(), types, seg.edge.direction.clone());
             if !seg.node.labels.is_empty() {
                 expand = expand.with_target_labels(seg.node.labels.clone());
             }
@@ -7229,18 +6438,11 @@ impl QueryPlanner {
                 let filter = props
                     .iter()
                     .map(|(k, v)| Expression::Binary {
-                        left: Box::new(Expression::Property {
-                            variable: target.clone(),
-                            property: k.clone(),
-                        }),
+                        left: Box::new(Expression::Property { variable: target.clone(), property: k.clone() }),
                         op: BinaryOp::Eq,
                         right: Box::new(Expression::Literal(v.clone())),
                     })
-                    .reduce(|a, b| Expression::Binary {
-                        left: Box::new(a),
-                        op: BinaryOp::And,
-                        right: Box::new(b),
-                    })
+                    .reduce(|a, b| Expression::Binary { left: Box::new(a), op: BinaryOp::And, right: Box::new(b) })
                     .expect("non-empty properties");
                 op = Box::new(FilterOperator::new(op, filter));
             }
@@ -7270,17 +6472,8 @@ impl QueryPlanner {
         if allow_hash {
             for predicate in predicates {
                 for conjunct in flatten_and_predicates(predicate) {
-                    if let Expression::Binary {
-                        left,
-                        op: BinaryOp::Eq,
-                        right,
-                    } = conjunct
-                    {
-                        if let (
-                            Expression::Property { variable: a, .. },
-                            Expression::Property { variable: b, .. },
-                        ) = (&*left, &*right)
-                        {
+                    if let Expression::Binary { left, op: BinaryOp::Eq, right } = conjunct {
+                        if let (Expression::Property { variable: a, .. }, Expression::Property { variable: b, .. }) = (&*left, &*right) {
                             if left_vars.contains(a) && right_vars.contains(b) {
                                 keys.push((*left, *right));
                             } else if left_vars.contains(b) && right_vars.contains(a) {
@@ -7320,14 +6513,8 @@ impl QueryPlanner {
         cross_preds: &mut Vec<Expression>,
         store: &GraphStore,
     ) -> Result<OperatorBox, OperatorBox> {
-        let (op, mut used) = Self::lookup_chain(
-            existing,
-            match_clause,
-            own_where,
-            cross_preds,
-            |v| known_vars.contains(v),
-            store,
-        )?;
+        let (op, mut used) =
+            Self::lookup_chain(existing, match_clause, own_where, cross_preds, |v| known_vars.contains(v), store)?;
         used.sort_unstable();
         for i in used.into_iter().rev() {
             cross_preds.remove(i);
@@ -7353,16 +6540,9 @@ impl QueryPlanner {
             unwind.expression.clone(),
             unwind.variable.clone(),
         ));
-        Self::lookup_chain(
-            base,
-            match_clause,
-            own_where,
-            late_preds,
-            |v| v == unwind.variable,
-            store,
-        )
-        .ok()
-        .map(|(op, _)| op)
+        Self::lookup_chain(base, match_clause, own_where, late_preds, |v| v == unwind.variable, store)
+            .ok()
+            .map(|(op, _)| op)
     }
 
     /// Collect variables referenced by an expression
@@ -7373,29 +6553,17 @@ impl QueryPlanner {
 
     fn collect_expression_variables(expr: &Expression, vars: &mut HashSet<String>) {
         match expr {
-            Expression::Variable(v) => {
-                vars.insert(v.clone());
-            }
-            Expression::Property { variable, .. } => {
-                vars.insert(variable.clone());
-            }
+            Expression::Variable(v) => { vars.insert(v.clone()); }
+            Expression::Property { variable, .. } => { vars.insert(variable.clone()); }
             Expression::Binary { left, right, .. } => {
                 Self::collect_expression_variables(left, vars);
                 Self::collect_expression_variables(right, vars);
             }
-            Expression::Unary { expr: e, .. } => {
-                Self::collect_expression_variables(e, vars);
-            }
+            Expression::Unary { expr: e, .. } => { Self::collect_expression_variables(e, vars); }
             Expression::Function { args, .. } => {
-                for arg in args {
-                    Self::collect_expression_variables(arg, vars);
-                }
+                for arg in args { Self::collect_expression_variables(arg, vars); }
             }
-            Expression::ExistsSubquery {
-                pattern,
-                where_clause,
-                ..
-            } => {
+            Expression::ExistsSubquery { pattern, where_clause, .. } => {
                 // An EXISTS subquery's pattern routinely references variables bound
                 // by the enclosing query — `NOT EXISTS { MATCH (a)-[:KNOWS]-(b) }`
                 // where both `a` and `b` come from the outer MATCH. Those are real
@@ -7413,16 +6581,10 @@ impl QueryPlanner {
                 // (deferred predicates and cross-path predicates are both applied
                 // after the joins), never evaluates it too early.
                 for path in &pattern.paths {
-                    if let Some(v) = &path.start.variable {
-                        vars.insert(v.clone());
-                    }
+                    if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
                     for seg in &path.segments {
-                        if let Some(v) = &seg.node.variable {
-                            vars.insert(v.clone());
-                        }
-                        if let Some(v) = &seg.edge.variable {
-                            vars.insert(v.clone());
-                        }
+                        if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
+                        if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
                     }
                 }
                 if let Some(wc) = where_clause {
@@ -7464,11 +6626,7 @@ impl QueryPlanner {
                     Self::collect_expression_variables(e, vars);
                 }
             }
-            Expression::Case {
-                operand,
-                when_clauses,
-                else_result,
-            } => {
+            Expression::Case { operand, when_clauses, else_result } => {
                 for e in operand.iter() {
                     Self::collect_expression_variables(e, vars);
                 }
@@ -7484,12 +6642,7 @@ impl QueryPlanner {
             // is *not* an outer dependency -- deferring a predicate on a name
             // nothing outside ever binds would defer it past every point that
             // could apply it.
-            Expression::ListComprehension {
-                variable,
-                list_expr,
-                filter,
-                map_expr,
-            } => {
+            Expression::ListComprehension { variable, list_expr, filter, map_expr } => {
                 let mut inner = HashSet::new();
                 Self::collect_expression_variables(list_expr, &mut inner);
                 for e in filter.iter() {
@@ -7499,25 +6652,14 @@ impl QueryPlanner {
                 inner.remove(variable);
                 vars.extend(inner);
             }
-            Expression::PredicateFunction {
-                variable,
-                list_expr,
-                predicate,
-                ..
-            } => {
+            Expression::PredicateFunction { variable, list_expr, predicate, .. } => {
                 let mut inner = HashSet::new();
                 Self::collect_expression_variables(list_expr, &mut inner);
                 Self::collect_expression_variables(predicate, &mut inner);
                 inner.remove(variable);
                 vars.extend(inner);
             }
-            Expression::Reduce {
-                accumulator,
-                init,
-                variable,
-                list_expr,
-                expression,
-            } => {
+            Expression::Reduce { accumulator, init, variable, list_expr, expression } => {
                 let mut inner = HashSet::new();
                 Self::collect_expression_variables(init, &mut inner);
                 Self::collect_expression_variables(list_expr, &mut inner);
@@ -7526,24 +6668,14 @@ impl QueryPlanner {
                 inner.remove(variable);
                 vars.extend(inner);
             }
-            Expression::PatternComprehension {
-                pattern,
-                filter,
-                projection,
-            } => {
+            Expression::PatternComprehension { pattern, filter, projection } => {
                 // The pattern's own variables are over-approximated as
                 // dependencies, exactly as in the `ExistsSubquery` arm.
                 for path in &pattern.paths {
-                    if let Some(v) = &path.start.variable {
-                        vars.insert(v.clone());
-                    }
+                    if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
                     for seg in &path.segments {
-                        if let Some(v) = &seg.node.variable {
-                            vars.insert(v.clone());
-                        }
-                        if let Some(v) = &seg.edge.variable {
-                            vars.insert(v.clone());
-                        }
+                        if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
+                        if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
                     }
                 }
                 for e in filter.iter() {
@@ -7666,12 +6798,17 @@ impl QueryPlanner {
             .iter()
             .enumerate()
             .map(|(i, item)| {
-                let alias = item.alias.clone().unwrap_or_else(|| item.column_name(i));
+                let alias = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| item.column_name(i));
                 output_columns.push(alias.clone());
                 // For the count() item, project the already-bound alias
                 // rather than re-evaluating the aggregate function.
                 let expr = match &item.expression {
-                    Expression::Function { name, .. } if name.eq_ignore_ascii_case("count") => {
+                    Expression::Function { name, .. }
+                        if name.eq_ignore_ascii_case("count") =>
+                    {
                         count_item_alias = Some(alias.clone());
                         Expression::Variable(pat.count_alias.clone())
                     }
@@ -7730,11 +6867,7 @@ impl QueryPlanner {
                     .iter()
                     .map(|i| {
                         (
-                            resolve_sort_key(
-                                &i.expression,
-                                &order_keys,
-                                SortPosition::AfterProjection,
-                            ),
+                            resolve_sort_key(&i.expression, &order_keys, SortPosition::AfterProjection),
                             i.ascending,
                         )
                     })
@@ -7897,10 +7030,15 @@ impl QueryPlanner {
             .iter()
             .enumerate()
             .map(|(i, item)| {
-                let alias = item.alias.clone().unwrap_or_else(|| item.column_name(i));
+                let alias = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| item.column_name(i));
                 output_columns.push(alias.clone());
                 let expr = match &item.expression {
-                    Expression::Function { name, .. } if name.eq_ignore_ascii_case("count") => {
+                    Expression::Function { name, .. }
+                        if name.eq_ignore_ascii_case("count") =>
+                    {
                         Expression::Variable(pat.core.count_alias.clone())
                     }
                     other => other.clone(),
@@ -8078,7 +7216,10 @@ impl QueryPlanner {
             .iter()
             .enumerate()
             .map(|(i, item)| {
-                let alias = item.alias.clone().unwrap_or_else(|| item.column_name(i));
+                let alias = item
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| item.column_name(i));
                 output_columns.push(alias.clone());
                 (item.expression.clone(), alias)
             })
@@ -8236,11 +7377,12 @@ impl QueryPlanner {
             // Add start node
             let start = &path.start;
             let labels: Vec<Label> = start.labels.clone();
-            let properties: HashMap<String, PropertyValue> =
-                start.properties.clone().unwrap_or_default();
+            let properties: HashMap<String, PropertyValue> = start.properties.clone().unwrap_or_default();
             let variable = start.variable.clone();
 
-            let start_already_bound = variable.as_ref().is_some_and(|v| created_vars.contains(v));
+            let start_already_bound = variable
+                .as_ref()
+                .is_some_and(|v| created_vars.contains(v));
 
             // Track output column if variable exists — once per variable, since
             // a repeat mention is the same node.
@@ -8279,8 +7421,7 @@ impl QueryPlanner {
             for segment in &path.segments {
                 let node = &segment.node;
                 let node_labels: Vec<Label> = node.labels.clone();
-                let node_properties: HashMap<String, PropertyValue> =
-                    node.properties.clone().unwrap_or_default();
+                let node_properties: HashMap<String, PropertyValue> = node.properties.clone().unwrap_or_default();
                 let node_variable = node.variable.clone();
 
                 let node_already_bound = node_variable
@@ -8311,13 +7452,10 @@ impl QueryPlanner {
 
                 // Extract edge information
                 let edge = &segment.edge;
-                let edge_type = edge
-                    .types
-                    .first()
+                let edge_type = edge.types.first()
                     .cloned()
                     .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
-                let edge_properties: HashMap<String, PropertyValue> =
-                    edge.properties.clone().unwrap_or_default();
+                let edge_properties: HashMap<String, PropertyValue> = edge.properties.clone().unwrap_or_default();
                 let edge_variable = edge.variable.clone();
 
                 // Both endpoints now always have a handle (real or synthetic), so an edge
@@ -8378,10 +7516,7 @@ impl QueryPlanner {
         } else {
             // Create edges after nodes are created
             // We need a special combined operator that creates nodes first, then edges
-            Box::new(CreateNodesAndEdgesOperator::new(
-                node_operator,
-                edges_to_create,
-            ))
+            Box::new(CreateNodesAndEdgesOperator::new(node_operator, edges_to_create))
         };
 
         // Bind any named paths from the handles collected above (#876).
@@ -8398,10 +7533,7 @@ impl QueryPlanner {
         Ok(ExecutionPlan {
             root: final_operator,
             output_columns,
-            is_write: true,
-            candidates_evaluated: 0,
-            chosen_plan_cost: 0.0,
-            candidate_costs: Vec::new(),
+            is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
         })
     }
 }
@@ -8421,12 +7553,8 @@ fn named_path_handles(
     let mut out = Vec::new();
     let mut anon = 0usize;
     for path in &pattern.paths {
-        let Some(pv) = &path.path_variable else {
-            continue;
-        };
-        let Some(start) = &path.start.variable else {
-            continue;
-        };
+        let Some(pv) = &path.path_variable else { continue };
+        let Some(start) = &path.start.variable else { continue };
         let mut nodes = vec![start.clone()];
         let mut edges = Vec::new();
         let mut complete = true;
@@ -8476,9 +7604,7 @@ fn propagate_shared_variable_labels(clauses: &[MatchClause]) -> Vec<MatchClause>
             None => return,
         };
         if !node.labels.is_empty() {
-            var_labels
-                .entry(var.clone())
-                .or_insert_with(|| node.labels.clone());
+            var_labels.entry(var.clone()).or_insert_with(|| node.labels.clone());
         }
         if let Some(props) = &node.properties {
             let entry = var_properties.entry(var.clone()).or_default();
@@ -8551,15 +7677,9 @@ fn point_index_scan(
         return None;
     }
     for pred in preds.iter().flat_map(flatten_and_predicates) {
-        let Some((property, region)) = super::point_ops::spatial_region(var, &pred, store) else {
-            continue;
-        };
+        let Some((property, region)) = super::point_ops::spatial_region(var, &pred, store) else { continue };
         for label in labels {
-            if store
-                .point_index
-                .name_for(label.as_str(), &property)
-                .is_some()
-            {
+            if store.point_index.name_for(label.as_str(), &property).is_some() {
                 return Some(Box::new(super::point_ops::PointIndexScanOperator::new(
                     var.to_string(),
                     label.clone(),
@@ -8582,11 +7702,7 @@ struct FusedCloseSegment {
 /// segment along. The pairs it matches are the ones the written path matches.
 fn reversed_path(p: &PathPattern) -> PathPattern {
     let mut out = p.clone();
-    out.start = p
-        .segments
-        .last()
-        .map(|s| s.node.clone())
-        .unwrap_or_else(|| p.start.clone());
+    out.start = p.segments.last().map(|s| s.node.clone()).unwrap_or_else(|| p.start.clone());
     out.segments = (0..p.segments.len())
         .rev()
         .map(|k| {
@@ -8596,11 +7712,7 @@ fn reversed_path(p: &PathPattern) -> PathPattern {
                 Direction::Incoming => Direction::Outgoing,
                 Direction::Both => Direction::Both,
             };
-            let node = if k == 0 {
-                p.start.clone()
-            } else {
-                p.segments[k - 1].node.clone()
-            };
+            let node = if k == 0 { p.start.clone() } else { p.segments[k - 1].node.clone() };
             PathSegment { edge, node }
         })
         .collect();
@@ -8694,24 +7806,18 @@ fn range_other_end(
         if i == skip {
             continue;
         }
-        let Expression::Binary { left, op, right } = pred else {
-            continue;
-        };
+        let Expression::Binary { left, op, right } = pred else { continue };
         let (op, value) = match (left.as_ref(), right.as_ref()) {
-            (
-                Expression::Property {
-                    variable,
-                    property: p,
-                },
-                other,
-            ) if variable == var && p == property => (op.clone(), fold_constant(other)),
-            (
-                other,
-                Expression::Property {
-                    variable,
-                    property: p,
-                },
-            ) if variable == var && p == property => (flip_comparison_op(op), fold_constant(other)),
+            (Expression::Property { variable, property: p }, other)
+                if variable == var && p == property =>
+            {
+                (op.clone(), fold_constant(other))
+            }
+            (other, Expression::Property { variable, property: p })
+                if variable == var && p == property =>
+            {
+                (flip_comparison_op(op), fold_constant(other))
+            }
             _ => continue,
         };
         let Some(value) = value else { continue };
@@ -8720,15 +7826,11 @@ fn range_other_end(
         }
         match op {
             BinaryOp::Lt | BinaryOp::Le if want_upper => {
-                let Some(hi) = numeric_tie_end(&value, true) else {
-                    continue;
-                };
+                let Some(hi) = numeric_tie_end(&value, true) else { continue };
                 return Some(OtherEnd::AtMost(hi));
             }
             BinaryOp::Gt | BinaryOp::Ge if want_lower => {
-                let Some(lo) = numeric_tie_end(&value, false) else {
-                    continue;
-                };
+                let Some(lo) = numeric_tie_end(&value, false) else { continue };
                 return Some(OtherEnd::AtLeast(lo));
             }
             _ => {}
@@ -8761,10 +7863,7 @@ fn flip_comparison_op(op: &BinaryOp) -> BinaryOp {
 /// `MATCH (n) WHERE id(n) = 5` lowered to a full label scan plus a filter, and
 /// `shortestPath((a)-[:KNOWS*]-(b)) WHERE id(a) = 1 AND id(b) = 3500` ran
 /// ~1000x slower than the same query written with inline properties (#538).
-fn find_id_predicate(
-    var: &str,
-    preds: &[Expression],
-) -> Option<(usize, Vec<crate::graph::NodeId>)> {
+fn find_id_predicate(var: &str, preds: &[Expression]) -> Option<(usize, Vec<crate::graph::NodeId>)> {
     /// `id(x)` applied to exactly this variable.
     fn is_id_of(expr: &Expression, var: &str) -> bool {
         matches!(
@@ -8805,8 +7904,7 @@ fn find_id_predicate(
             }
             BinaryOp::In => {
                 if let PropertyValue::Array(items) = literal {
-                    let ids: Vec<crate::graph::NodeId> =
-                        items.iter().filter_map(as_node_id).collect();
+                    let ids: Vec<crate::graph::NodeId> = items.iter().filter_map(as_node_id).collect();
                     // Only if every element was a usable id -- dropping one
                     // silently would lose rows.
                     if !ids.is_empty() && ids.len() == items.len() {
@@ -8865,23 +7963,16 @@ fn find_index_predicate(
     for (i, pred) in preds.iter().enumerate() {
         if let Expression::Binary { left, op, right } = pred {
             let matched = match (left.as_ref(), right.as_ref()) {
-                (Expression::Property { variable, property }, Expression::Literal(val))
-                    if variable == var =>
-                {
+                (Expression::Property { variable, property }, Expression::Literal(val)) if variable == var => {
                     Some((property.clone(), op.clone(), val.clone()))
                 }
-                (Expression::Literal(val), Expression::Property { variable, property })
-                    if variable == var =>
-                {
+                (Expression::Literal(val), Expression::Property { variable, property }) if variable == var => {
                     Some((property.clone(), flip_comparison_op(op), val.clone()))
                 }
                 _ => None,
             };
             if let Some((property, norm_op, val)) = matched {
-                if matches!(
-                    norm_op,
-                    BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le
-                ) {
+                if matches!(norm_op, BinaryOp::Eq | BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le) {
                     for label in labels {
                         if store.property_index.has_index(label, &property) {
                             return Some((i, label.clone(), property, norm_op, val));
@@ -8943,9 +8034,7 @@ fn anchor_cardinality(
         // one -- and inverted the choice (#303). One probe at plan time also
         // makes a missing anchor cost 0, so the plan short-circuits.
         let exact = if matches!(op, BinaryOp::Eq) {
-            store
-                .property_index
-                .indexed_equality_count(&label, &property, &val)
+            store.property_index.indexed_equality_count(&label, &property, &val)
         } else {
             None
         };
@@ -8959,9 +8048,7 @@ fn anchor_cardinality(
                     // From the histogram (#478): a range on a skewed property
                     // keeps anywhere from nothing to everything, and the fixed
                     // 0.3 costed both alike.
-                    stats
-                        .estimate_comparison_selectivity(&label, &property, &op, &val)
-                        .unwrap_or(0.3)
+                    stats.estimate_comparison_selectivity(&label, &property, &op, &val).unwrap_or(0.3)
                 };
                 (base * selectivity).max(1.0)
             }
@@ -8996,21 +8083,10 @@ fn anchor_cardinality(
         }
     }
     for pred in path_preds {
-        let Expression::Binary {
-            left,
-            op: BinaryOp::Eq,
-            right,
-        } = pred
-        else {
-            continue;
-        };
+        let Expression::Binary { left, op: BinaryOp::Eq, right } = pred else { continue };
         let (var, prop, value) = match (left.as_ref(), right.as_ref()) {
-            (Expression::Property { variable, property }, Expression::Literal(v)) => {
-                (variable, property, v)
-            }
-            (Expression::Literal(v), Expression::Property { variable, property }) => {
-                (variable, property, v)
-            }
+            (Expression::Property { variable, property }, Expression::Literal(v)) => (variable, property, v),
+            (Expression::Literal(v), Expression::Property { variable, property }) => (variable, property, v),
             _ => continue,
         };
         if var == &node.var {
@@ -9138,21 +8214,10 @@ fn pinned_node_for(
         return None;
     }
     for pred in preds {
-        let Expression::Binary {
-            left,
-            op: BinaryOp::Eq,
-            right,
-        } = pred
-        else {
-            continue;
-        };
+        let Expression::Binary { left, op: BinaryOp::Eq, right } = pred else { continue };
         let (prop_var, prop_name, value) = match (left.as_ref(), right.as_ref()) {
-            (Expression::Property { variable, property }, Expression::Literal(v)) => {
-                (variable, property, v)
-            }
-            (Expression::Literal(v), Expression::Property { variable, property }) => {
-                (variable, property, v)
-            }
+            (Expression::Property { variable, property }, Expression::Literal(v)) => (variable, property, v),
+            (Expression::Literal(v), Expression::Property { variable, property }) => (variable, property, v),
             _ => continue,
         };
         if prop_var != var {
@@ -9161,9 +8226,7 @@ fn pinned_node_for(
         // Ask the index for the actual matches rather than estimating: a pin
         // has to be exactly one node, and an estimate cannot establish that.
         for label in store.catalog().label_counts.keys() {
-            let Some(index) = store.property_index.get_index(label, prop_name) else {
-                continue;
-            };
+            let Some(index) = store.property_index.get_index(label, prop_name) else { continue };
             let nodes = index.read().unwrap().get(value);
             if nodes.len() == 1 {
                 return nodes.first().copied();
@@ -9296,15 +8359,8 @@ fn choose_anchor_index(
             let (scan, emitted) = anchor_cardinality(&nodes[i], path_preds, store);
             eprintln!(
                 "[anchor] {:<12} labels={:?} scan={:.0} emitted={:.0} path_cost={:.0}",
-                nodes[i].var,
-                nodes[i]
-                    .labels
-                    .iter()
-                    .map(|l| l.as_str())
-                    .collect::<Vec<_>>(),
-                scan,
-                emitted,
-                cost
+                nodes[i].var, nodes[i].labels.iter().map(|l| l.as_str()).collect::<Vec<_>>(),
+                scan, emitted, cost
             );
         }
         // Strict, so node 0 wins ties: re-anchoring has a real cost the model
@@ -9324,11 +8380,7 @@ fn choose_anchor_index(
 /// E.g., `a AND b AND c` → `[a, b, c]`
 fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
     match expr {
-        Expression::Binary {
-            left,
-            op: BinaryOp::And,
-            right,
-        } => {
+        Expression::Binary { left, op: BinaryOp::And, right } => {
             let mut result = flatten_and_predicates(left);
             result.extend(flatten_and_predicates(right));
             result
@@ -9341,16 +8393,8 @@ fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
 fn same_equality(a: &Expression, b: &Expression) -> bool {
     match (a, b) {
         (
-            Expression::Binary {
-                left: al,
-                op: BinaryOp::Eq,
-                right: ar,
-            },
-            Expression::Binary {
-                left: bl,
-                op: BinaryOp::Eq,
-                right: br,
-            },
+            Expression::Binary { left: al, op: BinaryOp::Eq, right: ar },
+            Expression::Binary { left: bl, op: BinaryOp::Eq, right: br },
         ) => (al == bl && ar == br) || (al == br && ar == bl),
         _ => false,
     }
@@ -9430,11 +8474,9 @@ fn propagated_equality_constants(
         usable_source: &[bool],
     ) -> Option<(&'e Expression, &'e Expression)> {
         match c {
-            Expression::Binary {
-                left,
-                op: BinaryOp::Eq,
-                right,
-            } if usable_source.get(i).copied().unwrap_or(false) => {
+            Expression::Binary { left, op: BinaryOp::Eq, right }
+                if usable_source.get(i).copied().unwrap_or(false) =>
+            {
                 Some((left.as_ref(), right.as_ref()))
             }
             _ => None,
@@ -9458,16 +8500,13 @@ fn propagated_equality_constants(
         return Vec::new();
     }
     let mut parent: Vec<usize> = (0..terms.len()).collect();
-    let index_of =
-        |t: &(String, String)| terms.iter().position(|u| u == t).expect("interned above");
+    let index_of = |t: &(String, String)| terms.iter().position(|u| u == t).expect("interned above");
 
     // An equality between two property terms links them; one against a literal
     // pins the term's class.
     let mut pinned: Vec<(usize, PropertyValue)> = Vec::new();
     for (i, c) in conjuncts.iter().enumerate() {
-        let Some((l, r)) = operands(i, c, usable_source) else {
-            continue;
-        };
+        let Some((l, r)) = operands(i, c, usable_source) else { continue };
         match (as_term(l), as_term(r)) {
             (Some(a), Some(b)) => {
                 let (ra, rb) = (index_of(&a), index_of(&b));
@@ -9503,9 +8542,7 @@ fn propagated_equality_constants(
     let mut out: Vec<Expression> = Vec::new();
     for ti in 0..terms.len() {
         let r = find(&mut parent, ti);
-        let Some(Some(v)) = class_literal[r].clone() else {
-            continue;
-        };
+        let Some(Some(v)) = class_literal[r].clone() else { continue };
         let (variable, property) = terms[ti].clone();
         if !emit_for_variable(&variable) {
             continue;
@@ -9554,7 +8591,8 @@ impl QueryPlanner {
             HashMap<String, PropertyValue>,
             Option<HashMap<String, Expression>>,
         )> = Vec::new();
-        let mut edges_to_create: Vec<crate::query::executor::operator::EdgeToCreate> = Vec::new();
+        let mut edges_to_create: Vec<crate::query::executor::operator::EdgeToCreate> =
+            Vec::new();
 
         let mut handle_for = |node: &crate::query::ast::NodePattern,
                               nodes: &mut Vec<(
@@ -9728,31 +8766,17 @@ impl QueryPlanner {
             match clause {
                 Clause::Match(m) => {
                     for path in &m.pattern.paths {
-                        if let Some(v) = &path.path_variable {
-                            bound.insert(v.clone());
-                        }
-                        if let Some(v) = &path.start.variable {
-                            bound.insert(v.clone());
-                        }
+                        if let Some(v) = &path.path_variable { bound.insert(v.clone()); }
+                        if let Some(v) = &path.start.variable { bound.insert(v.clone()); }
                         for seg in &path.segments {
-                            if let Some(v) = &seg.edge.variable {
-                                bound.insert(v.clone());
-                            }
-                            if let Some(v) = &seg.node.variable {
-                                bound.insert(v.clone());
-                            }
+                            if let Some(v) = &seg.edge.variable { bound.insert(v.clone()); }
+                            if let Some(v) = &seg.node.variable { bound.insert(v.clone()); }
                         }
                     }
                 }
-                Clause::Unwind(u) => {
-                    bound.insert(u.variable.clone());
-                }
-                Clause::LoadCsv(l) => {
-                    bound.insert(l.variable.clone());
-                }
-                Clause::LoadParquet(l) => {
-                    bound.insert(l.variable.clone());
-                }
+                Clause::Unwind(u) => { bound.insert(u.variable.clone()); }
+                Clause::LoadCsv(l) => { bound.insert(l.variable.clone()); }
+                Clause::LoadParquet(l) => { bound.insert(l.variable.clone()); }
                 _ => {}
             }
         }
@@ -9793,17 +8817,15 @@ impl QueryPlanner {
                     // an unsorted key order varies between runs.
                     let clause_vars = Self::clause_variables(&mc.pattern);
                     let match_op = self.dispatch_plan_match(mc, None, store)?;
-                    let mut shared: Vec<String> =
-                        bound.intersection(&clause_vars).cloned().collect();
+                    let mut shared: Vec<String> = bound.intersection(&clause_vars).cloned().collect();
                     shared.sort();
                     operator = if shared.is_empty() {
                         Box::new(CartesianProductOperator::new(operator, match_op)) as OperatorBox
                     } else if mc.optional {
                         let right_only: Vec<String> =
                             clause_vars.difference(&bound).cloned().collect();
-                        Box::new(LeftOuterJoinOperator::new(
-                            operator, match_op, shared, right_only,
-                        )) as OperatorBox
+                        Box::new(LeftOuterJoinOperator::new(operator, match_op, shared, right_only))
+                            as OperatorBox
                     } else {
                         Box::new(JoinOperator::new(operator, match_op, shared)) as OperatorBox
                     };
@@ -9887,25 +8909,21 @@ impl QueryPlanner {
                     bound = wc
                         .items
                         .iter()
-                        .filter_map(|i| {
-                            i.alias.clone().or_else(|| match &i.expression {
-                                Expression::Variable(v) => Some(v.clone()),
-                                _ => None,
-                            })
-                        })
+                        .filter_map(|i| i.alias.clone().or_else(|| match &i.expression {
+                            Expression::Variable(v) => Some(v.clone()),
+                            _ => None,
+                        }))
                         .collect();
                     output_columns = wc
                         .items
                         .iter()
-                        .map(|i| {
-                            i.alias.clone().unwrap_or_else(|| match &i.expression {
-                                Expression::Variable(v) => v.clone(),
-                                Expression::Property { variable, property } => {
-                                    format!("{variable}.{property}")
-                                }
-                                _ => String::new(),
-                            })
-                        })
+                        .map(|i| i.alias.clone().unwrap_or_else(|| match &i.expression {
+                            Expression::Variable(v) => v.clone(),
+                            Expression::Property { variable, property } => {
+                                format!("{variable}.{property}")
+                            }
+                            _ => String::new(),
+                        }))
                         .collect();
                 }
                 // A `LOAD CSV` after the reading prefix -- `WITH ... LOAD CSV ...`.
@@ -9913,10 +8931,9 @@ impl QueryPlanner {
                 // silently bind nothing, which is how a clause gets added to one AST
                 // shape and not the other.
                 Clause::LoadCsv(l) => {
-                    operator = Box::new(crate::query::executor::operator::LoadCsvOperator::new(
-                        operator,
-                        l.clone(),
-                    ));
+                    operator = Box::new(
+                        crate::query::executor::operator::LoadCsvOperator::new(operator, l.clone()),
+                    );
                     bound.insert(l.variable.clone());
                 }
                 // `WITH ... LOAD PARQUET ...`, for the same reason.
@@ -9956,8 +8973,7 @@ impl QueryPlanner {
                         operator = Box::new(RemovePropertyOperator::new(operator, props));
                     }
                     if !labels.is_empty() {
-                        operator =
-                            Box::new(LabelMutationOperator::new(operator, Vec::new(), labels));
+                        operator = Box::new(LabelMutationOperator::new(operator, Vec::new(), labels));
                     }
                 }
                 Clause::Delete(dc) => {
@@ -9965,11 +8981,7 @@ impl QueryPlanner {
                     operator = Box::new(crate::query::executor::operator::EagerOperator::new(
                         operator, 0, None,
                     ));
-                    operator = Box::new(DeleteOperator::new(
-                        operator,
-                        dc.expressions.clone(),
-                        dc.detach,
-                    ));
+                    operator = Box::new(DeleteOperator::new(operator, dc.expressions.clone(), dc.detach));
                     // The same drain in the clause-pipeline shape (#994). A
                     // rule applied to one AST shape and not its twin silently
                     // no-ops for every query written the other way.
@@ -10050,14 +9062,13 @@ impl QueryPlanner {
                             .items
                             .iter()
                             .map(|i| {
-                                let alias =
-                                    i.alias.clone().unwrap_or_else(|| match &i.expression {
-                                        Expression::Variable(v) => v.clone(),
-                                        Expression::Property { variable, property } => {
-                                            format!("{variable}.{property}")
-                                        }
-                                        _ => String::new(),
-                                    });
+                                let alias = i.alias.clone().unwrap_or_else(|| match &i.expression {
+                                    Expression::Variable(v) => v.clone(),
+                                    Expression::Property { variable, property } => {
+                                        format!("{variable}.{property}")
+                                    }
+                                    _ => String::new(),
+                                });
                                 (i.expression.clone(), alias)
                             })
                             .collect();
@@ -10109,7 +9120,7 @@ impl QueryPlanner {
                     if rc.distinct {
                         operator = Box::new(DistinctOperator::new(operator));
                     }
-
+                
                     // The aggregating half of the choice above: sort the
                     // projected rows, where the aggregate's alias is bound and
                     // `count` has already been computed. After `DISTINCT`,
@@ -10181,12 +9192,7 @@ impl QueryPlanner {
     }
 
     /// Build a WithBarrier operator from a WithClause (extracted for multi-WITH reuse)
-    fn build_with_barrier(
-        &self,
-        input: OperatorBox,
-        with_clause: &WithClause,
-        _store: &GraphStore,
-    ) -> ExecutionResult<OperatorBox> {
+    fn build_with_barrier(&self, input: OperatorBox, with_clause: &WithClause, _store: &GraphStore) -> ExecutionResult<OperatorBox> {
         let mut items = Vec::new();
         let mut aggregates = Vec::new();
         let mut group_by = Vec::new();
@@ -10204,8 +9210,7 @@ impl QueryPlanner {
         for (idx, item) in with_clause.items.iter().enumerate() {
             let alias = item.column_name(idx);
 
-            let (rewritten, extracted) =
-                extract_nested_aggregates(&item.expression, &mut agg_counter);
+            let (rewritten, extracted) = extract_nested_aggregates(&item.expression, &mut agg_counter);
             if !extracted.is_empty() {
                 has_aggregation = true;
             }
@@ -10279,21 +9284,14 @@ impl QueryPlanner {
             .map(|(idx, item)| item.column_name(idx))
             .collect();
         let mut input = input;
-        let mut where_predicate = with_clause
-            .where_clause
-            .as_ref()
-            .map(|wc| wc.predicate.clone());
+        let mut where_predicate = with_clause.where_clause.as_ref().map(|wc| wc.predicate.clone());
         if let Some(pred) = where_predicate.take() {
             let (mut pre, mut post): (Vec<Expression>, Vec<Expression>) = (Vec::new(), Vec::new());
             for conjunct in flatten_and_predicates(&pred) {
                 let mut vars = HashSet::new();
                 Self::collect_expression_variables(&conjunct, &mut vars);
                 let before = !vars.is_empty() && !vars.iter().any(|v| aliases.contains(v));
-                if before {
-                    pre.push(conjunct)
-                } else {
-                    post.push(conjunct)
-                }
+                if before { pre.push(conjunct) } else { post.push(conjunct) }
             }
             let join = |v: Vec<Expression>| {
                 v.into_iter().reduce(|acc, p| Expression::Binary {
@@ -10388,14 +9386,14 @@ impl QueryPlanner {
         };
 
         for path in &create_pattern.paths {
-            let mut current_var = handle_for(&path.start, &mut nodes_to_create, &mut anon_seq);
+            let mut current_var =
+                handle_for(&path.start, &mut nodes_to_create, &mut anon_seq);
 
             for segment in &path.segments {
-                let target_var = handle_for(&segment.node, &mut nodes_to_create, &mut anon_seq);
+                let target_var =
+                    handle_for(&segment.node, &mut nodes_to_create, &mut anon_seq);
                 let edge = &segment.edge;
-                let edge_type = edge
-                    .types
-                    .first()
+                let edge_type = edge.types.first()
                     .cloned()
                     .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
                 let edge_properties = edge.properties.clone().unwrap_or_default();
@@ -10489,14 +9487,11 @@ impl QueryPlanner {
                         i.property.clone(),
                         i.value.clone(),
                     )),
-                    SetOp::Entity(i) => writes.push(SetWrite::Entity(
-                        i.variable.clone(),
-                        i.merge,
-                        i.value.clone(),
-                    )),
-                    SetOp::Labels(i) => {
-                        label_adds.extend(i.labels.iter().map(|l| (i.variable.clone(), l.clone())))
+                    SetOp::Entity(i) => {
+                        writes.push(SetWrite::Entity(i.variable.clone(), i.merge, i.value.clone()))
                     }
+                    SetOp::Labels(i) => label_adds
+                        .extend(i.labels.iter().map(|l| (i.variable.clone(), l.clone()))),
                 }
             }
             if !writes.is_empty() {
@@ -10532,11 +9527,7 @@ impl QueryPlanner {
             operator = Box::new(RemovePropertyOperator::new(operator, items));
         }
         if !label_removes.is_empty() {
-            operator = Box::new(LabelMutationOperator::new(
-                operator,
-                Vec::new(),
-                label_removes,
-            ));
+            operator = Box::new(LabelMutationOperator::new(operator, Vec::new(), label_removes));
         }
         operator
     }
@@ -10570,10 +9561,7 @@ impl QueryPlanner {
             let mut complete = current_var.is_some();
             for segment in &path.segments {
                 let edge = &segment.edge;
-                let edge_type = edge
-                    .types
-                    .first()
-                    .cloned()
+                let edge_type = edge.types.first().cloned()
                     .unwrap_or_else(|| EdgeType::new("RELATED_TO"));
                 let edge_props = edge.properties.clone().unwrap_or_default();
                 let edge_var = match (&edge.variable, &path.path_variable) {
@@ -10598,7 +9586,8 @@ impl QueryPlanner {
                     // Without this the operator only ever looked for
                     // `src -> tgt`, so an existing `tgt -> src` did not
                     // match and MERGE wrote a duplicate beside it (#938).
-                    let undirected = matches!(edge.direction, crate::query::ast::Direction::Both);
+                    let undirected =
+                        matches!(edge.direction, crate::query::ast::Direction::Both);
                     edges_to_merge.push((
                         src.clone(),
                         tgt.clone(),
@@ -10635,9 +9624,11 @@ impl QueryPlanner {
         // `MATCH (a:A) MERGE (a)-[:T]->(b:B)` -- where `b` is bound by
         // nothing -- wired an edge between one endpoint and no other, and
         // the whole MERGE became a silent no-op returning zero rows (#894).
-        let all_endpoints_bound = edges_to_merge.iter().all(|(src, tgt, ..)| {
-            bound_by_match.iter().any(|v| v == src) && bound_by_match.iter().any(|v| v == tgt)
-        });
+        let all_endpoints_bound = edges_to_merge
+            .iter()
+            .all(|(src, tgt, ..)| {
+                bound_by_match.iter().any(|v| v == src) && bound_by_match.iter().any(|v| v == tgt)
+            });
         if !edges_to_merge.is_empty() && all_endpoints_bound {
             // Edge MERGE: use MatchMergeEdgeOperator
             use crate::query::executor::operator::MatchMergeEdgeOperator;
@@ -10736,19 +9727,11 @@ impl QueryPlanner {
     fn clause_variables(pattern: &crate::query::ast::Pattern) -> HashSet<String> {
         let mut vars = HashSet::new();
         for path in &pattern.paths {
-            if let Some(v) = &path.path_variable {
-                vars.insert(v.clone());
-            }
-            if let Some(v) = &path.start.variable {
-                vars.insert(v.clone());
-            }
+            if let Some(v) = &path.path_variable { vars.insert(v.clone()); }
+            if let Some(v) = &path.start.variable { vars.insert(v.clone()); }
             for seg in &path.segments {
-                if let Some(v) = &seg.node.variable {
-                    vars.insert(v.clone());
-                }
-                if let Some(v) = &seg.edge.variable {
-                    vars.insert(v.clone());
-                }
+                if let Some(v) = &seg.node.variable { vars.insert(v.clone()); }
+                if let Some(v) = &seg.edge.variable { vars.insert(v.clone()); }
             }
         }
         vars
@@ -10980,9 +9963,7 @@ impl QueryPlanner {
                 let mut pvars = HashSet::new();
                 Self::collect_expression_variables(p, &mut pvars);
                 !pvars.is_empty()
-                    && !clause_vars
-                        .iter()
-                        .any(|_| pvars.iter().all(|v| new_vars.contains(v)))
+                    && !clause_vars.iter().any(|_| pvars.iter().all(|v| new_vars.contains(v)))
             })
             .collect();
         if !remaining_preds.is_empty() {
@@ -11027,12 +10008,8 @@ impl QueryPlanner {
             .variable
             .clone()
             .expect("optional_pushdown_vars requires a named far end");
-        let edge_types: Vec<String> = segment
-            .edge
-            .types
-            .iter()
-            .map(|t| t.as_str().to_string())
-            .collect();
+        let edge_types: Vec<String> =
+            segment.edge.types.iter().map(|t| t.as_str().to_string()).collect();
 
         let mut expand = ExpandOperator::new(
             upstream,
@@ -11060,7 +10037,9 @@ impl QueryPlanner {
                 // lookup per candidate edge instead of a node fetch and a
                 // property compare (#665). This path was written after that
                 // one and did not inherit it.
-                if let Some(ids) = self.resolve_target_ids(&segment.node.labels, &pushed, store) {
+                if let Some(ids) =
+                    self.resolve_target_ids(&segment.node.labels, &pushed, store)
+                {
                     expand = expand.with_target_ids(ids);
                 }
                 expand = expand.with_target_props(pushed);
@@ -11328,11 +10307,7 @@ impl QueryPlanner {
             // end variable that is, with every single-hop segment and no path
             // variable, so the path can be walked from its end instead
             // (#1613; `plan_pushed_down_match` does the reversal).
-            let start_bound = path
-                .start
-                .variable
-                .as_ref()
-                .is_some_and(|v| known_vars.contains(v));
+            let start_bound = path.start.variable.as_ref().is_some_and(|v| known_vars.contains(v));
             if !start_bound {
                 let end_bound = path
                     .segments
@@ -11347,23 +10322,11 @@ impl QueryPlanner {
                 }
                 // The other endpoint and everything between must be new, by
                 // the same argument as below.
-                let interior_bound = path
-                    .start
-                    .variable
-                    .as_ref()
-                    .is_some_and(|v| known_vars.contains(v))
-                    || path.segments[..path.segments.len() - 1].iter().any(|s| {
-                        s.node
-                            .variable
-                            .as_ref()
-                            .is_some_and(|v| known_vars.contains(v))
-                    })
-                    || path.segments.iter().any(|s| {
-                        s.edge
-                            .variable
-                            .as_ref()
-                            .is_some_and(|v| known_vars.contains(v))
-                    });
+                let interior_bound = path.start.variable.as_ref().is_some_and(|v| known_vars.contains(v))
+                    || path.segments[..path.segments.len() - 1]
+                        .iter()
+                        .any(|s| s.node.variable.as_ref().is_some_and(|v| known_vars.contains(v)))
+                    || path.segments.iter().any(|s| s.edge.variable.as_ref().is_some_and(|v| known_vars.contains(v)));
                 if interior_bound {
                     return false;
                 }
@@ -11407,6 +10370,7 @@ impl QueryPlanner {
     }
 }
 
+
 /// The property and whole-entity items of an `ON CREATE` / `ON MATCH` block,
 /// as writes in the order written (#1919). Labels are taken separately by
 /// [`merge_labels`]; a property write cannot disturb a label.
@@ -11414,16 +10378,10 @@ fn merge_writes(ops: &[SetOp]) -> Vec<crate::query::executor::operator::SetWrite
     use crate::query::executor::operator::SetWrite;
     ops.iter()
         .filter_map(|op| match op {
-            SetOp::Property(i) => Some(SetWrite::Property(
-                i.variable.clone(),
-                i.property.clone(),
-                i.value.clone(),
-            )),
-            SetOp::Entity(i) => Some(SetWrite::Entity(
-                i.variable.clone(),
-                i.merge,
-                i.value.clone(),
-            )),
+            SetOp::Property(i) => {
+                Some(SetWrite::Property(i.variable.clone(), i.property.clone(), i.value.clone()))
+            }
+            SetOp::Entity(i) => Some(SetWrite::Entity(i.variable.clone(), i.merge, i.value.clone())),
             SetOp::Labels(_) => None,
         })
         .collect()
@@ -11497,18 +10455,11 @@ mod tests {
         use crate::graph::{Label, PropertyValue};
 
         let mut store = GraphStore::new();
-        store
-            .property_index
-            .create_index(Label::new("Person"), "name".to_string());
+        store.property_index.create_index(Label::new("Person"), "name".to_string());
 
         let person = store.create_node(Label::new("Person"));
         store
-            .set_node_property(
-                "default",
-                person,
-                "name",
-                PropertyValue::String("Acme".into()),
-            )
+            .set_node_property("default", person, "name", PropertyValue::String("Acme".into()))
             .unwrap();
 
         let org = store.create_node(Label::new("Organisation"));
@@ -11525,14 +10476,8 @@ mod tests {
             )
             .expect("the Organisation label is far under the scan cap");
 
-        assert_eq!(
-            ids,
-            std::iter::once(org).collect::<std::collections::HashSet<_>>()
-        );
-        assert!(
-            !ids.contains(&person),
-            "a Person index must not answer for an Organisation target"
-        );
+        assert_eq!(ids, std::iter::once(org).collect::<std::collections::HashSet<_>>());
+        assert!(!ids.contains(&person), "a Person index must not answer for an Organisation target");
     }
 
     /// An unlabelled target declines rather than guessing a label.
@@ -11544,17 +10489,10 @@ mod tests {
         use crate::graph::{Label, PropertyValue};
 
         let mut store = GraphStore::new();
-        store
-            .property_index
-            .create_index(Label::new("Person"), "name".to_string());
+        store.property_index.create_index(Label::new("Person"), "name".to_string());
         let person = store.create_node(Label::new("Person"));
         store
-            .set_node_property(
-                "default",
-                person,
-                "name",
-                PropertyValue::String("Acme".into()),
-            )
+            .set_node_property("default", person, "name", PropertyValue::String("Acme".into()))
             .unwrap();
 
         let planner = QueryPlanner::new();
@@ -11644,11 +10582,7 @@ mod tests {
 
         let query = parse_query("CREATE (n:Person {name: 'Alice'})").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for CREATE: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for CREATE: {:?}", result.err());
     }
 
     #[test]
@@ -11658,11 +10592,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person) DELETE n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for DELETE: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for DELETE: {:?}", result.err());
     }
 
     #[test]
@@ -11682,11 +10612,7 @@ mod tests {
 
         let query = parse_query("MERGE (n:Person {name: 'Alice'})").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for MERGE: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for MERGE: {:?}", result.err());
     }
 
     #[test]
@@ -11696,11 +10622,7 @@ mod tests {
 
         let query = parse_query("MATCH (n) UNWIND [1,2,3] AS x RETURN x").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for UNWIND: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for UNWIND: {:?}", result.err());
     }
 
     #[test]
@@ -11708,15 +10630,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Company) RETURN m.name")
-                .unwrap();
+        let query = parse_query("MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Company) RETURN m.name").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for UNION: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for UNION: {:?}", result.err());
     }
 
     #[test]
@@ -11724,14 +10640,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN n, m").unwrap();
+        let query = parse_query("MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN n, m").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for OPTIONAL MATCH: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for OPTIONAL MATCH: {:?}", result.err());
     }
 
     #[test]
@@ -11741,11 +10652,7 @@ mod tests {
 
         let query = parse_query("EXPLAIN MATCH (n:Person) RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for EXPLAIN: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for EXPLAIN: {:?}", result.err());
     }
 
     #[test]
@@ -11755,11 +10662,7 @@ mod tests {
 
         let query = parse_query("PROFILE MATCH (n:Person) RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for PROFILE: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for PROFILE: {:?}", result.err());
     }
 
     #[test]
@@ -11769,11 +10672,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person) RETURN n.city, count(n) AS cnt").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for aggregation: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for aggregation: {:?}", result.err());
     }
 
     #[test]
@@ -11783,11 +10682,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person) RETURN n ORDER BY n.name LIMIT 5").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for ORDER BY + LIMIT: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for ORDER BY + LIMIT: {:?}", result.err());
     }
 
     #[test]
@@ -11797,11 +10692,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person) RETURN DISTINCT n.name").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for DISTINCT: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for DISTINCT: {:?}", result.err());
     }
 
     #[test]
@@ -11811,11 +10702,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person) WITH n.name AS name RETURN name").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for WITH: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for WITH: {:?}", result.err());
     }
 
     #[test]
@@ -11825,11 +10712,7 @@ mod tests {
 
         let query = parse_query("CREATE INDEX ON :Person(name)").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for CREATE INDEX: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for CREATE INDEX: {:?}", result.err());
     }
 
     #[test]
@@ -11839,11 +10722,7 @@ mod tests {
 
         let query = parse_query("DROP INDEX ON :Person(name)").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for DROP INDEX: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for DROP INDEX: {:?}", result.err());
     }
 
     #[test]
@@ -11853,11 +10732,7 @@ mod tests {
 
         let query = parse_query("SHOW INDEXES").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for SHOW INDEXES: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for SHOW INDEXES: {:?}", result.err());
     }
 
     #[test]
@@ -11867,11 +10742,7 @@ mod tests {
 
         let query = parse_query("SHOW CONSTRAINTS").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for SHOW CONSTRAINTS: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for SHOW CONSTRAINTS: {:?}", result.err());
     }
 
     #[test]
@@ -11879,14 +10750,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE").unwrap();
+        let query = parse_query("CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for CREATE CONSTRAINT: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for CREATE CONSTRAINT: {:?}", result.err());
     }
 
     #[test]
@@ -11894,14 +10760,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("CALL algo.pageRank({maxIterations: 20}) YIELD node, score").unwrap();
+        let query = parse_query("CALL algo.pageRank({maxIterations: 20}) YIELD node, score").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for CALL algo: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for CALL algo: {:?}", result.err());
     }
 
     #[test]
@@ -11948,11 +10809,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person) DETACH DELETE n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Planner failed for DETACH DELETE: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Planner failed for DETACH DELETE: {:?}", result.err());
     }
 
     // ========== Coverage Enhancement Tests ==========
@@ -12055,10 +10912,7 @@ mod tests {
 
         let query = parse_query("SHOW CONSTRAINTS").unwrap();
         let plan = planner.plan(&query, &store).unwrap();
-        assert!(
-            !plan.is_write,
-            "SHOW CONSTRAINTS should not be a write plan"
-        );
+        assert!(!plan.is_write, "SHOW CONSTRAINTS should not be a write plan");
     }
 
     #[test]
@@ -12066,8 +10920,7 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE").unwrap();
+        let query = parse_query("CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE").unwrap();
         let plan = planner.plan(&query, &store).unwrap();
         assert!(plan.is_write, "CREATE CONSTRAINT should be a write plan");
     }
@@ -12077,9 +10930,7 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})")
-                .unwrap();
+        let query = parse_query("CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})").unwrap();
         let plan = planner.plan(&query, &store).unwrap();
         assert!(plan.is_write);
         // Both variables should appear in output columns
@@ -12092,14 +10943,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (a:Person), (b:Company) CREATE (a)-[:WORKS_AT]->(b)").unwrap();
+        let query = parse_query("MATCH (a:Person), (b:Company) CREATE (a)-[:WORKS_AT]->(b)").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "MATCH...CREATE should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "MATCH...CREATE should plan: {:?}", result.err());
         let plan = result.unwrap();
         assert!(plan.is_write);
     }
@@ -12121,11 +10967,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person) RETURN n SKIP 5 LIMIT 10").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "SKIP + LIMIT should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "SKIP + LIMIT should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12146,28 +10988,15 @@ mod tests {
         // Create nodes and an index so the planner can choose IndexScan
         for i in 0..100 {
             let id = store.create_node("Person");
-            store
-                .set_node_property(
-                    "default",
-                    id,
-                    "name",
-                    crate::graph::PropertyValue::String(format!("Person{}", i)),
-                )
-                .unwrap();
+            store.set_node_property("default", id, "name", crate::graph::PropertyValue::String(format!("Person{}", i))).unwrap();
         }
         // Create a property index
-        store
-            .property_index
-            .create_index(crate::graph::Label::new("Person"), "name".to_string());
+        store.property_index.create_index(crate::graph::Label::new("Person"), "name".to_string());
 
         let planner = QueryPlanner::new();
         let query = parse_query("MATCH (n:Person) WHERE n.name = 'Person50' RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Index scan planning failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Index scan planning failed: {:?}", result.err());
     }
 
     #[test]
@@ -12177,11 +11006,7 @@ mod tests {
 
         let query = parse_query("CREATE INDEX ON :Person(name, age)").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Composite CREATE INDEX should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Composite CREATE INDEX should plan: {:?}", result.err());
         let plan = result.unwrap();
         assert!(plan.is_write);
     }
@@ -12194,11 +11019,7 @@ mod tests {
         // Two independent patterns produce CartesianProduct
         let query = parse_query("MATCH (a:Person), (b:Company) RETURN a, b").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Multiple MATCH patterns should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Multiple MATCH patterns should plan: {:?}", result.err());
         let plan = result.unwrap();
         assert_eq!(plan.output_columns.len(), 2);
     }
@@ -12208,8 +11029,7 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN n, m").unwrap();
+        let query = parse_query("MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN n, m").unwrap();
         let plan = planner.plan(&query, &store).unwrap();
         assert_eq!(plan.output_columns.len(), 2);
         assert!(plan.output_columns.contains(&"n".to_string()));
@@ -12221,15 +11041,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (n:Person) WITH n.city AS city, count(n) AS cnt RETURN city, cnt")
-                .unwrap();
+        let query = parse_query("MATCH (n:Person) WITH n.city AS city, count(n) AS cnt RETURN city, cnt").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "WITH + aggregation should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "WITH + aggregation should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12237,14 +11051,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (n:Person) WITH n ORDER BY n.name LIMIT 10 RETURN n").unwrap();
+        let query = parse_query("MATCH (n:Person) WITH n ORDER BY n.name LIMIT 10 RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "WITH ORDER BY LIMIT should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "WITH ORDER BY LIMIT should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12252,14 +11061,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (n:Person) WITH DISTINCT n.city AS city RETURN city").unwrap();
+        let query = parse_query("MATCH (n:Person) WITH DISTINCT n.city AS city RETURN city").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "WITH DISTINCT should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "WITH DISTINCT should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12269,11 +11073,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person) RETURN count(n) AS cnt, sum(n.age) AS total_age, avg(n.age) AS avg_age").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Multiple aggregations should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Multiple aggregations should plan: {:?}", result.err());
         let plan = result.unwrap();
         assert_eq!(plan.output_columns.len(), 3);
         assert!(plan.output_columns.contains(&"cnt".to_string()));
@@ -12288,11 +11088,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person) RETURN collect(n.name) AS names").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "collect() aggregation should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "collect() aggregation should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12300,15 +11096,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (n:Person) RETURN min(n.age) AS youngest, max(n.age) AS oldest")
-                .unwrap();
+        let query = parse_query("MATCH (n:Person) RETURN min(n.age) AS youngest, max(n.age) AS oldest").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "min/max aggregation should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "min/max aggregation should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12316,16 +11106,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query = parse_query(
-            "MATCH (n:Person) WHERE n.age > 18 AND n.city = 'NYC' AND n.active = true RETURN n",
-        )
-        .unwrap();
+        let query = parse_query("MATCH (n:Person) WHERE n.age > 18 AND n.city = 'NYC' AND n.active = true RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Complex AND chain WHERE should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Complex AND chain WHERE should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12333,14 +11116,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (n:Person) WHERE n.age > 18 OR n.name = 'Admin' RETURN n").unwrap();
+        let query = parse_query("MATCH (n:Person) WHERE n.age > 18 OR n.name = 'Admin' RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "OR predicate should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "OR predicate should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12407,11 +11185,8 @@ mod tests {
         assert!(result.is_err());
         if let Err(e) = result {
             let msg = format!("{}", e);
-            assert!(
-                msg.contains("MATCH") || msg.contains("CALL") || msg.contains("CREATE"),
-                "Error should mention required clauses: {}",
-                msg
-            );
+            assert!(msg.contains("MATCH") || msg.contains("CALL") || msg.contains("CREATE"),
+                "Error should mention required clauses: {}", msg);
         }
     }
 
@@ -12422,11 +11197,7 @@ mod tests {
 
         let query = parse_query("MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, r, b").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Edge variable should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Edge variable should plan: {:?}", result.err());
         let plan = result.unwrap();
         assert_eq!(plan.output_columns.len(), 3);
     }
@@ -12436,9 +11207,7 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (n:Person) RETURN n.name AS name, n.age AS age, id(n) AS node_id")
-                .unwrap();
+        let query = parse_query("MATCH (n:Person) RETURN n.name AS name, n.age AS age, id(n) AS node_id").unwrap();
         let plan = planner.plan(&query, &store).unwrap();
         assert_eq!(plan.output_columns, vec!["name", "age", "node_id"]);
     }
@@ -12472,14 +11241,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query =
-            parse_query("MATCH (n:Person) RETURN n.city, count(n) AS cnt ORDER BY cnt").unwrap();
+        let query = parse_query("MATCH (n:Person) RETURN n.city, count(n) AS cnt ORDER BY cnt").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "ORDER BY with aggregation should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "ORDER BY with aggregation should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12489,11 +11253,7 @@ mod tests {
 
         let query = parse_query("MATCH (n) UNWIND [1, 2, 3] AS x RETURN x, n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "UNWIND with RETURN should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "UNWIND with RETURN should plan: {:?}", result.err());
         let plan = result.unwrap();
         assert!(plan.output_columns.contains(&"x".to_string()));
         assert!(plan.output_columns.contains(&"n".to_string()));
@@ -12506,11 +11266,7 @@ mod tests {
 
         let query = parse_query("MERGE (n:Person {name: 'Alice'}) RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "MERGE with RETURN should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "MERGE with RETURN should plan: {:?}", result.err());
         let plan = result.unwrap();
         assert!(plan.is_write);
         assert!(plan.output_columns.contains(&"n".to_string()));
@@ -12554,11 +11310,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person {name: 'Alice'}) RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Node with inline properties should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Node with inline properties should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12568,63 +11320,37 @@ mod tests {
         let mut store = GraphStore::new();
         for i in 0..100 {
             let id = store.create_node("Person");
-            store
-                .set_node_property(
-                    "default",
-                    id,
-                    "name",
-                    crate::graph::PropertyValue::String(format!("Person{}", i)),
-                )
-                .unwrap();
+            store.set_node_property("default", id, "name",
+                crate::graph::PropertyValue::String(format!("Person{}", i))).unwrap();
         }
-        store
-            .property_index
-            .create_index(crate::graph::Label::new("Person"), "name".to_string());
+        store.property_index.create_index(crate::graph::Label::new("Person"), "name".to_string());
 
         // Both forms should produce the same plan with IndexScan
-        use crate::graph::PropertyValue;
         use crate::query::executor::record::Value;
+        use crate::graph::PropertyValue;
 
         // WHERE form (already works)
-        let q_where =
-            parse_query("EXPLAIN MATCH (n:Person) WHERE n.name = 'Person50' RETURN n").unwrap();
+        let q_where = parse_query("EXPLAIN MATCH (n:Person) WHERE n.name = 'Person50' RETURN n").unwrap();
         let executor_where = crate::query::executor::QueryExecutor::new(&store);
         let r_where = executor_where.execute(&q_where).unwrap();
-        let plan_where = if let Some(Value::Property(PropertyValue::String(s))) =
-            r_where.records[0].get("plan")
-        {
+        let plan_where = if let Some(Value::Property(PropertyValue::String(s))) = r_where.records[0].get("plan") {
             s.clone()
-        } else {
-            panic!("Expected plan text");
-        };
+        } else { panic!("Expected plan text"); };
 
         // Inline form (was broken, should now use IndexScan)
         let q_inline = parse_query("EXPLAIN MATCH (n:Person {name: 'Person50'}) RETURN n").unwrap();
         let executor_inline = crate::query::executor::QueryExecutor::new(&store);
         let r_inline = executor_inline.execute(&q_inline).unwrap();
-        let plan_inline = if let Some(Value::Property(PropertyValue::String(s))) =
-            r_inline.records[0].get("plan")
-        {
+        let plan_inline = if let Some(Value::Property(PropertyValue::String(s))) = r_inline.records[0].get("plan") {
             s.clone()
-        } else {
-            panic!("Expected plan text");
-        };
+        } else { panic!("Expected plan text"); };
 
-        assert!(
-            plan_where.contains("IndexScan"),
-            "WHERE form should use IndexScan: {}",
-            plan_where
-        );
-        assert!(
-            plan_inline.contains("IndexScan"),
-            "Inline properties should use IndexScan: {}",
-            plan_inline
-        );
-        assert!(
-            !plan_inline.contains("NodeScan"),
-            "Inline properties should NOT use NodeScan when index exists: {}",
-            plan_inline
-        );
+        assert!(plan_where.contains("IndexScan"),
+            "WHERE form should use IndexScan: {}", plan_where);
+        assert!(plan_inline.contains("IndexScan"),
+            "Inline properties should use IndexScan: {}", plan_inline);
+        assert!(!plan_inline.contains("NodeScan"),
+            "Inline properties should NOT use NodeScan when index exists: {}", plan_inline);
     }
 
     #[test]
@@ -12634,44 +11360,25 @@ mod tests {
         let mut store = GraphStore::new();
         for i in 0..100 {
             let id = store.create_node("Person");
-            store
-                .set_node_property(
-                    "default",
-                    id,
-                    "name",
-                    crate::graph::PropertyValue::String(format!("Person{}", i)),
-                )
-                .unwrap();
+            store.set_node_property("default", id, "name",
+                crate::graph::PropertyValue::String(format!("Person{}", i))).unwrap();
         }
-        store
-            .property_index
-            .create_index(crate::graph::Label::new("Person"), "name".to_string());
+        store.property_index.create_index(crate::graph::Label::new("Person"), "name".to_string());
 
-        use crate::graph::PropertyValue;
         use crate::query::executor::record::Value;
+        use crate::graph::PropertyValue;
 
-        let query =
-            parse_query("EXPLAIN MATCH (n:Person) WHERE 'Person50' = n.name RETURN n").unwrap();
+        let query = parse_query("EXPLAIN MATCH (n:Person) WHERE 'Person50' = n.name RETURN n").unwrap();
         let executor = crate::query::executor::QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        let plan_text = if let Some(Value::Property(PropertyValue::String(s))) =
-            result.records[0].get("plan")
-        {
+        let plan_text = if let Some(Value::Property(PropertyValue::String(s))) = result.records[0].get("plan") {
             s.clone()
-        } else {
-            panic!("Expected plan text");
-        };
+        } else { panic!("Expected plan text"); };
 
-        assert!(
-            plan_text.contains("IndexScan"),
-            "Reversed-operand equality should use IndexScan: {}",
-            plan_text
-        );
-        assert!(
-            !plan_text.contains("NodeScan"),
-            "Reversed-operand equality should not fall back to NodeScan: {}",
-            plan_text
-        );
+        assert!(plan_text.contains("IndexScan"),
+            "Reversed-operand equality should use IndexScan: {}", plan_text);
+        assert!(!plan_text.contains("NodeScan"),
+            "Reversed-operand equality should not fall back to NodeScan: {}", plan_text);
     }
 
     #[test]
@@ -12679,57 +11386,33 @@ mod tests {
         // `25 < n.age` is equivalent to `n.age > 25` — the comparison operator must be
         // flipped (not just the operands) when normalizing to the indexed form.
         let mut store = GraphStore::new();
-        store
-            .property_index
-            .create_index(crate::graph::Label::new("Person"), "age".to_string());
+        store.property_index.create_index(crate::graph::Label::new("Person"), "age".to_string());
         for i in 0..50 {
             let id = store.create_node("Person");
-            store
-                .set_node_property(
-                    "default",
-                    id,
-                    "age",
-                    crate::graph::PropertyValue::Integer(i as i64),
-                )
-                .unwrap();
+            store.set_node_property("default", id, "age", crate::graph::PropertyValue::Integer(i as i64)).unwrap();
         }
 
-        use crate::graph::PropertyValue;
         use crate::query::executor::record::Value;
+        use crate::graph::PropertyValue;
 
         let query = parse_query("EXPLAIN MATCH (n:Person) WHERE 25 < n.age RETURN n").unwrap();
         let executor = crate::query::executor::QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        let plan_text = if let Some(Value::Property(PropertyValue::String(s))) =
-            result.records[0].get("plan")
-        {
+        let plan_text = if let Some(Value::Property(PropertyValue::String(s))) = result.records[0].get("plan") {
             s.clone()
-        } else {
-            panic!("Expected plan text");
-        };
+        } else { panic!("Expected plan text"); };
 
-        assert!(
-            plan_text.contains("IndexScan"),
-            "Reversed-operand comparison should use IndexScan: {}",
-            plan_text
-        );
-        assert!(
-            !plan_text.contains("NodeScan"),
-            "Reversed-operand comparison should not fall back to NodeScan: {}",
-            plan_text
-        );
+        assert!(plan_text.contains("IndexScan"),
+            "Reversed-operand comparison should use IndexScan: {}", plan_text);
+        assert!(!plan_text.contains("NodeScan"),
+            "Reversed-operand comparison should not fall back to NodeScan: {}", plan_text);
 
         // Correctness: flipping `25 < n.age` to `n.age > 25` must preserve results —
         // exercise actual execution, not just the plan shape.
-        let exec_query =
-            parse_query("MATCH (n:Person) WHERE 25 < n.age RETURN n.age AS age").unwrap();
+        let exec_query = parse_query("MATCH (n:Person) WHERE 25 < n.age RETURN n.age AS age").unwrap();
         let exec = crate::query::executor::QueryExecutor::new(&store);
         let rows = exec.execute(&exec_query).unwrap();
-        assert_eq!(
-            rows.records.len(),
-            24,
-            "Expected ages 26..49 to match 25 < n.age"
-        );
+        assert_eq!(rows.records.len(), 24, "Expected ages 26..49 to match 25 < n.age");
     }
 
     #[test]
@@ -12739,56 +11422,35 @@ mod tests {
         // via its index and traverse the relationship in reverse, rather than always
         // full-scanning `a`'s (much larger) label first.
         let mut store = GraphStore::new();
-        store
-            .property_index
-            .create_index(crate::graph::Label::new("Person"), "name".to_string());
+        store.property_index.create_index(crate::graph::Label::new("Person"), "name".to_string());
         let mut company_ids = Vec::new();
         for i in 0..500 {
             let id = store.create_node("Company");
-            store
-                .set_node_property(
-                    "default",
-                    id,
-                    "name",
-                    crate::graph::PropertyValue::String(format!("Company{}", i)),
-                )
-                .unwrap();
+            store.set_node_property("default", id, "name",
+                crate::graph::PropertyValue::String(format!("Company{}", i))).unwrap();
             company_ids.push(id);
         }
         for i in 0..500 {
             let id = store.create_node("Person");
-            store
-                .set_node_property(
-                    "default",
-                    id,
-                    "name",
-                    crate::graph::PropertyValue::String(format!("Person{}", i)),
-                )
-                .unwrap();
+            store.set_node_property("default", id, "name",
+                crate::graph::PropertyValue::String(format!("Person{}", i))).unwrap();
             store.create_edge(company_ids[i], id, "WORKS_AT").unwrap();
         }
 
-        use crate::graph::PropertyValue;
         use crate::query::executor::record::Value;
+        use crate::graph::PropertyValue;
 
         let query = parse_query(
             "EXPLAIN MATCH (a:Company)-[:WORKS_AT]->(b:Person) WHERE b.name = 'Person250' RETURN a, b"
         ).unwrap();
         let executor = crate::query::executor::QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        let plan_text = if let Some(Value::Property(PropertyValue::String(s))) =
-            result.records[0].get("plan")
-        {
+        let plan_text = if let Some(Value::Property(PropertyValue::String(s))) = result.records[0].get("plan") {
             s.clone()
-        } else {
-            panic!("Expected plan text");
-        };
+        } else { panic!("Expected plan text"); };
 
-        assert!(
-            plan_text.contains("IndexScan"),
-            "Predicate on non-start node should still use IndexScan: {}",
-            plan_text
-        );
+        assert!(plan_text.contains("IndexScan"),
+            "Predicate on non-start node should still use IndexScan: {}", plan_text);
 
         // Correctness: executing the query must still return the single matching row,
         // with the relationship traversed to the correct company.
@@ -12798,18 +11460,10 @@ mod tests {
         let exec = crate::query::executor::QueryExecutor::new(&store);
         let rows = exec.execute(&exec_query).unwrap();
         assert_eq!(rows.records.len(), 1);
-        assert_eq!(
-            rows.records[0].get("company"),
-            Some(&Value::Property(PropertyValue::String(
-                "Company250".to_string()
-            )))
-        );
-        assert_eq!(
-            rows.records[0].get("person"),
-            Some(&Value::Property(PropertyValue::String(
-                "Person250".to_string()
-            )))
-        );
+        assert_eq!(rows.records[0].get("company"),
+            Some(&Value::Property(PropertyValue::String("Company250".to_string()))));
+        assert_eq!(rows.records[0].get("person"),
+            Some(&Value::Property(PropertyValue::String("Person250".to_string()))));
     }
 
     #[test]
@@ -12818,9 +11472,7 @@ mod tests {
         // The reversed anchor traversal must flip the already-reversed direction correctly
         // (Incoming written direction -> Outgoing effective direction from the anchor).
         let mut store = GraphStore::new();
-        store
-            .property_index
-            .create_index(crate::graph::Label::new("Person"), "name".to_string());
+        store.property_index.create_index(crate::graph::Label::new("Person"), "name".to_string());
         let mut company_ids = Vec::new();
         for i in 0..500 {
             let id = store.create_node("Company");
@@ -12828,28 +11480,17 @@ mod tests {
         }
         for i in 0..500 {
             let id = store.create_node("Person");
-            store
-                .set_node_property(
-                    "default",
-                    id,
-                    "name",
-                    crate::graph::PropertyValue::String(format!("Person{}", i)),
-                )
-                .unwrap();
+            store.set_node_property("default", id, "name",
+                crate::graph::PropertyValue::String(format!("Person{}", i))).unwrap();
             store.create_edge(company_ids[i], id, "WORKS_AT").unwrap();
         }
 
         let exec_query = parse_query(
-            "MATCH (b:Person)<-[:WORKS_AT]-(a:Company) WHERE b.name = 'Person250' RETURN a, b",
-        )
-        .unwrap();
+            "MATCH (b:Person)<-[:WORKS_AT]-(a:Company) WHERE b.name = 'Person250' RETURN a, b"
+        ).unwrap();
         let exec = crate::query::executor::QueryExecutor::new(&store);
         let rows = exec.execute(&exec_query).unwrap();
-        assert_eq!(
-            rows.records.len(),
-            1,
-            "Expected exactly one company employing Person250"
-        );
+        assert_eq!(rows.records.len(), 1, "Expected exactly one company employing Person250");
     }
 
     #[test]
@@ -12871,16 +11512,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query = parse_query(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:LIVES_IN]->(c:City) RETURN a, b, c",
-        )
-        .unwrap();
+        let query = parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:LIVES_IN]->(c:City) RETURN a, b, c").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Multi-hop path should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Multi-hop path should plan: {:?}", result.err());
         let plan = result.unwrap();
         assert_eq!(plan.output_columns.len(), 3);
     }
@@ -12890,27 +11524,14 @@ mod tests {
         let mut store = GraphStore::new();
         for i in 0..50 {
             let id = store.create_node("Person");
-            store
-                .set_node_property(
-                    "default",
-                    id,
-                    "age",
-                    crate::graph::PropertyValue::Integer(i as i64),
-                )
-                .unwrap();
+            store.set_node_property("default", id, "age", crate::graph::PropertyValue::Integer(i as i64)).unwrap();
         }
-        store
-            .property_index
-            .create_index(crate::graph::Label::new("Person"), "age".to_string());
+        store.property_index.create_index(crate::graph::Label::new("Person"), "age".to_string());
 
         let planner = QueryPlanner::new();
         let query = parse_query("MATCH (n:Person) WHERE n.age > 25 RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Index scan with > should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Index scan with > should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12918,27 +11539,14 @@ mod tests {
         let mut store = GraphStore::new();
         for i in 0..50 {
             let id = store.create_node("Person");
-            store
-                .set_node_property(
-                    "default",
-                    id,
-                    "age",
-                    crate::graph::PropertyValue::Integer(i as i64),
-                )
-                .unwrap();
+            store.set_node_property("default", id, "age", crate::graph::PropertyValue::Integer(i as i64)).unwrap();
         }
-        store
-            .property_index
-            .create_index(crate::graph::Label::new("Person"), "age".to_string());
+        store.property_index.create_index(crate::graph::Label::new("Person"), "age".to_string());
 
         let planner = QueryPlanner::new();
         let query = parse_query("MATCH (n:Person) WHERE n.age < 25 RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Index scan with < should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Index scan with < should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12947,15 +11555,9 @@ mod tests {
         let planner = QueryPlanner::new();
 
         // WHERE predicate references variables from different MATCH patterns
-        let query =
-            parse_query("MATCH (a:Person), (b:Company) WHERE a.company = b.name RETURN a, b")
-                .unwrap();
+        let query = parse_query("MATCH (a:Person), (b:Company) WHERE a.company = b.name RETURN a, b").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Cross-match WHERE should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Cross-match WHERE should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12966,11 +11568,7 @@ mod tests {
         // Match without label — all node scan
         let query = parse_query("MATCH (n) RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "All-node scan should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "All-node scan should plan: {:?}", result.err());
     }
 
     #[test]
@@ -12991,14 +11589,9 @@ mod tests {
         let store = GraphStore::new();
         let planner = QueryPlanner::new();
 
-        let query = parse_query("MATCH (n:Person) RETURN collect(DISTINCT n.name) AS unique_names")
-            .unwrap();
+        let query = parse_query("MATCH (n:Person) RETURN collect(DISTINCT n.name) AS unique_names").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "collect(DISTINCT) should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "collect(DISTINCT) should plan: {:?}", result.err());
     }
 
     #[test]
@@ -13008,11 +11601,7 @@ mod tests {
 
         let query = parse_query("MATCH (n:Person) WITH n.city AS city, count(n) AS cnt, collect(n.name) AS names RETURN city, cnt, names").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "WITH multiple aggregations should plan: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "WITH multiple aggregations should plan: {:?}", result.err());
     }
 
     #[test]
@@ -13022,16 +11611,10 @@ mod tests {
         // only be applied before the WithBarrier, not after it.
         let mut store = GraphStore::new();
         let n1 = store.create_node("Team");
-        store
-            .get_node_mut(n1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("India".into()));
+        store.get_node_mut(n1).unwrap().set_property("name", PropertyValue::String("India".into()));
         let n2 = store.create_node("Match");
         let n3 = store.create_node("Tournament");
-        store
-            .get_node_mut(n3)
-            .unwrap()
-            .set_property("name", PropertyValue::String("IPL".into()));
+        store.get_node_mut(n3).unwrap().set_property("name", PropertyValue::String("IPL".into()));
         store.create_edge(n1, n2, "COMPETED_IN").unwrap();
         store.create_edge(n2, n3, "PART_OF").unwrap();
 
@@ -13039,20 +11622,15 @@ mod tests {
             "MATCH (t:Team)-[:COMPETED_IN]->(m:Match)-[:PART_OF]->(trn:Tournament) \
              WHERE trn.name = 'IPL' \
              WITH t, count(m) AS played \
-             RETURN t.name AS team, played",
-        )
-        .unwrap();
+             RETURN t.name AS team, played"
+        ).unwrap();
 
         let planner = QueryPlanner::new();
         let plan = planner.plan(&query, &store).unwrap();
         use crate::query::QueryExecutor;
         let executor = QueryExecutor::new(&store);
         let result = executor.execute_plan(plan);
-        assert!(
-            result.is_ok(),
-            "WHERE + WITH should not fail: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "WHERE + WITH should not fail: {:?}", result.err());
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 1);
     }
@@ -13061,15 +11639,9 @@ mod tests {
     fn test_node_identity_comparison() {
         let mut store = GraphStore::new();
         let n1 = store.create_node("Team");
-        store
-            .get_node_mut(n1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("India".into()));
+        store.get_node_mut(n1).unwrap().set_property("name", PropertyValue::String("India".into()));
         let n2 = store.create_node("Team");
-        store
-            .get_node_mut(n2)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Australia".into()));
+        store.get_node_mut(n2).unwrap().set_property("name", PropertyValue::String("Australia".into()));
         let m1 = store.create_node("Match");
         store.create_edge(n1, m1, "COMPETED_IN").unwrap();
         store.create_edge(n2, m1, "COMPETED_IN").unwrap();
@@ -13078,20 +11650,15 @@ mod tests {
         let query = parse_query(
             "MATCH (t1:Team)-[:COMPETED_IN]->(m:Match)<-[:COMPETED_IN]-(t2:Team) \
              WHERE t1 <> t2 \
-             RETURN t1.name AS team1, t2.name AS team2",
-        )
-        .unwrap();
+             RETURN t1.name AS team1, t2.name AS team2"
+        ).unwrap();
 
         let planner = QueryPlanner::new();
         let plan = planner.plan(&query, &store).unwrap();
         use crate::query::QueryExecutor;
         let executor = QueryExecutor::new(&store);
         let result = executor.execute_plan(plan);
-        assert!(
-            result.is_ok(),
-            "Node identity comparison should work: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Node identity comparison should work: {:?}", result.err());
         let batch = result.unwrap();
         // Should get 2 rows: (India, Australia) and (Australia, India)
         assert_eq!(batch.records.len(), 2);
@@ -13123,10 +11690,7 @@ mod tests {
     fn test_plan_match_native_simple() {
         let mut store = GraphStore::new();
         let n1 = store.create_node("Person");
-        store
-            .get_node_mut(n1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Alice".to_string()));
+        store.get_node_mut(n1).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
 
         let planner = QueryPlanner::with_config(PlannerConfig {
             graph_native: true,
@@ -13134,11 +11698,7 @@ mod tests {
         });
         let query = parse_query("MATCH (n:Person) RETURN n").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Graph-native planner should handle simple MATCH: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Graph-native planner should handle simple MATCH: {:?}", result.err());
     }
 
     #[test]
@@ -13154,11 +11714,7 @@ mod tests {
         });
         let query = parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b").unwrap();
         let result = planner.plan(&query, &store);
-        assert!(
-            result.is_ok(),
-            "Graph-native planner should handle expand: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Graph-native planner should handle expand: {:?}", result.err());
     }
 
     #[test]
@@ -13166,15 +11722,9 @@ mod tests {
         // A/B test: both planners should produce identical results
         let mut store = GraphStore::new();
         let n1 = store.create_node("Person");
-        store
-            .get_node_mut(n1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Alice".to_string()));
+        store.get_node_mut(n1).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
         let n2 = store.create_node("Person");
-        store
-            .get_node_mut(n2)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Bob".to_string()));
+        store.get_node_mut(n2).unwrap().set_property("name", PropertyValue::String("Bob".to_string()));
         store.create_node("Company"); // should not appear
 
         let query = parse_query("MATCH (n:Person) RETURN n.name").unwrap();
@@ -13215,25 +11765,15 @@ mod tests {
         // A/B: ALL candidate plans must produce identical results to legacy
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .get_node_mut(a)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Alice".to_string()));
+        store.get_node_mut(a).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
         let b = store.create_node("Person");
-        store
-            .get_node_mut(b)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Bob".to_string()));
+        store.get_node_mut(b).unwrap().set_property("name", PropertyValue::String("Bob".to_string()));
         let c = store.create_node("Person");
-        store
-            .get_node_mut(c)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Charlie".to_string()));
+        store.get_node_mut(c).unwrap().set_property("name", PropertyValue::String("Charlie".to_string()));
         store.create_edge(a, b, "KNOWS").unwrap();
         store.create_edge(a, c, "KNOWS").unwrap();
 
-        let query =
-            parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name").unwrap();
+        let query = parse_query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name").unwrap();
 
         // Legacy planner results
         let legacy = QueryPlanner::new();
@@ -13241,74 +11781,36 @@ mod tests {
         let mut legacy_results: Vec<String> = Vec::new();
         let mut op = legacy_plan.root;
         while let Some(record) = op.next(&store).unwrap() {
-            let a_name = record
-                .get("a.name")
-                .map(|v| format!("{:?}", v))
-                .unwrap_or_default();
-            let b_name = record
-                .get("b.name")
-                .map(|v| format!("{:?}", v))
-                .unwrap_or_default();
+            let a_name = record.get("a.name").map(|v| format!("{:?}", v)).unwrap_or_default();
+            let b_name = record.get("b.name").map(|v| format!("{:?}", v)).unwrap_or_default();
             legacy_results.push(format!("{}->{}", a_name, b_name));
         }
         legacy_results.sort();
 
         // Graph-native planner — verify ALL candidate plans produce correct results
         use super::super::logical_plan::PatternGraph;
-        use super::super::physical_planner::logical_to_physical;
         use super::super::plan_enumerator::{enumerate_plans, EnumerationConfig};
+        use super::super::physical_planner::logical_to_physical;
 
         let match_clause = &query.match_clauses[0];
         let pg = PatternGraph::from_match_clause(match_clause);
         let catalog = store.catalog();
-        let config = EnumerationConfig {
-            max_candidate_plans: 64,
-        };
-        let candidates = enumerate_plans(
-            &pg,
-            query.where_clause.as_ref(),
-            catalog,
-            &store.property_index,
-            &config,
-        );
-        assert!(
-            candidates.len() >= 2,
-            "Should have at least 2 candidate plans"
-        );
+        let config = EnumerationConfig { max_candidate_plans: 64 };
+        let candidates = enumerate_plans(&pg, query.where_clause.as_ref(), catalog, &store.property_index, &config);
+        assert!(candidates.len() >= 2, "Should have at least 2 candidate plans");
 
         for (plan_idx, (logical_plan, cost)) in candidates.iter().enumerate() {
             let physical = logical_to_physical(logical_plan);
             let projections = vec![
-                (
-                    Expression::Property {
-                        variable: "a".to_string(),
-                        property: "name".to_string(),
-                    },
-                    "a.name".to_string(),
-                ),
-                (
-                    Expression::Property {
-                        variable: "b".to_string(),
-                        property: "name".to_string(),
-                    },
-                    "b.name".to_string(),
-                ),
+                (Expression::Property { variable: "a".to_string(), property: "name".to_string() }, "a.name".to_string()),
+                (Expression::Property { variable: "b".to_string(), property: "name".to_string() }, "b.name".to_string()),
             ];
-            let mut op: OperatorBox = Box::new(super::super::operator::ProjectOperator::new(
-                physical,
-                projections,
-            ));
+            let mut op: OperatorBox = Box::new(super::super::operator::ProjectOperator::new(physical, projections));
 
             let mut native_results: Vec<String> = Vec::new();
             while let Some(record) = op.next(&store).unwrap() {
-                let a_name = record
-                    .get("a.name")
-                    .map(|v| format!("{:?}", v))
-                    .unwrap_or_default();
-                let b_name = record
-                    .get("b.name")
-                    .map(|v| format!("{:?}", v))
-                    .unwrap_or_default();
+                let a_name = record.get("a.name").map(|v| format!("{:?}", v)).unwrap_or_default();
+                let b_name = record.get("b.name").map(|v| format!("{:?}", v)).unwrap_or_default();
                 native_results.push(format!("{}->{}", a_name, b_name));
             }
             native_results.sort();
@@ -13324,40 +11826,19 @@ mod tests {
         // A/B: MATCH with WHERE filter
         let mut store = GraphStore::new();
         let n1 = store.create_node("Person");
-        store
-            .get_node_mut(n1)
-            .unwrap()
-            .set_property("age", PropertyValue::Integer(25));
-        store
-            .get_node_mut(n1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Alice".to_string()));
+        store.get_node_mut(n1).unwrap().set_property("age", PropertyValue::Integer(25));
+        store.get_node_mut(n1).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
         let n2 = store.create_node("Person");
-        store
-            .get_node_mut(n2)
-            .unwrap()
-            .set_property("age", PropertyValue::Integer(35));
-        store
-            .get_node_mut(n2)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Bob".to_string()));
+        store.get_node_mut(n2).unwrap().set_property("age", PropertyValue::Integer(35));
+        store.get_node_mut(n2).unwrap().set_property("name", PropertyValue::String("Bob".to_string()));
         let n3 = store.create_node("Person");
-        store
-            .get_node_mut(n3)
-            .unwrap()
-            .set_property("age", PropertyValue::Integer(45));
-        store
-            .get_node_mut(n3)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Charlie".to_string()));
+        store.get_node_mut(n3).unwrap().set_property("age", PropertyValue::Integer(45));
+        store.get_node_mut(n3).unwrap().set_property("name", PropertyValue::String("Charlie".to_string()));
 
         let query = parse_query("MATCH (n:Person) WHERE n.age > 30 RETURN n.name").unwrap();
 
         let legacy = QueryPlanner::new();
-        let native = QueryPlanner::with_config(PlannerConfig {
-            graph_native: true,
-            max_candidate_plans: 64,
-        });
+        let native = QueryPlanner::with_config(PlannerConfig { graph_native: true, max_candidate_plans: 64 });
 
         let legacy_plan = legacy.plan(&query, &store).unwrap();
         let native_plan = native.plan(&query, &store).unwrap();
@@ -13380,11 +11861,8 @@ mod tests {
         }
         native_results.sort();
 
-        assert_eq!(
-            legacy_results, native_results,
-            "WHERE filter results differ.\nLegacy: {:?}\nNative: {:?}",
-            legacy_results, native_results
-        );
+        assert_eq!(legacy_results, native_results,
+            "WHERE filter results differ.\nLegacy: {:?}\nNative: {:?}", legacy_results, native_results);
     }
 
     // ============================
@@ -13395,23 +11873,14 @@ mod tests {
 
     /// Helper: execute a query with graph-native planner and verify it doesn't error
     fn assert_native_query_ok(store: &GraphStore, cypher: &str) {
-        let query = crate::query::parse_query(cypher)
-            .unwrap_or_else(|e| panic!("Parse error for '{}': {}", cypher, e));
+        let query = crate::query::parse_query(cypher).unwrap_or_else(|e| panic!("Parse error for '{}': {}", cypher, e));
 
-        let mut executor = super::super::QueryExecutor::with_planner(
-            store,
-            QueryPlanner::with_config(PlannerConfig {
-                graph_native: true,
-                max_candidate_plans: 64,
-            }),
-        );
+        let mut executor = super::super::QueryExecutor::with_planner(store, QueryPlanner::with_config(PlannerConfig {
+            graph_native: true,
+            max_candidate_plans: 64,
+        }));
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "Query failed for '{}': {:?}",
-            cypher,
-            result.err()
-        );
+        assert!(result.is_ok(), "Query failed for '{}': {:?}", cypher, result.err());
     }
 
     /// Helper: create a store with Horse Digital Twin-like data
@@ -13419,130 +11888,64 @@ mod tests {
         let mut store = GraphStore::new();
         // Stables
         let s1 = store.create_node("Stable");
-        store
-            .get_node_mut(s1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Flyinge".to_string()));
+        store.get_node_mut(s1).unwrap().set_property("name", PropertyValue::String("Flyinge".to_string()));
         let s2 = store.create_node("Stable");
-        store
-            .get_node_mut(s2)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Täby".to_string()));
+        store.get_node_mut(s2).unwrap().set_property("name", PropertyValue::String("Täby".to_string()));
         // Horses
         let h1 = store.create_node("Horse");
-        store
-            .get_node_mut(h1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Storm Runner".to_string()));
-        store
-            .get_node_mut(h1)
-            .unwrap()
-            .set_property("breed", PropertyValue::String("Thoroughbred".to_string()));
-        store
-            .get_node_mut(h1)
-            .unwrap()
-            .set_property("sex", PropertyValue::String("male".to_string()));
+        store.get_node_mut(h1).unwrap().set_property("name", PropertyValue::String("Storm Runner".to_string()));
+        store.get_node_mut(h1).unwrap().set_property("breed", PropertyValue::String("Thoroughbred".to_string()));
+        store.get_node_mut(h1).unwrap().set_property("sex", PropertyValue::String("male".to_string()));
         let h2 = store.create_node("Horse");
-        store
-            .get_node_mut(h2)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Nordic Star".to_string()));
-        store.get_node_mut(h2).unwrap().set_property(
-            "breed",
-            PropertyValue::String("Swedish Warmblood".to_string()),
-        );
-        store
-            .get_node_mut(h2)
-            .unwrap()
-            .set_property("sex", PropertyValue::String("female".to_string()));
+        store.get_node_mut(h2).unwrap().set_property("name", PropertyValue::String("Nordic Star".to_string()));
+        store.get_node_mut(h2).unwrap().set_property("breed", PropertyValue::String("Swedish Warmblood".to_string()));
+        store.get_node_mut(h2).unwrap().set_property("sex", PropertyValue::String("female".to_string()));
         let h3 = store.create_node("Horse");
-        store
-            .get_node_mut(h3)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Autumn Gold".to_string()));
+        store.get_node_mut(h3).unwrap().set_property("name", PropertyValue::String("Autumn Gold".to_string()));
         // Pedigree
         store.create_edge(h3, h1, "SIRE").unwrap(); // Autumn Gold's sire = Storm Runner
-        store.create_edge(h3, h2, "DAM").unwrap(); // Autumn Gold's dam = Nordic Star
-                                                   // Stabled
+        store.create_edge(h3, h2, "DAM").unwrap();  // Autumn Gold's dam = Nordic Star
+        // Stabled
         store.create_edge(h1, s1, "STABLED_AT").unwrap();
         store.create_edge(h2, s2, "STABLED_AT").unwrap();
         store.create_edge(h3, s1, "STABLED_AT").unwrap();
         // Sensors
         let sn1 = store.create_node("Sensor");
-        store.get_node_mut(sn1).unwrap().set_property(
-            "sensor_type",
-            PropertyValue::String("heart_rate".to_string()),
-        );
+        store.get_node_mut(sn1).unwrap().set_property("sensor_type", PropertyValue::String("heart_rate".to_string()));
         store.create_edge(sn1, h1, "WEARS").unwrap();
         // Alerts
         let a1 = store.create_node("Alert");
-        store
-            .get_node_mut(a1)
-            .unwrap()
-            .set_property("severity", PropertyValue::String("critical".to_string()));
-        store
-            .get_node_mut(a1)
-            .unwrap()
-            .set_property("alert_type", PropertyValue::String("hr_spike".to_string()));
-        store
-            .get_node_mut(a1)
-            .unwrap()
-            .set_property("resolved", PropertyValue::Boolean(false));
+        store.get_node_mut(a1).unwrap().set_property("severity", PropertyValue::String("critical".to_string()));
+        store.get_node_mut(a1).unwrap().set_property("alert_type", PropertyValue::String("hr_spike".to_string()));
+        store.get_node_mut(a1).unwrap().set_property("resolved", PropertyValue::Boolean(false));
         store.create_edge(sn1, a1, "TRIGGERED").unwrap();
         // Trainer + TrainingSession
         let t1 = store.create_node("Trainer");
-        store
-            .get_node_mut(t1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Johan".to_string()));
+        store.get_node_mut(t1).unwrap().set_property("name", PropertyValue::String("Johan".to_string()));
         store.create_edge(h1, t1, "TRAINED_BY").unwrap();
         let ts1 = store.create_node("TrainingSession");
-        store
-            .get_node_mut(ts1)
-            .unwrap()
-            .set_property("session_type", PropertyValue::String("gallop".to_string()));
-        store
-            .get_node_mut(ts1)
-            .unwrap()
-            .set_property("distance_km", PropertyValue::Float(5.2));
+        store.get_node_mut(ts1).unwrap().set_property("session_type", PropertyValue::String("gallop".to_string()));
+        store.get_node_mut(ts1).unwrap().set_property("distance_km", PropertyValue::Float(5.2));
         store.create_edge(h1, ts1, "COMPLETED").unwrap();
         store.create_edge(t1, ts1, "SUPERVISED_BY").unwrap();
         // Race + RaceResult
         let r1 = store.create_node("Race");
-        store
-            .get_node_mut(r1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Täby Cup".to_string()));
+        store.get_node_mut(r1).unwrap().set_property("name", PropertyValue::String("Täby Cup".to_string()));
         let rr1 = store.create_node("RaceResult");
-        store
-            .get_node_mut(rr1)
-            .unwrap()
-            .set_property("position", PropertyValue::Integer(1));
+        store.get_node_mut(rr1).unwrap().set_property("position", PropertyValue::Integer(1));
         store.create_edge(h1, rr1, "ENTERED").unwrap();
         store.create_edge(rr1, r1, "RESULT_OF").unwrap();
         // HealthRecord + Vet
         let hr1 = store.create_node("HealthRecord");
-        store.get_node_mut(hr1).unwrap().set_property(
-            "record_type",
-            PropertyValue::String("vaccination".to_string()),
-        );
-        store
-            .get_node_mut(hr1)
-            .unwrap()
-            .set_property("diagnosis", PropertyValue::String("routine".to_string()));
+        store.get_node_mut(hr1).unwrap().set_property("record_type", PropertyValue::String("vaccination".to_string()));
+        store.get_node_mut(hr1).unwrap().set_property("diagnosis", PropertyValue::String("routine".to_string()));
         store.create_edge(h1, hr1, "HAS_RECORD").unwrap();
         let v1 = store.create_node("Veterinarian");
-        store
-            .get_node_mut(v1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Dr. Eva".to_string()));
+        store.get_node_mut(v1).unwrap().set_property("name", PropertyValue::String("Dr. Eva".to_string()));
         store.create_edge(v1, hr1, "EXAMINED_BY").unwrap();
         // Owner
         let o1 = store.create_node("Owner");
-        store
-            .get_node_mut(o1)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Erik".to_string()));
+        store.get_node_mut(o1).unwrap().set_property("name", PropertyValue::String("Erik".to_string()));
         store.create_edge(h1, o1, "OWNED_BY").unwrap();
 
         store
@@ -13563,28 +11966,19 @@ mod tests {
     #[test]
     fn test_native_label_count() {
         let store = horse_twin_store();
-        assert_native_query_ok(
-            &store,
-            "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS count ORDER BY count DESC",
-        );
+        assert_native_query_ok(&store, "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS count ORDER BY count DESC");
     }
 
     #[test]
     fn test_native_edge_type_count() {
         let store = horse_twin_store();
-        assert_native_query_ok(
-            &store,
-            "MATCH ()-[r]->() RETURN type(r) AS edge_type, count(r) AS count ORDER BY count DESC",
-        );
+        assert_native_query_ok(&store, "MATCH ()-[r]->() RETURN type(r) AS edge_type, count(r) AS count ORDER BY count DESC");
     }
 
     #[test]
     fn test_native_single_hop_with_label() {
         let store = horse_twin_store();
-        assert_native_query_ok(
-            &store,
-            "MATCH (h:Horse)-[:STABLED_AT]->(s:Stable) RETURN h.name, s.name",
-        );
+        assert_native_query_ok(&store, "MATCH (h:Horse)-[:STABLED_AT]->(s:Stable) RETURN h.name, s.name");
     }
 
     #[test]
@@ -13620,22 +12014,16 @@ mod tests {
     #[test]
     fn test_native_with_optional_match() {
         let store = horse_twin_store();
-        assert_native_query_ok(
-            &store,
-            "MATCH (h:Horse) OPTIONAL MATCH (h)-[:SIRE]->(sire:Horse) RETURN h.name, sire.name",
-        );
+        assert_native_query_ok(&store, "MATCH (h:Horse) OPTIONAL MATCH (h)-[:SIRE]->(sire:Horse) RETURN h.name, sire.name");
     }
 
     #[test]
     fn test_native_explain_shows_diagnostics() {
         let store = horse_twin_store();
-        let mut executor = super::super::QueryExecutor::with_planner(
-            &store,
-            QueryPlanner::with_config(PlannerConfig {
-                graph_native: true,
-                max_candidate_plans: 64,
-            }),
-        );
+        let mut executor = super::super::QueryExecutor::with_planner(&store, QueryPlanner::with_config(PlannerConfig {
+            graph_native: true,
+            max_candidate_plans: 64,
+        }));
         let query = crate::query::parse_query(
             "EXPLAIN MATCH (s:Sensor)-[:WEARS]->(h:Horse)-[:COMPLETED]->(ts:TrainingSession) RETURN s.sensor_type"
         ).unwrap();
@@ -13643,45 +12031,26 @@ mod tests {
         assert!(result.is_ok(), "EXPLAIN should succeed: {:?}", result.err());
         let batch = result.unwrap();
         let plan_text = if let Some(record) = batch.records.first() {
-            if let Some(super::super::Value::Property(PropertyValue::String(s))) =
-                record.get("plan")
-            {
+            if let Some(super::super::Value::Property(PropertyValue::String(s))) = record.get("plan") {
                 s.clone()
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
+            } else { String::new() }
+        } else { String::new() };
 
-        assert!(
-            plan_text.contains("Planner Diagnostics"),
-            "EXPLAIN should include planner diagnostics section. Got: {}",
-            &plan_text[..200.min(plan_text.len())]
-        );
-        assert!(
-            plan_text.contains("Candidates evaluated"),
-            "EXPLAIN should show candidate count"
-        );
+        assert!(plan_text.contains("Planner Diagnostics"), "EXPLAIN should include planner diagnostics section. Got: {}", &plan_text[..200.min(plan_text.len())]);
+        assert!(plan_text.contains("Candidates evaluated"), "EXPLAIN should show candidate count");
     }
 
     #[test]
     fn test_native_reverse_direction() {
         let store = horse_twin_store();
-        assert_native_query_ok(
-            &store,
-            "MATCH (ts:TrainingSession)<-[:COMPLETED]-(h:Horse) RETURN h.name, ts.session_type",
-        );
+        assert_native_query_ok(&store, "MATCH (ts:TrainingSession)<-[:COMPLETED]-(h:Horse) RETURN h.name, ts.session_type");
     }
 
     #[test]
     fn test_native_variable_length_path_fallback() {
         let store = horse_twin_store();
         // Variable-length paths may not be supported by graph-native planner — should fallback
-        assert_native_query_ok(
-            &store,
-            "MATCH (h:Horse)-[:SIRE*1..3]->(ancestor:Horse) RETURN h.name, ancestor.name",
-        );
+        assert_native_query_ok(&store, "MATCH (h:Horse)-[:SIRE*1..3]->(ancestor:Horse) RETURN h.name, ancestor.name");
     }
 
     #[test]
@@ -13761,10 +12130,10 @@ mod tests {
         // Create demographics for only countries 0, 1, 2
         for i in 0..3 {
             let dem = store.create_node("Demographic");
-            store.get_node_mut(dem).unwrap().set_property(
-                "population",
-                PropertyValue::Integer((i as i64 + 1) * 1_000_000),
-            );
+            store
+                .get_node_mut(dem)
+                .unwrap()
+                .set_property("population", PropertyValue::Integer((i as i64 + 1) * 1_000_000));
             store
                 .create_edge(country_ids[i], dem, "DEMOGRAPHIC_OF")
                 .unwrap();
@@ -13827,11 +12196,7 @@ mod tests {
 
         let count = |cypher: &str| {
             let q = parse_query(cypher).unwrap();
-            QueryExecutor::new(&store)
-                .execute(&q)
-                .unwrap()
-                .records
-                .len()
+            QueryExecutor::new(&store).execute(&q).unwrap().records.len()
         };
 
         // Outgoing reachability from a within k hops (distinct endpoints):
@@ -13840,31 +12205,13 @@ mod tests {
         //   *1..3 -> {b,e,c,d}        (4)
         //   *2..2 -> {c}              (1)   (regression guard: NOT the 1-hop set)
         //   *2..3 -> {c,d}            (2)
-        assert_eq!(
-            count("MATCH (a:Person {name:'a'})-[:KNOWS*1..1]->(o:Person) RETURN o.name"),
-            2
-        );
-        assert_eq!(
-            count("MATCH (a:Person {name:'a'})-[:KNOWS*1..2]->(o:Person) RETURN o.name"),
-            3
-        );
-        assert_eq!(
-            count("MATCH (a:Person {name:'a'})-[:KNOWS*1..3]->(o:Person) RETURN o.name"),
-            4
-        );
-        assert_eq!(
-            count("MATCH (a:Person {name:'a'})-[:KNOWS*2..2]->(o:Person) RETURN o.name"),
-            1
-        );
-        assert_eq!(
-            count("MATCH (a:Person {name:'a'})-[:KNOWS*2..3]->(o:Person) RETURN o.name"),
-            2
-        );
+        assert_eq!(count("MATCH (a:Person {name:'a'})-[:KNOWS*1..1]->(o:Person) RETURN o.name"), 2);
+        assert_eq!(count("MATCH (a:Person {name:'a'})-[:KNOWS*1..2]->(o:Person) RETURN o.name"), 3);
+        assert_eq!(count("MATCH (a:Person {name:'a'})-[:KNOWS*1..3]->(o:Person) RETURN o.name"), 4);
+        assert_eq!(count("MATCH (a:Person {name:'a'})-[:KNOWS*2..2]->(o:Person) RETURN o.name"), 1);
+        assert_eq!(count("MATCH (a:Person {name:'a'})-[:KNOWS*2..3]->(o:Person) RETURN o.name"), 2);
         // Undirected expansion reaches the whole component from any node.
-        assert_eq!(
-            count("MATCH (d:Person {name:'d'})-[:KNOWS*1..9]-(o:Person) RETURN o.name"),
-            4
-        );
+        assert_eq!(count("MATCH (d:Person {name:'d'})-[:KNOWS*1..9]-(o:Person) RETURN o.name"), 4);
     }
 
     #[test]

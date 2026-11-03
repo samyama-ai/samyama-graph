@@ -63,12 +63,11 @@ impl PropertyIndex {
     }
 
     pub fn get(&self, value: &PropertyValue) -> Vec<NodeId> {
-        self.index
-            .get(value)
+        self.index.get(value)
             .map(|nodes| nodes.iter().cloned().collect())
             .unwrap_or_default()
     }
-
+    
     pub fn range<R>(&self, range: R) -> Vec<NodeId>
     where
         R: std::ops::RangeBounds<PropertyValue>,
@@ -124,12 +123,9 @@ mod tests {
 
         // Range 3..=7
         use std::ops::Bound;
-        let range = (
-            Bound::Included(PropertyValue::Integer(3)),
-            Bound::Included(PropertyValue::Integer(7)),
-        );
+        let range = (Bound::Included(PropertyValue::Integer(3)), Bound::Included(PropertyValue::Integer(7)));
         let results = index.range(range);
-
+        
         assert_eq!(results.len(), 5); // 3, 4, 5, 6, 7
         for i in 3..=7 {
             assert!(results.contains(&NodeId::new(i)));

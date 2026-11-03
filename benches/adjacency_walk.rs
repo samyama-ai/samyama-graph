@@ -150,20 +150,13 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| -> Option<usize> {
-        args.iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1))
-            .and_then(|v| v.parse().ok())
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok())
     };
     let nodes = arg("--nodes").unwrap_or(300_000);
     let degree = arg("--degree").unwrap_or(30);
     let types = arg("--types").unwrap_or(6);
 
-    let order = match args
-        .iter()
-        .position(|a| a == "--order")
-        .and_then(|i| args.get(i + 1))
-    {
+    let order = match args.iter().position(|a| a == "--order").and_then(|i| args.get(i + 1)) {
         Some(o) if o == "by-type" => Order::ByType,
         Some(o) if o == "by-node" => Order::ByNode,
         Some(o) => panic!("--order takes by-node or by-type, not {o}"),
@@ -175,11 +168,7 @@ fn main() {
 
     eprintln!(
         "Building {nodes} nodes x {degree} edges over {types} types, {}…",
-        if order == Order::ByType {
-            "edges written type by type"
-        } else {
-            "edges written node by node"
-        }
+        if order == Order::ByType { "edges written type by type" } else { "edges written node by node" }
     );
     let started = Instant::now();
     let (store, ids) = build(nodes, degree, types, order);
@@ -207,10 +196,7 @@ fn main() {
     };
 
     println!("{} edges visited per pass\n", visited);
-    println!(
-        "{:<48} {:>9}  {:>12} {:>12}",
-        "walk", "ns/edge", "visited", "kept"
-    );
+    println!("{:<48} {:>9}  {:>12} {:>12}", "walk", "ns/edge", "visited", "kept");
     println!("{:-<48} {:->9}  {:->12} {:->12}", "", "", "", "");
 
     // The no-probe baseline. `get_outgoing_neighbor_slice` hands back the write
@@ -276,13 +262,9 @@ fn main() {
         let unlabelled = "MATCH (a:N)-[:TYPE0]->(b) RETURN count(b) AS c";
         let time_it = |cypher: &str| -> f64 {
             let query = parse_query(cypher).expect("query should parse");
-            let _ = QueryExecutor::new(&store)
-                .execute(&query)
-                .expect("query should run");
+            let _ = QueryExecutor::new(&store).execute(&query).expect("query should run");
             let started = Instant::now();
-            let out = QueryExecutor::new(&store)
-                .execute(&query)
-                .expect("query should run");
+            let out = QueryExecutor::new(&store).execute(&query).expect("query should run");
             let ms = started.elapsed().as_secs_f64() * 1000.0;
             let _ = out;
             ms
@@ -325,11 +307,7 @@ fn main() {
     println!();
     println!("Both numbers include one scattered probe of `edge_type_ids` per edge visited:");
     println!("the wildcard case still probes it, because an edge whose type is UNSET has to be");
-    println!(
-        "rejected. At {} edges the array is {:.0} MB.",
-        store.edge_count(),
-        store.edge_count() as f64 * 2.0 / 1e6
-    );
+    println!("rejected. At {} edges the array is {:.0} MB.", store.edge_count(), store.edge_count() as f64 * 2.0 / 1e6);
     println!();
     println!("LDBC IC5 and IC9 both measure ~300-365 ns per edge visited on SF1, whose type");
     println!("array is 42 MB (#520).");
@@ -344,9 +322,7 @@ fn main() {
     );
     println!("#738 is about, and it is the number to watch as the array outgrows cache.");
     println!();
-    println!(
-        "The walk itself is {unfiltered:.1} ns per edge. Running the same traversal through the"
-    );
+    println!("The walk itself is {unfiltered:.1} ns per edge. Running the same traversal through the");
     println!("query engine costs {expand_ns:.1} ns per edge visited -- {:.0}x the walk. Whatever `Expand`", expand_ns / unfiltered.max(0.01));
     println!("costs, storage is not where it goes.");
     println!();

@@ -78,30 +78,27 @@
 
 pub mod adjacency_agg_detector;
 pub mod analyze_ops;
-pub mod budget;
 pub mod cost_model;
 pub mod hierarchy_detector;
 pub mod hierarchy_ops;
+pub mod projection_ops;
+pub mod point_ops;
+pub mod semi_join_detector;
 pub mod leapfrog;
 pub mod logical_optimizer;
 pub mod logical_plan;
+pub mod temporal;
 pub mod operator;
+pub mod budget;
+pub mod profile;
 pub mod physical_planner;
 pub mod plan_enumerator;
 pub mod planner;
-pub mod point_ops;
-pub mod profile;
-pub mod projection_ops;
 pub mod record;
-pub mod semi_join_detector;
-pub mod temporal;
 
 // Export operators - added CreateNodeOperator, CreateEdgeOperator, CartesianProductOperator for CREATE support
-pub use operator::{
-    undescribed_plan_lines, CartesianProductOperator, CreateEdgeOperator, CreateNodeOperator,
-    MatchCreateEdgeOperator, OperatorBox, OperatorDescription, PhysicalOperator,
-};
-pub use planner::{ExecutionPlan, PlannerConfig, QueryPlanner};
+pub use operator::{PhysicalOperator, OperatorBox, OperatorDescription, CreateNodeOperator, CreateEdgeOperator, MatchCreateEdgeOperator, CartesianProductOperator, undescribed_plan_lines};
+pub use planner::{QueryPlanner, ExecutionPlan, PlannerConfig};
 pub use record::{PropertyCursor, Record, RecordBatch, Value};
 
 use crate::graph::GraphStore;
@@ -129,10 +126,7 @@ pub enum ExecutionError {
     TypeError(String),
 
     /// Variable not found
-    #[error(
-        "[{}] Variable not found: {0}",
-        crate::query::error_code::VARIABLE_NOT_BOUND
-    )]
+    #[error("[{}] Variable not found: {0}", crate::query::error_code::VARIABLE_NOT_BOUND)]
     VariableNotFound(String),
 
     /// Variable not found, with the variables that *are* in scope.
@@ -141,10 +135,7 @@ pub enum ExecutionError {
     /// site that raises it has a record in hand, and a message that says
     /// "in scope: " with an empty list is worse than one that does not claim
     /// to know.
-    #[error(
-        "[{}] Variable not found: {name} (in scope: {in_scope})",
-        crate::query::error_code::VARIABLE_NOT_BOUND
-    )]
+    #[error("[{}] Variable not found: {name} (in scope: {in_scope})", crate::query::error_code::VARIABLE_NOT_BOUND)]
     VariableNotFoundInScope { name: String, in_scope: String },
 
     /// A read of an entity that is no longer in the graph.
@@ -153,10 +144,7 @@ pub enum ExecutionError {
     /// and a null cannot: an unset property and a deleted node both answered
     /// `null`, so a query that read a node it had already deleted looked
     /// exactly like a query reading a property nobody set.
-    #[error(
-        "[{}] {0} was deleted in this query and cannot be read",
-        crate::query::error_code::ENTITY_DELETED
-    )]
+    #[error("[{}] {0} was deleted in this query and cannot be read", crate::query::error_code::ENTITY_DELETED)]
     EntityNotFound(String),
 
     /// A runtime fault that carries its own code.
@@ -176,10 +164,7 @@ pub enum ExecutionError {
     /// Its own variant because the caller's response differs: a `TypeError` is
     /// a bug in the query, while this is the engine declining to do something
     /// destructive the query did not say it wanted (#946).
-    #[error(
-        "[{}] Constraint verification failed: {0}",
-        crate::query::error_code::CONSTRAINT
-    )]
+    #[error("[{}] Constraint verification failed: {0}", crate::query::error_code::CONSTRAINT)]
     ConstraintVerificationFailed(String),
 }
 
@@ -206,10 +191,7 @@ impl ExecutionError {
 
     /// A fault with a code finer than the variant it would otherwise use.
     pub fn coded(code: &'static str, message: impl Into<String>) -> Self {
-        Self::Coded {
-            code,
-            message: message.into(),
-        }
+        Self::Coded { code, message: message.into() }
     }
 
     pub fn unknown_function(message: impl Into<String>) -> Self {
@@ -341,12 +323,7 @@ impl<'a> QueryExecutor<'a> {
         // Planning tells us whether the subquery writes. Say so plainly -- the
         // read-only-executor message underneath is about internals the caller
         // did not choose and cannot act on.
-        if self
-            .planner
-            .plan(inner, self.store)
-            .map(|p| p.is_write)
-            .unwrap_or(false)
-        {
+        if self.planner.plan(inner, self.store).map(|p| p.is_write).unwrap_or(false) {
             return Err(ExecutionError::RuntimeError(
                 "writes inside a CALL {} subquery are not supported".to_string(),
             ));
@@ -367,30 +344,23 @@ impl<'a> QueryExecutor<'a> {
             return Ok(inner_batch);
         };
 
-        let mut root: OperatorBox =
-            Box::new(operator::MaterializedOperator::new(inner_batch.records));
+        let mut root: OperatorBox = Box::new(operator::MaterializedOperator::new(inner_batch.records));
 
         if let Some(where_clause) = &query.where_clause {
-            root = Box::new(operator::FilterOperator::new(
-                root,
-                where_clause.predicate.clone(),
-            ));
+            root = Box::new(operator::FilterOperator::new(root, where_clause.predicate.clone()));
         }
 
         let projections: Vec<(crate::query::ast::Expression, String)> = return_clause
             .items
             .iter()
             .map(|item| {
-                let alias = item
-                    .alias
-                    .clone()
-                    .unwrap_or_else(|| match &item.expression {
-                        crate::query::ast::Expression::Variable(v) => v.clone(),
-                        crate::query::ast::Expression::Property { variable, property } => {
-                            format!("{variable}.{property}")
-                        }
-                        other => format!("{other:?}"),
-                    });
+                let alias = item.alias.clone().unwrap_or_else(|| match &item.expression {
+                    crate::query::ast::Expression::Variable(v) => v.clone(),
+                    crate::query::ast::Expression::Property { variable, property } => {
+                        format!("{variable}.{property}")
+                    }
+                    other => format!("{other:?}"),
+                });
                 (item.expression.clone(), alias)
             })
             .collect();
@@ -415,11 +385,7 @@ impl<'a> QueryExecutor<'a> {
             records.retain(|r| seen.insert(r.dedup_key()));
         }
 
-        Ok(RecordBatch {
-            records,
-            columns,
-            plan_hash: None,
-        })
+        Ok(RecordBatch { records, columns, plan_hash: None })
     }
 
     /// Execute a read-only query and return results
@@ -428,13 +394,7 @@ impl<'a> QueryExecutor<'a> {
         batch
             .records
             .iter()
-            .map(|r| {
-                batch
-                    .columns
-                    .iter()
-                    .map(|c| format!("{:?}", r.get(c)))
-                    .collect()
-            })
+            .map(|r| batch.columns.iter().map(|c| format!("{:?}", r.get(c))).collect())
             .collect()
     }
 
@@ -475,8 +435,7 @@ impl<'a> QueryExecutor<'a> {
 
         if !union_all {
             // First-seen order, so the result does not depend on hash order.
-            let mut seen: std::collections::HashSet<&Vec<String>> =
-                std::collections::HashSet::new();
+            let mut seen: std::collections::HashSet<&Vec<String>> = std::collections::HashSet::new();
             let mut keep: Vec<bool> = Vec::with_capacity(keys.len());
             for k in &keys {
                 keep.push(seen.insert(k));
@@ -494,11 +453,7 @@ impl<'a> QueryExecutor<'a> {
                 records.append(&mut rows);
                 Ok(())
             })?;
-        Ok(RecordBatch {
-            records,
-            columns,
-            plan_hash,
-        })
+        Ok(RecordBatch { records, columns, plan_hash })
     }
 
     /// Run a read-only query and hand its rows to `sink` **as the pipeline
@@ -527,11 +482,7 @@ impl<'a> QueryExecutor<'a> {
         let whole = |batch: RecordBatch,
                      sink: &mut dyn FnMut(&[String], Vec<Record>) -> ExecutionResult<()>|
          -> ExecutionResult<(Vec<String>, Option<u64>)> {
-            let RecordBatch {
-                records,
-                columns,
-                plan_hash,
-            } = batch;
+            let RecordBatch { records, columns, plan_hash } = batch;
             sink(&columns, records)?;
             Ok((columns, plan_hash))
         };
@@ -541,10 +492,7 @@ impl<'a> QueryExecutor<'a> {
         let _clock = crate::query::executor::operator::statement_clock::begin();
         crate::query::executor::operator::notifications::begin();
         // Substitute parameters if any
-        let query = if !self.params.is_empty()
-            || !query.params.is_empty()
-            || query.has_deferred_row_counts()
-        {
+        let query = if !self.params.is_empty() || !query.params.is_empty() || query.has_deferred_row_counts() {
             let mut q = query.clone();
             let mut merged_params = query.params.clone();
             merged_params.extend(self.params.clone());
@@ -575,14 +523,11 @@ impl<'a> QueryExecutor<'a> {
         // TRUST-06: the hash of the plan that runs, taken before it is
         // consumed. Re-planning later could describe a different plan: the
         // planner reads statistics that move with the data.
-        let plan_hash = self
-            .plan_hash
-            .then(|| plan.root.describe().structural_hash());
+        let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
 
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain {
-            let mut batch =
-                Self::explain_plan_with_stats(&mut plan, Some(self.store), self.row_budget);
+            let mut batch = Self::explain_plan_with_stats(&mut plan, Some(self.store), self.row_budget);
             batch.plan_hash = plan_hash;
             return whole(batch, sink);
         }
@@ -642,16 +587,9 @@ impl<'a> QueryExecutor<'a> {
             );
 
             let mut record = Record::new();
-            record.bind(
-                "plan".to_string(),
-                Value::Property(PropertyValue::String(profile_text)),
-            );
+            record.bind("plan".to_string(), Value::Property(PropertyValue::String(profile_text)));
             return whole(
-                RecordBatch {
-                    records: vec![record],
-                    columns: vec!["plan".to_string()],
-                    plan_hash,
-                },
+                RecordBatch { records: vec![record], columns: vec!["plan".to_string()], plan_hash },
                 sink,
             );
         }
@@ -680,9 +618,7 @@ impl<'a> QueryExecutor<'a> {
         };
 
         // Append planner diagnostics (candidate plans) if available
-        let diagnostics = PLAN_DIAGNOSTICS.with(
-            |diag: &std::cell::RefCell<Option<planner::PlanDiagnostics>>| diag.borrow_mut().take(),
-        );
+        let diagnostics = PLAN_DIAGNOSTICS.with(|diag: &std::cell::RefCell<Option<planner::PlanDiagnostics>>| diag.borrow_mut().take());
         if let Some(diag) = diagnostics {
             plan_text.push_str("\n--- Planner Diagnostics ---\n");
             plan_text.push_str(&format!(
@@ -690,32 +626,23 @@ impl<'a> QueryExecutor<'a> {
                 diag.candidates_evaluated,
                 diag.chosen_plan_cost,
                 diag.chosen + 1,
-                if diag.chosen == 0 {
-                    ""
-                } else {
-                    ", forced by CYPHER plan=N"
-                }
+                if diag.chosen == 0 { "" } else { ", forced by CYPHER plan=N" }
             ));
             if diag.candidate_costs.len() > 1 {
                 // Numbered as `CYPHER plan=N` takes them, so a reader can run
                 // any of them (#1616).
                 plan_text.push_str("Alternative plans:\n");
-                for (i, (desc, cost)) in diag
-                    .candidate_costs
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != diag.chosen)
-                    .take(5)
-                {
-                    plan_text.push_str(&format!("  #{} (cost {:.2}):\n", i + 1, cost));
+                for (i, (desc, cost)) in diag.candidate_costs.iter().enumerate().filter(|(i, _)| *i != diag.chosen).take(5) {
+                    plan_text.push_str(&format!(
+                        "  #{} (cost {:.2}):\n", i + 1, cost
+                    ));
                     for line in desc.lines() {
                         plan_text.push_str(&format!("    {}\n", line));
                     }
                 }
                 if diag.candidate_costs.len() > 6 {
                     plan_text.push_str(&format!(
-                        "  ... and {} more\n",
-                        diag.candidate_costs.len() - 6
+                        "  ... and {} more\n", diag.candidate_costs.len() - 6
                     ));
                 }
             }
@@ -747,10 +674,7 @@ impl<'a> QueryExecutor<'a> {
         }
 
         let mut record = Record::new();
-        record.bind(
-            "plan".to_string(),
-            Value::Property(PropertyValue::String(plan_text)),
-        );
+        record.bind("plan".to_string(), Value::Property(PropertyValue::String(plan_text)));
 
         RecordBatch {
             records: vec![record],
@@ -765,11 +689,7 @@ impl<'a> QueryExecutor<'a> {
             records.append(&mut rows);
             Ok(())
         })?;
-        Ok(RecordBatch {
-            records,
-            columns,
-            plan_hash: None,
-        })
+        Ok(RecordBatch { records, columns, plan_hash: None })
     }
 
     /// Pull the plan to exhaustion, handing each batch to `sink` as it
@@ -803,10 +723,9 @@ impl<'a> QueryExecutor<'a> {
                 // and whatever lock the caller holds for it -- alive.
                 if let Some(deadline) = self.deadline {
                     if std::time::Instant::now() > deadline {
-                        return Err(ExecutionError::RuntimeError(format!(
-                            "Query timed out after {} rows",
-                            produced
-                        )));
+                        return Err(ExecutionError::RuntimeError(
+                            format!("Query timed out after {} rows", produced)
+                        ));
                     }
                 }
             }
@@ -893,10 +812,7 @@ impl<'a> MutQueryExecutor<'a> {
         let _clock = crate::query::executor::operator::statement_clock::begin();
         crate::query::executor::operator::notifications::begin();
         // Substitute parameters if any
-        let query = if !self.params.is_empty()
-            || !query.params.is_empty()
-            || query.has_deferred_row_counts()
-        {
+        let query = if !self.params.is_empty() || !query.params.is_empty() || query.has_deferred_row_counts() {
             let mut q = query.clone();
             let mut merged_params = query.params.clone();
             merged_params.extend(self.params.clone());
@@ -923,15 +839,12 @@ impl<'a> MutQueryExecutor<'a> {
             self.planner.plan(query, store_ref)?
         };
         // TRUST-06, as on the read executor.
-        let plan_hash = self
-            .plan_hash
-            .then(|| plan.root.describe().structural_hash());
+        let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
 
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain {
             let store_ref: &GraphStore = self.store;
-            let mut batch =
-                QueryExecutor::explain_plan_with_stats(&mut plan, Some(store_ref), self.row_budget);
+            let mut batch = QueryExecutor::explain_plan_with_stats(&mut plan, Some(store_ref), self.row_budget);
             batch.plan_hash = plan_hash;
             return Ok(batch);
         }
@@ -965,11 +878,7 @@ impl<'a> MutQueryExecutor<'a> {
             // return a row where `CREATE (a), (b)` correctly returns none.
             || query.clauses.iter().any(|c| c.is_write());
         if is_data_write && query.return_clause.is_none() && query.call_clause.is_none() {
-            return Ok(RecordBatch {
-                records: Vec::new(),
-                columns: Vec::new(),
-                plan_hash,
-            });
+            return Ok(RecordBatch { records: Vec::new(), columns: Vec::new(), plan_hash });
         }
         Ok(batch)
     }
@@ -987,10 +896,7 @@ impl<'a> MutQueryExecutor<'a> {
         // Pull records from the root operator in batches
         // Use next_batch_mut to allow operators to modify the graph store
         let result = (|| {
-            while let Some(batch) =
-                plan.root
-                    .next_batch_mut(self.store, &self.tenant_id, batch_size)?
-            {
+            while let Some(batch) = plan.root.next_batch_mut(self.store, &self.tenant_id, batch_size)? {
                 records.extend(batch.records);
                 // `>=`, so a limit of zero stops the statement after its
                 // first batch without depending on the clock having ticked.
@@ -1024,10 +930,7 @@ impl<'a> MutQueryExecutor<'a> {
 /// with "Unresolved parameter": `DELETE list[$i]`, `UNWIND $rows`, a MERGE or
 /// CREATE property, FOREACH's list, a CALL argument. The TCK found them once
 /// its harness passed parameters.
-fn substitute_params(
-    query: &mut Query,
-    params: &HashMap<String, crate::graph::PropertyValue>,
-) -> ExecutionResult<()> {
+fn substitute_params(query: &mut Query, params: &HashMap<String, crate::graph::PropertyValue>) -> ExecutionResult<()> {
     use crate::query::ast::Clause;
     let p = params;
     if let Some(wc) = &mut query.where_clause {
@@ -1246,11 +1149,7 @@ fn substitute_pattern(
         Ok(())
     }
     for path in &mut pattern.paths {
-        props(
-            &mut path.start.properties,
-            &mut path.start.property_exprs,
-            p,
-        )?;
+        props(&mut path.start.properties, &mut path.start.property_exprs, p)?;
         for seg in &mut path.segments {
             props(&mut seg.edge.properties, &mut seg.edge.property_exprs, p)?;
             props(&mut seg.node.properties, &mut seg.node.property_exprs, p)?;
@@ -1268,9 +1167,7 @@ fn resolve_row_count(
     p: &HashMap<String, crate::graph::PropertyValue>,
 ) -> ExecutionResult<()> {
     use crate::graph::PropertyValue;
-    let Some(mut e) = deferred.take() else {
-        return Ok(());
-    };
+    let Some(mut e) = deferred.take() else { return Ok(()) };
     substitute_expr(&mut e, p)?;
     let v = crate::query::executor::operator::eval_expression(
         &e,
@@ -1289,10 +1186,8 @@ fn resolve_row_count(
     Ok(())
 }
 
-fn substitute_expr(
-    expr: &mut crate::query::ast::Expression,
-    params: &HashMap<String, crate::graph::PropertyValue>,
-) -> ExecutionResult<()> {
+
+fn substitute_expr(expr: &mut crate::query::ast::Expression, params: &HashMap<String, crate::graph::PropertyValue>) -> ExecutionResult<()> {
     use crate::query::ast::Expression;
     match expr {
         // Recursed into, not skipped: a parameter inside a collection literal
@@ -1327,11 +1222,7 @@ fn substitute_expr(
                 substitute_expr(arg, params)?;
             }
         }
-        Expression::Case {
-            operand,
-            when_clauses,
-            else_result,
-        } => {
+        Expression::Case { operand, when_clauses, else_result } => {
             if let Some(op) = operand {
                 substitute_expr(op, params)?;
             }
@@ -1347,11 +1238,7 @@ fn substitute_expr(
             substitute_expr(e, params)?;
             substitute_expr(index, params)?;
         }
-        Expression::ListSlice {
-            expr: e,
-            start,
-            end,
-        } => {
+        Expression::ListSlice { expr: e, start, end } => {
             substitute_expr(e, params)?;
             if let Some(s) = start {
                 substitute_expr(s, params)?;
@@ -1360,42 +1247,23 @@ fn substitute_expr(
                 substitute_expr(en, params)?;
             }
         }
-        Expression::ListComprehension {
-            list_expr,
-            filter,
-            map_expr,
-            ..
-        } => {
+        Expression::ListComprehension { list_expr, filter, map_expr, .. } => {
             substitute_expr(list_expr, params)?;
             if let Some(f) = filter {
                 substitute_expr(f, params)?;
             }
             substitute_expr(map_expr, params)?;
         }
-        Expression::PredicateFunction {
-            list_expr,
-            predicate,
-            ..
-        } => {
+        Expression::PredicateFunction { list_expr, predicate, .. } => {
             substitute_expr(list_expr, params)?;
             substitute_expr(predicate, params)?;
         }
-        Expression::Reduce {
-            init,
-            list_expr,
-            expression,
-            ..
-        } => {
+        Expression::Reduce { init, list_expr, expression, .. } => {
             substitute_expr(init, params)?;
             substitute_expr(list_expr, params)?;
             substitute_expr(expression, params)?;
         }
-        Expression::PatternComprehension {
-            pattern,
-            filter,
-            projection,
-            ..
-        } => {
+        Expression::PatternComprehension { pattern, filter, projection, .. } => {
             substitute_pattern(pattern, params)?;
             if let Some(f) = filter {
                 substitute_expr(f, params)?;
@@ -1403,15 +1271,9 @@ fn substitute_expr(
             substitute_expr(projection, params)?;
         }
         // Leaf expressions — no substitution needed
-        Expression::Variable(_)
-        | Expression::Property { .. }
-        | Expression::Literal(_)
+        Expression::Variable(_) | Expression::Property { .. } | Expression::Literal(_)
         | Expression::PathVariable(_) => {}
-        Expression::ExistsSubquery {
-            pattern,
-            where_clause,
-            ..
-        } => {
+        Expression::ExistsSubquery { pattern, where_clause, .. } => {
             substitute_pattern(pattern, params)?;
             if let Some(w) = where_clause {
                 substitute_expr(&mut w.predicate, params)?;
@@ -1420,6 +1282,7 @@ fn substitute_expr(
     }
     Ok(())
 }
+
 
 /// A plan node with the estimate the operator gives for it.
 struct EstimatedNode {
@@ -1459,36 +1322,20 @@ fn estimate_node(op: &mut OperatorBox, store: &GraphStore) -> EstimatedNode {
     let child_rows: Vec<Option<f64>> = children.iter().map(|c| c.rows).collect();
     let rows = op.estimate_rows(store, &child_rows);
     let cost = rows.and_then(|r| {
-        children
-            .iter()
-            .try_fold(r, |acc, c| c.cost.map(|cc| acc + cc))
+        children.iter().try_fold(r, |acc, c| c.cost.map(|cc| acc + cc))
     });
-    EstimatedNode {
-        name: description.name,
-        details: description.details,
-        rows,
-        cost,
-        children,
-    }
+    EstimatedNode { name: description.name, details: description.details, rows, cost, children }
 }
 
 fn format_estimated(node: &EstimatedNode, indent: usize, out: &mut String) {
-    let prefix = if indent == 0 {
-        String::new()
-    } else {
-        format!("{}+- ", "   ".repeat(indent - 1))
-    };
+    let prefix = if indent == 0 { String::new() } else { format!("{}+- ", "   ".repeat(indent - 1)) };
     out.push_str(&prefix);
     out.push_str(&node.name);
     if !node.details.is_empty() {
         out.push_str(&format!(" ({})", node.details));
     }
     match (node.rows, node.cost) {
-        (Some(r), Some(c)) => out.push_str(&format!(
-            " [estimated rows={} cost={}]",
-            r.round(),
-            c.round()
-        )),
+        (Some(r), Some(c)) => out.push_str(&format!(" [estimated rows={} cost={}]", r.round(), c.round())),
         (Some(r), None) => out.push_str(&format!(" [estimated rows={}]", r.round())),
         _ => out.push_str(" [estimated rows=?]"),
     }
@@ -1564,22 +1411,12 @@ mod tests {
         }
 
         // IS NOT NULL should return only Alice
-        let query =
-            parse_query("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n.name").unwrap();
+        let query = parse_query("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n.name").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "IS NOT NULL query failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "IS NOT NULL query failed: {:?}", result.err());
         let batch = result.unwrap();
-        assert_eq!(
-            batch.records.len(),
-            1,
-            "Expected 1 result, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 1, "Expected 1 result, got {}", batch.records.len());
     }
 
     #[test]
@@ -1603,12 +1440,7 @@ mod tests {
         let result = executor.execute(&query);
         assert!(result.is_ok(), "IS NULL query failed: {:?}", result.err());
         let batch = result.unwrap();
-        assert_eq!(
-            batch.records.len(),
-            1,
-            "Expected 1 result, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 1, "Expected 1 result, got {}", batch.records.len());
     }
 
     #[test]
@@ -1655,7 +1487,9 @@ mod tests {
         }
 
         // COLLECT aggregate
-        let query = parse_query("MATCH (n:Person) RETURN collect(n.name) AS names").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) RETURN collect(n.name) AS names"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         assert!(result.is_ok(), "COLLECT query failed: {:?}", result.err());
@@ -1677,11 +1511,7 @@ mod tests {
         // point. This asserted 1 row and was pinning the older behaviour; 34
         // TCK scenarios whose entire assertion is "the result should be empty"
         // were failing against it while the write itself was correct.
-        assert_eq!(
-            batch.records.len(),
-            0,
-            "MERGE without RETURN returns no rows"
-        );
+        assert_eq!(batch.records.len(), 0, "MERGE without RETURN returns no rows");
 
         // Verify node was created
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
@@ -1716,28 +1546,22 @@ mod tests {
         let alice = store.create_node("Person");
         if let Some(node) = store.get_node_mut(alice) {
             node.set_property("name", "Alice");
-            node.set_property(
-                "tags",
-                PropertyValue::Array(vec![
-                    PropertyValue::String("dev".to_string()),
-                    PropertyValue::String("rust".to_string()),
-                ]),
-            );
+            node.set_property("tags", PropertyValue::Array(vec![
+                PropertyValue::String("dev".to_string()),
+                PropertyValue::String("rust".to_string()),
+            ]));
         }
 
         // UNWIND the tags array
-        let query = parse_query("MATCH (n:Person) UNWIND n.tags AS tag RETURN tag").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) UNWIND n.tags AS tag RETURN tag"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         assert!(result.is_ok(), "UNWIND query failed: {:?}", result.err());
         let batch = result.unwrap();
         // Should get 2 rows (one per tag)
-        assert_eq!(
-            batch.records.len(),
-            2,
-            "Expected 2 rows from UNWIND, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 2, "Expected 2 rows from UNWIND, got {}", batch.records.len());
     }
 
     #[test]
@@ -1763,20 +1587,14 @@ mod tests {
         store.create_edge(alice, company, "WORKS_AT").unwrap();
 
         let query = parse_query(
-            "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:WORKS_AT]->(:Company) } RETURN n.name",
-        )
-        .unwrap();
+            "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:WORKS_AT]->(:Company) } RETURN n.name"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         assert!(result.is_ok(), "EXISTS query failed: {:?}", result.err());
         let batch = result.unwrap();
         // Only Alice has a WORKS_AT edge
-        assert_eq!(
-            batch.records.len(),
-            1,
-            "Expected 1 result from EXISTS, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 1, "Expected 1 result from EXISTS, got {}", batch.records.len());
     }
 
     #[test]
@@ -1796,17 +1614,14 @@ mod tests {
         }
 
         // IS NULL - should return Bob
-        let query = parse_query("MATCH (n:Person) WHERE n.email IS NULL RETURN n.name").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) WHERE n.email IS NULL RETURN n.name"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         assert!(result.is_ok(), "IS NULL query failed: {:?}", result.err());
         let batch = result.unwrap();
-        assert_eq!(
-            batch.records.len(),
-            1,
-            "Expected 1 result from IS NULL, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 1, "Expected 1 result from IS NULL, got {}", batch.records.len());
     }
 
     #[test]
@@ -1825,22 +1640,14 @@ mod tests {
         }
 
         // IS NOT NULL - should return Alice
-        let query =
-            parse_query("MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n.name").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n.name"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "IS NOT NULL query failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "IS NOT NULL query failed: {:?}", result.err());
         let batch = result.unwrap();
-        assert_eq!(
-            batch.records.len(),
-            1,
-            "Expected 1 result from IS NOT NULL, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 1, "Expected 1 result from IS NOT NULL, got {}", batch.records.len());
     }
 
     #[test]
@@ -1850,15 +1657,15 @@ mod tests {
         let alice = store.create_node("Person");
         if let Some(node) = store.get_node_mut(alice) {
             node.set_property("name", "Alice");
-            node.set_property(
-                "scores",
-                PropertyValue::Array(vec![PropertyValue::Integer(90), PropertyValue::Integer(85)]),
-            );
+            node.set_property("scores", PropertyValue::Array(vec![
+                PropertyValue::Integer(90),
+                PropertyValue::Integer(85),
+            ]));
         }
 
-        let query =
-            parse_query("MATCH (n:Person) FOREACH (s IN n.scores | SET n.processed = TRUE)")
-                .unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) FOREACH (s IN n.scores | SET n.processed = TRUE)"
+        ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query);
         assert!(result.is_ok(), "FOREACH query failed: {:?}", result.err());
@@ -1878,25 +1685,20 @@ mod tests {
         let alice = store.create_node("Person");
         if let Some(node) = store.get_node_mut(alice) {
             node.set_property("name", "Alice");
-            node.set_property(
-                "scores",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(10),
-                    PropertyValue::Integer(20),
-                    PropertyValue::Integer(30),
-                ]),
-            );
+            node.set_property("scores", PropertyValue::Array(vec![
+                PropertyValue::Integer(10),
+                PropertyValue::Integer(20),
+                PropertyValue::Integer(30),
+            ]));
         }
 
         // Simple list comprehension: [x IN n.scores | x]
-        let query = parse_query("MATCH (n:Person) RETURN [x IN n.scores | x]").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) RETURN [x IN n.scores | x]"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "List comprehension query failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "List comprehension query failed: {:?}", result.err());
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 1);
     }
@@ -1921,22 +1723,15 @@ mod tests {
         }
 
         // Multiple MATCH with comma-separated patterns
-        let query = parse_query("MATCH (p:Person), (c:Company) RETURN p.name, c.name").unwrap();
+        let query = parse_query(
+            "MATCH (p:Person), (c:Company) RETURN p.name, c.name"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "Multi-pattern MATCH failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Multi-pattern MATCH failed: {:?}", result.err());
         let batch = result.unwrap();
         // 2 persons × 1 company = 2 results
-        assert_eq!(
-            batch.records.len(),
-            2,
-            "Expected 2 results from multi-pattern, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 2, "Expected 2 results from multi-pattern, got {}", batch.records.len());
     }
 
     #[test]
@@ -1963,20 +1758,14 @@ mod tests {
 
         // OPTIONAL MATCH - both persons should be returned
         let query = parse_query(
-            "MATCH (n:Person) OPTIONAL MATCH (n)-[:WORKS_AT]->(c:Company) RETURN n.name",
-        )
-        .unwrap();
+            "MATCH (n:Person) OPTIONAL MATCH (n)-[:WORKS_AT]->(c:Company) RETURN n.name"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         assert!(result.is_ok(), "OPTIONAL MATCH failed: {:?}", result.err());
         let batch = result.unwrap();
         // Both Alice and Bob should be in results
-        assert_eq!(
-            batch.records.len(),
-            2,
-            "Expected 2 results from OPTIONAL MATCH, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 2, "Expected 2 results from OPTIONAL MATCH, got {}", batch.records.len());
     }
 
     #[test]
@@ -1998,14 +1787,12 @@ mod tests {
         }
 
         // WITH n passes through the variable binding
-        let query = parse_query("MATCH (n:Person) WITH n RETURN n.name").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) WITH n RETURN n.name"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "WITH clause query failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "WITH clause query failed: {:?}", result.err());
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 2);
     }
@@ -2028,11 +1815,7 @@ mod tests {
         let query = parse_query("MATCH (n:Person) WITH n.name AS name RETURN name").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "WITH alias projection failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "WITH alias projection failed: {:?}", result.err());
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 2);
     }
@@ -2051,11 +1834,7 @@ mod tests {
         let query = parse_query("MATCH (n:Person) WITH count(n) AS total RETURN total").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "WITH aggregation failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "WITH aggregation failed: {:?}", result.err());
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 1);
         // total should be 5
@@ -2079,22 +1858,14 @@ mod tests {
             }
         }
 
-        let query =
-            parse_query("MATCH (n:Person) WITH n ORDER BY n.age DESC LIMIT 2 RETURN n.name")
-                .unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) WITH n ORDER BY n.age DESC LIMIT 2 RETURN n.name"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "WITH ORDER BY LIMIT failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "WITH ORDER BY LIMIT failed: {:?}", result.err());
         let batch = result.unwrap();
-        assert_eq!(
-            batch.records.len(),
-            2,
-            "Expected 2 results from WITH LIMIT 2"
-        );
+        assert_eq!(batch.records.len(), 2, "Expected 2 results from WITH LIMIT 2");
     }
 
     #[test]
@@ -2114,8 +1885,9 @@ mod tests {
             }
         }
 
-        let query =
-            parse_query("MATCH (n:Person) WITH DISTINCT n.category AS cat RETURN cat").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) WITH DISTINCT n.category AS cat RETURN cat"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         assert!(result.is_ok(), "WITH DISTINCT failed: {:?}", result.err());
@@ -2139,7 +1911,9 @@ mod tests {
 
         assert_eq!(store.get_nodes_by_label(&Label::new("Person")).len(), 2);
 
-        let query = parse_query("MATCH (n:Person) WHERE n.name = 'Alice' DELETE n").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) WHERE n.name = 'Alice' DELETE n"
+        ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query);
         assert!(result.is_ok(), "DELETE query failed: {:?}", result.err());
@@ -2158,16 +1932,15 @@ mod tests {
             node.set_property("age", 30i64);
         }
 
-        let query = parse_query("MATCH (n:Person) WHERE n.name = 'Alice' SET n.age = 31").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) WHERE n.name = 'Alice' SET n.age = 31"
+        ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query);
         assert!(result.is_ok(), "SET query failed: {:?}", result.err());
 
         let node = store.get_node(alice).unwrap();
-        assert_eq!(
-            store.node_property(node.id, "age").as_ref(),
-            Some(&PropertyValue::Integer(31))
-        );
+        assert_eq!(store.node_property(node.id, "age").as_ref(), Some(&PropertyValue::Integer(31)));
     }
 
     #[test]
@@ -2182,7 +1955,9 @@ mod tests {
 
         assert!(store.node_property(alice, "temp").is_some());
 
-        let query = parse_query("MATCH (n:Person) WHERE n.name = 'Alice' REMOVE n.temp").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) WHERE n.name = 'Alice' REMOVE n.temp"
+        ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query);
         assert!(result.is_ok(), "REMOVE query failed: {:?}", result.err());
@@ -2202,14 +1977,12 @@ mod tests {
             node.set_property("bonus", 5i64);
         }
 
-        let query = parse_query("MATCH (n:Person) RETURN n.age + n.bonus").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) RETURN n.age + n.bonus"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "Arithmetic query failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Arithmetic query failed: {:?}", result.err());
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 1);
     }
@@ -2223,21 +1996,16 @@ mod tests {
             node.set_property("name", "Alice");
         }
 
-        let query = parse_query("MATCH (n:Person) RETURN toUpper(n.name)").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) RETURN toUpper(n.name)"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "String function query failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "String function query failed: {:?}", result.err());
         let batch = result.unwrap();
         assert_eq!(batch.records.len(), 1);
         let val = batch.records[0].get("toUpper(n.name)").unwrap();
-        assert_eq!(
-            *val,
-            Value::Property(PropertyValue::String("ALICE".to_string()))
-        );
+        assert_eq!(*val, Value::Property(PropertyValue::String("ALICE".to_string())));
     }
 
     #[test]
@@ -2256,19 +2024,14 @@ mod tests {
             node.set_property("email", "bob@test.org");
         }
 
-        let query =
-            parse_query(r#"MATCH (n:Person) WHERE n.email =~ ".*@example\.com" RETURN n.name"#)
-                .unwrap();
+        let query = parse_query(
+            r#"MATCH (n:Person) WHERE n.email =~ ".*@example\.com" RETURN n.name"#
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         assert!(result.is_ok(), "Regex query failed: {:?}", result.err());
         let batch = result.unwrap();
-        assert_eq!(
-            batch.records.len(),
-            1,
-            "Expected 1 regex match, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 1, "Expected 1 regex match, got {}", batch.records.len());
     }
 
     #[test]
@@ -2290,23 +2053,14 @@ mod tests {
             node.set_property("name", "Charlie");
         }
 
-        let query =
-            parse_query(r#"MATCH (n:Person) WHERE n.name IN ["Alice", "Charlie"] RETURN n.name"#)
-                .unwrap();
+        let query = parse_query(
+            r#"MATCH (n:Person) WHERE n.name IN ["Alice", "Charlie"] RETURN n.name"#
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "IN operator query failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "IN operator query failed: {:?}", result.err());
         let batch = result.unwrap();
-        assert_eq!(
-            batch.records.len(),
-            2,
-            "Expected 2 IN results, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 2, "Expected 2 IN results, got {}", batch.records.len());
     }
 
     #[test]
@@ -2322,21 +2076,14 @@ mod tests {
         }
 
         // SKIP 3 LIMIT 2
-        let query = parse_query("MATCH (n:Person) RETURN n.name SKIP 3 LIMIT 2").unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) RETURN n.name SKIP 3 LIMIT 2"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "SKIP/LIMIT query failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "SKIP/LIMIT query failed: {:?}", result.err());
         let batch = result.unwrap();
-        assert_eq!(
-            batch.records.len(),
-            2,
-            "Expected 2 results from SKIP 3 LIMIT 2, got {}",
-            batch.records.len()
-        );
+        assert_eq!(batch.records.len(), 2, "Expected 2 results from SKIP 3 LIMIT 2, got {}", batch.records.len());
     }
 
     #[test]
@@ -2361,24 +2108,10 @@ mod tests {
         assert_eq!(batch.records.len(), 1);
 
         // The plan should contain operator names
-        if let Some(Value::Property(PropertyValue::String(plan_text))) =
-            batch.records[0].get("plan")
-        {
-            assert!(
-                plan_text.contains("Project"),
-                "Plan should contain Project operator, got: {}",
-                plan_text
-            );
-            assert!(
-                plan_text.contains("Filter"),
-                "Plan should contain Filter operator, got: {}",
-                plan_text
-            );
-            assert!(
-                plan_text.contains("NodeScan"),
-                "Plan should contain NodeScan operator, got: {}",
-                plan_text
-            );
+        if let Some(Value::Property(PropertyValue::String(plan_text))) = batch.records[0].get("plan") {
+            assert!(plan_text.contains("Project"), "Plan should contain Project operator, got: {}", plan_text);
+            assert!(plan_text.contains("Filter"), "Plan should contain Filter operator, got: {}", plan_text);
+            assert!(plan_text.contains("NodeScan"), "Plan should contain NodeScan operator, got: {}", plan_text);
         } else {
             panic!("Expected plan text in result");
         }
@@ -2388,31 +2121,15 @@ mod tests {
     fn test_explain_traversal() {
         let store = GraphStore::new();
 
-        let query =
-            parse_query("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name")
-                .unwrap();
+        let query = parse_query("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "EXPLAIN traversal failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "EXPLAIN traversal failed: {:?}", result.err());
 
         let batch = result.unwrap();
-        if let Some(Value::Property(PropertyValue::String(plan_text))) =
-            batch.records[0].get("plan")
-        {
-            assert!(
-                plan_text.contains("Expand"),
-                "Plan should contain Expand operator, got: {}",
-                plan_text
-            );
-            assert!(
-                plan_text.contains("NodeScan"),
-                "Plan should contain NodeScan operator, got: {}",
-                plan_text
-            );
+        if let Some(Value::Property(PropertyValue::String(plan_text))) = batch.records[0].get("plan") {
+            assert!(plan_text.contains("Expand"), "Plan should contain Expand operator, got: {}", plan_text);
+            assert!(plan_text.contains("NodeScan"), "Plan should contain NodeScan operator, got: {}", plan_text);
         } else {
             panic!("Expected plan text in result");
         }
@@ -2425,21 +2142,11 @@ mod tests {
         let query = parse_query("EXPLAIN MATCH (n:Person) RETURN n.dept, count(n)").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_ok(),
-            "EXPLAIN aggregation failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "EXPLAIN aggregation failed: {:?}", result.err());
 
         let batch = result.unwrap();
-        if let Some(Value::Property(PropertyValue::String(plan_text))) =
-            batch.records[0].get("plan")
-        {
-            assert!(
-                plan_text.contains("Aggregate"),
-                "Plan should contain Aggregate operator, got: {}",
-                plan_text
-            );
+        if let Some(Value::Property(PropertyValue::String(plan_text))) = batch.records[0].get("plan") {
+            assert!(plan_text.contains("Aggregate"), "Plan should contain Aggregate operator, got: {}", plan_text);
         } else {
             panic!("Expected plan text in result");
         }
@@ -2468,25 +2175,11 @@ mod tests {
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
 
-        if let Some(Value::Property(PropertyValue::String(plan_text))) =
-            result.records[0].get("plan")
-        {
+        if let Some(Value::Property(PropertyValue::String(plan_text))) = result.records[0].get("plan") {
             // Should contain statistics section
-            assert!(
-                plan_text.contains("Statistics"),
-                "Plan should contain Statistics, got: {}",
-                plan_text
-            );
-            assert!(
-                plan_text.contains("Person"),
-                "Statistics should mention Person label, got: {}",
-                plan_text
-            );
-            assert!(
-                plan_text.contains("Company"),
-                "Statistics should mention Company label, got: {}",
-                plan_text
-            );
+            assert!(plan_text.contains("Statistics"), "Plan should contain Statistics, got: {}", plan_text);
+            assert!(plan_text.contains("Person"), "Statistics should mention Person label, got: {}", plan_text);
+            assert!(plan_text.contains("Company"), "Statistics should mention Company label, got: {}", plan_text);
         } else {
             panic!("Expected plan text in result");
         }
@@ -2519,11 +2212,7 @@ mod tests {
 
         // Selectivity for "city" on Person — should be ~0.5 (2 distinct values)
         let city_sel = stats.estimate_equality_selectivity(&Label::new("Person"), "city");
-        assert!(
-            city_sel > 0.3 && city_sel < 0.7,
-            "City selectivity should be ~0.5, got {}",
-            city_sel
-        );
+        assert!(city_sel > 0.3 && city_sel < 0.7, "City selectivity should be ~0.5, got {}", city_sel);
     }
 
     #[test]
@@ -2542,11 +2231,7 @@ mod tests {
         let query = parse_query("MATCH (s:Sensor) WHERE s.value > 20 RETURN s.name").unwrap();
         let result = executor.execute(&query).unwrap();
         // Sensor0=5.0, Sensor1=15.0, Sensor2=25.0, Sensor3=35.0, Sensor4=45.0
-        assert_eq!(
-            result.records.len(),
-            3,
-            "Expected 3 sensors with value > 20"
-        );
+        assert_eq!(result.records.len(), 3, "Expected 3 sensors with value > 20");
     }
 
     #[test]
@@ -2605,33 +2290,24 @@ mod tests {
         store.create_edge(alice, post2, "LIKES").unwrap();
 
         // count(b) should return 3 (all edges)
-        let query =
-            parse_query("MATCH (a:Person)-[:LIKES]->(b:Post) RETURN a.name, count(b) AS cnt")
-                .unwrap();
+        let query = parse_query(
+            "MATCH (a:Person)-[:LIKES]->(b:Post) RETURN a.name, count(b) AS cnt"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
         let cnt = result.records[0].get("cnt").unwrap();
-        assert_eq!(
-            *cnt,
-            Value::Property(PropertyValue::Integer(3)),
-            "count(b) should be 3"
-        );
+        assert_eq!(*cnt, Value::Property(PropertyValue::Integer(3)), "count(b) should be 3");
 
         // count(DISTINCT b) should return 2 (unique posts)
         let query = parse_query(
-            "MATCH (a:Person)-[:LIKES]->(b:Post) RETURN a.name, count(DISTINCT b) AS cnt",
-        )
-        .unwrap();
+            "MATCH (a:Person)-[:LIKES]->(b:Post) RETURN a.name, count(DISTINCT b) AS cnt"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
         let cnt = result.records[0].get("cnt").unwrap();
-        assert_eq!(
-            *cnt,
-            Value::Property(PropertyValue::Integer(2)),
-            "count(DISTINCT b) should be 2"
-        );
+        assert_eq!(*cnt, Value::Property(PropertyValue::Integer(2)), "count(DISTINCT b) should be 2");
     }
 
     #[test]
@@ -2647,11 +2323,7 @@ mod tests {
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
         if let Some(Value::Property(PropertyValue::Float(v))) = result.records[0].get("val") {
-            assert!(
-                (v - 1.0).abs() < 1e-10,
-                "log(exp(1.0)) should be ~1.0, got {}",
-                v
-            );
+            assert!((v - 1.0).abs() < 1e-10, "log(exp(1.0)) should be ~1.0, got {}", v);
         } else {
             panic!("Expected float from log(exp())");
         }
@@ -2680,11 +2352,7 @@ mod tests {
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
         if let Some(Value::Property(PropertyValue::Float(v))) = result.records[0].get("val") {
-            assert!(
-                *v >= 0.0 && *v < 1.0,
-                "rand() should be in [0,1), got {}",
-                v
-            );
+            assert!(*v >= 0.0 && *v < 1.0, "rand() should be in [0,1), got {}", v);
         } else {
             panic!("Expected float from rand()");
         }
@@ -2700,11 +2368,7 @@ mod tests {
         assert_eq!(result.records.len(), 1);
         if let Some(Value::Property(PropertyValue::Integer(ts))) = result.records[0].get("ts") {
             // Should be a reasonable timestamp (after 2025-01-01)
-            assert!(
-                *ts > 1_735_689_600_000,
-                "timestamp() should be after 2025, got {}",
-                ts
-            );
+            assert!(*ts > 1_735_689_600_000, "timestamp() should be after 2025, got {}", ts);
         } else {
             panic!("Expected integer from timestamp()");
         }
@@ -2715,16 +2379,13 @@ mod tests {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
         if let Some(node) = store.get_node_mut(id) {
-            node.set_property(
-                "items",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                    PropertyValue::Integer(4),
-                    PropertyValue::Integer(5),
-                ]),
-            );
+            node.set_property("items", PropertyValue::Array(vec![
+                PropertyValue::Integer(1),
+                PropertyValue::Integer(2),
+                PropertyValue::Integer(3),
+                PropertyValue::Integer(4),
+                PropertyValue::Integer(5),
+            ]));
         }
         let executor = QueryExecutor::new(&store);
 
@@ -2785,25 +2446,17 @@ mod tests {
                 node.set_property("name", format!("Machine{}", i));
                 // Only set utilization on some nodes
                 if i % 2 == 0 {
-                    node.set_property(
-                        "utilization",
-                        PropertyValue::Float(80.0 + (i as f64) * 10.0),
-                    );
+                    node.set_property("utilization", PropertyValue::Float(80.0 + (i as f64) * 10.0));
                 }
                 // Nodes 1 and 3 have NO utilization property → Null
             }
         }
         let executor = QueryExecutor::new(&store);
         // This should NOT error — Null > 90 returns Null, which filters out the record
-        let query =
-            parse_query("MATCH (m:Machine) WHERE m.utilization > 90 RETURN m.name").unwrap();
+        let query = parse_query("MATCH (m:Machine) WHERE m.utilization > 90 RETURN m.name").unwrap();
         let result = executor.execute(&query).unwrap();
         // Machine0=80.0, Machine2=100.0, Machine4=120.0 — only Machine2 and Machine4 > 90
-        assert_eq!(
-            result.records.len(),
-            2,
-            "Expected 2 machines with utilization > 90"
-        );
+        assert_eq!(result.records.len(), 2, "Expected 2 machines with utilization > 90");
     }
 
     // ========== Batch 2: EXPLAIN integration tests ==========
@@ -2813,14 +2466,7 @@ mod tests {
         let executor = QueryExecutor::new(store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        result.records[0]
-            .get("plan")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap()
-            .to_string()
+        result.records[0].get("plan").unwrap().as_property().unwrap().as_string().unwrap().to_string()
     }
 
     #[test]
@@ -2828,26 +2474,16 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("Person");
         let plan = get_explain_plan(&store, "EXPLAIN MATCH (n:Person) RETURN n");
-        assert!(
-            plan.contains("Project") || plan.contains("NodeScan"),
-            "Plan should contain operators: {}",
-            plan
-        );
+        assert!(plan.contains("Project") || plan.contains("NodeScan"), "Plan should contain operators: {}", plan);
     }
 
     #[test]
     fn test_explain_filter() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "age", 30i64)
-            .unwrap();
+        store.set_node_property("default", id, "age", 30i64).unwrap();
         let plan = get_explain_plan(&store, "EXPLAIN MATCH (n:Person) WHERE n.age > 30 RETURN n");
-        assert!(
-            plan.contains("Filter") || plan.contains("NodeScan"),
-            "Plan should contain Filter: {}",
-            plan
-        );
+        assert!(plan.contains("Filter") || plan.contains("NodeScan"), "Plan should contain Filter: {}", plan);
     }
 
     #[test]
@@ -2855,26 +2491,16 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("Person");
         let plan = get_explain_plan(&store, "EXPLAIN MATCH (n:Person) RETURN n LIMIT 10");
-        assert!(
-            plan.contains("Limit") || plan.contains("10"),
-            "Plan should contain Limit: {}",
-            plan
-        );
+        assert!(plan.contains("Limit") || plan.contains("10"), "Plan should contain Limit: {}", plan);
     }
 
     #[test]
     fn test_explain_order_by() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
         let plan = get_explain_plan(&store, "EXPLAIN MATCH (n:Person) RETURN n ORDER BY n.name");
-        assert!(
-            plan.contains("Sort") || plan.contains("ORDER"),
-            "Plan should contain Sort: {}",
-            plan
-        );
+        assert!(plan.contains("Sort") || plan.contains("ORDER"), "Plan should contain Sort: {}", plan);
     }
 
     #[test]
@@ -2882,11 +2508,7 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("Person");
         let plan = get_explain_plan(&store, "EXPLAIN MATCH (n:Person) RETURN count(n)");
-        assert!(
-            plan.contains("Aggregate") || plan.contains("count"),
-            "Plan should contain Aggregate: {}",
-            plan
-        );
+        assert!(plan.contains("Aggregate") || plan.contains("count"), "Plan should contain Aggregate: {}", plan);
     }
 
     #[test]
@@ -2896,42 +2518,28 @@ mod tests {
         let b = store.create_node("Person");
         store.create_edge(a, b, "KNOWS").unwrap();
         let plan = get_explain_plan(&store, "EXPLAIN MATCH (a:Person)-[:KNOWS]->(b) RETURN a, b");
-        assert!(
-            plan.contains("Expand") || plan.contains("KNOWS") || plan.contains("NodeScan"),
-            "Plan should contain Expand: {}",
-            plan
-        );
+        assert!(plan.contains("Expand") || plan.contains("KNOWS") || plan.contains("NodeScan"), "Plan should contain Expand: {}", plan);
     }
 
     #[test]
     fn test_explain_distinct() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
         let plan = get_explain_plan(&store, "EXPLAIN MATCH (n:Person) RETURN DISTINCT n.name");
         // DISTINCT may be part of the Project operator details
-        assert!(
-            plan.contains("Distinct") || plan.contains("DISTINCT") || plan.contains("Project"),
-            "Plan should contain Distinct or Project: {}",
-            plan
-        );
+        assert!(plan.contains("Distinct") || plan.contains("DISTINCT") || plan.contains("Project"),
+            "Plan should contain Distinct or Project: {}", plan);
     }
 
     #[test]
     fn test_explain_with_pipe() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
         let plan = get_explain_plan(&store, "EXPLAIN MATCH (n:Person) WITH n RETURN n");
-        assert!(
-            plan.contains("With") || plan.contains("Barrier") || plan.contains("Project"),
-            "Plan should contain With/Barrier: {}",
-            plan
-        );
+        assert!(plan.contains("With") || plan.contains("Barrier") || plan.contains("Project"),
+            "Plan should contain With/Barrier: {}", plan);
     }
 
     #[test]
@@ -2941,13 +2549,7 @@ mod tests {
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let plan = result.records[0]
-            .get("plan")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
+        let plan = result.records[0].get("plan").unwrap().as_property().unwrap().as_string().unwrap();
         // CREATE plan may show as "Unknown" or "Create" depending on the planner
         assert!(!plan.is_empty(), "Plan should not be empty: {}", plan);
     }
@@ -2960,43 +2562,21 @@ mod tests {
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let plan = result.records[0]
-            .get("plan")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
-        assert!(
-            plan.contains("Delete") || plan.contains("NodeScan"),
-            "Plan: {}",
-            plan
-        );
+        let plan = result.records[0].get("plan").unwrap().as_property().unwrap().as_string().unwrap();
+        assert!(plan.contains("Delete") || plan.contains("NodeScan"), "Plan: {}", plan);
     }
 
     #[test]
     fn test_explain_set() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "age", 30i64)
-            .unwrap();
+        store.set_node_property("default", id, "age", 30i64).unwrap();
         let query = parse_query("EXPLAIN MATCH (n:Person) SET n.age = 31").unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let plan = result.records[0]
-            .get("plan")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
-        assert!(
-            plan.contains("Set") || plan.contains("NodeScan"),
-            "Plan: {}",
-            plan
-        );
+        let plan = result.records[0].get("plan").unwrap().as_property().unwrap().as_string().unwrap();
+        assert!(plan.contains("Set") || plan.contains("NodeScan"), "Plan: {}", plan);
     }
 
     #[test]
@@ -3006,11 +2586,7 @@ mod tests {
             store.create_node("Person");
         }
         let plan = get_explain_plan(&store, "EXPLAIN MATCH (n:Person) RETURN n");
-        assert!(
-            plan.contains("Statistics"),
-            "Plan should contain Statistics: {}",
-            plan
-        );
+        assert!(plan.contains("Statistics"), "Plan should contain Statistics: {}", plan);
     }
 
     #[test]
@@ -3028,37 +2604,17 @@ mod tests {
     fn test_profile_query() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
         let query = parse_query("PROFILE MATCH (n:Person) RETURN n").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         // PROFILE should return a single record with "plan" column (like EXPLAIN)
         assert_eq!(result.columns, vec!["plan".to_string()]);
         assert_eq!(result.records.len(), 1);
-        let plan_text = result.records[0]
-            .get("plan")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
-        assert!(
-            plan_text.contains("Rows:"),
-            "Profile should contain Rows: {}",
-            plan_text
-        );
-        assert!(
-            plan_text.contains("Execution time:"),
-            "Profile should contain Execution time: {}",
-            plan_text
-        );
-        assert!(
-            plan_text.contains("Profile"),
-            "Profile should contain Profile section: {}",
-            plan_text
-        );
+        let plan_text = result.records[0].get("plan").unwrap().as_property().unwrap().as_string().unwrap();
+        assert!(plan_text.contains("Rows:"), "Profile should contain Rows: {}", plan_text);
+        assert!(plan_text.contains("Execution time:"), "Profile should contain Execution time: {}", plan_text);
+        assert!(plan_text.contains("Profile"), "Profile should contain Profile section: {}", plan_text);
     }
 
     #[test]
@@ -3067,10 +2623,7 @@ mod tests {
         let query = parse_query("CREATE (n:Person)").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_err(),
-            "Read-only executor should reject write queries"
-        );
+        assert!(result.is_err(), "Read-only executor should reject write queries");
     }
 
     // ========== Batch 2: describe() unit tests in operator.rs ==========
@@ -3081,11 +2634,13 @@ mod tests {
         let desc = crate::query::executor::operator::OperatorDescription {
             name: "Project".to_string(),
             details: "columns=[n]".to_string(),
-            children: vec![crate::query::executor::operator::OperatorDescription {
-                name: "NodeScan".to_string(),
-                details: "n:Person".to_string(),
-                children: vec![],
-            }],
+            children: vec![
+                crate::query::executor::operator::OperatorDescription {
+                    name: "NodeScan".to_string(),
+                    details: "n:Person".to_string(),
+                    children: vec![],
+                }
+            ],
         };
         let formatted = desc.format(0);
         assert!(formatted.contains("Project (columns=[n])"));
@@ -3108,15 +2663,19 @@ mod tests {
         let desc = crate::query::executor::operator::OperatorDescription {
             name: "Root".to_string(),
             details: String::new(),
-            children: vec![crate::query::executor::operator::OperatorDescription {
-                name: "Child".to_string(),
-                details: String::new(),
-                children: vec![crate::query::executor::operator::OperatorDescription {
-                    name: "Grandchild".to_string(),
+            children: vec![
+                crate::query::executor::operator::OperatorDescription {
+                    name: "Child".to_string(),
                     details: String::new(),
-                    children: vec![],
-                }],
-            }],
+                    children: vec![
+                        crate::query::executor::operator::OperatorDescription {
+                            name: "Grandchild".to_string(),
+                            details: String::new(),
+                            children: vec![],
+                        }
+                    ],
+                }
+            ],
         };
         let formatted = desc.format(0);
         assert!(formatted.contains("Root"));
@@ -3139,22 +2698,8 @@ mod tests {
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
         let node = &nodes[0];
-        assert_eq!(
-            store
-                .node_property(node.id, "name")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("Alice")
-        );
-        assert_eq!(
-            store
-                .node_property(node.id, "age")
-                .as_ref()
-                .unwrap()
-                .as_integer(),
-            Some(30)
-        );
+        assert_eq!(store.node_property(node.id, "name").as_ref().unwrap().as_string(), Some("Alice"));
+        assert_eq!(store.node_property(node.id, "age").as_ref().unwrap().as_integer(), Some(30));
     }
 
     #[test]
@@ -3171,15 +2716,11 @@ mod tests {
     #[test]
     fn test_create_edge_with_props() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'Alice'})-[:KNOWS {since: 2020}]->(b:Person {name: 'Bob'})",
-        );
+        exec_mut(&mut store, "CREATE (a:Person {name: 'Alice'})-[:KNOWS {since: 2020}]->(b:Person {name: 'Bob'})");
         let persons = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(persons.len(), 2);
         // Check edges exist
-        let all_edges: Vec<_> = persons
-            .iter()
+        let all_edges: Vec<_> = persons.iter()
             .flat_map(|n| store.get_outgoing_edges(n.id))
             .collect();
         assert!(all_edges.len() >= 1, "Should have at least 1 edge");
@@ -3197,10 +2738,7 @@ mod tests {
     #[test]
     fn test_detach_delete() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})",
-        );
+        exec_mut(&mut store, "CREATE (a:Person {name: 'A'})-[:KNOWS]->(b:Person {name: 'B'})");
         let persons_before = store.get_nodes_by_label(&Label::new("Person")).len();
         assert_eq!(persons_before, 2);
         exec_mut(&mut store, "MATCH (n:Person {name: 'A'}) DETACH DELETE n");
@@ -3212,38 +2750,18 @@ mod tests {
     fn test_set_property() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 25})");
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person {name: 'Alice'}) SET n.age = 30",
-        );
+        exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) SET n.age = 30");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "age")
-                .as_ref()
-                .unwrap()
-                .as_integer(),
-            Some(30)
-        );
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(30));
     }
 
     #[test]
     fn test_set_new_property() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice'})");
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person) SET n.email = 'alice@example.com'",
-        );
+        exec_mut(&mut store, "MATCH (n:Person) SET n.email = 'alice@example.com'");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "email")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("alice@example.com")
-        );
+        assert_eq!(store.node_property(nodes[0].id, "email").as_ref().unwrap().as_string(), Some("alice@example.com"));
     }
 
     #[test]
@@ -3272,40 +2790,20 @@ mod tests {
     #[test]
     fn test_merge_on_create() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true",
-        );
+        exec_mut(&mut store, "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "name")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("Alice")
-        );
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("Alice"));
     }
 
     #[test]
     fn test_merge_on_match() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', seen: 0})");
-        exec_mut(
-            &mut store,
-            "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.seen = 1",
-        );
+        exec_mut(&mut store, "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.seen = 1");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "seen")
-                .as_ref()
-                .unwrap()
-                .as_integer(),
-            Some(1)
-        );
+        assert_eq!(store.node_property(nodes[0].id, "seen").as_ref().unwrap().as_integer(), Some(1));
     }
 
     #[test]
@@ -3314,14 +2812,7 @@ mod tests {
         exec_mut(&mut store, "MERGE (n:Person {name: 'Bob'})");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "name")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("Bob")
-        );
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("Bob"));
     }
 
     #[test]
@@ -3347,11 +2838,9 @@ mod tests {
         // After dropping, should have no Person/name index
         let has_person_name = result.records.iter().any(|r| {
             r.get("label").map_or(false, |v| {
-                v.as_property()
-                    .map_or(false, |p| p.as_string() == Some("Person"))
+                v.as_property().map_or(false, |p| p.as_string() == Some("Person"))
             }) && r.get("property").map_or(false, |v| {
-                v.as_property()
-                    .map_or(false, |p| p.as_string() == Some("name"))
+                v.as_property().map_or(false, |p| p.as_string() == Some("name"))
             })
         });
         assert!(!has_person_name, "Person.name index should be dropped");
@@ -3381,17 +2870,11 @@ mod tests {
     fn test_create_constraint_unique() {
         let mut store = GraphStore::new();
         // Parser syntax: CREATE CONSTRAINT ON (n:Label) ASSERT n.prop IS UNIQUE
-        exec_mut(
-            &mut store,
-            "CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE",
-        );
+        exec_mut(&mut store, "CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE");
         let query = parse_query("SHOW CONSTRAINTS").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 1,
-            "Should have at least 1 constraint"
-        );
+        assert!(result.records.len() >= 1, "Should have at least 1 constraint");
     }
 
     #[test]
@@ -3423,23 +2906,11 @@ mod tests {
     fn test_list_comprehension_with_filter() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                    PropertyValue::Integer(4),
-                    PropertyValue::Integer(5),
-                ]),
-            )
-            .unwrap();
-        let query =
-            parse_query("MATCH (d:Data) RETURN [x IN d.nums WHERE x > 2 | x * 2] AS result")
-                .unwrap();
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+            PropertyValue::Integer(4), PropertyValue::Integer(5),
+        ])).unwrap();
+        let query = parse_query("MATCH (d:Data) RETURN [x IN d.nums WHERE x > 2 | x * 2] AS result").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
@@ -3455,20 +2926,10 @@ mod tests {
     fn test_list_comprehension_no_filter() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "scores",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let query =
-            parse_query("MATCH (d:Data) RETURN [x IN d.scores | x * 10] AS result").unwrap();
+        store.set_node_property("default", id, "scores", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let query = parse_query("MATCH (d:Data) RETURN [x IN d.scores | x * 10] AS result").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
@@ -3484,28 +2945,14 @@ mod tests {
     fn test_predicate_function_all() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(4),
-                    PropertyValue::Integer(6),
-                ]),
-            )
-            .unwrap();
-        let query = parse_query("MATCH (d:Data) RETURN all(x IN d.nums WHERE x % 2 = 0) AS result")
-            .unwrap();
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(2), PropertyValue::Integer(4), PropertyValue::Integer(6),
+        ])).unwrap();
+        let query = parse_query("MATCH (d:Data) RETURN all(x IN d.nums WHERE x % 2 = 0) AS result").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(true));
     }
 
@@ -3513,28 +2960,14 @@ mod tests {
     fn test_predicate_function_any() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let query =
-            parse_query("MATCH (d:Data) RETURN any(x IN d.nums WHERE x > 2) AS result").unwrap();
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let query = parse_query("MATCH (d:Data) RETURN any(x IN d.nums WHERE x > 2) AS result").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(true));
     }
 
@@ -3542,28 +2975,14 @@ mod tests {
     fn test_predicate_function_none() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let query =
-            parse_query("MATCH (d:Data) RETURN none(x IN d.nums WHERE x > 10) AS result").unwrap();
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let query = parse_query("MATCH (d:Data) RETURN none(x IN d.nums WHERE x > 10) AS result").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(true));
     }
 
@@ -3571,28 +2990,14 @@ mod tests {
     fn test_predicate_function_single() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let query =
-            parse_query("MATCH (d:Data) RETURN single(x IN d.nums WHERE x = 2) AS result").unwrap();
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let query = parse_query("MATCH (d:Data) RETURN single(x IN d.nums WHERE x = 2) AS result").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(true));
     }
 
@@ -3600,30 +3005,14 @@ mod tests {
     fn test_reduce_sum() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                    PropertyValue::Integer(4),
-                ]),
-            )
-            .unwrap();
-        let query =
-            parse_query("MATCH (d:Data) RETURN reduce(acc = 0, x IN d.nums | acc + x) AS result")
-                .unwrap();
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3), PropertyValue::Integer(4),
+        ])).unwrap();
+        let query = parse_query("MATCH (d:Data) RETURN reduce(acc = 0, x IN d.nums | acc + x) AS result").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Integer(10));
     }
 
@@ -3631,20 +3020,14 @@ mod tests {
     fn test_case_simple() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "status", "active")
-            .unwrap();
+        store.set_node_property("default", id, "status", "active").unwrap();
         let query = parse_query(
             "MATCH (n:Person) RETURN CASE n.status WHEN 'active' THEN 'yes' WHEN 'inactive' THEN 'no' ELSE 'unknown' END AS result"
         ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("yes".to_string()));
     }
 
@@ -3652,20 +3035,14 @@ mod tests {
     fn test_case_searched() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "age", 25i64)
-            .unwrap();
+        store.set_node_property("default", id, "age", 25i64).unwrap();
         let query = parse_query(
             "MATCH (n:Person) RETURN CASE WHEN n.age < 18 THEN 'minor' WHEN n.age < 65 THEN 'adult' ELSE 'senior' END AS category"
         ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("category")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("category").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("adult".to_string()));
     }
 
@@ -3673,21 +3050,15 @@ mod tests {
     fn test_case_no_else() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "age", 100i64)
-            .unwrap();
+        store.set_node_property("default", id, "age", 100i64).unwrap();
         let query = parse_query(
-            "MATCH (n:Person) RETURN CASE WHEN n.age < 18 THEN 'minor' END AS category",
-        )
-        .unwrap();
+            "MATCH (n:Person) RETURN CASE WHEN n.age < 18 THEN 'minor' END AS category"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
         let val = result.records[0].get("category").unwrap();
-        assert!(matches!(
-            val,
-            Value::Null | Value::Property(PropertyValue::Null)
-        ));
+        assert!(matches!(val, Value::Null | Value::Property(PropertyValue::Null)));
     }
 
     // ========== Batch 4: Pattern comprehension ==========
@@ -3696,24 +3067,17 @@ mod tests {
     fn test_pattern_comprehension() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "name", "Charlie")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Charlie").unwrap();
         store.create_edge(a, b, "KNOWS").unwrap();
         store.create_edge(a, c, "KNOWS").unwrap();
 
         let query = parse_query(
-            "MATCH (a:Person {name: 'Alice'}) RETURN [(a)-[:KNOWS]->(b) | b.name] AS friends",
-        )
-        .unwrap();
+            "MATCH (a:Person {name: 'Alice'}) RETURN [(a)-[:KNOWS]->(b) | b.name] AS friends"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
@@ -3733,20 +3097,12 @@ mod tests {
     fn test_parameterized_query() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", id, "age", 30i64)
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
+        store.set_node_property("default", id, "age", 30i64).unwrap();
 
         let id2 = store.create_node("Person");
-        store
-            .set_node_property("default", id2, "name", "Bob")
-            .unwrap();
-        store
-            .set_node_property("default", id2, "age", 25i64)
-            .unwrap();
+        store.set_node_property("default", id2, "name", "Bob").unwrap();
+        store.set_node_property("default", id2, "age", 25i64).unwrap();
 
         let query = parse_query("MATCH (n:Person) WHERE n.age > $min_age RETURN n.name").unwrap();
         let mut params = HashMap::new();
@@ -3761,22 +3117,13 @@ mod tests {
         let mut store = GraphStore::new();
         // Create a node first so we can use params in a MATCH SET query
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 25})");
-        let query =
-            parse_query("MATCH (n:Person) WHERE n.age > $min_age SET n.status = 'senior'").unwrap();
+        let query = parse_query("MATCH (n:Person) WHERE n.age > $min_age SET n.status = 'senior'").unwrap();
         let mut params = HashMap::new();
         params.insert("min_age".to_string(), PropertyValue::Integer(20));
-        let mut executor =
-            MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params);
+        let mut executor = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params);
         executor.execute(&query).unwrap();
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "status")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("senior")
-        );
+        assert_eq!(store.node_property(nodes[0].id, "status").as_ref().unwrap().as_string(), Some("senior"));
     }
 
     // ========== Batch 5: UNION ==========
@@ -3785,18 +3132,12 @@ mod tests {
     fn test_union_query() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
         let id2 = store.create_node("Person");
-        store
-            .set_node_property("default", id2, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", id2, "name", "Bob").unwrap();
 
         // UNION deduplicates; test parse+execute succeeds
-        let query =
-            parse_query("MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Person) RETURN m.name")
-                .unwrap();
+        let query = parse_query("MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Person) RETURN m.name").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 4,
@@ -3809,23 +3150,16 @@ mod tests {
     fn test_optional_match() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         // Alice has no KNOWS edges
 
-        let query =
-            parse_query("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b")
-                .unwrap();
+        let query = parse_query("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
         // b should be null since no matches
         let b = result.records[0].get("b").unwrap();
-        assert!(matches!(
-            b,
-            Value::Null | Value::Property(PropertyValue::Null)
-        ));
+        assert!(matches!(b, Value::Null | Value::Property(PropertyValue::Null)));
     }
 
     // ========== Mop-up: Additional operator coverage ==========
@@ -3840,31 +3174,16 @@ mod tests {
     fn test_where_or_condition() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", a, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
+        store.set_node_property("default", a, "age", PropertyValue::Integer(30)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
-        store
-            .set_node_property("default", b, "age", PropertyValue::Integer(20))
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
+        store.set_node_property("default", b, "age", PropertyValue::Integer(20)).unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "name", "Charlie")
-            .unwrap();
-        store
-            .set_node_property("default", c, "age", PropertyValue::Integer(25))
-            .unwrap();
+        store.set_node_property("default", c, "name", "Charlie").unwrap();
+        store.set_node_property("default", c, "age", PropertyValue::Integer(25)).unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.age > 28 OR n.name = 'Bob' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.age > 28 OR n.name = 'Bob' RETURN n.name");
         assert_eq!(result.records.len(), 2);
     }
 
@@ -3872,18 +3191,11 @@ mod tests {
     fn test_where_contains() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alexander")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alexander").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.name CONTAINS 'lex' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name CONTAINS 'lex' RETURN n.name");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -3891,18 +3203,11 @@ mod tests {
     fn test_where_starts_with() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alexander")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alexander").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.name STARTS WITH 'Al' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name STARTS WITH 'Al' RETURN n.name");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -3910,18 +3215,11 @@ mod tests {
     fn test_where_ends_with() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alexander")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alexander").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.name ENDS WITH 'der' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name ENDS WITH 'der' RETURN n.name");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -3929,13 +3227,9 @@ mod tests {
     fn test_where_arithmetic() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", a, "age", PropertyValue::Integer(30)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "age", PropertyValue::Integer(20))
-            .unwrap();
+        store.set_node_property("default", b, "age", PropertyValue::Integer(20)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Person) WHERE n.age + 5 > 30 RETURN n.age");
         assert_eq!(result.records.len(), 1);
@@ -3945,9 +3239,7 @@ mod tests {
     fn test_where_null_comparison() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let _b = store.create_node("Person");
 
         let result = exec_read(&store, "MATCH (n:Person) WHERE n.name > 'A' RETURN n.name");
@@ -3958,17 +3250,11 @@ mod tests {
     fn test_where_le_comparison() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "age", PropertyValue::Integer(20))
-            .unwrap();
+        store.set_node_property("default", a, "age", PropertyValue::Integer(20)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", b, "age", PropertyValue::Integer(30)).unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "age", PropertyValue::Integer(25))
-            .unwrap();
+        store.set_node_property("default", c, "age", PropertyValue::Integer(25)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Person) WHERE n.age <= 25 RETURN n.age");
         assert_eq!(result.records.len(), 2);
@@ -3978,13 +3264,9 @@ mod tests {
     fn test_where_ge_comparison() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "age", PropertyValue::Integer(20))
-            .unwrap();
+        store.set_node_property("default", a, "age", PropertyValue::Integer(20)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", b, "age", PropertyValue::Integer(30)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Person) WHERE n.age >= 30 RETURN n.age");
         assert_eq!(result.records.len(), 1);
@@ -3994,18 +3276,11 @@ mod tests {
     fn test_where_not_equals() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.name <> 'Alice' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name <> 'Alice' RETURN n.name");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -4013,24 +3288,13 @@ mod tests {
     fn test_where_and_condition() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", a, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
+        store.set_node_property("default", a, "age", PropertyValue::Integer(30)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
-        store
-            .set_node_property("default", b, "age", PropertyValue::Integer(20))
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
+        store.set_node_property("default", b, "age", PropertyValue::Integer(20)).unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.age > 25 AND n.name = 'Alice' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.age > 25 AND n.name = 'Alice' RETURN n.name");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -4038,9 +3302,7 @@ mod tests {
     fn test_return_arithmetic_expression() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", a, "age", PropertyValue::Integer(30)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN n.age * 2 AS double_age");
         assert_eq!(result.records.len(), 1);
@@ -4049,15 +3311,9 @@ mod tests {
     #[test]
     fn test_create_edge_via_mutation() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'Alice'})-[:KNOWS {since: 2020}]->(b:Person {name: 'Bob'})",
-        );
+        exec_mut(&mut store, "CREATE (a:Person {name: 'Alice'})-[:KNOWS {since: 2020}]->(b:Person {name: 'Bob'})");
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, b.name",
-        );
+        let result = exec_read(&store, "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, b.name");
         assert!(result.records.len() >= 1);
     }
 
@@ -4065,10 +3321,7 @@ mod tests {
     fn test_set_map_merge() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 30})");
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person) SET n.status = 'active', n.score = 100",
-        );
+        exec_mut(&mut store, "MATCH (n:Person) SET n.status = 'active', n.score = 100");
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN n.status, n.score");
         assert_eq!(result.records.len(), 1);
@@ -4077,10 +3330,7 @@ mod tests {
     #[test]
     fn test_merge_on_create_set() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true",
-        );
+        exec_mut(&mut store, "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true");
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN n.name, n.created");
         assert_eq!(result.records.len(), 1);
@@ -4090,30 +3340,18 @@ mod tests {
     fn test_merge_on_match_set() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice'})");
-        exec_mut(
-            &mut store,
-            "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.visited = true",
-        );
+        exec_mut(&mut store, "MERGE (n:Person {name: 'Alice'}) ON MATCH SET n.visited = true");
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.visited = true RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.visited = true RETURN n.name");
         assert_eq!(result.records.len(), 1);
     }
 
     #[test]
     fn test_call_algo_pagerank() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)",
-        );
+        exec_mut(&mut store, "CREATE (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)");
 
-        let query = parse_query(
-            "CALL algo.pageRank('Person', 'KNOWS') YIELD nodeId, score RETURN nodeId, score",
-        )
-        .unwrap();
+        let query = parse_query("CALL algo.pageRank('Person', 'KNOWS') YIELD nodeId, score RETURN nodeId, score").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         // Algorithm may or may not be available — just verify no panic
@@ -4125,10 +3363,7 @@ mod tests {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (a:Person)-[:KNOWS]->(b:Person)");
 
-        let query = parse_query(
-            "CALL algo.wcc('Person', 'KNOWS') YIELD nodeId, componentId RETURN nodeId, componentId",
-        )
-        .unwrap();
+        let query = parse_query("CALL algo.wcc('Person', 'KNOWS') YIELD nodeId, componentId RETURN nodeId, componentId").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         let _ = result;
@@ -4139,8 +3374,7 @@ mod tests {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})-[:KNOWS]->(c:Person {name: 'Charlie'})");
 
-        let query = parse_query("CALL algo.shortestPath(1, 3, 'KNOWS') YIELD nodeId RETURN nodeId")
-            .unwrap();
+        let query = parse_query("CALL algo.shortestPath(1, 3, 'KNOWS') YIELD nodeId RETURN nodeId").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         let _ = result;
@@ -4151,32 +3385,20 @@ mod tests {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice'})");
         // FOREACH must be part of a larger query with MATCH
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person) FOREACH (x IN [1, 2, 3] | SET n.count = x)",
-        );
+        exec_mut(&mut store, "MATCH (n:Person) FOREACH (x IN [1, 2, 3] | SET n.count = x)");
     }
 
     #[test]
     fn test_with_order_by() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Charlie")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Charlie").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Alice").unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Bob").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WITH n ORDER BY n.name RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WITH n ORDER BY n.name RETURN n.name");
         assert_eq!(result.records.len(), 3);
     }
 
@@ -4184,36 +3406,23 @@ mod tests {
     fn test_with_distinct_values() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "city", "NYC")
-            .unwrap();
+        store.set_node_property("default", a, "city", "NYC").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "city", "NYC")
-            .unwrap();
+        store.set_node_property("default", b, "city", "NYC").unwrap();
         let c = store.create_node("Person");
         store.set_node_property("default", c, "city", "LA").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WITH DISTINCT n.city AS city RETURN city",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WITH DISTINCT n.city AS city RETURN city");
         assert_eq!(result.records.len(), 2);
     }
 
     #[test]
     fn test_exists_subquery_with_edge() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})",
-        );
+        exec_mut(&mut store, "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})");
         exec_mut(&mut store, "CREATE (c:Person {name: 'Charlie'})");
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->() } RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->() } RETURN n.name");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -4221,13 +3430,9 @@ mod tests {
     fn test_return_distinct_values() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "city", "NYC")
-            .unwrap();
+        store.set_node_property("default", a, "city", "NYC").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "city", "NYC")
-            .unwrap();
+        store.set_node_property("default", b, "city", "NYC").unwrap();
         let c = store.create_node("Person");
         store.set_node_property("default", c, "city", "LA").unwrap();
 
@@ -4240,22 +3445,13 @@ mod tests {
     fn test_multiple_aggregations() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", a, "age", PropertyValue::Integer(30)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "age", PropertyValue::Integer(20))
-            .unwrap();
+        store.set_node_property("default", b, "age", PropertyValue::Integer(20)).unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "age", PropertyValue::Integer(40))
-            .unwrap();
+        store.set_node_property("default", c, "age", PropertyValue::Integer(40)).unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) RETURN count(n) AS cnt, min(n.age) AS youngest, max(n.age) AS oldest",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) RETURN count(n) AS cnt, min(n.age) AS youngest, max(n.age) AS oldest");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -4263,17 +3459,10 @@ mod tests {
     fn test_float_arithmetic() {
         let mut store = GraphStore::new();
         let a = store.create_node("Item");
-        store
-            .set_node_property("default", a, "price", PropertyValue::Float(19.99))
-            .unwrap();
-        store
-            .set_node_property("default", a, "quantity", PropertyValue::Integer(3))
-            .unwrap();
+        store.set_node_property("default", a, "price", PropertyValue::Float(19.99)).unwrap();
+        store.set_node_property("default", a, "quantity", PropertyValue::Integer(3)).unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Item) RETURN n.price * n.quantity AS total",
-        );
+        let result = exec_read(&store, "MATCH (n:Item) RETURN n.price * n.quantity AS total");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -4281,14 +3470,9 @@ mod tests {
     fn test_subtraction_and_division() {
         let mut store = GraphStore::new();
         let a = store.create_node("Item");
-        store
-            .set_node_property("default", a, "value", PropertyValue::Integer(100))
-            .unwrap();
+        store.set_node_property("default", a, "value", PropertyValue::Integer(100)).unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Item) RETURN n.value - 10 AS sub, n.value / 5 AS div",
-        );
+        let result = exec_read(&store, "MATCH (n:Item) RETURN n.value - 10 AS sub, n.value / 5 AS div");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -4296,9 +3480,7 @@ mod tests {
     fn test_modulo_operator() {
         let mut store = GraphStore::new();
         let a = store.create_node("Item");
-        store
-            .set_node_property("default", a, "value", PropertyValue::Integer(17))
-            .unwrap();
+        store.set_node_property("default", a, "value", PropertyValue::Integer(17)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN n.value % 5 AS remainder");
         assert_eq!(result.records.len(), 1);
@@ -4319,13 +3501,9 @@ mod tests {
     fn test_collect_aggregate_read() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN collect(n.name) AS names");
         assert_eq!(result.records.len(), 1);
@@ -4335,22 +3513,13 @@ mod tests {
     fn test_order_by_desc_read() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Charlie")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Charlie").unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Bob").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) RETURN n.name ORDER BY n.name DESC",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) RETURN n.name ORDER BY n.name DESC");
         assert_eq!(result.records.len(), 3);
     }
 
@@ -4359,9 +3528,7 @@ mod tests {
         let mut store = GraphStore::new();
         for i in 0..5 {
             let n = store.create_node("Person");
-            store
-                .set_node_property("default", n, "idx", PropertyValue::Integer(i))
-                .unwrap();
+            store.set_node_property("default", n, "idx", PropertyValue::Integer(i)).unwrap();
         }
 
         // SKIP 3 should skip first 3 results
@@ -4391,12 +3558,8 @@ mod tests {
     fn test_return_keys_function() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", a, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
+        store.set_node_property("default", a, "age", PropertyValue::Integer(30)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN keys(n) AS k");
         assert_eq!(result.records.len(), 1);
@@ -4406,14 +3569,9 @@ mod tests {
     fn test_return_coalesce_function() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) RETURN coalesce(n.missing, n.name) AS val",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) RETURN coalesce(n.missing, n.name) AS val");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -4421,9 +3579,7 @@ mod tests {
     fn test_return_math_functions() {
         let mut store = GraphStore::new();
         let a = store.create_node("Item");
-        store
-            .set_node_property("default", a, "value", PropertyValue::Float(-3.7))
-            .unwrap();
+        store.set_node_property("default", a, "value", PropertyValue::Float(-3.7)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN abs(n.value) AS a, ceil(n.value) AS c, floor(n.value) AS f, round(n.value) AS r");
         assert_eq!(result.records.len(), 1);
@@ -4433,14 +3589,9 @@ mod tests {
     fn test_return_sqrt_sign() {
         let mut store = GraphStore::new();
         let a = store.create_node("Item");
-        store
-            .set_node_property("default", a, "value", PropertyValue::Float(16.0))
-            .unwrap();
+        store.set_node_property("default", a, "value", PropertyValue::Float(16.0)).unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Item) RETURN sqrt(n.value) AS s, sign(n.value) AS sg",
-        );
+        let result = exec_read(&store, "MATCH (n:Item) RETURN sqrt(n.value) AS s, sign(n.value) AS sg");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -4448,9 +3599,7 @@ mod tests {
     fn test_return_string_manipulation() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN replace(n.name, 'ice', 'ex') AS r, reverse(n.name) AS rev, size(n.name) AS s");
         assert_eq!(result.records.len(), 1);
@@ -4460,14 +3609,9 @@ mod tests {
     fn test_return_left_right() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alexander")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alexander").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) RETURN left(n.name, 4) AS l, right(n.name, 3) AS r",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) RETURN left(n.name, 4) AS l, right(n.name, 3) AS r");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -4475,9 +3619,7 @@ mod tests {
     fn test_return_head_last_tail() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Person) WITH collect(n.name) AS names RETURN head(names) AS h, last(names) AS l, tail(names) AS t");
         assert_eq!(result.records.len(), 1);
@@ -4533,17 +3675,13 @@ mod tests {
     fn test_union_dedup() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
         let id2 = store.create_node("Person");
-        store
-            .set_node_property("default", id2, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", id2, "name", "Bob").unwrap();
 
-        let query =
-            parse_query("MATCH (n:Person) RETURN n.name UNION MATCH (m:Person) RETURN m.name")
-                .unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) RETURN n.name UNION MATCH (m:Person) RETURN m.name"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         // UNION should deduplicate: Alice, Bob appear in both halves -> 2 unique results
@@ -4555,25 +3693,18 @@ mod tests {
     fn test_union_all_with_same_labels() {
         let mut store = GraphStore::new();
         let p1 = store.create_node("Person");
-        store
-            .set_node_property("default", p1, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", p1, "name", "Alice").unwrap();
         let p2 = store.create_node("Person");
-        store
-            .set_node_property("default", p2, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", p2, "name", "Bob").unwrap();
 
         // UNION ALL with same label - both halves return same 2 rows
-        let query =
-            parse_query("MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Person) RETURN m.name")
-                .unwrap();
+        let query = parse_query(
+            "MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Person) RETURN m.name"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         // Note: UNION execution may only process the first query (implementation-dependent)
-        assert!(
-            result.records.len() >= 2,
-            "UNION ALL should return at least 2 records"
-        );
+        assert!(result.records.len() >= 2, "UNION ALL should return at least 2 records");
     }
 
     // --- OPTIONAL MATCH with returning null b.name ---
@@ -4581,28 +3712,15 @@ mod tests {
     fn test_optional_match_with_null_property() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Company");
-        store
-            .set_node_property("default", c, "name", "Acme")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Acme").unwrap();
         store.create_edge(a, c, "WORKS_AT").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) OPTIONAL MATCH (n)-[:WORKS_AT]->(c:Company) RETURN n.name, c.name",
-        );
-        assert_eq!(
-            result.records.len(),
-            2,
-            "OPTIONAL MATCH should return 2 rows (Alice+Acme, Bob+null)"
-        );
+        let result = exec_read(&store, "MATCH (n:Person) OPTIONAL MATCH (n)-[:WORKS_AT]->(c:Company) RETURN n.name, c.name");
+        assert_eq!(result.records.len(), 2, "OPTIONAL MATCH should return 2 rows (Alice+Acme, Bob+null)");
     }
 
     // --- CartesianProduct: multiple labels ---
@@ -4610,21 +3728,13 @@ mod tests {
     fn test_cartesian_product_two_labels() {
         let mut store = GraphStore::new();
         let p1 = store.create_node("Person");
-        store
-            .set_node_property("default", p1, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", p1, "name", "Alice").unwrap();
         let p2 = store.create_node("Person");
-        store
-            .set_node_property("default", p2, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", p2, "name", "Bob").unwrap();
         let c1 = store.create_node("City");
-        store
-            .set_node_property("default", c1, "name", "NYC")
-            .unwrap();
+        store.set_node_property("default", c1, "name", "NYC").unwrap();
         let c2 = store.create_node("City");
-        store
-            .set_node_property("default", c2, "name", "LA")
-            .unwrap();
+        store.set_node_property("default", c2, "name", "LA").unwrap();
 
         let result = exec_read(&store, "MATCH (a:Person), (b:City) RETURN a.name, b.name");
         assert_eq!(result.records.len(), 4, "2 persons x 2 cities = 4");
@@ -4642,15 +3752,8 @@ mod tests {
         exec_mut(&mut store, "CREATE (n:Person {name: 'Charlie', age: 35})");
 
         // This should use IndexScan since we have an index on Person.name
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.name",
-        );
-        assert_eq!(
-            result.records.len(),
-            1,
-            "Index scan should find exactly Alice"
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.name");
+        assert_eq!(result.records.len(), 1, "Index scan should find exactly Alice");
     }
 
     #[test]
@@ -4659,18 +3762,12 @@ mod tests {
         exec_mut(&mut store, "CREATE INDEX ON :Sensor(value)");
         for i in 0..5 {
             let id = store.create_node("Sensor");
-            store
-                .set_node_property("default", id, "value", PropertyValue::Integer(i * 10))
-                .unwrap();
+            store.set_node_property("default", id, "value", PropertyValue::Integer(i * 10)).unwrap();
         }
 
         // Range query: value > 20
         let result = exec_read(&store, "MATCH (s:Sensor) WHERE s.value > 20 RETURN s.value");
-        assert_eq!(
-            result.records.len(),
-            2,
-            "Should find sensors with value 30 and 40"
-        );
+        assert_eq!(result.records.len(), 2, "Should find sensors with value 30 and 40");
     }
 
     // --- CASE expression: more scenarios ---
@@ -4679,12 +3776,8 @@ mod tests {
         let mut store = GraphStore::new();
         for (name, age) in &[("Alice", 35i64), ("Bob", 15), ("Charlie", 70)] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
-            store
-                .set_node_property("default", id, "age", PropertyValue::Integer(*age))
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
+            store.set_node_property("default", id, "age", PropertyValue::Integer(*age)).unwrap();
         }
 
         let result = exec_read(
@@ -4699,24 +3792,11 @@ mod tests {
     fn test_list_comprehension_inline_literal() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                    PropertyValue::Integer(4),
-                    PropertyValue::Integer(5),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN [x IN d.nums WHERE x > 2 | x * 2] AS result",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+            PropertyValue::Integer(4), PropertyValue::Integer(5),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN [x IN d.nums WHERE x > 2 | x * 2] AS result");
         assert_eq!(result.records.len(), 1);
         if let Some(Value::Property(PropertyValue::Array(arr))) = result.records[0].get("result") {
             let vals: Vec<i64> = arr.iter().map(|v| v.as_integer().unwrap()).collect();
@@ -4731,28 +3811,12 @@ mod tests {
     fn test_predicate_all_with_property() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(4),
-                    PropertyValue::Integer(6),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN all(x IN d.nums WHERE x > 0) AS result",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(2), PropertyValue::Integer(4), PropertyValue::Integer(6),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN all(x IN d.nums WHERE x > 0) AS result");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(true));
     }
 
@@ -4760,28 +3824,12 @@ mod tests {
     fn test_predicate_any_with_property() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN any(x IN d.nums WHERE x > 2) AS result",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN any(x IN d.nums WHERE x > 2) AS result");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(true));
     }
 
@@ -4789,28 +3837,12 @@ mod tests {
     fn test_predicate_none_with_property() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN none(x IN d.nums WHERE x > 5) AS result",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN none(x IN d.nums WHERE x > 5) AS result");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(true));
     }
 
@@ -4818,28 +3850,12 @@ mod tests {
     fn test_predicate_single_with_property() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN single(x IN d.nums WHERE x = 2) AS result",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN single(x IN d.nums WHERE x = 2) AS result");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(true));
     }
 
@@ -4847,28 +3863,12 @@ mod tests {
     fn test_predicate_all_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN all(x IN d.nums WHERE x > 5) AS result",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN all(x IN d.nums WHERE x > 5) AS result");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(false));
     }
 
@@ -4876,28 +3876,12 @@ mod tests {
     fn test_predicate_any_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN any(x IN d.nums WHERE x > 10) AS result",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN any(x IN d.nums WHERE x > 10) AS result");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(false));
     }
 
@@ -4905,28 +3889,12 @@ mod tests {
     fn test_predicate_none_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN none(x IN d.nums WHERE x = 2) AS result",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN none(x IN d.nums WHERE x = 2) AS result");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Boolean(false));
     }
 
@@ -4934,28 +3902,12 @@ mod tests {
     fn test_predicate_single_false_multiple() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN single(x IN d.nums WHERE x > 1) AS result",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN single(x IN d.nums WHERE x > 1) AS result");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("result")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("result").unwrap().as_property().unwrap();
         // Two values > 1 (2 and 3), so single is false
         assert_eq!(val, &PropertyValue::Boolean(false));
     }
@@ -4965,28 +3917,12 @@ mod tests {
     fn test_reduce_with_property_list() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN reduce(acc = 0, x IN d.nums | acc + x) AS total",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN reduce(acc = 0, x IN d.nums | acc + x) AS total");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("total")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("total").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Integer(6));
     }
 
@@ -4994,28 +3930,12 @@ mod tests {
     fn test_reduce_product_with_property() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                    PropertyValue::Integer(4),
-                ]),
-            )
-            .unwrap();
-        let result = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN reduce(acc = 1, x IN d.nums | acc * x) AS product",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(2), PropertyValue::Integer(3), PropertyValue::Integer(4),
+        ])).unwrap();
+        let result = exec_read(&store, "MATCH (d:Data) RETURN reduce(acc = 1, x IN d.nums | acc * x) AS product");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("product")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("product").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Integer(24));
     }
 
@@ -5024,19 +3944,12 @@ mod tests {
     fn test_type_function() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         store.create_edge(a, b, "KNOWS").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person)-[r]->(b:Person) RETURN type(r) AS t",
-        );
+        let result = exec_read(&store, "MATCH (a:Person)-[r]->(b:Person) RETURN type(r) AS t");
         assert_eq!(result.records.len(), 1);
         let val = result.records[0].get("t").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("KNOWS".to_string()));
@@ -5046,24 +3959,15 @@ mod tests {
     fn test_type_function_multiple_edge_types() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Company");
-        store
-            .set_node_property("default", c, "name", "Acme")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Acme").unwrap();
         store.create_edge(a, b, "KNOWS").unwrap();
         store.create_edge(a, c, "WORKS_AT").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person {name: 'Alice'})-[r]->(b) RETURN type(r) AS t",
-        );
+        let result = exec_read(&store, "MATCH (a:Person {name: 'Alice'})-[r]->(b) RETURN type(r) AS t");
         assert_eq!(result.records.len(), 2);
     }
 
@@ -5072,9 +3976,7 @@ mod tests {
     fn test_tostring_integer() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Integer(42))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Integer(42)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN toString(n.val) AS s");
         assert_eq!(result.records.len(), 1);
@@ -5086,19 +3988,13 @@ mod tests {
     fn test_tostring_float() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Float(3.14))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Float(3.14)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN toString(n.val) AS s");
         assert_eq!(result.records.len(), 1);
         let val = result.records[0].get("s").unwrap().as_property().unwrap();
         if let PropertyValue::String(s) = val {
-            assert!(
-                s.starts_with("3.14"),
-                "toString(3.14) should start with '3.14', got '{}'",
-                s
-            );
+            assert!(s.starts_with("3.14"), "toString(3.14) should start with '3.14', got '{}'", s);
         } else {
             panic!("Expected string from toString()");
         }
@@ -5108,9 +4004,7 @@ mod tests {
     fn test_tostring_boolean() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "flag", PropertyValue::Boolean(true))
-            .unwrap();
+        store.set_node_property("default", id, "flag", PropertyValue::Boolean(true)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN toString(n.flag) AS s");
         assert_eq!(result.records.len(), 1);
@@ -5135,9 +4029,7 @@ mod tests {
     fn test_tointeger_from_float() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Float(3.9))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Float(3.9)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN toInteger(n.val) AS i");
         assert_eq!(result.records.len(), 1);
@@ -5149,19 +4041,13 @@ mod tests {
     fn test_tofloat_from_string() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", "3.14")
-            .unwrap();
+        store.set_node_property("default", id, "val", "3.14").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN toFloat(n.val) AS f");
         assert_eq!(result.records.len(), 1);
         let val = result.records[0].get("f").unwrap().as_property().unwrap();
         if let PropertyValue::Float(f) = val {
-            assert!(
-                (f - 3.14).abs() < 0.001,
-                "toFloat('3.14') should be ~3.14, got {}",
-                f
-            );
+            assert!((f - 3.14).abs() < 0.001, "toFloat('3.14') should be ~3.14, got {}", f);
         } else {
             panic!("Expected float from toFloat()");
         }
@@ -5171,19 +4057,13 @@ mod tests {
     fn test_tofloat_from_integer() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Integer(5))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Integer(5)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN toFloat(n.val) AS f");
         assert_eq!(result.records.len(), 1);
         let val = result.records[0].get("f").unwrap().as_property().unwrap();
         if let PropertyValue::Float(f) = val {
-            assert!(
-                (f - 5.0).abs() < 0.001,
-                "toFloat(5) should be 5.0, got {}",
-                f
-            );
+            assert!((f - 5.0).abs() < 0.001, "toFloat(5) should be 5.0, got {}", f);
         } else {
             panic!("Expected float from toFloat()");
         }
@@ -5194,17 +4074,11 @@ mod tests {
     fn test_ltrim_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", "  hello")
-            .unwrap();
+        store.set_node_property("default", id, "val", "  hello").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN ltrim(n.val) AS trimmed");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("trimmed")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("trimmed").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("hello".to_string()));
     }
 
@@ -5212,17 +4086,11 @@ mod tests {
     fn test_rtrim_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", "hello  ")
-            .unwrap();
+        store.set_node_property("default", id, "val", "hello  ").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN rtrim(n.val) AS trimmed");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("trimmed")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("trimmed").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("hello".to_string()));
     }
 
@@ -5230,17 +4098,11 @@ mod tests {
     fn test_trim_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", "  hello  ")
-            .unwrap();
+        store.set_node_property("default", id, "val", "  hello  ").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN trim(n.val) AS trimmed");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("trimmed")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("trimmed").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("hello".to_string()));
     }
 
@@ -5248,9 +4110,7 @@ mod tests {
     fn test_reverse_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", "hello")
-            .unwrap();
+        store.set_node_property("default", id, "val", "hello").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN reverse(n.val) AS rev");
         assert_eq!(result.records.len(), 1);
@@ -5262,9 +4122,7 @@ mod tests {
     fn test_substring_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", "hello world")
-            .unwrap();
+        store.set_node_property("default", id, "val", "hello world").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN substring(n.val, 6) AS sub");
         assert_eq!(result.records.len(), 1);
@@ -5276,14 +4134,9 @@ mod tests {
     fn test_substring_with_length() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", "hello world")
-            .unwrap();
+        store.set_node_property("default", id, "val", "hello world").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Item) RETURN substring(n.val, 0, 5) AS sub",
-        );
+        let result = exec_read(&store, "MATCH (n:Item) RETURN substring(n.val, 0, 5) AS sub");
         assert_eq!(result.records.len(), 1);
         let val = result.records[0].get("sub").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("hello".to_string()));
@@ -5293,9 +4146,7 @@ mod tests {
     fn test_tolower_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", "HELLO")
-            .unwrap();
+        store.set_node_property("default", id, "val", "HELLO").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN toLower(n.val) AS low");
         assert_eq!(result.records.len(), 1);
@@ -5308,9 +4159,7 @@ mod tests {
     fn test_abs_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Integer(-5))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Integer(-5)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN abs(n.val) AS a");
         assert_eq!(result.records.len(), 1);
@@ -5322,9 +4171,7 @@ mod tests {
     fn test_ceil_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Float(3.2))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Float(3.2)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN ceil(n.val) AS c");
         assert_eq!(result.records.len(), 1);
@@ -5336,9 +4183,7 @@ mod tests {
     fn test_floor_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Float(3.8))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Float(3.8)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN floor(n.val) AS f");
         assert_eq!(result.records.len(), 1);
@@ -5350,9 +4195,7 @@ mod tests {
     fn test_round_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Float(3.5))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Float(3.5)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN round(n.val) AS r");
         assert_eq!(result.records.len(), 1);
@@ -5364,9 +4207,7 @@ mod tests {
     fn test_sqrt_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Float(16.0))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Float(16.0)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN sqrt(n.val) AS s");
         assert_eq!(result.records.len(), 1);
@@ -5382,9 +4223,7 @@ mod tests {
     fn test_sign_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Integer(-3))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Integer(-3)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN sign(n.val) AS s");
         assert_eq!(result.records.len(), 1);
@@ -5398,15 +4237,10 @@ mod tests {
         let mut store = GraphStore::new();
         for name in &["Alice", "Alexander", "Bob"] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.name STARTS WITH 'Al' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name STARTS WITH 'Al' RETURN n.name");
         assert_eq!(result.records.len(), 2);
     }
 
@@ -5415,15 +4249,10 @@ mod tests {
         let mut store = GraphStore::new();
         for name in &["Alice", "Grace", "Bob"] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.name ENDS WITH 'ce' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name ENDS WITH 'ce' RETURN n.name");
         assert_eq!(result.records.len(), 2);
     }
 
@@ -5432,15 +4261,10 @@ mod tests {
         let mut store = GraphStore::new();
         for name in &["Alice", "Alicia", "Bob"] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.name CONTAINS 'lic' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name CONTAINS 'lic' RETURN n.name");
         assert_eq!(result.records.len(), 2);
     }
 
@@ -5448,20 +4272,13 @@ mod tests {
     fn test_contains_null_property_skips_row() {
         let mut store = GraphStore::new();
         let id1 = store.create_node("Person");
-        store
-            .set_node_property("default", id1, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id1, "name", "Alice").unwrap();
         let _id2 = store.create_node("Person"); // no name property → null
         let id3 = store.create_node("Person");
-        store
-            .set_node_property("default", id3, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", id3, "name", "Bob").unwrap();
 
         // CONTAINS on null should return null → filtered out, not error
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.name CONTAINS 'lic' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name CONTAINS 'lic' RETURN n.name");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -5469,14 +4286,9 @@ mod tests {
     fn test_starts_with_null_property_skips_row() {
         let mut store = GraphStore::new();
         let id1 = store.create_node("Person");
-        store
-            .set_node_property("default", id1, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id1, "name", "Alice").unwrap();
         let _id2 = store.create_node("Person"); // no name → null
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.name STARTS WITH 'Ali' RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.name STARTS WITH 'Ali' RETURN n.name");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -5484,11 +4296,9 @@ mod tests {
     fn test_not_on_null_property_skips_row() {
         let mut store = GraphStore::new();
         let id1 = store.create_node("Person");
-        store
-            .set_node_property("default", id1, "active", true)
-            .unwrap();
+        store.set_node_property("default", id1, "active", true).unwrap();
         let _id2 = store.create_node("Person"); // no active property → null
-                                                // NOT null → null → filtered out
+        // NOT null → null → filtered out
         let result = exec_read(&store, "MATCH (n:Person) WHERE NOT n.active RETURN n");
         assert_eq!(result.records.len(), 0);
     }
@@ -5499,15 +4309,10 @@ mod tests {
         let mut store = GraphStore::new();
         for name in &["Alice", "Bob", "Charlie", "Diana"] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            r#"MATCH (n:Person) WHERE n.name IN ["Alice", "Charlie", "Diana"] RETURN n.name"#,
-        );
+        let result = exec_read(&store, r#"MATCH (n:Person) WHERE n.name IN ["Alice", "Charlie", "Diana"] RETURN n.name"#);
         assert_eq!(result.records.len(), 3);
     }
 
@@ -5516,15 +4321,10 @@ mod tests {
         let mut store = GraphStore::new();
         for city in &["NYC", "LA", "Chicago", "Boston", "Seattle"] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "city", *city)
-                .unwrap();
+            store.set_node_property("default", id, "city", *city).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            r#"MATCH (n:Person) WHERE n.city IN ["NYC", "Boston"] RETURN n.city"#,
-        );
+        let result = exec_read(&store, r#"MATCH (n:Person) WHERE n.city IN ["NYC", "Boston"] RETURN n.city"#);
         assert_eq!(result.records.len(), 2);
     }
 
@@ -5534,15 +4334,10 @@ mod tests {
         let mut store = GraphStore::new();
         for name in &["Alice", "Bob", "Alice2", "Charlie"] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            r#"MATCH (n:Person) WHERE n.name =~ "Alice.*" RETURN n.name"#,
-        );
+        let result = exec_read(&store, r#"MATCH (n:Person) WHERE n.name =~ "Alice.*" RETURN n.name"#);
         assert_eq!(result.records.len(), 2, "Should match Alice and Alice2");
     }
 
@@ -5551,16 +4346,10 @@ mod tests {
     fn test_is_null_filter() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", a, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
+        store.set_node_property("default", a, "age", PropertyValue::Integer(30)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         // Bob has no age property
 
         let result = exec_read(&store, "MATCH (n:Person) WHERE n.age IS NULL RETURN n.name");
@@ -5571,21 +4360,12 @@ mod tests {
     fn test_is_not_null_filter() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", a, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
+        store.set_node_property("default", a, "age", PropertyValue::Integer(30)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.age IS NOT NULL RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.age IS NOT NULL RETURN n.name");
         assert_eq!(result.records.len(), 1, "Only Alice has non-null age");
     }
 
@@ -5596,21 +4376,16 @@ mod tests {
         // Create index
         exec_mut(&mut store, "CREATE INDEX ON :Person(name)");
         let result = exec_read(&store, "SHOW INDEXES");
-        assert!(
-            result.records.len() >= 1,
-            "Should have at least 1 index after CREATE"
-        );
+        assert!(result.records.len() >= 1, "Should have at least 1 index after CREATE");
 
         // Drop index
         exec_mut(&mut store, "DROP INDEX ON :Person(name)");
         let result = exec_read(&store, "SHOW INDEXES");
         let has_person_name = result.records.iter().any(|r| {
             r.get("label").map_or(false, |v| {
-                v.as_property()
-                    .map_or(false, |p| p.as_string() == Some("Person"))
+                v.as_property().map_or(false, |p| p.as_string() == Some("Person"))
             }) && r.get("property").map_or(false, |v| {
-                v.as_property()
-                    .map_or(false, |p| p.as_string() == Some("name"))
+                v.as_property().map_or(false, |p| p.as_string() == Some("name"))
             })
         });
         assert!(!has_person_name, "Person.name index should be dropped");
@@ -5619,15 +4394,9 @@ mod tests {
     #[test]
     fn test_constraint_lifecycle() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE",
-        );
+        exec_mut(&mut store, "CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE");
         let result = exec_read(&store, "SHOW CONSTRAINTS");
-        assert!(
-            result.records.len() >= 1,
-            "Should have at least 1 constraint"
-        );
+        assert!(result.records.len() >= 1, "Should have at least 1 constraint");
     }
 
     // --- EXPLAIN with various query shapes ---
@@ -5643,18 +4412,9 @@ mod tests {
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let plan = result.records[0]
-            .get("plan")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
-        assert!(
-            plan.contains("Expand") || plan.contains("NodeScan"),
-            "Plan should contain Expand or NodeScan: {}",
-            plan
-        );
+        let plan = result.records[0].get("plan").unwrap().as_property().unwrap().as_string().unwrap();
+        assert!(plan.contains("Expand") || plan.contains("NodeScan"),
+            "Plan should contain Expand or NodeScan: {}", plan);
     }
 
     #[test]
@@ -5667,18 +4427,9 @@ mod tests {
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let plan = result.records[0]
-            .get("plan")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
-        assert!(
-            plan.contains("Aggregate") || plan.contains("count"),
-            "Plan should contain Aggregate: {}",
-            plan
-        );
+        let plan = result.records[0].get("plan").unwrap().as_property().unwrap().as_string().unwrap();
+        assert!(plan.contains("Aggregate") || plan.contains("count"),
+            "Plan should contain Aggregate: {}", plan);
     }
 
     // --- NOT operator ---
@@ -5686,24 +4437,13 @@ mod tests {
     fn test_not_operator() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", a, "active", PropertyValue::Boolean(true))
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
+        store.set_node_property("default", a, "active", PropertyValue::Boolean(true)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
-        store
-            .set_node_property("default", b, "active", PropertyValue::Boolean(false))
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
+        store.set_node_property("default", b, "active", PropertyValue::Boolean(false)).unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE NOT n.active = true RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE NOT n.active = true RETURN n.name");
         assert_eq!(result.records.len(), 1, "NOT should negate the condition");
     }
 
@@ -5712,9 +4452,7 @@ mod tests {
     fn test_unary_minus() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "val", PropertyValue::Integer(42))
-            .unwrap();
+        store.set_node_property("default", id, "val", PropertyValue::Integer(42)).unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN -n.val AS neg");
         assert_eq!(result.records.len(), 1);
@@ -5727,30 +4465,19 @@ mod tests {
     fn test_two_hop_traversal() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "name", "Charlie")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Charlie").unwrap();
         store.create_edge(a, b, "KNOWS").unwrap();
         store.create_edge(b, c, "KNOWS").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN c.name",
+        let result = exec_read(&store,
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN c.name"
         );
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("c.name")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("c.name").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("Charlie".to_string()));
     }
 
@@ -5760,18 +4487,12 @@ mod tests {
         let mut store = GraphStore::new();
         for v in &[10i64, 20, 30] {
             let id = store.create_node("Item");
-            store
-                .set_node_property("default", id, "val", PropertyValue::Integer(*v))
-                .unwrap();
+            store.set_node_property("default", id, "val", PropertyValue::Integer(*v)).unwrap();
         }
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN sum(n.val) AS total");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("total")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("total").unwrap().as_property().unwrap();
         // sum() preserves Integer type when all inputs are Integer (OpenCypher
         // convention; previously Samyama always returned Float, which broke
         // adjacency-aware aggregation's post-grouping merge of integer counts).
@@ -5783,40 +4504,24 @@ mod tests {
         let mut store = GraphStore::new();
         for v in &[10.5f64, 20.0, 30.5] {
             let id = store.create_node("Item");
-            store
-                .set_node_property("default", id, "val", PropertyValue::Float(*v))
-                .unwrap();
+            store.set_node_property("default", id, "val", PropertyValue::Float(*v)).unwrap();
         }
         let result = exec_read(&store, "MATCH (n:Item) RETURN sum(n.val) AS total");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("total")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("total").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Float(61.0));
     }
 
     #[test]
     fn test_sum_aggregation_mixed() {
         let mut store = GraphStore::new();
-        for v in &[
-            PropertyValue::Integer(10),
-            PropertyValue::Float(20.5),
-            PropertyValue::Integer(30),
-        ] {
+        for v in &[PropertyValue::Integer(10), PropertyValue::Float(20.5), PropertyValue::Integer(30)] {
             let id = store.create_node("Item");
-            store
-                .set_node_property("default", id, "val", v.clone())
-                .unwrap();
+            store.set_node_property("default", id, "val", v.clone()).unwrap();
         }
         let result = exec_read(&store, "MATCH (n:Item) RETURN sum(n.val) AS total");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("total")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("total").unwrap().as_property().unwrap();
         // Once any input is Float, the result is Float — promote-on-mix.
         assert_eq!(val, &PropertyValue::Float(60.5));
     }
@@ -5826,24 +4531,14 @@ mod tests {
         let mut store = GraphStore::new();
         for v in &[10i64, 20, 30] {
             let id = store.create_node("Item");
-            store
-                .set_node_property("default", id, "val", PropertyValue::Integer(*v))
-                .unwrap();
+            store.set_node_property("default", id, "val", PropertyValue::Integer(*v)).unwrap();
         }
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN avg(n.val) AS average");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("average")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("average").unwrap().as_property().unwrap();
         if let PropertyValue::Float(f) = val {
-            assert!(
-                (f - 20.0).abs() < 0.001,
-                "avg(10,20,30) should be 20.0, got {}",
-                f
-            );
+            assert!((f - 20.0).abs() < 0.001, "avg(10,20,30) should be 20.0, got {}", f);
         } else if let PropertyValue::Integer(i) = val {
             assert_eq!(*i, 20, "avg(10,20,30) should be 20");
         } else {
@@ -5856,15 +4551,10 @@ mod tests {
         let mut store = GraphStore::new();
         for v in &[10i64, 20, 30] {
             let id = store.create_node("Item");
-            store
-                .set_node_property("default", id, "val", PropertyValue::Integer(*v))
-                .unwrap();
+            store.set_node_property("default", id, "val", PropertyValue::Integer(*v)).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Item) RETURN min(n.val) AS lo, max(n.val) AS hi",
-        );
+        let result = exec_read(&store, "MATCH (n:Item) RETURN min(n.val) AS lo, max(n.val) AS hi");
         assert_eq!(result.records.len(), 1);
         let lo = result.records[0].get("lo").unwrap().as_property().unwrap();
         let hi = result.records[0].get("hi").unwrap().as_property().unwrap();
@@ -5878,20 +4568,12 @@ mod tests {
         let mut store = GraphStore::new();
         for (dept, age) in &[("eng", 30i64), ("eng", 25), ("sales", 35), ("sales", 40)] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "dept", *dept)
-                .unwrap();
-            store
-                .set_node_property("default", id, "age", PropertyValue::Integer(*age))
-                .unwrap();
+            store.set_node_property("default", id, "dept", *dept).unwrap();
+            store.set_node_property("default", id, "age", PropertyValue::Integer(*age)).unwrap();
         }
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN n.dept, count(n) AS cnt");
-        assert_eq!(
-            result.records.len(),
-            2,
-            "Two departments should produce 2 groups"
-        );
+        assert_eq!(result.records.len(), 2, "Two departments should produce 2 groups");
     }
 
     // --- EXISTS subquery to check for related edges ---
@@ -5899,24 +4581,15 @@ mod tests {
     fn test_exists_subquery_filter() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Company");
-        store
-            .set_node_property("default", c, "name", "Acme")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Acme").unwrap();
         store.create_edge(a, c, "WORKS_AT").unwrap();
 
         // EXISTS subquery: only Alice has a WORKS_AT edge
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:WORKS_AT]->(:Company) } RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:WORKS_AT]->(:Company) } RETURN n.name");
         assert_eq!(result.records.len(), 1, "Only Alice works at a company");
     }
 
@@ -5925,21 +4598,12 @@ mod tests {
     fn test_coalesce_multiple_args() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         // nickname is missing
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) RETURN coalesce(n.nickname, n.name) AS display_name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) RETURN coalesce(n.nickname, n.name) AS display_name");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("display_name")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("display_name").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("Alice".to_string()));
     }
 
@@ -5948,20 +4612,11 @@ mod tests {
     fn test_nested_functions() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "  Alice  ")
-            .unwrap();
+        store.set_node_property("default", id, "name", "  Alice  ").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) RETURN toUpper(trim(n.name)) AS clean",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) RETURN toUpper(trim(n.name)) AS clean");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("clean")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("clean").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("ALICE".to_string()));
     }
 
@@ -5969,25 +4624,13 @@ mod tests {
     #[test]
     fn test_order_by_multiple_columns() {
         let mut store = GraphStore::new();
-        for (name, age) in &[
-            ("Alice", 30i64),
-            ("Bob", 25),
-            ("Charlie", 30),
-            ("Diana", 25),
-        ] {
+        for (name, age) in &[("Alice", 30i64), ("Bob", 25), ("Charlie", 30), ("Diana", 25)] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
-            store
-                .set_node_property("default", id, "age", PropertyValue::Integer(*age))
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
+            store.set_node_property("default", id, "age", PropertyValue::Integer(*age)).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age ASC, n.name ASC",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age ASC, n.name ASC");
         assert_eq!(result.records.len(), 4);
     }
 
@@ -5997,36 +4640,21 @@ mod tests {
         let mut store = GraphStore::new();
         for city in &["NYC", "NYC", "LA", "LA", "Chicago"] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "city", *city)
-                .unwrap();
+            store.set_node_property("default", id, "city", *city).unwrap();
         }
 
         // WITH DISTINCT is the reliable way to deduplicate on property values
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WITH DISTINCT n.city AS city RETURN city",
-        );
-        assert_eq!(
-            result.records.len(),
-            3,
-            "Should have exactly 3 distinct cities"
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WITH DISTINCT n.city AS city RETURN city");
+        assert_eq!(result.records.len(), 3, "Should have exactly 3 distinct cities");
     }
 
     // --- MATCH with edge variable ---
     #[test]
     fn test_match_with_edge_variable_properties() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'Alice'})-[:KNOWS {since: 2020}]->(b:Person {name: 'Bob'})",
-        );
+        exec_mut(&mut store, "CREATE (a:Person {name: 'Alice'})-[:KNOWS {since: 2020}]->(b:Person {name: 'Bob'})");
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, r.since, b.name",
-        );
+        let result = exec_read(&store, "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, r.since, b.name");
         assert!(result.records.len() >= 1, "Should find the KNOWS edge");
     }
 
@@ -6035,43 +4663,20 @@ mod tests {
     fn test_multiple_set_items() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice'})");
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person) SET n.age = 30, n.city = 'NYC', n.active = true",
-        );
+        exec_mut(&mut store, "MATCH (n:Person) SET n.age = 30, n.city = 'NYC', n.active = true");
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "age")
-                .as_ref()
-                .unwrap()
-                .as_integer(),
-            Some(30)
-        );
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "city")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("NYC")
-        );
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(nodes[0].id, "city").as_ref().unwrap().as_string(), Some("NYC"));
     }
 
     // --- DETACH DELETE with multiple edges ---
     #[test]
     fn test_detach_delete_multiple_edges() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})",
-        );
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'Alice2'})-[:LIKES]->(b:Person {name: 'Bob2'})",
-        );
+        exec_mut(&mut store, "CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})");
+        exec_mut(&mut store, "CREATE (a:Person {name: 'Alice2'})-[:LIKES]->(b:Person {name: 'Bob2'})");
 
         // Detach delete all Person nodes
         exec_mut(&mut store, "MATCH (n:Person) DETACH DELETE n");
@@ -6084,24 +4689,13 @@ mod tests {
     fn test_where_boolean_property() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", a, "active", PropertyValue::Boolean(true))
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
+        store.set_node_property("default", a, "active", PropertyValue::Boolean(true)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
-        store
-            .set_node_property("default", b, "active", PropertyValue::Boolean(false))
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
+        store.set_node_property("default", b, "active", PropertyValue::Boolean(false)).unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.active = true RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.active = true RETURN n.name");
         assert_eq!(result.records.len(), 1);
     }
 
@@ -6110,18 +4704,11 @@ mod tests {
     fn test_size_on_list() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "items",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "items", PropertyValue::Array(vec![
+            PropertyValue::Integer(1),
+            PropertyValue::Integer(2),
+            PropertyValue::Integer(3),
+        ])).unwrap();
 
         let result = exec_read(&store, "MATCH (d:Data) RETURN size(d.items) AS s");
         assert_eq!(result.records.len(), 1);
@@ -6134,9 +4721,7 @@ mod tests {
     fn test_size_on_string() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "name", "hello")
-            .unwrap();
+        store.set_node_property("default", id, "name", "hello").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Item) RETURN size(n.name) AS s");
         assert_eq!(result.records.len(), 1);
@@ -6149,18 +4734,11 @@ mod tests {
     fn test_head_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "items",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(10),
-                    PropertyValue::Integer(20),
-                    PropertyValue::Integer(30),
-                ]),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "items", PropertyValue::Array(vec![
+            PropertyValue::Integer(10),
+            PropertyValue::Integer(20),
+            PropertyValue::Integer(30),
+        ])).unwrap();
 
         let result = exec_read(&store, "MATCH (d:Data) RETURN head(d.items) AS h");
         assert_eq!(result.records.len(), 1);
@@ -6172,18 +4750,11 @@ mod tests {
     fn test_last_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "items",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(10),
-                    PropertyValue::Integer(20),
-                    PropertyValue::Integer(30),
-                ]),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "items", PropertyValue::Array(vec![
+            PropertyValue::Integer(10),
+            PropertyValue::Integer(20),
+            PropertyValue::Integer(30),
+        ])).unwrap();
 
         let result = exec_read(&store, "MATCH (d:Data) RETURN last(d.items) AS l");
         assert_eq!(result.records.len(), 1);
@@ -6195,18 +4766,11 @@ mod tests {
     fn test_tail_function() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "items",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(10),
-                    PropertyValue::Integer(20),
-                    PropertyValue::Integer(30),
-                ]),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "items", PropertyValue::Array(vec![
+            PropertyValue::Integer(10),
+            PropertyValue::Integer(20),
+            PropertyValue::Integer(30),
+        ])).unwrap();
 
         let result = exec_read(&store, "MATCH (d:Data) RETURN tail(d.items) AS t");
         assert_eq!(result.records.len(), 1);
@@ -6258,15 +4822,9 @@ mod tests {
         exec_mut(&mut store, "CREATE INDEX ON :Person(name)");
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice'})");
 
-        let plan = get_explain_plan(
-            &store,
-            "EXPLAIN MATCH (n:Person) WHERE n.name = 'Alice' RETURN n",
-        );
-        assert!(
-            plan.contains("IndexScan") || plan.contains("Index"),
-            "Plan should use IndexScan when index exists: {}",
-            plan
-        );
+        let plan = get_explain_plan(&store, "EXPLAIN MATCH (n:Person) WHERE n.name = 'Alice' RETURN n");
+        assert!(plan.contains("IndexScan") || plan.contains("Index"),
+            "Plan should use IndexScan when index exists: {}", plan);
     }
 
     // --- Composite index ---
@@ -6284,23 +4842,14 @@ mod tests {
         let mut store = GraphStore::new();
         for (name, age) in &[("Alice", 30i64), ("Bob", 15), ("Charlie", 45)] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
-            store
-                .set_node_property("default", id, "age", PropertyValue::Integer(*age))
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
+            store.set_node_property("default", id, "age", PropertyValue::Integer(*age)).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WITH n WHERE n.age > 20 RETURN n.name",
+        let result = exec_read(&store,
+            "MATCH (n:Person) WITH n WHERE n.age > 20 RETURN n.name"
         );
-        assert_eq!(
-            result.records.len(),
-            2,
-            "Only Alice and Charlie are over 20"
-        );
+        assert_eq!(result.records.len(), 2, "Only Alice and Charlie are over 20");
     }
 
     // --- WITH + aggregation + GROUP BY ---
@@ -6309,33 +4858,21 @@ mod tests {
         let mut store = GraphStore::new();
         for (dept, sal) in &[("eng", 100i64), ("eng", 200), ("sales", 150)] {
             let id = store.create_node("Employee");
-            store
-                .set_node_property("default", id, "dept", *dept)
-                .unwrap();
-            store
-                .set_node_property("default", id, "salary", PropertyValue::Integer(*sal))
-                .unwrap();
+            store.set_node_property("default", id, "dept", *dept).unwrap();
+            store.set_node_property("default", id, "salary", PropertyValue::Integer(*sal)).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            "MATCH (e:Employee) WITH e.dept AS dept, count(e) AS cnt RETURN dept, cnt",
+        let result = exec_read(&store,
+            "MATCH (e:Employee) WITH e.dept AS dept, count(e) AS cnt RETURN dept, cnt"
         );
-        assert_eq!(
-            result.records.len(),
-            2,
-            "Two departments should produce 2 groups"
-        );
+        assert_eq!(result.records.len(), 2, "Two departments should produce 2 groups");
     }
 
     // --- Create multiple nodes in one CREATE ---
     #[test]
     fn test_create_multiple_nodes() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})",
-        );
+        exec_mut(&mut store, "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 2);
     }
@@ -6345,15 +4882,10 @@ mod tests {
     fn test_comparison_with_null_literal() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
 
         // n.age does not exist, comparing to null-returning expression
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WHERE n.missing IS NULL RETURN n.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WHERE n.missing IS NULL RETURN n.name");
         assert_eq!(result.records.len(), 1, "Missing property should be null");
     }
 
@@ -6362,23 +4894,16 @@ mod tests {
     fn test_collect_with_traversal() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "name", "Charlie")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Charlie").unwrap();
         store.create_edge(a, b, "KNOWS").unwrap();
         store.create_edge(a, c, "KNOWS").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN collect(b.name) AS friends",
+        let result = exec_read(&store,
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN collect(b.name) AS friends"
         );
         assert_eq!(result.records.len(), 1);
         if let Some(Value::Property(PropertyValue::Array(arr))) = result.records[0].get("friends") {
@@ -6393,28 +4918,19 @@ mod tests {
     fn test_collect_distinct() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Post");
-        store
-            .set_node_property("default", b, "tag", "rust")
-            .unwrap();
+        store.set_node_property("default", b, "tag", "rust").unwrap();
         let c = store.create_node("Post");
-        store
-            .set_node_property("default", c, "tag", "rust")
-            .unwrap();
+        store.set_node_property("default", c, "tag", "rust").unwrap();
         let d = store.create_node("Post");
-        store
-            .set_node_property("default", d, "tag", "python")
-            .unwrap();
+        store.set_node_property("default", d, "tag", "python").unwrap();
         store.create_edge(a, b, "TAGGED").unwrap();
         store.create_edge(a, c, "TAGGED").unwrap();
         store.create_edge(a, d, "TAGGED").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person)-[:TAGGED]->(p:Post) RETURN collect(DISTINCT p.tag) AS tags",
+        let result = exec_read(&store,
+            "MATCH (a:Person)-[:TAGGED]->(p:Post) RETURN collect(DISTINCT p.tag) AS tags"
         );
         assert_eq!(result.records.len(), 1);
         if let Some(Value::Property(PropertyValue::Array(arr))) = result.records[0].get("tags") {
@@ -6429,26 +4945,15 @@ mod tests {
     fn test_incoming_edge_traversal() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         store.create_edge(a, b, "KNOWS").unwrap();
 
         // Query from Bob's perspective: who knows Bob?
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person)-[:KNOWS]->(b:Person {name: 'Bob'}) RETURN a.name",
-        );
+        let result = exec_read(&store, "MATCH (a:Person)-[:KNOWS]->(b:Person {name: 'Bob'}) RETURN a.name");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("a.name")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("a.name").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("Alice".to_string()));
     }
 
@@ -6458,27 +4963,16 @@ mod tests {
         let mut store = GraphStore::new();
         for (name, price, quantity) in &[("A", 10i64, 5i64), ("B", 20, 3), ("C", 5, 10)] {
             let id = store.create_node("Product");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
-            store
-                .set_node_property("default", id, "price", PropertyValue::Integer(*price))
-                .unwrap();
-            store
-                .set_node_property("default", id, "quantity", PropertyValue::Integer(*quantity))
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
+            store.set_node_property("default", id, "price", PropertyValue::Integer(*price)).unwrap();
+            store.set_node_property("default", id, "quantity", PropertyValue::Integer(*quantity)).unwrap();
         }
 
         // A=50, B=60, C=50 — all three >= 50
-        let result = exec_read(
-            &store,
-            "MATCH (p:Product) WHERE p.price * p.quantity >= 50 RETURN p.name",
+        let result = exec_read(&store,
+            "MATCH (p:Product) WHERE p.price * p.quantity >= 50 RETURN p.name"
         );
-        assert_eq!(
-            result.records.len(),
-            3,
-            "A (50), B (60), C (50) all have total >= 50"
-        );
+        assert_eq!(result.records.len(), 3, "A (50), B (60), C (50) all have total >= 50");
     }
 
     // --- String concatenation ---
@@ -6486,23 +4980,12 @@ mod tests {
     fn test_string_concatenation() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "first", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", id, "last", "Smith")
-            .unwrap();
+        store.set_node_property("default", id, "first", "Alice").unwrap();
+        store.set_node_property("default", id, "last", "Smith").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) RETURN n.first + ' ' + n.last AS full_name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) RETURN n.first + ' ' + n.last AS full_name");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("full_name")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("full_name").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("Alice Smith".to_string()));
     }
 
@@ -6511,29 +4994,14 @@ mod tests {
     fn test_mixed_type_arithmetic() {
         let mut store = GraphStore::new();
         let id = store.create_node("Item");
-        store
-            .set_node_property("default", id, "int_val", PropertyValue::Integer(10))
-            .unwrap();
-        store
-            .set_node_property("default", id, "float_val", PropertyValue::Float(2.5))
-            .unwrap();
+        store.set_node_property("default", id, "int_val", PropertyValue::Integer(10)).unwrap();
+        store.set_node_property("default", id, "float_val", PropertyValue::Float(2.5)).unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Item) RETURN n.int_val * n.float_val AS product",
-        );
+        let result = exec_read(&store, "MATCH (n:Item) RETURN n.int_val * n.float_val AS product");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("product")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("product").unwrap().as_property().unwrap();
         if let PropertyValue::Float(f) = val {
-            assert!(
-                (f - 25.0).abs() < 0.001,
-                "10 * 2.5 should be 25.0, got {}",
-                f
-            );
+            assert!((f - 25.0).abs() < 0.001, "10 * 2.5 should be 25.0, got {}", f);
         } else {
             panic!("Expected float from mixed arithmetic, got {:?}", val);
         }
@@ -6546,19 +5014,10 @@ mod tests {
         exec_mut(&mut store, "CREATE (a:Person {name: 'Alice'})");
         exec_mut(&mut store, "CREATE (b:Person {name: 'Bob'})");
         // Use MATCH to find both, then CREATE the edge
-        exec_mut(
-            &mut store,
-            "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)",
-        );
+        exec_mut(&mut store, "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)");
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name",
-        );
-        assert!(
-            result.records.len() >= 1,
-            "MATCH+CREATE should create the KNOWS edge"
-        );
+        let result = exec_read(&store, "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name");
+        assert!(result.records.len() >= 1, "MATCH+CREATE should create the KNOWS edge");
     }
 
     // --- Filter with multiple conditions (AND + OR) ---
@@ -6572,15 +5031,9 @@ mod tests {
             ("Diana", 15, true),
         ] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
-            store
-                .set_node_property("default", id, "age", PropertyValue::Integer(*age))
-                .unwrap();
-            store
-                .set_node_property("default", id, "active", PropertyValue::Boolean(*active))
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
+            store.set_node_property("default", id, "age", PropertyValue::Integer(*age)).unwrap();
+            store.set_node_property("default", id, "active", PropertyValue::Boolean(*active)).unwrap();
         }
 
         let result = exec_read(&store,
@@ -6609,20 +5062,13 @@ mod tests {
     fn test_parameterized_string_query() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
         let id2 = store.create_node("Person");
-        store
-            .set_node_property("default", id2, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", id2, "name", "Bob").unwrap();
 
         let query = parse_query("MATCH (n:Person) WHERE n.name = $target RETURN n.name").unwrap();
         let mut params = HashMap::new();
-        params.insert(
-            "target".to_string(),
-            PropertyValue::String("Alice".to_string()),
-        );
+        params.insert("target".to_string(), PropertyValue::String("Alice".to_string()));
         let executor = QueryExecutor::new(&store).with_params(params);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
@@ -6637,20 +5083,11 @@ mod tests {
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        let plan = result.records[0]
-            .get("plan")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
+        let plan = result.records[0].get("plan").unwrap().as_property().unwrap().as_string().unwrap();
         assert!(!plan.is_empty(), "EXPLAIN MERGE should produce a plan");
         // Verify MERGE did NOT create a node
-        assert_eq!(
-            store.get_nodes_by_label(&Label::new("Person")).len(),
-            0,
-            "EXPLAIN should not execute the MERGE"
-        );
+        assert_eq!(store.get_nodes_by_label(&Label::new("Person")).len(), 0,
+            "EXPLAIN should not execute the MERGE");
     }
 
     // --- EXPLAIN for UNWIND ---
@@ -6658,15 +5095,9 @@ mod tests {
     fn test_explain_unwind() {
         let mut store = GraphStore::new();
         store.create_node("Dummy");
-        let plan = get_explain_plan(
-            &store,
-            "EXPLAIN MATCH (d:Dummy) UNWIND [1,2,3] AS x RETURN x",
-        );
-        assert!(
-            plan.contains("Unwind") || plan.contains("UNWIND"),
-            "EXPLAIN should show Unwind operator: {}",
-            plan
-        );
+        let plan = get_explain_plan(&store, "EXPLAIN MATCH (d:Dummy) UNWIND [1,2,3] AS x RETURN x");
+        assert!(plan.contains("Unwind") || plan.contains("UNWIND"),
+            "EXPLAIN should show Unwind operator: {}", plan);
     }
 
     // --- Multiple MATCH clauses (implicit join) ---
@@ -6674,17 +5105,11 @@ mod tests {
     fn test_multi_match_implicit_join() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Company");
-        store
-            .set_node_property("default", c, "name", "Acme")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Acme").unwrap();
         store.create_edge(a, b, "KNOWS").unwrap();
         store.create_edge(a, c, "WORKS_AT").unwrap();
 
@@ -6704,13 +5129,8 @@ mod tests {
         store.create_node("City");
 
         let plan = get_explain_plan(&store, "EXPLAIN MATCH (a:Person), (b:City) RETURN a, b");
-        assert!(
-            plan.contains("CartesianProduct")
-                || plan.contains("Cartesian")
-                || plan.contains("NodeScan"),
-            "Plan should mention CartesianProduct: {}",
-            plan
-        );
+        assert!(plan.contains("CartesianProduct") || plan.contains("Cartesian") || plan.contains("NodeScan"),
+            "Plan should mention CartesianProduct: {}", plan);
     }
 
     // --- EXPLAIN for OPTIONAL MATCH ---
@@ -6721,15 +5141,11 @@ mod tests {
         let b = store.create_node("Person");
         store.create_edge(a, b, "KNOWS").unwrap();
 
-        let plan = get_explain_plan(
-            &store,
-            "EXPLAIN MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a, b",
+        let plan = get_explain_plan(&store,
+            "EXPLAIN MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a, b"
         );
-        assert!(
-            plan.contains("LeftOuterJoin") || plan.contains("Optional") || plan.contains("Expand"),
-            "Plan should mention LeftOuterJoin or Optional: {}",
-            plan
-        );
+        assert!(plan.contains("LeftOuterJoin") || plan.contains("Optional") || plan.contains("Expand"),
+            "Plan should mention LeftOuterJoin or Optional: {}", plan);
     }
 
     // --- Verify read-only executor rejects SET ---
@@ -6737,17 +5153,12 @@ mod tests {
     fn test_read_executor_rejects_set() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
 
         let query = parse_query("MATCH (n:Person) SET n.age = 30").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_err(),
-            "Read-only executor should reject SET queries"
-        );
+        assert!(result.is_err(), "Read-only executor should reject SET queries");
     }
 
     // --- Verify read-only executor rejects DELETE ---
@@ -6759,10 +5170,7 @@ mod tests {
         let query = parse_query("MATCH (n:Person) DELETE n").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_err(),
-            "Read-only executor should reject DELETE queries"
-        );
+        assert!(result.is_err(), "Read-only executor should reject DELETE queries");
     }
 
     // --- MATCH on empty store ---
@@ -6790,26 +5198,15 @@ mod tests {
     fn test_list_index_access() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "items",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(10),
-                    PropertyValue::Integer(20),
-                    PropertyValue::Integer(30),
-                ]),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "items", PropertyValue::Array(vec![
+            PropertyValue::Integer(10),
+            PropertyValue::Integer(20),
+            PropertyValue::Integer(30),
+        ])).unwrap();
 
         let result = exec_read(&store, "MATCH (d:Data) RETURN d.items[1] AS second");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("second")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("second").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Integer(20));
     }
 
@@ -6818,26 +5215,15 @@ mod tests {
     fn test_list_negative_index() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "items",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(10),
-                    PropertyValue::Integer(20),
-                    PropertyValue::Integer(30),
-                ]),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "items", PropertyValue::Array(vec![
+            PropertyValue::Integer(10),
+            PropertyValue::Integer(20),
+            PropertyValue::Integer(30),
+        ])).unwrap();
 
         let result = exec_read(&store, "MATCH (d:Data) RETURN d.items[-1] AS last_item");
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("last_item")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("last_item").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::Integer(30));
     }
 
@@ -6846,21 +5232,13 @@ mod tests {
     fn test_match_with_property_filter() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
 
         let result = exec_read(&store, r#"MATCH (n:Person {name: "Alice"}) RETURN n.name"#);
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("n.name")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("n.name").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("Alice".to_string()));
     }
 
@@ -6872,11 +5250,7 @@ mod tests {
         store.create_node("Person");
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN n SKIP 100");
-        assert_eq!(
-            result.records.len(),
-            0,
-            "SKIP past all results should return empty"
-        );
+        assert_eq!(result.records.len(), 0, "SKIP past all results should return empty");
     }
 
     // --- LIMIT 0 ---
@@ -6896,25 +5270,14 @@ mod tests {
         let mut store = GraphStore::new();
         for age in &[30i64, 10, 20, 40] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "age", PropertyValue::Integer(*age))
-                .unwrap();
+            store.set_node_property("default", id, "age", PropertyValue::Integer(*age)).unwrap();
         }
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN n.age ORDER BY n.age ASC");
         assert_eq!(result.records.len(), 4);
         // Verify ascending order
-        let ages: Vec<i64> = result
-            .records
-            .iter()
-            .map(|r| {
-                r.get("n.age")
-                    .unwrap()
-                    .as_property()
-                    .unwrap()
-                    .as_integer()
-                    .unwrap()
-            })
+        let ages: Vec<i64> = result.records.iter()
+            .map(|r| r.get("n.age").unwrap().as_property().unwrap().as_integer().unwrap())
             .collect();
         assert_eq!(ages, vec![10, 20, 30, 40]);
     }
@@ -6924,24 +5287,13 @@ mod tests {
         let mut store = GraphStore::new();
         for age in &[30i64, 10, 20, 40] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "age", PropertyValue::Integer(*age))
-                .unwrap();
+            store.set_node_property("default", id, "age", PropertyValue::Integer(*age)).unwrap();
         }
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN n.age ORDER BY n.age DESC");
         assert_eq!(result.records.len(), 4);
-        let ages: Vec<i64> = result
-            .records
-            .iter()
-            .map(|r| {
-                r.get("n.age")
-                    .unwrap()
-                    .as_property()
-                    .unwrap()
-                    .as_integer()
-                    .unwrap()
-            })
+        let ages: Vec<i64> = result.records.iter()
+            .map(|r| r.get("n.age").unwrap().as_property().unwrap().as_integer().unwrap())
             .collect();
         assert_eq!(ages, vec![40, 30, 20, 10]);
     }
@@ -6952,27 +5304,13 @@ mod tests {
         let mut store = GraphStore::new();
         for age in &[30i64, 10, 20, 40, 50] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "age", PropertyValue::Integer(*age))
-                .unwrap();
+            store.set_node_property("default", id, "age", PropertyValue::Integer(*age)).unwrap();
         }
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) RETURN n.age ORDER BY n.age ASC LIMIT 3",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) RETURN n.age ORDER BY n.age ASC LIMIT 3");
         assert_eq!(result.records.len(), 3);
-        let ages: Vec<i64> = result
-            .records
-            .iter()
-            .map(|r| {
-                r.get("n.age")
-                    .unwrap()
-                    .as_property()
-                    .unwrap()
-                    .as_integer()
-                    .unwrap()
-            })
+        let ages: Vec<i64> = result.records.iter()
+            .map(|r| r.get("n.age").unwrap().as_property().unwrap().as_integer().unwrap())
             .collect();
         assert_eq!(ages, vec![10, 20, 30]);
     }
@@ -6982,30 +5320,19 @@ mod tests {
     fn test_traversal_edge_type_filter() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "name", "Charlie")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Charlie").unwrap();
         store.create_edge(a, b, "KNOWS").unwrap();
         store.create_edge(a, c, "LIKES").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person) RETURN b.name",
+        let result = exec_read(&store,
+            "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person) RETURN b.name"
         );
         assert_eq!(result.records.len(), 1, "Only KNOWS edge should match");
-        let val = result.records[0]
-            .get("b.name")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("b.name").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("Bob".to_string()));
     }
 
@@ -7014,15 +5341,9 @@ mod tests {
     fn test_return_multiple_properties() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", id, "age", PropertyValue::Integer(30))
-            .unwrap();
-        store
-            .set_node_property("default", id, "city", "NYC")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
+        store.set_node_property("default", id, "age", PropertyValue::Integer(30)).unwrap();
+        store.set_node_property("default", id, "city", "NYC").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN n.name, n.age, n.city");
         assert_eq!(result.records.len(), 1);
@@ -7034,16 +5355,11 @@ mod tests {
     fn test_return_with_alias() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", id, "name", "Alice").unwrap();
 
         let result = exec_read(&store, "MATCH (n:Person) RETURN n.name AS person_name");
         assert_eq!(result.records.len(), 1);
-        assert!(
-            result.records[0].get("person_name").is_some(),
-            "Should have aliased column"
-        );
+        assert!(result.records[0].get("person_name").is_some(), "Should have aliased column");
     }
 
     // --- Long traversal chain ---
@@ -7062,16 +5378,11 @@ mod tests {
         store.create_edge(b, c, "KNOWS").unwrap();
         store.create_edge(c, d, "KNOWS").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person {name: 'A'})-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(d) RETURN d.name",
+        let result = exec_read(&store,
+            "MATCH (a:Person {name: 'A'})-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(d) RETURN d.name"
         );
         assert_eq!(result.records.len(), 1);
-        let val = result.records[0]
-            .get("d.name")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let val = result.records[0].get("d.name").unwrap().as_property().unwrap();
         assert_eq!(val, &PropertyValue::String("D".to_string()));
     }
 
@@ -7083,17 +5394,11 @@ mod tests {
     fn build_triangle_graph() -> GraphStore {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "name", "Charlie")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Charlie").unwrap();
         store.create_edge(a, b, "KNOWS").unwrap();
         store.create_edge(b, c, "KNOWS").unwrap();
         store.create_edge(a, c, "KNOWS").unwrap();
@@ -7105,14 +5410,12 @@ mod tests {
     #[test]
     fn test_algo_pagerank_with_results() {
         let store = build_triangle_graph();
-        let query = parse_query("CALL algo.pageRank('Person') YIELD node, score").unwrap();
+        let query = parse_query(
+            "CALL algo.pageRank('Person') YIELD node, score"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 3,
-            "PageRank should return a result for each Person node, got {}",
-            result.records.len()
-        );
+        assert!(result.records.len() >= 3, "PageRank should return a result for each Person node, got {}", result.records.len());
         for record in &result.records {
             let score = record.get("score").expect("Should have score");
             if let Value::Property(PropertyValue::Float(s)) = score {
@@ -7131,63 +5434,39 @@ mod tests {
         ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 3,
-            "PageRank with config should return results"
-        );
+        assert!(result.records.len() >= 3, "PageRank with config should return results");
     }
 
     #[test]
     fn test_algo_wcc_with_results() {
         let store = build_triangle_graph();
-        let query = parse_query("CALL algo.wcc('Person') YIELD node, componentId").unwrap();
+        let query = parse_query(
+            "CALL algo.wcc('Person') YIELD node, componentId"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 3,
-            "WCC should return a result for each node, got {}",
-            result.records.len()
-        );
-        let component_ids: Vec<i64> = result
-            .records
-            .iter()
-            .map(|r| {
-                r.get("componentId")
-                    .unwrap()
-                    .as_property()
-                    .unwrap()
-                    .as_integer()
-                    .unwrap()
-            })
+        assert!(result.records.len() >= 3, "WCC should return a result for each node, got {}", result.records.len());
+        let component_ids: Vec<i64> = result.records.iter()
+            .map(|r| r.get("componentId").unwrap().as_property().unwrap().as_integer().unwrap())
             .collect();
         let first_id = component_ids[0];
-        assert!(
-            component_ids.iter().all(|&c| c == first_id),
-            "All nodes in a connected graph should be in the same component"
-        );
+        assert!(component_ids.iter().all(|&c| c == first_id),
+            "All nodes in a connected graph should be in the same component");
     }
 
     #[test]
     fn test_algo_cdlp_with_results() {
         let store = build_triangle_graph();
-        let query = parse_query("CALL algo.cdlp('Person') YIELD node, communityId").unwrap();
+        let query = parse_query(
+            "CALL algo.cdlp('Person') YIELD node, communityId"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 3,
-            "CDLP should return a result per node, got {}",
-            result.records.len()
-        );
+        assert!(result.records.len() >= 3, "CDLP should return a result per node, got {}", result.records.len());
         for record in &result.records {
             assert!(record.get("node").is_some(), "CDLP result should bind node");
-            let cid = record
-                .get("communityId")
-                .expect("CDLP result should have communityId");
-            assert!(
-                matches!(cid, Value::Property(PropertyValue::Integer(_))),
-                "communityId should be an integer, got {:?}",
-                cid
-            );
+            let cid = record.get("communityId").expect("CDLP result should have communityId");
+            assert!(matches!(cid, Value::Property(PropertyValue::Integer(_))), "communityId should be an integer, got {:?}", cid);
         }
     }
 
@@ -7195,37 +5474,26 @@ mod tests {
     fn test_algo_cdlp_with_config() {
         let store = build_triangle_graph();
         let query = parse_query(
-            "CALL algo.cdlp('Person', 'KNOWS', {maxIterations: 5}) YIELD node, communityId",
-        )
-        .unwrap();
+            "CALL algo.cdlp('Person', 'KNOWS', {maxIterations: 5}) YIELD node, communityId"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 3,
-            "CDLP with config should return results"
-        );
+        assert!(result.records.len() >= 3, "CDLP with config should return results");
     }
 
     #[test]
     fn test_algo_lcc_with_results() {
         let store = build_triangle_graph();
-        let query = parse_query("CALL algo.lcc('Person') YIELD node, coefficient").unwrap();
+        let query = parse_query(
+            "CALL algo.lcc('Person') YIELD node, coefficient"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 3,
-            "LCC should return a result per node, got {}",
-            result.records.len()
-        );
+        assert!(result.records.len() >= 3, "LCC should return a result per node, got {}", result.records.len());
         for record in &result.records {
-            let coeff = record
-                .get("coefficient")
-                .expect("LCC result should have coefficient");
+            let coeff = record.get("coefficient").expect("LCC result should have coefficient");
             if let Value::Property(PropertyValue::Float(c)) = coeff {
-                assert!(
-                    *c >= 0.0 && *c <= 1.0,
-                    "LCC coefficient must be in [0,1], got {c}"
-                );
+                assert!(*c >= 0.0 && *c <= 1.0, "LCC coefficient must be in [0,1], got {c}");
             } else {
                 panic!("Expected float coefficient, got {coeff:?}");
             }
@@ -7235,19 +5503,14 @@ mod tests {
     #[test]
     fn test_algo_scc_with_results() {
         let store = build_triangle_graph();
-        let query = parse_query("CALL algo.scc('Person') YIELD node, componentId").unwrap();
+        let query = parse_query(
+            "CALL algo.scc('Person') YIELD node, componentId"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 1,
-            "SCC should return results, got {}",
-            result.records.len()
-        );
+        assert!(result.records.len() >= 1, "SCC should return results, got {}", result.records.len());
         for record in &result.records {
-            assert!(
-                record.get("componentId").is_some(),
-                "Each SCC result should have componentId"
-            );
+            assert!(record.get("componentId").is_some(), "Each SCC result should have componentId");
         }
     }
 
@@ -7257,37 +5520,21 @@ mod tests {
         // Get actual node IDs from the store
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert!(nodes.len() >= 3, "Should have 3 Person nodes");
-        let alice_id = nodes
-            .iter()
-            .find(|n| {
-                store
-                    .node_property(n.id, "name")
-                    .is_some_and(|v| v.as_string() == Some("Alice"))
-            })
+        let alice_id = nodes.iter()
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Alice")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Alice should exist");
-        let charlie_id = nodes
-            .iter()
-            .find(|n| {
-                store
-                    .node_property(n.id, "name")
-                    .is_some_and(|v| v.as_string() == Some("Charlie"))
-            })
+        let charlie_id = nodes.iter()
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Charlie")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Charlie should exist");
 
-        let cypher = format!(
-            "CALL algo.shortestPath({}, {}) YIELD path, cost",
-            alice_id, charlie_id
-        );
+        let cypher = format!("CALL algo.shortestPath({}, {}) YIELD path, cost", alice_id, charlie_id);
         let query = parse_query(&cypher).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         // The algorithm should find a path (direct edge Alice->Charlie exists)
-        assert!(
-            !result.records.is_empty(),
-            "Should find a path from Alice to Charlie"
-        );
+        assert!(!result.records.is_empty(), "Should find a path from Alice to Charlie");
         let cost = result.records[0].get("cost").expect("Should have cost");
         if let Value::Property(PropertyValue::Float(c)) = cost {
             assert!(*c >= 0.0, "Path cost should be non-negative");
@@ -7297,17 +5544,13 @@ mod tests {
     #[test]
     fn test_algo_triangle_count() {
         let store = build_triangle_graph();
-        let query = parse_query("CALL algo.triangleCount() YIELD triangles").unwrap();
+        let query = parse_query(
+            "CALL algo.triangleCount() YIELD triangles"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
-        assert_eq!(
-            result.records.len(),
-            1,
-            "Triangle count should return one record"
-        );
-        let triangles = result.records[0]
-            .get("triangles")
-            .expect("Should have triangles");
+        assert_eq!(result.records.len(), 1, "Triangle count should return one record");
+        let triangles = result.records[0].get("triangles").expect("Should have triangles");
         if let Value::Property(PropertyValue::Integer(t)) = triangles {
             assert!(*t >= 0, "Triangle count should be non-negative, got {}", t);
         } else {
@@ -7320,86 +5563,65 @@ mod tests {
     #[test]
     fn test_algo_pagerank_via_mut_executor() {
         let mut store = build_triangle_graph();
-        let query = parse_query("CALL algo.pageRank('Person') YIELD node, score").unwrap();
+        let query = parse_query(
+            "CALL algo.pageRank('Person') YIELD node, score"
+        ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 3,
-            "PageRank via MutExecutor should return results"
-        );
+        assert!(result.records.len() >= 3, "PageRank via MutExecutor should return results");
     }
 
     #[test]
     fn test_algo_wcc_via_mut_executor() {
         let mut store = build_triangle_graph();
-        let query = parse_query("CALL algo.wcc('Person') YIELD node, componentId").unwrap();
+        let query = parse_query(
+            "CALL algo.wcc('Person') YIELD node, componentId"
+        ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 3,
-            "WCC via MutExecutor should return results"
-        );
+        assert!(result.records.len() >= 3, "WCC via MutExecutor should return results");
     }
 
     #[test]
     fn test_algo_scc_via_mut_executor() {
         let mut store = build_triangle_graph();
-        let query = parse_query("CALL algo.scc('Person') YIELD node, componentId").unwrap();
+        let query = parse_query(
+            "CALL algo.scc('Person') YIELD node, componentId"
+        ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert!(
-            result.records.len() >= 1,
-            "SCC via MutExecutor should return results"
-        );
+        assert!(result.records.len() >= 1, "SCC via MutExecutor should return results");
     }
 
     #[test]
     fn test_algo_shortest_path_via_mut_executor() {
         let mut store = build_triangle_graph();
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        let alice_id = nodes
-            .iter()
-            .find(|n| {
-                store
-                    .node_property(n.id, "name")
-                    .is_some_and(|v| v.as_string() == Some("Alice"))
-            })
+        let alice_id = nodes.iter()
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Alice")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Alice should exist");
-        let charlie_id = nodes
-            .iter()
-            .find(|n| {
-                store
-                    .node_property(n.id, "name")
-                    .is_some_and(|v| v.as_string() == Some("Charlie"))
-            })
+        let charlie_id = nodes.iter()
+            .find(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("Charlie")))
             .map(|n| n.id.as_u64() as i64)
             .expect("Charlie should exist");
 
-        let cypher = format!(
-            "CALL algo.shortestPath({}, {}) YIELD path, cost",
-            alice_id, charlie_id
-        );
+        let cypher = format!("CALL algo.shortestPath({}, {}) YIELD path, cost", alice_id, charlie_id);
         let query = parse_query(&cypher).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert!(
-            !result.records.is_empty(),
-            "ShortestPath via MutExecutor should find path"
-        );
+        assert!(!result.records.is_empty(), "ShortestPath via MutExecutor should find path");
     }
 
     #[test]
     fn test_algo_triangle_count_via_mut_executor() {
         let mut store = build_triangle_graph();
-        let query = parse_query("CALL algo.triangleCount() YIELD triangles").unwrap();
+        let query = parse_query(
+            "CALL algo.triangleCount() YIELD triangles"
+        ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert_eq!(
-            result.records.len(),
-            1,
-            "Triangle count via MutExecutor should return one record"
-        );
+        assert_eq!(result.records.len(), 1, "Triangle count via MutExecutor should return one record");
     }
 
     #[test]
@@ -7420,28 +5642,13 @@ mod tests {
 
         let a_id = a.as_u64() as i64;
         let c_id = c.as_u64() as i64;
-        let cypher = format!(
-            "CALL algo.weightedPath({}, {}, 'distance') YIELD path, cost",
-            a_id, c_id
-        );
+        let cypher = format!("CALL algo.weightedPath({}, {}, 'distance') YIELD path, cost", a_id, c_id);
         let query = parse_query(&cypher).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert!(
-            !result.records.is_empty(),
-            "WeightedPath should find a path"
-        );
-        let cost = result.records[0]
-            .get("cost")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_float()
-            .unwrap();
-        assert!(
-            cost <= 10.0,
-            "Weighted path should find a cheaper route than the direct edge"
-        );
+        assert!(!result.records.is_empty(), "WeightedPath should find a path");
+        let cost = result.records[0].get("cost").unwrap().as_property().unwrap().as_float().unwrap();
+        assert!(cost <= 10.0, "Weighted path should find a cheaper route than the direct edge");
     }
 
     #[test]
@@ -7457,21 +5664,12 @@ mod tests {
 
         let a_id = a.as_u64() as i64;
         let c_id = c.as_u64() as i64;
-        let cypher = format!(
-            "CALL algo.maxFlow({}, {}, 'capacity') YIELD max_flow",
-            a_id, c_id
-        );
+        let cypher = format!("CALL algo.maxFlow({}, {}, 'capacity') YIELD max_flow", a_id, c_id);
         let query = parse_query(&cypher).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1, "maxFlow should return one record");
-        let flow = result.records[0]
-            .get("max_flow")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_float()
-            .unwrap();
+        let flow = result.records[0].get("max_flow").unwrap().as_property().unwrap().as_float().unwrap();
         assert!(flow >= 0.0, "Max flow should be non-negative");
     }
 
@@ -7488,13 +5686,12 @@ mod tests {
         let e3 = store.create_edge(a, c, "EDGE").unwrap();
         store.set_edge_property_sparse(e3, "weight", PropertyValue::Float(3.0));
 
-        let query = parse_query("CALL algo.mst('weight') YIELD total_weight").unwrap();
+        let query = parse_query(
+            "CALL algo.mst('weight') YIELD total_weight"
+        ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert!(
-            !result.records.is_empty(),
-            "MST should return at least one record"
-        );
+        assert!(!result.records.is_empty(), "MST should return at least one record");
     }
 
     // --- 2. Optimization operator (algo.or.solve) ---
@@ -7504,38 +5701,23 @@ mod tests {
         let mut store = GraphStore::new();
         let a = store.create_node("Resource");
         store.set_node_property("default", a, "name", "A").unwrap();
-        store
-            .set_node_property("default", a, "cost", PropertyValue::Float(10.0))
-            .unwrap();
+        store.set_node_property("default", a, "cost", PropertyValue::Float(10.0)).unwrap();
         let b = store.create_node("Resource");
         store.set_node_property("default", b, "name", "B").unwrap();
-        store
-            .set_node_property("default", b, "cost", PropertyValue::Float(20.0))
-            .unwrap();
+        store.set_node_property("default", b, "cost", PropertyValue::Float(20.0)).unwrap();
         let c = store.create_node("Resource");
         store.set_node_property("default", c, "name", "C").unwrap();
-        store
-            .set_node_property("default", c, "cost", PropertyValue::Float(15.0))
-            .unwrap();
+        store.set_node_property("default", c, "cost", PropertyValue::Float(15.0)).unwrap();
 
         let query = parse_query(
             "CALL algo.or.solve({label: 'Resource', property: 'allocation', cost_property: 'cost', algorithm: 'Jaya', budget: 30.0, population_size: 20, max_iterations: 50}) YIELD fitness, algorithm, iterations"
         ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert!(
-            !result.records.is_empty(),
-            "Jaya optimization should return results"
-        );
+        assert!(!result.records.is_empty(), "Jaya optimization should return results");
         let fitness = result.records[0].get("fitness");
         assert!(fitness.is_some(), "Should have fitness result");
-        let algo_name = result.records[0]
-            .get("algorithm")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
+        let algo_name = result.records[0].get("algorithm").unwrap().as_property().unwrap().as_string().unwrap();
         assert_eq!(algo_name, "Jaya");
     }
 
@@ -7544,31 +5726,18 @@ mod tests {
         let mut store = GraphStore::new();
         let a = store.create_node("Resource");
         store.set_node_property("default", a, "name", "A").unwrap();
-        store
-            .set_node_property("default", a, "cost", PropertyValue::Float(10.0))
-            .unwrap();
+        store.set_node_property("default", a, "cost", PropertyValue::Float(10.0)).unwrap();
         let b = store.create_node("Resource");
         store.set_node_property("default", b, "name", "B").unwrap();
-        store
-            .set_node_property("default", b, "cost", PropertyValue::Float(20.0))
-            .unwrap();
+        store.set_node_property("default", b, "cost", PropertyValue::Float(20.0)).unwrap();
 
         let query = parse_query(
             "CALL algo.or.solve({label: 'Resource', property: 'allocation', cost_property: 'cost', algorithm: 'TLBO', budget: 25.0, population_size: 20, max_iterations: 50}) YIELD fitness, algorithm"
         ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert!(
-            !result.records.is_empty(),
-            "TLBO optimization should return results"
-        );
-        let algo_name = result.records[0]
-            .get("algorithm")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
+        assert!(!result.records.is_empty(), "TLBO optimization should return results");
+        let algo_name = result.records[0].get("algorithm").unwrap().as_property().unwrap().as_string().unwrap();
         assert_eq!(algo_name, "TLBO");
     }
 
@@ -7577,45 +5746,24 @@ mod tests {
         let mut store = GraphStore::new();
         let a = store.create_node("Resource");
         store.set_node_property("default", a, "name", "A").unwrap();
-        store
-            .set_node_property("default", a, "cost", PropertyValue::Float(10.0))
-            .unwrap();
-        store
-            .set_node_property("default", a, "value", PropertyValue::Float(5.0))
-            .unwrap();
+        store.set_node_property("default", a, "cost", PropertyValue::Float(10.0)).unwrap();
+        store.set_node_property("default", a, "value", PropertyValue::Float(5.0)).unwrap();
         let b = store.create_node("Resource");
         store.set_node_property("default", b, "name", "B").unwrap();
-        store
-            .set_node_property("default", b, "cost", PropertyValue::Float(20.0))
-            .unwrap();
-        store
-            .set_node_property("default", b, "value", PropertyValue::Float(8.0))
-            .unwrap();
+        store.set_node_property("default", b, "cost", PropertyValue::Float(20.0)).unwrap();
+        store.set_node_property("default", b, "value", PropertyValue::Float(8.0)).unwrap();
         let c = store.create_node("Resource");
         store.set_node_property("default", c, "name", "C").unwrap();
-        store
-            .set_node_property("default", c, "cost", PropertyValue::Float(15.0))
-            .unwrap();
-        store
-            .set_node_property("default", c, "value", PropertyValue::Float(6.0))
-            .unwrap();
+        store.set_node_property("default", c, "cost", PropertyValue::Float(15.0)).unwrap();
+        store.set_node_property("default", c, "value", PropertyValue::Float(6.0)).unwrap();
 
         let query = parse_query(
             "CALL algo.or.solve({label: 'Resource', property: 'allocation', cost_properties: ['cost', 'value'], algorithm: 'NSGA2', population_size: 20, max_iterations: 50}) YIELD fitness, algorithm, front_size"
         ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert!(
-            !result.records.is_empty(),
-            "NSGA2 multi-objective optimization should return results"
-        );
-        let algo_name = result.records[0]
-            .get("algorithm")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
+        assert!(!result.records.is_empty(), "NSGA2 multi-objective optimization should return results");
+        let algo_name = result.records[0].get("algorithm").unwrap().as_property().unwrap().as_string().unwrap();
         assert_eq!(algo_name, "NSGA2");
         let front_size = result.records[0].get("front_size");
         assert!(front_size.is_some(), "NSGA2 should return front_size");
@@ -7629,43 +5777,29 @@ mod tests {
         ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert_eq!(
-            result.records.len(),
-            0,
-            "Optimization with no matching nodes should return no results"
-        );
+        assert_eq!(result.records.len(), 0, "Optimization with no matching nodes should return no results");
     }
 
     #[test]
     fn test_optimization_read_only_errors() {
         let store = build_triangle_graph();
-        let query =
-            parse_query("CALL algo.or.solve({label: 'Person', property: 'x'}) YIELD fitness")
-                .unwrap();
+        let query = parse_query(
+            "CALL algo.or.solve({label: 'Person', property: 'x'}) YIELD fitness"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_err(),
-            "algo.or.solve should fail with read-only executor"
-        );
+        assert!(result.is_err(), "algo.or.solve should fail with read-only executor");
     }
 
     #[test]
     fn test_optimization_various_solvers() {
-        let solvers = vec![
-            "Rao1", "Rao2", "Rao3", "Firefly", "Cuckoo", "GWO", "GA", "SA", "Bat", "ABC", "GSA",
-            "HS", "FPA",
-        ];
+        let solvers = vec!["Rao1", "Rao2", "Rao3", "Firefly", "Cuckoo", "GWO", "GA", "SA", "Bat", "ABC", "GSA", "HS", "FPA"];
         for solver_name in solvers {
             let mut store = GraphStore::new();
             let a = store.create_node("Item");
-            store
-                .set_node_property("default", a, "cost", PropertyValue::Float(5.0))
-                .unwrap();
+            store.set_node_property("default", a, "cost", PropertyValue::Float(5.0)).unwrap();
             let b = store.create_node("Item");
-            store
-                .set_node_property("default", b, "cost", PropertyValue::Float(10.0))
-                .unwrap();
+            store.set_node_property("default", b, "cost", PropertyValue::Float(10.0)).unwrap();
 
             let cypher = format!(
                 "CALL algo.or.solve({{label: 'Item', property: 'alloc', cost_property: 'cost', algorithm: '{}', population_size: 10, max_iterations: 20}}) YIELD fitness, algorithm",
@@ -7674,23 +5808,9 @@ mod tests {
             let query = parse_query(&cypher).unwrap();
             let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
             let result = executor.execute(&query).unwrap();
-            assert!(
-                !result.records.is_empty(),
-                "Solver {} should return results",
-                solver_name
-            );
-            let algo = result.records[0]
-                .get("algorithm")
-                .unwrap()
-                .as_property()
-                .unwrap()
-                .as_string()
-                .unwrap();
-            assert_eq!(
-                algo, solver_name,
-                "Algorithm name should match for {}",
-                solver_name
-            );
+            assert!(!result.records.is_empty(), "Solver {} should return results", solver_name);
+            let algo = result.records[0].get("algorithm").unwrap().as_property().unwrap().as_string().unwrap();
+            assert_eq!(algo, solver_name, "Algorithm name should match for {}", solver_name);
         }
     }
 
@@ -7698,36 +5818,19 @@ mod tests {
     fn test_optimization_motlbo_multi_objective() {
         let mut store = GraphStore::new();
         let a = store.create_node("Item");
-        store
-            .set_node_property("default", a, "c1", PropertyValue::Float(3.0))
-            .unwrap();
-        store
-            .set_node_property("default", a, "c2", PropertyValue::Float(7.0))
-            .unwrap();
+        store.set_node_property("default", a, "c1", PropertyValue::Float(3.0)).unwrap();
+        store.set_node_property("default", a, "c2", PropertyValue::Float(7.0)).unwrap();
         let b = store.create_node("Item");
-        store
-            .set_node_property("default", b, "c1", PropertyValue::Float(5.0))
-            .unwrap();
-        store
-            .set_node_property("default", b, "c2", PropertyValue::Float(2.0))
-            .unwrap();
+        store.set_node_property("default", b, "c1", PropertyValue::Float(5.0)).unwrap();
+        store.set_node_property("default", b, "c2", PropertyValue::Float(2.0)).unwrap();
 
         let query = parse_query(
             "CALL algo.or.solve({label: 'Item', property: 'alloc', cost_properties: ['c1', 'c2'], algorithm: 'MOTLBO', population_size: 10, max_iterations: 20}) YIELD fitness, algorithm, front_size"
         ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
-        assert!(
-            !result.records.is_empty(),
-            "MOTLBO multi-objective should return results"
-        );
-        let algo = result.records[0]
-            .get("algorithm")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
+        assert!(!result.records.is_empty(), "MOTLBO multi-objective should return results");
+        let algo = result.records[0].get("algorithm").unwrap().as_property().unwrap().as_string().unwrap();
         assert_eq!(algo, "MOTLBO");
     }
 
@@ -7743,10 +5846,7 @@ mod tests {
             let executor = QueryExecutor::new(&store);
             let result = executor.execute(&q);
             if let Ok(batch) = result {
-                assert!(
-                    !batch.records.is_empty(),
-                    "ShortestPath should find a path from Alice to Charlie"
-                );
+                assert!(!batch.records.is_empty(), "ShortestPath should find a path from Alice to Charlie");
             }
         }
     }
@@ -7761,10 +5861,7 @@ mod tests {
             let executor = QueryExecutor::new(&store);
             let result = executor.execute(&q);
             if let Ok(batch) = result {
-                assert!(
-                    !batch.records.is_empty(),
-                    "ShortestPath should find direct edge Alice -> Charlie"
-                );
+                assert!(!batch.records.is_empty(), "ShortestPath should find direct edge Alice -> Charlie");
             }
         }
     }
@@ -7774,27 +5871,17 @@ mod tests {
     #[test]
     fn test_create_edge_with_properties_and_return() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'X'})-[:KNOWS {since: 2024}]->(b:Person {name: 'Y'})",
+        exec_mut(&mut store,
+            "CREATE (a:Person {name: 'X'})-[:KNOWS {since: 2024}]->(b:Person {name: 'Y'})"
         );
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person {name: 'X'})-[r:KNOWS]->(b:Person {name: 'Y'}) RETURN a.name, b.name",
+        let result = exec_read(&store,
+            "MATCH (a:Person {name: 'X'})-[r:KNOWS]->(b:Person {name: 'Y'}) RETURN a.name, b.name"
         );
         assert_eq!(result.records.len(), 1, "Should find the created edge");
-        let a_name = result.records[0]
-            .get("a.name")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let a_name = result.records[0].get("a.name").unwrap().as_property().unwrap();
         assert_eq!(a_name, &PropertyValue::String("X".to_string()));
-        let b_name = result.records[0]
-            .get("b.name")
-            .unwrap()
-            .as_property()
-            .unwrap();
+        let b_name = result.records[0].get("b.name").unwrap().as_property().unwrap();
         assert_eq!(b_name, &PropertyValue::String("Y".to_string()));
     }
 
@@ -7808,14 +5895,10 @@ mod tests {
             "MATCH (a:Person {name: 'P1'}), (b:Person {name: 'P2'}) CREATE (a)-[:FRIENDS {year: 2025}]->(b)"
         );
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person)-[:FRIENDS]->(b:Person) RETURN a.name, b.name",
+        let result = exec_read(&store,
+            "MATCH (a:Person)-[:FRIENDS]->(b:Person) RETURN a.name, b.name"
         );
-        assert!(
-            result.records.len() >= 1,
-            "Should find the created FRIENDS edge"
-        );
+        assert!(result.records.len() >= 1, "Should find the created FRIENDS edge");
     }
 
     // --- 5. MERGE with ON CREATE SET / ON MATCH SET ---
@@ -7823,42 +5906,27 @@ mod tests {
     #[test]
     fn test_merge_on_create_set_with_return() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "MERGE (n:Person {name: 'MergeTest'}) ON CREATE SET n.created = true",
+        exec_mut(&mut store,
+            "MERGE (n:Person {name: 'MergeTest'}) ON CREATE SET n.created = true"
         );
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "name")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("MergeTest")
-        );
-        assert_eq!(
-            store.node_property(nodes[0].id, "created").as_ref(),
-            Some(&PropertyValue::Boolean(true))
-        );
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("MergeTest"));
+        assert_eq!(store.node_property(nodes[0].id, "created").as_ref(), Some(&PropertyValue::Boolean(true)));
     }
 
     #[test]
     fn test_merge_on_match_set_with_return() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'MergeTest'})");
-        exec_mut(
-            &mut store,
-            "MERGE (n:Person {name: 'MergeTest'}) ON MATCH SET n.matched = true",
+        exec_mut(&mut store,
+            "MERGE (n:Person {name: 'MergeTest'}) ON MATCH SET n.matched = true"
         );
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1, "MERGE should not create a duplicate");
-        assert_eq!(
-            store.node_property(nodes[0].id, "matched").as_ref(),
-            Some(&PropertyValue::Boolean(true)),
-            "ON MATCH SET should have set matched property"
-        );
+        assert_eq!(store.node_property(nodes[0].id, "matched").as_ref(), Some(&PropertyValue::Boolean(true)),
+            "ON MATCH SET should have set matched property");
     }
 
     #[test]
@@ -7869,30 +5937,16 @@ mod tests {
         );
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "status")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("new"),
-            "First MERGE should trigger ON CREATE SET"
-        );
+        assert_eq!(store.node_property(nodes[0].id, "status").as_ref().unwrap().as_string(), Some("new"),
+            "First MERGE should trigger ON CREATE SET");
 
         exec_mut(&mut store,
             "MERGE (n:Person {name: 'BothTest'}) ON CREATE SET n.status = 'new' ON MATCH SET n.status = 'existing'"
         );
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1, "Should not create a duplicate");
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "status")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("existing"),
-            "Second MERGE should trigger ON MATCH SET"
-        );
+        assert_eq!(store.node_property(nodes[0].id, "status").as_ref().unwrap().as_string(), Some("existing"),
+            "Second MERGE should trigger ON MATCH SET");
     }
 
     // --- 6. DELETE and DETACH DELETE ---
@@ -7900,52 +5954,26 @@ mod tests {
     #[test]
     fn test_detach_delete_node_with_multiple_edge_types() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'Hub'})-[:KNOWS]->(b:Person {name: 'Friend1'})",
-        );
-        exec_mut(
-            &mut store,
-            "CREATE (c:Person {name: 'Friend2'})-[:LIKES]->(a:Person {name: 'Hub'})",
-        );
+        exec_mut(&mut store, "CREATE (a:Person {name: 'Hub'})-[:KNOWS]->(b:Person {name: 'Friend1'})");
+        exec_mut(&mut store, "CREATE (c:Person {name: 'Friend2'})-[:LIKES]->(a:Person {name: 'Hub'})");
 
         let before_count = store.get_nodes_by_label(&Label::new("Person")).len();
         exec_mut(&mut store, "MATCH (n:Person {name: 'Hub'}) DETACH DELETE n");
         let after_count = store.get_nodes_by_label(&Label::new("Person")).len();
-        assert!(
-            after_count < before_count,
-            "DETACH DELETE should remove Hub node(s)"
-        );
+        assert!(after_count < before_count, "DETACH DELETE should remove Hub node(s)");
     }
 
     #[test]
     fn test_delete_edge_only() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'A1'})-[:KNOWS]->(b:Person {name: 'B1'})",
-        );
-        exec_mut(
-            &mut store,
-            "MATCH (a:Person {name: 'A1'})-[r:KNOWS]->(b:Person {name: 'B1'}) DELETE r",
-        );
+        exec_mut(&mut store, "CREATE (a:Person {name: 'A1'})-[:KNOWS]->(b:Person {name: 'B1'})");
+        exec_mut(&mut store, "MATCH (a:Person {name: 'A1'})-[r:KNOWS]->(b:Person {name: 'B1'}) DELETE r");
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        let a_exists = nodes.iter().any(|n| {
-            store
-                .node_property(n.id, "name")
-                .is_some_and(|v| v.as_string() == Some("A1"))
-        });
-        let b_exists = nodes.iter().any(|n| {
-            store
-                .node_property(n.id, "name")
-                .is_some_and(|v| v.as_string() == Some("B1"))
-        });
+        let a_exists = nodes.iter().any(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("A1")));
+        let b_exists = nodes.iter().any(|n| store.node_property(n.id, "name").is_some_and(|v| v.as_string() == Some("B1")));
         assert!(a_exists, "Node A1 should still exist after edge deletion");
         assert!(b_exists, "Node B1 should still exist after edge deletion");
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person {name: 'A1'})-[:KNOWS]->(b:Person) RETURN b.name",
-        );
+        let result = exec_read(&store, "MATCH (a:Person {name: 'A1'})-[:KNOWS]->(b:Person) RETURN b.name");
         assert_eq!(result.records.len(), 0, "Edge should have been deleted");
     }
 
@@ -7954,15 +5982,8 @@ mod tests {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Lonely {name: 'Solo'})");
         assert_eq!(store.get_nodes_by_label(&Label::new("Lonely")).len(), 1);
-        exec_mut(
-            &mut store,
-            "MATCH (n:Lonely {name: 'Solo'}) DETACH DELETE n",
-        );
-        assert_eq!(
-            store.get_nodes_by_label(&Label::new("Lonely")).len(),
-            0,
-            "Isolated node should be deleted"
-        );
+        exec_mut(&mut store, "MATCH (n:Lonely {name: 'Solo'}) DETACH DELETE n");
+        assert_eq!(store.get_nodes_by_label(&Label::new("Lonely")).len(), 0, "Isolated node should be deleted");
     }
 
     // --- 7. SET operations ---
@@ -7971,20 +5992,13 @@ mod tests {
     fn test_set_property_to_null_removes_it() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 30})");
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person {name: 'Alice'}) SET n.age = null",
-        );
+        exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) SET n.age = null");
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
         let age = store.node_property(nodes[0].id, "age");
         if let Some(val) = age {
-            assert_eq!(
-                val,
-                PropertyValue::Null,
-                "Setting to null should make property Null"
-            );
+            assert_eq!(val, PropertyValue::Null, "Setting to null should make property Null");
         }
     }
 
@@ -7992,67 +6006,31 @@ mod tests {
     fn test_set_multiple_properties() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice'})");
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person {name: 'Alice'}) SET n.age = 30, n.city = 'NYC'",
-        );
+        exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) SET n.age = 30, n.city = 'NYC'");
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "age")
-                .as_ref()
-                .unwrap()
-                .as_integer(),
-            Some(30)
-        );
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "city")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("NYC")
-        );
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(30));
+        assert_eq!(store.node_property(nodes[0].id, "city").as_ref().unwrap().as_string(), Some("NYC"));
     }
 
     #[test]
     fn test_set_overwrite_existing_property() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 25})");
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person {name: 'Alice'}) SET n.age = 35",
-        );
+        exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) SET n.age = 35");
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "age")
-                .as_ref()
-                .unwrap()
-                .as_integer(),
-            Some(35)
-        );
+        assert_eq!(store.node_property(nodes[0].id, "age").as_ref().unwrap().as_integer(), Some(35));
     }
 
     #[test]
     fn test_set_edge_property() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (a:Person {name: 'A'})-[:KNOWS {since: 2020}]->(b:Person {name: 'B'})",
-        );
-        exec_mut(
-            &mut store,
-            "MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b:Person {name: 'B'}) SET r.since = 2025",
-        );
+        exec_mut(&mut store, "CREATE (a:Person {name: 'A'})-[:KNOWS {since: 2020}]->(b:Person {name: 'B'})");
+        exec_mut(&mut store, "MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b:Person {name: 'B'}) SET r.since = 2025");
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b:Person {name: 'B'}) RETURN r.since",
-        );
+        let result = exec_read(&store, "MATCH (a:Person {name: 'A'})-[r:KNOWS]->(b:Person {name: 'B'}) RETURN r.since");
         assert!(result.records.len() >= 1, "Should find the edge");
     }
 
@@ -8061,79 +6039,39 @@ mod tests {
     #[test]
     fn test_remove_property_verify_gone() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (n:Person {name: 'Alice', age: 30, city: 'NYC'})",
-        );
+        exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 30, city: 'NYC'})");
         exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) REMOVE n.age");
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert!(
-            store.node_property(nodes[0].id, "age").as_ref().is_none(),
-            "age property should be removed"
-        );
-        assert!(
-            store.node_property(nodes[0].id, "name").as_ref().is_some(),
-            "name property should still exist"
-        );
-        assert!(
-            store.node_property(nodes[0].id, "city").as_ref().is_some(),
-            "city property should still exist"
-        );
+        assert!(store.node_property(nodes[0].id, "age").as_ref().is_none(), "age property should be removed");
+        assert!(store.node_property(nodes[0].id, "name").as_ref().is_some(), "name property should still exist");
+        assert!(store.node_property(nodes[0].id, "city").as_ref().is_some(), "city property should still exist");
     }
 
     #[test]
     fn test_remove_nonexistent_property() {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice'})");
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person {name: 'Alice'}) REMOVE n.nonexistent",
-        );
+        exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) REMOVE n.nonexistent");
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert_eq!(
-            store
-                .node_property(nodes[0].id, "name")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("Alice")
-        );
+        assert_eq!(store.node_property(nodes[0].id, "name").as_ref().unwrap().as_string(), Some("Alice"));
     }
 
     #[test]
     fn test_remove_multiple_properties() {
         let mut store = GraphStore::new();
-        exec_mut(
-            &mut store,
-            "CREATE (n:Person {name: 'Alice', age: 30, city: 'NYC', score: 100})",
-        );
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person {name: 'Alice'}) REMOVE n.age, n.city",
-        );
+        exec_mut(&mut store, "CREATE (n:Person {name: 'Alice', age: 30, city: 'NYC', score: 100})");
+        exec_mut(&mut store, "MATCH (n:Person {name: 'Alice'}) REMOVE n.age, n.city");
 
         let nodes = store.get_nodes_by_label(&Label::new("Person"));
         assert_eq!(nodes.len(), 1);
-        assert!(
-            store.node_property(nodes[0].id, "age").as_ref().is_none(),
-            "age should be removed"
-        );
-        assert!(
-            store.node_property(nodes[0].id, "city").as_ref().is_none(),
-            "city should be removed"
-        );
-        assert!(
-            store.node_property(nodes[0].id, "name").as_ref().is_some(),
-            "name should still exist"
-        );
-        assert!(
-            store.node_property(nodes[0].id, "score").as_ref().is_some(),
-            "score should still exist"
-        );
+        assert!(store.node_property(nodes[0].id, "age").as_ref().is_none(), "age should be removed");
+        assert!(store.node_property(nodes[0].id, "city").as_ref().is_none(), "city should be removed");
+        assert!(store.node_property(nodes[0].id, "name").as_ref().is_some(), "name should still exist");
+        assert!(store.node_property(nodes[0].id, "score").as_ref().is_some(), "score should still exist");
     }
 
     #[test]
@@ -8155,46 +6093,38 @@ mod tests {
     #[test]
     fn test_unknown_algorithm_errors() {
         let store = build_triangle_graph();
-        let query = parse_query("CALL algo.nonExistent() YIELD x").unwrap();
+        let query = parse_query(
+            "CALL algo.nonExistent() YIELD x"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
         assert!(result.is_err(), "Unknown algorithm should return an error");
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(
-            err_msg.contains("Unknown algorithm"),
-            "Error should mention unknown algorithm"
-        );
+        assert!(err_msg.contains("Unknown algorithm"), "Error should mention unknown algorithm");
     }
 
     #[test]
     fn test_unknown_algorithm_via_mut_executor() {
         let mut store = build_triangle_graph();
-        let query = parse_query("CALL algo.nonExistent() YIELD x").unwrap();
+        let query = parse_query(
+            "CALL algo.nonExistent() YIELD x"
+        ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query);
-        assert!(
-            result.is_err(),
-            "Unknown algorithm via MutExecutor should return an error"
-        );
+        assert!(result.is_err(), "Unknown algorithm via MutExecutor should return an error");
     }
 
     #[test]
     fn test_algo_or_solve_requires_write_access() {
         let store = build_triangle_graph();
-        let query =
-            parse_query("CALL algo.or.solve({label: 'Person', property: 'x'}) YIELD fitness")
-                .unwrap();
+        let query = parse_query(
+            "CALL algo.or.solve({label: 'Person', property: 'x'}) YIELD fitness"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query);
-        assert!(
-            result.is_err(),
-            "algo.or.solve should fail with read-only executor"
-        );
+        assert!(result.is_err(), "algo.or.solve should fail with read-only executor");
         let err_msg = format!("{}", result.unwrap_err());
-        assert!(
-            err_msg.contains("write access"),
-            "Error should mention write access requirement"
-        );
+        assert!(err_msg.contains("write access"), "Error should mention write access requirement");
     }
 
     // --- WCC with disconnected components ---
@@ -8213,29 +6143,18 @@ mod tests {
         store.set_node_property("default", d, "name", "D").unwrap();
         store.create_edge(c, d, "KNOWS").unwrap();
 
-        let query = parse_query("CALL algo.wcc('Person') YIELD node, componentId").unwrap();
+        let query = parse_query(
+            "CALL algo.wcc('Person') YIELD node, componentId"
+        ).unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 4, "WCC should return all 4 nodes");
 
-        let component_ids: Vec<i64> = result
-            .records
-            .iter()
-            .map(|r| {
-                r.get("componentId")
-                    .unwrap()
-                    .as_property()
-                    .unwrap()
-                    .as_integer()
-                    .unwrap()
-            })
+        let component_ids: Vec<i64> = result.records.iter()
+            .map(|r| r.get("componentId").unwrap().as_property().unwrap().as_integer().unwrap())
             .collect();
         let unique_components: std::collections::HashSet<i64> = component_ids.into_iter().collect();
-        assert_eq!(
-            unique_components.len(),
-            2,
-            "Should have exactly 2 weakly connected components"
-        );
+        assert_eq!(unique_components.len(), 2, "Should have exactly 2 weakly connected components");
     }
 
     // ========== Batch 8: Deep operator.rs coverage for uncovered lines ==========
@@ -8247,10 +6166,7 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("D");
         let r = exec_read(&store, "MATCH (d:D) RETURN 2.5 < 3.5 AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
@@ -8258,10 +6174,7 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("D");
         let r = exec_read(&store, "MATCH (d:D) RETURN 3.5 > 2.5 AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
@@ -8269,10 +6182,7 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("D");
         let r = exec_read(&store, "MATCH (d:D) RETURN 3.5 <= 3.5 AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
@@ -8280,10 +6190,7 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("D");
         let r = exec_read(&store, "MATCH (d:D) RETURN 2.5 >= 3.5 AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(false)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(false));
     }
 
     #[test]
@@ -8291,10 +6198,7 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("D");
         let r = exec_read(&store, "MATCH (d:D) RETURN 2 < 3.5 AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
@@ -8302,10 +6206,7 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("D");
         let r = exec_read(&store, "MATCH (d:D) RETURN 3.5 > 2 AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
@@ -8313,10 +6214,7 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("D");
         let r = exec_read(&store, "MATCH (d:D) RETURN 3 <= 3.0 AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
@@ -8324,10 +6222,7 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("D");
         let r = exec_read(&store, "MATCH (d:D) RETURN 3.0 >= 3 AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
@@ -8337,12 +6232,7 @@ mod tests {
             let id = store.create_node("P");
             store.set_node_property("default", id, "name", *n).unwrap();
         }
-        assert_eq!(
-            exec_read(&store, "MATCH (n:P) WHERE n.name < 'M' RETURN n.name")
-                .records
-                .len(),
-            2
-        );
+        assert_eq!(exec_read(&store, "MATCH (n:P) WHERE n.name < 'M' RETURN n.name").records.len(), 2);
     }
 
     #[test]
@@ -8352,12 +6242,7 @@ mod tests {
             let id = store.create_node("P");
             store.set_node_property("default", id, "name", *n).unwrap();
         }
-        assert_eq!(
-            exec_read(&store, "MATCH (n:P) WHERE n.name >= 'M' RETURN n.name")
-                .records
-                .len(),
-            2
-        );
+        assert_eq!(exec_read(&store, "MATCH (n:P) WHERE n.name >= 'M' RETURN n.name").records.len(), 2);
     }
 
     #[test]
@@ -8367,12 +6252,7 @@ mod tests {
             let id = store.create_node("P");
             store.set_node_property("default", id, "name", *n).unwrap();
         }
-        assert_eq!(
-            exec_read(&store, "MATCH (n:P) WHERE n.name <= 'Bob' RETURN n.name")
-                .records
-                .len(),
-            2
-        );
+        assert_eq!(exec_read(&store, "MATCH (n:P) WHERE n.name <= 'Bob' RETURN n.name").records.len(), 2);
     }
 
     #[test]
@@ -8382,12 +6262,7 @@ mod tests {
             let id = store.create_node("P");
             store.set_node_property("default", id, "name", *n).unwrap();
         }
-        assert_eq!(
-            exec_read(&store, "MATCH (n:P) WHERE n.name > 'Bob' RETURN n.name")
-                .records
-                .len(),
-            1
-        );
+        assert_eq!(exec_read(&store, "MATCH (n:P) WHERE n.name > 'Bob' RETURN n.name").records.len(), 1);
     }
 
     // --- 2. OPTIONAL MATCH / LeftOuterJoin ---
@@ -8396,32 +6271,19 @@ mod tests {
     fn test_cov_optional_match_partial() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "name", "Charlie")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Charlie").unwrap();
         store.create_edge(a, b, "KNOWS").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name",
-        );
+        let result = exec_read(&store, "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name");
         assert_eq!(result.records.len(), 3);
-        let null_count = result
-            .records
-            .iter()
+        let null_count = result.records.iter()
             .filter(|r| {
                 let v = r.get("b.name");
-                v.is_none()
-                    || matches!(v, Some(Value::Null))
-                    || matches!(v, Some(Value::Property(PropertyValue::Null)))
+                v.is_none() || matches!(v, Some(Value::Null)) || matches!(v, Some(Value::Property(PropertyValue::Null)))
             })
             .count();
         assert_eq!(null_count, 2);
@@ -8431,24 +6293,15 @@ mod tests {
     fn test_cov_optional_match_all_matched() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
         let c = store.create_node("Company");
-        store
-            .set_node_property("default", c, "name", "Acme")
-            .unwrap();
+        store.set_node_property("default", c, "name", "Acme").unwrap();
         store.create_edge(a, c, "WORKS_AT").unwrap();
         store.create_edge(b, c, "WORKS_AT").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) OPTIONAL MATCH (n)-[:WORKS_AT]->(c:Company) RETURN n.name, c.name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) OPTIONAL MATCH (n)-[:WORKS_AT]->(c:Company) RETURN n.name, c.name");
         assert_eq!(result.records.len(), 2);
     }
 
@@ -8456,18 +6309,11 @@ mod tests {
     fn test_cov_optional_match_none_matched() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN n.name, m",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN n.name, m");
         assert_eq!(result.records.len(), 2);
     }
 
@@ -8477,47 +6323,29 @@ mod tests {
     fn test_cov_union_across_labels() {
         let mut store = GraphStore::new();
         let p = store.create_node("Person");
-        store
-            .set_node_property("default", p, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", p, "name", "Alice").unwrap();
         let c = store.create_node("City");
-        store
-            .set_node_property("default", c, "name", "NYC")
-            .unwrap();
+        store.set_node_property("default", c, "name", "NYC").unwrap();
 
-        let q = parse_query("MATCH (n:Person) RETURN n.name UNION MATCH (c:City) RETURN c.name")
-            .unwrap();
+        let q = parse_query("MATCH (n:Person) RETURN n.name UNION MATCH (c:City) RETURN c.name").unwrap();
         let result = QueryExecutor::new(&store).execute(&q).unwrap();
         // UNION implementation returns at least 1 result
-        assert!(
-            result.records.len() >= 1,
-            "UNION across labels should return at least 1 record, got {}",
-            result.records.len()
-        );
+        assert!(result.records.len() >= 1, "UNION across labels should return at least 1 record, got {}", result.records.len());
     }
 
     #[test]
     fn test_cov_union_all_preserves_dups() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
 
-        let q =
-            parse_query("MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Person) RETURN m.name")
-                .unwrap();
+        let q = parse_query("MATCH (n:Person) RETURN n.name UNION ALL MATCH (m:Person) RETURN m.name").unwrap();
         let result = QueryExecutor::new(&store).execute(&q).unwrap();
         // UNION ALL should return at least 2 records
-        assert_eq!(
-            result.records.len(),
-            4,
-            "UNION ALL over 2 Person nodes is 4 rows, not 2"
-        );
+        assert_eq!(result.records.len(), 4,
+            "UNION ALL over 2 Person nodes is 4 rows, not 2");
     }
 
     // --- 4. UNWIND ---
@@ -8529,10 +6357,7 @@ mod tests {
             let id = store.create_node("Person");
             store.set_node_property("default", id, "name", *n).unwrap();
         }
-        let result = exec_read(
-            &store,
-            "MATCH (n:Person) WITH collect(n.name) AS names UNWIND names AS name RETURN name",
-        );
+        let result = exec_read(&store, "MATCH (n:Person) WITH collect(n.name) AS names UNWIND names AS name RETURN name");
         assert_eq!(result.records.len(), 3);
     }
 
@@ -8553,71 +6378,41 @@ mod tests {
     fn test_cov_case_simple() {
         let mut store = GraphStore::new();
         store.create_node("D");
-        let r = exec_read(
-            &store,
-            "MATCH (d:D) RETURN CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::String("two".to_string())
-        );
+        let r = exec_read(&store, "MATCH (d:D) RETURN CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::String("two".to_string()));
     }
 
     #[test]
     fn test_cov_case_else() {
         let mut store = GraphStore::new();
         store.create_node("D");
-        let r = exec_read(
-            &store,
-            "MATCH (d:D) RETURN CASE 99 WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::String("other".to_string())
-        );
+        let r = exec_read(&store, "MATCH (d:D) RETURN CASE 99 WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::String("other".to_string()));
     }
 
     #[test]
     fn test_cov_case_searched_false() {
         let mut store = GraphStore::new();
         store.create_node("D");
-        let r = exec_read(
-            &store,
-            "MATCH (d:D) RETURN CASE WHEN 1 > 2 THEN 'yes' ELSE 'no' END AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::String("no".to_string())
-        );
+        let r = exec_read(&store, "MATCH (d:D) RETURN CASE WHEN 1 > 2 THEN 'yes' ELSE 'no' END AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::String("no".to_string()));
     }
 
     #[test]
     fn test_cov_case_searched_true() {
         let mut store = GraphStore::new();
         store.create_node("D");
-        let r = exec_read(
-            &store,
-            "MATCH (d:D) RETURN CASE WHEN 3 > 2 THEN 'yes' ELSE 'no' END AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::String("yes".to_string())
-        );
+        let r = exec_read(&store, "MATCH (d:D) RETURN CASE WHEN 3 > 2 THEN 'yes' ELSE 'no' END AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::String("yes".to_string()));
     }
 
     #[test]
     fn test_cov_case_null_fallthrough() {
         let mut store = GraphStore::new();
         store.create_node("D");
-        let r = exec_read(
-            &store,
-            "MATCH (d:D) RETURN CASE 99 WHEN 1 THEN 'one' WHEN 2 THEN 'two' END AS r",
-        );
+        let r = exec_read(&store, "MATCH (d:D) RETURN CASE 99 WHEN 1 THEN 'one' WHEN 2 THEN 'two' END AS r");
         let v = r.records[0].get("r").unwrap();
-        assert!(matches!(
-            v,
-            Value::Null | Value::Property(PropertyValue::Null)
-        ));
+        assert!(matches!(v, Value::Null | Value::Property(PropertyValue::Null)));
     }
 
     // --- 6. List comprehension ---
@@ -8626,55 +6421,29 @@ mod tests {
     fn test_cov_listcomp_filter_map() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                    PropertyValue::Integer(4),
-                    PropertyValue::Integer(5),
-                ]),
-            )
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN [x IN d.nums WHERE x > 3 | x * 2] AS r",
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+            PropertyValue::Integer(4), PropertyValue::Integer(5),
+        ])).unwrap();
+        let r = exec_read(&store, "MATCH (d:Data) RETURN [x IN d.nums WHERE x > 3 | x * 2] AS r");
         if let Some(Value::Property(PropertyValue::Array(arr))) = r.records[0].get("r") {
             let vals: Vec<i64> = arr.iter().map(|v| v.as_integer().unwrap()).collect();
             assert_eq!(vals, vec![8, 10]);
-        } else {
-            panic!("Expected array");
-        }
+        } else { panic!("Expected array"); }
     }
 
     #[test]
     fn test_cov_listcomp_map_only() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
         let r = exec_read(&store, "MATCH (d:Data) RETURN [x IN d.nums | x + 10] AS r");
         if let Some(Value::Property(PropertyValue::Array(arr))) = r.records[0].get("r") {
             let vals: Vec<i64> = arr.iter().map(|v| v.as_integer().unwrap()).collect();
             assert_eq!(vals, vec![11, 12, 13]);
-        } else {
-            panic!("Expected array");
-        }
+        } else { panic!("Expected array"); }
     }
 
     // --- 7. Predicate functions (using node property arrays) ---
@@ -8683,208 +6452,88 @@ mod tests {
     fn test_cov_pred_all_true() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN all(x IN d.nums WHERE x > 0) AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let r = exec_read(&store, "MATCH (d:Data) RETURN all(x IN d.nums WHERE x > 0) AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
     fn test_cov_pred_all_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN all(x IN d.nums WHERE x > 1) AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(false)
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let r = exec_read(&store, "MATCH (d:Data) RETURN all(x IN d.nums WHERE x > 1) AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(false));
     }
 
     #[test]
     fn test_cov_pred_any_true() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN any(x IN d.nums WHERE x > 2) AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let r = exec_read(&store, "MATCH (d:Data) RETURN any(x IN d.nums WHERE x > 2) AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
     fn test_cov_pred_any_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN any(x IN d.nums WHERE x > 10) AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(false)
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let r = exec_read(&store, "MATCH (d:Data) RETURN any(x IN d.nums WHERE x > 10) AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(false));
     }
 
     #[test]
     fn test_cov_pred_none_true() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN none(x IN d.nums WHERE x > 5) AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let r = exec_read(&store, "MATCH (d:Data) RETURN none(x IN d.nums WHERE x > 5) AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
     fn test_cov_pred_none_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN none(x IN d.nums WHERE x = 2) AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(false)
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let r = exec_read(&store, "MATCH (d:Data) RETURN none(x IN d.nums WHERE x = 2) AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(false));
     }
 
     #[test]
     fn test_cov_pred_single_true() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN single(x IN d.nums WHERE x = 2) AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let r = exec_read(&store, "MATCH (d:Data) RETURN single(x IN d.nums WHERE x = 2) AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
     fn test_cov_pred_single_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("Data");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "nums",
-                PropertyValue::Array(vec![
-                    PropertyValue::Integer(1),
-                    PropertyValue::Integer(2),
-                    PropertyValue::Integer(3),
-                ]),
-            )
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (d:Data) RETURN single(x IN d.nums WHERE x > 1) AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(false)
-        );
+        store.set_node_property("default", id, "nums", PropertyValue::Array(vec![
+            PropertyValue::Integer(1), PropertyValue::Integer(2), PropertyValue::Integer(3),
+        ])).unwrap();
+        let r = exec_read(&store, "MATCH (d:Data) RETURN single(x IN d.nums WHERE x > 1) AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(false));
     }
 
     // --- 8. FOREACH with SET ---
@@ -8907,10 +6556,7 @@ mod tests {
         let mut store = GraphStore::new();
         exec_mut(&mut store, "CREATE (n:Person {name: 'Alice'})");
         // This pattern matches the existing test_foreach_set_property
-        exec_mut(
-            &mut store,
-            "MATCH (n:Person) FOREACH (x IN [1, 2, 3] | SET n.count = x)",
-        );
+        exec_mut(&mut store, "MATCH (n:Person) FOREACH (x IN [1, 2, 3] | SET n.count = x)");
         // Just verify no crash — the SET overwrites each iteration so final value is 3
     }
 
@@ -8920,28 +6566,18 @@ mod tests {
     fn test_cov_ltrim_preserves_right() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "  hello  ")
-            .unwrap();
+        store.set_node_property("default", id, "v", "  hello  ").unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN ltrim(n.v) AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::String("hello  ".to_string())
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::String("hello  ".to_string()));
     }
 
     #[test]
     fn test_cov_rtrim_preserves_left() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "  hello  ")
-            .unwrap();
+        store.set_node_property("default", id, "v", "  hello  ").unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN rtrim(n.v) AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::String("  hello".to_string())
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::String("  hello".to_string()));
     }
 
     #[test]
@@ -8953,9 +6589,7 @@ mod tests {
         let id = store.create_node("I");
         store.set_node_property("default", id, "v", "bad").unwrap();
         let q = parse_query("MATCH (n:I) RETURN toInteger(n.v) AS i").unwrap();
-        let batch = QueryExecutor::new(&store)
-            .execute(&q)
-            .expect("must not fail the query");
+        let batch = QueryExecutor::new(&store).execute(&q).expect("must not fail the query");
         assert_eq!(
             batch.records[0].get("i"),
             Some(&Value::Property(PropertyValue::Null))
@@ -8969,9 +6603,7 @@ mod tests {
         let id = store.create_node("I");
         store.set_node_property("default", id, "v", "xyz").unwrap();
         let q = parse_query("MATCH (n:I) RETURN toFloat(n.v) AS f").unwrap();
-        let batch = QueryExecutor::new(&store)
-            .execute(&q)
-            .expect("must not fail the query");
+        let batch = QueryExecutor::new(&store).execute(&q).expect("must not fail the query");
         assert_eq!(
             batch.records[0].get("f"),
             Some(&Value::Property(PropertyValue::Null))
@@ -8984,60 +6616,44 @@ mod tests {
     fn test_cov_log_one() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Float(1.0))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Float(1.0)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN log(n.v) AS r");
         if let PropertyValue::Float(f) = r.records[0].get("r").unwrap().as_property().unwrap() {
             assert!(f.abs() < 0.001);
-        } else {
-            panic!("Expected float");
-        }
+        } else { panic!("Expected float"); }
     }
 
     #[test]
     fn test_cov_log_ten() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Integer(10))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Integer(10)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN log(n.v) AS r");
         if let PropertyValue::Float(f) = r.records[0].get("r").unwrap().as_property().unwrap() {
             assert!((f - 2.302585).abs() < 0.001);
-        } else {
-            panic!("Expected float");
-        }
+        } else { panic!("Expected float"); }
     }
 
     #[test]
     fn test_cov_exp_one() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Float(1.0))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Float(1.0)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN exp(n.v) AS r");
         if let PropertyValue::Float(f) = r.records[0].get("r").unwrap().as_property().unwrap() {
             assert!((f - std::f64::consts::E).abs() < 0.001);
-        } else {
-            panic!("Expected float");
-        }
+        } else { panic!("Expected float"); }
     }
 
     #[test]
     fn test_cov_exp_zero() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Integer(0))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Integer(0)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN exp(n.v) AS r");
         if let PropertyValue::Float(f) = r.records[0].get("r").unwrap().as_property().unwrap() {
             assert!((f - 1.0).abs() < 0.001);
-        } else {
-            panic!("Expected float");
-        }
+        } else { panic!("Expected float"); }
     }
 
     #[test]
@@ -9047,9 +6663,7 @@ mod tests {
         let r = exec_read(&store, "MATCH (d:D) RETURN rand() AS r");
         if let PropertyValue::Float(f) = r.records[0].get("r").unwrap().as_property().unwrap() {
             assert!(*f >= 0.0 && *f < 1.0);
-        } else {
-            panic!("Expected float");
-        }
+        } else { panic!("Expected float"); }
     }
 
     // --- 11. STARTS WITH / ENDS WITH / CONTAINS as expressions ---
@@ -9058,84 +6672,54 @@ mod tests {
     fn test_cov_sw_return_true() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello world")
-            .unwrap();
+        store.set_node_property("default", id, "v", "hello world").unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.v STARTS WITH 'hello' AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
     fn test_cov_ew_return_true() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello world")
-            .unwrap();
+        store.set_node_property("default", id, "v", "hello world").unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.v ENDS WITH 'world' AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
     fn test_cov_ct_return_true() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello world")
-            .unwrap();
+        store.set_node_property("default", id, "v", "hello world").unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.v CONTAINS 'lo wo' AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
     fn test_cov_sw_return_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello world")
-            .unwrap();
+        store.set_node_property("default", id, "v", "hello world").unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.v STARTS WITH 'world' AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(false)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(false));
     }
 
     #[test]
     fn test_cov_ew_return_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello world")
-            .unwrap();
+        store.set_node_property("default", id, "v", "hello world").unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.v ENDS WITH 'hello' AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(false)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(false));
     }
 
     #[test]
     fn test_cov_ct_return_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello world")
-            .unwrap();
+        store.set_node_property("default", id, "v", "hello world").unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.v CONTAINS 'xyz' AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(false)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(false));
     }
 
     // --- 12. IN operator (using WHERE clause like existing tests) ---
@@ -9145,14 +6729,9 @@ mod tests {
         let mut store = GraphStore::new();
         for name in &["Alice", "Bob", "Charlie"] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
         }
-        let r = exec_read(
-            &store,
-            r#"MATCH (n:Person) WHERE n.name IN ["Alice", "Bob"] RETURN n.name"#,
-        );
+        let r = exec_read(&store, r#"MATCH (n:Person) WHERE n.name IN ["Alice", "Bob"] RETURN n.name"#);
         assert_eq!(r.records.len(), 2);
     }
 
@@ -9161,14 +6740,9 @@ mod tests {
         let mut store = GraphStore::new();
         for name in &["Alice", "Bob", "Charlie"] {
             let id = store.create_node("Person");
-            store
-                .set_node_property("default", id, "name", *name)
-                .unwrap();
+            store.set_node_property("default", id, "name", *name).unwrap();
         }
-        let r = exec_read(
-            &store,
-            r#"MATCH (n:Person) WHERE n.name IN ["Diana", "Eve"] RETURN n.name"#,
-        );
+        let r = exec_read(&store, r#"MATCH (n:Person) WHERE n.name IN ["Diana", "Eve"] RETURN n.name"#);
         assert_eq!(r.records.len(), 0);
     }
 
@@ -9178,29 +6752,20 @@ mod tests {
     fn test_cov_mod_int() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Integer(10))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Integer(10)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.v % 3 AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Integer(1)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Integer(1));
     }
 
     #[test]
     fn test_cov_mod_float() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Float(10.5))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Float(10.5)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.v % 3.0 AS r");
         if let PropertyValue::Float(f) = r.records[0].get("r").unwrap().as_property().unwrap() {
             assert!((f - 1.5).abs() < 0.001);
-        } else {
-            panic!("Expected float");
-        }
+        } else { panic!("Expected float"); }
     }
 
     #[test]
@@ -9208,16 +6773,9 @@ mod tests {
         let mut store = GraphStore::new();
         for v in &[1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
             let id = store.create_node("N");
-            store
-                .set_node_property("default", id, "v", PropertyValue::Integer(*v))
-                .unwrap();
+            store.set_node_property("default", id, "v", PropertyValue::Integer(*v)).unwrap();
         }
-        assert_eq!(
-            exec_read(&store, "MATCH (n:N) WHERE n.v % 2 = 0 RETURN n.v")
-                .records
-                .len(),
-            5
-        );
+        assert_eq!(exec_read(&store, "MATCH (n:N) WHERE n.v % 2 = 0 RETURN n.v").records.len(), 5);
     }
 
     // --- 14. Regex ---
@@ -9226,28 +6784,18 @@ mod tests {
     fn test_cov_regex_true() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello")
-            .unwrap();
+        store.set_node_property("default", id, "v", "hello").unwrap();
         let r = exec_read(&store, r#"MATCH (n:I) RETURN n.v =~ "hel.*" AS r"#);
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(true)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(true));
     }
 
     #[test]
     fn test_cov_regex_false() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello")
-            .unwrap();
+        store.set_node_property("default", id, "v", "hello").unwrap();
         let r = exec_read(&store, r#"MATCH (n:I) RETURN n.v =~ "xyz.*" AS r"#);
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Boolean(false)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Boolean(false));
     }
 
     #[test]
@@ -9257,12 +6805,7 @@ mod tests {
             let id = store.create_node("P");
             store.set_node_property("default", id, "name", *n).unwrap();
         }
-        assert_eq!(
-            exec_read(&store, r#"MATCH (n:P) WHERE n.name =~ "A.*" RETURN n.name"#)
-                .records
-                .len(),
-            3
-        );
+        assert_eq!(exec_read(&store, r#"MATCH (n:P) WHERE n.name =~ "A.*" RETURN n.name"#).records.len(), 3);
     }
 
     // --- Null propagation ---
@@ -9271,30 +6814,16 @@ mod tests {
     fn test_cov_null_lt_int() {
         let mut store = GraphStore::new();
         let id = store.create_node("P");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
-        assert_eq!(
-            exec_read(&store, "MATCH (n:P) WHERE n.missing < 5 RETURN n.name")
-                .records
-                .len(),
-            0
-        );
+        store.set_node_property("default", id, "name", "Alice").unwrap();
+        assert_eq!(exec_read(&store, "MATCH (n:P) WHERE n.missing < 5 RETURN n.name").records.len(), 0);
     }
 
     #[test]
     fn test_cov_int_ge_null() {
         let mut store = GraphStore::new();
         let id = store.create_node("P");
-        store
-            .set_node_property("default", id, "name", "Alice")
-            .unwrap();
-        assert_eq!(
-            exec_read(&store, "MATCH (n:P) WHERE 5 >= n.missing RETURN n.name")
-                .records
-                .len(),
-            0
-        );
+        store.set_node_property("default", id, "name", "Alice").unwrap();
+        assert_eq!(exec_read(&store, "MATCH (n:P) WHERE 5 >= n.missing RETURN n.name").records.len(), 0);
     }
 
     // --- Additional math ---
@@ -9303,114 +6832,76 @@ mod tests {
     fn test_cov_sqrt_int() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Integer(25))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Integer(25)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN sqrt(n.v) AS s");
         if let PropertyValue::Float(f) = r.records[0].get("s").unwrap().as_property().unwrap() {
             assert!((f - 5.0).abs() < 0.001);
-        } else {
-            panic!("Expected float");
-        }
+        } else { panic!("Expected float"); }
     }
 
     #[test]
     fn test_cov_abs_float() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Float(-7.5))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Float(-7.5)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN abs(n.v) AS a");
         if let PropertyValue::Float(f) = r.records[0].get("a").unwrap().as_property().unwrap() {
             assert!((f - 7.5).abs() < 0.001);
-        } else {
-            panic!("Expected float");
-        }
+        } else { panic!("Expected float"); }
     }
 
     #[test]
     fn test_cov_sign_pos() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Float(3.14))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Float(3.14)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN sign(n.v) AS s");
-        assert_eq!(
-            r.records[0].get("s").unwrap().as_property().unwrap(),
-            &PropertyValue::Integer(1)
-        );
+        assert_eq!(r.records[0].get("s").unwrap().as_property().unwrap(), &PropertyValue::Integer(1));
     }
 
     #[test]
     fn test_cov_sign_neg() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Float(-2.7))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Float(-2.7)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN sign(n.v) AS s");
-        assert_eq!(
-            r.records[0].get("s").unwrap().as_property().unwrap(),
-            &PropertyValue::Integer(-1)
-        );
+        assert_eq!(r.records[0].get("s").unwrap().as_property().unwrap(), &PropertyValue::Integer(-1));
     }
 
     #[test]
     fn test_cov_sign_zero() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Float(0.0))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Float(0.0)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN sign(n.v) AS s");
-        assert_eq!(
-            r.records[0].get("s").unwrap().as_property().unwrap(),
-            &PropertyValue::Integer(0)
-        );
+        assert_eq!(r.records[0].get("s").unwrap().as_property().unwrap(), &PropertyValue::Integer(0));
     }
 
     #[test]
     fn test_cov_ceil_int() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Integer(5))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Integer(5)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN ceil(n.v) AS c");
-        assert_eq!(
-            r.records[0].get("c").unwrap().as_property().unwrap(),
-            &PropertyValue::Integer(5)
-        );
+        assert_eq!(r.records[0].get("c").unwrap().as_property().unwrap(), &PropertyValue::Integer(5));
     }
 
     #[test]
     fn test_cov_floor_int() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Integer(5))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Integer(5)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN floor(n.v) AS f");
-        assert_eq!(
-            r.records[0].get("f").unwrap().as_property().unwrap(),
-            &PropertyValue::Integer(5)
-        );
+        assert_eq!(r.records[0].get("f").unwrap().as_property().unwrap(), &PropertyValue::Integer(5));
     }
 
     #[test]
     fn test_cov_round_int() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Integer(5))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Integer(5)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN round(n.v) AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Integer(5)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Integer(5));
     }
 
     #[test]
@@ -9420,9 +6911,7 @@ mod tests {
         let r = exec_read(&store, "MATCH (d:D) RETURN timestamp() AS ts");
         if let PropertyValue::Integer(ts) = r.records[0].get("ts").unwrap().as_property().unwrap() {
             assert!(*ts > 0);
-        } else {
-            panic!("Expected integer");
-        }
+        } else { panic!("Expected integer"); }
     }
 
     // --- Mixed subtraction/division ---
@@ -9431,47 +6920,32 @@ mod tests {
     fn test_cov_mixed_sub() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "a", PropertyValue::Integer(10))
-            .unwrap();
-        store
-            .set_node_property("default", id, "b", PropertyValue::Float(2.5))
-            .unwrap();
+        store.set_node_property("default", id, "a", PropertyValue::Integer(10)).unwrap();
+        store.set_node_property("default", id, "b", PropertyValue::Float(2.5)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.a - n.b AS diff");
         if let PropertyValue::Float(f) = r.records[0].get("diff").unwrap().as_property().unwrap() {
             assert!((f - 7.5).abs() < 0.001);
-        } else {
-            panic!("Expected float");
-        }
+        } else { panic!("Expected float"); }
     }
 
     #[test]
     fn test_cov_int_div() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Integer(10))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Integer(10)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.v / 3 AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::Integer(3)
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::Integer(3));
     }
 
     #[test]
     fn test_cov_float_div() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", PropertyValue::Float(10.0))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Float(10.0)).unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN n.v / 3.0 AS r");
         if let PropertyValue::Float(f) = r.records[0].get("r").unwrap().as_property().unwrap() {
             assert!((f - 3.333).abs() < 0.01);
-        } else {
-            panic!("Expected float");
-        }
+        } else { panic!("Expected float"); }
     }
 
     // --- Negative comparison ---
@@ -9481,27 +6955,11 @@ mod tests {
         let mut store = GraphStore::new();
         for v in &[-5i64, -3, 0, 3, 5] {
             let id = store.create_node("N");
-            store
-                .set_node_property("default", id, "v", PropertyValue::Integer(*v))
-                .unwrap();
+            store.set_node_property("default", id, "v", PropertyValue::Integer(*v)).unwrap();
         }
-        let r = exec_read(
-            &store,
-            "MATCH (n:N) WHERE n.v < 0 RETURN n.v ORDER BY n.v ASC",
-        );
+        let r = exec_read(&store, "MATCH (n:N) WHERE n.v < 0 RETURN n.v ORDER BY n.v ASC");
         assert_eq!(r.records.len(), 2);
-        let vals: Vec<i64> = r
-            .records
-            .iter()
-            .map(|r| {
-                r.get("n.v")
-                    .unwrap()
-                    .as_property()
-                    .unwrap()
-                    .as_integer()
-                    .unwrap()
-            })
-            .collect();
+        let vals: Vec<i64> = r.records.iter().map(|r| r.get("n.v").unwrap().as_property().unwrap().as_integer().unwrap()).collect();
         assert_eq!(vals, vec![-5, -3]);
     }
 
@@ -9511,36 +6969,16 @@ mod tests {
     fn test_cov_not_gt() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "name", "Alice")
-            .unwrap();
-        store
-            .set_node_property("default", a, "active", PropertyValue::Boolean(true))
-            .unwrap();
+        store.set_node_property("default", a, "name", "Alice").unwrap();
+        store.set_node_property("default", a, "active", PropertyValue::Boolean(true)).unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "name", "Bob")
-            .unwrap();
-        store
-            .set_node_property("default", b, "active", PropertyValue::Boolean(false))
-            .unwrap();
+        store.set_node_property("default", b, "name", "Bob").unwrap();
+        store.set_node_property("default", b, "active", PropertyValue::Boolean(false)).unwrap();
         let c = store.create_node("Person");
-        store
-            .set_node_property("default", c, "name", "Charlie")
-            .unwrap();
-        store
-            .set_node_property("default", c, "active", PropertyValue::Boolean(false))
-            .unwrap();
+        store.set_node_property("default", c, "name", "Charlie").unwrap();
+        store.set_node_property("default", c, "active", PropertyValue::Boolean(false)).unwrap();
         // NOT negates the equality condition
-        assert_eq!(
-            exec_read(
-                &store,
-                "MATCH (n:Person) WHERE NOT n.active = true RETURN n.name"
-            )
-            .records
-            .len(),
-            2
-        );
+        assert_eq!(exec_read(&store, "MATCH (n:Person) WHERE NOT n.active = true RETURN n.name").records.len(), 2);
     }
 
     // --- CASE grade assignment ---
@@ -9550,26 +6988,12 @@ mod tests {
         let mut store = GraphStore::new();
         for v in &[10i64, 50, 90] {
             let id = store.create_node("I");
-            store
-                .set_node_property("default", id, "score", PropertyValue::Integer(*v))
-                .unwrap();
+            store.set_node_property("default", id, "score", PropertyValue::Integer(*v)).unwrap();
         }
         let r = exec_read(&store,
             "MATCH (n:I) RETURN CASE WHEN n.score >= 80 THEN 'A' WHEN n.score >= 40 THEN 'B' ELSE 'C' END AS grade ORDER BY n.score ASC"
         );
-        let grades: Vec<String> = r
-            .records
-            .iter()
-            .map(|r| {
-                r.get("grade")
-                    .unwrap()
-                    .as_property()
-                    .unwrap()
-                    .as_string()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
+        let grades: Vec<String> = r.records.iter().map(|r| r.get("grade").unwrap().as_property().unwrap().as_string().unwrap().to_string()).collect();
         assert_eq!(grades, vec!["C", "B", "A"]);
     }
 
@@ -9579,26 +7003,13 @@ mod tests {
     fn test_cov_reduce_concat() {
         let mut store = GraphStore::new();
         let id = store.create_node("Da");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "words",
-                PropertyValue::Array(vec![
-                    PropertyValue::String("hello".to_string()),
-                    PropertyValue::String(" ".to_string()),
-                    PropertyValue::String("world".to_string()),
-                ]),
-            )
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (d:Da) RETURN reduce(acc = '', x IN d.words | acc + x) AS s",
-        );
-        assert_eq!(
-            r.records[0].get("s").unwrap().as_property().unwrap(),
-            &PropertyValue::String("hello world".to_string())
-        );
+        store.set_node_property("default", id, "words", PropertyValue::Array(vec![
+            PropertyValue::String("hello".to_string()),
+            PropertyValue::String(" ".to_string()),
+            PropertyValue::String("world".to_string()),
+        ])).unwrap();
+        let r = exec_read(&store, "MATCH (d:Da) RETURN reduce(acc = '', x IN d.words | acc + x) AS s");
+        assert_eq!(r.records[0].get("s").unwrap().as_property().unwrap(), &PropertyValue::String("hello world".to_string()));
     }
 
     // --- String + toString ---
@@ -9607,20 +7018,10 @@ mod tests {
     fn test_cov_str_concat_tostring() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "name", "Item")
-            .unwrap();
-        store
-            .set_node_property("default", id, "num", PropertyValue::Integer(42))
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (n:I) RETURN n.name + toString(n.num) AS label",
-        );
-        assert_eq!(
-            r.records[0].get("label").unwrap().as_property().unwrap(),
-            &PropertyValue::String("Item42".to_string())
-        );
+        store.set_node_property("default", id, "name", "Item").unwrap();
+        store.set_node_property("default", id, "num", PropertyValue::Integer(42)).unwrap();
+        let r = exec_read(&store, "MATCH (n:I) RETURN n.name + toString(n.num) AS label");
+        assert_eq!(r.records[0].get("label").unwrap().as_property().unwrap(), &PropertyValue::String("Item42".to_string()));
     }
 
     // --- replace, left, right ---
@@ -9629,45 +7030,27 @@ mod tests {
     fn test_cov_replace_fn() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello world")
-            .unwrap();
-        let r = exec_read(
-            &store,
-            "MATCH (n:I) RETURN replace(n.v, 'world', 'rust') AS r",
-        );
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::String("hello rust".to_string())
-        );
+        store.set_node_property("default", id, "v", "hello world").unwrap();
+        let r = exec_read(&store, "MATCH (n:I) RETURN replace(n.v, 'world', 'rust') AS r");
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::String("hello rust".to_string()));
     }
 
     #[test]
     fn test_cov_left_fn() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello world")
-            .unwrap();
+        store.set_node_property("default", id, "v", "hello world").unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN left(n.v, 5) AS l");
-        assert_eq!(
-            r.records[0].get("l").unwrap().as_property().unwrap(),
-            &PropertyValue::String("hello".to_string())
-        );
+        assert_eq!(r.records[0].get("l").unwrap().as_property().unwrap(), &PropertyValue::String("hello".to_string()));
     }
 
     #[test]
     fn test_cov_right_fn() {
         let mut store = GraphStore::new();
         let id = store.create_node("I");
-        store
-            .set_node_property("default", id, "v", "hello world")
-            .unwrap();
+        store.set_node_property("default", id, "v", "hello world").unwrap();
         let r = exec_read(&store, "MATCH (n:I) RETURN right(n.v, 5) AS r");
-        assert_eq!(
-            r.records[0].get("r").unwrap().as_property().unwrap(),
-            &PropertyValue::String("world".to_string())
-        );
+        assert_eq!(r.records[0].get("r").unwrap().as_property().unwrap(), &PropertyValue::String("world".to_string()));
     }
 
     // ==================== Bug fix tests ====================
@@ -9681,13 +7064,7 @@ mod tests {
 
         let r = exec_read(&store, "MATCH (n:Person) RETURN count(*) AS total");
         assert_eq!(r.records.len(), 1);
-        let total = r.records[0]
-            .get("total")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_integer()
-            .unwrap();
+        let total = r.records[0].get("total").unwrap().as_property().unwrap().as_integer().unwrap();
         assert_eq!(total, 3);
     }
 
@@ -9695,38 +7072,18 @@ mod tests {
     fn test_count_star_with_group_by() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .set_node_property("default", a, "city", "NYC")
-            .unwrap();
+        store.set_node_property("default", a, "city", "NYC").unwrap();
         let b = store.create_node("Person");
-        store
-            .set_node_property("default", b, "city", "NYC")
-            .unwrap();
+        store.set_node_property("default", b, "city", "NYC").unwrap();
         let c = store.create_node("Person");
         store.set_node_property("default", c, "city", "LA").unwrap();
 
-        let r = exec_read(
-            &store,
-            "MATCH (n:Person) RETURN n.city AS city, count(*) AS cnt",
-        );
+        let r = exec_read(&store, "MATCH (n:Person) RETURN n.city AS city, count(*) AS cnt");
         assert_eq!(r.records.len(), 2);
         let mut counts = std::collections::HashMap::new();
         for rec in &r.records {
-            let city = rec
-                .get("city")
-                .unwrap()
-                .as_property()
-                .unwrap()
-                .as_string()
-                .unwrap()
-                .to_string();
-            let cnt = rec
-                .get("cnt")
-                .unwrap()
-                .as_property()
-                .unwrap()
-                .as_integer()
-                .unwrap();
+            let city = rec.get("city").unwrap().as_property().unwrap().as_string().unwrap().to_string();
+            let cnt = rec.get("cnt").unwrap().as_property().unwrap().as_integer().unwrap();
             counts.insert(city, cnt);
         }
         assert_eq!(counts["NYC"], 2);
@@ -9752,19 +7109,10 @@ mod tests {
         let r = exec_read(&store, "PROFILE MATCH (n:Person) RETURN n LIMIT 5");
         assert_eq!(r.columns, vec!["plan".to_string()]);
         assert_eq!(r.records.len(), 1);
-        let text = r.records[0]
-            .get("plan")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap();
+        let text = r.records[0].get("plan").unwrap().as_property().unwrap().as_string().unwrap();
         assert!(text.contains("Profile"), "Should contain Profile section");
         assert!(text.contains("Rows:"), "Should contain row count");
-        assert!(
-            text.contains("Statistics"),
-            "Should contain Statistics section"
-        );
+        assert!(text.contains("Statistics"), "Should contain Statistics section");
     }
 
     #[test]
@@ -9785,8 +7133,7 @@ mod tests {
         assert_eq!(result.records.len(), 2);
 
         // Anonymous nodes with aggregation using count(*)
-        let query =
-            parse_query("MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c ORDER BY t").unwrap();
+        let query = parse_query("MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c ORDER BY t").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 2);
@@ -9803,10 +7150,7 @@ mod tests {
         assert_eq!(result.columns, vec!["n.name"]);
         assert_eq!(result.records.len(), 1);
         let val = result.records[0].get("n.name").unwrap();
-        assert_eq!(
-            *val,
-            Value::Property(PropertyValue::String("Alice".to_string()))
-        );
+        assert_eq!(*val, Value::Property(PropertyValue::String("Alice".to_string())));
     }
 
     #[test]
@@ -9829,9 +7173,7 @@ mod tests {
             r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"}) RETURN a.name, b.name"#,
         ).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
-        let result = executor
-            .execute(&query)
-            .expect("CREATE-RETURN with second variable should succeed");
+        let result = executor.execute(&query).expect("CREATE-RETURN with second variable should succeed");
         assert_eq!(result.columns, vec!["a.name", "b.name"]);
         assert_eq!(result.records.len(), 1);
         assert_eq!(
@@ -9847,21 +7189,13 @@ mod tests {
     #[test]
     fn test_create_return_multiple_properties() {
         let mut store = GraphStore::new();
-        let query =
-            parse_query(r#"CREATE (n:Person {name: "Carol", age: 30}) RETURN n.name, n.age"#)
-                .unwrap();
+        let query = parse_query(r#"CREATE (n:Person {name: "Carol", age: 30}) RETURN n.name, n.age"#).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.columns, vec!["n.name", "n.age"]);
         assert_eq!(result.records.len(), 1);
-        assert_eq!(
-            *result.records[0].get("n.name").unwrap(),
-            Value::Property(PropertyValue::String("Carol".to_string()))
-        );
-        assert_eq!(
-            *result.records[0].get("n.age").unwrap(),
-            Value::Property(PropertyValue::Integer(30))
-        );
+        assert_eq!(*result.records[0].get("n.name").unwrap(), Value::Property(PropertyValue::String("Carol".to_string())));
+        assert_eq!(*result.records[0].get("n.age").unwrap(), Value::Property(PropertyValue::Integer(30)));
     }
 
     // ==================== CY-13: Edge MERGE in MATCH context ====================
@@ -9870,63 +7204,33 @@ mod tests {
     fn test_match_merge_edge_creates() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        let _ = store.set_node_property(
-            "default",
-            a,
-            "name",
-            PropertyValue::String("Alice".to_string()),
-        );
+        let _ = store.set_node_property("default", a, "name", PropertyValue::String("Alice".to_string()));
         let b = store.create_node("Person");
-        let _ = store.set_node_property(
-            "default",
-            b,
-            "name",
-            PropertyValue::String("Bob".to_string()),
-        );
+        let _ = store.set_node_property("default", b, "name", PropertyValue::String("Bob".to_string()));
 
-        let query = parse_query(
-            r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) MERGE (a)-[:KNOWS]->(b)"#,
-        )
-        .unwrap();
+        let query = parse_query(r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) MERGE (a)-[:KNOWS]->(b)"#).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query);
         assert!(result.is_ok(), "Edge MERGE failed: {:?}", result.err());
-        assert!(store
-            .edge_between(a, b, Some(&crate::graph::EdgeType::new("KNOWS")))
-            .is_some());
+        assert!(store.edge_between(a, b, Some(&crate::graph::EdgeType::new("KNOWS"))).is_some());
     }
 
     #[test]
     fn test_match_merge_edge_idempotent() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        let _ = store.set_node_property(
-            "default",
-            a,
-            "name",
-            PropertyValue::String("Alice".to_string()),
-        );
+        let _ = store.set_node_property("default", a, "name", PropertyValue::String("Alice".to_string()));
         let b = store.create_node("Person");
-        let _ = store.set_node_property(
-            "default",
-            b,
-            "name",
-            PropertyValue::String("Bob".to_string()),
-        );
+        let _ = store.set_node_property("default", b, "name", PropertyValue::String("Bob".to_string()));
 
-        let q =
-            r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) MERGE (a)-[:KNOWS]->(b)"#;
+        let q = r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) MERGE (a)-[:KNOWS]->(b)"#;
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         executor.execute(&parse_query(q).unwrap()).unwrap();
         let edge_count = store.edge_count();
 
         let mut executor2 = MutQueryExecutor::new(&mut store, "default".to_string());
         executor2.execute(&parse_query(q).unwrap()).unwrap();
-        assert_eq!(
-            store.edge_count(),
-            edge_count,
-            "MERGE created a duplicate edge"
-        );
+        assert_eq!(store.edge_count(), edge_count, "MERGE created a duplicate edge");
     }
 
     // ==================== QE-10: SET on existing properties ====================
@@ -9935,46 +7239,27 @@ mod tests {
     fn test_set_overwrites_existing_property() {
         let mut store = GraphStore::new();
         let mut ex = MutQueryExecutor::new(&mut store, "default".to_string());
-        ex.execute(&parse_query(r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap())
-            .unwrap();
+        ex.execute(&parse_query(r#"CREATE (n:Person {name: "Alice", age: 30})"#).unwrap()).unwrap();
 
         let mut ex2 = MutQueryExecutor::new(&mut store, "default".to_string());
-        ex2.execute(&parse_query(r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31"#).unwrap())
-            .unwrap();
+        ex2.execute(&parse_query(r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31"#).unwrap()).unwrap();
 
-        let result = QueryExecutor::new(&store)
-            .execute(
-                &parse_query(r#"MATCH (n:Person {name: "Alice"}) RETURN n.age AS age"#).unwrap(),
-            )
-            .unwrap();
+        let result = QueryExecutor::new(&store).execute(&parse_query(r#"MATCH (n:Person {name: "Alice"}) RETURN n.age AS age"#).unwrap()).unwrap();
         assert_eq!(result.records.len(), 1);
-        assert_eq!(
-            *result.records[0].get("age").unwrap(),
-            Value::Property(PropertyValue::Integer(31))
-        );
+        assert_eq!(*result.records[0].get("age").unwrap(), Value::Property(PropertyValue::Integer(31)));
     }
 
     #[test]
     fn test_set_with_function_expression() {
         let mut store = GraphStore::new();
         let mut ex = MutQueryExecutor::new(&mut store, "default".to_string());
-        ex.execute(&parse_query(r#"CREATE (n:Person {name: "alice"})"#).unwrap())
-            .unwrap();
+        ex.execute(&parse_query(r#"CREATE (n:Person {name: "alice"})"#).unwrap()).unwrap();
 
         let mut ex2 = MutQueryExecutor::new(&mut store, "default".to_string());
-        ex2.execute(
-            &parse_query(r#"MATCH (n:Person {name: "alice"}) SET n.upper_name = toUpper(n.name)"#)
-                .unwrap(),
-        )
-        .unwrap();
+        ex2.execute(&parse_query(r#"MATCH (n:Person {name: "alice"}) SET n.upper_name = toUpper(n.name)"#).unwrap()).unwrap();
 
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query(r#"MATCH (n:Person) RETURN n.upper_name AS u"#).unwrap())
-            .unwrap();
-        assert_eq!(
-            *result.records[0].get("u").unwrap(),
-            Value::Property(PropertyValue::String("ALICE".to_string()))
-        );
+        let result = QueryExecutor::new(&store).execute(&parse_query(r#"MATCH (n:Person) RETURN n.upper_name AS u"#).unwrap()).unwrap();
+        assert_eq!(*result.records[0].get("u").unwrap(), Value::Property(PropertyValue::String("ALICE".to_string())));
     }
 
     // ==================== CY-11: Piped edge types ====================
@@ -9985,24 +7270,9 @@ mod tests {
         let a = store.create_node("Person");
         let b = store.create_node("Person");
         let c = store.create_node("Person");
-        let _ = store.set_node_property(
-            "default",
-            a,
-            "name",
-            PropertyValue::String("Alice".to_string()),
-        );
-        let _ = store.set_node_property(
-            "default",
-            b,
-            "name",
-            PropertyValue::String("Bob".to_string()),
-        );
-        let _ = store.set_node_property(
-            "default",
-            c,
-            "name",
-            PropertyValue::String("Carol".to_string()),
-        );
+        let _ = store.set_node_property("default", a, "name", PropertyValue::String("Alice".to_string()));
+        let _ = store.set_node_property("default", b, "name", PropertyValue::String("Bob".to_string()));
+        let _ = store.set_node_property("default", c, "name", PropertyValue::String("Carol".to_string()));
         store.create_edge(a, b, "KNOWS").unwrap();
         store.create_edge(a, c, "WORKS_WITH").unwrap();
 
@@ -10010,14 +7280,8 @@ mod tests {
             &parse_query(r#"MATCH (a:Person {name: "Alice"})-[:KNOWS|WORKS_WITH]->(b) RETURN b.name AS name ORDER BY b.name"#).unwrap()
         ).unwrap();
         assert_eq!(result.records.len(), 2);
-        assert_eq!(
-            *result.records[0].get("name").unwrap(),
-            Value::Property(PropertyValue::String("Bob".to_string()))
-        );
-        assert_eq!(
-            *result.records[1].get("name").unwrap(),
-            Value::Property(PropertyValue::String("Carol".to_string()))
-        );
+        assert_eq!(*result.records[0].get("name").unwrap(), Value::Property(PropertyValue::String("Bob".to_string())));
+        assert_eq!(*result.records[1].get("name").unwrap(), Value::Property(PropertyValue::String("Carol".to_string())));
     }
 
     // ==================== CY-17: Trigonometric functions ====================
@@ -10036,9 +7300,7 @@ mod tests {
         let pi_r = eval_function("pi", &[], None).unwrap();
         if let Value::Property(PropertyValue::Float(pi)) = pi_r {
             assert!((pi - std::f64::consts::PI).abs() < 1e-10);
-        } else {
-            panic!("pi() should return Float");
-        }
+        } else { panic!("pi() should return Float"); }
 
         let haversin_r = eval_function("haversin", &[val(0.0)], None).unwrap();
         assert_eq!(haversin_r, Value::Property(PropertyValue::Float(0.0)));
@@ -10049,14 +7311,10 @@ mod tests {
         use crate::query::executor::operator::eval_function;
         let val = |f: f64| Value::Property(PropertyValue::Float(f));
 
-        if let Value::Property(PropertyValue::Float(d)) =
-            eval_function("degrees", &[val(std::f64::consts::PI)], None).unwrap()
-        {
+        if let Value::Property(PropertyValue::Float(d)) = eval_function("degrees", &[val(std::f64::consts::PI)], None).unwrap() {
             assert!((d - 180.0).abs() < 1e-6);
         }
-        if let Value::Property(PropertyValue::Float(r)) =
-            eval_function("radians", &[val(180.0)], None).unwrap()
-        {
+        if let Value::Property(PropertyValue::Float(r)) = eval_function("radians", &[val(180.0)], None).unwrap() {
             assert!((r - std::f64::consts::PI).abs() < 1e-6);
         }
     }
@@ -10067,24 +7325,17 @@ mod tests {
     fn test_properties_function() {
         let mut store = GraphStore::new();
         let n = store.create_node("Person");
-        let _ = store.set_node_property(
-            "default",
-            n,
-            "name",
-            PropertyValue::String("Alice".to_string()),
-        );
+        let _ = store.set_node_property("default", n, "name", PropertyValue::String("Alice".to_string()));
         let _ = store.set_node_property("default", n, "age", PropertyValue::Integer(30));
 
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query(r#"MATCH (n:Person) RETURN properties(n) AS props"#).unwrap())
-            .unwrap();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"MATCH (n:Person) RETURN properties(n) AS props"#).unwrap()
+        ).unwrap();
         assert_eq!(result.records.len(), 1);
         if let Value::Property(PropertyValue::Map(map)) = result.records[0].get("props").unwrap() {
             assert!(map.contains_key("name"));
             assert!(map.contains_key("age"));
-        } else {
-            panic!("properties() should return a Map");
-        }
+        } else { panic!("properties() should return a Map"); }
     }
 
     // ==================== CY-21: isEmpty() ====================
@@ -10123,14 +7374,12 @@ mod tests {
         let mut store = GraphStore::new();
         store.create_node("Person");
 
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query(r#"MATCH (n:Person) RETURN elementId(n) AS eid"#).unwrap())
-            .unwrap();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"MATCH (n:Person) RETURN elementId(n) AS eid"#).unwrap()
+        ).unwrap();
         if let Value::Property(PropertyValue::String(s)) = result.records[0].get("eid").unwrap() {
             assert!(s.starts_with("node:"));
-        } else {
-            panic!("elementId() should return string");
-        }
+        } else { panic!("elementId() should return string"); }
     }
 
     // ==================== CY-26: valueType() ====================
@@ -10138,36 +7387,12 @@ mod tests {
     #[test]
     fn test_value_type() {
         use crate::query::executor::operator::eval_function;
-        let r1 = eval_function(
-            "valuetype",
-            &[Value::Property(PropertyValue::Integer(42))],
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            r1,
-            Value::Property(PropertyValue::String("INTEGER".to_string()))
-        );
-        let r2 = eval_function(
-            "valuetype",
-            &[Value::Property(PropertyValue::String("hi".to_string()))],
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            r2,
-            Value::Property(PropertyValue::String("STRING".to_string()))
-        );
-        let r3 = eval_function(
-            "valuetype",
-            &[Value::Property(PropertyValue::Boolean(true))],
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            r3,
-            Value::Property(PropertyValue::String("BOOLEAN".to_string()))
-        );
+        let r1 = eval_function("valuetype", &[Value::Property(PropertyValue::Integer(42))], None).unwrap();
+        assert_eq!(r1, Value::Property(PropertyValue::String("INTEGER".to_string())));
+        let r2 = eval_function("valuetype", &[Value::Property(PropertyValue::String("hi".to_string()))], None).unwrap();
+        assert_eq!(r2, Value::Property(PropertyValue::String("STRING".to_string())));
+        let r3 = eval_function("valuetype", &[Value::Property(PropertyValue::Boolean(true))], None).unwrap();
+        assert_eq!(r3, Value::Property(PropertyValue::String("BOOLEAN".to_string())));
     }
 
     // ==================== CY-27: toBoolean / OrNull conversions ====================
@@ -10185,26 +7410,14 @@ mod tests {
     #[test]
     fn test_tointegerornull_valid() {
         use crate::query::executor::operator::eval_function;
-        let r = eval_function(
-            "tointegerornull",
-            &[Value::Property(PropertyValue::String("42".to_string()))],
-            None,
-        )
-        .unwrap();
+        let r = eval_function("tointegerornull", &[Value::Property(PropertyValue::String("42".to_string()))], None).unwrap();
         assert_eq!(r, Value::Property(PropertyValue::Integer(42)));
     }
 
     #[test]
     fn test_tointegerornull_invalid() {
         use crate::query::executor::operator::eval_function;
-        let r = eval_function(
-            "tointegerornull",
-            &[Value::Property(PropertyValue::String(
-                "not_a_number".to_string(),
-            ))],
-            None,
-        )
-        .unwrap();
+        let r = eval_function("tointegerornull", &[Value::Property(PropertyValue::String("not_a_number".to_string()))], None).unwrap();
         assert_eq!(r, Value::Null);
     }
 
@@ -10218,23 +7431,13 @@ mod tests {
             let _ = store.set_node_property("default", n, "x", PropertyValue::Integer(i));
         }
 
-        let result = QueryExecutor::new(&store)
-            .execute(
-                &parse_query("MATCH (n:Val) RETURN percentileCont(n.x, 0.5) AS median").unwrap(),
-            )
-            .unwrap();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("MATCH (n:Val) RETURN percentileCont(n.x, 0.5) AS median").unwrap()
+        ).unwrap();
         assert_eq!(result.records.len(), 1);
-        if let Value::Property(PropertyValue::Float(median)) =
-            result.records[0].get("median").unwrap()
-        {
-            assert!(
-                (median - 5.5).abs() < 0.01,
-                "Median should be 5.5, got {}",
-                median
-            );
-        } else {
-            panic!("percentileCont should return Float");
-        }
+        if let Value::Property(PropertyValue::Float(median)) = result.records[0].get("median").unwrap() {
+            assert!((median - 5.5).abs() < 0.01, "Median should be 5.5, got {}", median);
+        } else { panic!("percentileCont should return Float"); }
     }
 
     #[test]
@@ -10245,15 +7448,13 @@ mod tests {
             let _ = store.set_node_property("default", n, "x", PropertyValue::Float(v));
         }
 
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query("MATCH (n:Val) RETURN stDevP(n.x) AS sd").unwrap())
-            .unwrap();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("MATCH (n:Val) RETURN stDevP(n.x) AS sd").unwrap()
+        ).unwrap();
         assert_eq!(result.records.len(), 1);
         if let Value::Property(PropertyValue::Float(sd)) = result.records[0].get("sd").unwrap() {
             assert!((sd - 2.0).abs() < 0.01, "StDevP should be ~2.0, got {}", sd);
-        } else {
-            panic!("stDevP should return Float");
-        }
+        } else { panic!("stDevP should return Float"); }
     }
 
     // ==================== CY-28: Temporal types ====================
@@ -10261,54 +7462,38 @@ mod tests {
     #[test]
     fn test_date_constructor_string() {
         let store = GraphStore::new();
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query(r#"RETURN date("2024-06-15") AS d"#).unwrap())
-            .unwrap();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"RETURN date("2024-06-15") AS d"#).unwrap()
+        ).unwrap();
         if let Value::Property(p @ PropertyValue::Date(_)) = result.records[0].get("d").unwrap() {
             assert_eq!(p.to_cypher_string(), "2024-06-15");
             use chrono::{Datelike, TimeZone};
-            let dt = chrono::Utc
-                .timestamp_millis_opt(p.as_epoch_millis().unwrap())
-                .unwrap();
+            let dt = chrono::Utc.timestamp_millis_opt(p.as_epoch_millis().unwrap()).unwrap();
             assert_eq!(dt.year(), 2024);
             assert_eq!(dt.month(), 6);
             assert_eq!(dt.day(), 15);
-        } else {
-            panic!("date() should return DateTime");
-        }
+        } else { panic!("date() should return DateTime"); }
     }
 
     #[test]
     fn test_date_constructor_no_args() {
         let store = GraphStore::new();
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query("RETURN date() AS d").unwrap())
-            .unwrap();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("RETURN date() AS d").unwrap()
+        ).unwrap();
         // A Date, not a timestamp (#689): this assertion used to hold for
         // `time()` and `datetime()` too, because all three returned the same
         // variant.
-        assert!(matches!(
-            result.records[0].get("d").unwrap(),
-            Value::Property(PropertyValue::Date(_))
-        ));
+        assert!(matches!(result.records[0].get("d").unwrap(), Value::Property(PropertyValue::Date(_))));
     }
 
     #[test]
     fn test_time_constructor_string() {
         use crate::query::executor::operator::eval_function;
-        let r = eval_function(
-            "time",
-            &[Value::Property(PropertyValue::String(
-                "10:30:00".to_string(),
-            ))],
-            None,
-        )
-        .unwrap();
+        let r = eval_function("time", &[Value::Property(PropertyValue::String("10:30:00".to_string()))], None).unwrap();
         if let Value::Property(p @ PropertyValue::Time { .. }) = r {
             assert_eq!(p.to_cypher_string(), "10:30Z");
-        } else {
-            panic!("time() should return Time, got {r:?}");
-        }
+        } else { panic!("time() should return Time, got {r:?}"); }
     }
 
     #[test]
@@ -10321,32 +7506,24 @@ mod tests {
         let r = eval_function("time", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
         if let Value::Property(p @ PropertyValue::Time { .. }) = r {
             assert_eq!(p.to_cypher_string(), "14:45:30Z");
-        } else {
-            panic!("time() should return Time, got {r:?}");
-        }
+        } else { panic!("time() should return Time, got {r:?}"); }
     }
 
     #[test]
     fn test_localdatetime_constructor_string() {
         let store = GraphStore::new();
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query(r#"RETURN localdatetime("2024-03-15T14:30:00") AS dt"#).unwrap())
-            .unwrap();
-        if let Value::Property(p @ PropertyValue::LocalDateTime { .. }) =
-            result.records[0].get("dt").unwrap()
-        {
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"RETURN localdatetime("2024-03-15T14:30:00") AS dt"#).unwrap()
+        ).unwrap();
+        if let Value::Property(p @ PropertyValue::LocalDateTime { .. }) = result.records[0].get("dt").unwrap() {
             assert_eq!(p.to_cypher_string(), "2024-03-15T14:30");
-            use chrono::{Datelike, TimeZone, Timelike};
-            let dt = chrono::Utc
-                .timestamp_millis_opt(p.as_epoch_millis().unwrap())
-                .unwrap();
+            use chrono::{Datelike, Timelike, TimeZone};
+            let dt = chrono::Utc.timestamp_millis_opt(p.as_epoch_millis().unwrap()).unwrap();
             assert_eq!(dt.year(), 2024);
             assert_eq!(dt.month(), 3);
             assert_eq!(dt.hour(), 14);
             assert_eq!(dt.minute(), 30);
-        } else {
-            panic!("localdatetime() should return DateTime");
-        }
+        } else { panic!("localdatetime() should return DateTime"); }
     }
 
     #[test]
@@ -10354,42 +7531,17 @@ mod tests {
         // Test via resolve_property directly since standalone WITH...RETURN isn't supported yet
         let store = GraphStore::new();
         let dt_val = Value::Property(PropertyValue::DateTime(
-            chrono::DateTime::parse_from_rfc3339("2024-06-15T10:30:45Z")
-                .unwrap()
-                .timestamp_millis(),
+            chrono::DateTime::parse_from_rfc3339("2024-06-15T10:30:45Z").unwrap().timestamp_millis()
         ));
-        assert_eq!(
-            dt_val.resolve_property("year", &store),
-            PropertyValue::Integer(2024)
-        );
-        assert_eq!(
-            dt_val.resolve_property("month", &store),
-            PropertyValue::Integer(6)
-        );
-        assert_eq!(
-            dt_val.resolve_property("day", &store),
-            PropertyValue::Integer(15)
-        );
-        assert_eq!(
-            dt_val.resolve_property("hour", &store),
-            PropertyValue::Integer(10)
-        );
-        assert_eq!(
-            dt_val.resolve_property("minute", &store),
-            PropertyValue::Integer(30)
-        );
-        assert_eq!(
-            dt_val.resolve_property("second", &store),
-            PropertyValue::Integer(45)
-        );
-        assert_eq!(
-            dt_val.resolve_property("epochMillis", &store),
-            PropertyValue::Integer(
-                chrono::DateTime::parse_from_rfc3339("2024-06-15T10:30:45Z")
-                    .unwrap()
-                    .timestamp_millis()
-            )
-        );
+        assert_eq!(dt_val.resolve_property("year", &store), PropertyValue::Integer(2024));
+        assert_eq!(dt_val.resolve_property("month", &store), PropertyValue::Integer(6));
+        assert_eq!(dt_val.resolve_property("day", &store), PropertyValue::Integer(15));
+        assert_eq!(dt_val.resolve_property("hour", &store), PropertyValue::Integer(10));
+        assert_eq!(dt_val.resolve_property("minute", &store), PropertyValue::Integer(30));
+        assert_eq!(dt_val.resolve_property("second", &store), PropertyValue::Integer(45));
+        assert_eq!(dt_val.resolve_property("epochMillis", &store), PropertyValue::Integer(
+            chrono::DateTime::parse_from_rfc3339("2024-06-15T10:30:45Z").unwrap().timestamp_millis()
+        ));
     }
 
     #[test]
@@ -10399,18 +7551,11 @@ mod tests {
         map.insert("days".to_string(), PropertyValue::Integer(5));
         map.insert("hours".to_string(), PropertyValue::Integer(3));
         map.insert("minutes".to_string(), PropertyValue::Integer(30));
-        let dur = eval_function(
-            "duration",
-            &[Value::Property(PropertyValue::Map(map))],
-            None,
-        )
-        .unwrap();
+        let dur = eval_function("duration", &[Value::Property(PropertyValue::Map(map))], None).unwrap();
         if let Value::Property(PropertyValue::Duration { days, seconds, .. }) = &dur {
             assert_eq!(*days, 5);
             assert_eq!(*seconds, 3 * 3600 + 30 * 60);
-        } else {
-            panic!("duration() should return Duration");
-        }
+        } else { panic!("duration() should return Duration"); }
     }
 
     // ==================== CY-30: Standalone RETURN ====================
@@ -10418,48 +7563,31 @@ mod tests {
     #[test]
     fn test_standalone_return_literal() {
         let store = GraphStore::new();
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query("RETURN 42 AS answer").unwrap())
-            .unwrap();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("RETURN 42 AS answer").unwrap()
+        ).unwrap();
         assert_eq!(result.records.len(), 1);
-        assert_eq!(
-            *result.records[0].get("answer").unwrap(),
-            Value::Property(PropertyValue::Integer(42))
-        );
+        assert_eq!(*result.records[0].get("answer").unwrap(), Value::Property(PropertyValue::Integer(42)));
     }
 
     #[test]
     fn test_standalone_return_arithmetic() {
         let store = GraphStore::new();
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query("RETURN 1 + 2 AS sum, 10 * 3 AS product").unwrap())
-            .unwrap();
-        assert_eq!(
-            *result.records[0].get("sum").unwrap(),
-            Value::Property(PropertyValue::Integer(3))
-        );
-        assert_eq!(
-            *result.records[0].get("product").unwrap(),
-            Value::Property(PropertyValue::Integer(30))
-        );
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("RETURN 1 + 2 AS sum, 10 * 3 AS product").unwrap()
+        ).unwrap();
+        assert_eq!(*result.records[0].get("sum").unwrap(), Value::Property(PropertyValue::Integer(3)));
+        assert_eq!(*result.records[0].get("product").unwrap(), Value::Property(PropertyValue::Integer(30)));
     }
 
     #[test]
     fn test_standalone_return_function() {
         let store = GraphStore::new();
-        let result = QueryExecutor::new(&store)
-            .execute(
-                &parse_query("RETURN sin(0) AS s, pi() AS p, toUpper(\"hello\") AS u").unwrap(),
-            )
-            .unwrap();
-        assert_eq!(
-            *result.records[0].get("s").unwrap(),
-            Value::Property(PropertyValue::Float(0.0))
-        );
-        assert_eq!(
-            *result.records[0].get("u").unwrap(),
-            Value::Property(PropertyValue::String("HELLO".to_string()))
-        );
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("RETURN sin(0) AS s, pi() AS p, toUpper(\"hello\") AS u").unwrap()
+        ).unwrap();
+        assert_eq!(*result.records[0].get("s").unwrap(), Value::Property(PropertyValue::Float(0.0)));
+        assert_eq!(*result.records[0].get("u").unwrap(), Value::Property(PropertyValue::String("HELLO".to_string())));
         if let Value::Property(PropertyValue::Float(p)) = result.records[0].get("p").unwrap() {
             assert!((p - std::f64::consts::PI).abs() < 1e-10);
         }
@@ -10468,33 +7596,21 @@ mod tests {
     #[test]
     fn test_standalone_return_string() {
         let store = GraphStore::new();
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query(r#"RETURN "hello world" AS greeting"#).unwrap())
-            .unwrap();
-        assert_eq!(
-            *result.records[0].get("greeting").unwrap(),
-            Value::Property(PropertyValue::String("hello world".to_string()))
-        );
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"RETURN "hello world" AS greeting"#).unwrap()
+        ).unwrap();
+        assert_eq!(*result.records[0].get("greeting").unwrap(), Value::Property(PropertyValue::String("hello world".to_string())));
     }
 
     #[test]
     fn test_standalone_return_boolean_null() {
         let store = GraphStore::new();
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query("RETURN true AS t, false AS f, null AS n").unwrap())
-            .unwrap();
-        assert_eq!(
-            *result.records[0].get("t").unwrap(),
-            Value::Property(PropertyValue::Boolean(true))
-        );
-        assert_eq!(
-            *result.records[0].get("f").unwrap(),
-            Value::Property(PropertyValue::Boolean(false))
-        );
-        assert_eq!(
-            *result.records[0].get("n").unwrap(),
-            Value::Property(PropertyValue::Null)
-        );
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("RETURN true AS t, false AS f, null AS n").unwrap()
+        ).unwrap();
+        assert_eq!(*result.records[0].get("t").unwrap(), Value::Property(PropertyValue::Boolean(true)));
+        assert_eq!(*result.records[0].get("f").unwrap(), Value::Property(PropertyValue::Boolean(false)));
+        assert_eq!(*result.records[0].get("n").unwrap(), Value::Property(PropertyValue::Null));
     }
 
     // ==================== CY-33: toString() for DateTime ====================
@@ -10502,25 +7618,12 @@ mod tests {
     #[test]
     fn test_tostring_datetime() {
         use crate::query::executor::operator::eval_function;
-        let dt = chrono::DateTime::parse_from_rfc3339("2024-06-15T10:30:00Z")
-            .unwrap()
-            .timestamp_millis();
-        let r = eval_function(
-            "tostring",
-            &[Value::Property(PropertyValue::DateTime(dt))],
-            None,
-        )
-        .unwrap();
+        let dt = chrono::DateTime::parse_from_rfc3339("2024-06-15T10:30:00Z").unwrap().timestamp_millis();
+        let r = eval_function("tostring", &[Value::Property(PropertyValue::DateTime(dt))], None).unwrap();
         if let Value::Property(PropertyValue::String(s)) = r {
-            assert!(
-                s.contains("2024-06-15"),
-                "toString should contain date: {}",
-                s
-            );
+            assert!(s.contains("2024-06-15"), "toString should contain date: {}", s);
             assert!(s.contains("10:30"), "toString should contain time: {}", s);
-        } else {
-            panic!("toString(datetime) should return string");
-        }
+        } else { panic!("toString(datetime) should return string"); }
     }
 
     /// ISO-8601, as openCypher writes a duration.
@@ -10537,52 +7640,21 @@ mod tests {
         use crate::query::executor::operator::eval_function;
         let cases = [
             (
-                PropertyValue::Duration {
-                    months: 2,
-                    days: 5,
-                    seconds: 3600,
-                    nanos: 0,
-                },
+                PropertyValue::Duration { months: 2, days: 5, seconds: 3600, nanos: 0 },
                 "P2M5DT1H",
             ),
             // Years split out of months, and a fractional second.
             (
-                PropertyValue::Duration {
-                    months: 154,
-                    days: 43,
-                    seconds: 65_343,
-                    nanos: 500_000_003,
-                },
+                PropertyValue::Duration { months: 154, days: 43, seconds: 65_343, nanos: 500_000_003 },
                 "P12Y10M43DT18H9M3.500000003S",
             ),
             // Zero components are omitted; an all-zero duration is not empty.
-            (
-                PropertyValue::Duration {
-                    months: 0,
-                    days: 0,
-                    seconds: 0,
-                    nanos: 0,
-                },
-                "PT0S",
-            ),
-            (
-                PropertyValue::Duration {
-                    months: 0,
-                    days: 0,
-                    seconds: 0,
-                    nanos: 1,
-                },
-                "PT0.000000001S",
-            ),
+            (PropertyValue::Duration { months: 0, days: 0, seconds: 0, nanos: 0 }, "PT0S"),
+            (PropertyValue::Duration { months: 0, days: 0, seconds: 0, nanos: 1 }, "PT0.000000001S"),
             // Each component keeps its own sign: months and days have no fixed
             // length, so they cannot be carried into one another.
             (
-                PropertyValue::Duration {
-                    months: -154,
-                    days: -43,
-                    seconds: -65_343,
-                    nanos: -500_000_003,
-                },
+                PropertyValue::Duration { months: -154, days: -43, seconds: -65_343, nanos: -500_000_003 },
                 "P-12Y-10M-43DT-18H-9M-3.500000003S",
             ),
         ];
@@ -10605,26 +7677,17 @@ mod tests {
             &parse_query(r#"WITH datetime("2024-06-15T10:30:45Z") AS dt RETURN dt.year AS y, dt.month AS m"#).unwrap()
         ).unwrap();
         assert_eq!(result.records.len(), 1);
-        assert_eq!(
-            *result.records[0].get("y").unwrap(),
-            Value::Property(PropertyValue::Integer(2024))
-        );
-        assert_eq!(
-            *result.records[0].get("m").unwrap(),
-            Value::Property(PropertyValue::Integer(6))
-        );
+        assert_eq!(*result.records[0].get("y").unwrap(), Value::Property(PropertyValue::Integer(2024)));
+        assert_eq!(*result.records[0].get("m").unwrap(), Value::Property(PropertyValue::Integer(6)));
     }
 
     #[test]
     fn test_with_return_expression() {
         let store = GraphStore::new();
-        let result = QueryExecutor::new(&store)
-            .execute(&parse_query("WITH 10 * 5 AS val RETURN val + 1 AS result").unwrap())
-            .unwrap();
-        assert_eq!(
-            *result.records[0].get("result").unwrap(),
-            Value::Property(PropertyValue::Integer(51))
-        );
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query("WITH 10 * 5 AS val RETURN val + 1 AS result").unwrap()
+        ).unwrap();
+        assert_eq!(*result.records[0].get("result").unwrap(), Value::Property(PropertyValue::Integer(51)));
     }
 
     // ==================== CY-29: Duration arithmetic ====================
@@ -10632,26 +7695,14 @@ mod tests {
     #[test]
     fn test_datetime_plus_duration() {
         let store = GraphStore::new();
-        let result = QueryExecutor::new(&store)
-            .execute(
-                &parse_query(
-                    r#"RETURN datetime("2024-01-01T00:00:00Z") + duration({days: 1}) AS tomorrow"#,
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let result = QueryExecutor::new(&store).execute(
+            &parse_query(r#"RETURN datetime("2024-01-01T00:00:00Z") + duration({days: 1}) AS tomorrow"#).unwrap()
+        ).unwrap();
         // Adding a duration keeps the operand's own type: a ZonedDateTime
         // plus a duration is a ZonedDateTime, not a bare timestamp.
-        if let Value::Property(p @ PropertyValue::ZonedDateTime { .. }) =
-            result.records[0].get("tomorrow").unwrap()
-        {
+        if let Value::Property(p @ PropertyValue::ZonedDateTime { .. }) = result.records[0].get("tomorrow").unwrap() {
             assert_eq!(p.to_cypher_string(), "2024-01-02T00:00Z");
-        } else {
-            panic!(
-                "datetime + duration should return ZonedDateTime, got {:?}",
-                result.records[0].get("tomorrow")
-            );
-        }
+        } else { panic!("datetime + duration should return ZonedDateTime, got {:?}", result.records[0].get("tomorrow")); }
     }
 
     #[test]
@@ -10660,13 +7711,9 @@ mod tests {
         let result = QueryExecutor::new(&store).execute(
             &parse_query(r#"RETURN datetime("2024-01-03T00:00:00Z") - datetime("2024-01-01T00:00:00Z") AS diff"#).unwrap()
         ).unwrap();
-        if let Value::Property(PropertyValue::Duration { days, .. }) =
-            result.records[0].get("diff").unwrap()
-        {
+        if let Value::Property(PropertyValue::Duration { days, .. }) = result.records[0].get("diff").unwrap() {
             assert_eq!(*days, 2);
-        } else {
-            panic!("datetime - datetime should return Duration");
-        }
+        } else { panic!("datetime - datetime should return Duration"); }
     }
 
     // ==================== CY-31: MERGE...RETURN ====================
@@ -10674,15 +7721,11 @@ mod tests {
     #[test]
     fn test_merge_return() {
         let mut store = GraphStore::new();
-        let query =
-            parse_query(r#"MERGE (n:City {name: "London"}) RETURN n.name AS city"#).unwrap();
+        let query = parse_query(r#"MERGE (n:City {name: "London"}) RETURN n.name AS city"#).unwrap();
         let mut executor = MutQueryExecutor::new(&mut store, "default".to_string());
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 1);
-        assert_eq!(
-            *result.records[0].get("city").unwrap(),
-            Value::Property(PropertyValue::String("London".to_string()))
-        );
+        assert_eq!(*result.records[0].get("city").unwrap(), Value::Property(PropertyValue::String("London".to_string())));
     }
 
     #[test]
@@ -10690,39 +7733,24 @@ mod tests {
         // Reproduces MB069: WITH p MATCH (p)-[:REL]->(x)
         let mut store = GraphStore::new();
         let g = store.create_node("Gene");
-        store
-            .set_node_property("default", g, "name", "TP53")
-            .unwrap();
+        store.set_node_property("default", g, "name", "TP53").unwrap();
         let p = store.create_node("Protein");
-        store
-            .set_node_property("default", p, "gene_name", "TP53")
-            .unwrap();
-        store
-            .set_node_property("default", p, "uid", "P04637")
-            .unwrap();
+        store.set_node_property("default", p, "gene_name", "TP53").unwrap();
+        store.set_node_property("default", p, "uid", "P04637").unwrap();
         let go = store.create_node("GOTerm");
-        store
-            .set_node_property("default", go, "go_id", "GO:0006915")
-            .unwrap();
+        store.set_node_property("default", go, "go_id", "GO:0006915").unwrap();
         store.create_edge(p, go, "HAS_GO_TERM").unwrap();
 
-        let result = exec_read(
-            &store,
+        let result = exec_read(&store,
             "MATCH (g:Gene {name: 'TP53'}) WITH g.name AS gn \
              MATCH (p:Protein) WHERE p.gene_name = gn \
              WITH p \
              MATCH (p)-[:HAS_GO_TERM]->(go:GOTerm) \
-             RETURN p.uid, go.go_id",
+             RETURN p.uid, go.go_id"
         );
         assert_eq!(result.records.len(), 1);
-        assert_eq!(
-            *result.records[0].get("p.uid").unwrap(),
-            Value::Property(PropertyValue::String("P04637".to_string()))
-        );
-        assert_eq!(
-            *result.records[0].get("go.go_id").unwrap(),
-            Value::Property(PropertyValue::String("GO:0006915".to_string()))
-        );
+        assert_eq!(*result.records[0].get("p.uid").unwrap(), Value::Property(PropertyValue::String("P04637".to_string())));
+        assert_eq!(*result.records[0].get("go.go_id").unwrap(), Value::Property(PropertyValue::String("GO:0006915".to_string())));
     }
 
     #[test]
@@ -10730,27 +7758,22 @@ mod tests {
         // Reproduces FA14: WITH d, count(...) AS cases ... MATCH (c2)-[:REL]->(d)
         let mut store = GraphStore::new();
         let d = store.create_node("Drug");
-        store
-            .set_node_property("default", d, "name", "Aspirin")
-            .unwrap();
+        store.set_node_property("default", d, "name", "Aspirin").unwrap();
         let c1 = store.create_node("Case");
         let c2 = store.create_node("Case");
         let r = store.create_node("Reaction");
-        store
-            .set_node_property("default", r, "term", "Headache")
-            .unwrap();
+        store.set_node_property("default", r, "term", "Headache").unwrap();
         store.create_edge(c1, d, "REPORTED_DRUG").unwrap();
         store.create_edge(c2, d, "REPORTED_DRUG").unwrap();
         store.create_edge(c2, r, "EXPERIENCED").unwrap();
 
-        let result = exec_read(
-            &store,
+        let result = exec_read(&store,
             "MATCH (c:Case)-[:REPORTED_DRUG]->(d:Drug) \
              WITH d, count(c) AS cases \
              MATCH (c2:Case)-[:REPORTED_DRUG]->(d) \
              WITH d, cases, c2 LIMIT 100 \
              MATCH (c2)-[:EXPERIENCED]->(r:Reaction) \
-             RETURN d.name, cases, r.term",
+             RETURN d.name, cases, r.term"
         );
         assert!(result.records.len() >= 1);
     }
@@ -10760,28 +7783,22 @@ mod tests {
         // Reproduces FA15: WITH r, count(c) AS cases ... RETURN r.term, cases
         let mut store = GraphStore::new();
         let r = store.create_node("Reaction");
-        store
-            .set_node_property("default", r, "term", "PARKINSON")
-            .unwrap();
+        store.set_node_property("default", r, "term", "PARKINSON").unwrap();
         let c1 = store.create_node("Case");
         let c2 = store.create_node("Case");
         store.create_edge(c1, r, "EXPERIENCED").unwrap();
         store.create_edge(c2, r, "EXPERIENCED").unwrap();
 
-        let result = exec_read(
-            &store,
+        let result = exec_read(&store,
             "MATCH (r:Reaction) WHERE r.term CONTAINS 'PARKINSON' \
              WITH r \
              MATCH (c:Case)-[:EXPERIENCED]->(r) \
              WITH r, count(c) AS cases \
              ORDER BY cases DESC LIMIT 10 \
-             RETURN r.term, cases",
+             RETURN r.term, cases"
         );
         assert_eq!(result.records.len(), 1);
-        assert_eq!(
-            *result.records[0].get("cases").unwrap(),
-            Value::Property(PropertyValue::Integer(2))
-        );
+        assert_eq!(*result.records[0].get("cases").unwrap(), Value::Property(PropertyValue::Integer(2)));
     }
 
     #[test]
@@ -10798,10 +7815,7 @@ mod tests {
         // Simpler test: just count all edges
         let r1 = exec_read(&store, "MATCH ()-[r]->() RETURN count(r) AS c");
         assert_eq!(r1.records.len(), 1);
-        assert_eq!(
-            *r1.records[0].get("c").unwrap(),
-            Value::Property(PropertyValue::Integer(3))
-        );
+        assert_eq!(*r1.records[0].get("c").unwrap(), Value::Property(PropertyValue::Integer(3)));
     }
 
     #[test]
@@ -10815,30 +7829,17 @@ mod tests {
         store.create_edge(a, c, "AUTHORED").unwrap();
         store.create_edge(b, c, "AUTHORED").unwrap();
 
-        let result = exec_read(
-            &store,
-            "MATCH ()-[r]->() RETURN type(r) AS edge_type, count(r) AS count ORDER BY count DESC",
+        let result = exec_read(&store,
+            "MATCH ()-[r]->() RETURN type(r) AS edge_type, count(r) AS count ORDER BY count DESC"
         );
         assert_eq!(result.records.len(), 2);
         // AUTHORED: 2, KNOWS: 1
         let first = &result.records[0];
-        assert_eq!(
-            *first.get("edge_type").unwrap(),
-            Value::Property(PropertyValue::String("AUTHORED".to_string()))
-        );
-        assert_eq!(
-            *first.get("count").unwrap(),
-            Value::Property(PropertyValue::Integer(2))
-        );
+        assert_eq!(*first.get("edge_type").unwrap(), Value::Property(PropertyValue::String("AUTHORED".to_string())));
+        assert_eq!(*first.get("count").unwrap(), Value::Property(PropertyValue::Integer(2)));
         let second = &result.records[1];
-        assert_eq!(
-            *second.get("edge_type").unwrap(),
-            Value::Property(PropertyValue::String("KNOWS".to_string()))
-        );
-        assert_eq!(
-            *second.get("count").unwrap(),
-            Value::Property(PropertyValue::Integer(1))
-        );
+        assert_eq!(*second.get("edge_type").unwrap(), Value::Property(PropertyValue::String("KNOWS".to_string())));
+        assert_eq!(*second.get("count").unwrap(), Value::Property(PropertyValue::Integer(1)));
     }
 
     /// Regression: `WITH x LIMIT N` used to materialize all upstream rows before
@@ -10876,7 +7877,8 @@ mod tests {
             }
         }
 
-        let query = parse_query("MATCH (t:Tag) WITH t SKIP 10 LIMIT 3 RETURN t.name AS n").unwrap();
+        let query =
+            parse_query("MATCH (t:Tag) WITH t SKIP 10 LIMIT 3 RETURN t.name AS n").unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 3);
@@ -10957,14 +7959,8 @@ mod tests {
         let mut store = GraphStore::new();
         let u_alice = store.create_node("User");
         let u_bob = store.create_node("User");
-        store
-            .get_node_mut(u_alice)
-            .unwrap()
-            .set_property("name", "Alice");
-        store
-            .get_node_mut(u_bob)
-            .unwrap()
-            .set_property("name", "Bob");
+        store.get_node_mut(u_alice).unwrap().set_property("name", "Alice");
+        store.get_node_mut(u_bob).unwrap().set_property("name", "Bob");
 
         for _ in 0..4 {
             let p = store.create_node("Post");
@@ -11070,20 +8066,11 @@ mod tests {
     fn test_adjacency_count_with_binding_ex49_shape() {
         let mut store = GraphStore::new();
         let alice = store.create_node("Author");
-        store
-            .get_node_mut(alice)
-            .unwrap()
-            .set_property("name", "Alice");
+        store.get_node_mut(alice).unwrap().set_property("name", "Alice");
         let smith = store.create_node("Author");
-        store
-            .get_node_mut(smith)
-            .unwrap()
-            .set_property("name", "Smith");
+        store.get_node_mut(smith).unwrap().set_property("name", "Smith");
         let stone = store.create_node("Author");
-        store
-            .get_node_mut(stone)
-            .unwrap()
-            .set_property("name", "Stone");
+        store.get_node_mut(stone).unwrap().set_property("name", "Stone");
 
         // Alice authors 10, Smith 3, Stone 1 — we expect Smith+Stone, not Alice.
         for _ in 0..10 {
@@ -11168,9 +8155,10 @@ mod tests {
             }
         }
 
-        let query =
-            parse_query("MATCH (t:Tag) WITH t ORDER BY t.rank DESC LIMIT 3 RETURN t.rank AS r")
-                .unwrap();
+        let query = parse_query(
+            "MATCH (t:Tag) WITH t ORDER BY t.rank DESC LIMIT 3 RETURN t.rank AS r",
+        )
+        .unwrap();
         let executor = QueryExecutor::new(&store);
         let result = executor.execute(&query).unwrap();
         assert_eq!(result.records.len(), 3);

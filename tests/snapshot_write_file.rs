@@ -17,43 +17,25 @@ fn sample() -> GraphStore {
     let ada = g.create_node("Person");
     g.add_label_to_node(T, ada, "Scientist").unwrap();
     g.set_node_property(T, ada, "uid", "ada").unwrap();
-    g.set_node_property(T, ada, "born", PropertyValue::Date(-56_000))
-        .unwrap();
+    g.set_node_property(T, ada, "born", PropertyValue::Date(-56_000)).unwrap();
     g.set_node_property(T, ada, "score", 9.5).unwrap();
-    g.set_node_property(
-        T,
-        ada,
-        "tags",
-        PropertyValue::Array(vec!["math".into(), "poetry".into()]),
-    )
-    .unwrap();
+    g.set_node_property(T, ada, "tags", PropertyValue::Array(vec!["math".into(), "poetry".into()]))
+        .unwrap();
 
     let alan = g.create_node("Person");
     g.set_node_property(T, alan, "uid", "alan").unwrap();
     g.set_node_property(T, alan, "active", false).unwrap();
-    g.set_node_property(
-        T,
-        alan,
-        "embedding",
-        PropertyValue::Vector(vec![0.5, -0.25]),
-    )
-    .unwrap();
+    g.set_node_property(T, alan, "embedding", PropertyValue::Vector(vec![0.5, -0.25])).unwrap();
 
     let london = g.create_node("City");
     g.set_node_property(T, london, "uid", "london").unwrap();
-    g.set_node_property(T, london, "population", 8_800_000i64)
-        .unwrap();
+    g.set_node_property(T, london, "population", 8_800_000i64).unwrap();
 
     let knows = g.create_edge(ada, alan, "KNOWS").unwrap();
     g.set_edge_property(
         knows,
         "since",
-        PropertyValue::Duration {
-            months: 12,
-            days: 0,
-            seconds: 0,
-            nanos: 0,
-        },
+        PropertyValue::Duration { months: 12, days: 0, seconds: 0, nanos: 0 },
     )
     .unwrap();
     g.create_edge(ada, london, "LIVES_IN").unwrap();
@@ -71,9 +53,7 @@ fn shape(g: &GraphStore) -> (Nodes, Edges) {
         other => panic!("a node without a uid: {other:?}"),
     };
     let props = |m: std::collections::HashMap<String, PropertyValue>| {
-        m.into_iter()
-            .map(|(k, v)| (k, format!("{v:?}")))
-            .collect::<BTreeMap<_, _>>()
+        m.into_iter().map(|(k, v)| (k, format!("{v:?}"))).collect::<BTreeMap<_, _>>()
     };
     let nodes = g
         .all_nodes()
@@ -109,10 +89,7 @@ fn what_it_writes_imports_back_as_the_same_graph() {
     let stats = write_file(&source, &path, &WriteOptions::default()).expect("write_file");
     assert_eq!(stats.node_count, 3);
     assert_eq!(stats.edge_count, 3);
-    assert!(
-        path.is_file(),
-        "the parent directories were created and the file is there"
-    );
+    assert!(path.is_file(), "the parent directories were created and the file is there");
     assert!(
         !dir.path().join("nested/deeper/sample.sgsnap.tmp").exists(),
         "the temporary file was renamed, not left beside it"
@@ -138,14 +115,7 @@ fn an_existing_file_is_replaced_whole() {
     let path = dir.path().join("g.sgsnap");
     std::fs::write(&path, b"not a snapshot").unwrap();
 
-    write_file(
-        &sample(),
-        &path,
-        &WriteOptions {
-            compression_level: 1,
-        },
-    )
-    .expect("write_file");
+    write_file(&sample(), &path, &WriteOptions { compression_level: 1 }).expect("write_file");
 
     let mut back = GraphStore::new();
     let imported = import_tenant(&mut back, std::fs::File::open(&path).unwrap()).expect("import");

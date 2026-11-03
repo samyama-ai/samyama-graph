@@ -86,7 +86,12 @@ pub struct Edge {
 
 impl Edge {
     /// Create a new directed edge
-    pub fn new(id: EdgeId, source: NodeId, target: NodeId, edge_type: impl Into<EdgeType>) -> Self {
+    pub fn new(
+        id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        edge_type: impl Into<EdgeType>,
+    ) -> Self {
         let now = Self::current_timestamp();
 
         Edge {
@@ -193,7 +198,12 @@ mod tests {
     fn test_create_edge() {
         // REQ-GRAPH-003: Edges with types
         // REQ-GRAPH-007: Directed edges
-        let edge = Edge::new(EdgeId::new(1), NodeId::new(1), NodeId::new(2), "KNOWS");
+        let edge = Edge::new(
+            EdgeId::new(1),
+            NodeId::new(1),
+            NodeId::new(2),
+            "KNOWS",
+        );
 
         assert_eq!(edge.id, EdgeId::new(1));
         assert_eq!(edge.source, NodeId::new(1));
@@ -204,7 +214,12 @@ mod tests {
     #[test]
     fn test_edge_direction() {
         // REQ-GRAPH-007: Directed edges
-        let edge = Edge::new(EdgeId::new(2), NodeId::new(10), NodeId::new(20), "FOLLOWS");
+        let edge = Edge::new(
+            EdgeId::new(2),
+            NodeId::new(10),
+            NodeId::new(20),
+            "FOLLOWS",
+        );
 
         assert!(edge.starts_from(NodeId::new(10)));
         assert!(edge.ends_at(NodeId::new(20)));
@@ -215,7 +230,12 @@ mod tests {
     #[test]
     fn test_edge_properties() {
         // REQ-GRAPH-004: Properties on edges
-        let mut edge = Edge::new(EdgeId::new(3), NodeId::new(1), NodeId::new(2), "KNOWS");
+        let mut edge = Edge::new(
+            EdgeId::new(3),
+            NodeId::new(1),
+            NodeId::new(2),
+            "KNOWS",
+        );
 
         // Set properties
         edge.set_property("since", 2020i64);
@@ -224,14 +244,8 @@ mod tests {
 
         // Get properties
         assert_eq!(edge.get_property("since").unwrap().as_integer(), Some(2020));
-        assert_eq!(
-            edge.get_property("strength").unwrap().as_float(),
-            Some(0.95)
-        );
-        assert_eq!(
-            edge.get_property("verified").unwrap().as_boolean(),
-            Some(true)
-        );
+        assert_eq!(edge.get_property("strength").unwrap().as_float(), Some(0.95));
+        assert_eq!(edge.get_property("verified").unwrap().as_boolean(), Some(true));
         assert_eq!(edge.property_count(), 3);
     }
 
@@ -285,7 +299,12 @@ mod tests {
 
     #[test]
     fn test_edge_connects() {
-        let edge = Edge::new(EdgeId::new(5), NodeId::new(10), NodeId::new(20), "LINKS");
+        let edge = Edge::new(
+            EdgeId::new(5),
+            NodeId::new(10),
+            NodeId::new(20),
+            "LINKS",
+        );
 
         assert!(edge.connects(NodeId::new(10), NodeId::new(20)));
         assert!(edge.connects(NodeId::new(20), NodeId::new(10))); // Order doesn't matter for connects()
@@ -294,7 +313,12 @@ mod tests {
 
     #[test]
     fn test_remove_property() {
-        let mut edge = Edge::new(EdgeId::new(6), NodeId::new(1), NodeId::new(2), "TEST");
+        let mut edge = Edge::new(
+            EdgeId::new(6),
+            NodeId::new(1),
+            NodeId::new(2),
+            "TEST",
+        );
 
         edge.set_property("temp", "value");
         assert!(edge.has_property("temp"));

@@ -56,34 +56,21 @@ fn main() {
     let v = problem.objective(&Array1::from(vec![2.0, 1.0]));
     println!("sanity SSE at (a=2, b=1): {:.6}", v);
 
-    let cfg = SolverConfig {
-        population_size: 30,
-        max_iterations: 200,
-    };
+    let cfg = SolverConfig { population_size: 30, max_iterations: 200 };
     let t0 = Instant::now();
     let r = BMWRSolver::new(cfg).solve(&problem);
     let wall = t0.elapsed();
 
     let stats = problem.stats();
     println!("=== Cypher-grounded BMWR result ===");
-    println!(
-        "best a, b                     : ({:.6}, {:.6})",
-        r.best_variables[0], r.best_variables[1]
-    );
+    println!("best a, b                     : ({:.6}, {:.6})", r.best_variables[0], r.best_variables[1]);
     println!("best SSE                      : {:.6}", r.best_fitness);
     println!("wall clock                    : {:?}", wall);
-    println!(
-        "cache hits / misses           : {} / {}",
-        stats.hits, stats.misses
-    );
-    println!(
-        "cache hit rate                : {:.1}%",
-        100.0 * stats.hits as f64 / (stats.hits + stats.misses).max(1) as f64
-    );
+    println!("cache hits / misses           : {} / {}", stats.hits, stats.misses);
+    println!("cache hit rate                : {:.1}%",
+        100.0 * stats.hits as f64 / (stats.hits + stats.misses).max(1) as f64);
     println!("cypher eval total time        : {} ms", stats.total_eval_ms);
-    println!(
-        "avg per cypher eval           : {:.3} ms",
-        stats.total_eval_ms as f64 / stats.misses.max(1) as f64
-    );
+    println!("avg per cypher eval           : {:.3} ms",
+        stats.total_eval_ms as f64 / stats.misses.max(1) as f64);
     println!("cache size                    : {}", problem.cache_size());
 }

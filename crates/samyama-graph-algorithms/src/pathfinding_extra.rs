@@ -143,10 +143,7 @@ fn a_star_non_negative(
                 path.push(cur);
             }
             path.reverse();
-            return Some((
-                path.into_iter().map(|i| view.index_to_node[i]).collect(),
-                g[target],
-            ));
+            return Some((path.into_iter().map(|i| view.index_to_node[i]).collect(), g[target]));
         }
         let (lo, hi) = (view.out_offsets[v], view.out_offsets[v + 1]);
         for slot in lo..hi {
@@ -205,16 +202,10 @@ pub fn yens_k_shortest(
             }
             let banned_nodes: HashSet<NodeId> = root[..i].iter().copied().collect();
             // `spur_node` is a NodeId; the search wants a dense index.
-            let Some(&spur_idx) = view.node_to_index.get(&spur_node) else {
-                continue;
-            };
-            if let Some((spur, _)) = shortest_avoiding(
-                view,
-                spur_idx,
-                prev[prev.len() - 1],
-                &banned_edges,
-                &banned_nodes,
-            ) {
+            let Some(&spur_idx) = view.node_to_index.get(&spur_node) else { continue };
+            if let Some((spur, _)) =
+                shortest_avoiding(view, spur_idx, prev[prev.len() - 1], &banned_edges, &banned_nodes)
+            {
                 let mut full = root[..i].to_vec();
                 full.extend(spur);
                 let c = path_cost(view, &full);
@@ -230,9 +221,7 @@ pub fn yens_k_shortest(
         }
         // Cheapest first; ties by the path itself so two runs agree.
         candidates.sort_by(|a, b| {
-            a.1.partial_cmp(&b.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.0.cmp(&b.0))
+            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
         });
         accepted.push(candidates.remove(0));
     }
@@ -289,10 +278,8 @@ fn shortest_avoiding(
 fn path_cost(view: &GraphView, path: &[NodeId]) -> f64 {
     let mut total = 0.0;
     for pair in path.windows(2) {
-        let (Some(&u), Some(&v)) = (
-            view.node_to_index.get(&pair[0]),
-            view.node_to_index.get(&pair[1]),
-        ) else {
+        let (Some(&u), Some(&v)) = (view.node_to_index.get(&pair[0]), view.node_to_index.get(&pair[1]))
+        else {
             continue;
         };
         let (lo, hi) = (view.out_offsets[u], view.out_offsets[u + 1]);
@@ -354,7 +341,8 @@ pub fn article_rank(view: &GraphView, damping: f64, iterations: usize) -> Vec<f6
     if n == 0 {
         return Vec::new();
     }
-    let avg_out: f64 = (0..n).map(|i| view.out_degree(i) as f64).sum::<f64>() / n as f64;
+    let avg_out: f64 =
+        (0..n).map(|i| view.out_degree(i) as f64).sum::<f64>() / n as f64;
     let mut rank = vec![1.0 / n as f64; n];
     for _ in 0..iterations {
         let mut next = vec![(1.0 - damping) / n as f64; n];

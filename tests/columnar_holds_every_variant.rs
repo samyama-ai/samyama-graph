@@ -48,12 +48,7 @@ fn every_variant() -> Vec<(&'static str, PropertyValue)> {
         ("vector", PropertyValue::Vector(vec![0.25, -0.5, 1.0])),
         (
             "duration",
-            PropertyValue::Duration {
-                months: 1,
-                days: 2,
-                seconds: 3,
-                nanos: 4,
-            },
+            PropertyValue::Duration { months: 1, days: 2, seconds: 3, nanos: 4 },
         ),
         // The five temporal types (#689). Added here rather than left out,
         // because this file's whole claim is "every variant" -- adding
@@ -68,17 +63,11 @@ fn every_variant() -> Vec<(&'static str, PropertyValue)> {
         ("localtime", PropertyValue::LocalTime(45_074_645_876_123)),
         (
             "time",
-            PropertyValue::Time {
-                nanos: 45_074_645_876_123,
-                offset_seconds: 19_800,
-            },
+            PropertyValue::Time { nanos: 45_074_645_876_123, offset_seconds: 19_800 },
         ),
         (
             "localdatetime",
-            PropertyValue::LocalDateTime {
-                secs: 1_437_514_832,
-                nanos: 142_000_042,
-            },
+            PropertyValue::LocalDateTime { secs: 1_437_514_832, nanos: 142_000_042 },
         ),
         (
             "zoneddatetime",
@@ -140,16 +129,8 @@ fn a_variant_can_be_overwritten_by_another_of_the_same_type() {
     let id = store.create_node("N");
     let idx = id.as_u64() as usize;
 
-    store.set_column_property(
-        id,
-        "a",
-        PropertyValue::Array(vec![PropertyValue::Integer(1)]),
-    );
-    store.set_column_property(
-        id,
-        "a",
-        PropertyValue::Array(vec![PropertyValue::Integer(2)]),
-    );
+    store.set_column_property(id, "a", PropertyValue::Array(vec![PropertyValue::Integer(1)]));
+    store.set_column_property(id, "a", PropertyValue::Array(vec![PropertyValue::Integer(2)]));
     assert_eq!(
         store.node_columns.get_property(idx, "a"),
         PropertyValue::Array(vec![PropertyValue::Integer(2)])
@@ -173,16 +154,12 @@ fn a_typed_column_promotes_rather_than_dropping_a_foreign_value() {
     );
 
     assert_eq!(
-        store
-            .node_columns
-            .get_property(first.as_u64() as usize, "mixed"),
+        store.node_columns.get_property(first.as_u64() as usize, "mixed"),
         PropertyValue::Integer(1),
         "the integer written first was lost when the column promoted"
     );
     assert_eq!(
-        store
-            .node_columns
-            .get_property(second.as_u64() as usize, "mixed"),
+        store.node_columns.get_property(second.as_u64() as usize, "mixed"),
         PropertyValue::Array(vec![PropertyValue::Integer(9)]),
         "the array was dropped by a column typed as Int"
     );
@@ -209,10 +186,7 @@ fn every_variant_survives_a_snapshot_round_trip() {
     let restored_id = restored.all_nodes().first().expect("one node").id;
     for (key, value) in every_variant() {
         assert_eq!(
-            restored
-                .node_properties_merged(restored_id)
-                .get(key)
-                .cloned(),
+            restored.node_properties_merged(restored_id).get(key).cloned(),
             Some(value),
             "{key} did not survive the snapshot round trip"
         );

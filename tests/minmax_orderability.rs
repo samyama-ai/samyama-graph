@@ -26,9 +26,7 @@ use samyama::query::parser::parse_query;
 
 fn one(store: &GraphStore, cypher: &str, col: &str) -> String {
     let q = parse_query(cypher).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
+    let batch = QueryExecutor::new(store).execute(&q).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
     format!("{:?}", batch.records[0].get(col))
 }
 
@@ -72,11 +70,7 @@ fn numbers_alone_still_compare_numerically() {
 #[test]
 fn strings_alone_still_compare_lexically() {
     let store = GraphStore::new();
-    let got = one(
-        &store,
-        "UNWIND ['b', 'a', 'c'] AS x RETURN min(x) AS m",
-        "m",
-    );
+    let got = one(&store, "UNWIND ['b', 'a', 'c'] AS x RETURN min(x) AS m", "m");
     assert!(got.contains("\"a\""), "{got}");
 }
 
@@ -87,14 +81,8 @@ fn nulls_are_ignored_not_compared() {
     // ordering put null greatest it would have won every max.
     let store = GraphStore::new();
     for (q, want) in [
-        (
-            "UNWIND [null, 2, null, 1] AS x RETURN min(x) AS m",
-            "Integer(1)",
-        ),
-        (
-            "UNWIND [null, 2, null, 1] AS x RETURN max(x) AS m",
-            "Integer(2)",
-        ),
+        ("UNWIND [null, 2, null, 1] AS x RETURN min(x) AS m", "Integer(1)"),
+        ("UNWIND [null, 2, null, 1] AS x RETURN max(x) AS m", "Integer(2)"),
     ] {
         let got = one(&store, q, "m");
         assert!(got.contains(want), "{q}: expected {want}, got {got}");

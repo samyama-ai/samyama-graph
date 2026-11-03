@@ -957,9 +957,7 @@ fn load_parquet_parses_in_the_by_kind_shape() {
 // ---------------------------------------------------------------------------
 
 fn projection_ddl(q: &str) -> GraphProjectionDdl {
-    ok(q)
-        .graph_projection_ddl
-        .unwrap_or_else(|| panic!("{q}: no projection statement"))
+    ok(q).graph_projection_ddl.unwrap_or_else(|| panic!("{q}: no projection statement"))
 }
 
 #[test]
@@ -979,11 +977,7 @@ fn create_graph_projection_reads_every_filter() {
 #[test]
 fn create_graph_projection_filters_are_each_optional() {
     match projection_ddl("CREATE GRAPH PROJECTION everything") {
-        GraphProjectionDdl::Create {
-            name,
-            spec,
-            if_not_exists,
-        } => {
+        GraphProjectionDdl::Create { name, spec, if_not_exists } => {
             assert_eq!(name, "everything");
             assert!(!if_not_exists);
             assert_eq!(spec, crate::graph::projection::ProjectionSpec::default());
@@ -1001,8 +995,7 @@ fn create_graph_projection_filters_are_each_optional() {
 
 #[test]
 fn graph_projection_names_and_filters_can_be_escaped() {
-    match projection_ddl("CREATE GRAPH PROJECTION `my graph` NODES :`Odd Label` WEIGHT `the cost`")
-    {
+    match projection_ddl("CREATE GRAPH PROJECTION `my graph` NODES :`Odd Label` WEIGHT `the cost`") {
         GraphProjectionDdl::Create { name, spec, .. } => {
             assert_eq!(name, "my graph");
             assert_eq!(spec.node_label.as_deref(), Some("Odd Label"));
@@ -1029,32 +1022,18 @@ fn a_keyword_can_be_a_projection_name() {
 fn refresh_drop_and_show_graph_projections() {
     assert_eq!(
         projection_ddl("REFRESH GRAPH PROJECTION social"),
-        GraphProjectionDdl::Refresh {
-            name: "social".into()
-        }
+        GraphProjectionDdl::Refresh { name: "social".into() }
     );
     assert_eq!(
         projection_ddl("DROP GRAPH PROJECTION social"),
-        GraphProjectionDdl::Drop {
-            name: "social".into(),
-            if_exists: false
-        }
+        GraphProjectionDdl::Drop { name: "social".into(), if_exists: false }
     );
     assert_eq!(
         projection_ddl("drop graph projection social if exists"),
-        GraphProjectionDdl::Drop {
-            name: "social".into(),
-            if_exists: true
-        }
+        GraphProjectionDdl::Drop { name: "social".into(), if_exists: true }
     );
-    assert_eq!(
-        projection_ddl("SHOW GRAPH PROJECTIONS"),
-        GraphProjectionDdl::Show
-    );
-    assert_eq!(
-        projection_ddl("show graph projection"),
-        GraphProjectionDdl::Show
-    );
+    assert_eq!(projection_ddl("SHOW GRAPH PROJECTIONS"), GraphProjectionDdl::Show);
+    assert_eq!(projection_ddl("show graph projection"), GraphProjectionDdl::Show);
 }
 
 #[test]
@@ -1074,11 +1053,7 @@ fn malformed_graph_projection_statements_do_not_parse() {
 #[test]
 fn only_show_graph_projections_is_a_read() {
     assert!(!ok("SHOW GRAPH PROJECTIONS").is_write());
-    for q in [
-        "CREATE GRAPH PROJECTION p",
-        "REFRESH GRAPH PROJECTION p",
-        "DROP GRAPH PROJECTION p IF EXISTS",
-    ] {
+    for q in ["CREATE GRAPH PROJECTION p", "REFRESH GRAPH PROJECTION p", "DROP GRAPH PROJECTION p IF EXISTS"] {
         assert!(ok(q).is_write(), "{q}");
     }
 }

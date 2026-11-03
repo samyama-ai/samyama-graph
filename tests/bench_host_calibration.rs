@@ -78,21 +78,14 @@ fn host_state_reports_what_it_can_and_says_so_when_it_cannot() {
     // read a source that exists as unknown, or invent a figure without one.
     #[cfg(target_os = "linux")]
     {
-        assert!(
-            state.load_average.is_some(),
-            "load average should be readable on Linux"
-        );
-        let published =
-            bench_setup::cpuinfo_mhz().is_some() || bench_setup::cpufreq_mhz().is_some();
+        assert!(state.load_average.is_some(), "load average should be readable on Linux");
+        let published = bench_setup::cpuinfo_mhz().is_some() || bench_setup::cpufreq_mhz().is_some();
         assert_eq!(state.cpu_mhz.is_some(), published, "cpu MHz: {text}");
         if !published {
             assert!(text.contains("cpu unknown"), "{text}");
         }
         #[cfg(target_arch = "x86_64")]
-        assert!(
-            state.cpu_mhz.is_some(),
-            "x86 Linux publishes cpu MHz: {text}"
-        );
+        assert!(state.cpu_mhz.is_some(), "x86 Linux publishes cpu MHz: {text}");
     }
     #[cfg(not(target_os = "linux"))]
     {

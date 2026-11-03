@@ -50,10 +50,7 @@ fn normalise(path: &str) -> String {
                 out.push_str("{}");
             }
             ':' => {
-                while chars
-                    .peek()
-                    .is_some_and(|c| c.is_alphanumeric() || *c == '_')
-                {
+                while chars.peek().is_some_and(|c| c.is_alphanumeric() || *c == '_') {
                     chars.next();
                 }
                 out.push_str("{}");
@@ -93,17 +90,13 @@ fn served_paths(src: &Path) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|e| e == "rs") {
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
+                let Ok(text) = std::fs::read_to_string(&path) else { continue };
                 // `:` and `{}` belong in the character set: the server
                 // registers path parameters as `/api/tenants/:id`, and leaving
                 // `:` out makes every parameterised route look unserved.
@@ -156,12 +149,7 @@ fn main() {
     println!("API contract");
     for (name, rel) in SURFACES {
         let present = repo.join(rel).exists();
-        println!(
-            "  {:<16} {:<48} {}",
-            name,
-            rel,
-            if present { "present" } else { "MISSING" }
-        );
+        println!("  {:<16} {:<48} {}", name, rel, if present { "present" } else { "MISSING" });
         if !present {
             failures.push(format!("surface {name} missing at {rel}"));
         }
@@ -180,24 +168,15 @@ fn main() {
 
     println!("\n  documented endpoints  {}", documented_n.len());
     println!("  served endpoints      {}", served_n.len());
-    println!(
-        "  agreeing              {}",
-        documented_n.intersection(&served_n).count()
-    );
+    println!("  agreeing              {}", documented_n.intersection(&served_n).count());
 
     if !unserved.is_empty() {
         println!("\n  documented but not served: {unserved:?}");
-        failures.push(format!(
-            "{} documented endpoint(s) the server does not register",
-            unserved.len()
-        ));
+        failures.push(format!("{} documented endpoint(s) the server does not register", unserved.len()));
     }
     if !undocumented.is_empty() {
         println!("  served but undocumented:   {undocumented:?}");
-        failures.push(format!(
-            "{} served endpoint(s) missing from the document",
-            undocumented.len()
-        ));
+        failures.push(format!("{} served endpoint(s) missing from the document", undocumented.len()));
     }
 
     if let Some(path) = json_out {

@@ -35,10 +35,7 @@ fn a_typo_is_an_error_and_not_a_third_party() {
     for typo in ["olama", "openAI2", "local", "none", "gpt4", "llama"] {
         let err = LLMProvider::parse(typo)
             .expect_err("an unknown provider must be refused, not defaulted");
-        assert!(
-            err.contains(typo),
-            "the message must quote what was set: {err}"
-        );
+        assert!(err.contains(typo), "the message must quote what was set: {err}");
         assert!(
             err.contains("ollama") && err.contains("claudecode"),
             "the message must list the accepted names: {err}"
@@ -52,10 +49,7 @@ fn an_unset_provider_is_an_error_too() {
     // way to send data somewhere nobody chose.
     let err = LLMProvider::parse("").expect_err("unset must be refused");
     assert!(err.contains("not set"), "{err}");
-    assert!(
-        err.contains("third party"),
-        "the message must say why: {err}"
-    );
+    assert!(err.contains("third party"), "the message must say why: {err}");
 }
 
 #[test]

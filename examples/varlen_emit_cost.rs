@@ -38,19 +38,9 @@ fn main() {
     let mut ids = Vec::new();
     for i in 0..n {
         let p = s.create_node_with_labels([Label::new("Person")]);
-        s.set_node_property("default", p, "id", PropertyValue::Integer(i))
-            .unwrap();
-        s.set_node_property(
-            "default",
-            p,
-            "firstName",
-            PropertyValue::String(if i % 4000 == 7 {
-                "Zeljko".into()
-            } else {
-                format!("Common{}", i % 900)
-            }),
-        )
-        .unwrap();
+        s.set_node_property("default", p, "id", PropertyValue::Integer(i)).unwrap();
+        s.set_node_property("default", p, "firstName", PropertyValue::String(
+            if i % 4000 == 7 { "Zeljko".into() } else { format!("Common{}", i % 900) })).unwrap();
         ids.push(p);
     }
     for i in 0..ids.len() {
@@ -59,15 +49,11 @@ fn main() {
         }
     }
     let q = parse_query("CREATE INDEX ON :Person(id)").unwrap();
-    MutQueryExecutor::new(&mut s, "default".to_string())
-        .execute(&q)
-        .unwrap();
+    MutQueryExecutor::new(&mut s, "default".to_string()).execute(&q).unwrap();
 
     // Same traversal in every case; only what is emitted differs.
-    let emit_all =
-        "MATCH (p:Person {id: 0})-[:KNOWS*1..3]-(f:Person) RETURN count(DISTINCT f) AS n";
-    let emit_none =
-        "MATCH (p:Person {id: 0})-[:KNOWS*1..3]-(f:NoSuchLabel) RETURN count(DISTINCT f) AS n";
+    let emit_all = "MATCH (p:Person {id: 0})-[:KNOWS*1..3]-(f:Person) RETURN count(DISTINCT f) AS n";
+    let emit_none = "MATCH (p:Person {id: 0})-[:KNOWS*1..3]-(f:NoSuchLabel) RETURN count(DISTINCT f) AS n";
     let ic1 = "MATCH (p:Person {id: 0})-[:KNOWS*1..3]-(f:Person {firstName: \"Zeljko\"}) \
                RETURN count(DISTINCT f) AS n";
 
@@ -79,33 +65,19 @@ fn main() {
     let reached = {
         let p = parse_query(emit_all).unwrap();
         let b = QueryExecutor::new(&s).execute(&p).unwrap();
-        b.records
-            .first()
-            .and_then(|r| r.values().next().cloned())
-            .map(|v| format!("{v:?}"))
-            .unwrap_or_default()
+        b.records.first().and_then(|r| r.values().next().cloned())
+            .map(|v| format!("{v:?}")).unwrap_or_default()
     };
 
-    println!(
-        "{n} Person, {} KNOWS (degree {degree}); 3-hop reaches {reached}\n",
-        n as usize * degree
-    );
+    println!("{n} Person, {} KNOWS (degree {degree}); 3-hop reaches {reached}\n",
+             n as usize * degree);
     println!("{:<44} {:>10.2?}", "walk + emit every endpoint", t_all);
-    println!(
-        "{:<44} {:>10.2?}",
-        "walk only (label matches nothing)", t_none
-    );
-    println!(
-        "{:<44} {:>10.2?}",
-        "walk + emit, name filtered above (IC1)", t_ic1
-    );
+    println!("{:<44} {:>10.2?}", "walk only (label matches nothing)", t_none);
+    println!("{:<44} {:>10.2?}", "walk + emit, name filtered above (IC1)", t_ic1);
 
     let emit_share = 1.0 - t_none.as_secs_f64() / t_all.as_secs_f64();
-    println!(
-        "\nemission is {:.0}% of the operator; the walk itself is {:.0}%",
-        emit_share * 100.0,
-        (1.0 - emit_share) * 100.0
-    );
+    println!("\nemission is {:.0}% of the operator; the walk itself is {:.0}%",
+             emit_share * 100.0, (1.0 - emit_share) * 100.0);
     println!("IC1 pays the emission cost in full and keeps almost none of it — the");
     println!("`firstName` predicate is inline on the target pattern, so the operator");
     println!("could prune before buffering the way `emit_ok` already does for labels.");

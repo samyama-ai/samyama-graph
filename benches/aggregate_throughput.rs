@@ -89,14 +89,10 @@ fn time_query(store: &GraphStore, cypher: &str, rows: usize) -> (f64, usize) {
     let query = parse_query(cypher).expect("query should parse");
     // Warm once: the first run pays for statistics and any lazy index work,
     // which is not what this is measuring.
-    let _ = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("query should run");
+    let _ = QueryExecutor::new(store).execute(&query).expect("query should run");
 
     let started = Instant::now();
-    let batch = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("query should run");
+    let batch = QueryExecutor::new(store).execute(&query).expect("query should run");
     let elapsed = started.elapsed();
 
     let ns_per_row = elapsed.as_secs_f64() * 1e9 / rows as f64;
@@ -149,10 +145,7 @@ fn main() {
         "{:<42} {:>10} {:>12} {:>10} {:>10}",
         "shape", "ns/row", "agg ns/row", "query ms", "groups"
     );
-    println!(
-        "{:-<42} {:->10} {:->12} {:->10} {:->10}",
-        "", "", "", "", ""
-    );
+    println!("{:-<42} {:->10} {:->12} {:->10} {:->10}", "", "", "", "", "");
     for (name, cypher) in &cases {
         let (ns_per_row, out_rows) = time_query(&store, cypher, rows);
         // `agg ns/row` is the operator alone; `ns/row` is the whole query,

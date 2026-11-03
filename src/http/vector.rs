@@ -1,9 +1,9 @@
 //! HTTP handlers for vector index management and similarity search
 
+use axum::{extract::State, response::IntoResponse, Json};
 use crate::embed::EmbedPipeline;
 use crate::http::server::AppState;
 use crate::vector::DistanceMetric;
-use axum::{extract::State, response::IntoResponse, Json};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -16,14 +16,10 @@ pub async fn list_indexes_handler(State(state): State<AppState>) -> impl IntoRes
     let indexes: Vec<_> = keys
         .iter()
         .map(|k| {
-            let (dimensions, metric) = match store.vector_index.get_index(&k.label, &k.property_key)
-            {
+            let (dimensions, metric) = match store.vector_index.get_index(&k.label, &k.property_key) {
                 Some(idx) => {
                     let idx = idx.read().unwrap();
-                    (
-                        Some(idx.dimensions()),
-                        Some(canonical_metric(&idx.metric())),
-                    )
+                    (Some(idx.dimensions()), Some(canonical_metric(&idx.metric())))
                 }
                 None => (None, None),
             };
@@ -113,17 +109,10 @@ pub async fn create_index_handler(
     let canonical = canonical_metric(&metric);
     // write lock: create_vector_index mutates the index registry
     let store = state.store.write().await;
-    match store.create_vector_index(
-        &payload.label,
-        &payload.property_key,
-        payload.dimensions,
-        metric,
-    ) {
+    match store.create_vector_index(&payload.label, &payload.property_key, payload.dimensions, metric) {
         Ok(_) => {
             if let Some(model_id) = payload.model_id.as_deref() {
-                store
-                    .vector_index
-                    .set_model_id(&payload.label, &payload.property_key, model_id);
+                store.vector_index.set_model_id(&payload.label, &payload.property_key, model_id);
             }
             Json(json!({
                 "status": "ok",
@@ -185,11 +174,7 @@ async fn resolve_embed_pipeline(state: &AppState, tenant_id: &str) -> Option<Arc
             if let Some(embed_config) = tenant.embed_config {
                 if let Ok(pipeline) = EmbedPipeline::new(embed_config) {
                     let p = Arc::new(pipeline);
-                    state
-                        .embed_cache
-                        .write()
-                        .await
-                        .insert(tenant_id.to_string(), Arc::clone(&p));
+                    state.embed_cache.write().await.insert(tenant_id.to_string(), Arc::clone(&p));
                     return Some(p);
                 }
             }
@@ -444,16 +429,12 @@ fn incompatible_index(
     };
     keys.sort();
     for (l, p) in keys {
-        let Some(index) = manager.get_index(&l, &p) else {
-            continue;
-        };
+        let Some(index) = manager.get_index(&l, &p) else { continue };
         let index_dimensions = index.read().unwrap().dimensions();
         if label.is_none() && index_dimensions != query_dimensions {
             continue;
         }
-        let Some(index_model) = manager.model_id(&l, &p) else {
-            continue;
-        };
+        let Some(index_model) = manager.model_id(&l, &p) else { continue };
         if index_model == query_model.trim() {
             continue;
         }
@@ -486,15 +467,10 @@ fn incompatible_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request, routing::{get, post}, Router};
     use crate::graph::GraphStore;
     use crate::http::server::AppState;
     use crate::query::QueryEngine;
-    use axum::{
-        body::Body,
-        http::Request,
-        routing::{get, post},
-        Router,
-    };
     use http_body_util::BodyExt;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -517,10 +493,7 @@ mod tests {
 
     fn test_app(state: AppState) -> Router {
         Router::new()
-            .route(
-                "/api/vector/indexes",
-                get(list_indexes_handler).post(create_index_handler),
-            )
+            .route("/api/vector/indexes", get(list_indexes_handler).post(create_index_handler))
             .route("/api/vector-search", post(search_handler))
             .with_state(state)
     }
@@ -552,10 +525,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .contains("query_text or query_vector"));
+        assert!(body["error"].as_str().unwrap().contains("query_text or query_vector"));
     }
 
     #[tokio::test]
@@ -567,10 +537,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .contains("must not be empty"));
+        assert!(body["error"].as_str().unwrap().contains("must not be empty"));
     }
 
     #[tokio::test]
@@ -582,10 +549,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .contains("Embedding pipeline not configured"));
+        assert!(body["error"].as_str().unwrap().contains("Embedding pipeline not configured"));
     }
 
     #[tokio::test]
@@ -621,10 +585,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .contains("dimensions must be > 0"));
+        assert!(body["error"].as_str().unwrap().contains("dimensions must be > 0"));
     }
 
     #[tokio::test]
@@ -636,10 +597,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
-        assert!(body["error"]
-            .as_str()
-            .unwrap()
-            .contains("label and property_key are required"));
+        assert!(body["error"].as_str().unwrap().contains("label and property_key are required"));
     }
 
     #[tokio::test]
@@ -713,10 +671,7 @@ mod tests {
         }
     }
 
-    async fn text_search(
-        state: &AppState,
-        label: Option<&str>,
-    ) -> (axum::http::StatusCode, serde_json::Value) {
+    async fn text_search(state: &AppState, label: Option<&str>) -> (axum::http::StatusCode, serde_json::Value) {
         let mut body = json!({ "query_text": "graph databases", "k": 2 });
         if let Some(l) = label {
             body["label"] = json!(l);
@@ -731,23 +686,13 @@ mod tests {
 
         for label in [Some("Doc"), None] {
             let (status, body) = text_search(&state, label).await;
-            assert_eq!(
-                status,
-                axum::http::StatusCode::CONFLICT,
-                "label {:?}: {}",
-                label,
-                body
-            );
+            assert_eq!(status, axum::http::StatusCode::CONFLICT, "label {:?}: {}", label, body);
             assert_eq!(body["code"], "incompatible_index", "{}", body);
             assert_eq!(body["query_model_id"], "model-b", "{}", body);
             assert_eq!(body["index_model_id"], "model-a", "{}", body);
             assert_eq!(body["label"], "Doc", "{}", body);
             let err = body["error"].as_str().unwrap();
-            assert!(
-                err.contains("model-a") && err.contains("model-b"),
-                "{}",
-                err
-            );
+            assert!(err.contains("model-a") && err.contains("model-b"), "{}", err);
         }
     }
 
@@ -789,10 +734,7 @@ mod tests {
     async fn test_list_indexes_reports_model_id() {
         let state = state_with_model(None);
         seed_doc_index(&state, Some("model-a")).await;
-        let req = Request::builder()
-            .uri("/api/vector/indexes")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/api/vector/indexes").body(Body::empty()).unwrap();
         let resp = test_app(state).oneshot(req).await.unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -807,12 +749,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = state_with_model(None);
         seed_doc_index(&src, Some("model-a")).await;
-        src.store
-            .read()
-            .await
-            .vector_index
-            .dump_all(dir.path())
-            .unwrap();
+        src.store.read().await.vector_index.dump_all(dir.path()).unwrap();
 
         let meta_path = dir.path().join("metadata.json");
         let meta: serde_json::Value =
@@ -821,13 +758,7 @@ mod tests {
 
         // Round trip: the reloaded index still refuses model B.
         let reloaded = state_with_model(Some("model-b"));
-        reloaded
-            .store
-            .read()
-            .await
-            .vector_index
-            .load_all(dir.path())
-            .unwrap();
+        reloaded.store.read().await.vector_index.load_all(dir.path()).unwrap();
         let (status, body) = text_search(&reloaded, Some("Doc")).await;
         assert_eq!(status, axum::http::StatusCode::CONFLICT, "{}", body);
 
@@ -836,12 +767,7 @@ mod tests {
         legacy[0].as_object_mut().unwrap().remove("model_id");
         std::fs::write(&meta_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let old = state_with_model(Some("model-b"));
-        old.store
-            .read()
-            .await
-            .vector_index
-            .load_all(dir.path())
-            .unwrap();
+        old.store.read().await.vector_index.load_all(dir.path()).unwrap();
         // The graph the index was dumped beside: search returns only nodes
         // that exist and carry the label (#1605).
         {
@@ -850,14 +776,7 @@ mod tests {
                 store.create_node("Doc");
             }
         }
-        assert_eq!(
-            old.store
-                .read()
-                .await
-                .vector_index
-                .model_id("Doc", "embedding"),
-            None
-        );
+        assert_eq!(old.store.read().await.vector_index.model_id("Doc", "embedding"), None);
         let (status, body) = text_search(&old, Some("Doc")).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{}", body);
         assert_eq!(body["results"].as_array().unwrap().len(), 2, "{}", body);
@@ -1011,11 +930,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
-        assert!(
-            body.to_string()
-                .contains("no vector index on :Nothing(vec)"),
-            "{body}"
-        );
+        assert!(body.to_string().contains("no vector index on :Nothing(vec)"), "{body}");
     }
 
     #[tokio::test]

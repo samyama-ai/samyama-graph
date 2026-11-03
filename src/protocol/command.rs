@@ -127,9 +127,7 @@ impl CommandHandler {
     pub fn commit_transaction_on(&self, store: &mut GraphStore) -> RespValue {
         let outcome = match &self.persistence {
             Some(pm) => pm.commit_session_transaction("default", store),
-            None => store
-                .commit_session_transaction()
-                .map_err(|e| e.to_string()),
+            None => store.commit_session_transaction().map_err(|e| e.to_string()),
         };
         match outcome {
             Ok(version) => RespValue::Integer(version as i64),
@@ -182,32 +180,19 @@ impl CommandHandler {
         };
         // Tenant binding and the statement's role (#1328).
         if let Some(user) = auth {
-            if let Err(e) = user.authorize_statement(
-                &graph_name,
-                self.query_engine.statement_is_write(&query_str),
-            ) {
+            if let Err(e) = user.authorize_statement(&graph_name, self.query_engine.statement_is_write(&query_str)) {
                 return RespValue::Error(format!("ERR {e}"));
             }
         }
 
-        let is_write = self
-            .query_engine
-            .statement_is_write(&query_str)
-            .unwrap_or(false);
+        let is_write = self.query_engine.statement_is_write(&query_str).unwrap_or(false);
         let time_limit = self.tenant_manager.query_time_limit(&graph_name);
         if read_only && is_write {
-            return RespValue::Error(
-                "ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY".to_string(),
-            );
+            return RespValue::Error("ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY".to_string());
         }
         let result = if is_write {
-            self.query_engine.execute_mut_with_params_within(
-                &query_str,
-                store,
-                &graph_name,
-                &params,
-                time_limit,
-            )
+            self.query_engine
+                .execute_mut_with_params_within(&query_str, store, &graph_name, &params, time_limit)
         } else {
             self.query_engine
                 .execute_with_params_within(&query_str, store, &params, time_limit)
@@ -230,10 +215,7 @@ impl CommandHandler {
     /// Two refusals: a dangling key with no value, which is a caller off by
     /// one and would otherwise bind nothing silently, and a key the query
     /// never mentions, which is a typo.
-    fn params_from_args(
-        query: &str,
-        rest: &[RespValue],
-    ) -> Result<crate::query::BoundParams, String> {
+    fn params_from_args(query: &str, rest: &[RespValue]) -> Result<crate::query::BoundParams, String> {
         if rest.len() % 2 != 0 {
             return Err(format!(
                 "parameters are key/value pairs; got {} trailing argument{} after the query",
@@ -270,9 +252,7 @@ impl CommandHandler {
         auth: Option<&crate::auth::Credential>,
     ) -> RespValue {
         if args.len() < 3 {
-            return RespValue::Error(
-                "ERR wrong number of arguments for 'GRAPH.QUERY' command".to_string(),
-            );
+            return RespValue::Error("ERR wrong number of arguments for 'GRAPH.QUERY' command".to_string());
         }
 
         // Extract graph name. This build serves a single graph: the name used to be
@@ -326,18 +306,18 @@ impl CommandHandler {
             // statement that failed to persist had succeeded, and a success
             // is not rolled back (#1274).
             if crate::persistence::health::is_degraded() {
-                return RespValue::Error(format!("ERR {}", crate::persistence::health::refusal()));
+                return RespValue::Error(format!(
+                    "ERR {}",
+                    crate::persistence::health::refusal()
+                ));
             }
-            if let Some(user) = auth {
-                if let Err(e) = user.authorize_statement(
-                    &graph_name,
-                    self.query_engine.statement_is_write(&query_str),
-                ) {
-                    return RespValue::Error(format!("ERR {e}"));
-                }
+        if let Some(user) = auth {
+            if let Err(e) = user.authorize_statement(&graph_name, self.query_engine.statement_is_write(&query_str)) {
+                return RespValue::Error(format!("ERR {e}"));
             }
+        }
 
-            let mut store_guard = store.write().await;
+        let mut store_guard = store.write().await;
 
             // Record what the statement changes, so persistence does not depend on
             // what it returns (#1094).
@@ -368,11 +348,7 @@ impl CommandHandler {
                 let mutations = store_guard.take_write_log();
                 match persist_mgr.apply_mutations(&graph_name, &store_guard, &mutations) {
                     Ok(n) => {
-                        debug!(
-                            "Persisted {} entities from {} mutations",
-                            n,
-                            mutations.len()
-                        );
+                        debug!("Persisted {} entities from {} mutations", n, mutations.len());
                         None
                     }
                     Err(e) => {
@@ -401,12 +377,9 @@ impl CommandHandler {
             }
         } else {
             let store_guard = store.read().await;
-            let res = self.query_engine.execute_with_params_within(
-                &query_str,
-                &*store_guard,
-                &params,
-                time_limit,
-            );
+            let res = self
+                .query_engine
+                .execute_with_params_within(&query_str, &*store_guard, &params, time_limit);
             drop(store_guard);
             res
         };
@@ -436,11 +409,7 @@ impl CommandHandler {
         // guarantee in the name was not one (#1111). Now that the parser decides
         // what a write is, refusing one here is a single check.
         if let Some(Ok(Some(query))) = args.get(2).map(|a| a.as_string()) {
-            if self
-                .query_engine
-                .statement_is_write(&query)
-                .unwrap_or(false)
-            {
+            if self.query_engine.statement_is_write(&query).unwrap_or(false) {
                 return RespValue::Error(
                     "ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY".to_string(),
                 );
@@ -533,9 +502,7 @@ impl CommandHandler {
         auth: Option<&crate::auth::Credential>,
     ) -> RespValue {
         if args.len() < 2 {
-            return RespValue::Error(
-                "ERR wrong number of arguments for 'GRAPH.DELETE' command".to_string(),
-            );
+            return RespValue::Error("ERR wrong number of arguments for 'GRAPH.DELETE' command".to_string());
         }
 
         let graph_name = match args[1].as_string() {
@@ -626,9 +593,7 @@ impl CommandHandler {
     /// Handle ECHO command
     fn handle_echo(&self, args: &[RespValue]) -> RespValue {
         if args.len() < 2 {
-            return RespValue::Error(
-                "ERR wrong number of arguments for 'ECHO' command".to_string(),
-            );
+            return RespValue::Error("ERR wrong number of arguments for 'ECHO' command".to_string());
         }
 
         match args[1].as_bulk_string() {
@@ -724,7 +689,9 @@ impl CommandHandler {
                     crate::graph::PropertyValue::String(s) => {
                         RespValue::BulkString(Some(s.clone().into_bytes()))
                     }
-                    crate::graph::PropertyValue::Integer(i) => RespValue::Integer(*i),
+                    crate::graph::PropertyValue::Integer(i) => {
+                        RespValue::Integer(*i)
+                    }
                     crate::graph::PropertyValue::Float(f) => {
                         RespValue::BulkString(Some(f.to_string().into_bytes()))
                     }
@@ -775,7 +742,7 @@ impl CommandHandler {
 
 impl Default for CommandHandler {
     fn default() -> Self {
-        Self::new(None) // Default is in-memory only (no persistence)
+        Self::new(None)  // Default is in-memory only (no persistence)
     }
 }
 
@@ -828,8 +795,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_ping() {
-        let handler = CommandHandler::new(None); // No persistence for tests
-        let cmd = RespValue::Array(vec![RespValue::BulkString(Some(b"PING".to_vec()))]);
+        let handler = CommandHandler::new(None);  // No persistence for tests
+        let cmd = RespValue::Array(vec![
+            RespValue::BulkString(Some(b"PING".to_vec())),
+        ]);
 
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let response = handler.handle_command(&cmd, &store, None).await;
@@ -839,7 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_echo() {
-        let handler = CommandHandler::new(None); // No persistence for tests
+        let handler = CommandHandler::new(None);  // No persistence for tests
         let cmd = RespValue::Array(vec![
             RespValue::BulkString(Some(b"ECHO".to_vec())),
             RespValue::BulkString(Some(b"hello".to_vec())),
@@ -853,7 +822,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graph_query() {
-        let handler = CommandHandler::new(None); // No persistence for tests
+        let handler = CommandHandler::new(None);  // No persistence for tests
 
         // Create test data
         let mut graph_store = GraphStore::new();
@@ -882,7 +851,9 @@ mod tests {
     async fn test_command_handler_default() {
         let handler = CommandHandler::default();
         let store = Arc::new(RwLock::new(GraphStore::new()));
-        let cmd = RespValue::Array(vec![RespValue::BulkString(Some(b"PING".to_vec()))]);
+        let cmd = RespValue::Array(vec![
+            RespValue::BulkString(Some(b"PING".to_vec())),
+        ]);
         let response = handler.handle_command(&cmd, &store, None).await;
         assert_eq!(response, RespValue::SimpleString("PONG".to_string()));
     }
@@ -925,7 +896,9 @@ mod tests {
         let handler = CommandHandler::new(None);
         let store = Arc::new(RwLock::new(GraphStore::new()));
 
-        let cmd = RespValue::Array(vec![RespValue::BulkString(Some(b"GRAPH.LIST".to_vec()))]);
+        let cmd = RespValue::Array(vec![
+            RespValue::BulkString(Some(b"GRAPH.LIST".to_vec())),
+        ]);
         let response = handler.handle_command(&cmd, &store, None).await;
         assert!(matches!(response, RespValue::Array(_)));
     }
@@ -935,7 +908,9 @@ mod tests {
         let handler = CommandHandler::new(None);
         let store = Arc::new(RwLock::new(GraphStore::new()));
 
-        let cmd = RespValue::Array(vec![RespValue::BulkString(Some(b"INFO".to_vec()))]);
+        let cmd = RespValue::Array(vec![
+            RespValue::BulkString(Some(b"INFO".to_vec())),
+        ]);
         let response = handler.handle_command(&cmd, &store, None).await;
         // Should return a bulk string with info
         assert!(matches!(response, RespValue::BulkString(_)));
@@ -946,7 +921,9 @@ mod tests {
         let handler = CommandHandler::new(None);
         let store = Arc::new(RwLock::new(GraphStore::new()));
 
-        let cmd = RespValue::Array(vec![RespValue::BulkString(Some(b"NONEXISTENT".to_vec()))]);
+        let cmd = RespValue::Array(vec![
+            RespValue::BulkString(Some(b"NONEXISTENT".to_vec())),
+        ]);
         let response = handler.handle_command(&cmd, &store, None).await;
         // Should return an error
         assert!(matches!(response, RespValue::Error(_)));
@@ -993,10 +970,7 @@ mod tests {
 
         match response {
             RespValue::Error(msg) => {
-                assert!(
-                    msg.contains("analytics"),
-                    "should name the rejected graph: {msg}"
-                );
+                assert!(msg.contains("analytics"), "should name the rejected graph: {msg}");
                 assert!(msg.contains("single graph"), "should explain why: {msg}");
             }
             other => panic!("expected an error, got {other:?}"),
@@ -1010,11 +984,7 @@ mod tests {
         ]);
         let _ = handler.handle_command(&cmd, &store, None).await;
         assert_eq!(
-            store
-                .read()
-                .await
-                .get_nodes_by_label(&crate::graph::Label::new("Leak"))
-                .len(),
+            store.read().await.get_nodes_by_label(&crate::graph::Label::new("Leak")).len(),
             0,
             "a rejected query must not write to the default graph"
         );
@@ -1039,7 +1009,9 @@ mod tests {
         );
 
         // Only 1 arg (command only)
-        let cmd = RespValue::Array(vec![RespValue::BulkString(Some(b"GRAPH.QUERY".to_vec()))]);
+        let cmd = RespValue::Array(vec![
+            RespValue::BulkString(Some(b"GRAPH.QUERY".to_vec())),
+        ]);
         let response = handler.handle_command(&cmd, &store, None).await;
         assert_eq!(
             response,
@@ -1075,7 +1047,10 @@ mod tests {
             RespValue::BulkString(None), // null query
         ]);
         let response = handler.handle_command(&cmd, &store, None).await;
-        assert_eq!(response, RespValue::Error("ERR null query".to_string()));
+        assert_eq!(
+            response,
+            RespValue::Error("ERR null query".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1084,13 +1059,13 @@ mod tests {
         let store = Arc::new(RwLock::new(GraphStore::new()));
 
         // Only 1 arg (command only, missing graph name)
-        let cmd = RespValue::Array(vec![RespValue::BulkString(Some(b"GRAPH.DELETE".to_vec()))]);
+        let cmd = RespValue::Array(vec![
+            RespValue::BulkString(Some(b"GRAPH.DELETE".to_vec())),
+        ]);
         let response = handler.handle_command(&cmd, &store, None).await;
         assert_eq!(
             response,
-            RespValue::Error(
-                "ERR wrong number of arguments for 'GRAPH.DELETE' command".to_string()
-            )
+            RespValue::Error("ERR wrong number of arguments for 'GRAPH.DELETE' command".to_string())
         );
     }
 
@@ -1100,7 +1075,9 @@ mod tests {
         let store = Arc::new(RwLock::new(GraphStore::new()));
 
         // Only 1 arg (command only, missing message)
-        let cmd = RespValue::Array(vec![RespValue::BulkString(Some(b"ECHO".to_vec()))]);
+        let cmd = RespValue::Array(vec![
+            RespValue::BulkString(Some(b"ECHO".to_vec())),
+        ]);
         let response = handler.handle_command(&cmd, &store, None).await;
         assert_eq!(
             response,
@@ -1149,7 +1126,10 @@ mod tests {
         ]);
         let response = handler.handle_command(&cmd, &store, None).await;
         // Should fall back to PONG when as_string fails
-        assert_eq!(response, RespValue::BulkString(Some(b"PONG".to_vec())));
+        assert_eq!(
+            response,
+            RespValue::BulkString(Some(b"PONG".to_vec()))
+        );
     }
 
     #[tokio::test]
@@ -1262,11 +1242,17 @@ mod tests {
         let handler = CommandHandler::new(None);
         let value_true = Value::Property(PropertyValue::Boolean(true));
         let result = handler.format_value(&value_true);
-        assert_eq!(result, RespValue::BulkString(Some(b"true".to_vec())));
+        assert_eq!(
+            result,
+            RespValue::BulkString(Some(b"true".to_vec()))
+        );
 
         let value_false = Value::Property(PropertyValue::Boolean(false));
         let result = handler.format_value(&value_false);
-        assert_eq!(result, RespValue::BulkString(Some(b"false".to_vec())));
+        assert_eq!(
+            result,
+            RespValue::BulkString(Some(b"false".to_vec()))
+        );
     }
 
     #[tokio::test]
@@ -1325,25 +1311,13 @@ mod tests {
         let mut batch = RecordBatch::new(vec!["name".to_string(), "age".to_string()]);
 
         let mut r1 = Record::new();
-        r1.bind(
-            "name".to_string(),
-            Value::Property(PropertyValue::String("Alice".to_string())),
-        );
-        r1.bind(
-            "age".to_string(),
-            Value::Property(PropertyValue::Integer(30)),
-        );
+        r1.bind("name".to_string(), Value::Property(PropertyValue::String("Alice".to_string())));
+        r1.bind("age".to_string(), Value::Property(PropertyValue::Integer(30)));
         batch.push(r1);
 
         let mut r2 = Record::new();
-        r2.bind(
-            "name".to_string(),
-            Value::Property(PropertyValue::String("Bob".to_string())),
-        );
-        r2.bind(
-            "age".to_string(),
-            Value::Property(PropertyValue::Integer(25)),
-        );
+        r2.bind("name".to_string(), Value::Property(PropertyValue::String("Bob".to_string())));
+        r2.bind("age".to_string(), Value::Property(PropertyValue::Integer(25)));
         batch.push(r2);
 
         let result = handler.format_query_result(batch);
@@ -1351,7 +1325,7 @@ mod tests {
             RespValue::Array(rows) => {
                 // First row is the header
                 assert_eq!(rows.len(), 3); // 1 header + 2 data rows
-                                           // Check header
+                // Check header
                 match &rows[0] {
                     RespValue::Array(header) => {
                         assert_eq!(header.len(), 2);
@@ -1393,10 +1367,7 @@ mod tests {
         // Record only has "name" bound, but batch declares "name" + "age" columns
         let mut batch = RecordBatch::new(vec!["name".to_string(), "age".to_string()]);
         let mut r = Record::new();
-        r.bind(
-            "name".to_string(),
-            Value::Property(PropertyValue::String("Alice".to_string())),
-        );
+        r.bind("name".to_string(), Value::Property(PropertyValue::String("Alice".to_string())));
         // "age" is NOT bound
         batch.push(r);
 
@@ -1444,7 +1415,10 @@ mod tests {
             RespValue::BulkString(Some(b"arg".to_vec())),
         ]);
         let response = handler.handle_command(&cmd, &store, None).await;
-        assert_eq!(response, RespValue::Error("ERR null command".to_string()));
+        assert_eq!(
+            response,
+            RespValue::Error("ERR null command".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1453,7 +1427,9 @@ mod tests {
         let store = Arc::new(RwLock::new(GraphStore::new()));
 
         // Array where first element is an Integer (not a BulkString)
-        let cmd = RespValue::Array(vec![RespValue::Integer(123)]);
+        let cmd = RespValue::Array(vec![
+            RespValue::Integer(123),
+        ]);
         let response = handler.handle_command(&cmd, &store, None).await;
         match response {
             RespValue::Error(msg) => {
@@ -1519,18 +1495,13 @@ mod tests {
         let cmd = RespValue::Array(vec![
             RespValue::BulkString(Some(b"GRAPH.QUERY".to_vec())),
             RespValue::BulkString(Some(b"default".to_vec())),
-            RespValue::BulkString(Some(
-                b"MATCH (n:Person {name: 'Alice'}) SET n.age = 30 RETURN n".to_vec(),
-            )),
+            RespValue::BulkString(Some(b"MATCH (n:Person {name: 'Alice'}) SET n.age = 30 RETURN n".to_vec())),
         ]);
         // Should detect " SET " and treat as write query
         let response = handler.handle_command(&cmd, &store, None).await;
         // May error since no Alice exists, but the important thing is it routes through the write path
         // without panicking
-        assert!(matches!(
-            response,
-            RespValue::Array(_) | RespValue::Error(_)
-        ));
+        assert!(matches!(response, RespValue::Array(_) | RespValue::Error(_)));
     }
 
     #[tokio::test]
@@ -1798,13 +1769,11 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(e, "null parameter name");
-            let e =
-                CommandHandler::params_from_args("RETURN $a", &[RespValue::Integer(1), bulk("1")])
-                    .unwrap_err();
+            let e = CommandHandler::params_from_args("RETURN $a", &[RespValue::Integer(1), bulk("1")])
+                .unwrap_err();
             assert!(e.contains("Expected bulk string"), "{e}");
-            let e =
-                CommandHandler::params_from_args("RETURN $a", &[bulk("a"), RespValue::Integer(1)])
-                    .unwrap_err();
+            let e = CommandHandler::params_from_args("RETURN $a", &[bulk("a"), RespValue::Integer(1)])
+                .unwrap_err();
             assert!(e.contains("Expected bulk string"), "{e}");
             let p = CommandHandler::params_from_args(
                 "RETURN $a",

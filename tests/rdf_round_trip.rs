@@ -42,10 +42,7 @@ fn round_trip(source: &GraphStore) -> GraphStore {
         .expect("import");
     // Samyama's own RDF is the case the mapping exists for: nothing in it may
     // be skipped or flattened (#1906).
-    assert!(
-        report.lossless(),
-        "a Samyama export did not import losslessly: {report:?}"
-    );
+    assert!(report.lossless(), "a Samyama export did not import losslessly: {report:?}");
     out
 }
 
@@ -57,7 +54,8 @@ fn shape(store: &GraphStore) -> Vec<(Vec<String>, Vec<(String, PropertyValue)>)>
         .all_nodes()
         .into_iter()
         .map(|n| {
-            let mut labels: Vec<String> = n.labels.iter().map(|l| l.as_str().to_string()).collect();
+            let mut labels: Vec<String> =
+                n.labels.iter().map(|l| l.as_str().to_string()).collect();
             labels.sort();
             // Merged, not `n.properties`: the row map is only half the store,
             // and an imported node's properties live on the columnar side
@@ -80,12 +78,10 @@ fn iris(store: &GraphStore) -> Vec<String> {
     let mut v: Vec<String> = store
         .all_nodes()
         .into_iter()
-        .filter_map(
-            |n| match store.node_properties_merged(n.id).get(IRI_PROPERTY) {
-                Some(PropertyValue::String(s)) => Some(s.clone()),
-                _ => None,
-            },
-        )
+        .filter_map(|n| match store.node_properties_merged(n.id).get(IRI_PROPERTY) {
+            Some(PropertyValue::String(s)) => Some(s.clone()),
+            _ => None,
+        })
         .collect();
     v.sort();
     v
@@ -371,9 +367,7 @@ fn a_node_with_no_label_still_comes_back() {
         .expect("import");
     assert_eq!(graph.all_nodes().len(), 1);
     assert_eq!(
-        graph
-            .node_properties_merged(graph.all_nodes()[0].id)
-            .get("name"),
+        graph.node_properties_merged(graph.all_nodes()[0].id).get("name"),
         Some(&PropertyValue::String("nameless".into()))
     );
 }

@@ -50,10 +50,7 @@ fn the_basic_extended_form_parses_too() {
 
 #[test]
 fn it_agrees_with_the_unit_form() {
-    assert_eq!(
-        dur("P2012-02-02T14:37:21.545"),
-        dur("P2012Y2M2DT14H37M21.545S")
-    );
+    assert_eq!(dur("P2012-02-02T14:37:21.545"), dur("P2012Y2M2DT14H37M21.545S"));
 }
 
 #[test]

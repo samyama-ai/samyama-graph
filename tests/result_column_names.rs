@@ -55,14 +55,8 @@ fn count_star_keeps_its_star() {
     // The reconstruction produced `count()` because `*` is not an argument
     // expression. A caller asking for the `count(*)` key got nothing.
     let store = two_nodes();
-    assert_eq!(
-        columns(&store, "MATCH () RETURN count(*)"),
-        vec!["count(*)"]
-    );
-    assert_eq!(
-        columns(&store, "MATCH (n) RETURN count(n)"),
-        vec!["count(n)"]
-    );
+    assert_eq!(columns(&store, "MATCH () RETURN count(*)"), vec!["count(*)"]);
+    assert_eq!(columns(&store, "MATCH (n) RETURN count(n)"), vec!["count(n)"]);
     assert_eq!(
         columns(&store, "MATCH (n) RETURN n.v, count(*)"),
         vec!["n.v", "count(*)"]
@@ -73,10 +67,7 @@ fn count_star_keeps_its_star() {
 fn an_alias_still_wins() {
     let store = two_nodes();
     assert_eq!(columns(&store, "MATCH (n) RETURN n.v AS val"), vec!["val"]);
-    assert_eq!(
-        columns(&store, "MATCH () RETURN count(*) AS total"),
-        vec!["total"]
-    );
+    assert_eq!(columns(&store, "MATCH () RETURN count(*) AS total"), vec!["total"]);
 }
 
 #[test]
@@ -86,9 +77,7 @@ fn the_named_column_is_the_one_the_row_carries() {
     // caller, so the lookup is asserted rather than the header alone.
     let store = two_nodes();
     let q = parse_query("MATCH () RETURN count(*)").expect("query should parse");
-    let out = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect("query should run");
+    let out = QueryExecutor::new(&store).execute(&q).expect("query should run");
     assert_eq!(out.columns, vec!["count(*)"]);
     assert!(
         out.records[0].get("count(*)").is_some(),

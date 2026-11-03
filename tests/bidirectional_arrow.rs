@@ -44,11 +44,7 @@ fn rows(store: &GraphStore, cypher: &str) -> usize {
 fn both_ends_means_either_direction() {
     let s = store();
     assert_eq!(rows(&s, "MATCH (n)<-->(k) RETURN n, k"), 2);
-    assert_eq!(
-        rows(&s, "MATCH (n)--(k) RETURN n, k"),
-        2,
-        "the equivalent spelling"
-    );
+    assert_eq!(rows(&s, "MATCH (n)--(k) RETURN n, k"), 2, "the equivalent spelling");
     assert_eq!(rows(&s, "MATCH (n)-->(k) RETURN n, k"), 1, "outgoing");
     assert_eq!(rows(&s, "MATCH (n)<--(k) RETURN n, k"), 1, "incoming");
 }

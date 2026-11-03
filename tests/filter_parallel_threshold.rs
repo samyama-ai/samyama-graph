@@ -81,10 +81,7 @@ fn cost_accumulates_across_conjuncts() {
     let same_plus_more = "MATCH (i:Item) WHERE toUpper(i.name) CONTAINS \"X\" \
                           AND toLower(i.name) CONTAINS \"y\" RETURN i";
     assert!(!goes_parallel(cheap));
-    assert!(
-        goes_parallel(same_plus_more),
-        "adding a second string call must not reduce cost"
-    );
+    assert!(goes_parallel(same_plus_more), "adding a second string call must not reduce cost");
 }
 
 /// The classification changes *how* rows are filtered, never *which*.
@@ -93,18 +90,8 @@ fn both_paths_return_the_same_rows() {
     let mut store = GraphStore::new();
     for i in 0..4000i64 {
         let id = store.create_node("Item");
-        let _ = store.set_node_property(
-            "default",
-            id,
-            "v".to_string(),
-            PropertyValue::Integer(i % 977),
-        );
-        let _ = store.set_node_property(
-            "default",
-            id,
-            "w".to_string(),
-            PropertyValue::Integer(i % 13),
-        );
+        let _ = store.set_node_property("default", id, "v".to_string(), PropertyValue::Integer(i % 977));
+        let _ = store.set_node_property("default", id, "w".to_string(), PropertyValue::Integer(i % 13));
         let _ = store.set_node_property(
             "default",
             id,
@@ -115,9 +102,7 @@ fn both_paths_return_the_same_rows() {
 
     let count = |cypher: &str| -> i64 {
         let query = parse_query(cypher).expect("query should parse");
-        let batch = QueryExecutor::new(&store)
-            .execute(&query)
-            .expect("query should run");
+        let batch = QueryExecutor::new(&store).execute(&query).expect("query should run");
         match batch.records[0].get("c") {
             Some(Value::Property(PropertyValue::Integer(n))) => *n,
             other => panic!("{other:?}"),
@@ -137,11 +122,7 @@ fn both_paths_return_the_same_rows() {
 
     let expected = (0..4000i64).filter(|i| i % 977 > 100 && i % 13 > 2).count() as i64;
     assert_eq!(count(sequential), expected);
-    assert_eq!(
-        count(parallel),
-        expected,
-        "the parallel path selected different rows"
-    );
+    assert_eq!(count(parallel), expected, "the parallel path selected different rows");
 }
 
 #[test]

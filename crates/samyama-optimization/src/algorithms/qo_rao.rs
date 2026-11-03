@@ -12,8 +12,8 @@
 //! Reference: Rao & Saroj (2020) "Quasi-oppositional-based Rao algorithms for
 //! multi-objective design optimization of selected heat sinks" (JCDE).
 
-use super::rao::RaoVariant;
 use crate::common::{Individual, OptimizationResult, Problem, SolverConfig};
+use super::rao::RaoVariant;
 use ndarray::Array1;
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -28,10 +28,7 @@ pub struct QORaoSolver {
 impl QORaoSolver {
     pub fn new(config: SolverConfig, variant: RaoVariant) -> Self {
         Self {
-            seed: None,
-            config,
-            variant,
-        }
+            seed: None, config, variant }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -61,7 +58,7 @@ impl QORaoSolver {
         let qo_init: Vec<Individual> = population
             .par_iter()
             .enumerate()
-            .map(|(__idx, ind)| {
+                .map(|(__idx, ind)| {
                 let mut local_rng = crate::common::rng::child_rng(self.seed, 0, __idx);
                 let qo_vars = quasi_oppose(&ind.variables, &lower, &upper, &mut local_rng);
                 let fitness = crate::common::evaluate(problem, &qo_vars);
@@ -99,7 +96,8 @@ impl QORaoSolver {
 
                     // Random vector for Rao-2/Rao-3 (sampled from bounds; matches existing rao.rs).
                     let mut rand_vars = Array1::zeros(dim);
-                    let need_rand = matches!(self.variant, RaoVariant::Rao2 | RaoVariant::Rao3);
+                    let need_rand =
+                        matches!(self.variant, RaoVariant::Rao2 | RaoVariant::Rao3);
                     if need_rand {
                         for j in 0..dim {
                             rand_vars[j] = local_rng.gen_range(lower[j]..upper[j]);

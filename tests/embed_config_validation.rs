@@ -8,7 +8,9 @@
 
 use std::collections::HashMap;
 
-use samyama::persistence::tenant::{native_dimension_for_model, AutoEmbedConfig, LLMProvider};
+use samyama::persistence::tenant::{
+    native_dimension_for_model, AutoEmbedConfig, LLMProvider,
+};
 use samyama::persistence::TenantManager;
 
 fn config(model: &str, dimension: usize) -> AutoEmbedConfig {
@@ -35,14 +37,8 @@ fn a_dimension_contradicting_the_model_is_rejected() {
         .expect_err("should not accept a config that can never store a vector");
 
     let msg = format!("{err}");
-    assert!(
-        msg.contains("768"),
-        "should name the model's real dimension: {msg}"
-    );
-    assert!(
-        msg.contains("1536"),
-        "should name the configured one: {msg}"
-    );
+    assert!(msg.contains("768"), "should name the model's real dimension: {msg}");
+    assert!(msg.contains("1536"), "should name the configured one: {msg}");
 }
 
 #[test]
@@ -93,12 +89,6 @@ fn model_names_are_recognised_through_tags_and_namespaces() {
             "unrecognised spelling: {name:?}"
         );
     }
-    assert_eq!(
-        native_dimension_for_model("text-embedding-3-large"),
-        Some(3072)
-    );
-    assert_eq!(
-        native_dimension_for_model("something-nobody-has-heard-of"),
-        None
-    );
+    assert_eq!(native_dimension_for_model("text-embedding-3-large"), Some(3072));
+    assert_eq!(native_dimension_for_model("something-nobody-has-heard-of"), None);
 }

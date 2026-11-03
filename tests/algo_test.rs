@@ -10,89 +10,55 @@ fn test_pagerank_procedure() {
     // Center (Alice) -> Bob, Charlie
     // Bob -> Alice
     // Charlie -> Alice
-
+    
     // Alice (Center)
     let alice = store.create_node("Person");
-    store
-        .set_node_property("default", alice, "name", "Alice")
-        .unwrap();
+    store.set_node_property("default", alice, "name", "Alice").unwrap();
 
     let bob = store.create_node("Person");
-    store
-        .set_node_property("default", bob, "name", "Bob")
-        .unwrap();
+    store.set_node_property("default", bob, "name", "Bob").unwrap();
 
     let charlie = store.create_node("Person");
-    store
-        .set_node_property("default", charlie, "name", "Charlie")
-        .unwrap();
-
+    store.set_node_property("default", charlie, "name", "Charlie").unwrap();
+    
     store.create_edge(alice, bob, "KNOWS").unwrap();
     store.create_edge(alice, charlie, "KNOWS").unwrap();
     store.create_edge(bob, alice, "KNOWS").unwrap();
     store.create_edge(charlie, alice, "KNOWS").unwrap();
-
+    
     // Run PageRank
     let query = "CALL algo.pageRank('Person', 'KNOWS') YIELD node, score RETURN node.name, score";
     let result = engine.execute(query, &store).unwrap();
-
+    
     assert_eq!(result.records.len(), 3);
-
+    
     // Alice should be first (highest score)
     let first = &result.records[0];
-    assert_eq!(
-        first
-            .get("node.name")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string(),
-        Some("Alice")
-    );
-
-    let score = first
-        .get("score")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_float()
-        .unwrap();
+    assert_eq!(first.get("node.name").unwrap().as_property().unwrap().as_string(), Some("Alice"));
+    
+    let score = first.get("score").unwrap().as_property().unwrap().as_float().unwrap();
     // With 1/N normalization (3 nodes), Alice's score should be highest but < 1.0
-    assert!(
-        score > 0.0 && score < 1.0,
-        "PageRank score should be in (0,1) with 1/N normalization, got {}",
-        score
-    );
+    assert!(score > 0.0 && score < 1.0, "PageRank score should be in (0,1) with 1/N normalization, got {}", score);
 }
 
 #[test]
 fn test_shortest_path_procedure() {
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
-
+    
     // 1 -> 2 -> 3
     let n1 = store.create_node("Node");
     let n2 = store.create_node("Node");
     let n3 = store.create_node("Node");
-
+    
     store.create_edge(n1, n2, "LINK").unwrap();
     store.create_edge(n2, n3, "LINK").unwrap();
-
+    
     // CALL algo.shortestPath(1, 3)
-    let query = format!(
-        "CALL algo.shortestPath({}, {}) YIELD path, cost RETURN cost",
-        n1.as_u64(),
-        n3.as_u64()
-    );
+    let query = format!("CALL algo.shortestPath({}, {}) YIELD path, cost RETURN cost", n1.as_u64(), n3.as_u64());
     let result = engine.execute(&query, &store).unwrap();
-
+    
     assert_eq!(result.records.len(), 1);
-    let cost = result.records[0]
-        .get("cost")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_float()
-        .unwrap();
+    let cost = result.records[0].get("cost").unwrap().as_property().unwrap().as_float().unwrap();
     assert_eq!(cost, 2.0);
 }

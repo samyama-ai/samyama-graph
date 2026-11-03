@@ -22,9 +22,7 @@ fn int(i: i64) -> Option<PropertyValue> {
 fn run(store: &mut GraphStore, cypher: &str) {
     let query = parse_query(cypher).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
     let mut mutating = MutQueryExecutor::new(store, "default".to_string());
-    mutating
-        .execute(&query)
-        .unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
+    mutating.execute(&query).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
 }
 
 fn count(store: &GraphStore, cypher: &str) -> PropertyValue {
@@ -43,20 +41,9 @@ fn create_with_properties_keeps_no_row_copy() {
     props.insert("x".to_string(), PropertyValue::Integer(1));
     let n = store.create_node_with_properties("default", vec![Label::new("N")], props);
 
-    assert!(
-        store.get_node(n).unwrap().properties.is_empty(),
-        "the row holds a second copy"
-    );
+    assert!(store.get_node(n).unwrap().properties.is_empty(), "the row holds a second copy");
     assert_eq!(store.node_property(n, "x"), int(1));
-    assert_eq!(
-        store
-            .node_materialized(n)
-            .unwrap()
-            .properties
-            .get("x")
-            .cloned(),
-        int(1)
-    );
+    assert_eq!(store.node_materialized(n).unwrap().properties.get("x").cloned(), int(1));
 }
 
 #[test]
@@ -66,10 +53,7 @@ fn a_property_write_keeps_no_row_copy() {
     store.set_node_property("default", n, "x", 1i64).unwrap();
     store.set_node_property("default", n, "x", 2i64).unwrap();
 
-    assert!(
-        store.get_node(n).unwrap().properties.is_empty(),
-        "the row holds a second copy"
-    );
+    assert!(store.get_node(n).unwrap().properties.is_empty(), "the row holds a second copy");
     assert_eq!(store.node_property(n, "x"), int(2));
 }
 
@@ -84,12 +68,7 @@ fn a_store_write_supersedes_a_value_written_to_the_row_directly() {
 
     assert_eq!(store.node_property(n, "x"), int(2));
     assert_eq!(
-        store
-            .node_materialized(n)
-            .unwrap()
-            .properties
-            .get("x")
-            .cloned(),
+        store.node_materialized(n).unwrap().properties.get("x").cloned(),
         int(2),
         "the merged map kept the row's superseded value"
     );

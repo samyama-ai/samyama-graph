@@ -156,8 +156,5 @@ fn a_wrong_bulk_length_would_be_caught() {
     let mut buf = BytesMut::from(broken.as_bytes());
     let decoded = RespValue::decode(&mut buf);
     let clean = matches!(decoded, Ok(Some(_))) && buf.is_empty();
-    assert!(
-        !clean,
-        "a one-byte length error decoded as a complete frame"
-    );
+    assert!(!clean, "a one-byte length error decoded as a complete frame");
 }

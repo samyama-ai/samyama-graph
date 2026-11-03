@@ -37,25 +37,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _calibration = bench_setup::report_calibration();
 
     let args: Vec<String> = std::env::args().collect();
-    let arg = |flag: &str| {
-        args.iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1))
-    };
+    let arg = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
     let data_dir = arg("--data-dir").map(PathBuf::from).unwrap_or_else(|| {
-        eprintln!(
-            "--data-dir <path> is required (this example needs input; see the header comment)"
-        );
-        std::process::exit(2)
-    });
-    let post_id: i64 = arg("--post-id")
-        .unwrap_or_else(|| {
-            eprintln!(
-                "--post-id <id> is required (this example needs input; see the header comment)"
-            );
+            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
             std::process::exit(2)
-        })
-        .parse()?;
+        });
+    let post_id: i64 = arg("--post-id").unwrap_or_else(|| {
+            eprintln!("--post-id <id> is required (this example needs input; see the header comment)");
+            std::process::exit(2)
+        }).parse()?;
     let runs: usize = arg("--runs").map(|s| s.parse()).transpose()?.unwrap_or(11);
 
     let mut graph = GraphStore::new();
@@ -142,18 +132,12 @@ RETURN count(f) AS c"
             continue;
         }
         times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!(
-            "{label:<44} median {:>8.3} ms   rows {rows}",
-            times[times.len() / 2]
-        );
+        println!("{label:<44} median {:>8.3} ms   rows {rows}", times[times.len() / 2]);
     }
 
     // Plans for both, because the `count` shape is the slow one and #711
     // described its plan by inference from IS7's rather than reading it.
-    for (label, cypher) in [
-        ("IS7 as written", &full),
-        ("op's KNOWS degree, counted", &knows_only),
-    ] {
+    for (label, cypher) in [("IS7 as written", &full), ("op's KNOWS degree, counted", &knows_only)] {
         println!("\n--- plan of {label} ---");
         let q = parse_query(&format!("EXPLAIN {cypher}"))?;
         for r in &QueryExecutor::new(&graph).execute(&q)?.records {

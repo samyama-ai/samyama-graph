@@ -33,10 +33,7 @@ fn a_relationship_variable_twice_in_one_pattern_is_refused() {
 
 #[test]
 fn the_message_names_the_relationship() {
-    let err = format!(
-        "{:?}",
-        parse_query("MATCH (a)-[r]->()-[r]->(a) RETURN r").unwrap_err()
-    );
+    let err = format!("{:?}", parse_query("MATCH (a)-[r]->()-[r]->(a) RETURN r").unwrap_err());
     assert!(err.contains('r'), "{err}");
 }
 

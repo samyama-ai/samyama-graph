@@ -54,25 +54,10 @@ fn a_pair_with_no_shared_date_measures_zero_days() {
         ("inDays", "date('1984-10-11')", "localtime('16:30')", "PT0S"),
         ("inDays", "date('1984-10-11')", "time('16:30+0100')", "PT0S"),
         ("inDays", "localtime('14:30')", "date('2015-06-24')", "PT0S"),
-        (
-            "inDays",
-            "localtime('14:30')",
-            "localdatetime('2016-07-21T21:45:22.142')",
-            "PT0S",
-        ),
-        (
-            "inDays",
-            "localtime('14:30')",
-            "datetime('2015-07-21T21:40:32.142+0100')",
-            "PT0S",
-        ),
+        ("inDays", "localtime('14:30')", "localdatetime('2016-07-21T21:45:22.142')", "PT0S"),
+        ("inDays", "localtime('14:30')", "datetime('2015-07-21T21:40:32.142+0100')", "PT0S"),
         ("inDays", "time('14:30')", "date('2015-06-24')", "PT0S"),
-        (
-            "inDays",
-            "localdatetime('2015-07-21T21:40:32.142')",
-            "localtime('16:30')",
-            "PT0S",
-        ),
+        ("inDays", "localdatetime('2015-07-21T21:40:32.142')", "localtime('16:30')", "PT0S"),
     ]);
 }
 
@@ -80,18 +65,8 @@ fn a_pair_with_no_shared_date_measures_zero_days() {
 #[test]
 fn the_clock_difference_is_the_whole_answer() {
     check(&[
-        (
-            "inSeconds",
-            "date('1984-10-11')",
-            "localtime('16:30')",
-            "PT16H30M",
-        ),
-        (
-            "inSeconds",
-            "localtime('14:30')",
-            "date('2015-06-24')",
-            "PT-14H-30M",
-        ),
+        ("inSeconds", "date('1984-10-11')", "localtime('16:30')", "PT16H30M"),
+        ("inSeconds", "localtime('14:30')", "date('2015-06-24')", "PT-14H-30M"),
         (
             "inSeconds",
             "localtime('14:30')",
@@ -110,19 +85,13 @@ fn the_three_spellings_agree() {
     for (lhs, rhs) in [
         ("date('1984-10-11')", "localtime('16:30')"),
         ("localtime('14:30')", "date('2015-06-24')"),
-        (
-            "localdatetime('2015-07-21T21:40:32.142')",
-            "localtime('16:30')",
-        ),
+        ("localdatetime('2015-07-21T21:40:32.142')", "localtime('16:30')"),
         ("time('14:30')", "datetime('2015-07-21T21:40:32.142+0100')"),
     ] {
         let between = duration(&format!("duration.between({lhs}, {rhs})"));
         let in_seconds = duration(&format!("duration.inSeconds({lhs}, {rhs})"));
         let in_days = duration(&format!("duration.inDays({lhs}, {rhs})"));
-        assert_eq!(
-            between, in_seconds,
-            "between vs inSeconds for ({lhs}, {rhs})"
-        );
+        assert_eq!(between, in_seconds, "between vs inSeconds for ({lhs}, {rhs})");
         assert_eq!(in_days, "PT0S", "inDays for ({lhs}, {rhs})");
     }
 }
@@ -132,29 +101,14 @@ fn the_three_spellings_agree() {
 #[test]
 fn pairs_sharing_a_date_are_unchanged() {
     check(&[
-        (
-            "inDays",
-            "date('1984-10-11')",
-            "date('2015-06-24')",
-            "P11213D",
-        ),
-        (
-            "inDays",
-            "localdatetime('2015-07-21T21:40:32.142')",
-            "date('2015-06-24')",
-            "P-27D",
-        ),
+        ("inDays", "date('1984-10-11')", "date('2015-06-24')", "P11213D"),
+        ("inDays", "localdatetime('2015-07-21T21:40:32.142')", "date('2015-06-24')", "P-27D"),
         (
             "inDays",
             "datetime('2014-07-21T21:40:36.143+0200')",
             "datetime('2015-07-21T21:40:32.142+0100')",
             "P365D",
         ),
-        (
-            "between",
-            "date('1984-10-11')",
-            "date('2015-06-24')",
-            "P30Y8M13D",
-        ),
+        ("between", "date('1984-10-11')", "date('2015-06-24')", "P30Y8M13D"),
     ]);
 }

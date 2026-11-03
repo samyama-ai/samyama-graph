@@ -141,51 +141,24 @@ const PROBES: &[(&str, &str, &str)] = &[
 fn fixture() -> GraphStore {
     let mut s = GraphStore::new();
     let a = s.create_node_with_labels([Label::new("N")]);
-    s.set_node_property("default", a, "x", PropertyValue::Integer(1))
-        .unwrap();
-    s.set_node_property(
-        "default",
-        a,
-        "body",
-        PropertyValue::String("a graph database indexes its own structures".into()),
-    )
-    .unwrap();
+    s.set_node_property("default", a, "x", PropertyValue::Integer(1)).unwrap();
+    s.set_node_property("default", a, "body",
+        PropertyValue::String("a graph database indexes its own structures".into())).unwrap();
     // Stored as a string: whether the engine has a datetime *property* type is
     // part of what NDS-03 is asking, so the fixture must not presume it.
-    s.set_node_property(
-        "default",
-        a,
-        "t",
-        PropertyValue::String("2024-06-01T00:00:00Z".into()),
-    )
-    .unwrap();
-    s.set_node_property(
-        "default",
-        a,
-        "start",
-        PropertyValue::String("2024-02-01T00:00:00Z".into()),
-    )
-    .unwrap();
-    s.set_node_property(
-        "default",
-        a,
-        "end",
-        PropertyValue::String("2024-08-01T00:00:00Z".into()),
-    )
-    .unwrap();
+    s.set_node_property("default", a, "t",
+        PropertyValue::String("2024-06-01T00:00:00Z".into())).unwrap();
+    s.set_node_property("default", a, "start",
+        PropertyValue::String("2024-02-01T00:00:00Z".into())).unwrap();
+    s.set_node_property("default", a, "end",
+        PropertyValue::String("2024-08-01T00:00:00Z".into())).unwrap();
     // `Vector`, not `Array` of floats: the engine has a dedicated vector
     // property type, and NDS-05/09 are about that type rather than about a
     // list that happens to hold numbers.
-    s.set_node_property(
-        "default",
-        a,
-        "embedding",
-        PropertyValue::Vector(vec![1.0, 2.0, 3.0]),
-    )
-    .unwrap();
+    s.set_node_property("default", a, "embedding",
+        PropertyValue::Vector(vec![1.0, 2.0, 3.0])).unwrap();
     let b = s.create_node_with_labels([Label::new("N")]);
-    s.set_node_property("default", b, "x", PropertyValue::Integer(2))
-        .unwrap();
+    s.set_node_property("default", b, "x", PropertyValue::Integer(2)).unwrap();
     s.create_edge(a, b, "LINKS").unwrap();
     s
 }
@@ -209,9 +182,7 @@ fn main() {
                     Err(e) => format!("exec: {}", e.to_string().lines().next().unwrap_or("")),
                 },
             };
-            if !outcome.is_empty() {
-                break;
-            }
+            if !outcome.is_empty() { break; }
         }
         let works = outcome.is_empty();
         rows.push(serde_json::json!({
@@ -228,11 +199,7 @@ fn main() {
     for (i, (req, what, _)) in PROBES.iter().enumerate() {
         let e = by_req.entry(req).or_insert((0, 0, Vec::new()));
         e.1 += 1;
-        if rows[i]["works"] == true {
-            e.0 += 1
-        } else {
-            e.2.push(what)
-        }
+        if rows[i]["works"] == true { e.0 += 1 } else { e.2.push(what) }
     }
 
     let json = serde_json::json!({
@@ -247,22 +214,15 @@ fn main() {
     });
     let args: Vec<String> = std::env::args().collect();
     let text = serde_json::to_string_pretty(&json).unwrap();
-    match args
-        .iter()
-        .position(|a| a == "--json")
-        .and_then(|i| args.get(i + 1))
-    {
+    match args.iter().position(|a| a == "--json").and_then(|i| args.get(i + 1)) {
         Some(p) => std::fs::write(p, &text).unwrap(),
         None => println!("{text}"),
     }
     for (req, (ok, total, missing)) in &by_req {
-        eprintln!(
-            "{req}: {ok}/{total}{}",
-            if missing.is_empty() {
-                String::new()
-            } else {
-                format!("  missing: {}", missing.join(", "))
-            }
-        );
+        eprintln!("{req}: {ok}/{total}{}", if missing.is_empty() {
+            String::new()
+        } else {
+            format!("  missing: {}", missing.join(", "))
+        });
     }
 }

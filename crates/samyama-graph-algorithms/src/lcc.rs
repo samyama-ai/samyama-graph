@@ -19,8 +19,8 @@
 //! that have a reciprocal edge.
 
 use super::common::{GraphView, NodeId};
-use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use rayon::prelude::*;
 
 /// Result of LCC computation
 #[derive(Debug, Clone)]
@@ -131,11 +131,7 @@ fn directed_clustering(
 /// Checked against the shipped `example-directed` reference: node 1 has
 /// `N = {3,5,8}`, the edges `3->5, 3->8, 5->3, 5->8` among them, and
 /// `4/6 = 0.6667`, which is what the reference file says.
-fn ldbc_clustering(
-    idx: usize,
-    neighbours: &HashSet<usize>,
-    successor_sets: &[HashSet<usize>],
-) -> f64 {
+fn ldbc_clustering(idx: usize, neighbours: &HashSet<usize>, successor_sets: &[HashSet<usize>]) -> f64 {
     let d = neighbours.len();
     if d < 2 {
         return 0.0;
@@ -186,10 +182,7 @@ pub fn local_clustering_coefficient_with(
 ) -> LccResult {
     let n = view.node_count;
     if n == 0 {
-        return LccResult {
-            coefficients: HashMap::new(),
-            average: 0.0,
-        };
+        return LccResult { coefficients: HashMap::new(), average: 0.0 };
     }
 
     // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
@@ -215,10 +208,7 @@ pub fn local_clustering_coefficient_with(
                         for (idx, &cc) in gpu_result.coefficients.iter().enumerate() {
                             coefficients.insert(view.index_to_node[idx], cc);
                         }
-                        return LccResult {
-                            coefficients,
-                            average: gpu_result.average,
-                        };
+                        return LccResult { coefficients, average: gpu_result.average };
                     }
                     Err(e) => crate::cpu_fallback::note_cpu_fallback(
                         crate::cpu_fallback::GpuAlgorithm::Lcc,
@@ -233,40 +223,19 @@ pub fn local_clustering_coefficient_with(
     let use_parallel = n >= 1000;
 
     let neighbors: Vec<HashSet<usize>> = if use_parallel {
-        (0..n)
-            .into_par_iter()
-            .map(|idx| {
-                let mut set = HashSet::new();
-                for &s in view.successors(idx) {
-                    if s != idx {
-                        set.insert(s);
-                    }
-                }
-                for &p in view.predecessors(idx) {
-                    if p != idx {
-                        set.insert(p);
-                    }
-                }
-                set
-            })
-            .collect()
+        (0..n).into_par_iter().map(|idx| {
+            let mut set = HashSet::new();
+            for &s in view.successors(idx) { if s != idx { set.insert(s); } }
+            for &p in view.predecessors(idx) { if p != idx { set.insert(p); } }
+            set
+        }).collect()
     } else {
-        (0..n)
-            .map(|idx| {
-                let mut set = HashSet::new();
-                for &s in view.successors(idx) {
-                    if s != idx {
-                        set.insert(s);
-                    }
-                }
-                for &p in view.predecessors(idx) {
-                    if p != idx {
-                        set.insert(p);
-                    }
-                }
-                set
-            })
-            .collect()
+        (0..n).map(|idx| {
+            let mut set = HashSet::new();
+            for &s in view.successors(idx) { if s != idx { set.insert(s); } }
+            for &p in view.predecessors(idx) { if p != idx { set.insert(p); } }
+            set
+        }).collect()
     };
 
     // Predecessor sets, needed alongside the successors for Fagiolo's
@@ -290,30 +259,17 @@ pub fn local_clustering_coefficient_with(
     // For directed mode, build successor sets for directed edge checking
     let successor_sets: Vec<HashSet<usize>> = if directed {
         if use_parallel {
-            (0..n)
-                .into_par_iter()
-                .map(|idx| {
-                    let mut set = HashSet::new();
-                    for &s in view.successors(idx) {
-                        if s != idx {
-                            set.insert(s);
-                        }
-                    }
-                    set
-                })
-                .collect()
+            (0..n).into_par_iter().map(|idx| {
+                let mut set = HashSet::new();
+                for &s in view.successors(idx) { if s != idx { set.insert(s); } }
+                set
+            }).collect()
         } else {
-            (0..n)
-                .map(|idx| {
-                    let mut set = HashSet::new();
-                    for &s in view.successors(idx) {
-                        if s != idx {
-                            set.insert(s);
-                        }
-                    }
-                    set
-                })
-                .collect()
+            (0..n).map(|idx| {
+                let mut set = HashSet::new();
+                for &s in view.successors(idx) { if s != idx { set.insert(s); } }
+                set
+            }).collect()
         }
     } else {
         Vec::new()
@@ -321,66 +277,65 @@ pub fn local_clustering_coefficient_with(
 
     // Compute LCC per node in parallel
     let per_node: Vec<(NodeId, f64)> = if use_parallel {
-        (0..n)
-            .into_par_iter()
-            .map(|idx| {
-                let deg = neighbors[idx].len();
-                if deg < 2 {
-                    return (view.index_to_node[idx], 0.0);
-                }
-                let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
+        (0..n).into_par_iter().map(|idx| {
+            let deg = neighbors[idx].len();
+            if deg < 2 {
+                return (view.index_to_node[idx], 0.0);
+            }
+            let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
 
-                let cc = if directed {
-                    match definition {
-                        DirectedLcc::Fagiolo => {
-                            directed_clustering(idx, &predecessor_sets, &successor_sets)
-                        }
-                        DirectedLcc::Ldbc => ldbc_clustering(idx, &neighbors[idx], &successor_sets),
+            let cc = if directed {
+                match definition {
+                    DirectedLcc::Fagiolo => {
+                        directed_clustering(idx, &predecessor_sets, &successor_sets)
                     }
-                } else {
-                    let mut triangle_edges = 0usize;
-                    for i in 0..neighbor_vec.len() {
-                        for j in (i + 1)..neighbor_vec.len() {
-                            if neighbors[neighbor_vec[i]].contains(&neighbor_vec[j]) {
-                                triangle_edges += 1;
-                            }
+                    DirectedLcc::Ldbc => {
+                        ldbc_clustering(idx, &neighbors[idx], &successor_sets)
+                    }
+                }
+            } else {
+                let mut triangle_edges = 0usize;
+                for i in 0..neighbor_vec.len() {
+                    for j in (i + 1)..neighbor_vec.len() {
+                        if neighbors[neighbor_vec[i]].contains(&neighbor_vec[j]) {
+                            triangle_edges += 1;
                         }
                     }
-                    triangle_edges as f64 / (deg * (deg - 1) / 2) as f64
-                };
-                (view.index_to_node[idx], cc)
-            })
-            .collect()
+                }
+                triangle_edges as f64 / (deg * (deg - 1) / 2) as f64
+            };
+            (view.index_to_node[idx], cc)
+        }).collect()
     } else {
-        (0..n)
-            .map(|idx| {
-                let deg = neighbors[idx].len();
-                if deg < 2 {
-                    return (view.index_to_node[idx], 0.0);
-                }
-                let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
+        (0..n).map(|idx| {
+            let deg = neighbors[idx].len();
+            if deg < 2 {
+                return (view.index_to_node[idx], 0.0);
+            }
+            let neighbor_vec: Vec<usize> = neighbors[idx].iter().cloned().collect();
 
-                let cc = if directed {
-                    match definition {
-                        DirectedLcc::Fagiolo => {
-                            directed_clustering(idx, &predecessor_sets, &successor_sets)
-                        }
-                        DirectedLcc::Ldbc => ldbc_clustering(idx, &neighbors[idx], &successor_sets),
+            let cc = if directed {
+                match definition {
+                    DirectedLcc::Fagiolo => {
+                        directed_clustering(idx, &predecessor_sets, &successor_sets)
                     }
-                } else {
-                    let mut triangle_edges = 0usize;
-                    for i in 0..neighbor_vec.len() {
-                        for j in (i + 1)..neighbor_vec.len() {
-                            if neighbors[neighbor_vec[i]].contains(&neighbor_vec[j]) {
-                                triangle_edges += 1;
-                            }
+                    DirectedLcc::Ldbc => {
+                        ldbc_clustering(idx, &neighbors[idx], &successor_sets)
+                    }
+                }
+            } else {
+                let mut triangle_edges = 0usize;
+                for i in 0..neighbor_vec.len() {
+                    for j in (i + 1)..neighbor_vec.len() {
+                        if neighbors[neighbor_vec[i]].contains(&neighbor_vec[j]) {
+                            triangle_edges += 1;
                         }
                     }
-                    triangle_edges as f64 / (deg * (deg - 1) / 2) as f64
-                };
-                (view.index_to_node[idx], cc)
-            })
-            .collect()
+                }
+                triangle_edges as f64 / (deg * (deg - 1) / 2) as f64
+            };
+            (view.index_to_node[idx], cc)
+        }).collect()
     };
 
     let mut coefficients = HashMap::with_capacity(n);
@@ -392,37 +347,20 @@ pub fn local_clustering_coefficient_with(
 
     let average = if n > 0 { sum / n as f64 } else { 0.0 };
 
-    LccResult {
-        coefficients,
-        average,
-    }
+    LccResult { coefficients, average }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::GraphView;
     use std::collections::HashMap;
+    use crate::common::GraphView;
 
     /// The shipped `example-directed` Graphalytics reference graph.
     fn example_directed() -> (GraphView, Vec<(u64, u64)>) {
         let edges: Vec<(u64, u64)> = vec![
-            (1, 3),
-            (1, 5),
-            (2, 4),
-            (2, 5),
-            (2, 10),
-            (3, 1),
-            (3, 5),
-            (3, 8),
-            (3, 10),
-            (5, 3),
-            (5, 4),
-            (5, 8),
-            (6, 3),
-            (6, 4),
-            (7, 4),
-            (8, 1),
+            (1, 3), (1, 5), (2, 4), (2, 5), (2, 10), (3, 1), (3, 5), (3, 8),
+            (3, 10), (5, 3), (5, 4), (5, 8), (6, 3), (6, 4), (7, 4), (8, 1),
             (9, 4),
         ];
         let ids: Vec<NodeId> = (1..=10).collect();
@@ -528,23 +466,12 @@ mod tests {
         let outgoing = vec![vec![1, 2], vec![0, 2], vec![0, 1]];
         let incoming = vec![vec![1, 2], vec![0, 2], vec![0, 1]];
 
-        let view = GraphView::from_adjacency_list(
-            3,
-            index_to_node,
-            node_to_index,
-            outgoing,
-            incoming,
-            None,
-        );
+        let view = GraphView::from_adjacency_list(3, index_to_node, node_to_index, outgoing, incoming, None);
         let result = local_clustering_coefficient(&view);
 
         // All nodes in a complete triangle have LCC = 1.0
         for (_node, cc) in &result.coefficients {
-            assert!(
-                (cc - 1.0).abs() < 1e-10,
-                "Complete triangle LCC should be 1.0, got {}",
-                cc
-            );
+            assert!((cc - 1.0).abs() < 1e-10, "Complete triangle LCC should be 1.0, got {}", cc);
         }
         assert!((result.average - 1.0).abs() < 1e-10);
     }
@@ -561,14 +488,7 @@ mod tests {
         let outgoing = vec![vec![1, 2, 3], vec![0], vec![0], vec![0]];
         let incoming = vec![vec![1, 2, 3], vec![0], vec![0], vec![0]];
 
-        let view = GraphView::from_adjacency_list(
-            4,
-            index_to_node,
-            node_to_index,
-            outgoing,
-            incoming,
-            None,
-        );
+        let view = GraphView::from_adjacency_list(4, index_to_node, node_to_index, outgoing, incoming, None);
         let result = local_clustering_coefficient(&view);
 
         // Center node: 3 neighbors, no edges among them -> LCC = 0
@@ -579,7 +499,9 @@ mod tests {
 
     #[test]
     fn test_lcc_empty() {
-        let view = GraphView::from_adjacency_list(0, vec![], HashMap::new(), vec![], vec![], None);
+        let view = GraphView::from_adjacency_list(
+            0, vec![], HashMap::new(), vec![], vec![], None,
+        );
         let result = local_clustering_coefficient(&view);
         assert!(result.coefficients.is_empty());
         assert!((result.average - 0.0).abs() < 1e-10);
@@ -601,24 +523,13 @@ mod tests {
         let outgoing = vec![vec![1], vec![2], vec![0]];
         let incoming = vec![vec![2], vec![0], vec![1]];
 
-        let view = GraphView::from_adjacency_list(
-            3,
-            index_to_node,
-            node_to_index,
-            outgoing,
-            incoming,
-            None,
-        );
+        let view = GraphView::from_adjacency_list(3, index_to_node, node_to_index, outgoing, incoming, None);
         let result = local_clustering_coefficient_directed(&view, true);
 
         // Node 0 (id=1): neighbors are {1, 2}. Directed edges among them: 1->2 = 1.
         // max = 2*1 = 2.  LCC = 1/2 = 0.5
         for (&_node, &cc) in &result.coefficients {
-            assert!(
-                (cc - 0.5).abs() < 1e-10,
-                "Directed cycle triangle LCC should be 0.5, got {}",
-                cc
-            );
+            assert!((cc - 0.5).abs() < 1e-10, "Directed cycle triangle LCC should be 0.5, got {}", cc);
         }
     }
 
@@ -636,22 +547,11 @@ mod tests {
         let outgoing = vec![vec![1, 2], vec![0, 2], vec![0, 1]];
         let incoming = vec![vec![1, 2], vec![0, 2], vec![0, 1]];
 
-        let view = GraphView::from_adjacency_list(
-            3,
-            index_to_node,
-            node_to_index,
-            outgoing,
-            incoming,
-            None,
-        );
+        let view = GraphView::from_adjacency_list(3, index_to_node, node_to_index, outgoing, incoming, None);
         let result = local_clustering_coefficient_directed(&view, true);
 
         for (&_node, &cc) in &result.coefficients {
-            assert!(
-                (cc - 1.0).abs() < 1e-10,
-                "Fully connected directed triangle LCC should be 1.0, got {}",
-                cc
-            );
+            assert!((cc - 1.0).abs() < 1e-10, "Fully connected directed triangle LCC should be 1.0, got {}", cc);
         }
     }
 }

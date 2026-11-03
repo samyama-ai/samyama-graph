@@ -21,59 +21,34 @@ fn the_default_build_ships_mimalloc() {
 
 #[test]
 fn the_server_installs_the_shipped_allocator() {
-    assert!(
-        read("src/main.rs").contains(INSTALL),
-        "src/main.rs does not install SHIPPED"
-    );
+    assert!(read("src/main.rs").contains(INSTALL), "src/main.rs does not install SHIPPED");
 }
 
 #[test]
 fn every_gated_bench_installs_the_shipped_allocator() {
-    for bench in [
-        "benches/ldbc_benchmark.rs",
-        "benches/ldbc_bi_benchmark.rs",
-        "benches/finbench_benchmark.rs",
-    ] {
-        assert!(
-            read(bench).contains(INSTALL),
-            "{bench} measures a different allocator from the server"
-        );
+    for bench in ["benches/ldbc_benchmark.rs", "benches/ldbc_bi_benchmark.rs", "benches/finbench_benchmark.rs"] {
+        assert!(read(bench).contains(INSTALL), "{bench} measures a different allocator from the server");
     }
     // The footprint bench counts bytes, so it wraps the shipped allocator
     // rather than installing it directly; it must not fall back to System.
     let footprint = read("benches/memory_footprint.rs");
     assert!(footprint.contains("samyama::allocator::SHIPPED.alloc(layout)"));
-    assert!(
-        !footprint.contains("System.alloc("),
-        "memory_footprint counts through System, not SHIPPED"
-    );
+    assert!(!footprint.contains("System.alloc("), "memory_footprint counts through System, not SHIPPED");
 }
 
 #[test]
 fn the_library_never_installs_a_global_allocator() {
     for path in ["src/lib.rs", "src/allocator.rs"] {
-        let code: String = read(path)
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect();
-        assert!(
-            !code.contains("#[global_allocator]"),
-            "{path} installs a global allocator for its host process"
-        );
+        let code: String = read(path).lines().filter(|l| !l.trim_start().starts_with("//")).collect();
+        assert!(!code.contains("#[global_allocator]"), "{path} installs a global allocator for its host process");
     }
 }
 
 #[test]
 fn the_sdk_does_not_take_the_servers_allocator() {
     let sdk = read("crates/samyama-sdk/Cargo.toml");
-    let line = sdk
-        .lines()
-        .find(|l| l.trim_start().starts_with("samyama = "))
-        .expect("samyama dependency");
-    assert!(
-        line.contains("default-features = false"),
-        "samyama-sdk would bring mimalloc into every embedding: {line}"
-    );
+    let line = sdk.lines().find(|l| l.trim_start().starts_with("samyama = ")).expect("samyama dependency");
+    assert!(line.contains("default-features = false"), "samyama-sdk would bring mimalloc into every embedding: {line}");
 }
 
 #[test]
@@ -82,15 +57,9 @@ fn every_gated_bench_says_which_allocator_it_ran_under() {
     // directory, an unknown option) can leave a run without it. The first version
     // of this line sat inside an error branch in two of the three benches and
     // never printed on a real run.
-    for bench in [
-        "benches/ldbc_benchmark.rs",
-        "benches/ldbc_bi_benchmark.rs",
-        "benches/finbench_benchmark.rs",
-    ] {
+    for bench in ["benches/ldbc_benchmark.rs", "benches/ldbc_bi_benchmark.rs", "benches/finbench_benchmark.rs"] {
         let src = read(bench);
-        let main = src
-            .find("fn main()")
-            .unwrap_or_else(|| panic!("{bench}: no main"));
+        let main = src.find("fn main()").unwrap_or_else(|| panic!("{bench}: no main"));
         let body = &src[main..];
         let open = body.find('{').expect("main body");
         let first_statement = body[open + 1..]
@@ -147,11 +116,7 @@ fn measurement_examples() -> Vec<String> {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        let name = path
-            .file_stem()
-            .expect("stem")
-            .to_string_lossy()
-            .to_string();
+        let name = path.file_stem().expect("stem").to_string_lossy().to_string();
         let code = code_of(&format!("examples/{name}.rs"));
         if code.contains("Instant::now()") && code.contains(".elapsed()") {
             found.push(name);
@@ -197,11 +162,7 @@ fn every_example_that_measures_installs_the_shipped_allocator() {
          that ships. Add\n  {INSTALL}\nwith the `#[global_allocator]` attribute above it, or \
          add the example to EXEMPT with a reason:\n{}",
         wrong.len(),
-        wrong
-            .iter()
-            .map(|n| format!("  examples/{n}.rs"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        wrong.iter().map(|n| format!("  examples/{n}.rs")).collect::<Vec<_>>().join("\n")
     );
 }
 
@@ -225,10 +186,7 @@ fn the_measurement_rule_still_selects_most_of_the_examples() {
         })
         .count();
     let measuring = measurement_examples().len();
-    assert!(
-        total >= 123,
-        "examples went from 123 to {total}; did the path change?"
-    );
+    assert!(total >= 123, "examples went from 123 to {total}; did the path change?");
     assert!(
         measuring >= 72,
         "the rule selects {measuring} of {total} examples, was 72. If timing moved behind a \
@@ -250,16 +208,10 @@ fn no_example_asserts_on_a_timing_threshold() {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        let name = path
-            .file_stem()
-            .expect("stem")
-            .to_string_lossy()
-            .to_string();
+        let name = path.file_stem().expect("stem").to_string_lossy().to_string();
         for line in code_of(&format!("examples/{name}.rs")).lines() {
             let has_assert = line.contains("assert!") || line.contains("assert_eq!");
-            if has_assert
-                && (line.contains("elapsed") || line.contains("_ms") || line.contains("secs_f64"))
-            {
+            if has_assert && (line.contains("elapsed") || line.contains("_ms") || line.contains("secs_f64")) {
                 offenders.push(format!("  examples/{name}.rs: {}", line.trim()));
             }
         }

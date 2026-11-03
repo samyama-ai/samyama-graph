@@ -31,12 +31,12 @@ pub fn edmonds_karp(view: &GraphView, source: NodeId, sink: NodeId) -> Option<Fl
     }
 
     let n = view.node_count;
-
+    
     // Build residual graph capacity matrix (or adjacency map for sparse)
     // Since GraphView is adjacency list, let's map it to a residual structure
     // (u_idx, v_idx) -> capacity
     // We need backward edges too.
-
+    
     // Using a vector of hashmaps for residual graph: residual[u][v] = capacity
     let mut residual: Vec<HashMap<usize, f64>> = vec![HashMap::new(); n];
 
@@ -59,11 +59,11 @@ pub fn edmonds_karp(view: &GraphView, source: NodeId, sink: NodeId) -> Option<Fl
         let mut parent = vec![None; n];
         let mut queue = VecDeque::new();
         queue.push_back(s_idx);
-
+        
         // visited array not strictly needed if we check parent (but source has no parent)
         // using a separate visited set or checking if u == s or parent[u] is set
         let mut found_path = false;
-
+        
         // Special marker for source parent to distinguish from unvisited
         // Actually, just use a visited bitset or map
         let mut visited = vec![false; n];
@@ -104,19 +104,17 @@ pub fn edmonds_karp(view: &GraphView, source: NodeId, sink: NodeId) -> Option<Fl
         curr = t_idx;
         while curr != s_idx {
             let prev = parent[curr].unwrap();
-
+            
             *residual[prev].get_mut(&curr).unwrap() -= path_flow;
             *residual[curr].get_mut(&prev).unwrap() += path_flow;
-
+            
             curr = prev;
         }
 
         total_flow += path_flow;
     }
 
-    Some(FlowResult {
-        max_flow: total_flow,
-    })
+    Some(FlowResult { max_flow: total_flow })
 }
 
 #[cfg(test)]
@@ -134,14 +132,14 @@ mod tests {
         // 3 -> 5 (10)
         // 4 -> 3 (6)
         // 4 -> 5 (10)
-
+        
         // Let's use a simpler diamond graph
         // S(1) -> A(2) (100)
         // S(1) -> B(3) (50)
         // A(2) -> B(3) (50)
         // A(2) -> T(4) (50)
         // B(3) -> T(4) (100)
-
+        
         // Expected max flow:
         // S->A->T: 50
         // S->B->T: 50
@@ -149,7 +147,7 @@ mod tests {
         // Total: 150?
         // S->A (100) splits to A->B (50) and A->T (50).
         // S->B (50) joins A->B (50) making 100 at B? No, capacity constraints.
-
+        
         // S->A->T: Flow 50. Residual: S->A 50, A->T 0.
         // S->B->T: Flow 50. Residual: S->B 0, B->T 50.
         // S->A->B->T: S->A (50 left), A->B (50), B->T (50 left). Flow 50.
@@ -158,28 +156,21 @@ mod tests {
         let node_count = 4;
         let index_to_node = vec![1, 2, 3, 4];
         let mut node_to_index = HashMap::new();
-        for (i, &id) in index_to_node.iter().enumerate() {
-            node_to_index.insert(id, i);
-        }
+        for (i, &id) in index_to_node.iter().enumerate() { node_to_index.insert(id, i); }
 
         let mut outgoing = vec![vec![]; 4];
         let mut weights = vec![vec![]; 4];
 
         // S->A
-        outgoing[0].push(1);
-        weights[0].push(100.0);
+        outgoing[0].push(1); weights[0].push(100.0);
         // S->B
-        outgoing[0].push(2);
-        weights[0].push(50.0);
+        outgoing[0].push(2); weights[0].push(50.0);
         // A->B
-        outgoing[1].push(2);
-        weights[1].push(50.0);
+        outgoing[1].push(2); weights[1].push(50.0);
         // A->T
-        outgoing[1].push(3);
-        weights[1].push(50.0);
+        outgoing[1].push(3); weights[1].push(50.0);
         // B->T
-        outgoing[2].push(3);
-        weights[2].push(100.0);
+        outgoing[2].push(3); weights[2].push(100.0);
 
         let view = GraphView::from_adjacency_list(
             node_count,

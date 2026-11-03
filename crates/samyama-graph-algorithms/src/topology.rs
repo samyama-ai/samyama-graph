@@ -3,8 +3,8 @@
 //! Triangle counting. Counted towards ALGO-01 (algorithms callable from Cypher).
 
 use super::common::GraphView;
-use rayon::prelude::*;
 use std::collections::HashSet;
+use rayon::prelude::*;
 
 /// Triangle Counting
 ///
@@ -21,10 +21,7 @@ pub fn count_triangles(view: &GraphView) -> usize {
     #[cfg(feature = "gpu")]
     {
         if let Err(reason) = crate::gpu_dispatch::gpu_route(n) {
-            crate::cpu_fallback::note_cpu_fallback(
-                crate::cpu_fallback::GpuAlgorithm::TriangleCount,
-                &reason,
-            );
+            crate::cpu_fallback::note_cpu_fallback(crate::cpu_fallback::GpuAlgorithm::TriangleCount, &reason);
         } else {
             {
                 match samyama_gpu::gpu_count_triangles(
@@ -46,62 +43,43 @@ pub fn count_triangles(view: &GraphView) -> usize {
 
     // Parallel outer loop: each node computes its partial triangle count
     if n >= 1000 {
-        (0..n)
-            .into_par_iter()
-            .map(|u| {
-                let u_neighbors: HashSet<_> = view
-                    .successors(u)
-                    .iter()
-                    .chain(view.predecessors(u).iter())
-                    .cloned()
-                    .collect();
-
-                let mut count = 0;
-                for &v in &u_neighbors {
-                    if v <= u {
-                        continue;
-                    }
-                    let v_neighbors: HashSet<_> = view
-                        .successors(v)
-                        .iter()
-                        .chain(view.predecessors(v).iter())
-                        .cloned()
-                        .collect();
-                    for &w in &v_neighbors {
-                        if w <= v {
-                            continue;
-                        }
-                        if u_neighbors.contains(&w) {
-                            count += 1;
-                        }
-                    }
-                }
-                count
-            })
-            .sum()
-    } else {
-        let mut triangle_count = 0;
-        for u in 0..n {
-            let u_neighbors: HashSet<_> = view
-                .successors(u)
-                .iter()
+        (0..n).into_par_iter().map(|u| {
+            let u_neighbors: HashSet<_> = view.successors(u).iter()
                 .chain(view.predecessors(u).iter())
                 .cloned()
                 .collect();
+
+            let mut count = 0;
             for &v in &u_neighbors {
-                if v <= u {
-                    continue;
-                }
-                let v_neighbors: HashSet<_> = view
-                    .successors(v)
-                    .iter()
+                if v <= u { continue; }
+                let v_neighbors: HashSet<_> = view.successors(v).iter()
                     .chain(view.predecessors(v).iter())
                     .cloned()
                     .collect();
                 for &w in &v_neighbors {
-                    if w <= v {
-                        continue;
+                    if w <= v { continue; }
+                    if u_neighbors.contains(&w) {
+                        count += 1;
                     }
+                }
+            }
+            count
+        }).sum()
+    } else {
+        let mut triangle_count = 0;
+        for u in 0..n {
+            let u_neighbors: HashSet<_> = view.successors(u).iter()
+                .chain(view.predecessors(u).iter())
+                .cloned()
+                .collect();
+            for &v in &u_neighbors {
+                if v <= u { continue; }
+                let v_neighbors: HashSet<_> = view.successors(v).iter()
+                    .chain(view.predecessors(v).iter())
+                    .cloned()
+                    .collect();
+                for &w in &v_neighbors {
+                    if w <= v { continue; }
                     if u_neighbors.contains(&w) {
                         triangle_count += 1;
                     }
@@ -121,18 +99,18 @@ mod tests {
     fn test_triangle_counting() {
         // Complete graph K4: 4 nodes, all connected.
         // Triangles: (0,1,2), (0,1,3), (0,2,3), (1,2,3) -> 4 triangles.
-
+        
         let node_count = 4;
         let mut outgoing = vec![vec![]; 4];
         let mut incoming = vec![vec![]; 4];
-
+        
         for i in 0..4 {
-            for j in (i + 1)..4 {
+            for j in (i+1)..4 {
                 outgoing[i].push(j);
                 incoming[j].push(i);
             }
         }
-
+        
         let view = GraphView::from_adjacency_list(
             node_count,
             vec![0, 1, 2, 3],
@@ -141,7 +119,7 @@ mod tests {
             incoming,
             None,
         );
-
+        
         let count = count_triangles(&view);
         assert_eq!(count, 4);
     }

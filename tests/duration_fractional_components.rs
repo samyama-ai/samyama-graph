@@ -56,14 +56,8 @@ fn the_tck_construction_table() {
             "P12Y5M14DT16H13M10S",
         ),
         ("{days: 14, seconds: 70, milliseconds: 1}", "P14DT1M10.001S"),
-        (
-            "{days: 14, seconds: 70, microseconds: 1}",
-            "P14DT1M10.000001S",
-        ),
-        (
-            "{days: 14, seconds: 70, nanoseconds: 1}",
-            "P14DT1M10.000000001S",
-        ),
+        ("{days: 14, seconds: 70, microseconds: 1}", "P14DT1M10.000001S"),
+        ("{days: 14, seconds: 70, nanoseconds: 1}", "P14DT1M10.000000001S"),
         ("{minutes: 1.5, seconds: 1}", "PT1M31S"),
     ]);
 }

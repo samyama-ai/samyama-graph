@@ -73,11 +73,7 @@ const FORMS: &[Form] = &[
 
 fn main() {
     let out = std::env::args().collect::<Vec<_>>();
-    let json_out = out
-        .iter()
-        .position(|a| a == "--json")
-        .and_then(|i| out.get(i + 1))
-        .cloned();
+    let json_out = out.iter().position(|a| a == "--json").and_then(|i| out.get(i + 1)).cloned();
     let store = fixture();
     let mut results = Vec::new();
 
@@ -99,12 +95,7 @@ fn main() {
                 }
             },
         };
-        println!(
-            "{:28} {:12} {}",
-            f.id,
-            state,
-            detail.chars().take(60).collect::<String>()
-        );
+        println!("{:28} {:12} {}", f.id, state, detail.chars().take(60).collect::<String>());
         results.push(serde_json::json!({
             "id": f.id, "about": f.about, "query": f.query,
             "state": state, "rows": rows,
@@ -117,10 +108,8 @@ fn main() {
         "forms": results,
     });
     match json_out {
-        Some(p) => {
-            std::fs::write(&p, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
-            eprintln!("wrote {p}");
-        }
+        Some(p) => { std::fs::write(&p, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+                     eprintln!("wrote {p}"); }
         None => println!("{}", serde_json::to_string_pretty(&doc).unwrap()),
     }
 }

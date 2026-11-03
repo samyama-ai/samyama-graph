@@ -11,7 +11,9 @@ use samyama_optimization::algorithms::{
     BMRSolver, BMWRSolver, BWRSolver, EHRJayaSolver, JayaSolver, MOBMWRSolver, MOBMWRVariant,
     MORaoDESolver, QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver,
 };
-use samyama_optimization::common::{MultiObjectiveProblem, Problem, SimpleProblem, SolverConfig};
+use samyama_optimization::common::{
+    MultiObjectiveProblem, Problem, SolverConfig, SimpleProblem,
+};
 
 // --- Single-objective test functions ---
 
@@ -30,10 +32,7 @@ fn rastrigin(x: &Array1<f64>) -> f64 {
 fn ackley(x: &Array1<f64>) -> f64 {
     let n = x.len() as f64;
     let s1: f64 = x.iter().map(|&v| v * v).sum();
-    let s2: f64 = x
-        .iter()
-        .map(|&v| (2.0 * std::f64::consts::PI * v).cos())
-        .sum();
+    let s2: f64 = x.iter().map(|&v| (2.0 * std::f64::consts::PI * v).cos()).sum();
     -20.0 * (-0.2 * (s1 / n).sqrt()).exp() - (s2 / n).exp() + 20.0 + std::f64::consts::E
 }
 
@@ -54,12 +53,8 @@ struct ZDT {
 }
 
 impl MultiObjectiveProblem for ZDT {
-    fn dim(&self) -> usize {
-        self.dim
-    }
-    fn num_objectives(&self) -> usize {
-        2
-    }
+    fn dim(&self) -> usize { self.dim }
+    fn num_objectives(&self) -> usize { 2 }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (Array1::zeros(self.dim), Array1::ones(self.dim))
     }
@@ -83,22 +78,16 @@ struct DTLZ1 {
 }
 
 impl MultiObjectiveProblem for DTLZ1 {
-    fn dim(&self) -> usize {
-        self.dim
-    }
-    fn num_objectives(&self) -> usize {
-        self.m
-    }
+    fn dim(&self) -> usize { self.dim }
+    fn num_objectives(&self) -> usize { self.m }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (Array1::zeros(self.dim), Array1::ones(self.dim))
     }
     fn objectives(&self, x: &Array1<f64>) -> Vec<f64> {
         let k = self.dim - self.m + 1;
-        let xm: f64 = x
-            .iter()
-            .skip(self.dim - k)
-            .map(|&v| (v - 0.5).powi(2) - (20.0 * std::f64::consts::PI * (v - 0.5)).cos())
-            .sum();
+        let xm: f64 = x.iter().skip(self.dim - k).map(|&v| {
+            (v - 0.5).powi(2) - (20.0 * std::f64::consts::PI * (v - 0.5)).cos()
+        }).sum();
         let g = 100.0 * (k as f64 + xm);
         let mut f = vec![0.5 * (1.0 + g); self.m];
         for i in 0..self.m {
@@ -118,156 +107,80 @@ impl MultiObjectiveProblem for DTLZ1 {
 fn bench_single_obj(c: &mut Criterion) {
     let mut group = c.benchmark_group("rao_family_single_obj_sphere_10d");
     group.sample_size(10);
-    let cfg = SolverConfig {
-        population_size: 30,
-        max_iterations: 100,
-    };
+    let cfg = SolverConfig { population_size: 30, max_iterations: 100 };
     let p = make_problem(sphere, 10, -10.0, 10.0);
 
-    group.bench_function("BMR", |b| {
-        b.iter(|| black_box(BMRSolver::new(cfg.clone()).solve(&p)))
-    });
-    group.bench_function("BWR", |b| {
-        b.iter(|| black_box(BWRSolver::new(cfg.clone()).solve(&p)))
-    });
-    group.bench_function("BMWR", |b| {
-        b.iter(|| black_box(BMWRSolver::new(cfg.clone()).solve(&p)))
-    });
-    group.bench_function("Jaya", |b| {
-        b.iter(|| black_box(JayaSolver::new(cfg.clone()).solve(&p)))
-    });
-    group.bench_function("Rao1", |b| {
-        b.iter(|| black_box(RaoSolver::new(cfg.clone(), RaoVariant::Rao1).solve(&p)))
-    });
-    group.bench_function("SAMP-Jaya", |b| {
-        b.iter(|| black_box(SAMPJayaSolver::new(cfg.clone()).solve(&p)))
-    });
-    group.bench_function("EHR-Jaya", |b| {
-        b.iter(|| black_box(EHRJayaSolver::new(cfg.clone()).solve(&p)))
-    });
-    group.bench_function("QO-Rao", |b| {
-        b.iter(|| black_box(QORaoSolver::new(cfg.clone(), RaoVariant::Rao1).solve(&p)))
-    });
-    group.bench_function("SAPHR", |b| {
-        b.iter(|| black_box(SAPHRSolver::new(cfg.clone()).solve(&p)))
-    });
+    group.bench_function("BMR", |b| b.iter(|| black_box(BMRSolver::new(cfg.clone()).solve(&p))));
+    group.bench_function("BWR", |b| b.iter(|| black_box(BWRSolver::new(cfg.clone()).solve(&p))));
+    group.bench_function("BMWR", |b| b.iter(|| black_box(BMWRSolver::new(cfg.clone()).solve(&p))));
+    group.bench_function("Jaya", |b| b.iter(|| black_box(JayaSolver::new(cfg.clone()).solve(&p))));
+    group.bench_function("Rao1", |b| b.iter(|| black_box(RaoSolver::new(cfg.clone(), RaoVariant::Rao1).solve(&p))));
+    group.bench_function("SAMP-Jaya", |b| b.iter(|| black_box(SAMPJayaSolver::new(cfg.clone()).solve(&p))));
+    group.bench_function("EHR-Jaya", |b| b.iter(|| black_box(EHRJayaSolver::new(cfg.clone()).solve(&p))));
+    group.bench_function("QO-Rao", |b| b.iter(|| black_box(QORaoSolver::new(cfg.clone(), RaoVariant::Rao1).solve(&p))));
+    group.bench_function("SAPHR", |b| b.iter(|| black_box(SAPHRSolver::new(cfg.clone()).solve(&p))));
     group.finish();
 }
 
 fn bench_rastrigin(c: &mut Criterion) {
     let mut group = c.benchmark_group("rao_family_rastrigin_10d");
     group.sample_size(10);
-    let cfg = SolverConfig {
-        population_size: 50,
-        max_iterations: 200,
-    };
+    let cfg = SolverConfig { population_size: 50, max_iterations: 200 };
     let p = make_problem(rastrigin, 10, -5.12, 5.12);
-    group.bench_function("BMWR", |b| {
-        b.iter(|| black_box(BMWRSolver::new(cfg.clone()).solve(&p)))
-    });
-    group.bench_function("EHR-Jaya", |b| {
-        b.iter(|| black_box(EHRJayaSolver::new(cfg.clone()).solve(&p)))
-    });
-    group.bench_function("SAPHR", |b| {
-        b.iter(|| black_box(SAPHRSolver::new(cfg.clone()).solve(&p)))
-    });
+    group.bench_function("BMWR", |b| b.iter(|| black_box(BMWRSolver::new(cfg.clone()).solve(&p))));
+    group.bench_function("EHR-Jaya", |b| b.iter(|| black_box(EHRJayaSolver::new(cfg.clone()).solve(&p))));
+    group.bench_function("SAPHR", |b| b.iter(|| black_box(SAPHRSolver::new(cfg.clone()).solve(&p))));
     group.finish();
 }
 
 fn bench_ackley(c: &mut Criterion) {
     let mut group = c.benchmark_group("rao_family_ackley_10d");
     group.sample_size(10);
-    let cfg = SolverConfig {
-        population_size: 50,
-        max_iterations: 200,
-    };
+    let cfg = SolverConfig { population_size: 50, max_iterations: 200 };
     let p = make_problem(ackley, 10, -32.768, 32.768);
-    group.bench_function("BMWR", |b| {
-        b.iter(|| black_box(BMWRSolver::new(cfg.clone()).solve(&p)))
-    });
-    group.bench_function("QO-Rao", |b| {
-        b.iter(|| black_box(QORaoSolver::new(cfg.clone(), RaoVariant::Rao1).solve(&p)))
-    });
+    group.bench_function("BMWR", |b| b.iter(|| black_box(BMWRSolver::new(cfg.clone()).solve(&p))));
+    group.bench_function("QO-Rao", |b| b.iter(|| black_box(QORaoSolver::new(cfg.clone(), RaoVariant::Rao1).solve(&p))));
     group.finish();
 }
 
 fn bench_mo_zdt1(c: &mut Criterion) {
     let mut group = c.benchmark_group("rao_family_mo_zdt1_30d");
     group.sample_size(10);
-    let cfg = SolverConfig {
-        population_size: 50,
-        max_iterations: 100,
-    };
-    let p = ZDT {
-        variant: 1,
-        dim: 30,
-    };
-    group.bench_function("MO-BMR", |b| {
-        b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMR).solve(&p)))
-    });
-    group.bench_function("MO-BWR", |b| {
-        b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBWR).solve(&p)))
-    });
-    group.bench_function("MO-BMWR", |b| {
-        b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMWR).solve(&p)))
-    });
-    group.bench_function("MO-Rao+DE", |b| {
-        b.iter(|| black_box(MORaoDESolver::new(cfg.clone()).solve(&p)))
-    });
+    let cfg = SolverConfig { population_size: 50, max_iterations: 100 };
+    let p = ZDT { variant: 1, dim: 30 };
+    group.bench_function("MO-BMR",   |b| b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMR).solve(&p))));
+    group.bench_function("MO-BWR",   |b| b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBWR).solve(&p))));
+    group.bench_function("MO-BMWR",  |b| b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMWR).solve(&p))));
+    group.bench_function("MO-Rao+DE",|b| b.iter(|| black_box(MORaoDESolver::new(cfg.clone()).solve(&p))));
     group.finish();
 }
 
 fn bench_mo_zdt2(c: &mut Criterion) {
     let mut group = c.benchmark_group("rao_family_mo_zdt2_30d");
     group.sample_size(10);
-    let cfg = SolverConfig {
-        population_size: 50,
-        max_iterations: 100,
-    };
-    let p = ZDT {
-        variant: 2,
-        dim: 30,
-    };
-    group.bench_function("MO-BMWR", |b| {
-        b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMWR).solve(&p)))
-    });
-    group.bench_function("MO-Rao+DE", |b| {
-        b.iter(|| black_box(MORaoDESolver::new(cfg.clone()).solve(&p)))
-    });
+    let cfg = SolverConfig { population_size: 50, max_iterations: 100 };
+    let p = ZDT { variant: 2, dim: 30 };
+    group.bench_function("MO-BMWR", |b| b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMWR).solve(&p))));
+    group.bench_function("MO-Rao+DE", |b| b.iter(|| black_box(MORaoDESolver::new(cfg.clone()).solve(&p))));
     group.finish();
 }
 
 fn bench_mo_zdt3(c: &mut Criterion) {
     let mut group = c.benchmark_group("rao_family_mo_zdt3_30d");
     group.sample_size(10);
-    let cfg = SolverConfig {
-        population_size: 50,
-        max_iterations: 100,
-    };
-    let p = ZDT {
-        variant: 3,
-        dim: 30,
-    };
-    group.bench_function("MO-BMWR", |b| {
-        b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMWR).solve(&p)))
-    });
+    let cfg = SolverConfig { population_size: 50, max_iterations: 100 };
+    let p = ZDT { variant: 3, dim: 30 };
+    group.bench_function("MO-BMWR", |b| b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMWR).solve(&p))));
     group.finish();
 }
 
 fn bench_mo_dtlz1(c: &mut Criterion) {
     let mut group = c.benchmark_group("rao_family_mo_dtlz1_3obj");
     group.sample_size(10);
-    let cfg = SolverConfig {
-        population_size: 60,
-        max_iterations: 100,
-    };
+    let cfg = SolverConfig { population_size: 60, max_iterations: 100 };
     let p = DTLZ1 { dim: 7, m: 3 };
-    group.bench_function("MO-BMR", |b| {
-        b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMR).solve(&p)))
-    });
-    group.bench_function("MO-BMWR", |b| {
-        b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMWR).solve(&p)))
-    });
+    group.bench_function("MO-BMR",  |b| b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMR).solve(&p))));
+    group.bench_function("MO-BMWR", |b| b.iter(|| black_box(MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMWR).solve(&p))));
     group.finish();
 }
 

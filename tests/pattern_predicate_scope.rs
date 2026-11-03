@@ -58,13 +58,7 @@ fn a_pattern_predicate_may_not_introduce_a_variable() {
 /// feature.
 #[test]
 fn anonymous_positions_are_fine() {
-    for pat in [
-        "(n)-->()",
-        "(n)-[]->()",
-        "()-->(n)",
-        "(n)-[]-()",
-        "(n)-[:T]->()",
-    ] {
+    for pat in ["(n)-->()", "(n)-[]->()", "()-->(n)", "(n)-[]-()", "(n)-[:T]->()"] {
         assert!(
             accepted(&format!("MATCH (n) WHERE {pat} RETURN n")),
             "`{pat}` introduces nothing and must be accepted"
@@ -77,9 +71,7 @@ fn anonymous_positions_are_fine() {
 fn already_bound_variables_are_fine() {
     assert!(accepted("MATCH (n), (m) WHERE (n)-->(m) RETURN n"));
     assert!(accepted("MATCH (n)-[r]->(m) WHERE (n)-[r]->(m) RETURN n"));
-    assert!(accepted(
-        "MATCH (a), (b), (c) WHERE (a)-->(b) AND (b)-->(c) RETURN a"
-    ));
+    assert!(accepted("MATCH (a), (b), (c) WHERE (a)-->(b) AND (b)-->(c) RETURN a"));
 }
 
 /// **`EXISTS { ... }` may introduce names.** That is the whole difference
@@ -110,9 +102,7 @@ fn exists_subqueries_may_introduce_variables() {
 /// A name bound by `UNWIND` counts as bound.
 #[test]
 fn unwind_bindings_count() {
-    assert!(accepted(
-        "UNWIND [1] AS i MATCH (n) WHERE (n)-->() RETURN n, i"
-    ));
+    assert!(accepted("UNWIND [1] AS i MATCH (n) WHERE (n)-->() RETURN n, i"));
 }
 
 /// The message names the variable and points at the fix.
@@ -121,8 +111,5 @@ fn the_message_names_the_variable() {
     let e = parse_query("MATCH (n) WHERE (n)-[r]->(a) RETURN n").expect_err("refused");
     let msg = format!("{e:?}");
     assert!(msg.contains('r') || msg.contains('a'), "{msg}");
-    assert!(
-        msg.contains("EXISTS"),
-        "the message should offer the alternative: {msg}"
-    );
+    assert!(msg.contains("EXISTS"), "the message should offer the alternative: {msg}");
 }

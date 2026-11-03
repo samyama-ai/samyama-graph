@@ -10,8 +10,9 @@
 //! - Health monitoring with real-time metrics
 
 use samyama::{
-    graph::{Label, NodeId},
-    ClusterConfig, ClusterManager, GraphStateMachine, PersistenceManager, RaftNode, RaftRequest,
+    ClusterConfig, ClusterManager,
+    GraphStateMachine, PersistenceManager,
+    RaftNode, RaftRequest, graph::{NodeId, Label},
 };
 use std::sync::Arc;
 
@@ -42,14 +43,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (id, addr, region, location, voter) in &nodes_info {
         config.add_node(*id, addr.to_string(), *voter);
-        println!(
-            "  Node {}: {} ({}, {}) [{}]",
-            id,
-            addr,
-            region,
-            location,
-            if *voter { "Voter" } else { "Learner" }
-        );
+        println!("  Node {}: {} ({}, {}) [{}]",
+            id, addr, region, location,
+            if *voter { "Voter" } else { "Learner" });
     }
     println!();
 
@@ -100,15 +96,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     manager.mark_active(3).await;
 
     // Node 1 (us-east) elected as leader
-    manager
-        .update_node_role(1, samyama::raft::cluster::NodeRole::Leader)
-        .await;
-    manager
-        .update_node_role(2, samyama::raft::cluster::NodeRole::Follower)
-        .await;
-    manager
-        .update_node_role(3, samyama::raft::cluster::NodeRole::Follower)
-        .await;
+    manager.update_node_role(1, samyama::raft::cluster::NodeRole::Leader).await;
+    manager.update_node_role(2, samyama::raft::cluster::NodeRole::Follower).await;
+    manager.update_node_role(3, samyama::raft::cluster::NodeRole::Follower).await;
 
     println!("  Election completed:");
     println!("    Node 1 (us-east-1):  LEADER");
@@ -124,32 +114,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("└──────────────────────────────────────────────────────────────────┘");
 
     let health = manager.health_status().await;
-    println!(
-        "  Cluster Status:     {}",
-        if health.healthy {
-            "HEALTHY"
-        } else {
-            "DEGRADED"
-        }
-    );
+    println!("  Cluster Status:     {}", if health.healthy { "HEALTHY" } else { "DEGRADED" });
     println!("  Total Nodes:        {}", health.total_nodes);
     println!("  Active Nodes:       {}", health.active_nodes);
-    println!(
-        "  Voters:             {}/{}",
-        health.active_voters, health.total_voters
-    );
-    println!(
-        "  Has Leader:         {}",
-        if health.has_leader { "Yes" } else { "No" }
-    );
-    println!(
-        "  Quorum Satisfied:   {}",
-        if health.active_voters > health.total_voters / 2 {
-            "Yes"
-        } else {
-            "No"
-        }
-    );
+    println!("  Voters:             {}/{}", health.active_voters, health.total_voters);
+    println!("  Has Leader:         {}", if health.has_leader { "Yes" } else { "No" });
+    println!("  Quorum Satisfied:   {}", if health.active_voters > health.total_voters / 2 { "Yes" } else { "No" });
     println!();
 
     // =========================================================================
@@ -177,18 +147,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             labels: vec![label.to_string()],
             properties: {
                 let mut props = samyama::PropertyMap::new();
-                props.insert(
-                    "name".to_string(),
-                    samyama::PropertyValue::String(name.to_string()),
-                );
-                props.insert(
-                    "region".to_string(),
-                    samyama::PropertyValue::String(region.to_string()),
-                );
-                props.insert(
-                    "status".to_string(),
-                    samyama::PropertyValue::String(status.to_string()),
-                );
+                props.insert("name".to_string(), samyama::PropertyValue::String(name.to_string()));
+                props.insert("region".to_string(), samyama::PropertyValue::String(region.to_string()));
+                props.insert("status".to_string(), samyama::PropertyValue::String(status.to_string()));
                 props
             },
         };
@@ -218,35 +179,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let health = manager.health_status().await;
     println!();
     println!("  Post-partition status:");
-    println!(
-        "    Cluster:    {}",
-        if health.healthy {
-            "HEALTHY"
-        } else {
-            "DEGRADED"
-        }
-    );
-    println!(
-        "    Active:     {}/{} nodes",
-        health.active_nodes, health.total_nodes
-    );
-    println!(
-        "    Voters:     {}/{}",
-        health.active_voters, health.total_voters
-    );
-    println!(
-        "    Quorum:     {} (need {})",
-        health.active_voters,
-        health.total_voters / 2 + 1
-    );
-    println!(
-        "    Can write:  {}",
-        if health.active_voters > health.total_voters / 2 {
-            "Yes"
-        } else {
-            "No"
-        }
-    );
+    println!("    Cluster:    {}", if health.healthy { "HEALTHY" } else { "DEGRADED" });
+    println!("    Active:     {}/{} nodes", health.active_nodes, health.total_nodes);
+    println!("    Voters:     {}/{}", health.active_voters, health.total_voters);
+    println!("    Quorum:     {} (need {})", health.active_voters, health.total_voters / 2 + 1);
+    println!("    Can write:  {}", if health.active_voters > health.total_voters / 2 { "Yes" } else { "No" });
     println!();
 
     // Write during partition - should succeed with 2/3 quorum
@@ -256,22 +193,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         labels: vec!["Alert".to_string()],
         properties: {
             let mut props = samyama::PropertyMap::new();
-            props.insert(
-                "name".to_string(),
-                samyama::PropertyValue::String("partition-alert".to_string()),
-            );
-            props.insert(
-                "severity".to_string(),
-                samyama::PropertyValue::String("Warning".to_string()),
-            );
+            props.insert("name".to_string(), samyama::PropertyValue::String("partition-alert".to_string()));
+            props.insert("severity".to_string(), samyama::PropertyValue::String("Warning".to_string()));
             props
         },
     };
     let write_result = node1.write(partition_write).await?;
-    println!(
-        "  Write during partition: {:?} (quorum maintained)",
-        write_result
-    );
+    println!("  Write during partition: {:?} (quorum maintained)", write_result);
     println!();
 
     // =========================================================================
@@ -285,18 +213,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     manager.mark_active(3).await;
 
     let health = manager.health_status().await;
-    println!(
-        "  Cluster status: {}",
-        if health.healthy {
-            "HEALTHY"
-        } else {
-            "DEGRADED"
-        }
-    );
-    println!(
-        "  Active nodes:   {}/{}",
-        health.active_nodes, health.total_nodes
-    );
+    println!("  Cluster status: {}", if health.healthy { "HEALTHY" } else { "DEGRADED" });
+    println!("  Active nodes:   {}/{}", health.active_nodes, health.total_nodes);
     println!("  Node 3 will catch up via log replication");
     println!();
 
@@ -307,25 +225,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("│ Step 8: Adding Read Replica (Learner Node)                      │");
     println!("└──────────────────────────────────────────────────────────────────┘");
 
-    manager
-        .add_node(4, "10.0.4.100:5000".to_string(), false)
-        .await?;
+    manager.add_node(4, "10.0.4.100:5000".to_string(), false).await?;
     println!("  Node 4 added as learner (ap-southeast-1, Singapore)");
     println!("  Role: Read replica (non-voting)");
 
     let config = manager.get_config().await;
     println!();
     println!("  Cluster topology:");
-    println!(
-        "    Voters:   {} (quorum = {})",
-        config.voters().len(),
-        config.voters().len() / 2 + 1
-    );
+    println!("    Voters:   {} (quorum = {})", config.voters().len(), config.voters().len() / 2 + 1);
     println!("    Learners: {}", config.learners().len());
-    println!(
-        "    Total:    {} nodes across 4 regions",
-        config.nodes.len()
-    );
+    println!("    Total:    {} nodes across 4 regions", config.nodes.len());
     println!();
 
     // =========================================================================
@@ -347,27 +256,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if node_id == 1 {
             // Leader transfer before upgrading leader
             println!("    Transferring leadership to Node 2...");
-            manager
-                .update_node_role(2, samyama::raft::cluster::NodeRole::Leader)
-                .await;
-            manager
-                .update_node_role(1, samyama::raft::cluster::NodeRole::Follower)
-                .await;
+            manager.update_node_role(2, samyama::raft::cluster::NodeRole::Leader).await;
+            manager.update_node_role(1, samyama::raft::cluster::NodeRole::Follower).await;
             println!("    Node 2 is now leader");
         }
 
         manager.mark_inactive(node_id).await;
         let health = manager.health_status().await;
-        println!(
-            "    Cluster during upgrade: {} ({}/{} active)",
-            if health.healthy {
-                "Healthy"
-            } else {
-                "Degraded"
-            },
-            health.active_nodes,
-            health.total_nodes
-        );
+        println!("    Cluster during upgrade: {} ({}/{} active)",
+            if health.healthy { "Healthy" } else { "Degraded" },
+            health.active_nodes, health.total_nodes);
 
         // Simulate upgrade (no actual sleep for fast demo)
         manager.mark_active(node_id).await;
@@ -383,35 +281,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("└──────────────────────────────────────────────────────────────────┘");
 
     let health = manager.health_status().await;
-    println!(
-        "  Cluster: {}",
-        if health.healthy {
-            "HEALTHY"
-        } else {
-            "DEGRADED"
-        }
-    );
-    println!(
-        "  Nodes:   {}/{} active",
-        health.active_nodes, health.total_nodes
-    );
-    println!(
-        "  Leader:  {}",
-        if health.has_leader { "Present" } else { "None" }
-    );
+    println!("  Cluster: {}", if health.healthy { "HEALTHY" } else { "DEGRADED" });
+    println!("  Nodes:   {}/{} active", health.active_nodes, health.total_nodes);
+    println!("  Leader:  {}", if health.has_leader { "Present" } else { "None" });
 
     println!();
     println!("  Node Metrics:");
     for (node_ref, id) in [(&node1, 1), (&node2, 2), (&node3, 3)] {
         let m = node_ref.metrics().await;
         let is_leader = node_ref.is_leader().await;
-        println!(
-            "    Node {}: log={}, applied={}, role={}",
-            id,
-            m.last_log_index,
-            m.last_applied,
-            if is_leader { "Leader" } else { "Follower" }
-        );
+        println!("    Node {}: log={}, applied={}, role={}",
+            id, m.last_log_index, m.last_applied,
+            if is_leader { "Leader" } else { "Follower" });
     }
     println!();
 

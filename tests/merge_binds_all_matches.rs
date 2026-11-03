@@ -48,11 +48,7 @@ fn two_nodes() -> GraphStore {
 fn merge_binds_each_matching_node() {
     let mut store = two_nodes();
     assert_eq!(write(&mut store, "MERGE (b) RETURN b"), 2);
-    assert_eq!(
-        count(&store, "MATCH (n) RETURN count(n) AS c"),
-        2,
-        "matched, not created"
-    );
+    assert_eq!(count(&store, "MATCH (n) RETURN count(n) AS c"), 2, "matched, not created");
 }
 
 #[test]
@@ -78,11 +74,7 @@ fn a_property_pattern_narrows_the_matches() {
         let _ = store.set_node_property("default", n, "v".to_string(), PropertyValue::Integer(v));
     }
     assert_eq!(write(&mut store, "MERGE (n:N {v: 1}) RETURN n"), 2);
-    assert_eq!(
-        count(&store, "MATCH (n) RETURN count(n) AS c"),
-        3,
-        "nothing created"
-    );
+    assert_eq!(count(&store, "MATCH (n) RETURN count(n) AS c"), 3, "nothing created");
 }
 
 #[test]
@@ -103,10 +95,7 @@ fn a_bound_variable_is_refused_by_an_earlier_rule() {
     // #764's territory and not this change's.
     let mut store = two_nodes();
     let q = parse_query("MATCH (a) MERGE (a) RETURN a");
-    assert!(
-        q.is_err(),
-        "if this starts parsing, the bound path needs a test"
-    );
+    assert!(q.is_err(), "if this starts parsing, the bound path needs a test");
     let _ = &mut store;
 }
 
@@ -119,26 +108,14 @@ fn on_match_set_runs_for_every_match() {
         store.create_node_with_labels([Label::new("N")]);
     }
     write(&mut store, "MERGE (n:N) ON MATCH SET n.seen = 1 RETURN n");
-    assert_eq!(
-        count(&store, "MATCH (n:N) WHERE n.seen = 1 RETURN count(n) AS c"),
-        3
-    );
+    assert_eq!(count(&store, "MATCH (n:N) WHERE n.seen = 1 RETURN count(n) AS c"), 3);
 }
 
 #[test]
 fn on_create_set_still_runs_for_the_created_node() {
     let mut store = GraphStore::new();
-    write(
-        &mut store,
-        "MERGE (n:Fresh) ON CREATE SET n.made = 1 RETURN n",
-    );
-    assert_eq!(
-        count(
-            &store,
-            "MATCH (n:Fresh) WHERE n.made = 1 RETURN count(n) AS c"
-        ),
-        1
-    );
+    write(&mut store, "MERGE (n:Fresh) ON CREATE SET n.made = 1 RETURN n");
+    assert_eq!(count(&store, "MATCH (n:Fresh) WHERE n.made = 1 RETURN count(n) AS c"), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -161,10 +138,7 @@ fn pair_with_two_edges() -> GraphStore {
 fn merge_binds_each_matching_relationship() {
     let mut store = pair_with_two_edges();
     assert_eq!(
-        write(
-            &mut store,
-            "MATCH (a:A), (b:B) MERGE (a)-[r:TYPE]->(b) RETURN r"
-        ),
+        write(&mut store, "MATCH (a:A), (b:B) MERGE (a)-[r:TYPE]->(b) RETURN r"),
         2
     );
     assert_eq!(
@@ -187,16 +161,10 @@ fn an_inline_property_narrows_which_relationships_match() {
         let _ = store.set_edge_property_sparse(e, "k", PropertyValue::Integer(v));
     }
     assert_eq!(
-        write(
-            &mut store,
-            "MATCH (a:A), (b:B) MERGE (a)-[r:TYPE {k: 1}]->(b) RETURN r"
-        ),
+        write(&mut store, "MATCH (a:A), (b:B) MERGE (a)-[r:TYPE {k: 1}]->(b) RETURN r"),
         1
     );
-    assert_eq!(
-        count(&store, "MATCH ()-[r:TYPE]->() RETURN count(r) AS c"),
-        2
-    );
+    assert_eq!(count(&store, "MATCH ()-[r:TYPE]->() RETURN count(r) AS c"), 2);
 }
 
 #[test]
@@ -206,14 +174,8 @@ fn a_relationship_merge_that_matches_nothing_still_creates_one() {
     let b = store.create_node_with_labels([Label::new("B")]);
     let _ = (a, b);
     assert_eq!(
-        write(
-            &mut store,
-            "MATCH (a:A), (b:B) MERGE (a)-[r:TYPE]->(b) RETURN r"
-        ),
+        write(&mut store, "MATCH (a:A), (b:B) MERGE (a)-[r:TYPE]->(b) RETURN r"),
         1
     );
-    assert_eq!(
-        count(&store, "MATCH ()-[r:TYPE]->() RETURN count(r) AS c"),
-        1
-    );
+    assert_eq!(count(&store, "MATCH ()-[r:TYPE]->() RETURN count(r) AS c"), 1);
 }

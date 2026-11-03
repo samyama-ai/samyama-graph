@@ -2,9 +2,7 @@
 //!
 //! This module provides an in-memory RDF store with efficient indexing.
 
-use super::types::{
-    NamedNode, Quad, QuadPattern, RdfObject, RdfPredicate, RdfSubject, Triple, TriplePattern,
-};
+use super::types::{Triple, Quad, TriplePattern, QuadPattern, RdfSubject, RdfPredicate, RdfObject, NamedNode};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
@@ -38,10 +36,7 @@ pub struct TripleIterator<'a> {
 
 impl<'a> TripleIterator<'a> {
     fn new(triples: Vec<&'a Triple>) -> Self {
-        Self {
-            triples,
-            current: 0,
-        }
+        Self { triples, current: 0 }
     }
 }
 
@@ -360,7 +355,7 @@ impl Default for RdfStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rdf::types::{Literal, NamedNode};
+    use crate::rdf::types::{NamedNode, Literal};
 
     fn create_test_triple() -> Triple {
         let subject = NamedNode::new("http://example.org/alice").unwrap();
@@ -585,17 +580,17 @@ mod tests {
         let mut store = RdfStore::new();
         let graph = NamedNode::new("http://example.org/g1").unwrap();
 
-        let subjects = [
-            "http://example.org/a",
-            "http://example.org/b",
-            "http://example.org/c",
-        ];
+        let subjects = ["http://example.org/a", "http://example.org/b", "http://example.org/c"];
         for s in &subjects {
             let subj = NamedNode::new(s).unwrap();
             let pred = RdfPredicate::new("http://example.org/p").unwrap();
             let obj = Literal::new_simple_literal("val");
-            let quad =
-                super::super::types::Quad::new(subj.into(), pred, obj.into(), Some(graph.clone()));
+            let quad = super::super::types::Quad::new(
+                subj.into(),
+                pred,
+                obj.into(),
+                Some(graph.clone()),
+            );
             store.insert_quad(quad).unwrap();
         }
 
@@ -614,18 +609,12 @@ mod tests {
         let subj1 = NamedNode::new("http://example.org/a").unwrap();
         let pred = RdfPredicate::new("http://example.org/p").unwrap();
         let obj = Literal::new_simple_literal("val1");
-        let quad1 = super::super::types::Quad::new(
-            subj1.into(),
-            pred.clone(),
-            obj.into(),
-            Some(graph1.clone()),
-        );
+        let quad1 = super::super::types::Quad::new(subj1.into(), pred.clone(), obj.into(), Some(graph1.clone()));
         store.insert_quad(quad1).unwrap();
 
         let subj2 = NamedNode::new("http://example.org/b").unwrap();
         let obj2 = Literal::new_simple_literal("val2");
-        let quad2 =
-            super::super::types::Quad::new(subj2.into(), pred, obj2.into(), Some(graph2.clone()));
+        let quad2 = super::super::types::Quad::new(subj2.into(), pred, obj2.into(), Some(graph2.clone()));
         store.insert_quad(quad2).unwrap();
 
         let graphs = store.list_graphs();
@@ -640,10 +629,7 @@ mod tests {
         let store = RdfStore::new();
         let result = store.get_graph("http://nonexistent.org/graph");
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            RdfStoreError::GraphNotFound(_)
-        ));
+        assert!(matches!(result.unwrap_err(), RdfStoreError::GraphNotFound(_)));
     }
 
     #[test]
@@ -679,16 +665,8 @@ mod tests {
         let name_pred = RdfPredicate::new("http://xmlns.com/foaf/0.1/name").unwrap();
         let age_pred = RdfPredicate::new("http://xmlns.com/foaf/0.1/age").unwrap();
 
-        let t1 = Triple::new(
-            alice.clone().into(),
-            name_pred.clone(),
-            Literal::new_simple_literal("Alice").into(),
-        );
-        let t2 = Triple::new(
-            alice.clone().into(),
-            age_pred.clone(),
-            Literal::new_simple_literal("30").into(),
-        );
+        let t1 = Triple::new(alice.clone().into(), name_pred.clone(), Literal::new_simple_literal("Alice").into());
+        let t2 = Triple::new(alice.clone().into(), age_pred.clone(), Literal::new_simple_literal("30").into());
 
         store.insert(t1).unwrap();
         store.insert(t2).unwrap();
@@ -713,11 +691,7 @@ mod tests {
         let obj = Literal::new_simple_literal("Alice");
 
         let t1 = Triple::new(alice.into(), name_pred.clone(), obj.clone().into());
-        let t2 = Triple::new(
-            bob.into(),
-            name_pred,
-            Literal::new_simple_literal("Bob").into(),
-        );
+        let t2 = Triple::new(bob.into(), name_pred, Literal::new_simple_literal("Bob").into());
 
         store.insert(t1).unwrap();
         store.insert(t2).unwrap();
@@ -812,9 +786,7 @@ mod tests {
             let subj = NamedNode::new(&format!("http://example.org/s{}", i)).unwrap();
             let pred = RdfPredicate::new("http://example.org/p").unwrap();
             let obj = Literal::new_simple_literal(format!("val{}", i));
-            store
-                .insert(Triple::new(subj.into(), pred, obj.into()))
-                .unwrap();
+            store.insert(Triple::new(subj.into(), pred, obj.into())).unwrap();
         }
 
         let count = store.iter().count();

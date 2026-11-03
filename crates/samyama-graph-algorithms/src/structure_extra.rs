@@ -97,10 +97,9 @@ pub fn greedy_colouring(view: &GraphView, bidirectional: bool) -> Vec<usize> {
     order.sort_by_key(|&i| (std::cmp::Reverse(adj[i].len()), i));
     let mut colour = vec![usize::MAX; n];
     for u in order {
-        let taken: HashSet<usize> = adj[u]
-            .iter()
-            .filter_map(|&v| (colour[v] != usize::MAX).then_some(colour[v]))
-            .collect();
+        let taken: HashSet<usize> = adj[u].iter().filter_map(|&v| {
+            (colour[v] != usize::MAX).then_some(colour[v])
+        }).collect();
         colour[u] = (0..).find(|c| !taken.contains(c)).unwrap();
     }
     colour
@@ -124,7 +123,8 @@ pub fn dominating_set(view: &GraphView, bidirectional: bool) -> Vec<usize> {
             if chosen.contains(&u) {
                 continue;
             }
-            let gain = (!dominated[u]) as usize + adj[u].iter().filter(|&&v| !dominated[v]).count();
+            let gain = (!dominated[u]) as usize
+                + adj[u].iter().filter(|&&v| !dominated[v]).count();
             if gain > best_gain {
                 best_gain = gain;
                 best = u;
@@ -155,9 +155,7 @@ pub fn k_truss(view: &GraphView, k: usize, bidirectional: bool) -> Vec<usize> {
         // k-truss is defined for k >= 3; below that every edge trivially
         // qualifies and the answer is "every node with an edge", which is not
         // a truss and should not be reported as one.
-        return (0..n)
-            .filter(|&u| !neighbours(view, u, bidirectional).is_empty())
-            .collect();
+        return (0..n).filter(|&u| !neighbours(view, u, bidirectional).is_empty()).collect();
     }
     let mut adj: Vec<HashSet<usize>> = (0..n)
         .map(|u| neighbours(view, u, bidirectional).into_iter().collect())
@@ -469,8 +467,8 @@ mod tests {
         let path = view(4, &[(0, 1), (1, 2), (2, 3)]);
         let d = dominating_set(&path, true);
         for u in 0..4 {
-            let covered =
-                d.contains(&u) || neighbours(&path, u, true).iter().any(|v| d.contains(v));
+            let covered = d.contains(&u)
+                || neighbours(&path, u, true).iter().any(|v| d.contains(v));
             assert!(covered, "node {u} uncovered by {d:?}");
         }
     }
@@ -481,11 +479,7 @@ mod tests {
         // triangles, so the 3-truss is empty. This is the case that makes
         // truss a different question from core rather than a rename.
         let cycle = view(4, &[(0, 1), (1, 2), (2, 3), (3, 0)]);
-        assert!(
-            k_truss(&cycle, 3, true).is_empty(),
-            "{:?}",
-            k_truss(&cycle, 3, true)
-        );
+        assert!(k_truss(&cycle, 3, true).is_empty(), "{:?}", k_truss(&cycle, 3, true));
         // A triangle survives: each edge is in one triangle, and 3-truss needs
         // k-2 = 1.
         let tri = view(3, &[(0, 1), (1, 2), (2, 0)]);

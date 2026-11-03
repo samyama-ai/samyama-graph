@@ -32,17 +32,17 @@
 //! let results = engine.query(query).unwrap();
 //! ```
 
-mod algebra;
-mod executor;
-mod http;
-mod optimizer;
 mod parser;
+mod executor;
+mod algebra;
+mod optimizer;
 mod results;
+mod http;
 
-pub use executor::{ExecutionError, SparqlExecutor};
-pub use http::{HttpError, SparqlHttpEndpoint};
-pub use parser::{ParseError as SparqlParseError, SparqlParser};
-pub use results::{QuerySolution, ResultFormat, SparqlResults};
+pub use parser::{SparqlParser, ParseError as SparqlParseError};
+pub use executor::{SparqlExecutor, ExecutionError};
+pub use results::{SparqlResults, ResultFormat, QuerySolution};
+pub use http::{SparqlHttpEndpoint, HttpError};
 
 use crate::rdf::RdfStore;
 use thiserror::Error;
@@ -132,10 +132,7 @@ mod tests {
     fn stub_query_returns_empty_bindings_and_update_succeeds() {
         let mut engine = SparqlEngine::new(RdfStore::new());
         match engine.query("ASK { ?s ?p ?o }").unwrap() {
-            SparqlResults::Bindings {
-                variables,
-                solutions,
-            } => {
+            SparqlResults::Bindings { variables, solutions } => {
                 assert!(variables.is_empty() && solutions.is_empty())
             }
             other => panic!("expected empty bindings, got {other:?}"),
@@ -158,12 +155,7 @@ mod tests {
     #[test]
     fn stub_results_serialize_to_empty_text_in_every_format() {
         let r = SparqlResults::Boolean(true);
-        for f in [
-            ResultFormat::Json,
-            ResultFormat::Xml,
-            ResultFormat::Csv,
-            ResultFormat::Tsv,
-        ] {
+        for f in [ResultFormat::Json, ResultFormat::Xml, ResultFormat::Csv, ResultFormat::Tsv] {
             assert_eq!(r.serialize(f).unwrap(), "");
         }
         let g = SparqlResults::Graph(vec![]);
@@ -173,32 +165,14 @@ mod tests {
     #[test]
     fn error_messages_name_their_kind() {
         assert_eq!(SparqlError::Parse("a".into()).to_string(), "Parse error: a");
-        assert_eq!(
-            SparqlError::Execution("b".into()).to_string(),
-            "Execution error: b"
-        );
+        assert_eq!(SparqlError::Execution("b".into()).to_string(), "Execution error: b");
         assert_eq!(SparqlError::Type("c".into()).to_string(), "Type error: c");
         assert_eq!(SparqlError::Http("d".into()).to_string(), "HTTP error: d");
-        assert_eq!(
-            SparqlParseError::Syntax("e".into()).to_string(),
-            "Syntax error: e"
-        );
-        assert_eq!(
-            SparqlParseError::Unsupported("f".into()).to_string(),
-            "Unsupported feature: f"
-        );
-        assert_eq!(
-            ExecutionError::Query("g".into()).to_string(),
-            "Query error: g"
-        );
-        assert_eq!(
-            ExecutionError::TypeMismatch("h".into()).to_string(),
-            "Type mismatch: h"
-        );
+        assert_eq!(SparqlParseError::Syntax("e".into()).to_string(), "Syntax error: e");
+        assert_eq!(SparqlParseError::Unsupported("f".into()).to_string(), "Unsupported feature: f");
+        assert_eq!(ExecutionError::Query("g".into()).to_string(), "Query error: g");
+        assert_eq!(ExecutionError::TypeMismatch("h".into()).to_string(), "Type mismatch: h");
         assert_eq!(HttpError::Server("i".into()).to_string(), "Server error: i");
-        assert_eq!(
-            HttpError::InvalidRequest("j".into()).to_string(),
-            "Invalid request: j"
-        );
+        assert_eq!(HttpError::InvalidRequest("j".into()).to_string(), "Invalid request: j");
     }
 }

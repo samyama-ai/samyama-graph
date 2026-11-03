@@ -11,7 +11,8 @@ pub struct TLBOSolver {
 
 impl TLBOSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { seed: None, config }
+        Self {
+            seed: None, config }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -44,10 +45,7 @@ impl TLBOSolver {
                 break;
             }
             if iter % 10 == 0 {
-                println!(
-                    "TLBO Solver: Iteration {}/{}",
-                    iter, self.config.max_iterations
-                );
+                println!("TLBO Solver: Iteration {}/{}", iter, self.config.max_iterations);
             }
             let best_idx = self.find_best(&population);
             let teacher_vars = population[best_idx].variables.clone();
@@ -86,14 +84,12 @@ impl TLBOSolver {
                 let mut learner_j_idx;
                 loop {
                     learner_j_idx = rng.gen_range(0..pop_len);
-                    if learner_j_idx != i {
-                        break;
-                    }
+                    if learner_j_idx != i { break; }
                 }
 
                 let ind_i = &population[i];
                 let ind_j = &population[learner_j_idx];
-
+                
                 let mut new_vars = Array1::zeros(dim);
                 for k in 0..dim {
                     let r: f64 = rng.gen();

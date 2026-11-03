@@ -4,10 +4,10 @@
 //! level, enabling the graph-native planner to accurately estimate cardinalities and choose
 //! optimal traversal directions.
 
-use super::types::{EdgeType, Label, NodeId};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use super::types::{Label, EdgeType, NodeId};
 
 /// Which endpoint of a triple a degree is counted on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,11 +27,7 @@ pub struct TriplePattern {
 }
 
 impl TriplePattern {
-    pub fn new(
-        source_label: impl Into<Label>,
-        edge_type: impl Into<EdgeType>,
-        target_label: impl Into<Label>,
-    ) -> Self {
+    pub fn new(source_label: impl Into<Label>, edge_type: impl Into<EdgeType>, target_label: impl Into<Label>) -> Self {
         TriplePattern {
             source_label: source_label.into(),
             edge_type: edge_type.into(),
@@ -51,11 +47,7 @@ trait TripleKey {
 
 impl TripleKey for TriplePattern {
     fn parts(&self) -> (&str, &str, &str) {
-        (
-            self.source_label.as_str(),
-            self.edge_type.as_str(),
-            self.target_label.as_str(),
-        )
+        (self.source_label.as_str(), self.edge_type.as_str(), self.target_label.as_str())
     }
 }
 
@@ -224,8 +216,7 @@ impl GraphCatalog {
                 // Probe by reference; build the owned key only to insert one.
                 let parts = (src_label, edge_type, tgt_label);
                 let key: &dyn TripleKey = &parts;
-                let owned =
-                    || TriplePattern::new(src_label.clone(), edge_type.clone(), tgt_label.clone());
+                let owned = || TriplePattern::new(src_label.clone(), edge_type.clone(), tgt_label.clone());
 
                 // `entry(k)` takes the key by value, so an `entry` per map cloned
                 // three Strings on every call whether or not the entry already
@@ -389,8 +380,7 @@ impl GraphCatalog {
         self.degrees_stale = true;
         for src_label in src_labels {
             for tgt_label in tgt_labels {
-                let pattern =
-                    TriplePattern::new(src_label.clone(), edge_type.clone(), tgt_label.clone());
+                let pattern = TriplePattern::new(src_label.clone(), edge_type.clone(), tgt_label.clone());
 
                 // Update source degree tracking
                 if let Some(src_map) = self.source_degrees.get_mut(&pattern) {
@@ -476,11 +466,7 @@ impl GraphCatalog {
                 found = true;
             }
         }
-        if found {
-            total_degree
-        } else {
-            1.0
-        } // default: assume 1 edge per node
+        if found { total_degree } else { 1.0 } // default: assume 1 edge per node
     }
 
     /// Estimate cardinality after an incoming expand to target_label via edge_type
@@ -493,11 +479,7 @@ impl GraphCatalog {
                 found = true;
             }
         }
-        if found {
-            total_degree
-        } else {
-            1.0
-        }
+        if found { total_degree } else { 1.0 }
     }
 
     /// Estimate the probability that an edge exists between a specific source and target
@@ -507,11 +489,7 @@ impl GraphCatalog {
         edge_type: &EdgeType,
         target_label: &Label,
     ) -> f64 {
-        let pattern = TriplePattern::new(
-            source_label.clone(),
-            edge_type.clone(),
-            target_label.clone(),
-        );
+        let pattern = TriplePattern::new(source_label.clone(), edge_type.clone(), target_label.clone());
         match self.triple_stats.get(&pattern) {
             Some(stats) => {
                 let source_count = self.label_counts.get(source_label).copied().unwrap_or(1) as f64;
@@ -860,12 +838,7 @@ impl<'a> Shard<'a> {
         for shard in shards {
             // A shard's label ids are its own: translate them into the
             // global numbering before the keys can be compared.
-            let remap: Vec<u32> = shard
-                .labels
-                .iter()
-                .copied()
-                .map(|l| global.intern(l))
-                .collect();
+            let remap: Vec<u32> = shard.labels.iter().copied().map(|l| global.intern(l)).collect();
             for (local, count) in shard.label_counts.iter().enumerate() {
                 global.label_counts[remap[local] as usize] += count;
             }
@@ -891,13 +864,7 @@ impl<'a> Shard<'a> {
         store: &super::store::GraphStore,
         triples: Vec<(TripleKeyIds, TripleAcc)>,
     ) -> GraphCatalog {
-        let Shard {
-            labels,
-            label_counts,
-            edges_counted,
-            non_unit_types,
-            ..
-        } = self;
+        let Shard { labels, label_counts, edges_counted, non_unit_types, .. } = self;
 
         let mut catalog = GraphCatalog::new();
         for (local, &count) in label_counts.iter().enumerate() {
@@ -914,9 +881,7 @@ impl<'a> Shard<'a> {
             let edge_type = match type_names.get(&type_id) {
                 Some(name) => name.clone(),
                 None => {
-                    let Some(name) = store.edge_type_name_at(type_id) else {
-                        continue;
-                    };
+                    let Some(name) = store.edge_type_name_at(type_id) else { continue };
                     type_names.insert(type_id, name.clone());
                     name.clone()
                 }
@@ -940,9 +905,7 @@ impl<'a> Shard<'a> {
                     max_out_degree,
                 },
             );
-            catalog
-                .source_degrees
-                .insert(pattern.clone(), acc.source_degrees);
+            catalog.source_degrees.insert(pattern.clone(), acc.source_degrees);
             catalog.target_degrees.insert(pattern, acc.target_degrees);
         }
 
@@ -1006,9 +969,7 @@ mod tests {
         // A type carried only by the multi-label tail, so it is the one type
         // whose disqualification lives in a single task's accumulator.
         for i in (n - 40)..n {
-            store
-                .create_edge(ids[i], ids[(i + 3) % n], "MULTI")
-                .unwrap();
+            store.create_edge(ids[i], ids[(i + 3) % n], "MULTI").unwrap();
         }
 
         for i in 0..n {
@@ -1017,20 +978,14 @@ mod tests {
             // A skewed fan-out: the first few nodes carry many edges.
             if i < 50 {
                 for j in 0..200 {
-                    store
-                        .create_edge(ids[i], ids[(i + j * 13) % n], types[j % 4])
-                        .unwrap();
+                    store.create_edge(ids[i], ids[(i + j * 13) % n], types[j % 4]).unwrap();
                 }
             }
             if i % 1_000 == 0 {
                 // Self-loop and a parallel edge of the same type.
                 store.create_edge(ids[i], ids[i], "KNOWS").unwrap();
-                store
-                    .create_edge(ids[i], ids[(i + 1) % n], types[i % 4])
-                    .unwrap();
-                store
-                    .create_edge(ids[i], ids[(i + 1) % n], types[i % 4])
-                    .unwrap();
+                store.create_edge(ids[i], ids[(i + 1) % n], types[i % 4]).unwrap();
+                store.create_edge(ids[i], ids[(i + 1) % n], types[i % 4]).unwrap();
             }
         }
         store
@@ -1040,10 +995,7 @@ mod tests {
     /// rather than within a tolerance: a tolerance would hide exactly the
     /// order-dependence this test exists to rule out.
     fn assert_catalogs_equal(expected: &GraphCatalog, actual: &GraphCatalog, what: &str) {
-        assert_eq!(
-            expected.label_counts, actual.label_counts,
-            "label_counts ({what})"
-        );
+        assert_eq!(expected.label_counts, actual.label_counts, "label_counts ({what})");
         assert_eq!(
             expected.triple_stats.len(),
             actual.triple_stats.len(),
@@ -1055,18 +1007,9 @@ mod tests {
                 .get(pattern)
                 .unwrap_or_else(|| panic!("missing triple {pattern:?} ({what})"));
             assert_eq!(want.count, got.count, "count {pattern:?} ({what})");
-            assert_eq!(
-                want.distinct_sources, got.distinct_sources,
-                "sources {pattern:?} ({what})"
-            );
-            assert_eq!(
-                want.distinct_targets, got.distinct_targets,
-                "targets {pattern:?} ({what})"
-            );
-            assert_eq!(
-                want.max_out_degree, got.max_out_degree,
-                "max_out {pattern:?} ({what})"
-            );
+            assert_eq!(want.distinct_sources, got.distinct_sources, "sources {pattern:?} ({what})");
+            assert_eq!(want.distinct_targets, got.distinct_targets, "targets {pattern:?} ({what})");
+            assert_eq!(want.max_out_degree, got.max_out_degree, "max_out {pattern:?} ({what})");
             assert_eq!(
                 want.avg_out_degree.to_bits(),
                 got.avg_out_degree.to_bits(),
@@ -1078,26 +1021,14 @@ mod tests {
                 "avg_in {pattern:?} ({what})"
             );
         }
-        assert_eq!(
-            expected.source_degrees, actual.source_degrees,
-            "source_degrees ({what})"
-        );
-        assert_eq!(
-            expected.target_degrees, actual.target_degrees,
-            "target_degrees ({what})"
-        );
-        assert_eq!(
-            expected.edges_counted, actual.edges_counted,
-            "edges_counted ({what})"
-        );
+        assert_eq!(expected.source_degrees, actual.source_degrees, "source_degrees ({what})");
+        assert_eq!(expected.target_degrees, actual.target_degrees, "target_degrees ({what})");
+        assert_eq!(expected.edges_counted, actual.edges_counted, "edges_counted ({what})");
         assert_eq!(
             expected.non_unit_label_types, actual.non_unit_label_types,
             "non_unit_label_types ({what})"
         );
-        assert_eq!(
-            expected.generation, actual.generation,
-            "generation ({what})"
-        );
+        assert_eq!(expected.generation, actual.generation, "generation ({what})");
     }
 
     #[test]
@@ -1107,20 +1038,9 @@ mod tests {
         // Not an empty check in disguise: the graph has to have produced
         // triples, degrees and a disqualified type for the comparison to mean
         // anything.
-        assert!(
-            serial.triple_stats.len() >= 20,
-            "triples: {}",
-            serial.triple_stats.len()
-        );
-        assert!(
-            !serial.non_unit_label_types.is_empty(),
-            "no multi-label edge was filed"
-        );
-        assert!(
-            serial.edges_counted > 30_000,
-            "edges: {}",
-            serial.edges_counted
-        );
+        assert!(serial.triple_stats.len() >= 20, "triples: {}", serial.triple_stats.len());
+        assert!(!serial.non_unit_label_types.is_empty(), "no multi-label edge was filed");
+        assert!(serial.edges_counted > 30_000, "edges: {}", serial.edges_counted);
 
         let parallel = GraphCatalog::recompute_full_parallel(&store);
         assert_catalogs_equal(&serial, &parallel, "default pool");
@@ -1159,13 +1079,7 @@ mod tests {
             .map(|i| store.create_node(if i % 3 == 0 { "Person" } else { "Company" }))
             .collect();
         for i in 0..n {
-            store
-                .create_edge(
-                    ids[i],
-                    ids[(i * 7 + 1) % n],
-                    if i % 2 == 0 { "KNOWS" } else { "RATED" },
-                )
-                .unwrap();
+            store.create_edge(ids[i], ids[(i * 7 + 1) % n], if i % 2 == 0 { "KNOWS" } else { "RATED" }).unwrap();
         }
         let serial = GraphCatalog::recompute_full_serial(&store);
         let dispatched = GraphCatalog::recompute_full(&store);
@@ -1239,20 +1153,8 @@ mod tests {
         let p2 = NodeId::new(2);
         let p3 = NodeId::new(3);
 
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p3,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p3, &[Label::new("Person")]);
 
         let pattern = TriplePattern::new("Person", "KNOWS", "Person");
         let stats = catalog.get_triple_stats(&pattern).unwrap();
@@ -1261,7 +1163,7 @@ mod tests {
         assert_eq!(stats.distinct_sources, 1); // only p1 is source
         assert_eq!(stats.distinct_targets, 2); // p2 and p3 are targets
         assert_eq!(stats.avg_out_degree, 2.0); // 2 edges / 1 source
-        assert_eq!(stats.avg_in_degree, 1.0); // 2 edges / 2 targets
+        assert_eq!(stats.avg_in_degree, 1.0);  // 2 edges / 2 targets
         assert_eq!(stats.max_out_degree, 2);
     }
 
@@ -1273,29 +1175,11 @@ mod tests {
         let p2 = NodeId::new(2);
         let p3 = NodeId::new(3);
 
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p3,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p3, &[Label::new("Person")]);
 
         // Delete one edge
-        catalog.on_edge_deleted(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p3,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_deleted(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p3, &[Label::new("Person")]);
 
         let pattern = TriplePattern::new("Person", "KNOWS", "Person");
         let stats = catalog.get_triple_stats(&pattern).unwrap();
@@ -1314,20 +1198,8 @@ mod tests {
         let p1 = NodeId::new(1);
         let p2 = NodeId::new(2);
 
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
-        catalog.on_edge_deleted(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
+        catalog.on_edge_deleted(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
 
         let pattern = TriplePattern::new("Person", "KNOWS", "Person");
         assert!(catalog.get_triple_stats(&pattern).is_none());
@@ -1375,36 +1247,12 @@ mod tests {
         let p4 = NodeId::new(4);
 
         // p1 knows p2, p3, p4 (degree 3)
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p3,
-            &[Label::new("Person")],
-        );
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p4,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p3, &[Label::new("Person")]);
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p4, &[Label::new("Person")]);
 
         // p2 knows p3 (degree 1)
-        catalog.on_edge_created(
-            p2,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p3,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_created(p2, &[Label::new("Person")], &EdgeType::new("KNOWS"), p3, &[Label::new("Person")]);
 
         let pattern = TriplePattern::new("Person", "KNOWS", "Person");
         let stats = catalog.get_triple_stats(&pattern).unwrap();
@@ -1423,36 +1271,16 @@ mod tests {
         let c1 = NodeId::new(3);
 
         // Each Person knows 2 Persons
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
-        catalog.on_edge_created(
-            p2,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p1,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
+        catalog.on_edge_created(p2, &[Label::new("Person")], &EdgeType::new("KNOWS"), p1, &[Label::new("Person")]);
 
         // Each Person works at 1 Company
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("WORKS_AT"),
-            c1,
-            &[Label::new("Company")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("WORKS_AT"), c1, &[Label::new("Company")]);
 
-        let knows_degree =
-            catalog.estimate_expand_out(&Label::new("Person"), &EdgeType::new("KNOWS"));
+        let knows_degree = catalog.estimate_expand_out(&Label::new("Person"), &EdgeType::new("KNOWS"));
         assert_eq!(knows_degree, 1.0); // 2 edges / 2 sources = 1.0
 
-        let works_degree =
-            catalog.estimate_expand_out(&Label::new("Person"), &EdgeType::new("WORKS_AT"));
+        let works_degree = catalog.estimate_expand_out(&Label::new("Person"), &EdgeType::new("WORKS_AT"));
         assert_eq!(works_degree, 1.0); // 1 edge / 1 source = 1.0
     }
 
@@ -1466,30 +1294,11 @@ mod tests {
         let c1 = NodeId::new(4);
 
         // 3 Person nodes WORKS_AT 1 Company
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("WORKS_AT"),
-            c1,
-            &[Label::new("Company")],
-        );
-        catalog.on_edge_created(
-            p2,
-            &[Label::new("Person")],
-            &EdgeType::new("WORKS_AT"),
-            c1,
-            &[Label::new("Company")],
-        );
-        catalog.on_edge_created(
-            p3,
-            &[Label::new("Person")],
-            &EdgeType::new("WORKS_AT"),
-            c1,
-            &[Label::new("Company")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("WORKS_AT"), c1, &[Label::new("Company")]);
+        catalog.on_edge_created(p2, &[Label::new("Person")], &EdgeType::new("WORKS_AT"), c1, &[Label::new("Company")]);
+        catalog.on_edge_created(p3, &[Label::new("Person")], &EdgeType::new("WORKS_AT"), c1, &[Label::new("Company")]);
 
-        let in_degree =
-            catalog.estimate_expand_in(&Label::new("Company"), &EdgeType::new("WORKS_AT"));
+        let in_degree = catalog.estimate_expand_in(&Label::new("Company"), &EdgeType::new("WORKS_AT"));
         assert_eq!(in_degree, 3.0); // 3 edges / 1 target = 3.0
     }
 
@@ -1506,13 +1315,7 @@ mod tests {
         let c1 = NodeId::new(3);
 
         // 1 of 2 persons works at the company
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("WORKS_AT"),
-            c1,
-            &[Label::new("Company")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("WORKS_AT"), c1, &[Label::new("Company")]);
 
         let prob = catalog.estimate_edge_existence(
             &Label::new("Person"),
@@ -1541,22 +1344,10 @@ mod tests {
 
         let p1 = NodeId::new(1);
         let p2 = NodeId::new(2);
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
         assert_eq!(catalog.generation, 2);
 
-        catalog.on_edge_deleted(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_deleted(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
         assert_eq!(catalog.generation, 3);
     }
 
@@ -1566,13 +1357,7 @@ mod tests {
         let p1 = NodeId::new(1);
         let p2 = NodeId::new(2);
 
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
 
         let output = catalog.format();
         assert!(output.contains("Triple Statistics:"));
@@ -1587,13 +1372,7 @@ mod tests {
         catalog.on_label_added(&Label::new("Person"));
         let p1 = NodeId::new(1);
         let p2 = NodeId::new(2);
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
 
         catalog.clear();
 
@@ -1630,22 +1409,8 @@ mod tests {
         assert_eq!(works_stats.count, 1);
 
         // Verify label counts
-        assert_eq!(
-            recomputed
-                .label_counts
-                .get(&Label::new("Person"))
-                .copied()
-                .unwrap_or(0),
-            3
-        );
-        assert_eq!(
-            recomputed
-                .label_counts
-                .get(&Label::new("Company"))
-                .copied()
-                .unwrap_or(0),
-            1
-        );
+        assert_eq!(recomputed.label_counts.get(&Label::new("Person")).copied().unwrap_or(0), 3);
+        assert_eq!(recomputed.label_counts.get(&Label::new("Company")).copied().unwrap_or(0), 1);
     }
 
     #[test]

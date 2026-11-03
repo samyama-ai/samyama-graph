@@ -32,15 +32,7 @@ fn rows(store: &GraphStore, cypher: &str) -> Vec<String> {
     let mut got: Vec<String> = out
         .records
         .iter()
-        .map(|r| {
-            format!(
-                "{:?}",
-                out.columns
-                    .iter()
-                    .map(|c| r.get(c).cloned())
-                    .collect::<Vec<_>>()
-            )
-        })
+        .map(|r| format!("{:?}", out.columns.iter().map(|c| r.get(c).cloned()).collect::<Vec<_>>()))
         .collect();
     got.sort();
     got
@@ -58,9 +50,7 @@ fn social(compact: bool) -> GraphStore {
     let people: Vec<NodeId> = (0..PEOPLE)
         .map(|i| {
             let n = store.create_node("P");
-            store
-                .set_node_property("default", n, "id", i as i64)
-                .unwrap();
+            store.set_node_property("default", n, "id", i as i64).unwrap();
             n
         })
         .collect();
@@ -76,9 +66,7 @@ fn social(compact: bool) -> GraphStore {
             }
         }
         for j in 0..12 {
-            store
-                .create_edge(p, people[(i * 5 + j + 1) % PEOPLE], "LIKES")
-                .unwrap();
+            store.create_edge(p, people[(i * 5 + j + 1) % PEOPLE], "LIKES").unwrap();
         }
         if i % 4 == 0 {
             store.create_edge(p, org, "WORKS_AT").unwrap();
@@ -127,10 +115,7 @@ fn compare(compact: bool) {
     let walked = social(compact);
     let indexed = social(compact);
     for shape in SHAPES {
-        let expected: Vec<Vec<String>> = ANCHORS
-            .iter()
-            .map(|&a| rows(&walked, &at(shape, a)))
-            .collect();
+        let expected: Vec<Vec<String>> = ANCHORS.iter().map(|&a| rows(&walked, &at(shape, a))).collect();
         assert_eq!(
             walked.type_adjacency_cached(),
             0,
@@ -138,30 +123,18 @@ fn compare(compact: bool) {
         );
 
         let all = rows(&indexed, &every_anchor(shape));
-        assert!(
-            !all.is_empty(),
-            "`{shape}` over every person matched nothing"
-        );
+        assert!(!all.is_empty(), "`{shape}` over every person matched nothing");
         assert!(
             indexed.type_adjacency_cached() > 0,
             "`{shape}` over every person never built a type index, so nothing was compared"
         );
         for (i, &a) in ANCHORS.iter().enumerate() {
             let got = rows(&indexed, &at(shape, a));
-            assert_eq!(
-                got,
-                expected[i],
-                "`{}` (compacted: {compact}) differs with the index",
-                at(shape, a)
-            );
+            assert_eq!(got, expected[i], "`{}` (compacted: {compact}) differs with the index", at(shape, a));
         }
         // The all-anchor run crossed the threshold mid-query; a second run
         // reads the index from its first walk. Both must agree.
-        assert_eq!(
-            rows(&indexed, &every_anchor(shape)),
-            all,
-            "`{shape}`: cold and warm runs differ"
-        );
+        assert_eq!(rows(&indexed, &every_anchor(shape)), all, "`{shape}`: cold and warm runs differ");
     }
 }
 
@@ -202,9 +175,7 @@ fn the_pinned_target_search_answers_the_same_from_the_index() {
     let (mut walked, mut indexed) = (social(false), social(false));
     for store in [&mut walked, &mut indexed] {
         let q = parse_query("CREATE INDEX ON :P(id)").unwrap();
-        MutQueryExecutor::new(store, "default".to_string())
-            .execute(&q)
-            .unwrap();
+        MutQueryExecutor::new(store, "default".to_string()).execute(&q).unwrap();
     }
     let (walked, indexed) = (walked, indexed);
     // The shape this test exists for: the planner pinned the target.
@@ -212,43 +183,19 @@ fn the_pinned_target_search_answers_the_same_from_the_index() {
         let q = parse_query(&format!("EXPLAIN {}", at(shape, 1))).unwrap();
         let out = QueryExecutor::new(&walked).execute(&q).unwrap();
         let plan = format!("{:?}", out.records[0].get("plan"));
-        assert!(
-            plan.contains("target pinned"),
-            "`{shape}` does not run the pinned-target search:\n{plan}"
-        );
+        assert!(plan.contains("target pinned"), "`{shape}` does not run the pinned-target search:\n{plan}");
     }
-    rows(
-        &indexed,
-        &every_anchor("MATCH (p:P {id: {A}})-[:KNOWS*1..3]-(f) RETURN f.id"),
-    );
-    assert!(
-        indexed.type_adjacency_cached() >= 2,
-        "both directions of KNOWS should be indexed"
-    );
+    rows(&indexed, &every_anchor("MATCH (p:P {id: {A}})-[:KNOWS*1..3]-(f) RETURN f.id"));
+    assert!(indexed.type_adjacency_cached() >= 2, "both directions of KNOWS should be indexed");
     for shape in shapes {
         // Per anchor only on the walk-only store: over every person the
         // planner may walk forward from each one, which crosses the build
         // threshold and would leave that store with an index of its own.
-        let expected: Vec<Vec<String>> = ANCHORS
-            .iter()
-            .map(|&a| rows(&walked, &at(shape, a)))
-            .collect();
-        assert_eq!(
-            walked.type_adjacency_cached(),
-            0,
-            "`{shape}` built an index on the walk-only store"
-        );
-        assert!(
-            expected.iter().any(|r| !r.is_empty()),
-            "`{shape}` reached the target from no anchor"
-        );
+        let expected: Vec<Vec<String>> = ANCHORS.iter().map(|&a| rows(&walked, &at(shape, a))).collect();
+        assert_eq!(walked.type_adjacency_cached(), 0, "`{shape}` built an index on the walk-only store");
+        assert!(expected.iter().any(|r| !r.is_empty()), "`{shape}` reached the target from no anchor");
         for (i, &a) in ANCHORS.iter().enumerate() {
-            assert_eq!(
-                rows(&indexed, &at(shape, a)),
-                expected[i],
-                "`{}`",
-                at(shape, a)
-            );
+            assert_eq!(rows(&indexed, &at(shape, a)), expected[i], "`{}`", at(shape, a));
         }
     }
 }
@@ -271,17 +218,12 @@ fn an_edge_added_after_the_index_was_built_is_walked() {
     let out = QueryExecutor::new(&store).execute(&q).unwrap();
     let five: NodeId = out.records[0].get("p").and_then(|v| v.node_id()).unwrap();
     let target = store.create_node("P");
-    store
-        .set_node_property("default", target, "id", 9_999i64)
-        .unwrap();
+    store.set_node_property("default", target, "id", 9_999i64).unwrap();
     store.create_edge(five, target, "KNOWS").unwrap();
 
     let after = rows(&store, &at(shape, 5));
-    assert_eq!(
-        after.len(),
-        before.len() + 1,
-        "the new KNOWS edge was not walked: {after:?}"
-    );
+    assert_eq!(after.len(), before.len() + 1, "the new KNOWS edge was not walked: {after:?}");
     assert!(after.iter().any(|r| r.contains("9999")));
     let _ = PropertyValue::Null;
 }
+

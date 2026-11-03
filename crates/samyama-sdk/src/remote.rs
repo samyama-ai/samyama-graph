@@ -89,7 +89,8 @@ impl RemoteClient {
     /// );
     /// ```
     pub fn with_config(http_base_url: &str, config: ConnectionConfig) -> Self {
-        let mut builder = Client::builder().pool_max_idle_per_host(config.pool_max_idle_per_host);
+        let mut builder = Client::builder()
+            .pool_max_idle_per_host(config.pool_max_idle_per_host);
         if let Some(t) = config.timeout {
             builder = builder.timeout(t);
         }
@@ -102,9 +103,9 @@ impl RemoteClient {
         // `build` fails only on a bad TLS backend, which is a programming error
         // here rather than a runtime condition; falling back to a default
         // client would silently drop the timeout this type exists to set.
-        let http_client = builder
-            .build()
-            .unwrap_or_else(|e| panic!("could not build HTTP client: {e}"));
+        let http_client = builder.build().unwrap_or_else(|e| {
+            panic!("could not build HTTP client: {e}")
+        });
         Self {
             http_base_url: http_base_url.trim_end_matches('/').to_string(),
             http_client,
@@ -219,23 +220,17 @@ impl RemoteClient {
             .await?;
 
         let status = response.status();
-        let payload: serde_json::Value = response
-            .json()
-            .await
+        let payload: serde_json::Value = response.json().await
             .unwrap_or_else(|_| serde_json::json!({"error": "Unknown error"}));
         if status.is_success() {
-            payload
-                .get("cypher")
+            payload.get("cypher")
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
-                .ok_or_else(|| {
-                    SamyamaError::ProtocolError(
-                        "/api/nlq response has no `cypher` string".to_string(),
-                    )
-                })
+                .ok_or_else(|| SamyamaError::ProtocolError(
+                    "/api/nlq response has no `cypher` string".to_string()
+                ))
         } else {
-            let msg = payload
-                .get("error")
+            let msg = payload.get("error")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown error")
                 .to_string();
@@ -413,12 +408,9 @@ impl RemoteClient {
             let result: QueryResult = response.json().await?;
             Ok(result)
         } else {
-            let error_body: serde_json::Value = response
-                .json()
-                .await
+            let error_body: serde_json::Value = response.json().await
                 .unwrap_or_else(|_| serde_json::json!({"error": "Unknown error"}));
-            let msg = error_body
-                .get("error")
+            let msg = error_body.get("error")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown error")
                 .to_string();
@@ -459,10 +451,9 @@ impl SamyamaClient for RemoteClient {
             let status: ServerStatus = response.json().await?;
             Ok(status)
         } else {
-            Err(SamyamaError::ConnectionError(format!(
-                "Status endpoint returned {}",
-                response.status()
-            )))
+            Err(SamyamaError::ConnectionError(
+                format!("Status endpoint returned {}", response.status())
+            ))
         }
     }
 
@@ -471,10 +462,9 @@ impl SamyamaClient for RemoteClient {
         if status.status == "healthy" {
             Ok("PONG".to_string())
         } else {
-            Err(SamyamaError::ConnectionError(format!(
-                "Server unhealthy: {}",
-                status.status
-            )))
+            Err(SamyamaError::ConnectionError(
+                format!("Server unhealthy: {}", status.status)
+            ))
         }
     }
 }

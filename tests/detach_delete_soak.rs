@@ -26,7 +26,7 @@
 //! default is sized for CI.
 
 use samyama::graph::GraphStore;
-use samyama::query::{parse_query, MutQueryExecutor, QueryEngine};
+use samyama::query::{MutQueryExecutor, QueryEngine, parse_query};
 
 const T: &str = "default";
 
@@ -45,8 +45,7 @@ const FIXTURES: &[&[(&str, &str)]] = &[
 fn run(store: &mut GraphStore, cypher: &str) {
     let q = parse_query(cypher).unwrap_or_else(|e| panic!("parse {cypher}: {e}"));
     let mut ex = MutQueryExecutor::new(store, T.to_string());
-    ex.execute(&q)
-        .unwrap_or_else(|e| panic!("execute {cypher}: {e}"));
+    ex.execute(&q).unwrap_or_else(|e| panic!("execute {cypher}: {e}"));
 }
 
 fn load(store: &mut GraphStore, edges: &[(&str, &str)]) {
@@ -128,9 +127,6 @@ fn cycling_fixtures_through_detach_delete_never_leaves_a_dangling_edge() {
             .expect("post-reset scan")
             .records
             .len();
-        assert_eq!(
-            left, 0,
-            "round {round}: DETACH DELETE left {left} edge(s) behind"
-        );
+        assert_eq!(left, 0, "round {round}: DETACH DELETE left {left} edge(s) behind");
     }
 }

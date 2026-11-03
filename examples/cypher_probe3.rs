@@ -17,19 +17,11 @@ fn render(v: Option<&Value>) -> String {
     match v {
         Some(Value::Map(entries)) => format!(
             "{{{}}}",
-            entries
-                .iter()
-                .map(|(k, v)| format!("{k}: {}", render(Some(v))))
-                .collect::<Vec<_>>()
-                .join(", ")
+            entries.iter().map(|(k, v)| format!("{k}: {}", render(Some(v)))).collect::<Vec<_>>().join(", ")
         ),
         Some(Value::List(items)) => format!(
             "[{}]",
-            items
-                .iter()
-                .map(|i| render(Some(i)))
-                .collect::<Vec<_>>()
-                .join(", ")
+            items.iter().map(|i| render(Some(i))).collect::<Vec<_>>().join(", ")
         ),
         Some(Value::Property(p)) => match p {
             PropertyValue::Integer(n) => n.to_string(),
@@ -39,14 +31,11 @@ fn render(v: Option<&Value>) -> String {
             PropertyValue::Null => "null".into(),
             PropertyValue::Array(a) => format!(
                 "[{}]",
-                a.iter()
-                    .map(|x| match x {
-                        PropertyValue::Integer(n) => n.to_string(),
-                        PropertyValue::String(s) => format!("\"{s}\""),
-                        other => format!("{other:?}"),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                a.iter().map(|x| match x {
+                    PropertyValue::Integer(n) => n.to_string(),
+                    PropertyValue::String(s) => format!("\"{s}\""),
+                    other => format!("{other:?}"),
+                }).collect::<Vec<_>>().join(", ")
             ),
             other => format!("{other:?}"),
         },
@@ -81,14 +70,8 @@ fn run(setup: &[&str], read: &str) -> Result<String, String> {
         m.execute(&q).map_err(|e| format!("exec `{stmt}`: {e:?}"))?;
     }
     let q = parse_query(read).map_err(|e| format!("parse: {e:?}"))?;
-    let batch = QueryExecutor::new(&store)
-        .execute(&q)
-        .map_err(|e| format!("exec: {e:?}"))?;
-    Ok(batch
-        .records
-        .first()
-        .map(|r| render(r.get("r")))
-        .unwrap_or("<no rows>".into()))
+    let batch = QueryExecutor::new(&store).execute(&q).map_err(|e| format!("exec: {e:?}"))?;
+    Ok(batch.records.first().map(|r| render(r.get("r"))).unwrap_or("<no rows>".into()))
 }
 
 fn main() {
@@ -135,32 +118,20 @@ fn main() {
     for (label, setup, read, expected) in cases {
         match run(setup, read) {
             Err(e) => errored.push((label.to_string(), read.to_string(), e)),
-            Ok(got) if got != *expected => wrong.push((
-                label.to_string(),
-                read.to_string(),
-                expected.to_string(),
-                got,
-            )),
+            Ok(got) if got != *expected => {
+                wrong.push((label.to_string(), read.to_string(), expected.to_string(), got))
+            }
             Ok(_) => {}
         }
     }
-    println!(
-        "{} cases: {} ok, {} wrong answer, {} errored",
-        cases.len(),
-        cases.len() - wrong.len() - errored.len(),
-        wrong.len(),
-        errored.len()
-    );
+    println!("{} cases: {} ok, {} wrong answer, {} errored",
+        cases.len(), cases.len()-wrong.len()-errored.len(), wrong.len(), errored.len());
     if !wrong.is_empty() {
         println!("\n=== WRONG ANSWER (parses, runs, returns the wrong thing) ===");
-        for (l, q, e, g) in &wrong {
-            println!("  {l}\n     {q}\n     expected {e}, got {g}");
-        }
+        for (l,q,e,g) in &wrong { println!("  {l}\n     {q}\n     expected {e}, got {g}"); }
     }
     if !errored.is_empty() {
         println!("\n=== ERRORED (at least it says so) ===");
-        for (l, q, e) in &errored {
-            println!("  {l}\n     {q}\n     {e}");
-        }
+        for (l,q,e) in &errored { println!("  {l}\n     {q}\n     {e}"); }
     }
 }

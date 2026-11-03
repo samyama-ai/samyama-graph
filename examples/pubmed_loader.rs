@@ -36,21 +36,15 @@ async fn main() -> Result<(), Error> {
         std::process::exit(0);
     }
 
-    let data_dir = args
-        .iter()
-        .position(|a| a == "--data-dir")
+    let data_dir = args.iter().position(|a| a == "--data-dir")
         .and_then(|i| args.get(i + 1))
         .map(|s| s.to_string())
         .unwrap_or_else(|| "data/pubmed-parsed".to_string());
 
-    let snapshot_path = args
-        .iter()
-        .position(|a| a == "--snapshot")
+    let snapshot_path = args.iter().position(|a| a == "--snapshot")
         .map(|pos| PathBuf::from(args.get(pos + 1).expect("--snapshot requires PATH")));
 
-    let max_articles: usize = args
-        .iter()
-        .position(|a| a == "--max-articles")
+    let max_articles: usize = args.iter().position(|a| a == "--max-articles")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
@@ -59,9 +53,7 @@ async fn main() -> Result<(), Error> {
 
     eprintln!("PubMed Knowledge Graph Loader");
     eprintln!("  Data dir: {}", data_dir);
-    if max_articles > 0 {
-        eprintln!("  Max articles: {}", format_num(max_articles));
-    }
+    if max_articles > 0 { eprintln!("  Max articles: {}", format_num(max_articles)); }
     eprintln!();
 
     let client = EmbeddedClient::new();
@@ -86,46 +78,28 @@ async fn main() -> Result<(), Error> {
         let t = Instant::now();
         let s = client.export_snapshot("default", snap_path).await?;
         let sz = std::fs::metadata(snap_path).map(|m| m.len()).unwrap_or(0);
-        eprintln!(
-            "Snapshot: {} nodes, {} edges ({:.1} MB) in {}",
-            format_num(s.node_count as usize),
-            format_num(s.edge_count as usize),
-            sz as f64 / (1024.0 * 1024.0),
-            format_duration(t.elapsed())
-        );
+        eprintln!("Snapshot: {} nodes, {} edges ({:.1} MB) in {}",
+            format_num(s.node_count as usize), format_num(s.edge_count as usize),
+            sz as f64 / (1024.0 * 1024.0), format_duration(t.elapsed()));
     }
 
     if query_mode {
         eprintln!("\nCypher REPL (type 'quit' to exit)\n");
         let stdin = io::stdin();
         loop {
-            eprint!("cypher> ");
-            io::stderr().flush()?;
+            eprint!("cypher> "); io::stderr().flush()?;
             let mut input = String::new();
-            if stdin.lock().read_line(&mut input)? == 0 {
-                break;
-            }
+            if stdin.lock().read_line(&mut input)? == 0 { break; }
             let q = input.trim();
-            if q.is_empty() {
-                continue;
-            }
-            if q == "quit" || q == "exit" {
-                break;
-            }
+            if q.is_empty() { continue; }
+            if q == "quit" || q == "exit" { break; }
             match client.query("default", q).await {
                 Ok(r) => {
-                    if r.columns.is_empty() {
-                        eprintln!("(empty)");
-                    } else {
+                    if r.columns.is_empty() { eprintln!("(empty)"); }
+                    else {
                         eprintln!("{}", r.columns.join(" | "));
                         for row in &r.records {
-                            eprintln!(
-                                "{}",
-                                row.iter()
-                                    .map(|v| format!("{}", v))
-                                    .collect::<Vec<_>>()
-                                    .join(" | ")
-                            );
+                            eprintln!("{}", row.iter().map(|v| format!("{}", v)).collect::<Vec<_>>().join(" | "));
                         }
                         eprintln!("({} rows)", r.records.len());
                     }

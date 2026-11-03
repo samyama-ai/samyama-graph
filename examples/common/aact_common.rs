@@ -31,19 +31,19 @@ pub struct LoadResult {
 
 /// ID maps for cross-table edge resolution.
 pub struct IdMaps {
-    pub trial: HashMap<String, NodeId>,         // nct_id -> NodeId
-    pub condition: HashMap<String, NodeId>,     // name.lower() -> NodeId
-    pub intervention: HashMap<String, NodeId>,  // name.lower() -> NodeId
-    pub sponsor: HashMap<String, NodeId>,       // name.lower() -> NodeId
-    pub site: HashMap<String, NodeId>,          // "facility|city".lower() -> NodeId
-    pub adverse_event: HashMap<String, NodeId>, // term.lower() -> NodeId
-    pub mesh: HashMap<String, NodeId>,          // name.lower() -> NodeId
-    pub publication: HashMap<String, NodeId>,   // pmid -> NodeId
+    pub trial: HashMap<String, NodeId>,             // nct_id -> NodeId
+    pub condition: HashMap<String, NodeId>,          // name.lower() -> NodeId
+    pub intervention: HashMap<String, NodeId>,       // name.lower() -> NodeId
+    pub sponsor: HashMap<String, NodeId>,            // name.lower() -> NodeId
+    pub site: HashMap<String, NodeId>,               // "facility|city".lower() -> NodeId
+    pub adverse_event: HashMap<String, NodeId>,      // term.lower() -> NodeId
+    pub mesh: HashMap<String, NodeId>,               // name.lower() -> NodeId
+    pub publication: HashMap<String, NodeId>,         // pmid -> NodeId
     // Per-trial maps for non-deduped entities
-    pub arm_group: HashMap<String, NodeId>, // "nct_id|label" -> NodeId
-    pub outcome: HashMap<String, NodeId>,   // "nct_id|measure" -> NodeId
+    pub arm_group: HashMap<String, NodeId>,          // "nct_id|label" -> NodeId
+    pub outcome: HashMap<String, NodeId>,            // "nct_id|measure" -> NodeId
     // AACT row-id maps for design_group_interventions join
-    pub intervention_row_id: HashMap<String, String>, // AACT id -> intervention name
+    pub intervention_row_id: HashMap<String, String>,    // AACT id -> intervention name
     pub group_row_id: HashMap<String, (String, String)>, // AACT id -> (nct_id, label)
 }
 
@@ -252,7 +252,10 @@ fn load_studies(
                 }
             }
             if let Some(summary) = summaries.get(nct_id) {
-                node.set_property("brief_summary", PropertyValue::String(summary.clone()));
+                node.set_property(
+                    "brief_summary",
+                    PropertyValue::String(summary.clone()),
+                );
             }
             if let Some(ci) = c_study_type {
                 let v = field(&fields, ci);
@@ -269,7 +272,10 @@ fn load_studies(
             if let Some(ci) = c_overall_status {
                 let v = field(&fields, ci);
                 if !v.is_empty() {
-                    node.set_property("overall_status", PropertyValue::String(v.to_string()));
+                    node.set_property(
+                        "overall_status",
+                        PropertyValue::String(v.to_string()),
+                    );
                 }
             }
             if let Some(ci) = c_enrollment {
@@ -287,7 +293,10 @@ fn load_studies(
             if let Some(ci) = c_completion_date {
                 let v = field(&fields, ci);
                 if !v.is_empty() {
-                    node.set_property("completion_date", PropertyValue::String(v.to_string()));
+                    node.set_property(
+                        "completion_date",
+                        PropertyValue::String(v.to_string()),
+                    );
                 }
             }
             if let Some(ci) = c_primary_completion {
@@ -302,7 +311,10 @@ fn load_studies(
             if let Some(ci) = c_last_updated {
                 let v = field(&fields, ci);
                 if !v.is_empty() {
-                    node.set_property("last_updated", PropertyValue::String(v.to_string()));
+                    node.set_property(
+                        "last_updated",
+                        PropertyValue::String(v.to_string()),
+                    );
                 }
             }
             // has_results: true if results_first_submitted_date is non-empty
@@ -323,10 +335,7 @@ fn load_studies(
         count += 1;
 
         if count % 100_000 == 0 && io::stderr().is_terminal() {
-            eprint!(
-                "\r  ClinicalTrial  {:>12} nodes...          ",
-                format_num(count)
-            );
+            eprint!("\r  ClinicalTrial  {:>12} nodes...          ", format_num(count));
         }
     }
 
@@ -492,7 +501,10 @@ fn load_interventions(
                 if let Some(ci) = c_desc {
                     let v = field(&fields, ci);
                     if !v.is_empty() {
-                        node.set_property("description", PropertyValue::String(truncate(v, 300)));
+                        node.set_property(
+                            "description",
+                            PropertyValue::String(truncate(v, 300)),
+                        );
                     }
                 }
             }
@@ -584,7 +596,10 @@ fn load_design_groups(
         let node_id = graph.create_node("ArmGroup");
         if let Some(node) = graph.get_node_mut(node_id) {
             node.set_property("label", PropertyValue::String(title.to_string()));
-            node.set_property("trial_nct_id", PropertyValue::String(nct_id.to_string()));
+            node.set_property(
+                "trial_nct_id",
+                PropertyValue::String(nct_id.to_string()),
+            );
             if let Some(ci) = c_type {
                 let v = field(&fields, ci);
                 if !v.is_empty() {
@@ -594,7 +609,10 @@ fn load_design_groups(
             if let Some(ci) = c_desc {
                 let v = field(&fields, ci);
                 if !v.is_empty() {
-                    node.set_property("description", PropertyValue::String(truncate(v, 300)));
+                    node.set_property(
+                        "description",
+                        PropertyValue::String(truncate(v, 300)),
+                    );
                 }
             }
         }
@@ -701,10 +719,7 @@ fn load_sponsors(
         };
 
         // ClinicalTrial -[:SPONSORED_BY]-> Sponsor
-        if graph
-            .create_edge(trial_node, sponsor_node, "SPONSORED_BY")
-            .is_ok()
-        {
+        if graph.create_edge(trial_node, sponsor_node, "SPONSORED_BY").is_ok() {
             edge_count += 1;
         }
 
@@ -776,7 +791,10 @@ fn load_outcomes(
         let node_id = graph.create_node("Outcome");
         if let Some(node) = graph.get_node_mut(node_id) {
             node.set_property("measure", PropertyValue::String(measure.to_string()));
-            node.set_property("trial_nct_id", PropertyValue::String(nct_id.to_string()));
+            node.set_property(
+                "trial_nct_id",
+                PropertyValue::String(nct_id.to_string()),
+            );
             if let Some(ci) = c_type {
                 let v = field(&fields, ci);
                 if !v.is_empty() {
@@ -792,7 +810,10 @@ fn load_outcomes(
             if let Some(ci) = c_desc {
                 let v = field(&fields, ci);
                 if !v.is_empty() {
-                    node.set_property("description", PropertyValue::String(truncate(v, 300)));
+                    node.set_property(
+                        "description",
+                        PropertyValue::String(truncate(v, 300)),
+                    );
                 }
             }
         }
@@ -887,7 +908,10 @@ fn load_facilities(
             let node_id = graph.create_node("Site");
             if let Some(node) = graph.get_node_mut(node_id) {
                 if !facility.is_empty() {
-                    node.set_property("facility", PropertyValue::String(facility.to_string()));
+                    node.set_property(
+                        "facility",
+                        PropertyValue::String(facility.to_string()),
+                    );
                 }
                 if !city.is_empty() {
                     node.set_property("city", PropertyValue::String(city.to_string()));
@@ -917,10 +941,7 @@ fn load_facilities(
         };
 
         // ClinicalTrial -[:CONDUCTED_AT]-> Site
-        if graph
-            .create_edge(trial_node, site_node, "CONDUCTED_AT")
-            .is_ok()
-        {
+        if graph.create_edge(trial_node, site_node, "CONDUCTED_AT").is_ok() {
             edge_count += 1;
         }
 
@@ -1007,7 +1028,10 @@ fn load_reported_events(
                 if let Some(ci) = c_organ {
                     let v = field(&fields, ci);
                     if !v.is_empty() {
-                        node.set_property("organ_system", PropertyValue::String(v.to_string()));
+                        node.set_property(
+                            "organ_system",
+                            PropertyValue::String(v.to_string()),
+                        );
                     }
                 }
                 node.set_property(
@@ -1129,10 +1153,7 @@ fn load_browse_conditions(
                 if seen_edges.contains(&edge_key) {
                     continue;
                 }
-                if graph
-                    .create_edge(cond_node, mesh_node, "CODED_AS_MESH")
-                    .is_ok()
-                {
+                if graph.create_edge(cond_node, mesh_node, "CODED_AS_MESH").is_ok() {
                     edge_count += 1;
                     seen_edges.insert(edge_key);
                 }
@@ -1216,7 +1237,10 @@ fn load_study_references(
                         if let Some(first_sentence) = citation.split(". ").next() {
                             let title = truncate(first_sentence, 200);
                             if !title.is_empty() {
-                                node.set_property("title", PropertyValue::String(title));
+                                node.set_property(
+                                    "title",
+                                    PropertyValue::String(title),
+                                );
                             }
                         }
                     }
@@ -1224,7 +1248,10 @@ fn load_study_references(
                 if let Some(ci) = c_ref_type {
                     let v = field(&fields, ci);
                     if !v.is_empty() {
-                        node.set_property("reference_type", PropertyValue::String(v.to_string()));
+                        node.set_property(
+                            "reference_type",
+                            PropertyValue::String(v.to_string()),
+                        );
                     }
                 }
             }
@@ -1234,10 +1261,7 @@ fn load_study_references(
         };
 
         // ClinicalTrial -[:PUBLISHED_IN]-> Publication
-        if graph
-            .create_edge(trial_node, pub_node, "PUBLISHED_IN")
-            .is_ok()
-        {
+        if graph.create_edge(trial_node, pub_node, "PUBLISHED_IN").is_ok() {
             edge_count += 1;
         }
 
@@ -1274,9 +1298,7 @@ fn load_design_group_interventions(
     let reader = BufReader::with_capacity(1 << 16, file);
     let mut lines = reader.lines();
 
-    let header = lines
-        .next()
-        .ok_or("Empty design_group_interventions.txt")??;
+    let header = lines.next().ok_or("Empty design_group_interventions.txt")??;
     let headers: Vec<&str> = header.split('|').collect();
     let c_dg_id = col_index(&headers, "design_group_id");
     let c_interv_id = col_index(&headers, "intervention_id");
@@ -1401,18 +1423,12 @@ fn enrich_drugs_from_drugbank(
         }
         // Parse CSV with quoted fields
         let fields = parse_drugbank_csv(&line);
-        let dbid = fields
-            .get(*col_idx.get("DrugBank ID").unwrap_or(&0))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        let common_name = fields
-            .get(*col_idx.get("Common name").unwrap_or(&2))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        let synonyms_str = fields
-            .get(*col_idx.get("Synonyms").unwrap_or(&5))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+        let dbid = fields.get(*col_idx.get("DrugBank ID").unwrap_or(&0))
+            .map(|s| s.trim().to_string()).unwrap_or_default();
+        let common_name = fields.get(*col_idx.get("Common name").unwrap_or(&2))
+            .map(|s| s.trim().to_string()).unwrap_or_default();
+        let synonyms_str = fields.get(*col_idx.get("Synonyms").unwrap_or(&5))
+            .map(|s| s.trim().to_string()).unwrap_or_default();
 
         if dbid.is_empty() || common_name.is_empty() {
             continue;
@@ -1425,27 +1441,22 @@ fn enrich_drugs_from_drugbank(
         for syn in synonyms_str.split('|') {
             let syn = syn.trim();
             if !syn.is_empty() {
-                name_to_drug
-                    .entry(syn.to_lowercase())
+                name_to_drug.entry(syn.to_lowercase())
                     .or_insert_with(|| entry.clone());
             }
         }
     }
 
-    eprintln!(
-        "    DrugBank vocabulary: {} names/synonyms indexed",
-        format_num(name_to_drug.len())
-    );
+    eprintln!("    DrugBank vocabulary: {} names/synonyms indexed", format_num(name_to_drug.len()));
 
     // Match interventions against DrugBank
-    let mut drug_nodes: HashMap<String, NodeId> = HashMap::new(); // dbid -> NodeId
+    let mut drug_nodes: HashMap<String, NodeId> = HashMap::new();  // dbid -> NodeId
     let mut node_count = 0usize;
     let mut edge_count = 0usize;
 
     for (interv_name_lower, &interv_node) in &ids.intervention {
         // Check if this intervention is a DRUG type
-        let is_drug = graph
-            .get_node(interv_node)
+        let is_drug = graph.get_node(interv_node)
             .and_then(|n| n.get_property("type"))
             .map(|v| matches!(v, PropertyValue::String(s) if s == "DRUG"))
             .unwrap_or(false);
@@ -1470,21 +1481,15 @@ fn enrich_drugs_from_drugbank(
             };
 
             // Intervention -[:CODED_AS_DRUG]-> Drug
-            if graph
-                .create_edge(interv_node, drug_node, "CODED_AS_DRUG")
-                .is_ok()
-            {
+            if graph.create_edge(interv_node, drug_node, "CODED_AS_DRUG").is_ok() {
                 edge_count += 1;
             }
         }
     }
 
-    eprintln!(
-        "    Matched: {} Drug nodes, {} CODED_AS_DRUG edges (from {} drug-type interventions)",
-        format_num(node_count),
-        format_num(edge_count),
-        format_num(ids.intervention.len())
-    );
+    eprintln!("    Matched: {} Drug nodes, {} CODED_AS_DRUG edges (from {} drug-type interventions)",
+        format_num(node_count), format_num(edge_count),
+        format_num(ids.intervention.len()));
 
     Ok((node_count, edge_count))
 }
@@ -1730,19 +1735,9 @@ pub fn load_dataset(
         Some(drugbank_vocab)
     } else {
         // Try sibling druginteractions-kg data dir
-        let alt = data_dir
-            .join("..")
-            .join("..")
-            .join("..")
-            .join("druginteractions-kg")
-            .join("data")
-            .join("drugbank")
-            .join("drugbank_vocabulary.csv");
-        if alt.exists() {
-            Some(alt)
-        } else {
-            None
-        }
+        let alt = data_dir.join("..").join("..").join("..").join("druginteractions-kg")
+            .join("data").join("drugbank").join("drugbank_vocabulary.csv");
+        if alt.exists() { Some(alt) } else { None }
     };
 
     if let Some(vocab_path) = drugbank_vocab {

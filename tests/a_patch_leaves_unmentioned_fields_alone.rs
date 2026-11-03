@@ -49,7 +49,10 @@ fn config() -> AutoEmbedConfig {
         chunk_size: 512,
         chunk_overlap: 64,
         vector_dimension: 768,
-        embedding_policies: HashMap::from([("Doc".to_string(), vec!["body".to_string()])]),
+        embedding_policies: HashMap::from([(
+            "Doc".to_string(),
+            vec!["body".to_string()],
+        )]),
         embedding_property: "embedding".to_string(),
     }
 }
@@ -66,12 +69,7 @@ fn app_with_configured_tenant() -> axum::Router {
     samyama::http::tenants::router(tenants, Arc::new(tokio::sync::RwLock::new(HashMap::new())))
 }
 
-async fn send(
-    app: &axum::Router,
-    method: &str,
-    uri: &str,
-    body: Option<Value>,
-) -> (StatusCode, Value) {
+async fn send(app: &axum::Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
     let req = Request::builder().method(method).uri(uri);
     let req = match body {
         Some(b) => req
@@ -109,11 +107,7 @@ async fn the_config_can_be_read_back_at_all() {
 async fn the_key_itself_is_never_returned() {
     let app = app_with_configured_tenant();
     let c = config_of(&app).await;
-    assert_eq!(
-        c["api_key_set"],
-        json!(true),
-        "a caller needs to know one is set"
-    );
+    assert_eq!(c["api_key_set"], json!(true), "a caller needs to know one is set");
     assert!(
         !c.to_string().contains("sk-not-a-real-key"),
         "the key must not be in the response: {c}"

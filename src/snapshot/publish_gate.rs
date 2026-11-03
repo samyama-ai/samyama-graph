@@ -87,39 +87,23 @@ pub fn scan_text(where_: &str, text: &str) -> Vec<Finding> {
 
     // email
     for (i, _) in text.match_indices('@') {
-        let start = text[..i]
-            .rfind(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '(')
-            .map(|p| p + 1)
-            .unwrap_or(0);
-        let end = text[i..]
-            .find(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == ')')
-            .map(|p| i + p)
-            .unwrap_or(text.len());
+        let start = text[..i].rfind(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '(')
+            .map(|p| p + 1).unwrap_or(0);
+        let end = text[i..].find(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == ')')
+            .map(|p| i + p).unwrap_or(text.len());
         let cand = &text[start..end];
         let (local, domain) = match cand.split_once('@') {
             Some(x) => x,
             None => continue,
         };
-        let tld_ok = domain
-            .rsplit('.')
-            .next()
-            .map(|t| t.len() >= 2 && t.chars().all(|c| c.is_ascii_alphabetic()))
-            .unwrap_or(false);
+        let tld_ok = domain.rsplit('.').next().map(|t| t.len() >= 2 && t.chars().all(|c| c.is_ascii_alphabetic())).unwrap_or(false);
         if !local.is_empty()
-            && local
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c))
+            && local.chars().all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c))
             && domain.contains('.')
             && tld_ok
-            && domain
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            && domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
         {
-            out.push(Finding {
-                where_: where_.into(),
-                kind: "email",
-                excerpt: redact(cand),
-            });
+            out.push(Finding { where_: where_.into(), kind: "email", excerpt: redact(cand) });
         }
     }
 
@@ -130,9 +114,7 @@ pub fn scan_text(where_: &str, text: &str) -> Vec<Finding> {
             let start = i;
             let mut digits: Vec<u8> = Vec::new();
             let mut j = i;
-            while j < bytes.len()
-                && (bytes[j].is_ascii_digit() || bytes[j] == b'-' || bytes[j] == b' ')
-            {
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'-' || bytes[j] == b' ') {
                 if bytes[j].is_ascii_digit() {
                     digits.push(bytes[j] - b'0');
                 }
@@ -142,23 +124,11 @@ pub fn scan_text(where_: &str, text: &str) -> Vec<Finding> {
             let raw = text[start..j].trim_end_matches([' ', '-']);
 
             if (13..=19).contains(&digits.len()) && luhn_ok(&digits) {
-                out.push(Finding {
-                    where_: where_.into(),
-                    kind: "card-number",
-                    excerpt: redact(raw),
-                });
+                out.push(Finding { where_: where_.into(), kind: "card-number", excerpt: redact(raw) });
             }
             // US SSN, with separators only.
-            if digits.len() == 9
-                && raw.len() == 11
-                && raw.as_bytes()[3] == b'-'
-                && raw.as_bytes()[6] == b'-'
-            {
-                out.push(Finding {
-                    where_: where_.into(),
-                    kind: "us-ssn",
-                    excerpt: redact(raw),
-                });
+            if digits.len() == 9 && raw.len() == 11 && raw.as_bytes()[3] == b'-' && raw.as_bytes()[6] == b'-' {
+                out.push(Finding { where_: where_.into(), kind: "us-ssn", excerpt: redact(raw) });
             }
             i = j;
         } else if bytes[i] == b'+' {
@@ -166,9 +136,7 @@ pub fn scan_text(where_: &str, text: &str) -> Vec<Finding> {
             let start = i;
             let mut j = i + 1;
             let mut count = 0usize;
-            while j < bytes.len()
-                && (bytes[j].is_ascii_digit() || bytes[j] == b'-' || bytes[j] == b' ')
-            {
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'-' || bytes[j] == b' ') {
                 if bytes[j].is_ascii_digit() {
                     count += 1;
                 }
@@ -176,11 +144,7 @@ pub fn scan_text(where_: &str, text: &str) -> Vec<Finding> {
             }
             if (10..=15).contains(&count) {
                 let raw = text[start..j].trim_end();
-                out.push(Finding {
-                    where_: where_.into(),
-                    kind: "phone",
-                    excerpt: redact(raw),
-                });
+                out.push(Finding { where_: where_.into(), kind: "phone", excerpt: redact(raw) });
             }
             i = j.max(i + 1);
         } else {
@@ -235,11 +199,7 @@ pub fn gate(
         ));
     }
 
-    GateVerdict {
-        publishable: reasons.is_empty(),
-        reasons,
-        findings,
-    }
+    GateVerdict { publishable: reasons.is_empty(), reasons, findings }
 }
 
 /// Why a catalog's own release stamp forbids publishing it, if it does (#1159).

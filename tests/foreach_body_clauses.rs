@@ -24,13 +24,9 @@ fn write(s: &mut GraphStore, q: &str) -> Result<(), String> {
 
 fn int(s: &GraphStore, q: &str) -> i64 {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(s)
-        .execute(&p)
-        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
     match out.records[0].get("c") {
-        Some(samyama::query::executor::Value::Property(
-            samyama::graph::PropertyValue::Integer(i),
-        )) => *i,
+        Some(samyama::query::executor::Value::Property(samyama::graph::PropertyValue::Integer(i))) => *i,
         other => panic!("`{q}` gave {other:?}"),
     }
 }
@@ -49,10 +45,7 @@ fn run(s: &mut GraphStore, q: &str) {
 #[test]
 fn delete_in_the_body_deletes() {
     let mut s = two_users();
-    run(
-        &mut s,
-        "MATCH (n:U) WITH collect(n) AS ns FOREACH (x IN ns | DETACH DELETE x)",
-    );
+    run(&mut s, "MATCH (n:U) WITH collect(n) AS ns FOREACH (x IN ns | DETACH DELETE x)");
     assert_eq!(int(&s, "MATCH (n:U) RETURN count(n) AS c"), 0);
 }
 
@@ -60,10 +53,7 @@ fn delete_in_the_body_deletes() {
 fn remove_in_the_body_removes() {
     let mut s = two_users();
     run(&mut s, "MATCH (n:U) FOREACH (x IN [1] | REMOVE n.k)");
-    assert_eq!(
-        int(&s, "MATCH (n:U) WHERE n.k IS NOT NULL RETURN count(n) AS c"),
-        0
-    );
+    assert_eq!(int(&s, "MATCH (n:U) WHERE n.k IS NOT NULL RETURN count(n) AS c"), 0);
 }
 
 #[test]
@@ -76,14 +66,8 @@ fn set_label_in_the_body_sets_it() {
 #[test]
 fn a_list_of_nodes_is_iterated() {
     let mut s = two_users();
-    run(
-        &mut s,
-        "MATCH (n:U) WITH collect(n) AS ns FOREACH (x IN ns | SET x.seen = true)",
-    );
-    assert_eq!(
-        int(&s, "MATCH (n:U) WHERE n.seen = true RETURN count(n) AS c"),
-        2
-    );
+    run(&mut s, "MATCH (n:U) WITH collect(n) AS ns FOREACH (x IN ns | SET x.seen = true)");
+    assert_eq!(int(&s, "MATCH (n:U) WHERE n.seen = true RETURN count(n) AS c"), 2);
 }
 
 #[test]
@@ -96,31 +80,16 @@ fn merge_in_the_body_matches_what_an_earlier_element_created() {
 #[test]
 fn merge_of_a_relationship_between_bound_nodes_happens_once() {
     let mut s = two_users();
-    run(
-        &mut s,
-        "MATCH (a:U {k: 1}), (b:U {k: 2}) FOREACH (x IN [1, 2] | MERGE (a)-[:M]->(b))",
-    );
-    assert_eq!(
-        int(
-            &s,
-            "MATCH (:U {k: 1})-[r:M]->(:U {k: 2}) RETURN count(r) AS c"
-        ),
-        1
-    );
+    run(&mut s, "MATCH (a:U {k: 1}), (b:U {k: 2}) FOREACH (x IN [1, 2] | MERGE (a)-[:M]->(b))");
+    assert_eq!(int(&s, "MATCH (:U {k: 1})-[r:M]->(:U {k: 2}) RETURN count(r) AS c"), 1);
 }
 
 #[test]
 fn nested_foreach_runs_the_inner_body_per_pair() {
     let mut s = GraphStore::new();
-    run(
-        &mut s,
-        "FOREACH (x IN [1, 2] | FOREACH (y IN [1, 2, 3] | CREATE (:B {v: x * 10 + y})))",
-    );
+    run(&mut s, "FOREACH (x IN [1, 2] | FOREACH (y IN [1, 2, 3] | CREATE (:B {v: x * 10 + y})))");
     assert_eq!(int(&s, "MATCH (n:B) RETURN count(n) AS c"), 6);
-    assert_eq!(
-        int(&s, "MATCH (n:B) RETURN sum(n.v) AS c"),
-        11 + 12 + 13 + 21 + 22 + 23
-    );
+    assert_eq!(int(&s, "MATCH (n:B) RETURN sum(n.v) AS c"), 11 + 12 + 13 + 21 + 22 + 23);
 }
 
 /// The issue's own example: a relationship from a bound node to a new one.
@@ -128,13 +97,7 @@ fn nested_foreach_runs_the_inner_body_per_pair() {
 fn create_of_a_relationship_uses_the_bound_node() {
     let mut s = two_users();
     run(&mut s, "MATCH (p:U {k: 1}) FOREACH (tag IN ['a', 'b', 'c'] | CREATE (p)-[:TAGGED]->(:Tag {name: tag}))");
-    assert_eq!(
-        int(
-            &s,
-            "MATCH (:U {k: 1})-[r:TAGGED]->(:Tag) RETURN count(r) AS c"
-        ),
-        3
-    );
+    assert_eq!(int(&s, "MATCH (:U {k: 1})-[r:TAGGED]->(:Tag) RETURN count(r) AS c"), 3);
     assert_eq!(int(&s, "MATCH (n) RETURN count(n) AS c"), 5);
 }
 
@@ -142,14 +105,8 @@ fn create_of_a_relationship_uses_the_bound_node() {
 #[test]
 fn body_clauses_run_in_written_order() {
     let mut s = two_users();
-    run(
-        &mut s,
-        "MATCH (n:U {k: 1}) FOREACH (x IN [1] | REMOVE n.k SET n.k2 = coalesce(n.k, -1))",
-    );
-    assert_eq!(
-        int(&s, "MATCH (n:U) WHERE n.k2 = -1 RETURN count(n) AS c"),
-        1
-    );
+    run(&mut s, "MATCH (n:U {k: 1}) FOREACH (x IN [1] | REMOVE n.k SET n.k2 = coalesce(n.k, -1))");
+    assert_eq!(int(&s, "MATCH (n:U) WHERE n.k2 = -1 RETURN count(n) AS c"), 1);
 }
 
 #[test]
@@ -176,10 +133,7 @@ fn return_inside_the_body_does_not_parse() {
 #[test]
 fn set_and_create_with_the_loop_variable_still_work() {
     let mut s = two_users();
-    run(
-        &mut s,
-        "MATCH (n:U {k: 1}) FOREACH (x IN [1, 2, 3] | SET n.last = x)",
-    );
+    run(&mut s, "MATCH (n:U {k: 1}) FOREACH (x IN [1, 2, 3] | SET n.last = x)");
     run(&mut s, "FOREACH (i IN [1, 2] | CREATE (:T {i: i}))");
     assert_eq!(int(&s, "MATCH (n:U {k: 1}) RETURN n.last AS c"), 3);
     assert_eq!(int(&s, "MATCH (n:T) RETURN sum(n.i) AS c"), 3);

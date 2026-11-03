@@ -71,17 +71,10 @@ fn a_where_filters_the_incomparable_row_without_aborting() {
     run(&mut store, "CREATE (:Child {var: 'xx'})");
     run(&mut store, "CREATE (:Child)");
 
-    let q =
-        parse_query("MATCH (i:Child) WHERE i.var IS NOT NULL AND i.var > 'x' RETURN i.var AS x")
-            .expect("parse");
-    let out = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect("should run, not error");
-    let got: Vec<Value> = out
-        .records
-        .iter()
-        .filter_map(|r| r.get("x").cloned())
-        .collect();
+    let q = parse_query("MATCH (i:Child) WHERE i.var IS NOT NULL AND i.var > 'x' RETURN i.var AS x")
+        .expect("parse");
+    let out = QueryExecutor::new(&store).execute(&q).expect("should run, not error");
+    let got: Vec<Value> = out.records.iter().filter_map(|r| r.get("x").cloned()).collect();
     assert_eq!(got.len(), 1, "only 'xx' compares against 'x', got {got:?}");
     assert_eq!(got[0], Value::Property(PropertyValue::String("xx".into())));
 }

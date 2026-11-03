@@ -154,10 +154,7 @@ fn main() {
     println!();
 
     let reps = 5;
-    println!(
-        "  {:<14} {:>8}  {:>12}  {:>12}   {}",
-        "Operator", "Size", "copy (ms)", "UM (ms)", "UM/copy"
-    );
+    println!("  {:<14} {:>8}  {:>12}  {:>12}   {}", "Operator", "Size", "copy (ms)", "UM (ms)", "UM/copy");
     println!("  {}", "-".repeat(62));
 
     let plan: [(&str, &[usize]); 4] = [
@@ -183,11 +180,7 @@ fn main() {
             };
             println!(
                 "  {:<14} {:>8}  {:>12.2}  {:>12.2}   {:.2}x",
-                op,
-                sizelbl,
-                copy,
-                umt,
-                umt / copy
+                op, sizelbl, copy, umt, umt / copy
             );
             drop(v);
         }

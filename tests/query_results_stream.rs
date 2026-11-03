@@ -91,9 +91,7 @@ async fn the_first_rows_leave_while_the_query_still_holds_its_read() {
         .expect("response");
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
-        resp.headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok()),
+        resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
         Some("application/x-ndjson"),
         "the client asked for a stream and did not get one"
     );
@@ -133,11 +131,7 @@ async fn the_first_rows_leave_while_the_query_still_holds_its_read() {
         .filter(|l| is_row(l))
         .map(|l| l["row"][0].as_i64().expect("integer cell"))
         .collect();
-    assert_eq!(
-        rows,
-        (1..=TOTAL).collect::<Vec<_>>(),
-        "every row, once, in order"
-    );
+    assert_eq!(rows, (1..=TOTAL).collect::<Vec<_>>(), "every row, once, in order");
 
     let trailer = all.last().expect("trailer");
     assert_eq!(trailer["done"], json!(true), "trailer: {trailer}");
@@ -157,9 +151,7 @@ async fn a_client_that_stops_reading_stops_the_query_and_frees_the_lock() {
         .await
         .expect("response");
     assert_eq!(
-        resp.headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok()),
+        resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
         Some("application/x-ndjson"),
         "not streamed"
     );
@@ -168,10 +160,7 @@ async fn a_client_that_stops_reading_stops_the_query_and_frees_the_lock() {
 
     // Stop reading. Backpressure: the query is paused on a full channel, not
     // racing ahead into memory, so it still holds the read.
-    assert!(
-        store.try_write().is_err(),
-        "the read ended before the client read it"
-    );
+    assert!(store.try_write().is_err(), "the read ended before the client read it");
 
     // A writer gets in within the stall budget (plus slack for a debug build),
     // not "when the client gets round to it".
@@ -186,27 +175,12 @@ async fn a_client_that_stops_reading_stops_the_query_and_frees_the_lock() {
         seen.extend(lines(&chunk));
     }
     let rows = seen.iter().filter(|l| is_row(l)).count() as i64;
-    assert!(
-        rows < TOTAL,
-        "all {TOTAL} rows arrived: the query never stopped"
-    );
+    assert!(rows < TOTAL, "all {TOTAL} rows arrived: the query never stopped");
     let trailer = seen.last().expect("trailer");
-    assert!(
-        trailer.get("done").is_none(),
-        "a cut-short stream claims completion: {trailer}"
-    );
-    let err = trailer["error"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no error trailer: {trailer}"));
-    assert!(
-        err.contains("did not read"),
-        "error does not say why: {err}"
-    );
-    assert_eq!(
-        trailer["rows"],
-        json!(rows),
-        "trailer row count disagrees with the body"
-    );
+    assert!(trailer.get("done").is_none(), "a cut-short stream claims completion: {trailer}");
+    let err = trailer["error"].as_str().unwrap_or_else(|| panic!("no error trailer: {trailer}"));
+    assert!(err.contains("did not read"), "error does not say why: {err}");
+    assert_eq!(trailer["rows"], json!(rows), "trailer row count disagrees with the body");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -216,9 +190,7 @@ async fn without_the_accept_header_the_response_is_the_buffered_envelope() {
         .method("POST")
         .uri("/api/query")
         .header("content-type", "application/json")
-        .body(Body::from(
-            json!({ "query": "UNWIND range(1, 3) AS x RETURN x" }).to_string(),
-        ))
+        .body(Body::from(json!({ "query": "UNWIND range(1, 3) AS x RETURN x" }).to_string()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -234,11 +206,7 @@ async fn a_stream_reports_errors_and_refuses_what_it_cannot_stream() {
     let (_store, app) = setup();
 
     // Fails before any row: still a 400 with the usual envelope.
-    let resp = app
-        .clone()
-        .oneshot(streamed("MATCH (n RETURN n"))
-        .await
-        .unwrap();
+    let resp = app.clone().oneshot(streamed("MATCH (n RETURN n")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v: Value =
         serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
@@ -246,18 +214,11 @@ async fn a_stream_reports_errors_and_refuses_what_it_cannot_stream() {
 
     // A write runs under the writer's lock, which a stream must not hand to
     // the client's read speed.
-    let resp = app
-        .clone()
-        .oneshot(streamed("CREATE (:X) RETURN 1"))
-        .await
-        .unwrap();
+    let resp = app.clone().oneshot(streamed("CREATE (:X) RETURN 1")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
 
     // An empty result is a header and a trailer.
-    let resp = app
-        .oneshot(streamed("MATCH (n:Nothing) RETURN n"))
-        .await
-        .unwrap();
+    let resp = app.oneshot(streamed("MATCH (n:Nothing) RETURN n")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let all = lines(&resp.into_body().collect().await.unwrap().to_bytes());
     assert_eq!(all.len(), 2, "{all:?}");
@@ -272,13 +233,9 @@ fn cross_store(side: usize) -> GraphStore {
     let mut store = GraphStore::new();
     for i in 0..side {
         let a = store.create_node("A");
-        store
-            .set_node_property("default", a, "i", i as i64)
-            .unwrap();
+        store.set_node_property("default", a, "i", i as i64).unwrap();
         let b = store.create_node("B");
-        store
-            .set_node_property("default", b, "j", i as i64)
-            .unwrap();
+        store.set_node_property("default", b, "j", i as i64).unwrap();
     }
     store
 }
@@ -292,10 +249,7 @@ fn a_sink_that_stops_early_ends_the_query_before_the_result_exists() {
 
     // Collected, the product passes the budget: the result is built whole.
     let whole = engine.execute(CROSS, &store);
-    assert!(
-        whole.is_err(),
-        "the row budget does not see this product; the test proves nothing"
-    );
+    assert!(whole.is_err(), "the row budget does not see this product; the test proves nothing");
 
     // Streamed, a consumer that has seen enough stops it far short of that.
     let mut calls = 0;
@@ -337,18 +291,12 @@ fn a_streamed_result_is_the_collected_result() {
         "MATCH (a:Nothing) RETURN a",
         "EXPLAIN MATCH (a:A) RETURN a",
     ] {
-        let collected = engine
-            .execute(q, &store)
-            .unwrap_or_else(|e| panic!("{q}: {e}"));
+        let collected = engine.execute(q, &store).unwrap_or_else(|e| panic!("{q}: {e}"));
         let mut rows = Vec::new();
         let done = engine
             .execute_streaming_with_params(q, &store, &BoundParams::new(), 7, &mut |cols, recs| {
                 for r in &recs {
-                    rows.push(
-                        cols.iter()
-                            .map(|c| format!("{:?}", r.get(c)))
-                            .collect::<Vec<_>>(),
-                    );
+                    rows.push(cols.iter().map(|c| format!("{:?}", r.get(c))).collect::<Vec<_>>());
                 }
                 Ok(())
             })
@@ -356,13 +304,7 @@ fn a_streamed_result_is_the_collected_result() {
         let expected: Vec<Vec<String>> = collected
             .records
             .iter()
-            .map(|r| {
-                collected
-                    .columns
-                    .iter()
-                    .map(|c| format!("{:?}", r.get(c)))
-                    .collect()
-            })
+            .map(|r| collected.columns.iter().map(|c| format!("{:?}", r.get(c))).collect())
             .collect();
         assert_eq!(done.columns, collected.columns, "{q}");
         assert_eq!(done.rows, expected.len(), "{q}");

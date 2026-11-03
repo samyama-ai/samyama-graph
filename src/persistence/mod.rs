@@ -58,12 +58,12 @@ pub mod wal;
 
 pub use storage::{PersistentStorage, StorageError, StorageResult};
 pub use tenant::{
-    AgentConfig, AutoEmbedConfig, ConnectionSlot, LLMProvider, NLQConfig, ResourceQuotas,
-    ResourceUsage, Tenant, TenantError, TenantManager, TenantResult, ToolConfig,
+    ConnectionSlot, ResourceQuotas, ResourceUsage, Tenant, TenantError, TenantManager, TenantResult,
+    AutoEmbedConfig, NLQConfig, AgentConfig, ToolConfig, LLMProvider,
 };
 pub use wal::{Wal, WalEntry, WalError, WalResult};
 
-use crate::graph::{Edge, GraphStore, Node, PropertyMap};
+use crate::graph::{Edge, Node, PropertyMap, GraphStore};
 use std::path::Path;
 use std::sync::Arc;
 // warn removed - was unused import causing compiler warning
@@ -211,10 +211,7 @@ impl PersistenceManager {
         tokio::spawn(async move {
             let (vector_index, property_index) = {
                 let guard = store.read().await;
-                (
-                    Arc::clone(&guard.vector_index),
-                    Arc::clone(&guard.property_index),
-                )
+                (Arc::clone(&guard.vector_index), Arc::clone(&guard.property_index))
             };
             GraphStore::start_background_indexer_with_store(
                 receiver,
@@ -222,8 +219,7 @@ impl PersistenceManager {
                 property_index,
                 tenant_manager,
                 Some(store),
-            )
-            .await;
+            ).await;
         });
     }
 
@@ -335,30 +331,18 @@ impl PersistenceManager {
     /// the transaction is rolled back instead, and whatever part of it already
     /// reached the disk is overwritten with the rolled-back state. Returns the
     /// commit version, or why the commit was refused.
-    pub fn commit_session_transaction(
-        &self,
-        tenant: &str,
-        store: &mut GraphStore,
-    ) -> Result<u64, String> {
+    pub fn commit_session_transaction(&self, tenant: &str, store: &mut GraphStore) -> Result<u64, String> {
         use crate::graph::event::Mutation;
         if store.session_transaction_version().is_none() {
-            return store
-                .commit_session_transaction()
-                .map_err(|e| e.to_string());
+            return store.commit_session_transaction().map_err(|e| e.to_string());
         }
         let mutations = store.take_write_log();
         let failure = match self.apply_mutations(tenant, store, &mutations) {
-            Ok(_) => {
-                return store
-                    .commit_session_transaction()
-                    .map_err(|e| e.to_string())
-            }
+            Ok(_) => return store.commit_session_transaction().map_err(|e| e.to_string()),
             Err(e) => e,
         };
         if let Err(e) = store.rollback_session_transaction() {
-            return Err(format!(
-                "the transaction could not be persisted ({failure}) and its rollback failed: {e}"
-            ));
+            return Err(format!("the transaction could not be persisted ({failure}) and its rollback failed: {e}"));
         }
         // Every entity the transaction or its rollback touched, as it now is.
         // One the rollback removed is a delete, since `apply_mutations` skips an
@@ -367,12 +351,8 @@ impl PersistenceManager {
             .into_iter()
             .chain(store.take_write_log())
             .map(|m| match m {
-                Mutation::NodeUpserted(id) if store.get_node(id).is_none() => {
-                    Mutation::NodeDeleted(id)
-                }
-                Mutation::EdgeUpserted(id) if store.get_edge(id).is_none() => {
-                    Mutation::EdgeDeleted(id)
-                }
+                Mutation::NodeUpserted(id) if store.get_node(id).is_none() => Mutation::NodeDeleted(id),
+                Mutation::EdgeUpserted(id) if store.get_edge(id).is_none() => Mutation::EdgeDeleted(id),
                 m => m,
             })
             .collect();
@@ -416,10 +396,7 @@ impl PersistenceManager {
         // make a write fail, and a read-only directory does not do it --
         // RocksDB buffers, so the failure surfaces somewhere else or not at
         // all. One relaxed load per persist, next to a RocksDB write.
-        if self
-            .fail_next_apply
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.fail_next_apply.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(PersistenceError::Io(std::io::Error::other(
                 "injected failure (fail_next_apply_for_test)",
             )));
@@ -437,8 +414,7 @@ impl PersistenceManager {
         // had already cleared it would lose the definition with nothing left to
         // say so.
         if store.index_catalog_is_dirty() {
-            self.storage
-                .put_index_catalog(tenant, &store.index_catalog())?;
+            self.storage.put_index_catalog(tenant, &store.index_catalog())?;
             store.clear_index_catalog_dirty();
         }
 
@@ -535,9 +511,8 @@ impl PersistenceManager {
     ) -> Result<usize, PersistenceError> {
         let mut wal = wal::lock(&self.wal);
         let mut rows = storage::RowBatch::default();
-        let result = self.stage_rows(
-            tenant, store, order, last, exists, per_row, usage, &mut wal, &mut rows,
-        );
+        let result =
+            self.stage_rows(tenant, store, order, last, exists, per_row, usage, &mut wal, &mut rows);
         // Committed whether or not a row failed: the rows staged before the
         // failure are the ones the old per-row writes had already put on disk.
         // Their records first.
@@ -548,11 +523,7 @@ impl PersistenceManager {
     }
 
     /// Sync the WAL, then commit the staged rows: the order a crash must see.
-    fn commit_logged(
-        &self,
-        wal: &mut Wal,
-        rows: &mut storage::RowBatch,
-    ) -> Result<(), PersistenceError> {
+    fn commit_logged(&self, wal: &mut Wal, rows: &mut storage::RowBatch) -> Result<(), PersistenceError> {
         if rows.is_empty() {
             return Ok(());
         }
@@ -782,8 +753,7 @@ impl PersistenceManager {
         tenant: &str,
         store: &GraphStore,
     ) -> Result<(), PersistenceError> {
-        self.storage
-            .put_index_catalog(tenant, &store.index_catalog())?;
+        self.storage.put_index_catalog(tenant, &store.index_catalog())?;
         store.clear_index_catalog_dirty();
         Ok(())
     }
@@ -864,31 +834,17 @@ impl PersistenceManager {
     }
 
     /// Save vector indices to disk
-    pub fn checkpoint_vectors(
-        &self,
-        vector_index: &crate::vector::VectorIndexManager,
-    ) -> Result<(), PersistenceError> {
+    pub fn checkpoint_vectors(&self, vector_index: &crate::vector::VectorIndexManager) -> Result<(), PersistenceError> {
         let vector_path = self.base_path.join("vectors");
-        vector_index.dump_all(&vector_path).map_err(|e| {
-            PersistenceError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })
+        vector_index.dump_all(&vector_path)
+            .map_err(|e| PersistenceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 
     /// Load vector indices from disk
-    pub fn recover_vectors(
-        &self,
-        vector_index: &crate::vector::VectorIndexManager,
-    ) -> Result<(), PersistenceError> {
+    pub fn recover_vectors(&self, vector_index: &crate::vector::VectorIndexManager) -> Result<(), PersistenceError> {
         let vector_path = self.base_path.join("vectors");
-        vector_index.load_all(&vector_path).map_err(|e| {
-            PersistenceError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })
+        vector_index.load_all(&vector_path)
+            .map_err(|e| PersistenceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 }
 
@@ -977,7 +933,9 @@ mod tests {
         let offenders: Vec<(usize, &str)> = production
             .lines()
             .enumerate()
-            .filter(|(_, l)| l.contains("persist_create_node(") || l.contains(".put_node("))
+            .filter(|(_, l)| {
+                l.contains("persist_create_node(") || l.contains(".put_node(")
+            })
             // The definition itself, and the one call inside it.
             .filter(|(_, l)| !l.contains("pub fn persist_create_node"))
             // `apply_mutations` is the merged path — it is fed `node_materialized`.
@@ -999,7 +957,7 @@ mod tests {
         );
     }
     use super::*;
-    use crate::graph::{EdgeId, EdgeType, Label, NodeId, PropertyMap, PropertyValue};
+    use crate::graph::{Label, NodeId, EdgeId, EdgeType, PropertyValue, PropertyMap};
     use tempfile::TempDir;
 
     #[test]
@@ -1050,22 +1008,18 @@ mod tests {
 
     #[test]
     fn test_vector_index_persistence() {
+        use crate::vector::{VectorIndexManager, DistanceMetric};
         use crate::graph::NodeId;
-        use crate::vector::{DistanceMetric, VectorIndexManager};
 
         let temp_dir = TempDir::new().unwrap();
         let manager = PersistenceManager::new(temp_dir.path()).unwrap();
 
         // Create and populate a vector index
         let vim = VectorIndexManager::new();
-        vim.create_index("Person", "embedding", 3, DistanceMetric::Cosine)
-            .unwrap();
-        vim.add_vector("Person", "embedding", NodeId::new(1), &vec![1.0, 0.0, 0.0])
-            .unwrap();
-        vim.add_vector("Person", "embedding", NodeId::new(2), &vec![0.0, 1.0, 0.0])
-            .unwrap();
-        vim.add_vector("Person", "embedding", NodeId::new(3), &vec![0.0, 0.0, 1.0])
-            .unwrap();
+        vim.create_index("Person", "embedding", 3, DistanceMetric::Cosine).unwrap();
+        vim.add_vector("Person", "embedding", NodeId::new(1), &vec![1.0, 0.0, 0.0]).unwrap();
+        vim.add_vector("Person", "embedding", NodeId::new(2), &vec![0.0, 1.0, 0.0]).unwrap();
+        vim.add_vector("Person", "embedding", NodeId::new(3), &vec![0.0, 0.0, 1.0]).unwrap();
 
         // Checkpoint vectors to disk
         manager.checkpoint_vectors(&vim).unwrap();
@@ -1075,9 +1029,7 @@ mod tests {
         manager.recover_vectors(&vim2).unwrap();
 
         // Verify search works after recovery
-        let results = vim2
-            .search("Person", "embedding", &[1.0, 0.1, 0.0], 2)
-            .unwrap();
+        let results = vim2.search("Person", "embedding", &[1.0, 0.1, 0.0], 2).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, NodeId::new(1));
     }
@@ -1090,14 +1042,11 @@ mod tests {
         // Create tenant with small quota
         let mut quotas = ResourceQuotas::default();
         quotas.max_nodes = Some(3);
-        manager
-            .tenants()
-            .create_tenant(
-                "limited".to_string(),
-                "Limited Tenant".to_string(),
-                Some(quotas),
-            )
-            .unwrap();
+        manager.tenants().create_tenant(
+            "limited".to_string(),
+            "Limited Tenant".to_string(),
+            Some(quotas),
+        ).unwrap();
 
         // Should succeed for first 3 nodes
         for i in 1..=3 {
@@ -1125,12 +1074,7 @@ mod tests {
         manager.persist_create_node("default", &n2).unwrap();
 
         // Create edge
-        let edge = Edge::new(
-            EdgeId::new(1),
-            NodeId::new(1),
-            NodeId::new(2),
-            EdgeType::new("KNOWS"),
-        );
+        let edge = Edge::new(EdgeId::new(1), NodeId::new(1), NodeId::new(2), EdgeType::new("KNOWS"));
         let result = manager.persist_create_edge("default", &edge);
         assert!(result.is_ok());
     }
@@ -1157,12 +1101,7 @@ mod tests {
         manager.persist_create_node("default", &n1).unwrap();
         manager.persist_create_node("default", &n2).unwrap();
 
-        let edge = Edge::new(
-            EdgeId::new(1),
-            NodeId::new(1),
-            NodeId::new(2),
-            EdgeType::new("E"),
-        );
+        let edge = Edge::new(EdgeId::new(1), NodeId::new(1), NodeId::new(2), EdgeType::new("E"));
         manager.persist_create_edge("default", &edge).unwrap();
 
         let result = manager.persist_delete_edge("default", 1);
@@ -1178,10 +1117,7 @@ mod tests {
         manager.persist_create_node("default", &node).unwrap();
 
         let mut props = PropertyMap::new();
-        props.insert(
-            "name".to_string(),
-            PropertyValue::String("Alice".to_string()),
-        );
+        props.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
 
         let result = manager.persist_update_node_properties("default", 1, &props);
         assert!(result.is_ok());

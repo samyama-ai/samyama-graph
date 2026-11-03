@@ -10,11 +10,7 @@
 /// `--query` is deliberately absent: it is repeatable, and
 /// [`selected_query_ids`] collects every occurrence.
 pub const SINGLE_VALUED: &[&str] = &[
-    "--data-dir",
-    "--derive-params",
-    "--params-file",
-    "--runs",
-    "--write-params",
+    "--data-dir", "--derive-params", "--params-file", "--runs", "--write-params",
 ];
 
 /// Which single-valued flags appear more than once.
@@ -80,15 +76,7 @@ mod tests {
     #[test]
     fn every_repeated_flag_is_reported_not_just_the_first() {
         let got = repeated_single_valued(&args(&[
-            "bench",
-            "--runs",
-            "3",
-            "--runs",
-            "10",
-            "--data-dir",
-            "a",
-            "--data-dir",
-            "b",
+            "bench", "--runs", "3", "--runs", "10", "--data-dir", "a", "--data-dir", "b",
         ]));
         assert_eq!(got, vec!["--data-dir", "--runs"]);
     }
@@ -97,10 +85,10 @@ mod tests {
     /// the check that forbids repeating.
     #[test]
     fn query_may_repeat() {
-        assert!(
-            repeated_single_valued(&args(&["bench", "--query", "IC2", "--query", "IC12"]))
-                .is_empty()
-        );
+        assert!(repeated_single_valued(&args(&[
+            "bench", "--query", "IC2", "--query", "IC12"
+        ]))
+        .is_empty());
     }
 
     #[test]

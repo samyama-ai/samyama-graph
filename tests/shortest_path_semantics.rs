@@ -51,9 +51,7 @@ fn diamond() -> GraphStore {
 
 fn lengths(store: &GraphStore, cypher: &str) -> Vec<i64> {
     let query = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("query should run");
+    let batch = QueryExecutor::new(store).execute(&query).expect("query should run");
     batch
         .records
         .iter()
@@ -84,10 +82,7 @@ fn all_shortest_paths_returns_every_minimum_length_path() {
          RETURN length(p) AS len",
     );
     assert_eq!(out.len(), 2, "A->B->D and A->C->D: {out:?}");
-    assert!(
-        out.iter().all(|&n| n == 2),
-        "the 3-hop detour is not shortest: {out:?}"
-    );
+    assert!(out.iter().all(|&n| n == 2), "the 3-hop detour is not shortest: {out:?}");
 }
 
 #[test]
@@ -163,11 +158,7 @@ fn the_edge_type_filter_is_honoured() {
         "MATCH p = shortestPath((a:N)-[:LINK*]->(c:N)) WHERE a.name = \"A\" AND c.name = \"C\" \
          RETURN length(p) AS len",
     );
-    assert_eq!(
-        out,
-        vec![2],
-        "the 1-hop OTHER edge must not be followed: {out:?}"
-    );
+    assert_eq!(out, vec![2], "the 1-hop OTHER edge must not be followed: {out:?}");
 }
 
 #[test]
@@ -178,10 +169,7 @@ fn an_unknown_edge_type_finds_no_path() {
         "MATCH p = shortestPath((a:N)-[:NO_SUCH_TYPE*]->(d:N)) WHERE a.name = \"A\" AND d.name = \"D\" \
          RETURN length(p) AS len",
     );
-    assert!(
-        out.is_empty(),
-        "an unknown type must match nothing: {out:?}"
-    );
+    assert!(out.is_empty(), "an unknown type must match nothing: {out:?}");
 }
 
 #[test]
@@ -238,9 +226,7 @@ fn a_wide_graph_three_hops_apart_finishes_quickly() {
         }
         // Noise of a type the query does not want, as a real graph has.
         for d in 0..40 {
-            let x = (i as u64)
-                .wrapping_mul(0x2545_F491_4F6C_DD1D)
-                .wrapping_add(d as u64);
+            let x = (i as u64).wrapping_mul(0x2545_F491_4F6C_DD1D).wrapping_add(d as u64);
             let tgt = ids[(x % N as u64) as usize];
             if tgt != src {
                 let _ = store.create_edge(src, tgt, "NOISE");

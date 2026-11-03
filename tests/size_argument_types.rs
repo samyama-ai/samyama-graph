@@ -56,9 +56,7 @@ fn size_of_a_path_is_refused() {
 /// check to both is how #798 rejected every `EXISTS` in the codebase.
 #[test]
 fn exists_subqueries_are_untouched() {
-    assert!(compiles(
-        "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) } RETURN a"
-    ));
+    assert!(compiles("MATCH (a) WHERE EXISTS { MATCH (a)-->(b) } RETURN a"));
     assert!(compiles("MATCH (a) RETURN EXISTS { MATCH (a)-->(b) } AS e"));
 }
 
@@ -67,19 +65,13 @@ fn exists_subqueries_are_untouched() {
 #[test]
 fn lists_and_strings_still_work() {
     let store = GraphStore::new();
-    for (expr, want) in [
-        ("size([1,2,3])", 3),
-        ("size('abc')", 3),
-        ("size(keys({a:1}))", 1),
-    ] {
+    for (expr, want) in [("size([1,2,3])", 3), ("size('abc')", 3), ("size(keys({a:1}))", 1)] {
         let cypher = format!("RETURN {expr} AS r");
         let q = parse_query(&cypher).unwrap_or_else(|e| panic!("{cypher} refused: {e:?}"));
         let batch = QueryExecutor::new(&store).execute(&q).expect("runs");
         assert_eq!(
             batch.records.first().and_then(|r| r.get("r")),
-            Some(&Value::Property(samyama::graph::PropertyValue::Integer(
-                want
-            ))),
+            Some(&Value::Property(samyama::graph::PropertyValue::Integer(want))),
             "{expr}"
         );
     }

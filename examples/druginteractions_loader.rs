@@ -35,14 +35,10 @@ async fn main() -> Result<(), Error> {
                 .expect("--data-dir requires a path argument"),
         )
     } else {
-        eprintln!(
-            "Usage: cargo run --release --example druginteractions_loader -- --data-dir <PATH>"
-        );
+        eprintln!("Usage: cargo run --release --example druginteractions_loader -- --data-dir <PATH>");
         eprintln!();
         eprintln!("Options:");
-        eprintln!(
-            "  --data-dir PATH   Directory with drugbank/, dgidb/, sider/ subdirs (required)"
-        );
+        eprintln!("  --data-dir PATH   Directory with drugbank/, dgidb/, sider/ subdirs (required)");
         eprintln!("  --phases PHASES   Comma-separated: drugbank_dgidb,sider,chembl,openfda (default: all)");
         eprintln!("  --snapshot PATH   Export snapshot to .sgsnap file after loading");
         eprintln!("  --query           Enter interactive Cypher REPL after loading");
@@ -100,10 +96,7 @@ async fn main() -> Result<(), Error> {
     eprintln!("  Side Effects:   {}", format_num(result.side_effect_nodes));
     eprintln!("  Indications:    {}", format_num(result.indication_nodes));
     eprintln!("  Bioactivities:  {}", format_num(result.bioactivity_nodes));
-    eprintln!(
-        "  Adverse Events: {}",
-        format_num(result.adverse_event_nodes)
-    );
+    eprintln!("  Adverse Events: {}", format_num(result.adverse_event_nodes));
     eprintln!("  ─────────────────────");
     eprintln!("  Total nodes:    {}", format_num(result.total_nodes));
     eprintln!("  Total edges:    {}", format_num(result.total_edges));
@@ -158,7 +151,8 @@ async fn main() -> Result<(), Error> {
                         eprintln!("{}", result.columns.join(" | "));
                         eprintln!("{}", "-".repeat(result.columns.len() * 20));
                         for row in &result.records {
-                            let vals: Vec<String> = row.iter().map(|v| format!("{}", v)).collect();
+                            let vals: Vec<String> =
+                                row.iter().map(|v| format!("{}", v)).collect();
                             eprintln!("{}", vals.join(" | "));
                         }
                         eprintln!("({} rows)", result.records.len());

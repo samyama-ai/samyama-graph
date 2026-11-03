@@ -36,19 +36,13 @@ const T: &str = "default";
 const GRAPHS: &[(&str, &[(&str, &str)])] = &[
     // Two parallel a->b edges: multiplicity is observable, which first-reach
     // deduplication destroys. This is #1140's graph.
-    (
-        "parallel",
-        &[("a", "b"), ("a", "b"), ("b", "c"), ("c", "a")],
-    ),
+    ("parallel", &[("a", "b"), ("a", "b"), ("b", "c"), ("c", "a")]),
     // A cycle: separates TRAIL from ACYCLIC, and makes A(k,k) non-empty for every k.
     ("triangle", &[("a", "b"), ("b", "c"), ("c", "a")]),
     // Two routes of equal length: ALL SHORTEST has more than one answer.
     ("diamond", &[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]),
     // Two routes of different length between the same pair.
-    (
-        "ladder",
-        &[("a", "b"), ("b", "d"), ("a", "c"), ("c", "e"), ("e", "d")],
-    ),
+    ("ladder", &[("a", "b"), ("b", "d"), ("a", "c"), ("c", "e"), ("e", "d")]),
     // A self-loop: length-1 path from a node to itself.
     ("selfloop", &[("a", "a"), ("a", "b"), ("b", "c")]),
     // A chain, as the control: relations must hold here too, and any violation
@@ -63,16 +57,12 @@ fn build(edges: &[(&str, &str)]) -> GraphStore {
     names.sort_unstable();
     names.dedup();
     for n in names {
-        engine
-            .execute_mut(&format!("CREATE (:N {{eid: \"{n}\"}})"), &mut store, T)
-            .unwrap();
+        engine.execute_mut(&format!("CREATE (:N {{eid: \"{n}\"}})"), &mut store, T).unwrap();
     }
     for &(a, b) in edges {
         engine
             .execute_mut(
-                &format!(
-                    "MATCH (x:N {{eid: \"{a}\"}}), (y:N {{eid: \"{b}\"}}) CREATE (x)-[:E]->(y)"
-                ),
+                &format!("MATCH (x:N {{eid: \"{a}\"}}), (y:N {{eid: \"{b}\"}}) CREATE (x)-[:E]->(y)"),
                 &mut store,
                 T,
             )
@@ -135,12 +125,7 @@ fn m1_widening_the_upper_bound_only_adds_paths() {
             }
         }
     }
-    assert!(
-        violations.is_empty(),
-        "M1 broken in {} cases:\n{}",
-        violations.len(),
-        violations.join("\n")
-    );
+    assert!(violations.is_empty(), "M1 broken in {} cases:\n{}", violations.len(), violations.join("\n"));
 }
 
 #[test]
@@ -162,12 +147,7 @@ fn m2_lowering_the_lower_bound_only_adds_paths() {
             }
         }
     }
-    assert!(
-        violations.is_empty(),
-        "M2 broken in {} cases:\n{}",
-        violations.len(),
-        violations.join("\n")
-    );
+    assert!(violations.is_empty(), "M2 broken in {} cases:\n{}", violations.len(), violations.join("\n"));
 }
 
 /// The decisive one: an interval is the sum of its exact lengths.
@@ -195,12 +175,7 @@ fn m3_an_interval_is_the_sum_of_its_exact_lengths() {
             }
         }
     }
-    assert!(
-        violations.is_empty(),
-        "M3 broken in {} cases:\n{}",
-        violations.len(),
-        violations.join("\n")
-    );
+    assert!(violations.is_empty(), "M3 broken in {} cases:\n{}", violations.len(), violations.join("\n"));
 }
 
 /// The relations hold under the GQL path modes too, which is what makes them
@@ -217,11 +192,10 @@ fn m3_holds_within_each_gql_path_mode() {
         let g = build(edges);
         for mode in ["TRAIL ", "ACYCLIC ", "SIMPLE "] {
             let ans = |lo: usize, hi: usize| -> BTreeMap<String, usize> {
-                let q =
-                    format!("MATCH {mode}(x:N {{eid: \"a\"}})-[:E*{lo}..{hi}]->(y) RETURN y.eid");
-                let batch = engine
-                    .execute(&q, &g)
-                    .unwrap_or_else(|e| panic!("{q}: {e}"));
+                let q = format!(
+                    "MATCH {mode}(x:N {{eid: \"a\"}})-[:E*{lo}..{hi}]->(y) RETURN y.eid"
+                );
+                let batch = engine.execute(&q, &g).unwrap_or_else(|e| panic!("{q}: {e}"));
                 let mut out = BTreeMap::new();
                 for rec in &batch.records {
                     *out.entry(format!("{:?}", rec.get("y.eid"))).or_insert(0) += 1;

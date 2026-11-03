@@ -629,19 +629,12 @@ fn a_statement_larger_than_one_commit_lands_whole() {
     let nodes: Vec<NodeId> = (0..rows).map(|_| store.create_node("P")).collect();
     let edge = store.create_edge(nodes[0], nodes[rows - 1], "R").unwrap();
     let log = store.take_write_log();
-    assert_eq!(
-        m.apply_mutations("default", &store, &log).unwrap(),
-        rows + 1
-    );
+    assert_eq!(m.apply_mutations("default", &store, &log).unwrap(), rows + 1);
 
     let (on_disk, edges) = m.recover("default").unwrap();
     assert_eq!(on_disk.len(), rows, "every staged node was committed");
     assert_eq!(edges.len(), 1);
-    assert!(m
-        .storage()
-        .get_edge("default", edge.as_u64())
-        .unwrap()
-        .is_some());
+    assert!(m.storage().get_edge("default", edge.as_u64()).unwrap().is_some());
 
     // Deletes are staged and committed the same way.
     for &n in &nodes[..3] {
@@ -650,17 +643,9 @@ fn a_statement_larger_than_one_commit_lands_whole() {
     let log = store.take_write_log();
     m.apply_mutations("default", &store, &log).unwrap();
     for &n in &nodes[..3] {
-        assert!(m
-            .storage()
-            .get_node("default", n.as_u64())
-            .unwrap()
-            .is_none());
+        assert!(m.storage().get_node("default", n.as_u64()).unwrap().is_none());
     }
-    assert!(m
-        .storage()
-        .get_node("default", nodes[3].as_u64())
-        .unwrap()
-        .is_some());
+    assert!(m.storage().get_node("default", nodes[3].as_u64()).unwrap().is_some());
 }
 
 /// With the WAL in sync mode, a statement costs one durability barrier per
@@ -688,15 +673,8 @@ fn a_synced_statement_pays_one_wal_barrier_per_commit() {
 
     assert_eq!(result.unwrap(), N);
     assert_eq!(ops.wal_appends, N as u64, "still one WAL record per row");
-    assert_eq!(
-        syncs, 1,
-        "one barrier for a statement that fits in one commit"
-    );
+    assert_eq!(syncs, 1, "one barrier for a statement that fits in one commit");
     for n in [nodes[0], nodes[N / 2], nodes[N - 1]] {
-        assert!(m
-            .storage()
-            .get_node("default", n.as_u64())
-            .unwrap()
-            .is_some());
+        assert!(m.storage().get_node("default", n.as_u64()).unwrap().is_some());
     }
 }

@@ -17,17 +17,13 @@ use samyama::query::parser::parse_query;
 
 fn write(s: &mut GraphStore, q: &str) {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    MutQueryExecutor::new(s, "default".into())
-        .execute(&p)
-        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    MutQueryExecutor::new(s, "default".into()).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
 }
 
 /// Column `c`, sorted.
 fn rows(s: &GraphStore, q: &str) -> Vec<String> {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(s)
-        .execute(&p)
-        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let mut v: Vec<String> = out
         .records
         .iter()
@@ -72,10 +68,7 @@ fn stores() -> (GraphStore, GraphStore) {
     let mut indexed = GraphStore::new();
     let mut plain = GraphStore::new();
     for s in [&mut indexed, &mut plain] {
-        write(
-            s,
-            "UNWIND range(1, 500) AS i CREATE (:N {id: i, v: 'v' + toString(i)})",
-        );
+        write(s, "UNWIND range(1, 500) AS i CREATE (:N {id: i, v: 'v' + toString(i)})");
         write(s, "CREATE (:A {k: 9}), (:A {k: 11})");
     }
     write(&mut indexed, "CREATE INDEX ON :N(id)");
@@ -90,18 +83,12 @@ fn same_both_ways(q: &str, expected: &[&str]) {
 
 #[test]
 fn duplicates_missing_and_null_keys() {
-    same_both_ways(
-        "UNWIND [3, 7, 7, 999, null] AS i MATCH (n:N) WHERE n.id = i RETURN n.id AS c",
-        &["3", "7", "7"],
-    );
+    same_both_ways("UNWIND [3, 7, 7, 999, null] AS i MATCH (n:N) WHERE n.id = i RETURN n.id AS c", &["3", "7", "7"]);
 }
 
 #[test]
 fn operands_either_way_round_and_a_map_key() {
-    same_both_ways(
-        "UNWIND [{id: 5}, {id: 6}] AS r MATCH (n:N) WHERE r.id = n.id RETURN n.v AS c",
-        &["v5", "v6"],
-    );
+    same_both_ways("UNWIND [{id: 5}, {id: 6}] AS r MATCH (n:N) WHERE r.id = n.id RETURN n.v AS c", &["v5", "v6"]);
 }
 
 #[test]
@@ -114,10 +101,7 @@ fn a_filter_on_the_node_still_applies() {
 
 #[test]
 fn after_a_with() {
-    same_both_ways(
-        "MATCH (a:A) WITH a.k AS k MATCH (n:N) WHERE n.id = k RETURN n.id AS c",
-        &["11", "9"],
-    );
+    same_both_ways("MATCH (a:A) WITH a.k AS k MATCH (n:N) WHERE n.id = k RETURN n.id AS c", &["11", "9"]);
 }
 
 #[test]
@@ -125,26 +109,14 @@ fn a_string_key() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:S {k: 'a'}), (:S {k: 'b'})");
     write(&mut s, "CREATE INDEX ON :S(k)");
-    assert_eq!(
-        rows(
-            &s,
-            "UNWIND ['b', 'x'] AS key MATCH (s:S) WHERE s.k = key RETURN s.k AS c"
-        ),
-        vec!["b"]
-    );
+    assert_eq!(rows(&s, "UNWIND ['b', 'x'] AS key MATCH (s:S) WHERE s.k = key RETURN s.k AS c"), vec!["b"]);
 }
 
 #[test]
 fn a_deleted_node_is_not_found() {
     let (mut indexed, _) = stores();
     write(&mut indexed, "MATCH (n:N {id: 3}) DETACH DELETE n");
-    assert_eq!(
-        rows(
-            &indexed,
-            "UNWIND [3, 4] AS i MATCH (n:N) WHERE n.id = i RETURN n.id AS c"
-        ),
-        vec!["4"]
-    );
+    assert_eq!(rows(&indexed, "UNWIND [3, 4] AS i MATCH (n:N) WHERE n.id = i RETURN n.id AS c"), vec!["4"]);
 }
 
 /// The point of the change: the indexed batch lookup is planned as a probe.
@@ -152,22 +124,10 @@ fn a_deleted_node_is_not_found() {
 fn the_index_is_probed_per_row_when_there_is_one() {
     let (indexed, plain) = stores();
     let q = "UNWIND [3, 7] AS i MATCH (n:N) WHERE n.id = i RETURN n.id AS c";
-    assert!(
-        plan(&indexed, q).contains("CorrelatedIndexLookup"),
-        "{}",
-        plan(&indexed, q)
-    );
-    assert!(
-        !plan(&plain, q).contains("CorrelatedIndexLookup"),
-        "{}",
-        plan(&plain, q)
-    );
+    assert!(plan(&indexed, q).contains("CorrelatedIndexLookup"), "{}", plan(&indexed, q));
+    assert!(!plan(&plain, q).contains("CorrelatedIndexLookup"), "{}", plan(&plain, q));
     let after_with = "MATCH (a:A) WITH a.k AS k MATCH (n:N) WHERE n.id = k RETURN n.id AS c";
-    assert!(
-        plan(&indexed, after_with).contains("CorrelatedIndexLookup"),
-        "{}",
-        plan(&indexed, after_with)
-    );
+    assert!(plan(&indexed, after_with).contains("CorrelatedIndexLookup"), "{}", plan(&indexed, after_with));
 }
 
 /// A pattern with one relationship probes the index, then expands from the
@@ -175,15 +135,8 @@ fn the_index_is_probed_per_row_when_there_is_one() {
 #[test]
 fn a_pattern_with_a_relationship_probes_then_expands() {
     let (mut indexed, _) = stores();
-    write(
-        &mut indexed,
-        "MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:R]->(b)",
-    );
+    write(&mut indexed, "MATCH (a:N {id: 1}), (b:N {id: 2}) CREATE (a)-[:R]->(b)");
     let q = "UNWIND [1] AS i MATCH (n:N)-[:R]->(m) WHERE n.id = i RETURN m.id AS c";
-    assert!(
-        plan(&indexed, q).contains("CorrelatedIndexLookup"),
-        "{}",
-        plan(&indexed, q)
-    );
+    assert!(plan(&indexed, q).contains("CorrelatedIndexLookup"), "{}", plan(&indexed, q));
     assert_eq!(rows(&indexed, q), vec!["2"]);
 }

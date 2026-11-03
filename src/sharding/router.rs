@@ -72,7 +72,7 @@ mod tests {
     fn test_local_routing() {
         let router = Router::new(1);
         router.update_route("tenant_a".to_string(), 1);
-
+        
         match router.route("tenant_a") {
             Some(RouteResult::Local) => assert!(true),
             _ => panic!("Should route locally"),
@@ -83,7 +83,7 @@ mod tests {
     fn test_remote_routing() {
         let router = Router::new(1);
         router.update_route("tenant_b".to_string(), 2);
-
+        
         match router.route("tenant_b") {
             Some(RouteResult::Remote(id)) => assert_eq!(id, 2),
             _ => panic!("Should route remotely"),
@@ -104,7 +104,7 @@ mod tests {
 
         let routes = router.get_all_routes();
         assert_eq!(routes.len(), 2);
-
+        
         router.remove_route("t1");
         assert!(router.route("t1").is_none());
         assert!(router.route("t2").is_some());

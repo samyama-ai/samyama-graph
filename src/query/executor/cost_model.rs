@@ -3,9 +3,9 @@
 //! Estimates the cardinality (number of rows) produced by each logical plan node,
 //! using triple-level statistics from GraphCatalog.
 
-use super::logical_plan::{ExpandDirection, LogicalPlanNode};
 use crate::graph::catalog::GraphCatalog;
 use crate::graph::types::Label;
+use super::logical_plan::{LogicalPlanNode, ExpandDirection};
 
 /// Cost of an index-resident hierarchy roll-up (ADR-035).
 ///
@@ -53,13 +53,7 @@ pub fn estimate_plan_cost(plan: &LogicalPlanNode, catalog: &GraphCatalog) -> f64
             10.0
         }
 
-        LogicalPlanNode::Expand {
-            input,
-            source_var: _,
-            edge_types,
-            direction,
-            ..
-        } => {
+        LogicalPlanNode::Expand { input, source_var: _, edge_types, direction, .. } => {
             let input_cost = estimate_plan_cost(input, catalog);
             // Get the source label from the input plan
             let source_label = extract_label_for_var(input, &get_expand_source_var(plan));
@@ -83,13 +77,7 @@ pub fn estimate_plan_cost(plan: &LogicalPlanNode, catalog: &GraphCatalog) -> f64
             input_cost * degree
         }
 
-        LogicalPlanNode::ExpandInto {
-            input,
-            source_var: _,
-            target_var: _,
-            edge_types,
-            ..
-        } => {
+        LogicalPlanNode::ExpandInto { input, source_var: _, target_var: _, edge_types, .. } => {
             let input_cost = estimate_plan_cost(input, catalog);
             // ExpandInto filters: only edges that exist pass through
             // Use edge existence probability as the selectivity
@@ -110,9 +98,7 @@ pub fn estimate_plan_cost(plan: &LogicalPlanNode, catalog: &GraphCatalog) -> f64
             input_cost * selectivity
         }
 
-        LogicalPlanNode::TrieJoin {
-            input, constraints, ..
-        } => {
+        LogicalPlanNode::TrieJoin { input, constraints, .. } => {
             let input_cost = estimate_plan_cost(input, catalog);
             // TrieJoin is worst-case optimal: cost is input_cost × intersection selectivity.
             // With k constraints, the intersection is much tighter than chained ExpandInto.
@@ -163,21 +149,23 @@ fn get_expand_source_var(plan: &LogicalPlanNode) -> String {
 /// Try to extract the label for a variable from a plan tree
 fn extract_label_for_var(plan: &LogicalPlanNode, variable: &str) -> Option<Label> {
     match plan {
-        LogicalPlanNode::LabelScan {
-            variable: v, label, ..
-        } if v == variable => label.clone(),
-        LogicalPlanNode::IndexLookup {
-            variable: v, label, ..
-        } if v == variable => Some(label.clone()),
+        LogicalPlanNode::LabelScan { variable: v, label, .. } if v == variable => {
+            label.clone()
+        }
+        LogicalPlanNode::IndexLookup { variable: v, label, .. } if v == variable => {
+            Some(label.clone())
+        }
         LogicalPlanNode::Expand { input, .. } => extract_label_for_var(input, variable),
         LogicalPlanNode::ExpandInto { input, .. } => extract_label_for_var(input, variable),
         LogicalPlanNode::TrieJoin { input, .. } => extract_label_for_var(input, variable),
         LogicalPlanNode::Filter { input, .. } => extract_label_for_var(input, variable),
         LogicalPlanNode::Join { left, right, .. } => {
-            extract_label_for_var(left, variable).or_else(|| extract_label_for_var(right, variable))
+            extract_label_for_var(left, variable)
+                .or_else(|| extract_label_for_var(right, variable))
         }
         LogicalPlanNode::CartesianProduct { left, right } => {
-            extract_label_for_var(left, variable).or_else(|| extract_label_for_var(right, variable))
+            extract_label_for_var(left, variable)
+                .or_else(|| extract_label_for_var(right, variable))
         }
         _ => None,
     }
@@ -186,7 +174,7 @@ fn extract_label_for_var(plan: &LogicalPlanNode, variable: &str) -> Option<Label
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::types::{EdgeType, NodeId};
+    use crate::graph::types::{NodeId, EdgeType};
     use crate::query::ast::Expression;
 
     #[test]
@@ -214,20 +202,8 @@ mod tests {
         let p1 = NodeId::new(1);
         let p2 = NodeId::new(2);
         let p3 = NodeId::new(3);
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p2,
-            &[Label::new("Person")],
-        );
-        catalog.on_edge_created(
-            p1,
-            &[Label::new("Person")],
-            &EdgeType::new("KNOWS"),
-            p3,
-            &[Label::new("Person")],
-        );
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p2, &[Label::new("Person")]);
+        catalog.on_edge_created(p1, &[Label::new("Person")], &EdgeType::new("KNOWS"), p3, &[Label::new("Person")]);
 
         let plan = LogicalPlanNode::Expand {
             input: Box::new(LogicalPlanNode::LabelScan {
@@ -309,14 +285,8 @@ mod tests {
         }
 
         let plan = LogicalPlanNode::CartesianProduct {
-            left: Box::new(LogicalPlanNode::LabelScan {
-                variable: "a".to_string(),
-                label: Some(Label::new("A")),
-            }),
-            right: Box::new(LogicalPlanNode::LabelScan {
-                variable: "b".to_string(),
-                label: Some(Label::new("B")),
-            }),
+            left: Box::new(LogicalPlanNode::LabelScan { variable: "a".to_string(), label: Some(Label::new("A")) }),
+            right: Box::new(LogicalPlanNode::LabelScan { variable: "b".to_string(), label: Some(Label::new("B")) }),
         };
         let cost = estimate_plan_cost(&plan, &catalog);
         assert_eq!(cost, 50.0); // 5 * 10

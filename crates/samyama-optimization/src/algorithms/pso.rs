@@ -15,7 +15,7 @@ pub struct PSOSolver {
 impl PSOSolver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
-            seed: None,
+            seed: None, 
             config,
             w: 0.7,
             c1: 1.5,
@@ -65,25 +65,19 @@ impl PSOSolver {
                 break;
             }
             if iter % 10 == 0 {
-                println!(
-                    "PSO Solver: Iteration {}/{}",
-                    iter, self.config.max_iterations
-                );
+                println!("PSO Solver: Iteration {}/{}", iter, self.config.max_iterations);
             }
-
+            
             history.push(gbest.fitness);
 
             // Update swarm
-            // Note: In parallel, we need to collect updates then apply?
+            // Note: In parallel, we need to collect updates then apply? 
             // Or we can update particle i using its own pbest and the *current* gbest (read-only).
             // Updating velocities requires mutable access to velocities[i].
             // Updating positions requires mutable access to swarm[i].
-
+            
             // We'll compute new state in parallel and then replace.
-            let results: Vec<(Individual, Array1<f64>, Individual)> = swarm
-                .par_iter()
-                .zip(velocities.par_iter())
-                .zip(pbests.par_iter())
+            let results: Vec<(Individual, Array1<f64>, Individual)> = swarm.par_iter().zip(velocities.par_iter()).zip(pbests.par_iter())
                 .enumerate()
                 .map(|(__idx, ((particle, velocity), pbest))| {
                     let mut local_rng = crate::common::rng::child_rng(self.seed, iter, __idx);
@@ -93,18 +87,18 @@ impl PSOSolver {
                     for j in 0..dim {
                         let r1: f64 = local_rng.gen();
                         let r2: f64 = local_rng.gen();
-
-                        let v = self.w * velocity[j]
-                            + self.c1 * r1 * (pbest.variables[j] - particle.variables[j])
-                            + self.c2 * r2 * (gbest.variables[j] - particle.variables[j]);
-
+                        
+                        let v = self.w * velocity[j] 
+                              + self.c1 * r1 * (pbest.variables[j] - particle.variables[j])
+                              + self.c2 * r2 * (gbest.variables[j] - particle.variables[j]);
+                        
                         new_vel[j] = v;
                         new_vars[j] = (particle.variables[j] + v).clamp(lower[j], upper[j]);
                     }
 
                     let new_fitness = crate::common::evaluate(problem, &new_vars);
                     let new_ind = Individual::new(new_vars, new_fitness);
-
+                    
                     let new_pbest = if new_fitness < pbest.fitness {
                         new_ind.clone()
                     } else {
@@ -120,7 +114,7 @@ impl PSOSolver {
                 swarm[i] = new_ind;
                 velocities[i] = new_vel;
                 pbests[i] = new_pbest;
-
+                
                 if swarm[i].fitness < gbest.fitness {
                     gbest = swarm[i].clone();
                 }

@@ -40,9 +40,12 @@ const T: &str = "default";
 
 /// Every name `or.solve` prints in its own refusal message.
 const ADVERTISED: &[&str] = &[
-    "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "MOTLBO", "Jaya", "QOJaya",
-    "SAMPJaya", "EHRJaya", "BMR", "BWR", "BMWR", "MOBMWR", "PSO", "DE", "LSHADE", "GA", "SA",
-    "ABC", "GSA", "HS", "FPA", "Firefly", "Cuckoo", "GWO", "Bat", "NSGA2", "MORaoDE", "SAPHR",
+    "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "MOTLBO",
+    "Jaya", "QOJaya", "SAMPJaya", "EHRJaya",
+    "BMR", "BWR", "BMWR", "MOBMWR",
+    "PSO", "DE", "LSHADE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
+    "Firefly", "Cuckoo", "GWO", "Bat",
+    "NSGA2", "MORaoDE", "SAPHR",
 ];
 
 fn store() -> GraphStore {
@@ -50,10 +53,8 @@ fn store() -> GraphStore {
     for (name, cost, value) in [("A", 10.0, 3.0), ("B", 20.0, 7.0), ("C", 15.0, 5.0)] {
         let n = s.create_node("Resource");
         s.set_node_property(T, n, "name", name).unwrap();
-        s.set_node_property(T, n, "cost", PropertyValue::Float(cost))
-            .unwrap();
-        s.set_node_property(T, n, "value", PropertyValue::Float(value))
-            .unwrap();
+        s.set_node_property(T, n, "cost", PropertyValue::Float(cost)).unwrap();
+        s.set_node_property(T, n, "value", PropertyValue::Float(value)).unwrap();
     }
     s
 }
@@ -101,10 +102,7 @@ fn no_advertised_algorithm_reports_a_dispatch_bug() {
     // bug that is not there and hiding the one that is.
     let mut misreported = Vec::new();
     for a in ADVERTISED {
-        for clause in [
-            "cost_property: 'cost'",
-            "cost_properties: ['cost', 'value']",
-        ] {
+        for clause in ["cost_property: 'cost'", "cost_properties: ['cost', 'value']"] {
             if let Err(e) = solve(a, clause) {
                 if e.contains("no implementation wired") {
                     misreported.push(format!("{a} with {clause}"));

@@ -56,7 +56,9 @@ fn triangle() -> GraphStore {
     for (x, y) in [("a", "b"), ("b", "c"), ("a", "c")] {
         run(
             &mut store,
-            &format!("MATCH (x:N {{name:\"{x}\"}}), (y:N {{name:\"{y}\"}}) CREATE (x)-[:R]->(y)"),
+            &format!(
+                "MATCH (x:N {{name:\"{x}\"}}), (y:N {{name:\"{y}\"}}) CREATE (x)-[:R]->(y)"
+            ),
         );
     }
     store
@@ -70,10 +72,7 @@ fn triangle() -> GraphStore {
 fn a_node_reachable_two_ways_within_the_bound_yields_two_rows() {
     let store = triangle();
     assert_eq!(
-        names(
-            &store,
-            "MATCH (a:N {name:\"a\"})-[:R*1..2]-(x) RETURN x.name AS n"
-        ),
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*1..2]-(x) RETURN x.name AS n"),
         vec!["b", "b", "c", "c"],
     );
 }
@@ -87,10 +86,7 @@ fn a_node_reachable_two_ways_within_the_bound_yields_two_rows() {
 fn a_lower_bound_still_matches_a_longer_route_to_a_near_node() {
     let store = triangle();
     assert_eq!(
-        names(
-            &store,
-            "MATCH (a:N {name:\"a\"})-[:R*2..2]-(x) RETURN x.name AS n"
-        ),
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..2]-(x) RETURN x.name AS n"),
         vec!["b", "c"],
     );
 }
@@ -108,15 +104,9 @@ fn one_edge_cannot_be_walked_out_and_back_to_make_two_hops() {
     let mut store = GraphStore::new();
     run(&mut store, "CREATE (:N {name: \"a\"})");
     run(&mut store, "CREATE (:N {name: \"b\"})");
-    run(
-        &mut store,
-        "MATCH (x:N {name:\"a\"}), (y:N {name:\"b\"}) CREATE (x)-[:R]->(y)",
-    );
+    run(&mut store, "MATCH (x:N {name:\"a\"}), (y:N {name:\"b\"}) CREATE (x)-[:R]->(y)");
     assert_eq!(
-        names(
-            &store,
-            "MATCH (a:N {name:\"a\"})-[:R*2..2]-(x) RETURN x.name AS n"
-        ),
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..2]-(x) RETURN x.name AS n"),
         Vec::<String>::new(),
     );
 }
@@ -133,10 +123,7 @@ fn a_var_length_segment_may_not_reuse_an_edge_the_clause_already_walked() {
     let mut store = GraphStore::new();
     run(&mut store, "CREATE (:N {name: \"a\"})");
     run(&mut store, "CREATE (:N {name: \"b\"})");
-    run(
-        &mut store,
-        "MATCH (x:N {name:\"a\"}), (y:N {name:\"b\"}) CREATE (x)-[:R]->(y)",
-    );
+    run(&mut store, "MATCH (x:N {name:\"a\"}), (y:N {name:\"b\"}) CREATE (x)-[:R]->(y)");
     assert_eq!(
         names(
             &store,
@@ -154,9 +141,10 @@ fn a_var_length_segment_may_not_reuse_an_edge_the_clause_already_walked() {
 #[test]
 fn a_named_path_over_a_lower_bounded_segment_has_the_right_length() {
     let store = triangle();
-    let q =
-        parse_query("MATCH p = (a:N {name:\"a\"})-[:R*2..2]-(x) RETURN length(p) AS n ORDER BY n")
-            .unwrap();
+    let q = parse_query(
+        "MATCH p = (a:N {name:\"a\"})-[:R*2..2]-(x) RETURN length(p) AS n ORDER BY n",
+    )
+    .unwrap();
     let out = QueryExecutor::new(&store).execute(&q).unwrap();
     let lengths: Vec<i64> = out
         .records
@@ -174,8 +162,9 @@ fn a_named_path_over_a_lower_bounded_segment_has_the_right_length() {
 #[test]
 fn a_relationship_list_over_a_lower_bounded_segment_has_one_entry_per_hop() {
     let store = triangle();
-    let q = parse_query("MATCH (a:N {name:\"a\"})-[rs:R*2..2]-(x) RETURN size(rs) AS n ORDER BY n")
-        .unwrap();
+    let q =
+        parse_query("MATCH (a:N {name:\"a\"})-[rs:R*2..2]-(x) RETURN size(rs) AS n ORDER BY n")
+            .unwrap();
     let out = QueryExecutor::new(&store).execute(&q).unwrap();
     let sizes: Vec<i64> = out
         .records
@@ -205,18 +194,12 @@ fn direction_is_honoured_by_the_lower_bounded_walk() {
         );
     }
     assert_eq!(
-        names(
-            &store,
-            "MATCH (a:N {name:\"a\"})-[:R*2..2]->(x) RETURN x.name AS n"
-        ),
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..2]->(x) RETURN x.name AS n"),
         vec!["c"],
     );
     // Undirected, the same graph has more: a-b-c forward, and a-c-b backward.
     assert_eq!(
-        names(
-            &store,
-            "MATCH (a:N {name:\"a\"})-[:R*2..2]-(x) RETURN x.name AS n"
-        ),
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..2]-(x) RETURN x.name AS n"),
         vec!["b", "c"],
     );
 }
@@ -237,17 +220,11 @@ fn a_target_label_filters_the_lower_bounded_walk() {
         );
     }
     assert_eq!(
-        names(
-            &store,
-            "MATCH (a:N {name:\"a\"})-[:R*2..2]->(x:M) RETURN x.name AS n"
-        ),
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..2]->(x:M) RETURN x.name AS n"),
         vec!["c"],
     );
     assert_eq!(
-        names(
-            &store,
-            "MATCH (a:N {name:\"a\"})-[:R*2..2]->(x:N) RETURN x.name AS n"
-        ),
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..2]->(x:N) RETURN x.name AS n"),
         Vec::<String>::new(),
     );
 }
@@ -260,10 +237,7 @@ fn a_range_above_the_lower_bound_keeps_matching() {
     // Two-hop: b, c. Three-hop: every trail of three distinct edges from `a`
     // ends back at `a` (a-b-c-a and a-c-b-a).
     assert_eq!(
-        names(
-            &store,
-            "MATCH (a:N {name:\"a\"})-[:R*2..3]-(x) RETURN x.name AS n"
-        ),
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*2..3]-(x) RETURN x.name AS n"),
         vec!["a", "a", "b", "c"],
     );
 }
@@ -288,14 +262,8 @@ fn an_inherited_edge_of_another_type_does_not_constrain_a_typed_segment() {
     run(&mut store, "CREATE (:N {name: \"b\"})");
     run(&mut store, "CREATE (:M {name: \"t\"})");
     // a -[:KNOWS]- b, and both tagged with t via a different type.
-    run(
-        &mut store,
-        "MATCH (a:N {name: \"a\"}), (b:N {name: \"b\"}) CREATE (a)-[:KNOWS]->(b)",
-    );
-    run(
-        &mut store,
-        "MATCH (b:N {name: \"b\"}), (t:M {name: \"t\"}) CREATE (b)-[:TAGGED]->(t)",
-    );
+    run(&mut store, "MATCH (a:N {name: \"a\"}), (b:N {name: \"b\"}) CREATE (a)-[:KNOWS]->(b)");
+    run(&mut store, "MATCH (b:N {name: \"b\"}), (t:M {name: \"t\"}) CREATE (b)-[:TAGGED]->(t)");
 
     // The reversed shape: start at the selective far end, walk back through a
     // different edge type, then take the var-length segment.
@@ -339,10 +307,7 @@ fn an_inherited_edge_of_another_type_does_not_constrain_a_typed_segment() {
 fn distinct_absorbs_the_multiplicity() {
     let store = triangle();
     assert_eq!(
-        names(
-            &store,
-            "MATCH (a:N {name:\"a\"})-[:R*1..2]-(x) RETURN DISTINCT x.name AS n"
-        ),
+        names(&store, "MATCH (a:N {name:\"a\"})-[:R*1..2]-(x) RETURN DISTINCT x.name AS n"),
         vec!["b", "c"],
     );
 }

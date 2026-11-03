@@ -69,10 +69,7 @@ async fn executes_sequential_plan_and_writes_telemetry() {
     for rec in &result.records {
         assert_eq!(rec.tool, "cypher");
         assert!(rec.error.is_none(), "unexpected error: {:?}", rec.error);
-        assert_eq!(
-            rec.hit_rate, 1.0,
-            "non-empty cypher result should score 1.0"
-        );
+        assert_eq!(rec.hit_rate, 1.0, "non-empty cypher result should score 1.0");
         assert!(rec.token_cost > 0);
     }
 
@@ -126,15 +123,8 @@ async fn parallel_group_shares_wall_time() {
     // latency is measured inside its own task, while the total spans scheduling and
     // contention as well, so under load the total legitimately exceeds the sum and the
     // test failed for reasons unrelated to the code (#382).
-    assert_eq!(
-        r.records.len(),
-        3,
-        "every call in the parallel group reports"
-    );
-    assert!(
-        r.total_latency_ms < 30_000,
-        "the group completed rather than hanging"
-    );
+    assert_eq!(r.records.len(), 3, "every call in the parallel group reports");
+    assert!(r.total_latency_ms < 30_000, "the group completed rather than hanging");
     let _ = sum;
 }
 

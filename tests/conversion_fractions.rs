@@ -44,16 +44,8 @@ fn a_fractional_week_carries_into_the_clock() {
         ("P1.5W", "{weeks: 1.5}", "P10DT12H"),
         ("P0.5W", "{weeks: 0.5}", "P3DT12H"),
     ] {
-        assert_eq!(
-            value(&format!("duration('{text}')")).to_cypher_string(),
-            want,
-            "{text}"
-        );
-        assert_eq!(
-            value(&format!("duration({map})")).to_cypher_string(),
-            want,
-            "{map}"
-        );
+        assert_eq!(value(&format!("duration('{text}')")).to_cypher_string(), want, "{text}");
+        assert_eq!(value(&format!("duration({map})")).to_cypher_string(), want, "{map}");
     }
 }
 
@@ -61,10 +53,7 @@ fn a_fractional_week_carries_into_the_clock() {
 /// while breaking its neighbours.
 #[test]
 fn the_other_fractional_units_are_unchanged() {
-    assert_eq!(
-        value("duration('P0.75M')").to_cypher_string(),
-        "P22DT19H51M49.5S"
-    );
+    assert_eq!(value("duration('P0.75M')").to_cypher_string(), "P22DT19H51M49.5S");
     assert_eq!(value("duration('P1.5D')").to_cypher_string(), "P1DT12H");
     assert_eq!(value("duration('PT1.5H')").to_cypher_string(), "PT1H30M");
 }

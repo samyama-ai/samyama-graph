@@ -16,9 +16,9 @@
 //! anything — and the engine had one, used only for `SKIP`/`LIMIT`.
 
 use samyama::graph::GraphStore;
-use samyama::graph::PropertyValue;
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
 use samyama::query::parser::parse_query;
+use samyama::graph::PropertyValue;
 
 fn setup(cypher: &str) -> GraphStore {
     let mut store = GraphStore::new();
@@ -44,10 +44,7 @@ fn count_of(store: &mut GraphStore, cypher: &str) -> i64 {
 fn an_undirected_expand_still_counts_both_orientations() {
     let mut store = setup("CREATE ()-[:R]->()");
     assert_eq!(
-        count_of(
-            &mut store,
-            "MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*) AS c"
-        ),
+        count_of(&mut store, "MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*) AS c"),
         2
     );
 }
@@ -75,16 +72,10 @@ fn the_count_matches_the_read_without_the_delete() {
         .first()
         .and_then(|r| r.get("c"))
         .cloned();
-    assert!(
-        matches!(read, Some(Value::Property(PropertyValue::Integer(2)))),
-        "{read:?}"
-    );
+    assert!(matches!(read, Some(Value::Property(PropertyValue::Integer(2)))), "{read:?}");
 
     assert_eq!(
-        count_of(
-            &mut read_only,
-            "MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*) AS c"
-        ),
+        count_of(&mut read_only, "MATCH (a)-[r]-(b) DELETE r, a, b RETURN count(*) AS c"),
         2,
         "adding the DELETE must not change the count"
     );
@@ -100,11 +91,7 @@ fn everything_matched_is_still_deleted() {
         .expect("runs");
     let remaining = parse_query("MATCH (n) RETURN n").expect("parses");
     assert_eq!(
-        QueryExecutor::new(&store)
-            .execute(&remaining)
-            .expect("runs")
-            .records
-            .len(),
+        QueryExecutor::new(&store).execute(&remaining).expect("runs").records.len(),
         0
     );
 }

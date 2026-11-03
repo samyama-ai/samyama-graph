@@ -1,11 +1,8 @@
+use samyama::graph::{GraphStore, Label, EdgeType, PropertyValue, NodeId, EdgeId, PropertyMap};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, HSSolver, FPASolver};
+use samyama_optimization::common::{Problem, SolverConfig};
 use ndarray::Array1;
 use rand::Rng;
-use samyama::graph::{EdgeId, EdgeType, GraphStore, Label, NodeId, PropertyMap, PropertyValue};
-use samyama_optimization::algorithms::{
-    ABCSolver, BatSolver, CuckooSolver, FPASolver, FireflySolver, GASolver, GSASolver, GWOSolver,
-    HSSolver, JayaSolver, RaoSolver, RaoVariant, SASolver,
-};
-use samyama_optimization::common::{Problem, SolverConfig};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -46,10 +43,7 @@ impl Problem for HospitalGraphProblem {
             // `node_property`, not `node.properties`: properties set through
             // `create_node_with_properties` live in the columnar store, and the
             // node's own map is empty, so this panicked on every run.
-            let demand = match store
-                .node_property(dept_id, "demand")
-                .expect("demand missing")
-            {
+            let demand = match store.node_property(dept_id, "demand").expect("demand missing") {
                 PropertyValue::Float(v) => v,
                 _ => 10.0,
             };
@@ -60,10 +54,7 @@ impl Problem for HospitalGraphProblem {
                 let quantity = variables[var_idx];
 
                 let res_id = self.resource_ids[j];
-                let efficiency = match store
-                    .node_property(res_id, "efficiency")
-                    .expect("efficiency missing")
-                {
+                let efficiency = match store.node_property(res_id, "efficiency").expect("efficiency missing") {
                     PropertyValue::Float(v) => v,
                     _ => 1.0,
                 };
@@ -71,9 +62,7 @@ impl Problem for HospitalGraphProblem {
                 capacity += quantity * efficiency;
             }
 
-            if capacity < 1.0 {
-                capacity = 1.0;
-            }
+            if capacity < 1.0 { capacity = 1.0; }
             total_wait_time += demand / capacity;
         }
 
@@ -136,69 +125,32 @@ fn main() {
         let mut store_write = store.write().unwrap();
         for r in 0..num_resources {
             let mut props = PropertyMap::new();
-            props.insert(
-                "name".to_string(),
-                PropertyValue::String(format!("Resource_{}", r)),
-            );
-            props.insert(
-                "cost".to_string(),
-                PropertyValue::Float(rng.gen_range(50.0..500.0)),
-            );
-            props.insert(
-                "efficiency".to_string(),
-                PropertyValue::Float(rng.gen_range(0.5..2.0)),
-            );
-            let id = store_write.create_node_with_properties(
-                "default",
-                vec![Label::new("Resource")],
-                props,
-            );
+            props.insert("name".to_string(), PropertyValue::String(format!("Resource_{}", r)));
+            props.insert("cost".to_string(), PropertyValue::Float(rng.gen_range(50.0..500.0)));
+            props.insert("efficiency".to_string(), PropertyValue::Float(rng.gen_range(0.5..2.0)));
+            let id = store_write.create_node_with_properties("default", vec![Label::new("Resource")], props);
             res_ids.push(id);
         }
 
         for d in 0..num_departments {
             let mut props = PropertyMap::new();
-            props.insert(
-                "name".to_string(),
-                PropertyValue::String(format!("Dept_{}", d)),
-            );
-            props.insert(
-                "demand".to_string(),
-                PropertyValue::Float(rng.gen_range(100.0..1000.0)),
-            );
-            let d_id = store_write.create_node_with_properties(
-                "default",
-                vec![Label::new("Department")],
-                props,
-            );
+            props.insert("name".to_string(), PropertyValue::String(format!("Dept_{}", d)));
+            props.insert("demand".to_string(), PropertyValue::Float(rng.gen_range(100.0..1000.0)));
+            let d_id = store_write.create_node_with_properties("default", vec![Label::new("Department")], props);
             dept_ids.push(d_id);
 
             for r_id in &res_ids {
                 let mut edge_props = PropertyMap::new();
                 edge_props.insert("quantity".to_string(), PropertyValue::Float(0.0));
-                let e_id = store_write
-                    .create_edge_with_properties(
-                        d_id,
-                        *r_id,
-                        EdgeType::new("ALLOCATED"),
-                        edge_props,
-                    )
-                    .unwrap();
+                let e_id = store_write.create_edge_with_properties(d_id, *r_id, EdgeType::new("ALLOCATED"), edge_props).unwrap();
                 edge_ids.push(e_id);
             }
         }
     }
-    println!(
-        "Graph built in {:.2?} ({} Nodes, {} Edges)",
-        start_build.elapsed(),
-        num_departments + num_resources,
-        total_vars
-    );
+    println!("Graph built in {:.2?} ({} Nodes, {} Edges)", start_build.elapsed(), num_departments + num_resources, total_vars);
 
     // 2. Define Algorithms
-    let algorithms = vec![
-        "Jaya", "Rao3", "Firefly", "Cuckoo", "GWO", "GA", "SA", "Bat", "ABC", "GSA", "HS", "FPA",
-    ];
+    let algorithms = vec!["Jaya", "Rao3", "Firefly", "Cuckoo", "GWO", "GA", "SA", "Bat", "ABC", "GSA", "HS", "FPA"];
     let mut results = Vec::new();
 
     let config = SolverConfig {
@@ -239,16 +191,10 @@ fn main() {
         };
 
         let solve_time = start_solve.elapsed();
-        let evals_sec =
-            (config.population_size * config.max_iterations) as f64 / solve_time.as_secs_f64();
+        let evals_sec = (config.population_size * config.max_iterations) as f64 / solve_time.as_secs_f64();
 
-        println!(
-            "| {:<9} | {:<8.2} | {:<12.4} | {:<9.0} |",
-            algo_name,
-            solve_time.as_secs_f64(),
-            result.best_fitness,
-            evals_sec
-        );
+        println!("| {:<9} | {:<8.2} | {:<12.4} | {:<9.0} |",
+            algo_name, solve_time.as_secs_f64(), result.best_fitness, evals_sec);
 
         results.push((algo_name, solve_time, result.best_fitness));
     }

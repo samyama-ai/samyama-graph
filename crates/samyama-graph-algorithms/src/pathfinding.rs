@@ -3,8 +3,8 @@
 //! BFS and Dijkstra. Counted towards ALGO-01 (algorithms callable from Cypher).
 
 use super::common::{GraphView, NodeId};
+use std::collections::{HashMap, VecDeque, BinaryHeap};
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 /// Result of a pathfinding algorithm
 #[derive(Debug, Clone)]
@@ -16,13 +16,17 @@ pub struct PathResult {
 }
 
 /// Breadth-First Search (Unweighted Shortest Path)
-pub fn bfs(view: &GraphView, source: NodeId, target: NodeId) -> Option<PathResult> {
+pub fn bfs(
+    view: &GraphView,
+    source: NodeId,
+    target: NodeId,
+) -> Option<PathResult> {
     let source_idx = *view.node_to_index.get(&source)?;
     let target_idx = *view.node_to_index.get(&target)?;
 
     let mut queue = VecDeque::new();
     let mut visited = HashMap::new(); // index -> parent_index
-
+    
     queue.push_back(source_idx);
     visited.insert(source_idx, None);
 
@@ -71,10 +75,7 @@ impl Eq for State {}
 impl Ord for State {
     fn cmp(&self, other: &Self) -> Ordering {
         // Compare costs reversed for min-heap
-        other
-            .cost
-            .partial_cmp(&self.cost)
-            .unwrap_or(Ordering::Equal)
+        other.cost.partial_cmp(&self.cost).unwrap_or(Ordering::Equal)
     }
 }
 
@@ -138,7 +139,11 @@ pub fn dijkstra(
     Ok(dijkstra_non_negative(view, source, target))
 }
 
-fn dijkstra_non_negative(view: &GraphView, source: NodeId, target: NodeId) -> Option<PathResult> {
+fn dijkstra_non_negative(
+    view: &GraphView,
+    source: NodeId,
+    target: NodeId,
+) -> Option<PathResult> {
     let source_idx = *view.node_to_index.get(&source)?;
     let target_idx = *view.node_to_index.get(&target)?;
 
@@ -147,10 +152,7 @@ fn dijkstra_non_negative(view: &GraphView, source: NodeId, target: NodeId) -> Op
     let mut heap = BinaryHeap::new();
 
     dist.insert(source_idx, 0.0);
-    heap.push(State {
-        cost: 0.0,
-        node_idx: source_idx,
-    });
+    heap.push(State { cost: 0.0, node_idx: source_idx });
 
     while let Some(State { cost, node_idx }) = heap.pop() {
         if node_idx == target_idx {
@@ -178,21 +180,20 @@ fn dijkstra_non_negative(view: &GraphView, source: NodeId, target: NodeId) -> Op
         let weights = view.weights(node_idx);
 
         for (i, &next_idx) in edges.iter().enumerate() {
-            let weight = if let Some(w) = weights { w[i] } else { 1.0 };
+            let weight = if let Some(w) = weights {
+                w[i]
+            } else {
+                1.0
+            };
 
-            if weight < 0.0 {
-                continue;
-            }
+            if weight < 0.0 { continue; }
 
             let next_cost = cost + weight;
 
             if next_cost < *dist.get(&next_idx).unwrap_or(&f64::INFINITY) {
                 dist.insert(next_idx, next_cost);
                 parent.insert(next_idx, Some(node_idx));
-                heap.push(State {
-                    cost: next_cost,
-                    node_idx: next_idx,
-                });
+                heap.push(State { cost: next_cost, node_idx: next_idx });
             }
         }
     }
@@ -201,7 +202,11 @@ fn dijkstra_non_negative(view: &GraphView, source: NodeId, target: NodeId) -> Op
 }
 
 /// BFS that returns ALL shortest paths between source and target
-pub fn bfs_all_shortest_paths(view: &GraphView, source: NodeId, target: NodeId) -> Vec<PathResult> {
+pub fn bfs_all_shortest_paths(
+    view: &GraphView,
+    source: NodeId,
+    target: NodeId,
+) -> Vec<PathResult> {
     let source_idx = match view.node_to_index.get(&source) {
         Some(&idx) => idx,
         None => return vec![],
@@ -273,8 +278,7 @@ pub fn bfs_all_shortest_paths(view: &GraphView, source: NodeId, target: NodeId) 
 
     while let Some((node, partial_path)) = stack.pop() {
         if node == source_idx {
-            let mut path: Vec<NodeId> = partial_path
-                .iter()
+            let mut path: Vec<NodeId> = partial_path.iter()
                 .rev()
                 .map(|&idx| view.index_to_node[idx])
                 .collect();
@@ -302,8 +306,8 @@ pub fn bfs_all_shortest_paths(view: &GraphView, source: NodeId, target: NodeId) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::GraphView;
     use std::collections::HashMap;
+    use crate::common::GraphView;
 
     #[test]
     fn test_bfs() {
@@ -344,12 +348,9 @@ mod tests {
         let mut outgoing = vec![vec![]; 3];
         let mut weights = vec![vec![]; 3];
 
-        outgoing[0].push(1);
-        weights[0].push(10.0);
-        outgoing[0].push(2);
-        weights[0].push(50.0); // Direct 1->3
-        outgoing[1].push(2);
-        weights[1].push(5.0);
+        outgoing[0].push(1); weights[0].push(10.0);
+        outgoing[0].push(2); weights[0].push(50.0); // Direct 1->3
+        outgoing[1].push(2); weights[1].push(5.0);
 
         let view = GraphView::from_adjacency_list(
             3,
@@ -377,8 +378,8 @@ mod tests {
 
         let mut outgoing = vec![vec![]; 4];
         outgoing[0] = vec![1, 2]; // 1->2, 1->3
-        outgoing[1] = vec![3]; // 2->4
-        outgoing[2] = vec![3]; // 3->4
+        outgoing[1] = vec![3];    // 2->4
+        outgoing[2] = vec![3];    // 3->4
 
         let view = GraphView::from_adjacency_list(
             4,
@@ -390,11 +391,7 @@ mod tests {
         );
 
         let results = bfs_all_shortest_paths(&view, 1, 4);
-        assert_eq!(
-            results.len(),
-            2,
-            "Should find 2 shortest paths in diamond graph"
-        );
+        assert_eq!(results.len(), 2, "Should find 2 shortest paths in diamond graph");
         for r in &results {
             assert_eq!(r.cost, 2.0);
             assert_eq!(r.path.len(), 3);

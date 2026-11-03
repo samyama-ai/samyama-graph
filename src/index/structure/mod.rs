@@ -177,9 +177,7 @@ impl StructureRegistry {
 /// Read a numeric property (`f64`) for `node_id` from either the columnar store (`node_columns`)
 /// or the in-memory property map.
 pub fn node_f64(store: &GraphStore, node_id: NodeId, prop: &str) -> Option<f64> {
-    let col_val = store
-        .node_columns
-        .get_property(node_id.as_u64() as usize, prop);
+    let col_val = store.node_columns.get_property(node_id.as_u64() as usize, prop);
     match col_val {
         PropertyValue::Float(f) if f.is_finite() => return Some(f),
         PropertyValue::Integer(i) => return Some(i as f64),
@@ -197,9 +195,7 @@ pub fn node_f64(store: &GraphStore, node_id: NodeId, prop: &str) -> Option<f64> 
 
 /// Read a string or integer grouping property as a `String`.
 pub fn node_group_string(store: &GraphStore, node_id: NodeId, prop: &str) -> Option<String> {
-    let col_val = store
-        .node_columns
-        .get_property(node_id.as_u64() as usize, prop);
+    let col_val = store.node_columns.get_property(node_id.as_u64() as usize, prop);
     match col_val {
         PropertyValue::String(s) if !s.is_empty() => return Some(s),
         PropertyValue::Integer(i) => return Some(i.to_string()),
@@ -257,14 +253,7 @@ pub fn detect_conventions(store: &GraphStore) -> Vec<StructuralConvention> {
 
         // Check 3D Euclidean candidate triplets
         for (xp, yp, zp, preset, unit, default_radius) in [
-            (
-                "ca_x",
-                "ca_y",
-                "ca_z",
-                "protein_ribbon_3d",
-                "angstrom",
-                Some(8.0),
-            ),
+            ("ca_x", "ca_y", "ca_z", "protein_ribbon_3d", "angstrom", Some(8.0)),
             ("x", "y", "z", "euclidean_3d", "unit", None),
             ("pos_x", "pos_y", "pos_z", "euclidean_3d", "unit", None),
         ] {
@@ -283,11 +272,7 @@ pub fn detect_conventions(store: &GraphStore) -> Vec<StructuralConvention> {
                     .map(str::to_string);
                 let group_prop = ["chain_id", "chain", "model_id", "segment"]
                     .into_iter()
-                    .find(|&p| {
-                        sample
-                            .iter()
-                            .any(|&id| node_group_string(store, id, p).is_some())
-                    })
+                    .find(|&p| sample.iter().any(|&id| node_group_string(store, id, p).is_some()))
                     .map(str::to_string);
                 let measure_prop = ["b_factor", "plddt", "weight", "score", "units"]
                     .into_iter()
@@ -308,11 +293,7 @@ pub fn detect_conventions(store: &GraphStore) -> Vec<StructuralConvention> {
                         },
                         sequence_prop: seq_prop,
                         group_by_prop: group_prop,
-                        contact_radius: if is_protein {
-                            Some(8.0)
-                        } else {
-                            default_radius
-                        },
+                        contact_radius: if is_protein { Some(8.0) } else { default_radius },
                     },
                     visual_preset: Some(
                         if is_protein {
@@ -332,14 +313,14 @@ pub fn detect_conventions(store: &GraphStore) -> Vec<StructuralConvention> {
         for (lat_p, lon_p) in [("lat", "lon"), ("latitude", "longitude"), ("lat", "lng")] {
             let hits = sample
                 .iter()
-                .filter(
-                    |&&id| match (node_f64(store, id, lat_p), node_f64(store, id, lon_p)) {
+                .filter(|&&id| {
+                    match (node_f64(store, id, lat_p), node_f64(store, id, lon_p)) {
                         (Some(lat), Some(lon)) => {
                             (-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)
                         }
                         _ => false,
-                    },
-                )
+                    }
+                })
                 .count();
             if hits * 2 >= sample.len() {
                 let alt_prop = ["elevation", "alt", "altitude", "height"]
@@ -601,24 +582,23 @@ impl SgiIndex {
             rank_of.insert(pt.node_id, idx);
         }
 
-        let (fenwick_sum, seg_min, seg_max) =
-            if convention.measure_prop.is_some() && !points.is_empty() {
-                let sum_vals: Vec<RollupValue> = points
-                    .iter()
-                    .map(|p| p.measure.unwrap_or(RollupValue::Float(0.0)))
-                    .collect();
-                let null_vals: Vec<RollupValue> = points
-                    .iter()
-                    .map(|p| p.measure.unwrap_or(RollupValue::Null))
-                    .collect();
-                (
-                    Some(Fenwick::build(&sum_vals)),
-                    Some(SegmentTree::build(&null_vals, RollupOp::Min)),
-                    Some(SegmentTree::build(&null_vals, RollupOp::Max)),
-                )
-            } else {
-                (None, None, None)
-            };
+        let (fenwick_sum, seg_min, seg_max) = if convention.measure_prop.is_some() && !points.is_empty() {
+            let sum_vals: Vec<RollupValue> = points
+                .iter()
+                .map(|p| p.measure.unwrap_or(RollupValue::Float(0.0)))
+                .collect();
+            let null_vals: Vec<RollupValue> = points
+                .iter()
+                .map(|p| p.measure.unwrap_or(RollupValue::Null))
+                .collect();
+            (
+                Some(Fenwick::build(&sum_vals)),
+                Some(SegmentTree::build(&null_vals, RollupOp::Min)),
+                Some(SegmentTree::build(&null_vals, RollupOp::Max)),
+            )
+        } else {
+            (None, None, None)
+        };
 
         Self {
             convention,
@@ -931,7 +911,10 @@ impl SgiIndex {
                 found_cost = Some(g_score);
                 break;
             }
-            let u_coords = self.rank_of.get(&node).map(|&r| self.points[r].coords);
+            let u_coords = self
+                .rank_of
+                .get(&node)
+                .map(|&r| self.points[r].coords);
             for v in neighbors(node) {
                 let step = match (u_coords, self.rank_of.get(&v)) {
                     (Some(uc), Some(&vr)) => {
@@ -986,7 +969,10 @@ impl SgiIndex {
             if node == goal {
                 break;
             }
-            let u_coords = self.rank_of.get(&node).map(|&r| self.points[r].coords);
+            let u_coords = self
+                .rank_of
+                .get(&node)
+                .map(|&r| self.points[r].coords);
             for v in neighbors(node) {
                 let step = match (u_coords, self.rank_of.get(&v)) {
                     (Some(uc), Some(&vr)) => {
@@ -1148,7 +1134,8 @@ pub fn build_structural_visual_cues(
     let center = sgi.bbox.center();
     let half_span = (0.5 * sgi.bbox.max_span()).max(1e-9);
 
-    let filter_set: Option<HashSet<NodeId>> = filter_nodes.map(|ids| ids.iter().copied().collect());
+    let filter_set: Option<HashSet<NodeId>> =
+        filter_nodes.map(|ids| ids.iter().copied().collect());
 
     let cos_az = std::f64::consts::FRAC_PI_4.cos();
     let sin_el = (30.0_f64).to_radians().sin();
@@ -1196,7 +1183,8 @@ pub fn build_structural_visual_cues(
         let depth_norm = ((cam_depth + 2.0) / 4.0).clamp(0.0, 1.0);
         let opacity = (1.0 - 0.6 * depth_norm).clamp(0.3, 1.0);
 
-        let chain_group = group_prop.and_then(|p| node_group_string(store, pt.node_id, p));
+        let chain_group = group_prop
+            .and_then(|p| node_group_string(store, pt.node_id, p));
         let sequence_order = seq_prop.and_then(|p| node_f64(store, pt.node_id, p));
 
         raw_depths.push((idx, depth_norm));
@@ -1258,7 +1246,10 @@ pub fn build_structural_visual_cues(
     };
 
     let mut whole_graph_rollups = BTreeMap::new();
-    whole_graph_rollups.insert("count".to_string(), serde_json::json!(total_indexed_nodes));
+    whole_graph_rollups.insert(
+        "count".to_string(),
+        serde_json::json!(total_indexed_nodes),
+    );
     if convention.measure_prop.is_some() && total_indexed_nodes > 0 {
         for op in [RollupOp::Sum, RollupOp::Min, RollupOp::Max] {
             let val = sgi.rollup_morton_range(0, u64::MAX, op);

@@ -82,16 +82,16 @@ use super::edge::{Edge, EdgeView};
 use super::node::Node;
 use super::property::{PropertyMap, PropertyValue};
 use super::types::{EdgeId, EdgeType, Label, NodeId};
-use crate::agent::{tools::WebSearchTool, AgentRuntime};
-use crate::graph::storage::ColumnStore;
-use crate::index::hierarchy::HierarchyIndexManager;
+use crate::vector::{VectorIndexManager, DistanceMetric, VectorResult};
 use crate::index::IndexManager;
-use crate::vector::{DistanceMetric, VectorIndexManager, VectorResult};
-use rayon::prelude::*;
+use crate::index::hierarchy::HierarchyIndexManager;
+use crate::graph::storage::ColumnStore;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use std::collections::{HashMap, HashSet};
+use rayon::prelude::*;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use crate::agent::{AgentRuntime, tools::WebSearchTool};
 
 // Add chrono dependency (local hack like in node.rs)
 mod chrono {
@@ -307,10 +307,9 @@ impl HistogramAxis {
             PropertyValue::ZonedDateTime { secs, nanos, .. } => {
                 Some((HistogramAxis::Instant, *secs as f64 + *nanos as f64 / 1e9))
             }
-            PropertyValue::LocalDateTime { secs, nanos } => Some((
-                HistogramAxis::LocalDateTime,
-                *secs as f64 + *nanos as f64 / 1e9,
-            )),
+            PropertyValue::LocalDateTime { secs, nanos } => {
+                Some((HistogramAxis::LocalDateTime, *secs as f64 + *nanos as f64 / 1e9))
+            }
             PropertyValue::Date(d) => Some((HistogramAxis::Date, *d as f64)),
             PropertyValue::LocalTime(n) => Some((HistogramAxis::LocalTime, *n as f64)),
             _ => None,
@@ -345,13 +344,8 @@ fn histogram_order(a: &PropertyValue, b: &PropertyValue) -> Option<std::cmp::Ord
 /// equal bounds, and the estimate of `<` and `<=` must differ by exactly it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Histogram {
-    Numeric {
-        axis: HistogramAxis,
-        bounds: Vec<f64>,
-    },
-    Text {
-        bounds: Vec<String>,
-    },
+    Numeric { axis: HistogramAxis, bounds: Vec<f64> },
+    Text { bounds: Vec<String> },
 }
 
 impl Histogram {
@@ -364,9 +358,7 @@ impl Histogram {
         if let PropertyValue::String(_) = &values[0] {
             let mut texts: Vec<&str> = Vec::with_capacity(values.len());
             for v in values {
-                let PropertyValue::String(t) = v else {
-                    return None;
-                };
+                let PropertyValue::String(t) = v else { return None };
                 texts.push(t);
             }
             texts.sort_unstable();
@@ -385,10 +377,7 @@ impl Histogram {
             }
         }
         keys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        Some(Histogram::Numeric {
-            axis,
-            bounds: Self::quantiles(&keys),
-        })
+        Some(Histogram::Numeric { axis, bounds: Self::quantiles(&keys) })
     }
 
     /// `HISTOGRAM_BUCKETS + 1` quantiles of a sorted slice, or one per value
@@ -425,13 +414,7 @@ impl Histogram {
                 if a != *axis {
                     return None;
                 }
-                Some(cdf(bounds, &v, |lo, hi| {
-                    if hi > lo {
-                        ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
-                    } else {
-                        1.0
-                    }
-                }))
+                Some(cdf(bounds, &v, |lo, hi| if hi > lo { ((v - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 1.0 }))
             }
             _ => None,
         }
@@ -441,10 +424,7 @@ impl Histogram {
 impl GraphStatistics {
     /// Estimate the number of rows from a label scan
     pub fn estimate_label_scan(&self, label: &Label) -> usize {
-        self.label_counts
-            .get(label)
-            .copied()
-            .unwrap_or(self.total_nodes)
+        self.label_counts.get(label).copied().unwrap_or(self.total_nodes)
     }
 
     /// Whether `edge_type_counts` accounts for every edge in the graph.
@@ -509,10 +489,7 @@ impl GraphStatistics {
         property: &str,
         value: &PropertyValue,
     ) -> f64 {
-        let Some(ps) = self
-            .property_stats
-            .get(&(label.clone(), property.to_string()))
-        else {
+        let Some(ps) = self.property_stats.get(&(label.clone(), property.to_string())) else {
             return 0.1;
         };
         if let Some((_, freq)) = ps.most_common.iter().find(|(v, _)| v == value) {
@@ -549,9 +526,7 @@ impl GraphStatistics {
         lower: Option<(&PropertyValue, bool)>,
         upper: Option<(&PropertyValue, bool)>,
     ) -> Option<f64> {
-        let ps = self
-            .property_stats
-            .get(&(label.clone(), property.to_string()))?;
+        let ps = self.property_stats.get(&(label.clone(), property.to_string()))?;
         let non_null = (1.0 - ps.null_fraction).clamp(0.0, 1.0);
         // Every distinct value the sample saw is in the most-common list: the
         // range is the sum of the ones it admits, exactly. A histogram's
@@ -562,9 +537,7 @@ impl GraphStatistics {
             let mut kept = 0.0;
             for (v, freq) in &ps.most_common {
                 let admits = |bound: Option<(&PropertyValue, bool)>, below: bool| -> Option<bool> {
-                    let Some((b, inclusive)) = bound else {
-                        return Some(true);
-                    };
+                    let Some((b, inclusive)) = bound else { return Some(true) };
                     let ord = histogram_order(v, b)?;
                     Some(match (below, ord) {
                         (_, std::cmp::Ordering::Equal) => inclusive,
@@ -582,11 +555,7 @@ impl GraphStatistics {
         // The fraction of non-null values below (or at, when inclusive) `v`.
         let at_or_below = |v: &PropertyValue, inclusive: bool| -> Option<f64> {
             let below = h.fraction_below(v)?;
-            let at = if inclusive {
-                self.estimate_equality_selectivity_for_value(label, property, v)
-            } else {
-                0.0
-            };
+            let at = if inclusive { self.estimate_equality_selectivity_for_value(label, property, v) } else { 0.0 };
             Some((below + at).clamp(0.0, 1.0))
         };
         let hi = match upper {
@@ -613,18 +582,10 @@ impl GraphStatistics {
     ) -> Option<f64> {
         use crate::query::ast::BinaryOp;
         match op {
-            BinaryOp::Lt => {
-                self.estimate_range_selectivity(label, property, None, Some((value, false)))
-            }
-            BinaryOp::Le => {
-                self.estimate_range_selectivity(label, property, None, Some((value, true)))
-            }
-            BinaryOp::Gt => {
-                self.estimate_range_selectivity(label, property, Some((value, false)), None)
-            }
-            BinaryOp::Ge => {
-                self.estimate_range_selectivity(label, property, Some((value, true)), None)
-            }
+            BinaryOp::Lt => self.estimate_range_selectivity(label, property, None, Some((value, false))),
+            BinaryOp::Le => self.estimate_range_selectivity(label, property, None, Some((value, true))),
+            BinaryOp::Gt => self.estimate_range_selectivity(label, property, Some((value, false)), None),
+            BinaryOp::Ge => self.estimate_range_selectivity(label, property, Some((value, true)), None),
             _ => None,
         }
     }
@@ -712,13 +673,9 @@ pub struct FrozenAdjacencyStore {
 }
 
 impl FrozenAdjacencyStore {
-    fn new() -> Self {
-        Self::default()
-    }
+    fn new() -> Self { Self::default() }
 
-    fn is_empty(&self) -> bool {
-        self.total_edges == 0
-    }
+    fn is_empty(&self) -> bool { self.total_edges == 0 }
 
     /// Append a new frozen segment from the current write buffer.
     fn push(&mut self, segment: FrozenAdjacency) {
@@ -726,9 +683,7 @@ impl FrozenAdjacencyStore {
         self.segments.push(segment);
     }
 
-    fn edge_count(&self) -> usize {
-        self.total_edges
-    }
+    fn edge_count(&self) -> usize { self.total_edges }
 
     /// Resident bytes across every segment (capacity, not length).
     fn heap_bytes(&self) -> usize {
@@ -736,11 +691,7 @@ impl FrozenAdjacencyStore {
     }
 
     fn node_capacity(&self) -> usize {
-        self.segments
-            .iter()
-            .map(|s| s.node_capacity())
-            .max()
-            .unwrap_or(0)
+        self.segments.iter().map(|s| s.node_capacity()).max().unwrap_or(0)
     }
 
     /// Collect all neighbors across all segments for a node. Returns a Vec.
@@ -876,10 +827,7 @@ impl FrozenAdjacency {
 
     /// Create an empty frozen tier
     fn empty() -> Self {
-        Self {
-            offsets: vec![0],
-            edges: Vec::new(),
-        }
+        Self { offsets: vec![0], edges: Vec::new() }
     }
 
     /// Build frozen tier from Vec-of-Vec adjacency lists.
@@ -935,11 +883,7 @@ impl FrozenAdjacency {
     /// Number of nodes tracked
     #[inline]
     fn node_capacity(&self) -> usize {
-        if self.offsets.len() > 0 {
-            self.offsets.len() - 1
-        } else {
-            0
-        }
+        if self.offsets.len() > 0 { self.offsets.len() - 1 } else { 0 }
     }
 
     /// Binary search within a node's frozen neighbor list
@@ -963,13 +907,9 @@ impl FrozenAdjacency {
         match neighbors.binary_search_by_key(&search_key, |(nid, _)| *nid) {
             Ok(pos) => {
                 let mut start = pos;
-                while start > 0 && neighbors[start - 1].0 == search_key {
-                    start -= 1;
-                }
+                while start > 0 && neighbors[start - 1].0 == search_key { start -= 1; }
                 let mut end = pos + 1;
-                while end < neighbors.len() && neighbors[end].0 == search_key {
-                    end += 1;
-                }
+                while end < neighbors.len() && neighbors[end].0 == search_key { end += 1; }
                 &neighbors[start..end]
             }
             Err(_) => &[],
@@ -983,14 +923,10 @@ impl FrozenAdjacency {
             Ok(pos) => {
                 // Walk back to first occurrence
                 let mut start = pos;
-                while start > 0 && neighbors[start - 1].0 == search_key {
-                    start -= 1;
-                }
+                while start > 0 && neighbors[start - 1].0 == search_key { start -= 1; }
                 // Walk forward to last
                 let mut end = pos + 1;
-                while end < neighbors.len() && neighbors[end].0 == search_key {
-                    end += 1;
-                }
+                while end < neighbors.len() && neighbors[end].0 == search_key { end += 1; }
                 neighbors[start..end].to_vec()
             }
             Err(_) => Vec::new(),
@@ -1052,11 +988,7 @@ pub struct Transaction {
 #[derive(Debug, Clone)]
 enum EdgeUndo {
     /// Before version `at`, property `key` held `old` (`None`: it was absent).
-    Property {
-        at: u64,
-        key: String,
-        old: Option<PropertyValue>,
-    },
+    Property { at: u64, key: String, old: Option<PropertyValue> },
     /// Before version `at`, the whole map was `old`. Only
     /// `get_edge_properties_mut` records this: it hands the map out without
     /// saying which key will change, so the one copy it costs is the price of
@@ -1092,11 +1024,7 @@ struct EdgeHistory {
 #[derive(Debug, Clone)]
 enum NodeUndo {
     /// Before version `at`, property `key` held `old` (`None`: it was absent).
-    Property {
-        at: u64,
-        key: String,
-        old: Option<PropertyValue>,
-    },
+    Property { at: u64, key: String, old: Option<PropertyValue> },
     /// Before version `at`, the node did (`had`) or did not carry `label`.
     Label { at: u64, label: Label, had: bool },
 }
@@ -1248,8 +1176,8 @@ pub struct GraphStore {
     nodes: Vec<Vec<Node>>,
 
     /// Edge type lookup table: maps type string → u16 index (DS-07c)
-    edge_type_table: Vec<EdgeType>, // index → EdgeType (small, ~6-20 entries)
-    edge_type_to_id: HashMap<EdgeType, u16>, // EdgeType → index
+    edge_type_table: Vec<EdgeType>,            // index → EdgeType (small, ~6-20 entries)
+    edge_type_to_id: HashMap<EdgeType, u16>,   // EdgeType → index
 
     /// Compact edge type array: EdgeId → type index. 2 bytes per edge (1B edges = 2 GB).
     /// Populated by create_edge_stub(). Replaces full Edge objects for type lookups.
@@ -1503,6 +1431,7 @@ pub struct GraphStore {
     snapshot_sources_stale: bool,
 }
 
+
 /// Can this value be a property?
 ///
 /// A property is a scalar or a list of scalars. A **map inside a list** is
@@ -1646,12 +1575,8 @@ impl GraphStore {
     /// Asked *before* the node exists. A creation path that does not ask is not
     /// bounded by the quota — see the module note on `WriteAdmission`.
     pub fn admit_node(&self) -> GraphResult<()> {
-        let Some(a) = self.admission else {
-            return Ok(());
-        };
-        let Some(max) = a.max_nodes else {
-            return Ok(());
-        };
+        let Some(a) = self.admission else { return Ok(()) };
+        let Some(max) = a.max_nodes else { return Ok(()) };
         let total = a.nodes_used.saturating_add(self.admission_births.0);
         if total >= max {
             return Err(GraphError::QuotaExceeded(format!("nodes ({total}/{max})")));
@@ -1667,9 +1592,7 @@ impl GraphStore {
     /// refuse, and a limit reached on row 900 would leave 899 nodes behind.
     /// This asks the whole question once (#1495).
     pub fn admits_bulk(&self, nodes: u64, edges: u64) -> GraphResult<()> {
-        let Some(a) = self.admission else {
-            return Ok(());
-        };
+        let Some(a) = self.admission else { return Ok(()) };
         if let Some(max) = a.max_nodes {
             let total = a
                 .nodes_used
@@ -1694,12 +1617,8 @@ impl GraphStore {
     /// May one more edge be created? Enforced inside `create_edge*`, which is
     /// fallible, so every edge path is covered.
     pub fn admit_edge(&self) -> GraphResult<()> {
-        let Some(a) = self.admission else {
-            return Ok(());
-        };
-        let Some(max) = a.max_edges else {
-            return Ok(());
-        };
+        let Some(a) = self.admission else { return Ok(()) };
+        let Some(max) = a.max_edges else { return Ok(()) };
         let total = a.edges_used.saturating_add(self.admission_births.1);
         if total >= max {
             return Err(GraphError::QuotaExceeded(format!("edges ({total}/{max})")));
@@ -1810,32 +1729,24 @@ impl GraphStore {
         let mut out = self.property_index.index_memory();
         out.extend(self.fulltext.index_memory());
         out.extend(self.vector_index.index_memory());
-        out.extend(
-            self.hierarchy_index
-                .list()
-                .into_iter()
-                .map(|h| crate::index::IndexMemory {
-                    kind: "hierarchy",
-                    entries: h.nodes,
-                    label: String::new(),
-                    property: h.edge_types.join("|"),
-                    name: Some(h.name),
-                    bytes: h.bytes,
-                }),
-        );
-        out.extend(
-            self.graph_projections
-                .list(self.data_changes())
-                .into_iter()
-                .map(|p| crate::index::IndexMemory {
-                    kind: "graph_projection",
-                    entries: p.nodes,
-                    label: p.spec.node_label.unwrap_or_default(),
-                    property: p.spec.edge_type.unwrap_or_default(),
-                    name: Some(p.name),
-                    bytes: p.bytes,
-                }),
-        );
+        out.extend(self.hierarchy_index.list().into_iter().map(|h| crate::index::IndexMemory {
+            kind: "hierarchy",
+            entries: h.nodes,
+            label: String::new(),
+            property: h.edge_types.join("|"),
+            name: Some(h.name),
+            bytes: h.bytes,
+        }));
+        out.extend(self.graph_projections.list(self.data_changes()).into_iter().map(|p| {
+            crate::index::IndexMemory {
+                kind: "graph_projection",
+                entries: p.nodes,
+                label: p.spec.node_label.unwrap_or_default(),
+                property: p.spec.edge_type.unwrap_or_default(),
+                name: Some(p.name),
+                bytes: p.bytes,
+            }
+        }));
         out.extend(self.point_index.index_memory().into_iter().map(
             |(name, label, property, bytes, entries)| crate::index::IndexMemory {
                 kind: "point",
@@ -1886,8 +1797,8 @@ impl GraphStore {
             .sum();
         let frozen = self.frozen_outgoing.heap_bytes() + self.frozen_incoming.heap_bytes();
 
-        let edge_endpoints =
-            self.edge_endpoints.capacity() * std::mem::size_of::<(NodeId, NodeId)>();
+        let edge_endpoints = self.edge_endpoints.capacity()
+            * std::mem::size_of::<(NodeId, NodeId)>();
         let edge_type_ids = self.edge_type_ids.capacity() * std::mem::size_of::<u16>();
         let mut edge_properties = self.edge_properties.capacity()
             * (std::mem::size_of::<EdgeId>() + std::mem::size_of::<PropertyMap>() + 1);
@@ -1905,13 +1816,14 @@ impl GraphStore {
         let mut label_index = self.label_index.capacity()
             * (std::mem::size_of::<Label>() + std::mem::size_of::<HashSet<NodeId>>() + 1);
         for (l, set) in self.label_index.iter() {
-            label_index += l.as_str().len() + set.capacity() * (std::mem::size_of::<NodeId>() + 1);
+            label_index += l.as_str().len()
+                + set.capacity() * (std::mem::size_of::<NodeId>() + 1);
         }
         let mut edge_type_index = self.edge_type_index.capacity()
             * (std::mem::size_of::<EdgeType>() + std::mem::size_of::<HashSet<EdgeId>>() + 1);
         for (t, set) in self.edge_type_index.iter() {
-            edge_type_index +=
-                t.as_str().len() + set.capacity() * (std::mem::size_of::<EdgeId>() + 1);
+            edge_type_index += t.as_str().len()
+                + set.capacity() * (std::mem::size_of::<EdgeId>() + 1);
         }
 
         MemoryReport {
@@ -1931,10 +1843,7 @@ impl GraphStore {
     }
 
     /// Create a new GraphStore with async indexing enabled
-    pub fn with_async_indexing() -> (
-        Self,
-        tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>,
-    ) {
+    pub fn with_async_indexing() -> (Self, tokio::sync::mpsc::UnboundedReceiver<crate::graph::event::IndexEvent>) {
         let (tx, rx) = unbounded_channel();
         let mut store = Self::new();
         store.index_sender = Some(tx);
@@ -1980,15 +1889,10 @@ impl GraphStore {
         store: Option<Arc<tokio::sync::RwLock<GraphStore>>>,
     ) {
         use crate::graph::event::IndexEvent::*;
-
+        
         while let Some(event) = receiver.recv().await {
             match event {
-                NodeCreated {
-                    tenant_id,
-                    id,
-                    labels,
-                    properties,
-                } => {
+                NodeCreated { tenant_id, id, labels, properties } => {
                     for (key, value) in &properties {
                         // A numeric array counts, not only the `Vector`
                         // variant: a list literal stays a list now (#628), so
@@ -2012,9 +1916,7 @@ impl GraphStore {
                             if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
                                 if let Some(config) = tenant.embed_config {
                                     for label in &labels {
-                                        if config
-                                            .embedding_policies
-                                            .get(label.as_str())
+                                        if config.embedding_policies.get(label.as_str())
                                             .is_some_and(|keys| keys.contains(key))
                                         {
                                             spawn_auto_embed(
@@ -2038,36 +1940,24 @@ impl GraphStore {
                         if let Some(agent_config) = tenant.agent_config {
                             if agent_config.enabled {
                                 for label in &labels {
-                                    if let Some(trigger_prompt) =
-                                        agent_config.policies.get(label.as_str())
-                                    {
+                                    if let Some(trigger_prompt) = agent_config.policies.get(label.as_str()) {
                                         // Construct context from node properties
-                                        let context =
-                                            format!("Node: {} {:?}", label.as_str(), properties);
+                                        let context = format!("Node: {} {:?}", label.as_str(), properties);
                                         let task = trigger_prompt.clone();
                                         let mut runtime = AgentRuntime::new(agent_config.clone());
                                         let label_str = label.as_str().to_string();
-
+                                        
                                         // Register tools based on config/availability
                                         if let Some(api_key) = &agent_config.api_key {
-                                            runtime.register_tool(Arc::new(WebSearchTool::new(
-                                                api_key.clone(),
-                                            )));
+                                            runtime.register_tool(Arc::new(WebSearchTool::new(api_key.clone())));
                                         } else {
                                             // Mock/Prototype mode
-                                            runtime.register_tool(Arc::new(WebSearchTool::new(
-                                                "mock".to_string(),
-                                            )));
+                                            runtime.register_tool(Arc::new(WebSearchTool::new("mock".to_string())));
                                         }
 
                                         tokio::spawn(async move {
-                                            if let Ok(result) =
-                                                runtime.process_trigger(&task, &context).await
-                                            {
-                                                println!(
-                                                    "Agent Action [{}] -> {}",
-                                                    label_str, result
-                                                );
+                                            if let Ok(result) = runtime.process_trigger(&task, &context).await {
+                                                println!("Agent Action [{}] -> {}", label_str, result);
                                                 // Future: Write result back to graph properties using a GraphStore client
                                             }
                                         });
@@ -2077,20 +1967,13 @@ impl GraphStore {
                         }
                     }
                 }
-                NodeDeleted { id, .. } => {
+NodeDeleted { id, .. } => {
                     // The writer has already dropped the node's vectors. A
                     // create still queued ahead of this event put them back,
                     // and events arrive in order, so drop them again (#1968).
                     vector_index.remove_node(id);
                 }
-                PropertySet {
-                    tenant_id,
-                    id,
-                    labels,
-                    key,
-                    old_value,
-                    new_value,
-                } => {
+                PropertySet { tenant_id, id, labels, key, old_value, new_value } => {
                     if let Some(vec) = new_value.to_vector() {
                         for label in &labels {
                             let _ = vector_index.add_vector(label.as_str(), &key, id, &vec);
@@ -2106,9 +1989,7 @@ impl GraphStore {
                         if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
                             if let Some(config) = tenant.embed_config {
                                 for label in &labels {
-                                    if config
-                                        .embedding_policies
-                                        .get(label.as_str())
+                                    if config.embedding_policies.get(label.as_str())
                                         .is_some_and(|keys| keys.contains(&key))
                                     {
                                         spawn_auto_embed(
@@ -2131,36 +2012,21 @@ impl GraphStore {
                         if let Some(agent_config) = tenant.agent_config {
                             if agent_config.enabled {
                                 for label in &labels {
-                                    if let Some(trigger_prompt) =
-                                        agent_config.policies.get(label.as_str())
-                                    {
-                                        let context = format!(
-                                            "Node: {} (Property Updated: {})",
-                                            label.as_str(),
-                                            key
-                                        );
+                                    if let Some(trigger_prompt) = agent_config.policies.get(label.as_str()) {
+                                        let context = format!("Node: {} (Property Updated: {})", label.as_str(), key);
                                         let task = trigger_prompt.clone();
                                         let mut runtime = AgentRuntime::new(agent_config.clone());
                                         let label_str = label.as_str().to_string();
-
+                                        
                                         if let Some(api_key) = &agent_config.api_key {
-                                            runtime.register_tool(Arc::new(WebSearchTool::new(
-                                                api_key.clone(),
-                                            )));
+                                            runtime.register_tool(Arc::new(WebSearchTool::new(api_key.clone())));
                                         } else {
-                                            runtime.register_tool(Arc::new(WebSearchTool::new(
-                                                "mock".to_string(),
-                                            )));
+                                            runtime.register_tool(Arc::new(WebSearchTool::new("mock".to_string())));
                                         }
 
                                         tokio::spawn(async move {
-                                            if let Ok(result) =
-                                                runtime.process_trigger(&task, &context).await
-                                            {
-                                                println!(
-                                                    "Agent Action [{}] -> {}",
-                                                    label_str, result
-                                                );
+                                            if let Ok(result) = runtime.process_trigger(&task, &context).await {
+                                                println!("Agent Action [{}] -> {}", label_str, result);
                                             }
                                         });
                                     }
@@ -2169,12 +2035,7 @@ impl GraphStore {
                         }
                     }
                 }
-                LabelAdded {
-                    tenant_id,
-                    id,
-                    label,
-                    properties,
-                } => {
+                LabelAdded { tenant_id, id, label, properties } => {
                     for (key, value) in properties {
                         if let Some(vec) = value.to_vector() {
                             let _ = vector_index.add_vector(label.as_str(), &key, id, &vec);
@@ -2183,9 +2044,7 @@ impl GraphStore {
                         if let PropertyValue::String(text) = &value {
                             if let Ok(tenant) = tenant_manager.get_tenant(&tenant_id) {
                                 if let Some(config) = tenant.embed_config {
-                                    if config
-                                        .embedding_policies
-                                        .get(label.as_str())
+                                    if config.embedding_policies.get(label.as_str())
                                         .is_some_and(|keys| keys.contains(&key))
                                     {
                                         spawn_auto_embed(
@@ -2428,8 +2287,7 @@ impl GraphStore {
         if !self.point_index.is_empty() {
             for (key, value) in &indexed_properties {
                 for label in &labels {
-                    self.point_index
-                        .on_property_set(label.as_str(), key, node_id, Some(value));
+                    self.point_index.on_property_set(label.as_str(), key, node_id, Some(value));
                 }
             }
         }
@@ -2442,8 +2300,7 @@ impl GraphStore {
             for (key, value) in &indexed_properties {
                 if let PropertyValue::String(text) = value {
                     for label in &labels {
-                        self.fulltext
-                            .on_property_set(label.as_str(), key, node_id, text);
+                        self.fulltext.on_property_set(label.as_str(), key, node_id, text);
                     }
                 }
             }
@@ -2452,8 +2309,7 @@ impl GraphStore {
             if self.index_sender.is_some() {
                 for (key, value) in &indexed_properties {
                     for label in &node.labels {
-                        self.property_index
-                            .index_insert(label, key, value.clone(), node_id);
+                        self.property_index.index_insert(label, key, value.clone(), node_id);
                     }
                 }
             } else {
@@ -2525,24 +2381,16 @@ impl GraphStore {
         };
         for entry in history.undo.iter().rev().take_while(|e| e.at() > version) {
             match entry {
-                NodeUndo::Property {
-                    key,
-                    old: Some(old),
-                    ..
-                } => {
+                NodeUndo::Property { key, old: Some(old), .. } => {
                     node.properties.insert(key.clone(), old.clone());
                 }
                 NodeUndo::Property { key, old: None, .. } => {
                     node.properties.remove(key);
                 }
-                NodeUndo::Label {
-                    label, had: true, ..
-                } => {
+                NodeUndo::Label { label, had: true, .. } => {
                     node.labels.insert(label.clone());
                 }
-                NodeUndo::Label {
-                    label, had: false, ..
-                } => {
+                NodeUndo::Label { label, had: false, .. } => {
                     node.labels.remove(label);
                 }
             }
@@ -2576,9 +2424,7 @@ impl GraphStore {
         // This cannot churn the epoch for read queries: `QueryExecutor` holds
         // `&GraphStore` and so cannot reach any `&mut self` method at all.
         self.bump_epoch();
-        self.nodes
-            .get_mut(id.as_u64() as usize)
-            .and_then(|v| v.last_mut())
+        self.nodes.get_mut(id.as_u64() as usize).and_then(|v| v.last_mut())
     }
 
     /// Check if a node exists
@@ -2744,25 +2590,26 @@ impl GraphStore {
         // SHOW CONSTRAINTS, and enforced nothing -- a double load silently produced
         // duplicates. The `has_any_unique_constraints` guard keeps graphs without
         // constraints (every bulk load) off the per-label path entirely.
-        let constrained_labels: Vec<Label> =
-            if self.property_index.has_any_unique_constraints() && !val.is_null() {
-                let labels: Vec<Label> = match self.get_node(node_id) {
-                    Some(node) => node.labels.iter().cloned().collect(),
-                    None => Vec::new(),
-                };
-                labels
-                    .into_iter()
-                    .filter(|l| self.property_index.has_unique_constraint(l, &key_str))
-                    .collect()
-            } else {
-                Vec::new()
+        let constrained_labels: Vec<Label> = if self.property_index.has_any_unique_constraints()
+            && !val.is_null()
+        {
+            let labels: Vec<Label> = match self.get_node(node_id) {
+                Some(node) => node.labels.iter().cloned().collect(),
+                None => Vec::new(),
             };
+            labels
+                .into_iter()
+                .filter(|l| self.property_index.has_unique_constraint(l, &key_str))
+                .collect()
+        } else {
+            Vec::new()
+        };
         for label in &constrained_labels {
             // Re-setting a property to the value this same node already holds is not a
             // violation; only another node holding it is.
-            if let Some(holder) = self
-                .property_index
-                .unique_constraint_holder(label, &key_str, &val)
+            if let Some(holder) =
+                self.property_index
+                    .unique_constraint_holder(label, &key_str, &val)
             {
                 if holder != node_id {
                     return Err(GraphError::ConstraintViolation(format!(
@@ -2784,21 +2631,12 @@ impl GraphStore {
             .ok_or(GraphError::NodeNotFound(node_id))?
             .version;
         let old_val = self.node_property(node_id, &key_str);
-        if self.undo_needed(
-            node_id,
-            last_write,
-            |e| matches!(e, NodeUndo::Property { key, .. } if *key == key_str),
-        ) {
+        if self.undo_needed(node_id, last_write, |e| {
+            matches!(e, NodeUndo::Property { key, .. } if *key == key_str)
+        }) {
             let at = self.current_version;
             let old = old_val.clone();
-            self.push_node_undo(
-                node_id,
-                NodeUndo::Property {
-                    at,
-                    key: key_str.clone(),
-                    old,
-                },
-            );
+            self.push_node_undo(node_id, NodeUndo::Property { at, key: key_str.clone(), old });
         }
 
         // Update columnar storage (always latest)
@@ -2918,13 +2756,14 @@ impl GraphStore {
     }
 
     /// Delete a node and all its connected edges
-    pub fn delete_node(&mut self, tenant_id: &str, id: NodeId) -> GraphResult<Node> {
+    pub fn delete_node(
+        &mut self,
+        tenant_id: &str,
+        id: NodeId
+    ) -> GraphResult<Node> {
         self.invalidate_statistics_cache();
         let idx = id.as_u64() as usize;
-        let latest_node = self
-            .get_node(id)
-            .ok_or(GraphError::NodeNotFound(id))?
-            .clone();
+        let latest_node = self.get_node(id).ok_or(GraphError::NodeNotFound(id))?.clone();
 
         // A deletion is the one change the undo log cannot reconstruct, so an
         // open session transaction keeps the whole node to put back (#1200
@@ -2947,7 +2786,7 @@ impl GraphStore {
         // Create a tombstone version (we use a special property or metadata in a real system)
         // For now, we'll just not return it in get_node_at_version if we had a flag.
         // Let's add a `deleted` flag to Node/Edge for true MVCC.
-
+        
         // Add to free list for reuse (In true MVCC, we only reuse after compaction/vacuum)
         self.free_node_ids.push(id.as_u64());
         // The history goes with the node. The id is reused, and the next node
@@ -2959,7 +2798,7 @@ impl GraphStore {
         // For this prototype, we'll keep the removal logic but wrap it in MVCC metadata if needed.
         // Actually, let's keep it simple: removal from the latest version effectively deletes it.
         // But to keep history, we should NOT remove from the Vec.
-
+        
         // Remove from label indices and update catalog
         // A deleted node must leave the full-text index too. Without this the
         // index keeps its terms and a search returns a node that no longer
@@ -3015,25 +2854,15 @@ impl GraphStore {
         let node = self.nodes[idx].pop().unwrap();
 
         // Remove all connected edges — collect from both frozen tier and write buffer
-        let mut outgoing_edges: Vec<EdgeId> = self
-            .frozen_outgoing
-            .neighbors_collected(idx)
-            .iter()
-            .map(|&(_, eid)| eid)
-            .collect();
+        let mut outgoing_edges: Vec<EdgeId> = self.frozen_outgoing.neighbors_collected(idx)
+            .iter().map(|&(_, eid)| eid).collect();
         let buffered_out = std::mem::take(&mut self.outgoing[idx]);
         self.buffer_edge_count -= buffered_out.len();
         outgoing_edges.extend(buffered_out.into_iter().map(|(_, eid)| eid));
-        let mut incoming_edges: Vec<EdgeId> = self
-            .frozen_incoming
-            .neighbors_collected(idx)
-            .iter()
-            .map(|&(_, eid)| eid)
-            .collect();
+        let mut incoming_edges: Vec<EdgeId> = self.frozen_incoming.neighbors_collected(idx)
+            .iter().map(|&(_, eid)| eid).collect();
         incoming_edges.extend(
-            std::mem::take(&mut self.incoming[idx])
-                .into_iter()
-                .map(|(_, eid)| eid),
+            std::mem::take(&mut self.incoming[idx]).into_iter().map(|(_, eid)| eid)
         );
 
         // The node's labels came off above, before its edges come off here, so
@@ -3067,7 +2896,11 @@ impl GraphStore {
     ///
     /// Removing a label the node does not have is a no-op returning `false`,
     /// which is Cypher's behaviour and not an error.
-    pub fn remove_label_from_node(&mut self, node_id: NodeId, label: &Label) -> GraphResult<bool> {
+    pub fn remove_label_from_node(
+        &mut self,
+        node_id: NodeId,
+        label: &Label,
+    ) -> GraphResult<bool> {
         self.invalidate_statistics_cache();
         let idx = node_id.as_u64() as usize;
 
@@ -3076,25 +2909,15 @@ impl GraphStore {
             .map(|n| (n.labels.contains(label), n.version))
             .ok_or(GraphError::NodeNotFound(node_id))?;
         if had
-            && self.undo_needed(
-                node_id,
-                last_write,
-                |e| matches!(e, NodeUndo::Label { label: l, .. } if l == label),
-            )
+            && self.undo_needed(node_id, last_write, |e| {
+                matches!(e, NodeUndo::Label { label: l, .. } if l == label)
+            })
         {
             let at = self.current_version;
-            self.push_node_undo(
-                node_id,
-                NodeUndo::Label {
-                    at,
-                    label: label.clone(),
-                    had: true,
-                },
-            );
+            self.push_node_undo(node_id, NodeUndo::Label { at, label: label.clone(), had: true });
         }
         if had && !self.point_index.is_empty() {
-            self.point_index
-                .on_node_removed(Some(label.as_str()), node_id);
+            self.point_index.on_node_removed(Some(label.as_str()), node_id);
         }
         if had {
             self.vector_index.remove_from(label.as_str(), None, node_id);
@@ -3152,7 +2975,7 @@ impl GraphStore {
         &mut self,
         tenant_id: &str,
         node_id: NodeId,
-        label: impl Into<Label>,
+        label: impl Into<Label>
     ) -> GraphResult<()> {
         self.add_label_to_node_inner(tenant_id, node_id, label.into(), true)
     }
@@ -3187,8 +3010,7 @@ impl GraphStore {
         };
         if !self.point_index.is_empty() {
             for (k, v) in &properties {
-                self.point_index
-                    .on_property_set(label.as_str(), k, node_id, Some(v));
+                self.point_index.on_property_set(label.as_str(), k, node_id, Some(v));
             }
         }
         let constrained: Vec<(&String, &PropertyValue)> =
@@ -3255,11 +3077,7 @@ impl GraphStore {
         }
         let current_version = self.current_version;
 
-        let node = self
-            .nodes
-            .get_mut(idx)
-            .and_then(|v| v.last_mut())
-            .ok_or(GraphError::NodeNotFound(node_id))?;
+        let node = self.nodes.get_mut(idx).and_then(|v| v.last_mut()).ok_or(GraphError::NodeNotFound(node_id))?;
         node.add_label(label.clone());
         if !had {
             node.version = current_version;
@@ -3300,8 +3118,7 @@ impl GraphStore {
         if self.index_sender.is_some() {
             if let crate::graph::event::IndexEvent::LabelAdded { properties, .. } = &event {
                 for (key, value) in properties {
-                    self.property_index
-                        .index_insert(&label, key, value.clone(), node_id);
+                    self.property_index.index_insert(&label, key, value.clone(), node_id);
                 }
             }
         } else {
@@ -3355,8 +3172,7 @@ impl GraphStore {
 
         // DS-07c: Edge endpoints
         if idx >= self.edge_endpoints.len() {
-            self.edge_endpoints
-                .resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
+            self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
         }
         self.edge_endpoints[idx] = (source, target);
 
@@ -3408,24 +3224,21 @@ impl GraphStore {
         // Update adjacency lists (sorted insert by target/source NodeId)
         {
             let out_list = &mut self.outgoing[source.as_u64() as usize];
-            let pos = out_list
-                .binary_search_by_key(&target, |(nid, _)| *nid)
+            let pos = out_list.binary_search_by_key(&target, |(nid, _)| *nid)
                 .unwrap_or_else(|p| p);
             out_list.insert(pos, (target, edge_id));
         }
         self.buffer_edge_count += 1;
         {
             let in_list = &mut self.incoming[target.as_u64() as usize];
-            let pos = in_list
-                .binary_search_by_key(&source, |(nid, _)| *nid)
+            let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)
                 .unwrap_or_else(|p| p);
             in_list.insert(pos, (source, edge_id));
         }
 
         // DS-07c: Edge endpoints + compact type
         if idx >= self.edge_endpoints.len() {
-            self.edge_endpoints
-                .resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
+            self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
         }
         self.edge_endpoints[idx] = (source, target);
         let type_id = self.intern_edge_type(&edge_type);
@@ -3471,8 +3284,7 @@ impl GraphStore {
         let empty = NO_LABELS.get_or_init(std::collections::HashSet::new);
         let src_labels = label_set(source).unwrap_or(empty);
         let tgt_labels = label_set(target).unwrap_or(empty);
-        self.catalog
-            .on_edge_created(source, src_labels, &edge_type, target, tgt_labels);
+        self.catalog.on_edge_created(source, src_labels, &edge_type, target, tgt_labels);
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
@@ -3519,24 +3331,21 @@ impl GraphStore {
         // Update adjacency lists (sorted insert by target/source NodeId)
         {
             let out_list = &mut self.outgoing[source.as_u64() as usize];
-            let pos = out_list
-                .binary_search_by_key(&target, |(nid, _)| *nid)
+            let pos = out_list.binary_search_by_key(&target, |(nid, _)| *nid)
                 .unwrap_or_else(|p| p);
             out_list.insert(pos, (target, edge_id));
         }
         self.buffer_edge_count += 1;
         {
             let in_list = &mut self.incoming[target.as_u64() as usize];
-            let pos = in_list
-                .binary_search_by_key(&source, |(nid, _)| *nid)
+            let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)
                 .unwrap_or_else(|p| p);
             in_list.insert(pos, (source, edge_id));
         }
 
         // DS-07c: Edge endpoints + compact type + sparse properties
         if idx >= self.edge_endpoints.len() {
-            self.edge_endpoints
-                .resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
+            self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
         }
         self.edge_endpoints[idx] = (source, target);
         let type_id = self.intern_edge_type(&edge_type);
@@ -3584,8 +3393,7 @@ impl GraphStore {
         let empty = NO_LABELS.get_or_init(std::collections::HashSet::new);
         let src_labels = label_set(source).unwrap_or(empty);
         let tgt_labels = label_set(target).unwrap_or(empty);
-        self.catalog
-            .on_edge_created(source, src_labels, &edge_type, target, tgt_labels);
+        self.catalog.on_edge_created(source, src_labels, &edge_type, target, tgt_labels);
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
@@ -3622,11 +3430,7 @@ impl GraphStore {
         if let Some(history) = history {
             for entry in history.undo.iter().rev().take_while(|e| e.at() > version) {
                 match entry {
-                    EdgeUndo::Property {
-                        key,
-                        old: Some(old),
-                        ..
-                    } => {
+                    EdgeUndo::Property { key, old: Some(old), .. } => {
                         properties.insert(key.clone(), old.clone());
                     }
                     EdgeUndo::Property { key, old: None, .. } => {
@@ -3673,13 +3477,9 @@ impl GraphStore {
     pub fn get_edge_properties_mut(&mut self, id: EdgeId) -> Option<&mut PropertyMap> {
         self.bump_epoch();
         let idx = id.as_u64() as usize;
-        if idx >= self.edge_endpoints.len() {
-            return None;
-        }
+        if idx >= self.edge_endpoints.len() { return None; }
         let (src, tgt) = self.edge_endpoints[idx];
-        if src.as_u64() == 0 && tgt.as_u64() == 0 {
-            return None;
-        }
+        if src.as_u64() == 0 && tgt.as_u64() == 0 { return None; }
         self.log_edge_map(id);
         Some(self.edge_properties.entry(id).or_default())
     }
@@ -3699,15 +3499,11 @@ impl GraphStore {
             return false;
         }
         !history.is_some_and(|h| {
-            h.undo
-                .iter()
-                .rev()
-                .take_while(|e| e.at() == v)
-                .any(|e| match (e, key) {
-                    (EdgeUndo::Map { .. }, _) => true,
-                    (EdgeUndo::Property { key: k, .. }, Some(key)) => k == key,
-                    (EdgeUndo::Property { .. }, None) => false,
-                })
+            h.undo.iter().rev().take_while(|e| e.at() == v).any(|e| match (e, key) {
+                (EdgeUndo::Map { .. }, _) => true,
+                (EdgeUndo::Property { key: k, .. }, Some(key)) => k == key,
+                (EdgeUndo::Property { .. }, None) => false,
+            })
         })
     }
 
@@ -3719,16 +3515,8 @@ impl GraphStore {
         }
         let at = self.current_version;
         let old = self.edge_property(edge_id, key);
-        let entry = EdgeUndo::Property {
-            at,
-            key: key.to_string(),
-            old,
-        };
-        self.edge_history
-            .entry(edge_id)
-            .or_default()
-            .undo
-            .push(entry);
+        let entry = EdgeUndo::Property { at, key: key.to_string(), old };
+        self.edge_history.entry(edge_id).or_default().undo.push(entry);
     }
 
     /// Record the whole map before `get_edge_properties_mut` hands it out,
@@ -3739,11 +3527,7 @@ impl GraphStore {
         }
         let at = self.current_version;
         let old = self.edge_properties_merged(edge_id);
-        self.edge_history
-            .entry(edge_id)
-            .or_default()
-            .undo
-            .push(EdgeUndo::Map { at, old });
+        self.edge_history.entry(edge_id).or_default().undo.push(EdgeUndo::Map { at, old });
     }
 
     /// An edge created after the first version did not exist at earlier ones.
@@ -3753,13 +3537,7 @@ impl GraphStore {
         let current = self.current_version;
         if current != Self::FIRST_VERSION {
             let born = Some(current);
-            self.edge_history.insert(
-                edge_id,
-                EdgeHistory {
-                    born,
-                    ..EdgeHistory::default()
-                },
-            );
+            self.edge_history.insert(edge_id, EdgeHistory { born, ..EdgeHistory::default() });
         } else if !self.edge_history.is_empty() {
             self.edge_history.remove(&edge_id);
         }
@@ -3770,12 +3548,7 @@ impl GraphStore {
     pub fn get_edge_view(&self, edge_id: EdgeId) -> Option<EdgeView> {
         let (source, target) = self.get_edge_endpoints(edge_id)?;
         let edge_type = self.get_edge_type(edge_id)?;
-        Some(EdgeView {
-            id: edge_id,
-            source,
-            target,
-            edge_type,
-        })
+        Some(EdgeView { id: edge_id, source, target, edge_type })
     }
 
     /// DS-07c: Get edge endpoints from compact storage
@@ -3796,12 +3569,7 @@ impl GraphStore {
     }
 
     /// DS-07c: Set a property on an edge via sparse map
-    pub fn set_edge_property_sparse(
-        &mut self,
-        edge_id: EdgeId,
-        key: impl Into<String>,
-        value: impl Into<PropertyValue>,
-    ) {
+    pub fn set_edge_property_sparse(&mut self, edge_id: EdgeId, key: impl Into<String>, value: impl Into<PropertyValue>) {
         self.invalidate_statistics_cache();
         let key = key.into();
         let value = value.into();
@@ -3821,8 +3589,7 @@ impl GraphStore {
         // r.p` scan); then it wrote both, which stored every value twice. The
         // column is now the only copy (#545, #1200 step 5). A value put in the
         // row through `get_edge_properties_mut` is superseded, so it goes.
-        self.edge_columns
-            .set_property(edge_id.as_u64() as usize, &key, value);
+        self.edge_columns.set_property(edge_id.as_u64() as usize, &key, value);
         if let Some(props) = self.edge_properties.get_mut(&edge_id) {
             props.remove(&key);
         }
@@ -3887,14 +3654,8 @@ impl GraphStore {
         self.invalidate_hierarchies_for_edge_type(&edge.edge_type);
 
         // Collect catalog info
-        let src_labels: Vec<Label> = self
-            .get_node(edge.source)
-            .map(|n| n.labels.iter().cloned().collect())
-            .unwrap_or_default();
-        let tgt_labels: Vec<Label> = self
-            .get_node(edge.target)
-            .map(|n| n.labels.iter().cloned().collect())
-            .unwrap_or_default();
+        let src_labels: Vec<Label> = self.get_node(edge.source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+        let tgt_labels: Vec<Label> = self.get_node(edge.target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
 
         // Add to free list — but only if no frozen segment can be holding a
         // stale entry for this id. Reusing one that is frozen overwrites the
@@ -3939,13 +3700,7 @@ impl GraphStore {
         self.edge_history.remove(&id);
 
         // Update catalog triple stats
-        self.catalog.on_edge_deleted(
-            edge.source,
-            &src_labels,
-            &edge.edge_type,
-            edge.target,
-            &tgt_labels,
-        );
+        self.catalog.on_edge_deleted(edge.source, &src_labels, &edge.edge_type, edge.target, &tgt_labels);
 
         self.journal(crate::graph::event::Mutation::EdgeDeleted(id));
         Ok(edge)
@@ -3957,16 +3712,12 @@ impl GraphStore {
         let mut result: Vec<Edge> = Vec::new();
         // Frozen tier (CSR)
         for &(_, eid) in &self.frozen_outgoing.neighbors_collected(idx) {
-            if let Some(e) = self.get_edge(eid) {
-                result.push(e);
-            }
+            if let Some(e) = self.get_edge(eid) { result.push(e); }
         }
         // Write buffer
         if let Some(entries) = self.outgoing.get(idx) {
             for &(_, eid) in entries {
-                if let Some(e) = self.get_edge(eid) {
-                    result.push(e);
-                }
+                if let Some(e) = self.get_edge(eid) { result.push(e); }
             }
         }
         result
@@ -3978,16 +3729,12 @@ impl GraphStore {
         let mut result: Vec<Edge> = Vec::new();
         // Frozen tier
         for &(_, eid) in &self.frozen_incoming.neighbors_collected(idx) {
-            if let Some(e) = self.get_edge(eid) {
-                result.push(e);
-            }
+            if let Some(e) = self.get_edge(eid) { result.push(e); }
         }
         // Write buffer
         if let Some(entries) = self.incoming.get(idx) {
             for &(_, eid) in entries {
-                if let Some(e) = self.get_edge(eid) {
-                    result.push(e);
-                }
+                if let Some(e) = self.get_edge(eid) { result.push(e); }
             }
         }
         result
@@ -3996,10 +3743,7 @@ impl GraphStore {
     /// Get outgoing edge targets as lightweight tuples.
     /// Returns (EdgeId, source NodeId, target NodeId, EdgeType) for each outgoing edge.
     /// Delegates to the DS-07c owned version.
-    pub fn get_outgoing_edge_targets(
-        &self,
-        node_id: NodeId,
-    ) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
+    pub fn get_outgoing_edge_targets(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
         self.get_outgoing_edge_targets_owned(node_id)
     }
 
@@ -4194,10 +3938,7 @@ impl GraphStore {
         }
     }
 
-    pub fn get_outgoing_edge_targets_owned(
-        &self,
-        node_id: NodeId,
-    ) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
+    pub fn get_outgoing_edge_targets_owned(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
         let src_idx = node_id.as_u64() as usize;
         let mut result = Vec::new();
         // Frozen tier
@@ -4218,10 +3959,7 @@ impl GraphStore {
     }
 
     /// Get incoming edge sources with owned EdgeType — works for both full and stub edges.
-    pub fn get_incoming_edge_sources_owned(
-        &self,
-        node_id: NodeId,
-    ) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
+    pub fn get_incoming_edge_sources_owned(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
         let tgt_idx = node_id.as_u64() as usize;
         let mut result = Vec::new();
         // Frozen tier
@@ -4244,34 +3982,19 @@ impl GraphStore {
     /// Count incoming edges of `node_id` whose type matches `edge_type`,
     /// without allocating a Vec or cloning EdgeType.
     pub fn incoming_degree_for_type(&self, node_id: NodeId, edge_type: &EdgeType) -> usize {
-        let type_id = match self.edge_type_to_id.get(edge_type) {
-            Some(&id) => id,
-            None => return 0,
-        };
+        let type_id = match self.edge_type_to_id.get(edge_type) { Some(&id) => id, None => return 0 };
         let idx = node_id.as_u64() as usize;
         let mut count = 0usize;
         for seg in &self.frozen_incoming.segments {
             for &(_src, eid) in seg.neighbors(idx) {
-                if self
-                    .edge_type_ids
-                    .get(eid.as_u64() as usize)
-                    .copied()
-                    .unwrap_or(Self::EDGE_TYPE_UNSET)
-                    == type_id
-                {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
                     count += 1;
                 }
             }
         }
         if let Some(entries) = self.incoming.get(idx) {
             for &(_src, eid) in entries {
-                if self
-                    .edge_type_ids
-                    .get(eid.as_u64() as usize)
-                    .copied()
-                    .unwrap_or(Self::EDGE_TYPE_UNSET)
-                    == type_id
-                {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
                     count += 1;
                 }
             }
@@ -4281,34 +4004,19 @@ impl GraphStore {
 
     /// Outgoing-direction analogue.
     pub fn outgoing_degree_for_type(&self, node_id: NodeId, edge_type: &EdgeType) -> usize {
-        let type_id = match self.edge_type_to_id.get(edge_type) {
-            Some(&id) => id,
-            None => return 0,
-        };
+        let type_id = match self.edge_type_to_id.get(edge_type) { Some(&id) => id, None => return 0 };
         let idx = node_id.as_u64() as usize;
         let mut count = 0usize;
         for seg in &self.frozen_outgoing.segments {
             for &(_tgt, eid) in seg.neighbors(idx) {
-                if self
-                    .edge_type_ids
-                    .get(eid.as_u64() as usize)
-                    .copied()
-                    .unwrap_or(Self::EDGE_TYPE_UNSET)
-                    == type_id
-                {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
                     count += 1;
                 }
             }
         }
         if let Some(entries) = self.outgoing.get(idx) {
             for &(_tgt, eid) in entries {
-                if self
-                    .edge_type_ids
-                    .get(eid.as_u64() as usize)
-                    .copied()
-                    .unwrap_or(Self::EDGE_TYPE_UNSET)
-                    == type_id
-                {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
                     count += 1;
                 }
             }
@@ -4317,39 +4025,19 @@ impl GraphStore {
     }
 
     /// Visit every incoming neighbor reachable through an edge of `edge_type`.
-    pub fn for_each_incoming_neighbor_of_type<F: FnMut(NodeId)>(
-        &self,
-        node_id: NodeId,
-        edge_type: &EdgeType,
-        mut f: F,
-    ) {
-        let type_id = match self.edge_type_to_id.get(edge_type) {
-            Some(&id) => id,
-            None => return,
-        };
+    pub fn for_each_incoming_neighbor_of_type<F: FnMut(NodeId)>(&self, node_id: NodeId, edge_type: &EdgeType, mut f: F) {
+        let type_id = match self.edge_type_to_id.get(edge_type) { Some(&id) => id, None => return };
         let idx = node_id.as_u64() as usize;
         for seg in &self.frozen_incoming.segments {
             for &(src, eid) in seg.neighbors(idx) {
-                if self
-                    .edge_type_ids
-                    .get(eid.as_u64() as usize)
-                    .copied()
-                    .unwrap_or(Self::EDGE_TYPE_UNSET)
-                    == type_id
-                {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
                     f(src);
                 }
             }
         }
         if let Some(entries) = self.incoming.get(idx) {
             for &(src, eid) in entries {
-                if self
-                    .edge_type_ids
-                    .get(eid.as_u64() as usize)
-                    .copied()
-                    .unwrap_or(Self::EDGE_TYPE_UNSET)
-                    == type_id
-                {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
                     f(src);
                 }
             }
@@ -4357,39 +4045,19 @@ impl GraphStore {
     }
 
     /// Outgoing-direction analogue.
-    pub fn for_each_outgoing_neighbor_of_type<F: FnMut(NodeId)>(
-        &self,
-        node_id: NodeId,
-        edge_type: &EdgeType,
-        mut f: F,
-    ) {
-        let type_id = match self.edge_type_to_id.get(edge_type) {
-            Some(&id) => id,
-            None => return,
-        };
+    pub fn for_each_outgoing_neighbor_of_type<F: FnMut(NodeId)>(&self, node_id: NodeId, edge_type: &EdgeType, mut f: F) {
+        let type_id = match self.edge_type_to_id.get(edge_type) { Some(&id) => id, None => return };
         let idx = node_id.as_u64() as usize;
         for seg in &self.frozen_outgoing.segments {
             for &(tgt, eid) in seg.neighbors(idx) {
-                if self
-                    .edge_type_ids
-                    .get(eid.as_u64() as usize)
-                    .copied()
-                    .unwrap_or(Self::EDGE_TYPE_UNSET)
-                    == type_id
-                {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
                     f(tgt);
                 }
             }
         }
         if let Some(entries) = self.outgoing.get(idx) {
             for &(tgt, eid) in entries {
-                if self
-                    .edge_type_ids
-                    .get(eid.as_u64() as usize)
-                    .copied()
-                    .unwrap_or(Self::EDGE_TYPE_UNSET)
-                    == type_id
-                {
+                if self.edge_type_ids.get(eid.as_u64() as usize).copied().unwrap_or(Self::EDGE_TYPE_UNSET) == type_id {
                     f(tgt);
                 }
             }
@@ -4399,10 +4067,7 @@ impl GraphStore {
     /// Get incoming edge sources as lightweight tuples (no Edge clone)
     /// Returns (EdgeId, source NodeId, target NodeId, &EdgeType) for each incoming edge
     /// Get incoming edge sources as owned tuples. Delegates to DS-07c owned version.
-    pub fn get_incoming_edge_sources(
-        &self,
-        node_id: NodeId,
-    ) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
+    pub fn get_incoming_edge_sources(&self, node_id: NodeId) -> Vec<(EdgeId, NodeId, NodeId, EdgeType)> {
         self.get_incoming_edge_sources_owned(node_id)
     }
 
@@ -4413,11 +4078,7 @@ impl GraphStore {
     /// direction of the adjacency list that produced the entry and only the
     /// type can be re-checked.
     fn edge_between_matches(
-        &self,
-        eid: EdgeId,
-        source: NodeId,
-        target: NodeId,
-        edge_type: Option<&EdgeType>,
+        &self, eid: EdgeId, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>,
     ) -> bool {
         match self.get_edge(eid) {
             Some(e) => {
@@ -4454,10 +4115,7 @@ impl GraphStore {
     /// tag, and walking the *Tag* to find out costs the tag's whole
     /// popularity.
     fn for_each_edge_between(
-        &self,
-        source: NodeId,
-        target: NodeId,
-        edge_type: Option<&EdgeType>,
+        &self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>,
         mut visit: impl FnMut(EdgeId) -> bool,
     ) {
         let idx = source.as_u64() as usize;
@@ -4483,12 +4141,7 @@ impl GraphStore {
     /// Check if an edge exists between source and target, optionally filtered by edge type.
     /// Checks both frozen tier (CSR) and write buffer.
     /// Returns the first matching EdgeId, or None.
-    pub fn edge_between(
-        &self,
-        source: NodeId,
-        target: NodeId,
-        edge_type: Option<&EdgeType>,
-    ) -> Option<EdgeId> {
+    pub fn edge_between(&self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>) -> Option<EdgeId> {
         let mut found = None;
         self.for_each_edge_between(source, target, edge_type, |eid| {
             found = Some(eid);
@@ -4499,12 +4152,7 @@ impl GraphStore {
 
     /// Get all edges between source and target, optionally filtered by edge type.
     /// Merges results from frozen tier and write buffer.
-    pub fn edges_between(
-        &self,
-        source: NodeId,
-        target: NodeId,
-        edge_type: Option<&EdgeType>,
-    ) -> Vec<EdgeId> {
+    pub fn edges_between(&self, source: NodeId, target: NodeId, edge_type: Option<&EdgeType>) -> Vec<EdgeId> {
         let mut result = Vec::new();
         self.for_each_edge_between(source, target, edge_type, |eid| {
             result.push(eid);
@@ -4535,20 +4183,14 @@ impl GraphStore {
         }
         // A removal is a write, and history keeps what it removed (#1200).
         if let Some(last_write) = self.get_node(node_id).map(|n| n.version) {
-            if self.undo_needed(
-                node_id,
-                last_write,
-                |e| matches!(e, NodeUndo::Property { key: k, .. } if k.as_str() == key),
-            ) {
+            if self.undo_needed(node_id, last_write, |e| {
+                matches!(e, NodeUndo::Property { key: k, .. } if k.as_str() == key)
+            }) {
                 if let Some(old) = self.node_property(node_id, key) {
                     let at = self.current_version;
                     self.push_node_undo(
                         node_id,
-                        NodeUndo::Property {
-                            at,
-                            key: key.to_string(),
-                            old: Some(old),
-                        },
+                        NodeUndo::Property { at, key: key.to_string(), old: Some(old) },
                     );
                 }
             }
@@ -4556,20 +4198,17 @@ impl GraphStore {
         if !self.point_index.is_empty() {
             if let Some(node) = self.get_node(node_id) {
                 for label in &node.labels {
-                    self.point_index
-                        .on_property_set(label.as_str(), key, node_id, None);
+                    self.point_index.on_property_set(label.as_str(), key, node_id, None);
                 }
             }
         }
         // A removed vector leaves its index (#1968).
         if let Some(node) = self.get_node(node_id) {
             for label in &node.labels {
-                self.vector_index
-                    .remove_from(label.as_str(), Some(key), node_id);
+                self.vector_index.remove_from(label.as_str(), Some(key), node_id);
             }
         }
-        self.node_columns
-            .remove_property(node_id.as_u64() as usize, key);
+        self.node_columns.remove_property(node_id.as_u64() as usize, key);
         let current_version = self.current_version;
         if let Some(node) = self.get_node_mut(node_id) {
             node.remove_property(key);
@@ -4586,8 +4225,7 @@ impl GraphStore {
         // record for a caller that does not say which key it changes (#1200).
         self.bump_epoch();
         self.log_edge_write(edge_id, key);
-        self.edge_columns
-            .remove_property(edge_id.as_u64() as usize, key);
+        self.edge_columns.remove_property(edge_id.as_u64() as usize, key);
         if let Some(props) = self.edge_properties.get_mut(&edge_id) {
             props.remove(key);
         }
@@ -4656,11 +4294,7 @@ impl GraphStore {
     /// Returns `None` when the type is too large to index, and caches that
     /// decision. Built by walking the adjacency exactly as the typed walk
     /// does, so the two cannot disagree.
-    pub fn type_adjacency(
-        &self,
-        type_id: u16,
-        outgoing: bool,
-    ) -> Option<std::sync::Arc<TypeAdjacency>> {
+    pub fn type_adjacency(&self, type_id: u16, outgoing: bool) -> Option<std::sync::Arc<TypeAdjacency>> {
         if let Some(cached) = self.type_adj.read().unwrap().get(&(type_id, outgoing)) {
             return cached.clone();
         }
@@ -4775,17 +4409,8 @@ impl GraphStore {
     /// should not walk every edge when an earlier query already paid for one:
     /// a variable-length expand from a single anchor visits a few dozen nodes
     /// (#1197).
-    pub fn type_adjacency_if_built(
-        &self,
-        type_id: u16,
-        outgoing: bool,
-    ) -> Option<std::sync::Arc<TypeAdjacency>> {
-        self.type_adj
-            .read()
-            .unwrap()
-            .get(&(type_id, outgoing))
-            .cloned()
-            .flatten()
+    pub fn type_adjacency_if_built(&self, type_id: u16, outgoing: bool) -> Option<std::sync::Arc<TypeAdjacency>> {
+        self.type_adj.read().unwrap().get(&(type_id, outgoing)).cloned().flatten()
     }
 
     /// Whether `edge_type_index` accounts for every edge in the adjacency.
@@ -4869,13 +4494,7 @@ impl GraphStore {
         let mut rows: Vec<(NodeId, NodeId, EdgeId)> = Vec::with_capacity(ids.len());
         for &eid in ids {
             let idx = eid.as_u64() as usize;
-            if self
-                .edge_type_ids
-                .get(idx)
-                .copied()
-                .unwrap_or(Self::EDGE_TYPE_UNSET)
-                != type_id
-            {
+            if self.edge_type_ids.get(idx).copied().unwrap_or(Self::EDGE_TYPE_UNSET) != type_id {
                 continue; // deleted, or retyped: the walk would not see it either
             }
             let (src, tgt) = *self.edge_endpoints.get(idx)?;
@@ -4932,8 +4551,7 @@ impl GraphStore {
     #[inline]
     pub fn bitset_contains(bits: &[u64], id: NodeId) -> bool {
         let idx = id.as_u64() as usize;
-        bits.get(idx / 64)
-            .is_some_and(|w| w & (1u64 << (idx % 64)) != 0)
+        bits.get(idx / 64).is_some_and(|w| w & (1u64 << (idx % 64)) != 0)
     }
 
     /// Drop the derived label bitsets. Called wherever `label_index` changes.
@@ -5214,11 +4832,7 @@ impl GraphStore {
     /// the rebuild passes).
     pub(crate) fn edge_type_id_at(&self, edge_id: EdgeId) -> Option<u16> {
         let id = self.edge_type_ids.get(edge_id.as_u64() as usize).copied()?;
-        if id == Self::EDGE_TYPE_UNSET {
-            None
-        } else {
-            Some(id)
-        }
+        if id == Self::EDGE_TYPE_UNSET { None } else { Some(id) }
     }
 
     /// The name behind an interned edge-type id, borrowed.
@@ -5292,8 +4906,7 @@ impl GraphStore {
         value: &PropertyValue,
     ) {
         if !self.hierarchy_index.is_empty() {
-            self.hierarchy_index
-                .update_measure(node_id, property, value);
+            self.hierarchy_index.update_measure(node_id, property, value);
         }
     }
 
@@ -5358,17 +4971,14 @@ impl GraphStore {
     /// `&self` rather than `&mut self` so the paths that hand out an interior
     /// mutable reference can call it before they give the reference away.
     pub fn bump_epoch(&self) {
-        self.epoch
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.data_changes
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.data_changes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Move the epoch for housekeeping that changes no data. See
     /// `data_changes`; only the two paths it names call this.
     fn bump_epoch_for_housekeeping(&self) {
-        self.epoch
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// How many times data may have changed: the epoch, less housekeeping.
@@ -5653,10 +5263,7 @@ impl GraphStore {
                 let mut groups: HashMap<u16, Vec<EdgeId>> = HashMap::new();
                 for idx in start..end {
                     if let Some(type_id) = self.indexable_edge_type(idx) {
-                        groups
-                            .entry(type_id)
-                            .or_default()
-                            .push(EdgeId::new(idx as u64));
+                        groups.entry(type_id).or_default().push(EdgeId::new(idx as u64));
                     }
                 }
                 groups
@@ -5717,10 +5324,9 @@ impl GraphStore {
                 // both tiers, so large labels (e.g. Problem) are no longer left empty.
                 // Accept a numeric array as well as a Vector: an embedding written with
                 // whole numbers (`[1, 0, 0]`) is a list of integers, not a float vector.
-                let inline = self.get_node(nid).and_then(|n| {
-                    n.get_property(&key.property_key)
-                        .and_then(|p| p.to_vector())
-                });
+                let inline = self
+                    .get_node(nid)
+                    .and_then(|n| n.get_property(&key.property_key).and_then(|p| p.to_vector()));
                 let vec = match inline {
                     Some(v) => Some(v),
                     None => self
@@ -5732,9 +5338,11 @@ impl GraphStore {
                     vectors.push((nid, vec));
                 }
             }
-            let _ = self
-                .vector_index
-                .rebuild_for_label(&key.label, &key.property_key, &vectors);
+            let _ = self.vector_index.rebuild_for_label(
+                &key.label,
+                &key.property_key,
+                &vectors,
+            );
         }
     }
 
@@ -5771,12 +5379,7 @@ impl GraphStore {
         // Pass 1: collect (label, property_key, dims) — immutable scan ends before mutations
         let mut discovered: HMap<(String, String), usize> = HMap::new();
         for node in self.all_nodes() {
-            let label = node
-                .labels
-                .iter()
-                .next()
-                .map(|l| l.as_str().to_string())
-                .unwrap_or_default();
+            let label = node.labels.iter().next().map(|l| l.as_str().to_string()).unwrap_or_default();
             if label.is_empty() {
                 continue;
             }
@@ -5814,9 +5417,7 @@ impl GraphStore {
         // Pass 2: register missing HNSW indices (mutable only on vector_index)
         for ((label, prop), dims) in &discovered {
             if self.vector_index.get_index(label, prop).is_none() {
-                let _ = self
-                    .vector_index
-                    .create_index(label, prop, *dims, DistanceMetric::Cosine);
+                let _ = self.vector_index.create_index(label, prop, *dims, DistanceMetric::Cosine);
                 // Discovery declares indexes nobody wrote DDL for, and those are
                 // as much a part of the catalog as the declared ones: without
                 // this, an index a snapshot import discovered would be gone
@@ -5870,9 +5471,7 @@ impl GraphStore {
             let mut unorderable: HashSet<String> = HashSet::new();
 
             for (i, &node_id) in node_ids.iter().enumerate() {
-                if i >= sample_size {
-                    break;
-                }
+                if i >= sample_size { break; }
                 // Read the merged view, not `node.properties` alone. A snapshot import
                 // populates only the columnar store, so sampling row storage found *no*
                 // properties at all and produced zero statistics -- leaving every
@@ -5890,18 +5489,10 @@ impl GraphStore {
                             val.hash(&mut hasher);
                             hasher.finish()
                         };
-                        property_distinct
-                            .entry(key.clone())
-                            .or_default()
-                            .insert(hash);
+                        property_distinct.entry(key.clone()).or_default().insert(hash);
 
-                        if matches!(val, PropertyValue::String(_))
-                            || HistogramAxis::of(val).is_some()
-                        {
-                            property_samples
-                                .entry(key.clone())
-                                .or_default()
-                                .push(val.clone());
+                        if matches!(val, PropertyValue::String(_)) || HistogramAxis::of(val).is_some() {
+                            property_samples.entry(key.clone()).or_default().push(val.clone());
                         } else if !matches!(val, PropertyValue::Null) {
                             unorderable.insert(key.clone());
                         }
@@ -5920,11 +5511,7 @@ impl GraphStore {
 
             for (prop, count) in &property_presence {
                 let distinct = property_distinct.get(prop).map(|s| s.len()).unwrap_or(0);
-                let selectivity = if distinct > 0 {
-                    1.0 / distinct as f64
-                } else {
-                    1.0
-                };
+                let selectivity = if distinct > 0 { 1.0 / distinct as f64 } else { 1.0 };
 
                 // Most common values, as a fraction of the non-null
                 // observations for this property.
@@ -5948,16 +5535,13 @@ impl GraphStore {
                     property_samples.get(prop).and_then(|v| Histogram::build(v))
                 };
 
-                property_stats.insert(
-                    (label.clone(), prop.clone()),
-                    PropertyStats {
-                        null_fraction: 1.0 - (*count as f64 / sample_size as f64),
-                        distinct_count: distinct,
-                        selectivity,
-                        most_common,
-                        histogram,
-                    },
-                );
+                property_stats.insert((label.clone(), prop.clone()), PropertyStats {
+                    null_fraction: 1.0 - (*count as f64 / sample_size as f64),
+                    distinct_count: distinct,
+                    selectivity,
+                    most_common,
+                    histogram,
+                });
             }
         }
 
@@ -5984,8 +5568,7 @@ impl GraphStore {
     /// [`GraphCatalog::degrees_are_exact_for`]; `false` means walk the
     /// adjacency.
     pub fn catalog_degrees_are_exact_for(&self, edge_type: &EdgeType) -> bool {
-        self.catalog
-            .degrees_are_exact_for(self.edge_count(), edge_type)
+        self.catalog.degrees_are_exact_for(self.edge_count(), edge_type)
     }
 
     /// Whether this node has any incident edge, in either tier and either
@@ -6024,10 +5607,7 @@ impl GraphStore {
 
     /// Get edge count for a specific type (fast, O(1))
     pub fn edge_type_count(&self, edge_type: &EdgeType) -> usize {
-        self.edge_type_index
-            .get(edge_type)
-            .map(|s| s.len())
-            .unwrap_or(0)
+        self.edge_type_index.get(edge_type).map(|s| s.len()).unwrap_or(0)
     }
 
     /// Get all label names in the graph
@@ -6058,11 +5638,8 @@ impl GraphStore {
         // different summary for the same graph on every start (#1509). This
         // text is the NLQ prompt's schema; an unstable one cannot be cached or
         // diffed.
-        let mut labels: Vec<(&Label, usize)> = self
-            .label_index
-            .iter()
-            .map(|(l, ids)| (l, ids.len()))
-            .collect();
+        let mut labels: Vec<(&Label, usize)> =
+            self.label_index.iter().map(|(l, ids)| (l, ids.len())).collect();
         labels.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 
         let mut summary = String::new();
@@ -6074,13 +5651,7 @@ impl GraphStore {
         // A node's label for a pattern: the smallest by name.
         let label_of = |id: NodeId| -> String {
             self.get_node(id)
-                .and_then(|n| {
-                    n.labels
-                        .iter()
-                        .map(|l| l.as_str())
-                        .min()
-                        .map(str::to_string)
-                })
+                .and_then(|n| n.labels.iter().map(|l| l.as_str()).min().map(str::to_string))
                 .unwrap_or_else(|| "Unknown".to_string())
         };
 
@@ -6288,11 +5859,7 @@ impl GraphStore {
     /// O(edges) and allocates a whole CSR, so this is for a caller to run at a
     /// moment of its choosing -- after a batch of deletes, say -- not something
     /// a query triggers (#740).
-    pub fn merge_frozen_segments_if_needed(
-        &mut self,
-        max_segments: usize,
-        max_dead_fraction: f64,
-    ) -> bool {
+    pub fn merge_frozen_segments_if_needed(&mut self, max_segments: usize, max_dead_fraction: f64) -> bool {
         let frozen = self.frozen_outgoing.edge_count();
         if frozen == 0 {
             return false;
@@ -6338,37 +5905,22 @@ impl GraphStore {
         // frozen if it was re-created, which the watermark covers because the
         // re-created edge's entry is the one that got frozen.
         self.frozen_edge_watermark = self.next_edge_id;
-        self.free_edge_ids
-            .retain(|&id| id >= self.frozen_edge_watermark);
+        self.free_edge_ids.retain(|&id| id >= self.frozen_edge_watermark);
 
         // Clear write buffers in parallel (can be millions of Vecs)
         if self.outgoing.len() >= 10_000 {
-            self.outgoing.par_iter_mut().for_each(|v| {
-                v.clear();
-                v.shrink_to_fit();
-            });
-            self.incoming.par_iter_mut().for_each(|v| {
-                v.clear();
-                v.shrink_to_fit();
-            });
+            self.outgoing.par_iter_mut().for_each(|v| { v.clear(); v.shrink_to_fit(); });
+            self.incoming.par_iter_mut().for_each(|v| { v.clear(); v.shrink_to_fit(); });
         } else {
-            for v in &mut self.outgoing {
-                v.clear();
-                v.shrink_to_fit();
-            }
-            for v in &mut self.incoming {
-                v.clear();
-                v.shrink_to_fit();
-            }
+            for v in &mut self.outgoing { v.clear(); v.shrink_to_fit(); }
+            for v in &mut self.incoming { v.clear(); v.shrink_to_fit(); }
         }
         self.buffer_edge_count = 0;
 
         let frozen_edge_count = self.frozen_outgoing.edge_count();
         eprintln!(
             "[compact] Frozen: {} edges ({} segments, {} nodes). Buffer: 0 edges.",
-            frozen_edge_count,
-            self.frozen_outgoing.segments.len(),
-            self.frozen_outgoing.node_capacity()
+            frozen_edge_count, self.frozen_outgoing.segments.len(), self.frozen_outgoing.node_capacity()
         );
     }
 
@@ -6392,7 +5944,9 @@ impl GraphStore {
         if last_write < v {
             return true;
         }
-        !history.is_some_and(|h| h.undo.iter().rev().take_while(|e| e.at() == v).any(same))
+        !history.is_some_and(|h| {
+            h.undo.iter().rev().take_while(|e| e.at() == v).any(same)
+        })
     }
 
     fn push_node_undo(&mut self, id: NodeId, entry: NodeUndo) {
@@ -6408,13 +5962,7 @@ impl GraphStore {
         self.admission_births.0 += 1;
         if self.current_version > 1 {
             let born = Some(self.current_version);
-            self.node_history.insert(
-                id,
-                NodeHistory {
-                    born,
-                    ..NodeHistory::default()
-                },
-            );
+            self.node_history.insert(id, NodeHistory { born, ..NodeHistory::default() });
         } else if !self.node_history.is_empty() {
             self.node_history.remove(&id);
         }
@@ -6438,10 +5986,7 @@ impl GraphStore {
         }
         self.current_version += 1;
         let version = self.current_version;
-        self.session_txn = Some(SessionTxn {
-            version,
-            ..SessionTxn::default()
-        });
+        self.session_txn = Some(SessionTxn { version, ..SessionTxn::default() });
         Ok(version)
     }
 
@@ -6465,10 +6010,7 @@ impl GraphStore {
 
     /// COMMIT: keep everything the transaction wrote and stop recording.
     pub fn commit_session_transaction(&mut self) -> GraphResult<u64> {
-        let txn = self
-            .session_txn
-            .take()
-            .ok_or(GraphError::TransactionNotFound(0))?;
+        let txn = self.session_txn.take().ok_or(GraphError::TransactionNotFound(0))?;
         Ok(txn.version)
     }
 
@@ -6517,10 +6059,7 @@ impl GraphStore {
     /// step, then whatever it created. The history it wrote goes with it, and
     /// so does the version.
     pub fn rollback_session_transaction(&mut self) -> GraphResult<()> {
-        let txn = self
-            .session_txn
-            .take()
-            .ok_or(GraphError::TransactionNotFound(0))?;
+        let txn = self.session_txn.take().ok_or(GraphError::TransactionNotFound(0))?;
         self.bump_epoch();
         let version = txn.version;
 
@@ -6560,16 +6099,11 @@ impl GraphStore {
             for (key, value) in properties {
                 self.edge_columns.set_property(idx, &key, value);
             }
-            let src_labels: Vec<Label> = self
-                .get_node(source)
-                .map(|n| n.labels.iter().cloned().collect())
-                .unwrap_or_default();
-            let tgt_labels: Vec<Label> = self
-                .get_node(target)
-                .map(|n| n.labels.iter().cloned().collect())
-                .unwrap_or_default();
-            self.catalog
-                .on_edge_created(source, &src_labels, &edge_type, target, &tgt_labels);
+            let src_labels: Vec<Label> =
+                self.get_node(source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+            let tgt_labels: Vec<Label> =
+                self.get_node(target).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
+            self.catalog.on_edge_created(source, &src_labels, &edge_type, target, &tgt_labels);
             self.free_edge_ids.retain(|&free| free != id.as_u64());
         }
 
@@ -6578,35 +6112,21 @@ impl GraphStore {
         let nodes: Vec<NodeId> = self.node_history.keys().copied().collect();
         for id in nodes {
             let entries: Vec<NodeUndo> = match self.node_history.get(&id) {
-                Some(history) => history
-                    .undo
-                    .iter()
-                    .rev()
-                    .take_while(|e| e.at() == version)
-                    .cloned()
-                    .collect(),
+                Some(history) => {
+                    history.undo.iter().rev().take_while(|e| e.at() == version).cloned().collect()
+                }
                 None => continue,
             };
             for entry in entries {
                 match entry {
-                    NodeUndo::Property {
-                        key,
-                        old: Some(value),
-                        ..
-                    } => {
+                    NodeUndo::Property { key, old: Some(value), .. } => {
                         let _ = self.set_node_property("default", id, key, value);
                     }
-                    NodeUndo::Property { key, old: None, .. } => {
-                        self.remove_node_property(id, &key)
-                    }
-                    NodeUndo::Label {
-                        label, had: true, ..
-                    } => {
+                    NodeUndo::Property { key, old: None, .. } => self.remove_node_property(id, &key),
+                    NodeUndo::Label { label, had: true, .. } => {
                         let _ = self.add_label_to_node_inner("default", id, label, false);
                     }
-                    NodeUndo::Label {
-                        label, had: false, ..
-                    } => {
+                    NodeUndo::Label { label, had: false, .. } => {
                         let _ = self.remove_label_from_node(id, &label);
                     }
                 }
@@ -6615,28 +6135,19 @@ impl GraphStore {
         let edges: Vec<EdgeId> = self.edge_history.keys().copied().collect();
         for id in edges {
             let entries: Vec<EdgeUndo> = match self.edge_history.get(&id) {
-                Some(history) => history
-                    .undo
-                    .iter()
-                    .rev()
-                    .take_while(|e| e.at() == version)
-                    .cloned()
-                    .collect(),
+                Some(history) => {
+                    history.undo.iter().rev().take_while(|e| e.at() == version).cloned().collect()
+                }
                 None => continue,
             };
             for entry in entries {
                 match entry {
-                    EdgeUndo::Property {
-                        key,
-                        old: Some(value),
-                        ..
-                    } => self.set_edge_property_sparse(id, key, value),
-                    EdgeUndo::Property { key, old: None, .. } => {
-                        self.remove_edge_property(id, &key)
+                    EdgeUndo::Property { key, old: Some(value), .. } => {
+                        self.set_edge_property_sparse(id, key, value)
                     }
+                    EdgeUndo::Property { key, old: None, .. } => self.remove_edge_property(id, &key),
                     EdgeUndo::Map { old, .. } => {
-                        let now: Vec<String> =
-                            self.edge_properties_merged(id).into_keys().collect();
+                        let now: Vec<String> = self.edge_properties_merged(id).into_keys().collect();
                         for key in now {
                             if !old.contains_key(&key) {
                                 self.remove_edge_property(id, &key);
@@ -6672,13 +6183,11 @@ impl GraphStore {
         for history in self.node_history.values_mut() {
             history.undo.retain(|e| e.at() != version);
         }
-        self.node_history
-            .retain(|_, h| h.born.is_some() || !h.undo.is_empty());
+        self.node_history.retain(|_, h| h.born.is_some() || !h.undo.is_empty());
         for history in self.edge_history.values_mut() {
             history.undo.retain(|e| e.at() != version);
         }
-        self.edge_history
-            .retain(|_, h| h.born.is_some() || !h.undo.is_empty());
+        self.edge_history.retain(|_, h| h.born.is_some() || !h.undo.is_empty());
 
         self.current_version = version - 1;
         Ok(())
@@ -6802,15 +6311,9 @@ impl GraphStore {
         if !created_here && self.get_node(node_id).is_none() {
             return Err(GraphError::NodeNotFound(node_id));
         }
-        let txn = self
-            .active_transactions
-            .get_mut(&txn_id)
-            .expect("checked above");
+        let txn = self.active_transactions.get_mut(&txn_id).expect("checked above");
         let value = (!matches!(value, PropertyValue::Null)).then_some(value);
-        txn.node_writes
-            .entry(node_id)
-            .or_default()
-            .insert(key, value);
+        txn.node_writes.entry(node_id).or_default().insert(key, value);
         txn.node_write_set.insert(node_id);
         Ok(())
     }
@@ -6825,12 +6328,8 @@ impl GraphStore {
     ) -> GraphResult<NodeId> {
         self.active_txn(txn_id)?;
         let node_id = self.allocate_node_id();
-        let txn = self
-            .active_transactions
-            .get_mut(&txn_id)
-            .expect("checked above");
-        txn.created_nodes
-            .push((node_id, labels.into_iter().collect()));
+        let txn = self.active_transactions.get_mut(&txn_id).expect("checked above");
+        txn.created_nodes.push((node_id, labels.into_iter().collect()));
         txn.node_write_set.insert(node_id);
         Ok(node_id)
     }
@@ -6893,9 +6392,7 @@ impl GraphStore {
     /// by another transaction after this transaction started. If so, abort.
     pub fn commit_transaction(&mut self, txn_id: TxnId) -> GraphResult<u64> {
         self.bump_epoch();
-        let txn = self
-            .active_transactions
-            .get(&txn_id)
+        let txn = self.active_transactions.get(&txn_id)
             .ok_or_else(|| GraphError::TransactionNotFound(txn_id))?
             .clone();
 
@@ -6935,10 +6432,7 @@ impl GraphStore {
         let commit_version = self.current_version;
 
         let (created, writes) = match self.active_transactions.get_mut(&txn_id) {
-            Some(t) => (
-                std::mem::take(&mut t.created_nodes),
-                std::mem::take(&mut t.node_writes),
-            ),
+            Some(t) => (std::mem::take(&mut t.created_nodes), std::mem::take(&mut t.node_writes)),
             None => (Vec::new(), HashMap::new()),
         };
         if let Err(e) = self.apply_txn_writes(created, writes) {
@@ -6969,9 +6463,7 @@ impl GraphStore {
     /// dropping the buffer undoes them, and the ids reserved for nodes it
     /// created go back to the free list (#1200 step 4).
     pub fn abort_transaction(&mut self, txn_id: TxnId) -> GraphResult<()> {
-        let txn = self
-            .active_transactions
-            .get_mut(&txn_id)
+        let txn = self.active_transactions.get_mut(&txn_id)
             .ok_or_else(|| GraphError::TransactionNotFound(txn_id))?;
 
         if txn.status != TxnStatus::Active {
@@ -6981,8 +6473,7 @@ impl GraphStore {
         txn.status = TxnStatus::Aborted;
         txn.node_writes.clear();
         let reserved = std::mem::take(&mut txn.created_nodes);
-        self.free_node_ids
-            .extend(reserved.into_iter().map(|(id, _)| id.as_u64()));
+        self.free_node_ids.extend(reserved.into_iter().map(|(id, _)| id.as_u64()));
         Ok(())
     }
 
@@ -7018,8 +6509,7 @@ impl GraphStore {
                 history.born = None;
             }
         }
-        self.node_history
-            .retain(|_, h| h.born.is_some() || !h.undo.is_empty());
+        self.node_history.retain(|_, h| h.born.is_some() || !h.undo.is_empty());
 
         // Relationship history, by the same rule (#1200 step 5).
         for history in self.edge_history.values_mut() {
@@ -7033,12 +6523,12 @@ impl GraphStore {
                 history.born = None;
             }
         }
-        self.edge_history
-            .retain(|_, h| h.born.is_some() || !h.undo.is_empty());
+        self.edge_history.retain(|_, h| h.born.is_some() || !h.undo.is_empty());
 
         // Clean up completed/aborted transactions older than min_version
-        self.active_transactions
-            .retain(|_, txn| txn.status == TxnStatus::Active || txn.start_version >= min_version);
+        self.active_transactions.retain(|_, txn| {
+            txn.status == TxnStatus::Active || txn.start_version >= min_version
+        });
 
         (nodes_pruned, edges_pruned)
     }
@@ -7047,8 +6537,7 @@ impl GraphStore {
     /// Versions below this watermark are safe to garbage-collect.
     /// Returns `current_version` if no active transactions exist.
     pub fn gc_watermark(&self) -> u64 {
-        self.active_transactions
-            .values()
+        self.active_transactions.values()
             .filter(|txn| txn.status == TxnStatus::Active)
             .map(|txn| txn.start_version)
             .min()
@@ -7167,15 +6656,13 @@ impl GraphStore {
             }
         }
         for label in labels {
-            self.property_index
-                .index_insert(label, key, new_value.clone(), id);
+            self.property_index.index_insert(label, key, new_value.clone(), id);
         }
         // Point indexes on the same choke point (#1618): a value that is not
         // a point removes the node from the index.
         if !self.point_index.is_empty() {
             for label in labels {
-                self.point_index
-                    .on_property_set(label.as_str(), key, id, Some(new_value));
+                self.point_index.on_property_set(label.as_str(), key, id, Some(new_value));
             }
         }
         // Full-text maintenance on the same choke point as the property
@@ -7247,29 +6734,21 @@ impl GraphStore {
                 property,
             })
             .collect();
-        definitions.extend(self.property_index.list_constraints().into_iter().map(
-            |(label, property)| IndexDefinition::UniqueConstraint {
-                label: label.as_str().to_string(),
-                property,
-            },
-        ));
         definitions.extend(
-            self.fulltext
-                .listing()
+            self.property_index
+                .list_constraints()
                 .into_iter()
-                .map(|(name, label, property)| IndexDefinition::FullText {
-                    name,
-                    label,
+                .map(|(label, property)| IndexDefinition::UniqueConstraint {
+                    label: label.as_str().to_string(),
                     property,
                 }),
         );
+        definitions.extend(self.fulltext.listing().into_iter().map(
+            |(name, label, property)| IndexDefinition::FullText { name, label, property },
+        ));
         definitions.extend(self.vector_index.definitions());
         definitions.extend(self.point_index.listing().into_iter().map(
-            |(name, label, property)| IndexDefinition::Point {
-                name,
-                label,
-                property,
-            },
+            |(name, label, property)| IndexDefinition::Point { name, label, property },
         ));
         // Sorted so two runs of the same DDL produce byte-identical records and
         // a diff of the catalog is a diff of the indexes, not of hash order.
@@ -7280,27 +6759,18 @@ impl GraphStore {
             IndexDefinition::UniqueConstraint { label, property } => {
                 (1u8, label.clone(), property.clone(), String::new())
             }
-            IndexDefinition::FullText {
-                name,
-                label,
-                property,
-            } => (2u8, label.clone(), property.clone(), name.clone()),
-            IndexDefinition::Vector {
-                name,
-                label,
-                property,
-                ..
-            } => (
+            IndexDefinition::FullText { name, label, property } => {
+                (2u8, label.clone(), property.clone(), name.clone())
+            }
+            IndexDefinition::Vector { name, label, property, .. } => (
                 3u8,
                 label.clone(),
                 property.clone(),
                 name.clone().unwrap_or_default(),
             ),
-            IndexDefinition::Point {
-                name,
-                label,
-                property,
-            } => (4u8, label.clone(), property.clone(), name.clone()),
+            IndexDefinition::Point { name, label, property } => {
+                (4u8, label.clone(), property.clone(), name.clone())
+            }
         });
         IndexCatalog { definitions }
     }
@@ -7340,8 +6810,7 @@ impl GraphStore {
         }
         let filled = entries.len();
         for (node_id, val) in entries {
-            self.property_index
-                .index_insert(label, property, val, node_id);
+            self.property_index.index_insert(label, property, val, node_id);
         }
         filled
     }
@@ -7388,8 +6857,7 @@ impl GraphStore {
                 .constraint_insert(label, property, val.clone(), node_id);
             // `create_unique_constraint` also creates the plain index; fill it
             // too, or the constraint is enforced and the predicate still scans.
-            self.property_index
-                .index_insert(label, property, val, node_id);
+            self.property_index.index_insert(label, property, val, node_id);
         }
         Ok(filled)
     }
@@ -7494,27 +6962,17 @@ impl GraphStore {
                             // nothing: a constraint restored over data that
                             // breaks it would reject the next legal write and
                             // accept nothing about the duplicates already in.
-                            tracing::warn!(
-                                "could not restore unique constraint on {label}.{property}: {e}"
-                            );
+                            tracing::warn!("could not restore unique constraint on {label}.{property}: {e}");
                             report.failed += 1;
                         }
                     }
                 }
-                IndexDefinition::FullText {
-                    name,
-                    label,
-                    property,
-                } => {
+                IndexDefinition::FullText { name, label, property } => {
                     // Declares and backfills in one call.
                     self.create_fulltext_index(name, label, property);
                     report.fulltext += 1;
                 }
-                IndexDefinition::Point {
-                    name,
-                    label,
-                    property,
-                } => {
+                IndexDefinition::Point { name, label, property } => {
                     self.create_point_index(name, label, property);
                     report.point += 1;
                 }
@@ -7538,7 +6996,9 @@ impl GraphStore {
                         any_vector = true;
                     }
                     Err(e) => {
-                        tracing::warn!("could not restore vector index on {label}.{property}: {e}");
+                        tracing::warn!(
+                            "could not restore vector index on {label}.{property}: {e}"
+                        );
                         report.failed += 1;
                     }
                 },
@@ -7599,12 +7059,7 @@ impl GraphStore {
         let points: Vec<(NodeId, PropertyValue)> = self
             .node_ids_by_label(&Label::new(label), None)
             .into_iter()
-            .filter_map(|id| {
-                self.node_properties_merged(id)
-                    .get(property)
-                    .cloned()
-                    .map(|v| (id, v))
-            })
+            .filter_map(|id| self.node_properties_merged(id).get(property).cloned().map(|v| (id, v)))
             .collect();
         self.point_index.rebuild(name, points)
     }
@@ -7627,19 +7082,10 @@ impl GraphStore {
         dropped
     }
 
-    pub fn handle_index_event(
-        &self,
-        event: crate::graph::event::IndexEvent,
-        _tenant_manager: Option<Arc<crate::persistence::TenantManager>>,
-    ) {
+    pub fn handle_index_event(&self, event: crate::graph::event::IndexEvent, _tenant_manager: Option<Arc<crate::persistence::TenantManager>>) {
         use crate::graph::event::IndexEvent::*;
         match event {
-            NodeCreated {
-                tenant_id: _,
-                id,
-                labels,
-                properties,
-            } => {
+            NodeCreated { tenant_id: _, id, labels, properties } => {
                 for (key, value) in properties {
                     if let Some(vec) = value.to_vector() {
                         for label in &labels {
@@ -7647,39 +7093,25 @@ impl GraphStore {
                         }
                     }
                     for label in &labels {
-                        self.property_index
-                            .index_insert(label, &key, value.clone(), id);
+                        self.property_index.index_insert(label, &key, value.clone(), id);
                     }
                 }
             }
-            NodeDeleted {
-                tenant_id: _,
-                id,
-                labels,
-                properties,
-            } => {
+            NodeDeleted { tenant_id: _, id, labels, properties } => {
                 for (key, value) in properties {
                     for label in &labels {
                         self.property_index.index_remove(label, &key, &value, id);
                     }
                 }
             }
-            PropertySet {
-                tenant_id: _,
-                id,
-                labels,
-                key,
-                old_value,
-                new_value,
-            } => {
+            PropertySet { tenant_id: _, id, labels, key, old_value, new_value } => {
                 if let Some(old) = old_value {
                     for label in &labels {
                         self.property_index.index_remove(label, &key, &old, id);
                     }
                 }
                 for label in &labels {
-                    self.property_index
-                        .index_insert(label, &key, new_value.clone(), id);
+                    self.property_index.index_insert(label, &key, new_value.clone(), id);
                 }
                 if let Some(vec) = new_value.to_vector() {
                     for label in &labels {
@@ -7687,18 +7119,12 @@ impl GraphStore {
                     }
                 }
             }
-            LabelAdded {
-                tenant_id: _,
-                id,
-                label,
-                properties,
-            } => {
+            LabelAdded { tenant_id: _, id, label, properties } => {
                 for (key, value) in properties {
                     if let Some(vec) = value.to_vector() {
                         let _ = self.vector_index.add_vector(label.as_str(), &key, id, &vec);
                     }
-                    self.property_index
-                        .index_insert(&label, &key, value.clone(), id);
+                    self.property_index.index_insert(&label, &key, value.clone(), id);
                 }
             }
         }
@@ -7716,8 +7142,7 @@ impl GraphStore {
         dimensions: usize,
         metric: DistanceMetric,
     ) -> VectorResult<()> {
-        self.vector_index
-            .create_index(label, property_key, dimensions, metric)?;
+        self.vector_index.create_index(label, property_key, dimensions, metric)?;
         self.mark_index_catalog_changed();
         Ok(())
     }
@@ -7732,14 +7157,8 @@ impl GraphStore {
         metric: DistanceMetric,
         quantization: crate::vector::index::Quantization,
     ) -> VectorResult<()> {
-        self.vector_index.create_index_named(
-            name,
-            label,
-            property_key,
-            dimensions,
-            metric,
-            quantization,
-        )?;
+        self.vector_index
+            .create_index_named(name, label, property_key, dimensions, metric, quantization)?;
         self.mark_index_catalog_changed();
         Ok(())
     }
@@ -7855,9 +7274,7 @@ impl GraphStore {
         if !self.has_edge(id) {
             return None;
         }
-        self.edge_properties
-            .get(&id)
-            .and_then(|props| props.get(key).cloned())
+        self.edge_properties.get(&id).and_then(|props| props.get(key).cloned())
     }
 
     pub fn node_property(&self, id: NodeId, key: &str) -> Option<PropertyValue> {
@@ -7954,24 +7371,21 @@ impl GraphStore {
         // Update adjacency lists (sorted insert)
         {
             let out_list = &mut self.outgoing[source.as_u64() as usize];
-            let pos = out_list
-                .binary_search_by_key(&target, |(nid, _)| *nid)
+            let pos = out_list.binary_search_by_key(&target, |(nid, _)| *nid)
                 .unwrap_or_else(|p| p);
             out_list.insert(pos, (target, edge_id));
         }
         self.buffer_edge_count += 1;
         {
             let in_list = &mut self.incoming[target.as_u64() as usize];
-            let pos = in_list
-                .binary_search_by_key(&source, |(nid, _)| *nid)
+            let pos = in_list.binary_search_by_key(&source, |(nid, _)| *nid)
                 .unwrap_or_else(|p| p);
             in_list.insert(pos, (source, edge_id));
         }
 
         // DS-07c: populate endpoints + compact type + properties
         if idx >= self.edge_endpoints.len() {
-            self.edge_endpoints
-                .resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
+            self.edge_endpoints.resize(idx + 1, (NodeId::new(0), NodeId::new(0)));
         }
         self.edge_endpoints[idx] = (source, target);
         let type_id = self.intern_edge_type(&edge.edge_type);
@@ -8048,12 +7462,7 @@ fn spawn_auto_embed(
         let pipeline = match crate::embed::EmbedPipeline::new(config) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(
-                    "auto-embed: pipeline unavailable for {}.{}: {}",
-                    label,
-                    target_key,
-                    e
-                );
+                tracing::warn!("auto-embed: pipeline unavailable for {}.{}: {}", label, target_key, e);
                 return;
             }
         };
@@ -8066,12 +7475,7 @@ fn spawn_auto_embed(
                 None => return,
             },
             Err(e) => {
-                tracing::warn!(
-                    "auto-embed: embedding failed for {}.{}: {}",
-                    label,
-                    target_key,
-                    e
-                );
+                tracing::warn!("auto-embed: embedding failed for {}.{}: {}", label, target_key, e);
                 return;
             }
         };
@@ -8086,20 +7490,14 @@ fn spawn_auto_embed(
                 Ok(()) => return,
                 Err(e) => tracing::warn!(
                     "auto-embed: could not store {}.{} on node {}: {}",
-                    label,
-                    target_key,
-                    id.as_u64(),
-                    e
+                    label, target_key, id.as_u64(), e
                 ),
             }
         }
         if let Err(e) = vector_index.add_vector(&label, &target_key, id, &embedding) {
             tracing::warn!(
                 "auto-embed: could not index {}.{} for node {}: {}",
-                label,
-                target_key,
-                id.as_u64(),
-                e
+                label, target_key, id.as_u64(), e
             );
         }
     });
@@ -8115,9 +7513,7 @@ mod tests {
         let mut store = GraphStore::new();
         let types = ["KNOWS", "WORKS_AT", "LIVES_IN", "RATED", "TAGGED"];
         let n = 20_000usize;
-        let ids: Vec<_> = (0..n)
-            .map(|i| store.create_node_stub(if i % 2 == 0 { "A" } else { "B" }))
-            .collect();
+        let ids: Vec<_> = (0..n).map(|i| store.create_node_stub(if i % 2 == 0 { "A" } else { "B" })).collect();
         let mut edges = Vec::new();
         for i in 0..n {
             for k in 0..5 {
@@ -8211,76 +7607,52 @@ mod tests {
             ("record_snapshot_sources", "records where the data came from, for the next export's header; no query reads it, and it must not bump: it records the current epoch to tell later writes apart (#1911)"),
         ];
 
-        let src =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/graph/store.rs"))
-                .expect("read own source");
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/src/graph/store.rs"
+        )).expect("read own source");
         let lines: Vec<&str> = src.lines().collect();
 
         // Bounded to the inherent `impl GraphStore` block. A `&mut self` on
         // GraphStatistics or TypeAdjacency is not a store mutation, and the
         // test module's own helpers are past the end of it.
-        let start = lines
-            .iter()
-            .position(|l| l.starts_with("impl GraphStore {"))
+        let start = lines.iter().position(|l| l.starts_with("impl GraphStore {"))
             .expect("inherent impl GraphStore");
-        let end = lines
-            .iter()
-            .enumerate()
+        let end = lines.iter().enumerate()
             .position(|(i, l)| i > start && l.starts_with("impl "))
             .expect("a later impl block closes it");
 
-        struct Fun {
-            name: String,
-            mutator: bool,
-            body: String,
-        }
+        struct Fun { name: String, mutator: bool, body: String }
         let mut funs: Vec<Fun> = Vec::new();
         let mut i = start;
         while i < end {
             let l = lines[i];
-            if !(l.starts_with("    pub fn ")
-                || l.starts_with("    fn ")
-                || l.starts_with("    pub(crate) fn "))
-            {
+            if !(l.starts_with("    pub fn ") || l.starts_with("    fn ")
+                || l.starts_with("    pub(crate) fn ")) {
                 i += 1;
                 continue;
             }
-            let name = l
-                .rsplit("fn ")
-                .next()
-                .unwrap_or("")
-                .split(['(', '<', ' '])
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let name = l.rsplit("fn ").next().unwrap_or("")
+                .split(['(', '<', ' ']).next().unwrap_or("").to_string();
             // A signature can wrap across lines; read to the opening brace.
             let mut sig = String::new();
             let mut j = i;
             while j < end {
                 sig.push_str(lines[j]);
                 sig.push(' ');
-                if lines[j].contains('{') {
-                    break;
-                }
+                if lines[j].contains('{') { break; }
                 j += 1;
             }
             // Body ends where brace depth returns to zero.
             let (mut depth, mut k, mut body) = (0i32, j, String::new());
             while k < end {
-                depth +=
-                    lines[k].matches('{').count() as i32 - lines[k].matches('}').count() as i32;
+                depth += lines[k].matches('{').count() as i32
+                       - lines[k].matches('}').count() as i32;
                 body.push_str(lines[k]);
                 body.push('\n');
-                if depth <= 0 {
-                    break;
-                }
+                if depth <= 0 { break; }
                 k += 1;
             }
-            funs.push(Fun {
-                name,
-                mutator: sig.contains("&mut self"),
-                body,
-            });
+            funs.push(Fun { name, mutator: sig.contains("&mut self"), body });
             i = k + 1;
         }
 
@@ -8289,33 +7661,20 @@ mod tests {
         // and the list stops meaning "cannot change query results".
         // `bump_epoch_for_housekeeping` moves the epoch too; it only leaves
         // `data_changes` alone (ALGO-05), which is not what this test guards.
-        let mut bumps: std::collections::HashSet<String> = [
-            "bump_epoch",
-            "bump_epoch_for_housekeeping",
-            "invalidate_statistics_cache",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let mut bumps: std::collections::HashSet<String> =
+            ["bump_epoch", "bump_epoch_for_housekeeping", "invalidate_statistics_cache"]
+                .iter().map(|s| s.to_string()).collect();
         loop {
             let mut grew = false;
             for f in &funs {
-                if bumps.contains(&f.name) {
-                    continue;
-                }
+                if bumps.contains(&f.name) { continue; }
                 let calls_bumper = bumps.iter().any(|b| f.body.contains(&format!("self.{b}(")));
-                if calls_bumper {
-                    bumps.insert(f.name.clone());
-                    grew = true;
-                }
+                if calls_bumper { bumps.insert(f.name.clone()); grew = true; }
             }
-            if !grew {
-                break;
-            }
+            if !grew { break; }
         }
 
-        let offenders: Vec<&str> = funs
-            .iter()
+        let offenders: Vec<&str> = funs.iter()
             .filter(|f| f.mutator && !bumps.contains(&f.name))
             .filter(|f| !EXEMPT.iter().any(|(n, _)| *n == f.name))
             .map(|f| f.name.as_str())
@@ -8379,6 +7738,7 @@ mod tests {
         assert_eq!(store.epoch(), settled, "a read moved the epoch");
     }
 
+
     /// The detector detects (#1143).
     ///
     /// Built by writing the edge arrays directly, because **no public API can
@@ -8437,22 +7797,8 @@ mod tests {
 
         let node = store.get_node(node_id).unwrap();
         assert_eq!(node.label_count(), 2);
-        assert_eq!(
-            store
-                .node_property(node.id, "name")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("Alice")
-        );
-        assert_eq!(
-            store
-                .node_property(node.id, "age")
-                .as_ref()
-                .unwrap()
-                .as_integer(),
-            Some(30)
-        );
+        assert_eq!(store.node_property(node.id, "name").as_ref().unwrap().as_string(), Some("Alice"));
+        assert_eq!(store.node_property(node.id, "age").as_ref().unwrap().as_integer(), Some(30));
     }
 
     #[test]
@@ -8622,9 +7968,7 @@ mod tests {
         assert_eq!(store.get_nodes_by_label(&Label::new("Employee")).len(), 0);
 
         // Add "Employee" label using the proper method
-        store
-            .add_label_to_node("default", node_id, "Employee")
-            .unwrap();
+        store.add_label_to_node("default", node_id, "Employee").unwrap();
 
         // Now both labels should be indexed and queryable
         assert_eq!(store.get_nodes_by_label(&Label::new("Person")).len(), 1);
@@ -8648,43 +7992,30 @@ mod tests {
     #[test]
     fn test_mvcc_node_versioning() {
         let mut store = GraphStore::new();
-
+        
         // Version 1: Create node
         let node_id = store.create_node("Person");
-        store
-            .set_node_property("default", node_id, "name", "Alice")
-            .unwrap();
-
+        store.set_node_property("default", node_id, "name", "Alice").unwrap();
+        
         // Check version 1
         let v1_node = store.get_node_at_version(node_id, 1).unwrap();
         assert_eq!(v1_node.version, 1);
-        assert_eq!(
-            v1_node.get_property("name").unwrap().as_string(),
-            Some("Alice")
-        );
+        assert_eq!(v1_node.get_property("name").unwrap().as_string(), Some("Alice"));
 
         // Version 2: Update property (creates new version)
         store.current_version = 2;
-        store
-            .set_node_property("default", node_id, "name", "Alice Cooper")
-            .unwrap();
+        store.set_node_property("default", node_id, "name", "Alice Cooper").unwrap();
 
         // Check version 2
         let v2_node = store.get_node_at_version(node_id, 2).unwrap();
         assert_eq!(v2_node.version, 2);
-        assert_eq!(
-            v2_node.get_property("name").unwrap().as_string(),
-            Some("Alice Cooper")
-        );
+        assert_eq!(v2_node.get_property("name").unwrap().as_string(), Some("Alice Cooper"));
 
         // Historical read (Version 1 should still be Alice)
         let v1_lookup = store.get_node_at_version(node_id, 1).unwrap();
         assert_eq!(v1_lookup.version, 1);
-        assert_eq!(
-            v1_lookup.get_property("name").unwrap().as_string(),
-            Some("Alice")
-        );
-
+        assert_eq!(v1_lookup.get_property("name").unwrap().as_string(), Some("Alice"));
+        
         let node = store.get_node(node_id).unwrap();
         assert_eq!(node.version, 2); // Should be latest version
     }
@@ -8694,11 +8025,11 @@ mod tests {
         let mut store = GraphStore::new();
         // Default capacity is 1024. Let's force a resize.
         // We can't easily peek capacity, but we can add > 1024 nodes.
-
+        
         for _ in 0..1100 {
             store.create_node("Item");
         }
-
+        
         assert_eq!(store.node_count(), 1100);
         let last_id = NodeId::new(1100);
         assert!(store.has_node(last_id));
@@ -8761,10 +8092,7 @@ mod tests {
         let id = store.create_node("Person");
         {
             let node = store.get_node_mut(id).unwrap();
-            node.set_property(
-                "name".to_string(),
-                PropertyValue::String("Alice".to_string()),
-            );
+            node.set_property("name".to_string(), PropertyValue::String("Alice".to_string()));
         }
         let node = store.get_node(id).unwrap();
         assert_eq!(
@@ -8789,9 +8117,7 @@ mod tests {
     fn test_set_node_property() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", id, "age", PropertyValue::Integer(30)).unwrap();
         let node = store.get_node(id).unwrap();
         assert_eq!(
             store.node_property(node.id, "age").as_ref(),
@@ -8799,9 +8125,7 @@ mod tests {
         );
 
         // Update existing property
-        store
-            .set_node_property("default", id, "age", PropertyValue::Integer(31))
-            .unwrap();
+        store.set_node_property("default", id, "age", PropertyValue::Integer(31)).unwrap();
         let node = store.get_node(id).unwrap();
         assert_eq!(
             store.node_property(node.id, "age").as_ref(),
@@ -8809,8 +8133,7 @@ mod tests {
         );
 
         // Non-existent node
-        let result =
-            store.set_node_property("default", NodeId::new(9999), "x", PropertyValue::Null);
+        let result = store.set_node_property("default", NodeId::new(9999), "x", PropertyValue::Null);
         assert!(result.is_err());
     }
 
@@ -8824,20 +8147,12 @@ mod tests {
         props.insert("since".to_string(), PropertyValue::Integer(2020));
         props.insert("weight".to_string(), PropertyValue::Float(0.8));
 
-        let eid = store
-            .create_edge_with_properties(a, b, "KNOWS", props)
-            .unwrap();
+        let eid = store.create_edge_with_properties(a, b, "KNOWS", props).unwrap();
         let edge = store.get_edge(eid).unwrap();
         assert_eq!(edge.source, a);
         assert_eq!(edge.target, b);
-        assert_eq!(
-            edge.get_property("since"),
-            Some(&PropertyValue::Integer(2020))
-        );
-        assert_eq!(
-            edge.get_property("weight"),
-            Some(&PropertyValue::Float(0.8))
-        );
+        assert_eq!(edge.get_property("since"), Some(&PropertyValue::Integer(2020)));
+        assert_eq!(edge.get_property("weight"), Some(&PropertyValue::Float(0.8)));
     }
 
     #[test]
@@ -8884,10 +8199,7 @@ mod tests {
             props.insert("weight".to_string(), PropertyValue::Float(1.5));
         }
         let edge = store.get_edge(eid).unwrap();
-        assert_eq!(
-            edge.get_property("weight"),
-            Some(&PropertyValue::Float(1.5))
-        );
+        assert_eq!(edge.get_property("weight"), Some(&PropertyValue::Float(1.5)));
 
         assert!(store.get_edge_properties_mut(EdgeId::new(9999)).is_none());
     }
@@ -8963,18 +8275,9 @@ mod tests {
         let a = store.create_node("Person");
         let b = store.create_node("Person");
         let c = store.create_node("Company");
-        store.get_node_mut(a).unwrap().set_property(
-            "name".to_string(),
-            PropertyValue::String("Alice".to_string()),
-        );
-        store
-            .get_node_mut(b)
-            .unwrap()
-            .set_property("name".to_string(), PropertyValue::String("Bob".to_string()));
-        store.get_node_mut(c).unwrap().set_property(
-            "name".to_string(),
-            PropertyValue::String("Acme".to_string()),
-        );
+        store.get_node_mut(a).unwrap().set_property("name".to_string(), PropertyValue::String("Alice".to_string()));
+        store.get_node_mut(b).unwrap().set_property("name".to_string(), PropertyValue::String("Bob".to_string()));
+        store.get_node_mut(c).unwrap().set_property("name".to_string(), PropertyValue::String("Acme".to_string()));
         store.create_edge(a, b, "KNOWS").unwrap();
         store.create_edge(a, c, "WORKS_AT").unwrap();
 
@@ -8983,22 +8286,11 @@ mod tests {
         assert_eq!(stats.total_edges, 2);
         assert_eq!(*stats.label_counts.get(&Label::new("Person")).unwrap(), 2);
         assert_eq!(*stats.label_counts.get(&Label::new("Company")).unwrap(), 1);
-        assert_eq!(
-            *stats.edge_type_counts.get(&EdgeType::new("KNOWS")).unwrap(),
-            1
-        );
-        assert_eq!(
-            *stats
-                .edge_type_counts
-                .get(&EdgeType::new("WORKS_AT"))
-                .unwrap(),
-            1
-        );
+        assert_eq!(*stats.edge_type_counts.get(&EdgeType::new("KNOWS")).unwrap(), 1);
+        assert_eq!(*stats.edge_type_counts.get(&EdgeType::new("WORKS_AT")).unwrap(), 1);
         assert!(stats.avg_out_degree > 0.0);
         // Property stats should exist for Person.name
-        let person_name_stats = stats
-            .property_stats
-            .get(&(Label::new("Person"), "name".to_string()));
+        let person_name_stats = stats.property_stats.get(&(Label::new("Person"), "name".to_string()));
         assert!(person_name_stats.is_some());
         let ps = person_name_stats.unwrap();
         assert_eq!(ps.null_fraction, 0.0); // All Person nodes have "name"
@@ -9174,14 +8466,9 @@ mod tests {
         // Edge with properties
         let mut props = PropertyMap::new();
         props.insert("weight".into(), PropertyValue::Float(0.5));
-        let e2 = store
-            .create_edge_with_properties(a, b, "WEIGHTED", props)
-            .unwrap();
+        let e2 = store.create_edge_with_properties(a, b, "WEIGHTED", props).unwrap();
         // The column holds it; the row keeps no copy (#545, #1200 step 5).
-        assert_eq!(
-            store.edge_property(e2, "weight"),
-            Some(PropertyValue::Float(0.5))
-        );
+        assert_eq!(store.edge_property(e2, "weight"), Some(PropertyValue::Float(0.5)));
         assert!(store.get_edge_properties(e2).is_none_or(|p| p.is_empty()));
     }
 
@@ -9193,20 +8480,11 @@ mod tests {
         let eid = store.create_edge(a, b, "R").unwrap();
         store.set_edge_properties_sparse(
             eid,
-            [
-                ("w", PropertyValue::Float(2.5)),
-                ("k", PropertyValue::Integer(7)),
-            ],
+            [("w", PropertyValue::Float(2.5)), ("k", PropertyValue::Integer(7))],
         );
         let idx = eid.as_u64() as usize;
-        assert_eq!(
-            store.edge_columns.get_property(idx, "w"),
-            PropertyValue::Float(2.5)
-        );
-        assert_eq!(
-            store.edge_property(eid, "k"),
-            Some(PropertyValue::Integer(7))
-        );
+        assert_eq!(store.edge_columns.get_property(idx, "w"), PropertyValue::Float(2.5));
+        assert_eq!(store.edge_property(eid, "k"), Some(PropertyValue::Integer(7)));
         assert!(
             store.get_edge_properties(eid).is_none_or(|p| p.is_empty()),
             "the row keeps a second copy (#545)"
@@ -9214,10 +8492,7 @@ mod tests {
         store.set_edge_properties_sparse(eid, [("w", PropertyValue::Null)]);
         assert!(store.edge_columns.get_property(idx, "w").is_null());
         assert_eq!(store.edge_property(eid, "w"), None);
-        assert_eq!(
-            store.edge_property(eid, "k"),
-            Some(PropertyValue::Integer(7))
-        );
+        assert_eq!(store.edge_property(eid, "k"), Some(PropertyValue::Integer(7)));
     }
 
     #[test]
@@ -9231,10 +8506,7 @@ mod tests {
             store.edge_columns.get_property(eid.as_u64() as usize, "w"),
             PropertyValue::Float(2.5)
         );
-        assert_eq!(
-            store.edge_property(eid, "w"),
-            Some(PropertyValue::Float(2.5))
-        );
+        assert_eq!(store.edge_property(eid, "w"), Some(PropertyValue::Float(2.5)));
     }
 
     #[test]
@@ -9249,14 +8521,8 @@ mod tests {
 
         // Add property via sparse map
         store.set_edge_property_sparse(eid, "key", PropertyValue::String("val".into()));
-        assert_eq!(
-            store.edge_property(eid, "key"),
-            Some(PropertyValue::String("val".into()))
-        );
-        assert!(
-            store.get_edge_properties(eid).is_none_or(|p| p.is_empty()),
-            "the row keeps a second copy"
-        );
+        assert_eq!(store.edge_property(eid, "key"), Some(PropertyValue::String("val".into())));
+        assert!(store.get_edge_properties(eid).is_none_or(|p| p.is_empty()), "the row keeps a second copy");
     }
 
     #[test]
@@ -9289,17 +8555,11 @@ mod tests {
     #[test]
     fn test_create_vector_index() {
         let store = GraphStore::new();
-        let result = store.create_vector_index(
-            "Person",
-            "embedding",
-            128,
-            crate::vector::DistanceMetric::Cosine,
-        );
+        let result = store.create_vector_index("Person", "embedding", 128, crate::vector::DistanceMetric::Cosine);
         assert!(result.is_ok());
 
         // Creating a second index with different label should also succeed
-        let result2 =
-            store.create_vector_index("Document", "vec", 256, crate::vector::DistanceMetric::L2);
+        let result2 = store.create_vector_index("Document", "vec", 256, crate::vector::DistanceMetric::L2);
         assert!(result2.is_ok());
     }
 
@@ -9307,43 +8567,18 @@ mod tests {
     fn test_set_node_property_updates_in_place() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "name",
-                PropertyValue::String("Alice".to_string()),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "name", PropertyValue::String("Alice".to_string())).unwrap();
 
         // Same version update — in-place
-        store
-            .set_node_property(
-                "default",
-                id,
-                "name",
-                PropertyValue::String("Bob".to_string()),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "name", PropertyValue::String("Bob".to_string())).unwrap();
         let node = store.get_node(id).unwrap();
-        assert_eq!(
-            store.node_property(node.id, "name").as_ref(),
-            Some(&PropertyValue::String("Bob".to_string()))
-        );
+        assert_eq!(store.node_property(node.id, "name").as_ref(), Some(&PropertyValue::String("Bob".to_string())));
 
         // Add another property
-        store
-            .set_node_property("default", id, "age", PropertyValue::Integer(30))
-            .unwrap();
+        store.set_node_property("default", id, "age", PropertyValue::Integer(30)).unwrap();
         let node = store.get_node(id).unwrap();
-        assert_eq!(
-            store.node_property(node.id, "age").as_ref(),
-            Some(&PropertyValue::Integer(30))
-        );
-        assert_eq!(
-            store.node_property(node.id, "name").as_ref(),
-            Some(&PropertyValue::String("Bob".to_string()))
-        );
+        assert_eq!(store.node_property(node.id, "age").as_ref(), Some(&PropertyValue::Integer(30)));
+        assert_eq!(store.node_property(node.id, "name").as_ref(), Some(&PropertyValue::String("Bob".to_string())));
     }
 
     // ========== Coverage Enhancement Tests ==========
@@ -9375,35 +8610,20 @@ mod tests {
     #[test]
     fn test_graph_error_display_invalid_edge_source() {
         let err = GraphError::InvalidEdgeSource(NodeId::new(99));
-        assert_eq!(
-            format!("{}", err),
-            "Invalid edge: source node NodeId(99) does not exist"
-        );
+        assert_eq!(format!("{}", err), "Invalid edge: source node NodeId(99) does not exist");
     }
 
     #[test]
     fn test_graph_error_display_invalid_edge_target() {
         let err = GraphError::InvalidEdgeTarget(NodeId::new(88));
-        assert_eq!(
-            format!("{}", err),
-            "Invalid edge: target node NodeId(88) does not exist"
-        );
+        assert_eq!(format!("{}", err), "Invalid edge: target node NodeId(88) does not exist");
     }
 
     #[test]
     fn test_graph_error_equality() {
-        assert_eq!(
-            GraphError::NodeNotFound(NodeId::new(1)),
-            GraphError::NodeNotFound(NodeId::new(1))
-        );
-        assert_ne!(
-            GraphError::NodeNotFound(NodeId::new(1)),
-            GraphError::NodeNotFound(NodeId::new(2))
-        );
-        assert_ne!(
-            GraphError::NodeNotFound(NodeId::new(1)),
-            GraphError::EdgeNotFound(EdgeId::new(1))
-        );
+        assert_eq!(GraphError::NodeNotFound(NodeId::new(1)), GraphError::NodeNotFound(NodeId::new(1)));
+        assert_ne!(GraphError::NodeNotFound(NodeId::new(1)), GraphError::NodeNotFound(NodeId::new(2)));
+        assert_ne!(GraphError::NodeNotFound(NodeId::new(1)), GraphError::EdgeNotFound(EdgeId::new(1)));
     }
 
     #[test]
@@ -9433,18 +8653,9 @@ mod tests {
         store.create_edge(b, c, "LIKES").unwrap();
 
         let stats = store.compute_statistics();
-        assert_eq!(
-            stats.estimate_expand(Some(&EdgeType::new("KNOWS"))) as usize,
-            2
-        );
-        assert_eq!(
-            stats.estimate_expand(Some(&EdgeType::new("LIKES"))) as usize,
-            1
-        );
-        assert_eq!(
-            stats.estimate_expand(Some(&EdgeType::new("NOPE"))) as usize,
-            0
-        );
+        assert_eq!(stats.estimate_expand(Some(&EdgeType::new("KNOWS"))) as usize, 2);
+        assert_eq!(stats.estimate_expand(Some(&EdgeType::new("LIKES"))) as usize, 1);
+        assert_eq!(stats.estimate_expand(Some(&EdgeType::new("NOPE"))) as usize, 0);
         // None means all edges
         assert_eq!(stats.estimate_expand(None) as usize, 3);
     }
@@ -9464,8 +8675,7 @@ mod tests {
         let sel = stats.estimate_equality_selectivity(&Label::new("Person"), "city");
         assert!((sel - 0.2).abs() < 0.01);
         // Unknown property should return default 0.1
-        let default_sel =
-            stats.estimate_equality_selectivity(&Label::new("Person"), "unknown_prop");
+        let default_sel = stats.estimate_equality_selectivity(&Label::new("Person"), "unknown_prop");
         assert!((default_sel - 0.1).abs() < 0.01);
         // Unknown label should return default 0.1
         let default_sel2 = stats.estimate_equality_selectivity(&Label::new("NotExist"), "city");
@@ -9509,16 +8719,10 @@ mod tests {
         }
         let stats = store.compute_statistics();
         // name should have null_fraction = 0.0 (all 4 have it)
-        let name_stats = stats
-            .property_stats
-            .get(&(Label::new("Person"), "name".to_string()))
-            .unwrap();
+        let name_stats = stats.property_stats.get(&(Label::new("Person"), "name".to_string())).unwrap();
         assert_eq!(name_stats.null_fraction, 0.0);
         // email should have null_fraction = 0.5 (2 out of 4 have it)
-        let email_stats = stats
-            .property_stats
-            .get(&(Label::new("Person"), "email".to_string()))
-            .unwrap();
+        let email_stats = stats.property_stats.get(&(Label::new("Person"), "email".to_string())).unwrap();
         assert!((email_stats.null_fraction - 0.5).abs() < 0.01);
     }
 
@@ -9526,14 +8730,7 @@ mod tests {
     fn test_vector_search_with_data() {
         let mut store = GraphStore::new();
         // Create a 4-dimensional index
-        store
-            .create_vector_index(
-                "Document",
-                "embedding",
-                4,
-                crate::vector::DistanceMetric::Cosine,
-            )
-            .unwrap();
+        store.create_vector_index("Document", "embedding", 4, crate::vector::DistanceMetric::Cosine).unwrap();
 
         // Add some vectors, for nodes that exist and carry the label: search
         // returns no other (#1605).
@@ -9544,23 +8741,12 @@ mod tests {
         let v2 = vec![0.0, 1.0, 0.0, 0.0];
         let v3 = vec![0.9, 0.1, 0.0, 0.0]; // close to v1
 
-        store
-            .vector_index
-            .add_vector("Document", "embedding", n1, &v1)
-            .unwrap();
-        store
-            .vector_index
-            .add_vector("Document", "embedding", n2, &v2)
-            .unwrap();
-        store
-            .vector_index
-            .add_vector("Document", "embedding", n3, &v3)
-            .unwrap();
+        store.vector_index.add_vector("Document", "embedding", n1, &v1).unwrap();
+        store.vector_index.add_vector("Document", "embedding", n2, &v2).unwrap();
+        store.vector_index.add_vector("Document", "embedding", n3, &v3).unwrap();
 
         // Search for vectors similar to v1
-        let results = store
-            .vector_search("Document", "embedding", &[1.0, 0.0, 0.0, 0.0], 2)
-            .unwrap();
+        let results = store.vector_search("Document", "embedding", &[1.0, 0.0, 0.0, 0.0], 2).unwrap();
         assert_eq!(results.len(), 2);
         // n1 should be the closest (exact match)
         assert_eq!(results[0].0, n1);
@@ -9571,14 +8757,8 @@ mod tests {
         let store = GraphStore::new();
         // A search over an index that does not exist is an error that names
         // it, not an empty answer that looks like "nothing matched" (#1660).
-        let err = store
-            .vector_search("NoLabel", "noprop", &[1.0, 2.0], 5)
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("no vector index on :NoLabel(noprop)"),
-            "{err}"
-        );
+        let err = store.vector_search("NoLabel", "noprop", &[1.0, 2.0], 5).unwrap_err();
+        assert!(err.to_string().contains("no vector index on :NoLabel(noprop)"), "{err}");
     }
 
     #[test]
@@ -9586,14 +8766,7 @@ mod tests {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
         let b = store.create_node("Company");
-        store
-            .set_node_property(
-                "default",
-                a,
-                "name",
-                PropertyValue::String("Alice".to_string()),
-            )
-            .unwrap();
+        store.set_node_property("default", a, "name", PropertyValue::String("Alice".to_string())).unwrap();
         let eid = store.create_edge(a, b, "WORKS_AT").unwrap();
 
         // Verify state before clear
@@ -9614,9 +8787,7 @@ mod tests {
         assert!(!store.has_node(a));
         assert!(!store.has_edge(eid));
         assert!(store.get_nodes_by_label(&Label::new("Person")).is_empty());
-        assert!(store
-            .get_edges_by_type(&EdgeType::new("WORKS_AT"))
-            .is_empty());
+        assert!(store.get_edges_by_type(&EdgeType::new("WORKS_AT")).is_empty());
 
         // After clear, creating new nodes should start from ID 1 again
         let new_node = store.create_node("NewLabel");
@@ -9726,10 +8897,7 @@ mod tests {
         assert!(store.has_edge(EdgeId::new(50)));
         assert_eq!(store.get_outgoing_edges(a).len(), 1);
         assert_eq!(store.get_incoming_edges(b).len(), 1);
-        assert_eq!(
-            store.get_edges_by_type(&EdgeType::new("RECOVERED")).len(),
-            1
-        );
+        assert_eq!(store.get_edges_by_type(&EdgeType::new("RECOVERED")).len(), 1);
 
         // Next edge should have ID > 50
         let new_eid = store.create_edge(a, b, "NEW").unwrap();
@@ -9765,40 +8933,20 @@ mod tests {
     fn test_mvcc_cow_versioning() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property(
-                "default",
-                id,
-                "name",
-                PropertyValue::String("Alice".to_string()),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "name", PropertyValue::String("Alice".to_string())).unwrap();
 
         // Bump version to trigger COW
         store.current_version = 2;
-        store
-            .set_node_property(
-                "default",
-                id,
-                "name",
-                PropertyValue::String("Bob".to_string()),
-            )
-            .unwrap();
+        store.set_node_property("default", id, "name", PropertyValue::String("Bob".to_string())).unwrap();
 
         // Latest version should be Bob
         let latest = store.get_node(id).unwrap();
-        assert_eq!(
-            store.node_property(latest.id, "name").as_ref(),
-            Some(&PropertyValue::String("Bob".to_string()))
-        );
+        assert_eq!(store.node_property(latest.id, "name").as_ref(), Some(&PropertyValue::String("Bob".to_string())));
         assert_eq!(latest.version, 2);
 
         // Version 1 should still be Alice
         let v1 = store.get_node_at_version(id, 1).unwrap();
-        assert_eq!(
-            v1.get_property("name"),
-            Some(&PropertyValue::String("Alice".to_string()))
-        );
+        assert_eq!(v1.get_property("name"), Some(&PropertyValue::String("Alice".to_string())));
         assert_eq!(v1.version, 1);
     }
 
@@ -9878,15 +9026,16 @@ mod tests {
     #[test]
     fn test_columnar_storage_integration() {
         let mut store = GraphStore::new();
-        let id = store.create_node_with_properties("default", vec![Label::new("Person")], {
-            let mut props = PropertyMap::new();
-            props.insert(
-                "name".to_string(),
-                PropertyValue::String("Alice".to_string()),
-            );
-            props.insert("age".to_string(), PropertyValue::Integer(30));
-            props
-        });
+        let id = store.create_node_with_properties(
+            "default",
+            vec![Label::new("Person")],
+            {
+                let mut props = PropertyMap::new();
+                props.insert("name".to_string(), PropertyValue::String("Alice".to_string()));
+                props.insert("age".to_string(), PropertyValue::Integer(30));
+                props
+            },
+        );
 
         // Verify columnar storage has the values
         let idx = id.as_u64() as usize;
@@ -9903,9 +9052,7 @@ mod tests {
         let b = store.create_node("B");
         let mut props = std::collections::HashMap::new();
         props.insert("weight".to_string(), PropertyValue::Float(0.75));
-        let eid = store
-            .create_edge_with_properties(a, b, "WEIGHTED", props)
-            .unwrap();
+        let eid = store.create_edge_with_properties(a, b, "WEIGHTED", props).unwrap();
 
         let idx = eid.as_u64() as usize;
         let weight_col = store.edge_columns.get_property(idx, "weight");
@@ -9916,24 +9063,14 @@ mod tests {
     fn test_set_node_property_updates_columnar_storage() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .set_node_property("default", id, "score", PropertyValue::Float(1.0))
-            .unwrap();
+        store.set_node_property("default", id, "score", PropertyValue::Float(1.0)).unwrap();
 
         let idx = id.as_u64() as usize;
-        assert_eq!(
-            store.node_columns.get_property(idx, "score"),
-            PropertyValue::Float(1.0)
-        );
+        assert_eq!(store.node_columns.get_property(idx, "score"), PropertyValue::Float(1.0));
 
         // Update
-        store
-            .set_node_property("default", id, "score", PropertyValue::Float(2.5))
-            .unwrap();
-        assert_eq!(
-            store.node_columns.get_property(idx, "score"),
-            PropertyValue::Float(2.5)
-        );
+        store.set_node_property("default", id, "score", PropertyValue::Float(2.5)).unwrap();
+        assert_eq!(store.node_columns.get_property(idx, "score"), PropertyValue::Float(2.5));
     }
 
     #[test]
@@ -9985,17 +9122,15 @@ mod tests {
         // Create more than 1000 nodes to test sample limiting
         for i in 0..1100 {
             let id = store.create_node("BigLabel");
-            store
-                .get_node_mut(id)
-                .unwrap()
-                .set_property("idx".to_string(), PropertyValue::Integer(i));
+            store.get_node_mut(id).unwrap().set_property(
+                "idx".to_string(),
+                PropertyValue::Integer(i),
+            );
         }
         let stats = store.compute_statistics();
         assert_eq!(stats.total_nodes, 1100);
         // Property stats should exist (sampled from first 1000)
-        let idx_stats = stats
-            .property_stats
-            .get(&(Label::new("BigLabel"), "idx".to_string()));
+        let idx_stats = stats.property_stats.get(&(Label::new("BigLabel"), "idx".to_string()));
         assert!(idx_stats.is_some());
         let ps = idx_stats.unwrap();
         // All sampled nodes have the property => null_fraction = 0
@@ -10092,10 +9227,7 @@ mod tests {
         let n2 = store.create_node("Person");
         let eid = store.create_edge(n1, n2, "KNOWS").unwrap();
 
-        assert_eq!(
-            store.edge_between(n1, n2, Some(&EdgeType::new("KNOWS"))),
-            Some(eid)
-        );
+        assert_eq!(store.edge_between(n1, n2, Some(&EdgeType::new("KNOWS"))), Some(eid));
     }
 
     #[test]
@@ -10104,10 +9236,7 @@ mod tests {
         let n1 = store.create_node("Person");
         let n2 = store.create_node("Person");
 
-        assert_eq!(
-            store.edge_between(n1, n2, Some(&EdgeType::new("KNOWS"))),
-            None
-        );
+        assert_eq!(store.edge_between(n1, n2, Some(&EdgeType::new("KNOWS"))), None);
     }
 
     #[test]
@@ -10117,10 +9246,7 @@ mod tests {
         let n2 = store.create_node("Person");
         store.create_edge(n1, n2, "KNOWS").unwrap();
 
-        assert_eq!(
-            store.edge_between(n1, n2, Some(&EdgeType::new("FOLLOWS"))),
-            None
-        );
+        assert_eq!(store.edge_between(n1, n2, Some(&EdgeType::new("FOLLOWS"))), None);
     }
 
     #[test]
@@ -10142,10 +9268,7 @@ mod tests {
         store.create_edge(n1, n2, "KNOWS").unwrap();
 
         // Reverse direction should NOT find the edge
-        assert_eq!(
-            store.edge_between(n2, n1, Some(&EdgeType::new("KNOWS"))),
-            None
-        );
+        assert_eq!(store.edge_between(n2, n1, Some(&EdgeType::new("KNOWS"))), None);
     }
 
     #[test]
@@ -10189,10 +9312,7 @@ mod tests {
         // Outgoing from n1 should be sorted by target: n2 before n3
         let out = &store.outgoing[n1.as_u64() as usize];
         assert_eq!(out.len(), 2);
-        assert!(
-            out[0].0 <= out[1].0,
-            "outgoing adjacency should be sorted by target NodeId"
-        );
+        assert!(out[0].0 <= out[1].0, "outgoing adjacency should be sorted by target NodeId");
     }
 
     #[test]
@@ -10228,12 +9348,8 @@ mod tests {
         assert_eq!(out[1].0, n2);
 
         // edge_between with binary search should find the right one
-        assert!(store
-            .edge_between(n1, n2, Some(&EdgeType::new("KNOWS")))
-            .is_some());
-        assert!(store
-            .edge_between(n1, n2, Some(&EdgeType::new("FOLLOWS")))
-            .is_some());
+        assert!(store.edge_between(n1, n2, Some(&EdgeType::new("KNOWS"))).is_some());
+        assert!(store.edge_between(n1, n2, Some(&EdgeType::new("FOLLOWS"))).is_some());
     }
 
     #[test]
@@ -10252,19 +9368,14 @@ mod tests {
         // Binary search should find any of them
         for &t in &targets {
             assert!(
-                store
-                    .edge_between(hub, t, Some(&EdgeType::new("LINKS")))
-                    .is_some(),
-                "edge_between should find edge to target {:?}",
-                t
+                store.edge_between(hub, t, Some(&EdgeType::new("LINKS"))).is_some(),
+                "edge_between should find edge to target {:?}", t
             );
         }
 
         // Non-existent target
         let fake = NodeId::new(9999);
-        assert!(store
-            .edge_between(hub, fake, Some(&EdgeType::new("LINKS")))
-            .is_none());
+        assert!(store.edge_between(hub, fake, Some(&EdgeType::new("LINKS"))).is_none());
     }
 
     // ============================
@@ -10357,15 +9468,9 @@ mod tests {
     fn test_compact_edge_targets() {
         let mut store = GraphStore::new();
         let a = store.create_node("Person");
-        store
-            .get_node_mut(a)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Alice".to_string()));
+        store.get_node_mut(a).unwrap().set_property("name", PropertyValue::String("Alice".to_string()));
         let b = store.create_node("Person");
-        store
-            .get_node_mut(b)
-            .unwrap()
-            .set_property("name", PropertyValue::String("Bob".to_string()));
+        store.get_node_mut(b).unwrap().set_property("name", PropertyValue::String("Bob".to_string()));
         store.create_edge(a, b, "KNOWS").unwrap();
 
         store.compact_adjacency();
@@ -10428,10 +9533,7 @@ mod tests {
 
         // After compaction: write buffer should be empty
         let buffer_non_empty: usize = store.outgoing.iter().filter(|v| !v.is_empty()).count();
-        assert_eq!(
-            buffer_non_empty, 0,
-            "Write buffer should be empty after compaction"
-        );
+        assert_eq!(buffer_non_empty, 0, "Write buffer should be empty after compaction");
         assert_eq!(store.frozen_outgoing.edge_count(), 99);
     }
 
@@ -10460,10 +9562,7 @@ mod tests {
         assert_eq!(neighbors.len(), 8);
 
         for w in neighbors.windows(2) {
-            assert!(
-                w[0].0 <= w[1].0,
-                "frozen neighbors must be sorted by NodeId"
-            );
+            assert!(w[0].0 <= w[1].0, "frozen neighbors must be sorted by NodeId");
         }
 
         for &i in &order {
@@ -10527,11 +9626,7 @@ mod tests {
         // ... segment two the lowest, so the concatenation runs [n2, n3, n1].
         let e1 = store.create_edge_stub(a, n1, "R").unwrap();
         store.compact_adjacency();
-        assert_eq!(
-            store.frozen_outgoing.segments.len(),
-            2,
-            "two segments is the premise"
-        );
+        assert_eq!(store.frozen_outgoing.segments.len(), 2, "two segments is the premise");
 
         // Every edge is still reachable by walking adjacency ...
         let mut walked = Vec::new();
@@ -10545,10 +9640,7 @@ mod tests {
             Some(e1),
             "edge_between missed an edge the adjacency walk finds"
         );
-        assert_eq!(
-            store.edges_between(a, n1, Some(&EdgeType::new("R"))),
-            vec![e1]
-        );
+        assert_eq!(store.edges_between(a, n1, Some(&EdgeType::new("R"))), vec![e1]);
     }
 
     /// The same binary search also runs over the **write buffer**, which is
@@ -10599,19 +9691,12 @@ mod tests {
             store.create_edge_stub(a, *t, "R").unwrap();
         }
         store.compact_adjacency();
-        assert_eq!(
-            store.frozen_outgoing.segments.len(),
-            2,
-            "two segments is the premise"
-        );
+        assert_eq!(store.frozen_outgoing.segments.len(), 2, "two segments is the premise");
 
         let got = store.frozen_outgoing_neighbors(a.0 as usize);
         assert_eq!(got.len(), 6);
         for w in got.windows(2) {
-            assert!(
-                w[0].0 <= w[1].0,
-                "frozen_outgoing_neighbors returned {got:?}, not sorted"
-            );
+            assert!(w[0].0 <= w[1].0, "frozen_outgoing_neighbors returned {got:?}, not sorted");
         }
     }
 
@@ -10657,14 +9742,8 @@ mod tests {
         assert_eq!(txn1, 1);
         assert_eq!(txn2, 2);
         assert_eq!(store.active_transactions.len(), 2);
-        assert_eq!(
-            store.active_transactions[&txn1].isolation,
-            IsolationLevel::ReadCommitted
-        );
-        assert_eq!(
-            store.active_transactions[&txn2].isolation,
-            IsolationLevel::SnapshotIsolation
-        );
+        assert_eq!(store.active_transactions[&txn1].isolation, IsolationLevel::ReadCommitted);
+        assert_eq!(store.active_transactions[&txn2].isolation, IsolationLevel::SnapshotIsolation);
         assert_eq!(store.active_transactions[&txn1].status, TxnStatus::Active);
     }
 
@@ -10695,54 +9774,36 @@ mod tests {
     fn test_snapshot_isolation_reads_start_version() {
         let mut store = GraphStore::new();
         let nid = store.create_node("Person");
-        store
-            .set_node_property("default", nid, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", nid, "name", "Alice").unwrap();
 
         // Start snapshot txn — sees version 1
         let txn = store.begin_transaction(IsolationLevel::SnapshotIsolation);
 
         // Another transaction modifies the node
         store.current_version = 2;
-        store
-            .set_node_property("default", nid, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", nid, "name", "Bob").unwrap();
 
         // Snapshot txn should still see "Alice" (version 1)
         let node = store.get_node_for_txn(txn, nid).unwrap();
-        assert_eq!(
-            node.get_property("name").unwrap().as_string(),
-            Some("Alice")
-        );
+        assert_eq!(node.get_property("name").unwrap().as_string(), Some("Alice"));
 
         // Current version sees "Bob"
         let latest = store.get_node(nid).unwrap();
-        assert_eq!(
-            store
-                .node_property(latest.id, "name")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("Bob")
-        );
+        assert_eq!(store.node_property(latest.id, "name").as_ref().unwrap().as_string(), Some("Bob"));
     }
 
     #[test]
     fn test_read_committed_sees_latest() {
         let mut store = GraphStore::new();
         let nid = store.create_node("Person");
-        store
-            .set_node_property("default", nid, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", nid, "name", "Alice").unwrap();
 
         // Start read-committed txn
         let txn = store.begin_transaction(IsolationLevel::ReadCommitted);
 
         // Modify after txn starts
         store.current_version = 2;
-        store
-            .set_node_property("default", nid, "name", "Bob")
-            .unwrap();
+        store.set_node_property("default", nid, "name", "Bob").unwrap();
 
         // Read-committed should see "Bob" (latest)
         let node = store.get_node_for_txn(txn, nid).unwrap();
@@ -10753,9 +9814,7 @@ mod tests {
     fn test_write_conflict_detection() {
         let mut store = GraphStore::new();
         let nid = store.create_node("Person");
-        store
-            .set_node_property("default", nid, "name", "Alice")
-            .unwrap();
+        store.set_node_property("default", nid, "name", "Alice").unwrap();
 
         // Txn A starts
         let txn_a = store.begin_transaction(IsolationLevel::SnapshotIsolation);
@@ -10847,10 +9906,7 @@ mod tests {
         // Snapshot sees version-1 properties
         let edge = store.get_edge_for_txn(txn, eid).unwrap();
         // The edge should reconstruct with version-1 properties
-        assert_eq!(
-            edge.properties.get("weight"),
-            Some(&PropertyValue::Float(1.0))
-        );
+        assert_eq!(edge.properties.get("weight"), Some(&PropertyValue::Float(1.0)));
     }
 
     #[test]
@@ -10876,19 +9932,13 @@ mod tests {
     fn test_gc_node_versions() {
         let mut store = GraphStore::new();
         let nid = store.create_node("Person");
-        store
-            .set_node_property("default", nid, "name", "v1")
-            .unwrap();
+        store.set_node_property("default", nid, "name", "v1").unwrap();
 
         store.current_version = 2;
-        store
-            .set_node_property("default", nid, "name", "v2")
-            .unwrap();
+        store.set_node_property("default", nid, "name", "v2").unwrap();
 
         store.current_version = 3;
-        store
-            .set_node_property("default", nid, "name", "v3")
-            .unwrap();
+        store.set_node_property("default", nid, "name", "v3").unwrap();
 
         // Two overwrites are two undo entries; the node is stored once (#1200).
         assert_eq!(store.nodes[nid.as_u64() as usize].len(), 1);
@@ -10903,14 +9953,7 @@ mod tests {
 
         // Latest still works
         let latest = store.get_node(nid).unwrap();
-        assert_eq!(
-            store
-                .node_property(latest.id, "name")
-                .as_ref()
-                .unwrap()
-                .as_string(),
-            Some("v3")
-        );
+        assert_eq!(store.node_property(latest.id, "name").as_ref().unwrap().as_string(), Some("v3"));
     }
 
     #[test]
@@ -10980,9 +10023,7 @@ mod tests {
     fn test_gc_preserves_single_version() {
         let mut store = GraphStore::new();
         let nid = store.create_node("X");
-        store
-            .set_node_property("default", nid, "v", "only")
-            .unwrap();
+        store.set_node_property("default", nid, "v", "only").unwrap();
 
         // Single version — GC should be a no-op
         let (pruned, _) = store.gc_versions(100);
@@ -11013,9 +10054,7 @@ mod tests {
     // ============================================================
 
     fn prop_at(store: &GraphStore, n: NodeId, version: u64, key: &str) -> Option<PropertyValue> {
-        store
-            .get_node_at_version(n, version)
-            .and_then(|node| node.get_property(key).cloned())
+        store.get_node_at_version(n, version).and_then(|node| node.get_property(key).cloned())
     }
 
     #[test]
@@ -11023,29 +10062,16 @@ mod tests {
         let mut store = GraphStore::new();
         let n = store.create_node("N");
         for i in 0..20i64 {
-            store
-                .set_node_property("default", n, format!("p{i}"), i)
-                .unwrap();
+            store.set_node_property("default", n, format!("p{i}"), i).unwrap();
         }
         store.current_version = 2;
         store.set_node_property("default", n, "p3", 99i64).unwrap();
 
-        assert_eq!(
-            store.nodes[n.as_u64() as usize].len(),
-            1,
-            "the write copied the node"
-        );
-        assert_eq!(
-            store.node_history[&n].undo.len(),
-            1,
-            "one changed key, one entry"
-        );
+        assert_eq!(store.nodes[n.as_u64() as usize].len(), 1, "the write copied the node");
+        assert_eq!(store.node_history[&n].undo.len(), 1, "one changed key, one entry");
         assert_eq!(prop_at(&store, n, 1, "p3"), Some(PropertyValue::Integer(3)));
         assert_eq!(prop_at(&store, n, 1, "p4"), Some(PropertyValue::Integer(4)));
-        assert_eq!(
-            prop_at(&store, n, 2, "p3"),
-            Some(PropertyValue::Integer(99))
-        );
+        assert_eq!(prop_at(&store, n, 2, "p3"), Some(PropertyValue::Integer(99)));
     }
 
     #[test]
@@ -11058,10 +10084,7 @@ mod tests {
         store.remove_node_property(n, "x");
         store.add_label_to_node("default", n, "M").unwrap();
         store.remove_label_from_node(n, &Label::new("N")).unwrap();
-        assert!(
-            store.node_history.is_empty(),
-            "history without a version to read it at"
-        );
+        assert!(store.node_history.is_empty(), "history without a version to read it at");
     }
 
     #[test]
@@ -11086,20 +10109,10 @@ mod tests {
         store.current_version = 2;
         store.set_node_property("default", n, "y", 5i64).unwrap();
         // Null removes (#952), and a removal is a write to undo.
-        store
-            .set_node_property("default", n, "x", PropertyValue::Null)
-            .unwrap();
+        store.set_node_property("default", n, "x", PropertyValue::Null).unwrap();
 
-        assert_eq!(
-            prop_at(&store, n, 1, "x"),
-            Some(PropertyValue::Integer(1)),
-            "removal not undone"
-        );
-        assert_eq!(
-            prop_at(&store, n, 1, "y"),
-            None,
-            "a key added at v2 is visible at v1"
-        );
+        assert_eq!(prop_at(&store, n, 1, "x"), Some(PropertyValue::Integer(1)), "removal not undone");
+        assert_eq!(prop_at(&store, n, 1, "y"), None, "a key added at v2 is visible at v1");
         assert_eq!(prop_at(&store, n, 2, "x"), None);
         assert_eq!(prop_at(&store, n, 2, "y"), Some(PropertyValue::Integer(5)));
     }
@@ -11124,10 +10137,7 @@ mod tests {
         let mut store = GraphStore::new();
         store.current_version = 2;
         let n = store.create_node("N");
-        assert!(
-            store.get_node_at_version(n, 1).is_none(),
-            "a node was visible before it existed"
-        );
+        assert!(store.get_node_at_version(n, 1).is_none(), "a node was visible before it existed");
         assert!(store.get_node_at_version(n, 2).is_some());
 
         // No reader is left below v2 once nothing is open, so the birth goes too.
@@ -11146,15 +10156,8 @@ mod tests {
 
         let fresh = store.create_node("Fresh");
         assert_eq!(fresh, old, "the test needs the id reused");
-        assert!(
-            store.get_node_at_version(fresh, 1).is_none(),
-            "the new node existed before it was created"
-        );
-        assert_eq!(
-            prop_at(&store, fresh, 2, "x"),
-            None,
-            "the new node carries the old one's value"
-        );
+        assert!(store.get_node_at_version(fresh, 1).is_none(), "the new node existed before it was created");
+        assert_eq!(prop_at(&store, fresh, 2, "x"), None, "the new node carries the old one's value");
     }
 
     #[test]
@@ -11162,9 +10165,7 @@ mod tests {
         let mut store = GraphStore::new();
         let n = store.create_node("N");
         // A restored graph holds scalars in the column with an empty row.
-        store
-            .node_columns
-            .set_property(n.as_u64() as usize, "x", PropertyValue::Integer(1));
+        store.node_columns.set_property(n.as_u64() as usize, "x", PropertyValue::Integer(1));
         store.current_version = 2;
         store.set_node_property("default", n, "x", 2i64).unwrap();
 
@@ -11176,15 +10177,8 @@ mod tests {
     // Relationship history as an undo log (#1200 step 5)
     // ============================================================
 
-    fn edge_prop_at(
-        store: &GraphStore,
-        e: EdgeId,
-        version: u64,
-        key: &str,
-    ) -> Option<PropertyValue> {
-        store
-            .get_edge_at_version(e, version)
-            .and_then(|edge| edge.properties.get(key).cloned())
+    fn edge_prop_at(store: &GraphStore, e: EdgeId, version: u64, key: &str) -> Option<PropertyValue> {
+        store.get_edge_at_version(e, version).and_then(|edge| edge.properties.get(key).cloned())
     }
 
     fn one_edge_store() -> (GraphStore, EdgeId) {
@@ -11204,27 +10198,14 @@ mod tests {
         store.current_version = 2;
         store.set_edge_property(e, "p3", 99i64).unwrap();
 
-        assert_eq!(
-            store.edge_history[&e].undo.len(),
-            1,
-            "one changed key, one entry"
-        );
+        assert_eq!(store.edge_history[&e].undo.len(), 1, "one changed key, one entry");
         assert!(
             matches!(store.edge_history[&e].undo[0], EdgeUndo::Property { .. }),
             "a property write copied the whole map"
         );
-        assert_eq!(
-            edge_prop_at(&store, e, 1, "p3"),
-            Some(PropertyValue::Integer(3))
-        );
-        assert_eq!(
-            edge_prop_at(&store, e, 1, "p4"),
-            Some(PropertyValue::Integer(4))
-        );
-        assert_eq!(
-            edge_prop_at(&store, e, 2, "p3"),
-            Some(PropertyValue::Integer(99))
-        );
+        assert_eq!(edge_prop_at(&store, e, 1, "p3"), Some(PropertyValue::Integer(3)));
+        assert_eq!(edge_prop_at(&store, e, 1, "p4"), Some(PropertyValue::Integer(4)));
+        assert_eq!(edge_prop_at(&store, e, 2, "p3"), Some(PropertyValue::Integer(99)));
     }
 
     #[test]
@@ -11234,14 +10215,8 @@ mod tests {
             store.set_edge_property(e, "w", i).unwrap();
         }
         store.remove_edge_property(e, "w");
-        store
-            .get_edge_properties_mut(e)
-            .unwrap()
-            .insert("z".to_string(), PropertyValue::Integer(1));
-        assert!(
-            store.edge_history.is_empty(),
-            "history without a version to read it at"
-        );
+        store.get_edge_properties_mut(e).unwrap().insert("z".to_string(), PropertyValue::Integer(1));
+        assert!(store.edge_history.is_empty(), "history without a version to read it at");
     }
 
     #[test]
@@ -11249,24 +10224,11 @@ mod tests {
         let (mut store, e) = one_edge_store();
         store.set_edge_property(e, "w", 1i64).unwrap();
         store.current_version = 2;
-        store
-            .get_edge_properties_mut(e)
-            .unwrap()
-            .insert("z".to_string(), PropertyValue::Integer(7));
+        store.get_edge_properties_mut(e).unwrap().insert("z".to_string(), PropertyValue::Integer(7));
 
-        assert_eq!(
-            edge_prop_at(&store, e, 1, "z"),
-            None,
-            "a key added at v2 is visible at v1"
-        );
-        assert_eq!(
-            edge_prop_at(&store, e, 1, "w"),
-            Some(PropertyValue::Integer(1))
-        );
-        assert_eq!(
-            edge_prop_at(&store, e, 2, "z"),
-            Some(PropertyValue::Integer(7))
-        );
+        assert_eq!(edge_prop_at(&store, e, 1, "z"), None, "a key added at v2 is visible at v1");
+        assert_eq!(edge_prop_at(&store, e, 1, "w"), Some(PropertyValue::Integer(1)));
+        assert_eq!(edge_prop_at(&store, e, 2, "z"), Some(PropertyValue::Integer(7)));
     }
 
     #[test]
@@ -11280,15 +10242,8 @@ mod tests {
 
         let fresh = store.create_edge(a, b, "R").unwrap();
         assert_eq!(fresh, old, "the test needs the id reused");
-        assert!(
-            store.get_edge_at_version(fresh, 1).is_none(),
-            "the new edge existed before it was created"
-        );
-        assert_eq!(
-            edge_prop_at(&store, fresh, 2, "w"),
-            None,
-            "the new edge carries the old one's value"
-        );
+        assert!(store.get_edge_at_version(fresh, 1).is_none(), "the new edge existed before it was created");
+        assert_eq!(edge_prop_at(&store, fresh, 2, "w"), None, "the new edge carries the old one's value");
     }
 
     // ============================================================
@@ -11307,15 +10262,8 @@ mod tests {
         assert_eq!(store.node_property(n, "x"), Some(PropertyValue::Integer(2)));
 
         store.rollback_session_transaction().unwrap();
-        assert_eq!(
-            store.node_property(n, "x"),
-            Some(PropertyValue::Integer(1)),
-            "the write survived a rollback"
-        );
-        assert!(
-            !store.get_node(n).unwrap().labels.contains(&Label::new("M")),
-            "the label survived a rollback"
-        );
+        assert_eq!(store.node_property(n, "x"), Some(PropertyValue::Integer(1)), "the write survived a rollback");
+        assert!(!store.get_node(n).unwrap().labels.contains(&Label::new("M")), "the label survived a rollback");
         assert_eq!(store.current_version, 1, "the version did not go back");
     }
 
@@ -11326,27 +10274,15 @@ mod tests {
 
         store.begin_session_transaction().unwrap();
         let fresh = store.create_node("B");
-        store
-            .set_node_property("default", fresh, "x", 1i64)
-            .unwrap();
+        store.set_node_property("default", fresh, "x", 1i64).unwrap();
         let e = store.create_edge(a, fresh, "R").unwrap();
         store.set_edge_property(e, "w", 1i64).unwrap();
 
         store.rollback_session_transaction().unwrap();
-        assert!(
-            store.get_node(fresh).is_none(),
-            "a created node survived a rollback"
-        );
+        assert!(store.get_node(fresh).is_none(), "a created node survived a rollback");
         assert_eq!(store.node_count(), 1);
-        assert_eq!(
-            store.edge_count(),
-            0,
-            "a created relationship survived a rollback"
-        );
-        assert!(
-            store.node_history.is_empty() && store.edge_history.is_empty(),
-            "history outlived the rollback"
-        );
+        assert_eq!(store.edge_count(), 0, "a created relationship survived a rollback");
+        assert!(store.node_history.is_empty() && store.edge_history.is_empty(), "history outlived the rollback");
     }
 
     #[test]
@@ -11363,21 +10299,10 @@ mod tests {
         assert!(store.get_node(a).is_none());
 
         store.rollback_session_transaction().unwrap();
-        assert!(
-            store.get_node(a).is_some(),
-            "the deleted node was not restored"
-        );
+        assert!(store.get_node(a).is_some(), "the deleted node was not restored");
         assert_eq!(store.node_property(a, "x"), Some(PropertyValue::Integer(1)));
-        assert_eq!(
-            store.get_nodes_by_label(&Label::new("A")).len(),
-            1,
-            "the label index was not restored"
-        );
-        assert_eq!(
-            store.edge_count(),
-            1,
-            "the deleted relationship was not restored"
-        );
+        assert_eq!(store.get_nodes_by_label(&Label::new("A")).len(), 1, "the label index was not restored");
+        assert_eq!(store.edge_count(), 1, "the deleted relationship was not restored");
         assert_eq!(store.edge_property(e, "w"), Some(PropertyValue::Integer(2)));
     }
 
@@ -11423,20 +10348,11 @@ mod tests {
     fn test_only_one_session_transaction_at_a_time() {
         let mut store = GraphStore::new();
         assert_eq!(store.begin_session_transaction().unwrap(), 2);
-        assert!(
-            store.begin_session_transaction().is_err(),
-            "a second transaction opened"
-        );
+        assert!(store.begin_session_transaction().is_err(), "a second transaction opened");
         assert_eq!(store.session_transaction_version(), Some(2));
         store.commit_session_transaction().unwrap();
-        assert!(
-            store.commit_session_transaction().is_err(),
-            "committing twice succeeded"
-        );
-        assert!(
-            store.rollback_session_transaction().is_err(),
-            "rolling back with none open succeeded"
-        );
+        assert!(store.commit_session_transaction().is_err(), "committing twice succeeded");
+        assert!(store.rollback_session_transaction().is_err(), "rolling back with none open succeeded");
     }
 
     /// A key lookup reads the one node it returns and no other (#542).

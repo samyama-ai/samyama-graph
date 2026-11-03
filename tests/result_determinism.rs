@@ -20,9 +20,9 @@
 //! behaviour for a reason that has nothing to do with luck.
 
 use samyama::graph::GraphStore;
-use samyama::graph::PropertyValue;
 use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
 use samyama::query::parser::parse_query;
+use samyama::graph::PropertyValue;
 
 fn write(store: &mut GraphStore, cypher: &str) {
     let q = parse_query(cypher).expect("query should parse");
@@ -34,18 +34,13 @@ fn write(store: &mut GraphStore, cypher: &str) {
 /// Rows rendered as sorted `key=value` strings, in result order.
 fn rows(store: &GraphStore, cypher: &str) -> Vec<String> {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .expect("query should run");
+    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
     batch
         .records
         .iter()
         .map(|r| {
-            let mut cells: Vec<String> = r
-                .bindings()
-                .iter()
-                .map(|(k, v)| format!("{k}={v:?}"))
-                .collect();
+            let mut cells: Vec<String> =
+                r.bindings().iter().map(|(k, v)| format!("{k}={v:?}")).collect();
             cells.sort();
             cells.join(",")
         })
@@ -115,10 +110,7 @@ fn descending_order_by_an_aggregate_takes_the_largest_group() {
         "MATCH (a:A) WITH a.num2 % 3 AS m, sum(a.num + a.num2) AS s ORDER BY sum(a.num + a.num2) \
          DESC LIMIT 1 RETURN m, s",
     );
-    assert_eq!(
-        out,
-        vec!["m=Property(Integer(0)),s=Property(Integer(15))".to_string()]
-    );
+    assert_eq!(out, vec!["m=Property(Integer(0)),s=Property(Integer(15))".to_string()]);
 }
 
 #[test]
@@ -135,10 +127,7 @@ fn an_aggregate_inside_a_compound_sort_key_is_resolved_too() {
         &store,
         "MATCH (a:A) WITH a.num2 % 3 AS m, sum(a.num + a.num2) AS s ORDER BY s DESC RETURN m, s",
     );
-    assert_eq!(
-        compound, descending,
-        "multiplying the key by -1 reverses the order"
-    );
+    assert_eq!(compound, descending, "multiplying the key by -1 reverses the order");
 }
 
 #[test]
@@ -193,11 +182,7 @@ fn labels_are_stable_across_many_nodes_with_the_same_label_set() {
         write(&mut store, "CREATE (:Zebra:Apple:Mango)");
     }
     let out = rows(&store, "MATCH (n) RETURN DISTINCT labels(n) AS labels");
-    assert_eq!(
-        out.len(),
-        1,
-        "200 identically-labelled nodes must render one distinct value: {out:?}"
-    );
+    assert_eq!(out.len(), 1, "200 identically-labelled nodes must render one distinct value: {out:?}");
     assert!(out[0].contains("Apple"), "{out:?}");
     assert!(
         out[0].find("Apple").unwrap() < out[0].find("Mango").unwrap(),
@@ -242,9 +227,7 @@ fn edges_fixture() -> GraphStore {
 /// The `id` property of each returned edge, in result order.
 fn edge_ids(store: &GraphStore, cypher: &str, column: &str) -> Vec<i64> {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .expect("query should run");
+    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
     batch
         .records
         .iter()
@@ -263,19 +246,11 @@ fn edge_ids(store: &GraphStore, cypher: &str, column: &str) -> Vec<i64> {
 fn ordering_by_a_property_of_a_return_alias_actually_sorts() {
     let store = edges_fixture();
     assert_eq!(
-        edge_ids(
-            &store,
-            "MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id ASC",
-            "rel"
-        ),
+        edge_ids(&store, "MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id ASC", "rel"),
         vec![0, 1, 2]
     );
     assert_eq!(
-        edge_ids(
-            &store,
-            "MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id DESC",
-            "rel"
-        ),
+        edge_ids(&store, "MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id DESC", "rel"),
         vec![2, 1, 0],
         "DESC must reverse the order — matching ASC means the sort was dropped"
     );
@@ -288,16 +263,8 @@ fn the_alias_and_the_underlying_variable_sort_identically() {
     let store = edges_fixture();
     for direction in ["ASC", "DESC"] {
         assert_eq!(
-            edge_ids(
-                &store,
-                &format!("MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id {direction}"),
-                "rel"
-            ),
-            edge_ids(
-                &store,
-                &format!("MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY r.id {direction}"),
-                "rel"
-            ),
+            edge_ids(&store, &format!("MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id {direction}"), "rel"),
+            edge_ids(&store, &format!("MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY r.id {direction}"), "rel"),
             "{direction}"
         );
     }
@@ -313,11 +280,7 @@ fn a_sort_after_an_aggregating_with_and_a_second_match_is_applied() {
     let cypher = "MATCH (a)-[r]->(b:X) WITH a, r, b, count(*) AS c ORDER BY c                   MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id";
     assert_eq!(edge_ids(&store, cypher, "rel"), vec![0, 1]);
     assert_eq!(
-        edge_ids(
-            &store,
-            &cypher.replace("ORDER BY rel.id", "ORDER BY rel.id DESC"),
-            "rel"
-        ),
+        edge_ids(&store, &cypher.replace("ORDER BY rel.id", "ORDER BY rel.id DESC"), "rel"),
         vec![1, 0]
     );
 }
@@ -330,9 +293,7 @@ fn an_alias_over_a_non_variable_expression_is_left_alone() {
     // must not silently sort by something else.
     let store = edges_fixture();
     let q = parse_query("MATCH (a)-[r]->(b) RETURN count(*) AS total ORDER BY total").unwrap();
-    let batch = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect("counting still works");
+    let batch = QueryExecutor::new(&store).execute(&q).expect("counting still works");
     assert_eq!(batch.records.len(), 1);
 }
 
@@ -342,11 +303,7 @@ fn ordering_by_an_expression_over_an_alias_property_is_resolved() {
     // resolves as well.
     let store = edges_fixture();
     assert_eq!(
-        edge_ids(
-            &store,
-            "MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id * -1",
-            "rel"
-        ),
+        edge_ids(&store, "MATCH (a)-[r]->(b) RETURN r AS rel ORDER BY rel.id * -1", "rel"),
         vec![2, 1, 0],
         "negating the key reverses the order"
     );

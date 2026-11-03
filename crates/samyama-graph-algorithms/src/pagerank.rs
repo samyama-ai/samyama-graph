@@ -4,8 +4,8 @@
 
 use super::common::{GraphView, NodeId};
 use super::progress::{NoProgress, Progress, Stopped};
-use rayon::prelude::*;
 use std::collections::HashMap;
+use rayon::prelude::*;
 
 /// PageRank configuration
 pub struct PageRankConfig {
@@ -33,7 +33,10 @@ impl Default for PageRankConfig {
 }
 
 /// Calculate PageRank for the graph view
-pub fn page_rank(view: &GraphView, config: PageRankConfig) -> HashMap<NodeId, f64> {
+pub fn page_rank(
+    view: &GraphView,
+    config: PageRankConfig,
+) -> HashMap<NodeId, f64> {
     match page_rank_with(view, config, &NoProgress) {
         Ok(scores) => scores,
         Err(_) => unreachable!("NoProgress never stops a run"),
@@ -77,10 +80,7 @@ pub fn page_rank_with(
             crate::gpu_dispatch::gpu_route(n)
         };
         if let Err(reason) = &route {
-            crate::cpu_fallback::note_cpu_fallback(
-                crate::cpu_fallback::GpuAlgorithm::PageRank,
-                reason,
-            );
+            crate::cpu_fallback::note_cpu_fallback(crate::cpu_fallback::GpuAlgorithm::PageRank, reason);
         } else {
             {
                 let gpu_config = samyama_gpu::pagerank::GpuPageRankConfig {
@@ -132,14 +132,12 @@ pub fn page_rank_with(
         // Compute dangling node mass if enabled
         let dangling_contrib = if config.dangling_redistribution {
             let dangling_sum: f64 = if use_parallel {
-                (0..n)
-                    .into_par_iter()
+                (0..n).into_par_iter()
                     .filter(|&i| view.out_degree(i) == 0)
                     .map(|i| scores[i])
                     .sum()
             } else {
-                (0..n)
-                    .filter(|&i| view.out_degree(i) == 0)
+                (0..n).filter(|&i| view.out_degree(i) == 0)
                     .map(|i| scores[i])
                     .sum()
             };
@@ -150,21 +148,17 @@ pub fn page_rank_with(
 
         // Compute new scores and convergence diff in parallel
         let total_diff = if use_parallel {
-            next_scores
-                .par_iter_mut()
-                .enumerate()
-                .map(|(i, next_score)| {
-                    let mut sum_incoming = 0.0;
-                    for &source_idx in view.predecessors(i) {
-                        let out_degree = view.out_degree(source_idx);
-                        if out_degree > 0 {
-                            sum_incoming += scores[source_idx] / out_degree as f64;
-                        }
+            next_scores.par_iter_mut().enumerate().map(|(i, next_score)| {
+                let mut sum_incoming = 0.0;
+                for &source_idx in view.predecessors(i) {
+                    let out_degree = view.out_degree(source_idx);
+                    if out_degree > 0 {
+                        sum_incoming += scores[source_idx] / out_degree as f64;
                     }
-                    *next_score = base_score + d * (sum_incoming + dangling_contrib);
-                    (*next_score - scores[i]).abs()
-                })
-                .sum::<f64>()
+                }
+                *next_score = base_score + d * (sum_incoming + dangling_contrib);
+                (*next_score - scores[i]).abs()
+            }).sum::<f64>()
         } else {
             let mut diff = 0.0;
             for i in 0..n {
@@ -221,14 +215,7 @@ mod tests {
         }
         let outgoing = vec![vec![1], vec![2], vec![0]]; // 1->2, 2->3, 3->1
         let incoming = vec![vec![2], vec![0], vec![1]]; // 1<-3, 2<-1, 3<-2
-        GraphView::from_adjacency_list(
-            node_count,
-            index_to_node,
-            node_to_index,
-            outgoing,
-            incoming,
-            None,
-        )
+        GraphView::from_adjacency_list(node_count, index_to_node, node_to_index, outgoing, incoming, None)
     }
 
     fn build_star_graph() -> GraphView {
@@ -241,19 +228,14 @@ mod tests {
         }
         let outgoing = vec![vec![1, 2, 3], vec![], vec![], vec![]];
         let incoming = vec![vec![], vec![0], vec![0], vec![0]];
-        GraphView::from_adjacency_list(
-            node_count,
-            index_to_node,
-            node_to_index,
-            outgoing,
-            incoming,
-            None,
-        )
+        GraphView::from_adjacency_list(node_count, index_to_node, node_to_index, outgoing, incoming, None)
     }
 
     #[test]
     fn test_pagerank_empty_graph() {
-        let view = GraphView::from_adjacency_list(0, vec![], HashMap::new(), vec![], vec![], None);
+        let view = GraphView::from_adjacency_list(
+            0, vec![], HashMap::new(), vec![], vec![], None,
+        );
         let result = page_rank(&view, PageRankConfig::default());
         assert!(result.is_empty());
     }
@@ -263,55 +245,36 @@ mod tests {
         let mut node_to_index = HashMap::new();
         node_to_index.insert(1u64, 0);
         let view = GraphView::from_adjacency_list(
-            1,
-            vec![1],
-            node_to_index,
-            vec![vec![]],
-            vec![vec![]],
-            None,
+            1, vec![1], node_to_index, vec![vec![]], vec![vec![]], None,
         );
-        let result = page_rank(
-            &view,
-            PageRankConfig {
-                damping_factor: 0.85,
-                iterations: 20,
-                tolerance: 0.0001,
-                dangling_redistribution: true,
-            },
-        );
+        let result = page_rank(&view, PageRankConfig {
+            damping_factor: 0.85,
+            iterations: 20,
+            tolerance: 0.0001,
+            dangling_redistribution: true,
+        });
         assert_eq!(result.len(), 1);
         // Single node with dangling redistribution: score should be ~1.0
         let score = result[&1];
-        assert!(
-            (score - 1.0).abs() < 0.01,
-            "Single node score should be ~1.0, got {}",
-            score
-        );
+        assert!((score - 1.0).abs() < 0.01, "Single node score should be ~1.0, got {}", score);
     }
 
     #[test]
     fn test_pagerank_triangle_symmetric() {
         let view = build_triangle_graph();
-        let result = page_rank(
-            &view,
-            PageRankConfig {
-                damping_factor: 0.85,
-                iterations: 100,
-                tolerance: 1e-10,
-                dangling_redistribution: true,
-            },
-        );
+        let result = page_rank(&view, PageRankConfig {
+            damping_factor: 0.85,
+            iterations: 100,
+            tolerance: 1e-10,
+            dangling_redistribution: true,
+        });
 
         assert_eq!(result.len(), 3);
         // In a symmetric triangle, all nodes should have equal PageRank
         let scores: Vec<f64> = vec![result[&1], result[&2], result[&3]];
         let avg = scores.iter().sum::<f64>() / 3.0;
         for s in &scores {
-            assert!(
-                (s - avg).abs() < 0.001,
-                "Triangle nodes should have equal rank, got {:?}",
-                scores
-            );
+            assert!((s - avg).abs() < 0.001, "Triangle nodes should have equal rank, got {:?}", scores);
         }
     }
 
@@ -319,15 +282,12 @@ mod tests {
     fn test_pagerank_star_hub_has_lowest_rank() {
         // In a star where hub points outward, the hub sends rank but receives none
         let view = build_star_graph();
-        let result = page_rank(
-            &view,
-            PageRankConfig {
-                damping_factor: 0.85,
-                iterations: 50,
-                tolerance: 1e-10,
-                dangling_redistribution: false,
-            },
-        );
+        let result = page_rank(&view, PageRankConfig {
+            damping_factor: 0.85,
+            iterations: 50,
+            tolerance: 1e-10,
+            dangling_redistribution: false,
+        });
 
         assert_eq!(result.len(), 4);
         // Without dangling redistribution, hub (node 1) that only sends should have lowest rank
@@ -335,131 +295,94 @@ mod tests {
         let hub_score = result[&1];
         let leaf_score = result[&2];
         // Hub sends all its rank out, leaf receives rank from hub
-        assert!(
-            leaf_score > hub_score,
+        assert!(leaf_score > hub_score,
             "Leaf ({}) should have higher rank than hub ({}) without dangling redistribution",
-            leaf_score,
-            hub_score
-        );
+            leaf_score, hub_score);
     }
 
     #[test]
     fn test_pagerank_scores_sum_to_one() {
         let view = build_triangle_graph();
-        let result = page_rank(
-            &view,
-            PageRankConfig {
-                damping_factor: 0.85,
-                iterations: 100,
-                tolerance: 1e-10,
-                dangling_redistribution: true,
-            },
-        );
+        let result = page_rank(&view, PageRankConfig {
+            damping_factor: 0.85,
+            iterations: 100,
+            tolerance: 1e-10,
+            dangling_redistribution: true,
+        });
 
         let total: f64 = result.values().sum();
-        assert!(
-            (total - 1.0).abs() < 0.01,
-            "PageRank scores should sum to ~1.0 with dangling redistribution, got {}",
-            total
-        );
+        assert!((total - 1.0).abs() < 0.01,
+            "PageRank scores should sum to ~1.0 with dangling redistribution, got {}", total);
     }
 
     #[test]
     fn test_pagerank_convergence() {
         let view = build_triangle_graph();
         // With very high tolerance, should converge in 1 iteration
-        let result_1 = page_rank(
-            &view,
-            PageRankConfig {
-                damping_factor: 0.85,
-                iterations: 1,
-                tolerance: 0.0,
-                dangling_redistribution: true,
-            },
-        );
-        let result_100 = page_rank(
-            &view,
-            PageRankConfig {
-                damping_factor: 0.85,
-                iterations: 100,
-                tolerance: 0.0,
-                dangling_redistribution: true,
-            },
-        );
+        let result_1 = page_rank(&view, PageRankConfig {
+            damping_factor: 0.85,
+            iterations: 1,
+            tolerance: 0.0,
+            dangling_redistribution: true,
+        });
+        let result_100 = page_rank(&view, PageRankConfig {
+            damping_factor: 0.85,
+            iterations: 100,
+            tolerance: 0.0,
+            dangling_redistribution: true,
+        });
 
         // More iterations should give more accurate result
         // In a symmetric triangle, converged score is 1/3
         let target = 1.0 / 3.0;
         let diff_1 = (result_1[&1] - target).abs();
         let diff_100 = (result_100[&1] - target).abs();
-        assert!(
-            diff_100 <= diff_1,
-            "100 iterations should be closer to target than 1: diff_1={}, diff_100={}",
-            diff_1,
-            diff_100
-        );
+        assert!(diff_100 <= diff_1,
+            "100 iterations should be closer to target than 1: diff_1={}, diff_100={}", diff_1, diff_100);
     }
 
     #[test]
     fn test_pagerank_dangling_redistribution_flag() {
         let view = build_star_graph(); // Nodes 2,3,4 are dangling
-        let with_dangling = page_rank(
-            &view,
-            PageRankConfig {
-                damping_factor: 0.85,
-                iterations: 50,
-                tolerance: 1e-10,
-                dangling_redistribution: true,
-            },
-        );
-        let without_dangling = page_rank(
-            &view,
-            PageRankConfig {
-                damping_factor: 0.85,
-                iterations: 50,
-                tolerance: 1e-10,
-                dangling_redistribution: false,
-            },
-        );
+        let with_dangling = page_rank(&view, PageRankConfig {
+            damping_factor: 0.85,
+            iterations: 50,
+            tolerance: 1e-10,
+            dangling_redistribution: true,
+        });
+        let without_dangling = page_rank(&view, PageRankConfig {
+            damping_factor: 0.85,
+            iterations: 50,
+            tolerance: 1e-10,
+            dangling_redistribution: false,
+        });
 
         // With dangling redistribution, scores should sum to ~1.0
         let total_with: f64 = with_dangling.values().sum();
-        assert!(
-            (total_with - 1.0).abs() < 0.01,
-            "With dangling redistribution, sum should be ~1.0, got {}",
-            total_with
-        );
+        assert!((total_with - 1.0).abs() < 0.01,
+            "With dangling redistribution, sum should be ~1.0, got {}", total_with);
 
         // Without redistribution, total will be < 1.0 (rank leaks through dangling nodes)
         let total_without: f64 = without_dangling.values().sum();
-        assert!(
-            total_without < 0.9,
-            "Without dangling redistribution, rank should leak, got sum={}",
-            total_without
-        );
+        assert!(total_without < 0.9,
+            "Without dangling redistribution, rank should leak, got sum={}", total_without);
     }
 
     #[test]
     fn test_pagerank_damping_factor_effect() {
         let view = build_triangle_graph();
-        let low_damping = page_rank(
-            &view,
-            PageRankConfig {
-                damping_factor: 0.5,
-                iterations: 100,
-                tolerance: 1e-10,
-                dangling_redistribution: true,
-            },
-        );
-        let high_damping = page_rank(
-            &view,
-            PageRankConfig {
-                damping_factor: 0.99,
-                iterations: 100,
-                tolerance: 1e-10,
-                dangling_redistribution: true,
-            },
-        );
+        let low_damping = page_rank(&view, PageRankConfig {
+            damping_factor: 0.5,
+            iterations: 100,
+            tolerance: 1e-10,
+            dangling_redistribution: true,
+        });
+        let high_damping = page_rank(&view, PageRankConfig {
+            damping_factor: 0.99,
+            iterations: 100,
+            tolerance: 1e-10,
+            dangling_redistribution: true,
+        });
 
         // Both should produce valid scores summing to 1
         let total_low: f64 = low_damping.values().sum();
@@ -479,10 +402,7 @@ mod tests {
 
     impl Recorder {
         fn new(stop_at: Option<usize>) -> Self {
-            Self {
-                steps: std::cell::RefCell::new(Vec::new()),
-                stop_at,
-            }
+            Self { steps: std::cell::RefCell::new(Vec::new()), stop_at }
         }
         fn steps(&self) -> Vec<(usize, usize)> {
             self.steps.borrow().clone()
@@ -498,11 +418,7 @@ mod tests {
 
     /// Tolerance 0 so the run never converges early and does every iteration.
     fn five_iterations() -> PageRankConfig {
-        PageRankConfig {
-            iterations: 5,
-            tolerance: 0.0,
-            ..PageRankConfig::default()
-        }
+        PageRankConfig { iterations: 5, tolerance: 0.0, ..PageRankConfig::default() }
     }
 
     #[test]
@@ -510,10 +426,7 @@ mod tests {
         let view = build_star_graph();
         let rec = Recorder::new(None);
         page_rank_with(&view, five_iterations(), &rec).unwrap();
-        assert_eq!(
-            rec.steps(),
-            vec![(0, 5), (1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]
-        );
+        assert_eq!(rec.steps(), vec![(0, 5), (1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]);
     }
 
     #[test]
@@ -522,11 +435,7 @@ mod tests {
         let rec = Recorder::new(Some(2));
         let err = page_rank_with(&view, five_iterations(), &rec).unwrap_err();
         assert_eq!(err, Stopped { done: 2, total: 5 });
-        assert_eq!(
-            rec.steps(),
-            vec![(0, 5), (1, 5), (2, 5)],
-            "no iteration after the stop"
-        );
+        assert_eq!(rec.steps(), vec![(0, 5), (1, 5), (2, 5)], "no iteration after the stop");
     }
 
     #[test]

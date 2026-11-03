@@ -47,16 +47,10 @@ fn engine() -> QueryEngine {
 fn writes_are_writes_and_reads_are_reads() {
     let e = engine();
     for q in WRITES {
-        assert!(
-            e.statement_is_write(q).unwrap(),
-            "classified as a read: {q}"
-        );
+        assert!(e.statement_is_write(q).unwrap(), "classified as a read: {q}");
     }
     for q in READS {
-        assert!(
-            !e.statement_is_write(q).unwrap(),
-            "classified as a write: {q}"
-        );
+        assert!(!e.statement_is_write(q).unwrap(), "classified as a write: {q}");
     }
 }
 

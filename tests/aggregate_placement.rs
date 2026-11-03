@@ -46,9 +46,7 @@ fn filtering_on_an_aggregate_alias_is_allowed() {
 #[test]
 fn an_aggregate_inside_a_comprehension_is_refused() {
     assert!(refused("MATCH (n) RETURN [x IN [1, 2, 3] | count(*)]"));
-    assert!(refused(
-        "MATCH (n) RETURN [x IN [1, 2] WHERE count(*) > 1 | x]"
-    ));
+    assert!(refused("MATCH (n) RETURN [x IN [1, 2] WHERE count(*) > 1 | x]"));
 }
 
 /// An aggregate *over* a comprehension is a different thing and is fine.
@@ -70,10 +68,7 @@ fn a_with_item_that_is_not_a_variable_needs_an_alias() {
     assert!(refused("MATCH (a) WITH a.name RETURN a"));
     assert!(refused("MATCH (a) WITH 1 + 1 RETURN a"));
 
-    assert!(
-        !refused("MATCH (a) WITH a RETURN a"),
-        "a bare variable needs none"
-    );
+    assert!(!refused("MATCH (a) WITH a RETURN a"), "a bare variable needs none");
     assert!(!refused("MATCH (a) WITH a, count(*) AS c RETURN a, c"));
     assert!(!refused("MATCH (a) RETURN a.name"), "RETURN is not WITH");
 }

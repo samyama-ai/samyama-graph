@@ -22,7 +22,8 @@ pub struct EHRJayaSolver {
 
 impl EHRJayaSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { seed: None, config }
+        Self {
+            seed: None, config }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -79,7 +80,8 @@ impl EHRJayaSolver {
                     if rank < half {
                         // High-performing: Rao-1 update
                         for j in 0..dim {
-                            let val = ind.variables[j] + r1 * (best_vars[j] - worst_vars[j]);
+                            let val =
+                                ind.variables[j] + r1 * (best_vars[j] - worst_vars[j]);
                             new_vars[j] = val.clamp(lower[j], upper[j]);
                         }
                     } else {

@@ -47,11 +47,7 @@ fn the_tck_multiply_and_divide_table() {
         ("/ 2", "P6Y2M22DT13H21M8S"),
         ("/ 0.5", "P24Y10M28DT32H26M20.000000002S"),
     ] {
-        assert_eq!(
-            rendered(&format!("RETURN {D} {expr} AS r")),
-            want,
-            "{D} {expr}"
-        );
+        assert_eq!(rendered(&format!("RETURN {D} {expr} AS r")), want, "{D} {expr}");
     }
 }
 
@@ -61,34 +57,22 @@ fn the_tck_multiply_and_divide_table() {
 /// construction — the `* 1` row of the table above is really a test of *this*.
 #[test]
 fn duration_keeps_its_sub_second_components() {
-    assert_eq!(
-        rendered("RETURN duration({nanoseconds: 1}) AS r"),
-        "PT0.000000001S"
-    );
-    assert_eq!(
-        rendered("RETURN duration({milliseconds: 645}) AS r"),
-        "PT0.645S"
-    );
+    assert_eq!(rendered("RETURN duration({nanoseconds: 1}) AS r"), "PT0.000000001S");
+    assert_eq!(rendered("RETURN duration({milliseconds: 645}) AS r"), "PT0.645S");
     // Additive with each other, as everywhere else in the temporal surface.
     assert_eq!(
         rendered("RETURN duration({milliseconds: 123, microseconds: 456, nanoseconds: 789}) AS r"),
         "PT0.123456789S"
     );
     // And they carry into seconds when they overflow.
-    assert_eq!(
-        rendered("RETURN duration({milliseconds: 1500}) AS r"),
-        "PT1.5S"
-    );
+    assert_eq!(rendered("RETURN duration({milliseconds: 1500}) AS r"), "PT1.5S");
 }
 
 /// `weeks` is seven days.
 #[test]
 fn weeks_are_days() {
     assert_eq!(rendered("RETURN duration({weeks: 2}) AS r"), "P14D");
-    assert_eq!(
-        rendered("RETURN duration({weeks: 1, days: 3}) AS r"),
-        "P10D"
-    );
+    assert_eq!(rendered("RETURN duration({weeks: 1, days: 3}) AS r"), "P10D");
 }
 
 /// **Hours do not carry into days.**
@@ -97,10 +81,7 @@ fn weeks_are_days() {
 /// normalise. `28DT32H` is the answer; `29DT8H` is the tidy-looking wrong one.
 #[test]
 fn hours_do_not_normalise_into_days() {
-    assert_eq!(
-        rendered("RETURN duration({days: 14, hours: 16}) * 2 AS r"),
-        "P28DT32H"
-    );
+    assert_eq!(rendered("RETURN duration({days: 14, hours: 16}) * 2 AS r"), "P28DT32H");
     assert_eq!(rendered("RETURN duration({hours: 30}) AS r"), "PT30H");
 }
 
@@ -117,10 +98,7 @@ fn a_fractional_month_uses_the_mean_gregorian_month() {
     // apart on a single month — the same discrepancy the TCK table exposes at
     // 12Y5M, just visible without the arithmetic in between. My first
     // expectation here said 24s; the code said 33s and the code was right.
-    assert_eq!(
-        rendered("RETURN duration({months: 1}) * 0.5 AS r"),
-        "P15DT5H14M33S"
-    );
+    assert_eq!(rendered("RETURN duration({months: 1}) * 0.5 AS r"), "P15DT5H14M33S");
 }
 
 /// Scaling by zero and by a negative number.
@@ -128,10 +106,7 @@ fn a_fractional_month_uses_the_mean_gregorian_month() {
 fn zero_and_negative_factors() {
     assert_eq!(rendered("RETURN duration({days: 3}) * 0 AS r"), "PT0S");
     assert_eq!(rendered("RETURN duration({days: 3}) * -1 AS r"), "P-3D");
-    assert_eq!(
-        rendered("RETURN duration({days: 3, hours: 4}) * -2 AS r"),
-        "P-6DT-8H"
-    );
+    assert_eq!(rendered("RETURN duration({days: 3, hours: 4}) * -2 AS r"), "P-6DT-8H");
 }
 
 /// Dividing by zero is an error, not an infinite duration.
@@ -139,9 +114,7 @@ fn zero_and_negative_factors() {
 fn division_by_zero_is_refused() {
     let store = GraphStore::new();
     let q = parse_query("RETURN duration({days: 1}) / 0 AS r").expect("parses");
-    let e = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect_err("should refuse");
+    let e = QueryExecutor::new(&store).execute(&q).expect_err("should refuse");
     assert!(format!("{e:?}").contains("zero"), "{e:?}");
 }
 
@@ -149,9 +122,10 @@ fn division_by_zero_is_refused() {
 #[test]
 fn duration_addition_is_undisturbed() {
     let store = GraphStore::new();
-    let q =
-        parse_query("RETURN duration({days: 1, hours: 2}) + duration({days: 3, hours: 4}) AS r")
-            .expect("parses");
+    let q = parse_query(
+        "RETURN duration({days: 1, hours: 2}) + duration({days: 3, hours: 4}) AS r",
+    )
+    .expect("parses");
     let batch = QueryExecutor::new(&store).execute(&q).expect("runs");
     match batch.records[0].get("r") {
         Some(Value::Property(PropertyValue::Duration { days, seconds, .. })) => {

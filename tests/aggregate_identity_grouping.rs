@@ -27,12 +27,7 @@ fn teams(spec: &[(&str, i64, usize)]) -> GraphStore {
     let mut store = GraphStore::new();
     for (title, score, members) in spec {
         let t = store.create_node("Team");
-        prop(
-            &mut store,
-            t,
-            "title",
-            PropertyValue::String(title.to_string()),
-        );
+        prop(&mut store, t, "title", PropertyValue::String(title.to_string()));
         prop(&mut store, t, "score", PropertyValue::Integer(*score));
         for i in 0..*members {
             let m = store.create_node("Member");
@@ -53,9 +48,7 @@ fn teams(spec: &[(&str, i64, usize)]) -> GraphStore {
 /// A second aggregate, or any aggregate that is not a plain count, defeats it.
 fn assert_hash_aggregate(store: &GraphStore, cypher: &str) {
     let query = parse_query(&format!("EXPLAIN {cypher}")).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("EXPLAIN should run");
+    let batch = QueryExecutor::new(store).execute(&query).expect("EXPLAIN should run");
     let text = match batch.records[0].get("plan") {
         Some(Value::Property(PropertyValue::String(t))) => t.clone(),
         other => panic!("{other:?}"),
@@ -71,18 +64,13 @@ fn assert_hash_aggregate(store: &GraphStore, cypher: &str) {
 fn rows(store: &GraphStore, cypher: &str) -> Vec<Vec<String>> {
     assert_hash_aggregate(store, cypher);
     let query = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("query should run");
+    let batch = QueryExecutor::new(store).execute(&query).expect("query should run");
     let mut out: Vec<Vec<String>> = batch
         .records
         .iter()
         .map(|r| {
-            let mut cells: Vec<String> = r
-                .bindings()
-                .iter()
-                .map(|(k, v)| format!("{k}={v:?}"))
-                .collect();
+            let mut cells: Vec<String> =
+                r.bindings().iter().map(|(k, v)| format!("{k}={v:?}")).collect();
             cells.sort();
             cells
         })
@@ -120,19 +108,10 @@ fn a_single_key_on_a_property_also_merges() {
     // One key is the same argument: `t.title` is a property of `t`, so this
     // takes the identity path too, and two teams share the title.
     let store = teams(&[("Ops", 10, 3), ("Ops", 11, 4), ("Dev", 1, 5)]);
-    let got = rows(
-        &store,
-        "MATCH (t:Team)<-[:IN]-(m:Member) RETURN t.title AS title, count(m) AS c, sum(m.v) AS s",
-    );
+    let got = rows(&store, "MATCH (t:Team)<-[:IN]-(m:Member) RETURN t.title AS title, count(m) AS c, sum(m.v) AS s");
     assert_eq!(got.len(), 2, "Ops and Dev: {got:?}");
-    let ops = got
-        .iter()
-        .find(|r| r.iter().any(|c| c.contains("Ops")))
-        .unwrap();
-    assert!(
-        ops.iter().any(|c| c.contains("Integer(7)")),
-        "3 + 4 = 7: {ops:?}"
-    );
+    let ops = got.iter().find(|r| r.iter().any(|c| c.contains("Ops"))).unwrap();
+    assert!(ops.iter().any(|c| c.contains("Integer(7)")), "3 + 4 = 7: {ops:?}");
 }
 
 /// Every aggregate has to survive a merge, and each merges differently. A
@@ -145,7 +124,7 @@ fn every_aggregate_survives_a_merge() {
 
     for (cypher, expected) in [
         ("count(m)", "Integer(7)"),
-        ("sum(m.v)", "Integer(9)"), // (0+1+2) + (0+1+2+3)
+        ("sum(m.v)", "Integer(9)"),   // (0+1+2) + (0+1+2+3)
         ("min(m.v)", "Integer(0)"),
         ("max(m.v)", "Integer(3)"),
         ("avg(m.v)", "Float(1.2857142857142858)"), // 9 / 7
@@ -171,11 +150,7 @@ fn every_aggregate_survives_a_merge() {
     for want in ["Integer(0)", "Integer(1)", "Integer(2)", "Integer(3)"] {
         assert!(rendered.contains(want), "collect lost {want}: {rendered}");
     }
-    assert_eq!(
-        rendered.matches("Integer(0)").count(),
-        2,
-        "both zeroes: {rendered}"
-    );
+    assert_eq!(rendered.matches("Integer(0)").count(), 2, "both zeroes: {rendered}");
 
     let _ = one;
 }
@@ -200,10 +175,7 @@ fn count_of_a_property_still_counts_non_null_values() {
         "MATCH (t:Team)<-[:IN]-(m:Member) RETURN t.title AS ti, t.score AS s, count(m.w) AS a",
     );
     assert_eq!(got.len(), 1);
-    assert!(
-        got[0].iter().any(|c| c.contains("Integer(5)")),
-        "half have w: {got:?}"
-    );
+    assert!(got[0].iter().any(|c| c.contains("Integer(5)")), "half have w: {got:?}");
 }
 
 #[test]
@@ -252,27 +224,12 @@ fn the_identity_path_agrees_with_the_general_path_on_a_wide_graph() {
         let t = store.create_node("Team");
         // 200 teams over 50 titles, so four teams share each title, and the
         // merge runs 150 times.
-        prop(
-            &mut store,
-            t,
-            "title",
-            PropertyValue::String(format!("t{}", g % 50)),
-        );
-        prop(
-            &mut store,
-            t,
-            "score",
-            PropertyValue::Integer((g % 50) as i64),
-        );
+        prop(&mut store, t, "title", PropertyValue::String(format!("t{}", g % 50)));
+        prop(&mut store, t, "score", PropertyValue::Integer((g % 50) as i64));
         for i in 0..(g % 7 + 1) {
             let m = store.create_node("Member");
             prop(&mut store, m, "v", PropertyValue::Integer(i as i64));
-            prop(
-                &mut store,
-                m,
-                "team_score",
-                PropertyValue::Integer((g % 50) as i64),
-            );
+            prop(&mut store, m, "team_score", PropertyValue::Integer((g % 50) as i64));
             store.create_edge(m, t, "IN").unwrap();
         }
     }
@@ -298,12 +255,7 @@ fn grouping_cost_does_not_scale_with_the_string_key() {
         let mut store = GraphStore::new();
         for g in 0..500 {
             let t = store.create_node("Team");
-            prop(
-                &mut store,
-                t,
-                "title",
-                PropertyValue::String(format!("{g}").repeat(title_len)),
-            );
+            prop(&mut store, t, "title", PropertyValue::String(format!("{g}").repeat(title_len)));
             prop(&mut store, t, "score", PropertyValue::Integer(g as i64));
             for i in 0..200 {
                 let m = store.create_node("Member");
@@ -340,10 +292,9 @@ fn explain_is_unchanged_by_the_grouping_strategy() {
     // it. Asserted so a future reader does not go looking for a `GroupBy` node
     // that was never there.
     let store = teams(&[("Ops", 10, 3)]);
-    let query = parse_query(
-        "EXPLAIN MATCH (t:Team)<-[:IN]-(m:Member) RETURN t.title AS a, t.score AS b, sum(m.v) AS c",
-    )
-    .unwrap();
+    let query =
+        parse_query("EXPLAIN MATCH (t:Team)<-[:IN]-(m:Member) RETURN t.title AS a, t.score AS b, sum(m.v) AS c")
+            .unwrap();
     let batch = QueryExecutor::new(&store).execute(&query).unwrap();
     let text = match batch.records[0].get("plan") {
         Some(Value::Property(PropertyValue::String(t))) => t.clone(),
@@ -375,8 +326,7 @@ fn grouping_on_edge_properties_rebuilds_the_edge() {
     assert_eq!(got.len(), 3, "three distinct edge weights: {got:?}");
     // 60 edges over 3 weights.
     assert!(
-        got.iter()
-            .all(|r| r.iter().any(|c| c.contains("Integer(20)"))),
+        got.iter().all(|r| r.iter().any(|c| c.contains("Integer(20)"))),
         "each group holds 20 edges: {got:?}"
     );
 }
@@ -397,12 +347,6 @@ fn grouping_on_a_property_of_a_map_still_works() {
         .iter()
         .find(|r| r.iter().any(|c| c == "a=Property(Integer(1))"))
         .unwrap_or_else(|| panic!("{got:?}"));
-    assert!(
-        group_one.iter().any(|c| c.contains("Integer(2)")),
-        "count 2: {group_one:?}"
-    );
-    assert!(
-        group_one.iter().any(|c| c.contains("Integer(40)")),
-        "10 + 30: {group_one:?}"
-    );
+    assert!(group_one.iter().any(|c| c.contains("Integer(2)")), "count 2: {group_one:?}");
+    assert!(group_one.iter().any(|c| c.contains("Integer(40)")), "10 + 30: {group_one:?}");
 }

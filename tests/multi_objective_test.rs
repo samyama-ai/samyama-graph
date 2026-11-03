@@ -12,30 +12,9 @@ fn test_multi_objective_optimization() {
     // n.cost2: [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
     for i in 1..=10 {
         let node_id = store.create_node("Task");
-        store
-            .set_node_property(
-                &tenant_id,
-                node_id,
-                "cost1".to_string(),
-                PropertyValue::Float(i as f64),
-            )
-            .unwrap();
-        store
-            .set_node_property(
-                &tenant_id,
-                node_id,
-                "cost2".to_string(),
-                PropertyValue::Float((11 - i) as f64),
-            )
-            .unwrap();
-        store
-            .set_node_property(
-                &tenant_id,
-                node_id,
-                "priority".to_string(),
-                PropertyValue::Float(0.0),
-            )
-            .unwrap();
+        store.set_node_property(&tenant_id, node_id, "cost1".to_string(), PropertyValue::Float(i as f64)).unwrap();
+        store.set_node_property(&tenant_id, node_id, "cost2".to_string(), PropertyValue::Float((11 - i) as f64)).unwrap();
+        store.set_node_property(&tenant_id, node_id, "priority".to_string(), PropertyValue::Float(0.0)).unwrap();
     }
 
     // Query: Multi-Objective minimize sum(priority * cost1) AND sum(priority * cost2)
@@ -58,24 +37,12 @@ fn test_multi_objective_optimization() {
 
     assert_eq!(result.records.len(), 1);
     let record = &result.records[0];
-
+    
     // fitness should be an array of 2 values
-    let fitness = record
-        .get("fitness")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_array()
-        .unwrap();
+    let fitness = record.get("fitness").unwrap().as_property().unwrap().as_array().unwrap();
     assert_eq!(fitness.len(), 2);
-
-    let front_size = record
-        .get("front_size")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_integer()
-        .unwrap();
+    
+    let front_size = record.get("front_size").unwrap().as_property().unwrap().as_integer().unwrap();
     println!("Pareto Front Size: {}", front_size);
     assert!(front_size > 0);
 }

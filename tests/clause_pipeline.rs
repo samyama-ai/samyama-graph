@@ -24,10 +24,7 @@ use samyama::query::parser::parse_query;
 
 fn fixture() -> GraphStore {
     let mut store = GraphStore::new();
-    run(
-        &mut store,
-        "CREATE (:P {n: 'a', x: 0, y: 9}), (:P {n: 'b', x: 0, y: 9})",
-    );
+    run(&mut store, "CREATE (:P {n: 'a', x: 0, y: 9}), (:P {n: 'b', x: 0, y: 9})");
     store
 }
 
@@ -43,9 +40,7 @@ fn run(store: &mut GraphStore, cypher: &str) -> usize {
 /// A single integer read back from the graph.
 fn scalar(store: &GraphStore, cypher: &str) -> Option<i64> {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .expect("query should run");
+    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
     match batch.records.first().and_then(|r| r.get("v")) {
         Some(Value::Property(PropertyValue::Integer(n))) => Some(*n),
         _ => None,
@@ -54,11 +49,7 @@ fn scalar(store: &GraphStore, cypher: &str) -> Option<i64> {
 
 fn count(store: &GraphStore, cypher: &str) -> usize {
     let q = parse_query(cypher).expect("query should parse");
-    QueryExecutor::new(store)
-        .execute(&q)
-        .expect("query should run")
-        .records
-        .len()
+    QueryExecutor::new(store).execute(&q).expect("query should run").records.len()
 }
 
 #[test]
@@ -67,14 +58,8 @@ fn a_set_before_a_with_actually_writes() {
     // while leaving the store untouched.
     let mut store = fixture();
     run(&mut store, "MATCH (p:P) SET p.x = 1 WITH p RETURN p.x AS v");
-    assert_eq!(
-        scalar(&store, "MATCH (p:P {n: 'a'}) RETURN p.x AS v"),
-        Some(1)
-    );
-    assert_eq!(
-        scalar(&store, "MATCH (p:P {n: 'b'}) RETURN p.x AS v"),
-        Some(1)
-    );
+    assert_eq!(scalar(&store, "MATCH (p:P {n: 'a'}) RETURN p.x AS v"), Some(1));
+    assert_eq!(scalar(&store, "MATCH (p:P {n: 'b'}) RETURN p.x AS v"), Some(1));
 }
 
 #[test]
@@ -102,10 +87,7 @@ fn a_remove_before_a_with_actually_removes() {
 #[test]
 fn a_delete_between_two_withs_actually_deletes() {
     let mut store = fixture();
-    run(
-        &mut store,
-        "MATCH (p:P) WITH p DELETE p WITH 1 AS d RETURN d AS v",
-    );
+    run(&mut store, "MATCH (p:P) WITH p DELETE p WITH 1 AS d RETURN d AS v");
     assert_eq!(count(&store, "MATCH (p:P) RETURN p"), 0);
 }
 
@@ -114,9 +96,7 @@ fn a_query_may_open_with_a_with() {
     // No reading clause at all — the pipeline starts from a single empty row.
     let store = GraphStore::new();
     let q = parse_query("WITH 1 AS a UNWIND [10, 20] AS b WITH a, b RETURN a + b AS v").unwrap();
-    let batch = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect("query should run");
+    let batch = QueryExecutor::new(&store).execute(&q).expect("query should run");
     let mut got: Vec<i64> = batch
         .records
         .iter()
@@ -132,21 +112,15 @@ fn a_query_may_open_with_a_with() {
 #[test]
 fn a_where_after_a_with_filters() {
     let store = GraphStore::new();
-    let q = parse_query("WITH [1, 2, 3] AS xs UNWIND xs AS x WITH x WHERE x > 1 RETURN x AS v")
-        .unwrap();
-    let batch = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect("query should run");
+    let q = parse_query("WITH [1, 2, 3] AS xs UNWIND xs AS x WITH x WHERE x > 1 RETURN x AS v").unwrap();
+    let batch = QueryExecutor::new(&store).execute(&q).expect("query should run");
     assert_eq!(batch.records.len(), 2);
 }
 
 #[test]
 fn a_create_before_a_with_actually_creates() {
     let mut store = GraphStore::new();
-    let rows = run(
-        &mut store,
-        "CREATE (a) WITH a CREATE (b) CREATE (a)<-[:T]-(b)",
-    );
+    let rows = run(&mut store, "CREATE (a) WITH a CREATE (b) CREATE (a)<-[:T]-(b)");
     assert_eq!(rows, 0, "a data write with no RETURN returns no rows");
     assert_eq!(count(&store, "MATCH (n) RETURN n"), 2);
     assert_eq!(count(&store, "MATCH ()-[:T]->() RETURN 1 AS z"), 1);
@@ -155,15 +129,9 @@ fn a_create_before_a_with_actually_creates() {
 #[test]
 fn a_create_after_an_unwind_runs_once_per_row() {
     let mut store = GraphStore::new();
-    run(
-        &mut store,
-        "UNWIND [1, 2, 3] AS x CREATE (n:N {num: x}) WITH n RETURN n.num AS v",
-    );
+    run(&mut store, "UNWIND [1, 2, 3] AS x CREATE (n:N {num: x}) WITH n RETURN n.num AS v");
     assert_eq!(count(&store, "MATCH (n:N) RETURN n"), 3);
-    assert_eq!(
-        scalar(&store, "MATCH (n:N) WHERE n.num = 2 RETURN n.num AS v"),
-        Some(2)
-    );
+    assert_eq!(scalar(&store, "MATCH (n:N) WHERE n.num = 2 RETURN n.num AS v"), Some(2));
 }
 
 #[test]
@@ -190,10 +158,7 @@ fn an_unsupported_clause_position_is_refused_not_mis_planned() {
     let err = parse_query("CREATE (a:A) WITH a FOREACH (i IN [1, 2] | SET a.n = i)")
         .expect_err("must refuse rather than silently drop the clause");
     let msg = err.to_string();
-    assert!(
-        msg.contains("FOREACH"),
-        "the message should name the clause: {msg}"
-    );
+    assert!(msg.contains("FOREACH"), "the message should name the clause: {msg}");
 }
 
 #[test]
@@ -241,9 +206,7 @@ fn order_by_a_column_the_return_does_not_carry_still_sorts() {
                   UNWIND prows AS p UNWIND qrows[p] AS q \
                   WITH p, count(q) AS rng RETURN p AS v ORDER BY rng DESC";
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect("query should run");
+    let batch = QueryExecutor::new(&store).execute(&q).expect("query should run");
     let got: Vec<i64> = batch
         .records
         .iter()
@@ -300,10 +263,7 @@ fn both_planning_paths_agree_on_an_expression_valued_merge_property() {
     // to what it was always really about: the two paths must do the same
     // thing, and that thing must now be correct.
     let mut legacy_store = GraphStore::new();
-    run(
-        &mut legacy_store,
-        "CREATE (:Src {k: 'a'}), (:Src {k: 'b'}), (:Src {k: 'a'})",
-    );
+    run(&mut legacy_store, "CREATE (:Src {k: 'a'}), (:Src {k: 'b'}), (:Src {k: 'a'})");
     run(&mut legacy_store, "MATCH (a:Src) MERGE (n:N {v: a.k})");
 
     let mut pipeline_store = GraphStore::new();
@@ -360,29 +320,16 @@ fn pairs(store: &mut GraphStore, cypher: &str) -> Vec<(String, String)> {
 
 fn two_a_two_b() -> GraphStore {
     let mut store = GraphStore::new();
-    run(
-        &mut store,
-        "CREATE (:A {k: 1}), (:A {k: 2}), (:B {k: 1}), (:B {k: 9})",
-    );
-    run(
-        &mut store,
-        "MATCH (a:A {k: 1}), (b:B {k: 1}) CREATE (a)-[:R]->(b)",
-    );
+    run(&mut store, "CREATE (:A {k: 1}), (:A {k: 2}), (:B {k: 1}), (:B {k: 9})");
+    run(&mut store, "MATCH (a:A {k: 1}), (b:B {k: 1}) CREATE (a)-[:R]->(b)");
     store
 }
 
 #[test]
 fn a_match_after_a_with_sharing_no_variable_is_a_cartesian_product() {
     let mut store = two_a_two_b();
-    let rows = pairs(
-        &mut store,
-        "MATCH (a:A) WITH a MATCH (b:B) RETURN a.k AS x, b.k AS y",
-    );
-    assert_eq!(
-        rows.len(),
-        4,
-        "two As against two Bs, uncorrelated: {rows:?}"
-    );
+    let rows = pairs(&mut store, "MATCH (a:A) WITH a MATCH (b:B) RETURN a.k AS x, b.k AS y");
+    assert_eq!(rows.len(), 4, "two As against two Bs, uncorrelated: {rows:?}");
 }
 
 #[test]
@@ -427,11 +374,7 @@ fn a_match_can_read_what_an_earlier_clause_created() {
     );
     assert_eq!(rows.len(), 2, "one row per A: {rows:?}");
     assert!(rows.iter().all(|(_, y)| y.contains('7')), "{rows:?}");
-    assert_eq!(
-        count(&store, "MATCH (n:C) RETURN n"),
-        1,
-        "exactly one C, created once"
-    );
+    assert_eq!(count(&store, "MATCH (n:C) RETURN n"), 1, "exactly one C, created once");
 }
 
 #[test]

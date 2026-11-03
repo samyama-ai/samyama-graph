@@ -36,15 +36,11 @@ const T: &str = "localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876
 #[test]
 fn a_date_and_a_time_select_into_a_datetime() {
     assert_eq!(
-        rendered(&format!(
-            "WITH {D} AS d, {T} AS t RETURN datetime({{date: d, time: t}}) AS r"
-        )),
+        rendered(&format!("WITH {D} AS d, {T} AS t RETURN datetime({{date: d, time: t}}) AS r")),
         "1984-10-11T12:31:14.645876123Z"
     );
     assert_eq!(
-        rendered(&format!(
-            "WITH {D} AS d, {T} AS t RETURN localdatetime({{date: d, time: t}}) AS r"
-        )),
+        rendered(&format!("WITH {D} AS d, {T} AS t RETURN localdatetime({{date: d, time: t}}) AS r")),
         "1984-10-11T12:31:14.645876123"
     );
 }
@@ -76,9 +72,7 @@ fn overrides_replace_only_the_fields_they_name() {
     );
     // Only the hour, with the fraction preserved.
     assert_eq!(
-        rendered(&format!(
-            "WITH {D} AS d, {T} AS t RETURN datetime({{date: d, time: t, hour: 1}}) AS r"
-        )),
+        rendered(&format!("WITH {D} AS d, {T} AS t RETURN datetime({{date: d, time: t, hour: 1}}) AS r")),
         "1984-10-11T01:31:14.645876123Z"
     );
 }
@@ -97,14 +91,8 @@ fn without_a_selection_the_components_are_the_whole_value() {
 #[test]
 fn a_bare_temporal_value_can_be_widened() {
     let ldt = "localdatetime({year: 1984, month: 3, day: 7, hour: 12, minute: 31, second: 14, millisecond: 645})";
-    assert_eq!(
-        rendered(&format!("RETURN datetime({ldt}) AS r")),
-        "1984-03-07T12:31:14.645Z"
-    );
-    assert_eq!(
-        rendered(&format!("RETURN localdatetime({ldt}) AS r")),
-        "1984-03-07T12:31:14.645"
-    );
+    assert_eq!(rendered(&format!("RETURN datetime({ldt}) AS r")), "1984-03-07T12:31:14.645Z");
+    assert_eq!(rendered(&format!("RETURN localdatetime({ldt}) AS r")), "1984-03-07T12:31:14.645");
     assert_eq!(rendered(&format!("RETURN date({ldt}) AS r")), "1984-03-07");
 }
 
@@ -112,16 +100,8 @@ fn a_bare_temporal_value_can_be_widened() {
 #[test]
 fn a_datetime_selects_into_its_parts() {
     let dt = "datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, timezone: '+01:00'})";
-    assert_eq!(
-        rendered(&format!("WITH {dt} AS x RETURN date({{date: x}}) AS r")),
-        "1984-10-11"
-    );
-    assert_eq!(
-        rendered(&format!(
-            "WITH {dt} AS x RETURN localtime({{time: x}}) AS r"
-        )),
-        "12:31:14"
-    );
+    assert_eq!(rendered(&format!("WITH {dt} AS x RETURN date({{date: x}}) AS r")), "1984-10-11");
+    assert_eq!(rendered(&format!("WITH {dt} AS x RETURN localtime({{time: x}}) AS r")), "12:31:14");
 }
 
 /// A map naming nothing the constructor understands is still refused, and the
@@ -130,12 +110,7 @@ fn a_datetime_selects_into_its_parts() {
 fn an_unrecognised_map_is_still_refused() {
     let store = GraphStore::new();
     let q = parse_query("RETURN datetime({nonsense: 1}) AS r").expect("parses");
-    let e = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect_err("should be refused");
+    let e = QueryExecutor::new(&store).execute(&q).expect_err("should be refused");
     let msg = format!("{e:?}");
-    assert!(
-        msg.contains("nonsense"),
-        "the message should name what was given: {msg}"
-    );
+    assert!(msg.contains("nonsense"), "the message should name what was given: {msg}");
 }

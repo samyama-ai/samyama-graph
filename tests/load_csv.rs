@@ -106,10 +106,7 @@ fn load_csv_end_to_end() {
             &GraphStore::new(),
         )
         .expect_err("read a file outside the import directory");
-    assert!(
-        err.to_string().contains("outside the import directory"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("outside the import directory"), "{err}");
 
     // ---- http is refused rather than fetched ----
     let err = engine
@@ -118,10 +115,7 @@ fn load_csv_end_to_end() {
             &GraphStore::new(),
         )
         .expect_err("fetched an http source");
-    assert!(
-        err.to_string().contains("cannot read 'https' sources"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("cannot read 'https' sources"), "{err}");
 
     // ---- fields arrive as strings, not guessed types ----
     write_csv(dir.path(), "zeros.csv", "code\n007\n");

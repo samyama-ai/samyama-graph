@@ -137,11 +137,7 @@ mod managed {
                 result::malloc_managed(bytes, sys::CUmemAttach_flags::CU_MEM_ATTACH_GLOBAL)
                     .map_err(|e| GpuError::DeviceCreation(format!("cuMemAllocManaged: {e}")))?
             };
-            Ok(Self {
-                ptr,
-                len,
-                _marker: PhantomData,
-            })
+            Ok(Self { ptr, len, _marker: PhantomData })
         }
 
         /// Allocate and copy `src` in — a one-time CPU write into the shared allocation.
@@ -214,11 +210,7 @@ mod tests {
 
         // The CPU reads the very bytes a kernel would read via device_ptr() — one copy.
         assert_eq!(buf.as_slice(), src.as_slice());
-        assert_ne!(
-            buf.device_ptr(),
-            0,
-            "managed device pointer must be non-null"
-        );
+        assert_ne!(buf.device_ptr(), 0, "managed device pointer must be non-null");
 
         // Mutate in place from the CPU (no host<->device copy) and observe it.
         buf.as_mut_slice()[0] = 42;

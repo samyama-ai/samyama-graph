@@ -18,18 +18,12 @@ type Rows = Vec<(u64, Vec<f64>)>;
 
 fn call(store: &GraphStore, cypher: &str) -> Result<Rows, String> {
     let q = parse_query(cypher).map_err(|e| format!("parse: {e}"))?;
-    let out = QueryExecutor::new(store)
-        .execute(&q)
-        .map_err(|e| e.to_string())?;
+    let out = QueryExecutor::new(store).execute(&q).map_err(|e| e.to_string())?;
     Ok(out
         .records
         .iter()
         .map(|r| {
-            let id = r
-                .get("node")
-                .and_then(|v| v.node_id())
-                .expect("node")
-                .as_u64();
+            let id = r.get("node").and_then(|v| v.node_id()).expect("node").as_u64();
             let proj = match r.get("projection") {
                 Some(samyama::query::executor::Value::List(items)) => items
                     .iter()
@@ -82,13 +76,8 @@ fn column_store() -> GraphStore {
 }
 
 fn library_projection(k: usize) -> Vec<Vec<f64>> {
-    let data: Vec<Vec<f64>> = (0..30)
-        .map(|i| features(i).iter().map(|&v| v as f64).collect())
-        .collect();
-    let config = PcaConfig {
-        n_components: k,
-        ..PcaConfig::default()
-    };
+    let data: Vec<Vec<f64>> = (0..30).map(|i| features(i).iter().map(|&v| v as f64).collect()).collect();
+    let config = PcaConfig { n_components: k, ..PcaConfig::default() };
     pca(&data, config).transform(&data)
 }
 
@@ -99,20 +88,13 @@ fn close(a: &[f64], b: &[f64]) -> bool {
 #[test]
 fn pca_is_callable_from_cypher_and_matches_the_library() {
     let (store, ids) = row_store();
-    let got = call(
-        &store,
-        "CALL algo.pca('P', ['a', 'b', 'c'], 2) YIELD node, projection RETURN node, projection",
-    )
-    .expect("algo.pca should run");
+    let got = call(&store, "CALL algo.pca('P', ['a', 'b', 'c'], 2) YIELD node, projection RETURN node, projection")
+        .expect("algo.pca should run");
     assert_eq!(got.len(), 30, "one row per :P node, none for :Q");
     let expected = library_projection(2);
     for (i, (id, proj)) in got.iter().enumerate() {
         assert_eq!(*id, ids[i].as_u64(), "rows are in node-id order");
-        assert!(
-            close(proj, &expected[i]),
-            "node {id}: {proj:?} vs the library's {:?}",
-            expected[i]
-        );
+        assert!(close(proj, &expected[i]), "node {id}: {proj:?} vs the library's {:?}", expected[i]);
     }
 }
 
@@ -121,43 +103,21 @@ fn column_only_nodes_are_read() {
     let (rows, _) = row_store();
     let cols = column_store();
     let q = "CALL algo.pca('P', ['a', 'b', 'c'], 2) YIELD node, projection RETURN node, projection";
-    let from_rows: Vec<Vec<f64>> = call(&rows, q)
-        .unwrap()
-        .into_iter()
-        .map(|(_, p)| p)
-        .collect();
-    let from_cols: Vec<Vec<f64>> = call(&cols, q)
-        .unwrap()
-        .into_iter()
-        .map(|(_, p)| p)
-        .collect();
+    let from_rows: Vec<Vec<f64>> = call(&rows, q).unwrap().into_iter().map(|(_, p)| p).collect();
+    let from_cols: Vec<Vec<f64>> = call(&cols, q).unwrap().into_iter().map(|(_, p)| p).collect();
     assert_eq!(from_cols.len(), 30);
     for (a, b) in from_rows.iter().zip(&from_cols) {
-        assert!(
-            close(a, b),
-            "a column-only node projected differently: {b:?} vs {a:?}"
-        );
+        assert!(close(a, b), "a column-only node projected differently: {b:?} vs {a:?}");
     }
-    assert!(
-        from_cols.iter().any(|p| p.iter().any(|x| x.abs() > 1e-6)),
-        "column-only features read as zeros"
-    );
+    assert!(from_cols.iter().any(|p| p.iter().any(|x| x.abs() > 1e-6)), "column-only features read as zeros");
 }
 
 #[test]
 fn n_components_defaults_to_two_and_is_honoured() {
     let (store, _) = row_store();
-    let two = call(
-        &store,
-        "CALL algo.pca('P', ['a', 'b', 'c']) YIELD node, projection RETURN node, projection",
-    )
-    .unwrap();
+    let two = call(&store, "CALL algo.pca('P', ['a', 'b', 'c']) YIELD node, projection RETURN node, projection").unwrap();
     assert!(two.iter().all(|(_, p)| p.len() == 2));
-    let one = call(
-        &store,
-        "CALL algo.pca('P', ['a', 'b', 'c'], 1) YIELD node, projection RETURN node, projection",
-    )
-    .unwrap();
+    let one = call(&store, "CALL algo.pca('P', ['a', 'b', 'c'], 1) YIELD node, projection RETURN node, projection").unwrap();
     assert!(one.iter().all(|(_, p)| p.len() == 1));
     let expected = library_projection(1);
     assert!(one.iter().zip(&expected).all(|((_, p), e)| close(p, e)));

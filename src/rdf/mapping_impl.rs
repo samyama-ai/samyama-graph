@@ -48,7 +48,7 @@
 
 use std::collections::HashMap;
 
-use super::mapping::{MappingConfig, MappingError, MappingResult};
+use super::mapping::{MappingError, MappingResult, MappingConfig};
 use super::{Literal, NamedNode, RdfObject, RdfPredicate, RdfStore, RdfSubject, Triple};
 use crate::graph::{Edge, GraphStore, Node, NodeId, PropertyValue};
 
@@ -98,24 +98,14 @@ fn escape_segment(s: &str) -> String {
 /// and leaves the row map empty (#554). Reading the row alone reported that
 /// every imported node had no properties at all, so the export of a graph that
 /// had just been imported was a set of bare subjects.
-pub fn node_iri(
-    config: &MappingConfig,
-    graph: &GraphStore,
-    node: &Node,
-) -> MappingResult<NamedNode> {
-    if let Some(PropertyValue::String(existing)) =
-        graph.node_properties_merged(node.id).get(IRI_PROPERTY)
-    {
+pub fn node_iri(config: &MappingConfig, graph: &GraphStore, node: &Node) -> MappingResult<NamedNode> {
+    if let Some(PropertyValue::String(existing)) = graph.node_properties_merged(node.id).get(IRI_PROPERTY) {
         return iri(existing);
     }
     iri(&format!("{}node/{}", config.base_iri, node.id.as_u64()))
 }
 
-fn node_iri_by_id(
-    config: &MappingConfig,
-    graph: &GraphStore,
-    id: NodeId,
-) -> MappingResult<NamedNode> {
+fn node_iri_by_id(config: &MappingConfig, graph: &GraphStore, id: NodeId) -> MappingResult<NamedNode> {
     match graph.get_node(id) {
         Some(node) => node_iri(config, graph, node),
         // An edge endpoint that is not in the store is a torn graph, not
@@ -185,15 +175,10 @@ pub fn value_for(lit: &Literal) -> PropertyValue {
 }
 
 /// Triples for one node: its labels and its properties.
-pub fn map_node(
-    config: &MappingConfig,
-    graph: &GraphStore,
-    node: &Node,
-) -> MappingResult<Vec<Triple>> {
+pub fn map_node(config: &MappingConfig, graph: &GraphStore, node: &Node) -> MappingResult<Vec<Triple>> {
     let subject = RdfSubject::NamedNode(node_iri(config, graph, node)?);
     let properties = graph.node_properties_merged(node.id);
-    let rdf_type =
-        RdfPredicate::new(RDF_TYPE).map_err(|_| MappingError::InvalidIri(RDF_TYPE.into()))?;
+    let rdf_type = RdfPredicate::new(RDF_TYPE).map_err(|_| MappingError::InvalidIri(RDF_TYPE.into()))?;
     let mut triples = Vec::new();
 
     // Sorted: `labels` is a HashSet and `properties` a HashMap, so without this
@@ -233,11 +218,7 @@ pub fn map_node(
 }
 
 /// Triples for one edge, reifying its properties when it has any.
-pub fn map_edge(
-    config: &MappingConfig,
-    graph: &GraphStore,
-    edge: &Edge,
-) -> MappingResult<Vec<Triple>> {
+pub fn map_edge(config: &MappingConfig, graph: &GraphStore, edge: &Edge) -> MappingResult<Vec<Triple>> {
     let source = node_iri_by_id(config, graph, edge.source)?;
     let target = node_iri_by_id(config, graph, edge.target)?;
     let predicate = RdfPredicate::new(&format!(
@@ -262,23 +243,11 @@ pub fn map_edge(
     // Reification: a resource standing for the statement, carrying the
     // properties. Keyed by edge id so two parallel edges reify separately even
     // though their base triple is the same one.
-    let statement = iri(&format!(
-        "{}statement/{}",
-        config.base_iri,
-        edge.id.as_u64()
-    ))?;
+    let statement = iri(&format!("{}statement/{}", config.base_iri, edge.id.as_u64()))?;
     let s = RdfSubject::NamedNode(statement);
     let p = |x: &str| RdfPredicate::new(x).map_err(|_| MappingError::InvalidIri(x.to_string()));
-    triples.push(Triple::new(
-        s.clone(),
-        p(RDF_TYPE)?,
-        RdfObject::NamedNode(iri(RDF_STATEMENT)?),
-    ));
-    triples.push(Triple::new(
-        s.clone(),
-        p(RDF_SUBJECT)?,
-        RdfObject::NamedNode(source),
-    ));
+    triples.push(Triple::new(s.clone(), p(RDF_TYPE)?, RdfObject::NamedNode(iri(RDF_STATEMENT)?)));
+    triples.push(Triple::new(s.clone(), p(RDF_SUBJECT)?, RdfObject::NamedNode(source)));
     triples.push(Triple::new(
         s.clone(),
         p(RDF_PREDICATE)?,
@@ -288,11 +257,7 @@ pub fn map_edge(
             escape_segment(edge.edge_type.as_str())
         ))?),
     ));
-    triples.push(Triple::new(
-        s.clone(),
-        p(RDF_OBJECT)?,
-        RdfObject::NamedNode(target),
-    ));
+    triples.push(Triple::new(s.clone(), p(RDF_OBJECT)?, RdfObject::NamedNode(target)));
 
     let mut keys: Vec<&String> = properties.keys().collect();
     keys.sort();
@@ -411,10 +376,7 @@ impl RdfImportReport {
     }
 
     fn skip(&mut self, predicate: &str) {
-        *self
-            .predicates_skipped
-            .entry(predicate.to_string())
-            .or_insert(0) += 1;
+        *self.predicates_skipped.entry(predicate.to_string()).or_insert(0) += 1;
     }
 
     /// Count what [`value_for`] loses when it reads `lit`.
@@ -470,12 +432,7 @@ pub fn map_to_graph(
                 subjects.push(s);
             }
         }
-        if triple
-            .predicate
-            .as_named_node()
-            .as_str()
-            .starts_with(&rel_prefix)
-        {
+        if triple.predicate.as_named_node().as_str().starts_with(&rel_prefix) {
             if let RdfObject::NamedNode(n) = &triple.object {
                 let s = n.as_str().to_string();
                 if !subjects.contains(&s) {
@@ -594,15 +551,7 @@ pub fn map_to_graph(
     // edge property survives being written and not being read — which is the
     // shape of a round trip that looks like it works. Left until last because
     // it needs the edges pass 2 created.
-    restore_reified_edge_properties(
-        config,
-        rdf,
-        graph,
-        &ids,
-        &rel_prefix,
-        &prop_prefix,
-        &mut report,
-    )?;
+    restore_reified_edge_properties(config, rdf, graph, &ids, &rel_prefix, &prop_prefix, &mut report)?;
     Ok(report)
 }
 
@@ -702,6 +651,4 @@ fn decode_segment(s: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
-#[cfg(test)]
-#[path = "mapping_cov_tests.rs"]
-mod cov_tests;
+#[cfg(test)] #[path = "mapping_cov_tests.rs"] mod cov_tests;

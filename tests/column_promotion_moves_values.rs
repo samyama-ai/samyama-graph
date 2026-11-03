@@ -57,29 +57,19 @@ fn promoting_a_string_column_moves_its_values_instead_of_copying_them() {
     for i in (1..N - 1).step_by(2) {
         store.set_property(i, "content", value(i));
     }
-    assert!(
-        !store.get_column("content").expect("column").is_dense(),
-        "promoted before the threshold"
-    );
+    assert!(!store.get_column("content").expect("column").is_dense(), "promoted before the threshold");
 
     let last = value(N - 1);
     let before = ALLOCS.load(Ordering::Relaxed);
     store.set_property(N - 1, "content", last);
     let during = ALLOCS.load(Ordering::Relaxed) - before;
 
-    assert!(
-        store.get_column("content").expect("column").is_dense(),
-        "the column was not promoted at {N} entries"
-    );
+    assert!(store.get_column("content").expect("column").is_dense(), "the column was not promoted at {N} entries");
     assert!(
         during < 64,
         "promoting {N} strings made {during} allocations: the values were copied, not moved"
     );
     for i in [0, 1, N / 2, N - 2, N - 1] {
-        assert_eq!(
-            store.get_property(i, "content"),
-            value(i),
-            "row {i} changed across promotion"
-        );
+        assert_eq!(store.get_property(i, "content"), value(i), "row {i} changed across promotion");
     }
 }

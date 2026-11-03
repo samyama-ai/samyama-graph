@@ -51,10 +51,7 @@ fn run(store: &mut GraphStore, cypher: &str) {
 #[test]
 fn an_aliased_variable_is_reused_not_recreated() {
     let mut store = one_node();
-    run(
-        &mut store,
-        "MATCH (n) MATCH (m) WITH n AS a, m AS b CREATE (a)-[:T]->(b) RETURN a, b",
-    );
+    run(&mut store, "MATCH (n) MATCH (m) WITH n AS a, m AS b CREATE (a)-[:T]->(b) RETURN a, b");
     assert_eq!(nodes(&store), 1, "only the relationship is new");
     assert_eq!(count(&store, "MATCH ()-[r:T]->() RETURN count(r) AS c"), 1);
 }
@@ -62,10 +59,7 @@ fn an_aliased_variable_is_reused_not_recreated() {
 #[test]
 fn only_the_genuinely_new_node_is_created() {
     let mut store = one_node();
-    run(
-        &mut store,
-        "MATCH (n) WITH n AS a CREATE (a)-[:T]->(x) RETURN a",
-    );
+    run(&mut store, "MATCH (n) WITH n AS a CREATE (a)-[:T]->(x) RETURN a");
     assert_eq!(nodes(&store), 2, "`x` is new, `a` is not");
 }
 
@@ -97,29 +91,20 @@ fn a_name_the_with_dropped_is_a_new_node() {
     // rather than adding its names to the match variables: `m` is not
     // projected, so it is out of scope and CREATE (m) makes a fresh node.
     let mut store = one_node();
-    run(
-        &mut store,
-        "MATCH (n) MATCH (m) WITH n AS a CREATE (a)-[:T]->(m) RETURN a",
-    );
+    run(&mut store, "MATCH (n) MATCH (m) WITH n AS a CREATE (a)-[:T]->(m) RETURN a");
     assert_eq!(nodes(&store), 2);
 }
 
 #[test]
 fn create_without_a_with_is_unchanged() {
     let mut store = one_node();
-    run(
-        &mut store,
-        "MATCH (n) MATCH (m) CREATE (n)-[:T]->(m) RETURN n, m",
-    );
+    run(&mut store, "MATCH (n) MATCH (m) CREATE (n)-[:T]->(m) RETURN n, m");
     assert_eq!(nodes(&store), 1);
 }
 
 #[test]
 fn a_match_after_the_with_still_binds() {
     let mut store = one_node();
-    run(
-        &mut store,
-        "MATCH (n) WITH n AS a MATCH (b) CREATE (a)-[:T]->(b) RETURN a",
-    );
+    run(&mut store, "MATCH (n) WITH n AS a MATCH (b) CREATE (a)-[:T]->(b) RETURN a");
     assert_eq!(nodes(&store), 1, "both ends were already bound");
 }

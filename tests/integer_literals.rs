@@ -87,9 +87,6 @@ fn ordinary_numbers_are_unaffected() {
     assert_eq!(int_of("RETURN -5 AS x"), -5);
     assert_eq!(int_of("RETURN 42 AS x"), 42);
     assert_eq!(value_of("RETURN 1.5 AS x"), Ok(PropertyValue::Float(1.5)));
-    assert_eq!(
-        value_of("RETURN 1e3 AS x"),
-        Ok(PropertyValue::Float(1000.0))
-    );
+    assert_eq!(value_of("RETURN 1e3 AS x"), Ok(PropertyValue::Float(1000.0)));
     assert_eq!(value_of("RETURN -1.5 AS x"), Ok(PropertyValue::Float(-1.5)));
 }

@@ -3,8 +3,8 @@
 //! Implements Prim's algorithm for MST.
 
 use super::common::{GraphView, NodeId};
+use std::collections::{HashSet, BinaryHeap};
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet};
 
 pub struct MSTResult {
     pub total_weight: f64,
@@ -66,11 +66,7 @@ impl PartialOrd for EdgeState {
 /// so the forest is the same forest on every run.
 pub fn prim_mst(view: &GraphView) -> MSTResult {
     if view.node_count == 0 {
-        return MSTResult {
-            total_weight: 0.0,
-            edges: Vec::new(),
-            components: 0,
-        };
+        return MSTResult { total_weight: 0.0, edges: Vec::new(), components: 0 };
     }
 
     let mut visited = HashSet::new();
@@ -88,12 +84,7 @@ pub fn prim_mst(view: &GraphView) -> MSTResult {
         let mut heap = BinaryHeap::new();
         add_edges(view, start_idx, &mut heap, &visited);
 
-        while let Some(EdgeState {
-            weight,
-            source,
-            target,
-        }) = heap.pop()
-        {
+        while let Some(EdgeState { weight, source, target }) = heap.pop() {
             if visited.contains(&target) {
                 continue;
             }
@@ -102,7 +93,7 @@ pub fn prim_mst(view: &GraphView) -> MSTResult {
             mst_edges.push((
                 view.index_to_node[source],
                 view.index_to_node[target],
-                weight,
+                weight
             ));
             total_weight += weight;
 
@@ -117,41 +108,28 @@ pub fn prim_mst(view: &GraphView) -> MSTResult {
     }
 }
 
-fn add_edges(
-    view: &GraphView,
-    u: usize,
-    heap: &mut BinaryHeap<EdgeState>,
-    visited: &HashSet<usize>,
-) {
+fn add_edges(view: &GraphView, u: usize, heap: &mut BinaryHeap<EdgeState>, visited: &HashSet<usize>) {
     // Check outgoing edges
     let u_out = view.successors(u);
     for (i, &v) in u_out.iter().enumerate() {
         if !visited.contains(&v) {
             let weight = view.weights(u).map(|w| w[i]).unwrap_or(1.0);
-            heap.push(EdgeState {
-                weight,
-                source: u,
-                target: v,
-            });
+            heap.push(EdgeState { weight, source: u, target: v });
         }
     }
 
     // Check incoming edges (treat as undirected)
     let u_in = view.predecessors(u);
     for &_v in u_in.iter() {
-        let v = _v; // explicit copy
-        if !visited.contains(&v) {
-            // Need to find weight in incoming list?
+         let v = _v; // explicit copy
+         if !visited.contains(&v) {
+            // Need to find weight in incoming list? 
             // GraphView structure: incoming[u] contains v implies edge v->u exists.
-
+            
             let v_out = view.successors(v);
             if let Some(idx) = v_out.iter().position(|&x| x == u) {
                 let weight = view.weights(v).map(|w| w[idx]).unwrap_or(1.0);
-                heap.push(EdgeState {
-                    weight,
-                    source: u,
-                    target: v,
-                }); // "source" here is just the connection point in MST
+                heap.push(EdgeState { weight, source: u, target: v }); // "source" here is just the connection point in MST
             }
         }
     }
@@ -166,44 +144,30 @@ mod tests {
     fn test_prim_mst() {
         // Triangle: 1-2 (1), 2-3 (2), 1-3 (10)
         // MST should be 1-2, 2-3. Total 3.
-
+        
         let node_count = 3;
         let index_to_node = vec![1, 2, 3];
         let mut node_to_index = HashMap::new();
-        node_to_index.insert(1, 0);
-        node_to_index.insert(2, 1);
-        node_to_index.insert(3, 2);
+        node_to_index.insert(1, 0); node_to_index.insert(2, 1); node_to_index.insert(3, 2);
 
         let mut outgoing = vec![vec![]; 3];
         let mut incoming = vec![vec![]; 3];
         let mut weights = vec![vec![]; 3];
 
         // 1->2 (1)
-        outgoing[0].push(1);
-        incoming[1].push(0);
-        weights[0].push(1.0);
+        outgoing[0].push(1); incoming[1].push(0); weights[0].push(1.0);
         // 2->1 (1) - Undirected explicitly stored?
-        outgoing[1].push(0);
-        incoming[0].push(1);
-        weights[1].push(1.0);
+        outgoing[1].push(0); incoming[0].push(1); weights[1].push(1.0);
 
         // 2->3 (2)
-        outgoing[1].push(2);
-        incoming[2].push(1);
-        weights[1].push(2.0);
+        outgoing[1].push(2); incoming[2].push(1); weights[1].push(2.0);
         // 3->2 (2)
-        outgoing[2].push(1);
-        incoming[1].push(2);
-        weights[2].push(2.0);
+        outgoing[2].push(1); incoming[1].push(2); weights[2].push(2.0);
 
         // 1->3 (10)
-        outgoing[0].push(2);
-        incoming[2].push(0);
-        weights[0].push(10.0);
+        outgoing[0].push(2); incoming[2].push(0); weights[0].push(10.0);
         // 3->1 (10)
-        outgoing[2].push(0);
-        incoming[0].push(2);
-        weights[2].push(10.0);
+        outgoing[2].push(0); incoming[0].push(2); weights[2].push(10.0);
 
         let view = GraphView::from_adjacency_list(
             node_count,
@@ -240,9 +204,7 @@ mod tests {
         let mut outgoing = vec![vec![]; 6];
         let mut incoming = vec![vec![]; 6];
         let mut weights = vec![vec![]; 6];
-        let mut link = |a: usize,
-                        b: usize,
-                        w: f64,
+        let mut link = |a: usize, b: usize, w: f64,
                         outgoing: &mut Vec<Vec<usize>>,
                         incoming: &mut Vec<Vec<usize>>,
                         weights: &mut Vec<Vec<f64>>| {
@@ -272,10 +234,7 @@ mod tests {
         let result = prim_mst(&view);
         assert_eq!(result.components, 2, "two components, so two trees");
         assert_eq!(result.edges.len(), 4, "n - components edges span a forest");
-        assert_eq!(
-            result.total_weight, 12.0,
-            "3 for the first tree, 9 for the second"
-        );
+        assert_eq!(result.total_weight, 12.0, "3 for the first tree, 9 for the second");
     }
 
     /// An edgeless graph is n components and no edges, not one empty tree.
@@ -336,11 +295,7 @@ mod tests {
 
         let first = prim_mst(&build()).edges;
         for _ in 0..5 {
-            assert_eq!(
-                prim_mst(&build()).edges,
-                first,
-                "the tie-break is not stable"
-            );
+            assert_eq!(prim_mst(&build()).edges, first, "the tie-break is not stable");
         }
         assert_eq!(first.len(), 3);
     }

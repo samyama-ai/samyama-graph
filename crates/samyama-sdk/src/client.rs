@@ -1,8 +1,8 @@
 //! SamyamaClient trait — the unified interface for embedded and remote modes
 
+use async_trait::async_trait;
 use crate::error::SamyamaResult;
 use crate::models::{QueryResult, ServerStatus};
-use async_trait::async_trait;
 
 /// Unified client interface for the Samyama graph database.
 ///

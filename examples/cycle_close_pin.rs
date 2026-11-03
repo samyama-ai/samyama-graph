@@ -28,11 +28,7 @@ fn closing_op_rows(s: &GraphStore, q: &str) -> Option<(&'static str, u64)> {
     let p = parse_query(&format!("PROFILE {q}")).ok()?;
     let b = QueryExecutor::new(s).execute(&p).ok()?;
     let text = format!("{:?}", b.records.first()?.values().next()?).replace("\\n", "\n");
-    let table = text
-        .split("--- Profile (per operator) ---")
-        .nth(1)?
-        .split("\n\n")
-        .next()?;
+    let table = text.split("--- Profile (per operator) ---").nth(1)?.split("\n\n").next()?;
     for line in table.lines() {
         let op = if line.contains("TrieJoin") {
             "TrieJoin"
@@ -60,8 +56,7 @@ fn main() {
     let mut ids = Vec::new();
     for i in 0..n {
         let p = s.create_node_with_labels([Label::new("P")]);
-        s.set_node_property("default", p, "id", PropertyValue::Integer(i))
-            .unwrap();
+        s.set_node_property("default", p, "id", PropertyValue::Integer(i)).unwrap();
         ids.push(p);
     }
     for i in 0..ids.len() {
@@ -81,10 +76,8 @@ fn main() {
 
     let mut answers = Vec::new();
     let mut pinned_all = true;
-    for (name, q) in [
-        ("unanchored (BI-17's path)", direct),
-        ("anchored (build_path_from_anchor)", anchored),
-    ] {
+    for (name, q) in [("unanchored (BI-17's path)", direct),
+                      ("anchored (build_path_from_anchor)", anchored)] {
         // Panics rather than printing a note: an unreadable profile means this
         // check is no longer checking, and `answers` staying empty made the
         // assertions below pass vacuously -- `all()` over nothing is true.
@@ -95,33 +88,22 @@ fn main() {
                  rather than letting it pass on nothing."
             )
         });
-        let ans = parse_query(q)
-            .ok()
+        let ans = parse_query(q).ok()
             .and_then(|p| QueryExecutor::new(&s).execute(&p).ok())
-            .and_then(|b| {
-                b.records
-                    .first()
-                    .and_then(|r| r.values().next().map(|v| format!("{v:?}")))
-            })
+            .and_then(|b| b.records.first()
+                .and_then(|r| r.values().next().map(|v| format!("{v:?}"))))
             .unwrap_or_default();
-        let triangles: u64 = ans
-            .chars()
-            .filter(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .unwrap_or(0);
+        let triangles: u64 = ans.chars().filter(|c| c.is_ascii_digit())
+            .collect::<String>().parse().unwrap_or(0);
         let pinned = close_rows == triangles;
-        println!(
-            "{name:<16} closing {op} emitted {close_rows:>8} rows, \
+        println!("{name:<16} closing {op} emitted {close_rows:>8} rows, \
                   answer {triangles:>8}  -> {}",
-            if pinned { "PINNED" } else { "NOT PINNED" }
-        );
+            if pinned { "PINNED" } else { "NOT PINNED" });
         pinned_all &= pinned;
         answers.push(triangles);
     }
     assert_eq!(
-        answers.len(),
-        2,
+        answers.len(), 2,
         "both planner paths must have been measured; a shorter list means a \
          read was skipped and `answers.iter().all(..)` below proves nothing"
     );
@@ -130,17 +112,13 @@ fn main() {
     // Different questions (all triangles vs triangles through one anchor), so
     // no cross-check here — the row count against each query's own answer is
     // the assertion that matters.
-    assert!(
-        answers.iter().all(|&a| a > 0),
-        "a zero answer proves nothing: an unpinned close would also emit zero"
-    );
+    assert!(answers.iter().all(|&a| a > 0),
+        "a zero answer proves nothing: an unpinned close would also emit zero");
     // A regression guard, not a demonstration. Both paths pin today — that was
     // verified against HEAD before and after a candidate change, and it held
     // both times, which is how the candidate was found to be a no-op and
     // dropped. What this asserts is that they keep pinning.
-    assert!(
-        pinned_all,
+    assert!(pinned_all,
         "a closing hop stopped being pinned: the expand is walking every \
-         neighbour and letting the filter above discard them (#195, #1069)"
-    );
+         neighbour and letting the filter above discard them (#195, #1069)");
 }

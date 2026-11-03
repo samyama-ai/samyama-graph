@@ -51,9 +51,7 @@ fn the_router_calls_every_registered_mutating_procedure_a_write() {
     for (procedure, _why) in AlgorithmOperator::MUTATING_PROCEDURES {
         let q = call_for(procedure);
         assert!(
-            engine
-                .statement_is_write(&q)
-                .unwrap_or_else(|e| panic!("{q} did not parse: {e}")),
+            engine.statement_is_write(&q).unwrap_or_else(|e| panic!("{q} did not parse: {e}")),
             "the registry marks `{procedure}` mutating and the router routed it to \
              the read executor: {q}"
         );
@@ -89,9 +87,7 @@ fn the_registry_is_the_operators_own_predicate() {
     for (procedure, _why) in AlgorithmOperator::MUTATING_PROCEDURES {
         assert!(AlgorithmOperator::procedure_is_mutating(procedure));
         // The prefixes and the casing a caller actually types.
-        assert!(AlgorithmOperator::procedure_is_mutating(&format!(
-            "algo.{procedure}"
-        )));
+        assert!(AlgorithmOperator::procedure_is_mutating(&format!("algo.{procedure}")));
         assert!(AlgorithmOperator::procedure_is_mutating(&format!(
             "samyama.{}",
             procedure.to_ascii_uppercase()
@@ -117,9 +113,7 @@ fn a_read_only_call_still_routes_to_the_read_executor() {
     let engine = QueryEngine::new();
     for q in READ_ONLY_CALLS {
         assert!(
-            !engine
-                .statement_is_write(q)
-                .unwrap_or_else(|e| panic!("{q} did not parse: {e}")),
+            !engine.statement_is_write(q).unwrap_or_else(|e| panic!("{q} did not parse: {e}")),
             "a read-only CALL was routed to the write executor: {q}"
         );
     }
@@ -197,8 +191,7 @@ async fn a_solver_is_reachable_over_http() {
         "the solver was refused for lack of write access over HTTP: {text}"
     );
     assert_eq!(status, StatusCode::OK, "body: {text}");
-    let v: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
     assert!(
         text.contains("Jaya"),
         "no solution in the response, so nothing was solved: {v}"

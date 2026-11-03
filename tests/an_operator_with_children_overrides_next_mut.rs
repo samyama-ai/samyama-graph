@@ -116,9 +116,7 @@ fn no_new_operator_inherits_the_read_only_next_mut() {
         if !holds_children(&src, &name) {
             continue;
         }
-        let Some(body) = impl_body(&src, &name) else {
-            continue;
-        };
+        let Some(body) = impl_body(&src, &name) else { continue };
         if !body.contains("fn next_mut") {
             offenders.push(name);
         }

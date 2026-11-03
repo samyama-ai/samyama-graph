@@ -89,10 +89,7 @@ fn a_map_literal_can_hold_a_node() {
     match value_of(&store, "MATCH (u:User) WITH {key: u} AS m RETURN m AS x") {
         Value::Map(entries) => {
             assert_eq!(entries.len(), 1);
-            assert!(matches!(
-                entries.get("key"),
-                Some(Value::NodeRef(_) | Value::Node(..))
-            ));
+            assert!(matches!(entries.get("key"), Some(Value::NodeRef(_) | Value::Node(..))));
         }
         other => panic!("expected a map holding a node, got {other:?}"),
     }

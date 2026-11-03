@@ -29,9 +29,7 @@ fn nums() -> GraphStore {
     let mut store = GraphStore::new();
     for n in [1i64, 2, 3] {
         let id = store.create_node_with_labels([Label::new("N")]);
-        store
-            .set_node_property("default", id, "v", PropertyValue::Integer(n))
-            .unwrap();
+        store.set_node_property("default", id, "v", PropertyValue::Integer(n)).unwrap();
     }
     store
 }
@@ -48,32 +46,17 @@ fn one(store: &GraphStore, cypher: &str) -> Value {
 #[test]
 fn all_over_a_collect_is_planned_as_an_aggregate() {
     let store = nums();
-    assert!(format!(
-        "{:?}",
-        one(
-            &store,
-            "UNWIND [true, true] AS x RETURN ALL(ok IN collect(x) WHERE ok) AS okay"
-        )
-    )
-    .contains("Boolean(true)"));
+    assert!(format!("{:?}", one(&store, "UNWIND [true, true] AS x RETURN ALL(ok IN collect(x) WHERE ok) AS okay"))
+        .contains("Boolean(true)"));
 }
 
 #[test]
 fn the_other_three_predicates_too() {
     let store = nums();
     for (q, want) in [
-        (
-            "MATCH (n:N) RETURN ANY(v IN collect(n.v) WHERE v = 2) AS r",
-            "Boolean(true)",
-        ),
-        (
-            "MATCH (n:N) RETURN NONE(v IN collect(n.v) WHERE v > 9) AS r",
-            "Boolean(true)",
-        ),
-        (
-            "MATCH (n:N) RETURN SINGLE(v IN collect(n.v) WHERE v = 3) AS r",
-            "Boolean(true)",
-        ),
+        ("MATCH (n:N) RETURN ANY(v IN collect(n.v) WHERE v = 2) AS r", "Boolean(true)"),
+        ("MATCH (n:N) RETURN NONE(v IN collect(n.v) WHERE v > 9) AS r", "Boolean(true)"),
+        ("MATCH (n:N) RETURN SINGLE(v IN collect(n.v) WHERE v = 3) AS r", "Boolean(true)"),
     ] {
         assert!(format!("{:?}", one(&store, q)).contains(want), "{q}");
     }
@@ -82,27 +65,16 @@ fn the_other_three_predicates_too() {
 #[test]
 fn reduce_hoists_its_seed_and_its_list() {
     let store = nums();
-    let got = one(
-        &store,
-        "MATCH (n:N) RETURN reduce(t = 0, v IN collect(n.v) | t + v) AS total",
-    );
+    let got = one(&store, "MATCH (n:N) RETURN reduce(t = 0, v IN collect(n.v) | t + v) AS total");
     assert!(format!("{got:?}").contains("Integer(6)"), "got {got:?}");
 }
 
 #[test]
 fn indexing_and_slicing_an_aggregate() {
     let store = nums();
-    assert!(format!(
-        "{:?}",
-        one(&store, "MATCH (n:N) RETURN collect(n.v)[0] AS r")
-    )
-    .contains("Integer(1)"));
+    assert!(format!("{:?}", one(&store, "MATCH (n:N) RETURN collect(n.v)[0] AS r")).contains("Integer(1)"));
     let sliced = one(&store, "MATCH (n:N) RETURN collect(n.v)[0..2] AS r");
-    assert_eq!(
-        format!("{sliced:?}").matches("Integer(").count(),
-        2,
-        "got {sliced:?}"
-    );
+    assert_eq!(format!("{sliced:?}").matches("Integer(").count(), 2, "got {sliced:?}");
 }
 
 #[test]
@@ -111,33 +83,16 @@ fn a_loop_body_is_left_alone() {
     // aggregate there is a different question and must not be hoisted out of
     // the loop. Only the *list* is rewritten.
     let store = nums();
-    let got = one(
-        &store,
-        "MATCH (n:N) RETURN [v IN collect(n.v) WHERE v > 1 | v * 2] AS r",
-    );
-    assert_eq!(
-        format!("{got:?}").matches("Integer(").count(),
-        2,
-        "got {got:?}"
-    );
+    let got = one(&store, "MATCH (n:N) RETURN [v IN collect(n.v) WHERE v > 1 | v * 2] AS r");
+    assert_eq!(format!("{got:?}").matches("Integer(").count(), 2, "got {got:?}");
 }
 
 #[test]
 fn a_predicate_over_an_ordinary_list_still_works() {
     let store = nums();
-    assert!(format!(
-        "{:?}",
-        one(&store, "RETURN ALL(x IN [1,2,3] WHERE x > 0) AS r")
-    )
-    .contains("Boolean(true)"));
-    assert!(format!(
-        "{:?}",
-        one(
-            &store,
-            "UNWIND [1,2] AS x WITH collect(x) AS c RETURN ALL(v IN c WHERE v > 0) AS r"
-        )
-    )
-    .contains("Boolean(true)"));
+    assert!(format!("{:?}", one(&store, "RETURN ALL(x IN [1,2,3] WHERE x > 0) AS r")).contains("Boolean(true)"));
+    assert!(format!("{:?}", one(&store, "UNWIND [1,2] AS x WITH collect(x) AS c RETURN ALL(v IN c WHERE v > 0) AS r"))
+        .contains("Boolean(true)"));
 }
 
 #[test]
@@ -145,14 +100,12 @@ fn the_full_tck_shape() {
     // List11[3]. `range()` was correct throughout; the failure was the final
     // `ALL(ok IN collect(...) WHERE ok)`.
     let store = nums();
-    let got = one(
-        &store,
+    let got = one(&store,
         "WITH 0 AS start, [1, 2, 500, 1000, 1500] AS stopList, \
          [-1000, -3, -2, -1, 1, 2, 3, 1000] AS stepList \
          UNWIND stopList AS stop UNWIND stepList AS step \
          WITH start, stop, step, range(start, stop, step) AS list \
          WITH start, stop, step, list, sign(stop-start) <> sign(step) AS empty \
-         RETURN ALL(ok IN collect((size(list) = 0) = empty) WHERE ok) AS okay",
-    );
+         RETURN ALL(ok IN collect((size(list) = 0) = empty) WHERE ok) AS okay");
     assert!(format!("{got:?}").contains("Boolean(true)"), "got {got:?}");
 }

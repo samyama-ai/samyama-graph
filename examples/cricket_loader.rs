@@ -152,7 +152,8 @@ async fn main() -> Result<(), Error> {
                         eprintln!("{}", result.columns.join(" | "));
                         eprintln!("{}", "-".repeat(result.columns.len() * 20));
                         for row in &result.records {
-                            let vals: Vec<String> = row.iter().map(|v| format!("{}", v)).collect();
+                            let vals: Vec<String> =
+                                row.iter().map(|v| format!("{}", v)).collect();
                             eprintln!("{}", vals.join(" | "));
                         }
                         eprintln!("({} rows)", result.records.len());

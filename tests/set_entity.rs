@@ -22,9 +22,7 @@ fn write(store: &mut GraphStore, cypher: &str) {
 /// from zero — which is the entire subject of this file.
 fn props(store: &GraphStore, cypher: &str, keys: &[&str]) -> Vec<Option<i64>> {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .expect("query should run");
+    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
     let r = &batch.records[0];
     keys.iter()
         .map(|k| match r.get(k) {
@@ -41,11 +39,7 @@ fn plus_equals_merges_and_leaves_the_rest_alone() {
     write(&mut store, "CREATE (:P {a: 1, b: 2})");
     write(&mut store, "MATCH (n:P) SET n += {b: 20, c: 3}");
     assert_eq!(
-        props(
-            &store,
-            "MATCH (n:P) RETURN n.a AS a, n.b AS b, n.c AS c",
-            &["a", "b", "c"]
-        ),
+        props(&store, "MATCH (n:P) RETURN n.a AS a, n.b AS b, n.c AS c", &["a", "b", "c"]),
         vec![Some(1), Some(20), Some(3)],
         "a untouched, b overwritten, c added"
     );
@@ -59,11 +53,7 @@ fn equals_replaces_and_removes_what_is_not_mentioned() {
     write(&mut store, "CREATE (:P {a: 1, b: 2})");
     write(&mut store, "MATCH (n:P) SET n = {z: 9}");
     assert_eq!(
-        props(
-            &store,
-            "MATCH (n:P) RETURN n.a AS a, n.b AS b, n.z AS z",
-            &["a", "b", "z"]
-        ),
+        props(&store, "MATCH (n:P) RETURN n.a AS a, n.b AS b, n.z AS z", &["a", "b", "z"]),
         vec![None, None, Some(9)],
         "a and b are gone; only z survives"
     );
@@ -75,11 +65,7 @@ fn assigning_one_entity_to_another_copies_its_properties() {
     write(&mut store, "CREATE (:A {x: 1, y: 2}), (:B {q: 7})");
     write(&mut store, "MATCH (a:B), (b:A) SET a = b");
     assert_eq!(
-        props(
-            &store,
-            "MATCH (n:B) RETURN n.x AS x, n.y AS y, n.q AS q",
-            &["x", "y", "q"]
-        ),
+        props(&store, "MATCH (n:B) RETURN n.x AS x, n.y AS y, n.q AS q", &["x", "y", "q"]),
         vec![Some(1), Some(2), None],
         "B takes A's properties and loses its own"
     );
@@ -102,21 +88,13 @@ fn a_relationship_can_be_assigned_too() {
     write(&mut store, "CREATE (:A)-[:R {a: 1, b: 2}]->(:B)");
     write(&mut store, "MATCH ()-[r:R]->() SET r += {b: 20, c: 3}");
     assert_eq!(
-        props(
-            &store,
-            "MATCH ()-[r:R]->() RETURN r.a AS a, r.b AS b, r.c AS c",
-            &["a", "b", "c"]
-        ),
+        props(&store, "MATCH ()-[r:R]->() RETURN r.a AS a, r.b AS b, r.c AS c", &["a", "b", "c"]),
         vec![Some(1), Some(20), Some(3)],
     );
 
     write(&mut store, "MATCH ()-[r:R]->() SET r = {only: 5}");
     assert_eq!(
-        props(
-            &store,
-            "MATCH ()-[r:R]->() RETURN r.a AS a, r.only AS only",
-            &["a", "only"]
-        ),
+        props(&store, "MATCH ()-[r:R]->() RETURN r.a AS a, r.only AS only", &["a", "only"]),
         vec![None, Some(5)],
     );
 }

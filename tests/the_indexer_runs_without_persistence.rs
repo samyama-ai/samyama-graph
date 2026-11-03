@@ -83,10 +83,7 @@ async fn a_vector_written_with_no_persistence_reaches_the_index() {
     for _ in 0..100 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let g = store.read().await;
-        if let Ok(found) = g
-            .vector_index
-            .search("Doc", "embedding", &[1.0, 0.0, 0.0], 5)
-        {
+        if let Ok(found) = g.vector_index.search("Doc", "embedding", &[1.0, 0.0, 0.0], 5) {
             hits = found.len();
             if hits > 0 {
                 break;

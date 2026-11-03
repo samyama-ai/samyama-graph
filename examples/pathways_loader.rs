@@ -40,9 +40,7 @@ async fn main() -> Result<(), Error> {
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --data-dir PATH          Directory containing reactome/, string/, go/ subdirs (required)");
-        eprintln!(
-            "  --phases PHASES          Comma-separated phases: reactome,string,go (default: all)"
-        );
+        eprintln!("  --phases PHASES          Comma-separated phases: reactome,string,go (default: all)");
         eprintln!("  --string-threshold N     STRING combined_score threshold (default: 700)");
         eprintln!("  --query                  Enter interactive Cypher REPL after loading");
         eprintln!("  --snapshot PATH          Export snapshot to .sgsnap file after loading");
@@ -168,7 +166,8 @@ async fn main() -> Result<(), Error> {
                         eprintln!("{}", result.columns.join(" | "));
                         eprintln!("{}", "-".repeat(result.columns.len() * 20));
                         for row in &result.records {
-                            let vals: Vec<String> = row.iter().map(|v| format!("{}", v)).collect();
+                            let vals: Vec<String> =
+                                row.iter().map(|v| format!("{}", v)).collect();
                             eprintln!("{}", vals.join(" | "));
                         }
                         eprintln!("({} rows)", result.records.len());

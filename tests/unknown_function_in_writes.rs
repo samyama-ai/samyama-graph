@@ -45,10 +45,7 @@ fn name_of_alice(s: &GraphStore, prop: &str) -> Option<PropertyValue> {
 #[test]
 fn the_reported_statement_is_refused() {
     let err = refused("MATCH (p:V {name: 'Alice'}) SET p.embedding = vecf32([0.1, 0.2])");
-    assert!(
-        err.contains("vecf32"),
-        "the message names the function: {err}"
-    );
+    assert!(err.contains("vecf32"), "the message names the function: {err}");
     refused("MATCH (p:V {name: 'Alice'}) SET p.x = noSuchFunction(1)");
 }
 
@@ -85,11 +82,7 @@ fn known_functions_in_updating_clauses_are_still_accepted() {
         // Namespaced names stay allowed, as they are in RETURN.
         "MATCH (n) SET n.d = date.truncate('day', date())",
     ] {
-        assert!(
-            parse_query(q).is_ok(),
-            "`{q}` should be accepted: {:?}",
-            parse_query(q).err()
-        );
+        assert!(parse_query(q).is_ok(), "`{q}` should be accepted: {:?}", parse_query(q).err());
     }
 }
 
@@ -105,9 +98,5 @@ fn a_set_whose_value_fails_at_run_time_is_an_error_and_writes_nothing() {
     let result = MutQueryExecutor::new(&mut s, "default".into()).execute(&p);
     let err = result.expect_err("a failing value is the statement's error");
     assert!(format!("{err}").contains("Division by zero"), "{err}");
-    assert_eq!(
-        name_of_alice(&s, "x"),
-        Some(PropertyValue::Integer(5)),
-        "x is left as it was"
-    );
+    assert_eq!(name_of_alice(&s, "x"), Some(PropertyValue::Integer(5)), "x is left as it was");
 }

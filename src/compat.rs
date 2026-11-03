@@ -196,14 +196,8 @@ mod tests {
     fn two_unknown_functions_are_one_cause() {
         // The grouping this exists for. Without it a corpus using ten APOC
         // functions reports ten problems instead of one.
-        let a = Refusal {
-            code: "X".into(),
-            detail: "Unknown function 'foo'".into(),
-        };
-        let b = Refusal {
-            code: "X".into(),
-            detail: "Unknown function 'bar'".into(),
-        };
+        let a = Refusal { code: "X".into(), detail: "Unknown function 'foo'".into() };
+        let b = Refusal { code: "X".into(), detail: "Unknown function 'bar'".into() };
         assert_eq!(a.cause(), b.cause());
         assert!(a.cause().contains("Unknown function"), "{}", a.cause());
     }
@@ -231,15 +225,9 @@ mod tests {
 
     #[test]
     fn short_code_is_the_last_segment() {
-        let r = Refusal {
-            code: "Samyama.ClientError.Statement.SyntaxError".into(),
-            detail: String::new(),
-        };
+        let r = Refusal { code: "Samyama.ClientError.Statement.SyntaxError".into(), detail: String::new() };
         assert_eq!(r.short_code(), "SyntaxError");
-        let bare = Refusal {
-            code: "Unclassified".into(),
-            detail: String::new(),
-        };
+        let bare = Refusal { code: "Unclassified".into(), detail: String::new() };
         assert_eq!(bare.short_code(), "Unclassified");
     }
 
@@ -269,17 +257,9 @@ mod tests {
     fn a_query_that_parses_but_cannot_be_planned_is_refused() {
         let store = GraphStore::new();
         let q = "MATCH (n) CALL { WITH m MATCH (x) RETURN x } RETURN n";
-        assert!(
-            crate::query::parse_query(q).is_ok(),
-            "the premise: this parses"
-        );
-        let r = judge(q, &store)
-            .refusal
-            .expect("an import of an unbound name cannot be planned");
-        assert!(
-            r.detail.contains("is not defined before the subquery"),
-            "{r:?}"
-        );
+        assert!(crate::query::parse_query(q).is_ok(), "the premise: this parses");
+        let r = judge(q, &store).refusal.expect("an import of an unbound name cannot be planned");
+        assert!(r.detail.contains("is not defined before the subquery"), "{r:?}");
     }
 
     #[test]
@@ -296,10 +276,7 @@ mod tests {
 
     #[test]
     fn splitter_handles_dash_comments_and_trailing_text() {
-        assert_eq!(
-            split_queries("-- c\nRETURN 1\nRETURN 2"),
-            vec!["RETURN 1 RETURN 2".to_string()]
-        );
+        assert_eq!(split_queries("-- c\nRETURN 1\nRETURN 2"), vec!["RETURN 1 RETURN 2".to_string()]);
         assert!(split_queries("\n;\n\n").is_empty());
     }
 }

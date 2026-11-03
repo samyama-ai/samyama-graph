@@ -167,7 +167,12 @@ impl RaftStorage {
     }
 
     /// Create a snapshot
-    pub async fn create_snapshot(&self, index: u64, term: u64, _data: Vec<u8>) -> RaftResult<()> {
+    pub async fn create_snapshot(
+        &self,
+        index: u64,
+        term: u64,
+        _data: Vec<u8>,
+    ) -> RaftResult<()> {
         info!("Creating snapshot at index {} term {}", index, term);
 
         // Save snapshot metadata

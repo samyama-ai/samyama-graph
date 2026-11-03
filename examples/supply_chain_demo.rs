@@ -19,9 +19,12 @@
 static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
 
 use samyama_sdk::{
-    AgentConfig, AlgorithmClient, Array1, DistanceMetric, EmbeddedClient, GraphStore, JayaSolver,
-    LLMProvider, Label, NLQConfig, NodeId, PageRankConfig, Problem, PropertyMap, PropertyValue,
-    SamyamaClient, SolverConfig, VectorClient,
+    EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
+    Label, PropertyValue, PropertyMap,
+    AgentConfig, LLMProvider, NLQConfig,
+    DistanceMetric, PageRankConfig,
+    JayaSolver, SolverConfig, Problem, Array1,
+    GraphStore, NodeId,
 };
 use std::collections::HashMap;
 use std::time::Instant;
@@ -148,7 +151,7 @@ struct PortDef {
     name: &'static str,
     country: &'static str,
     region: &'static str,
-    capacity_teu: i64, // annual TEU capacity in thousands
+    capacity_teu: i64,       // annual TEU capacity in thousands
     lat: f64,
     lon: f64,
 }
@@ -157,17 +160,17 @@ struct SupplierDef {
     name: &'static str,
     country: &'static str,
     capabilities: &'static str,
-    annual_revenue_m: i64, // in millions USD
+    annual_revenue_m: i64,    // in millions USD
     gmp_certified: bool,
-    nearest_port_idx: usize, // index into port_data()
+    nearest_port_idx: usize,  // index into port_data()
 }
 
 struct ProductDef {
     name: &'static str,
     category: &'static str,
     cold_chain: bool,
-    unit_value: f64,      // USD per unit
-    annual_demand_m: f64, // millions of units globally
+    unit_value: f64,          // USD per unit
+    annual_demand_m: f64,     // millions of units globally
 }
 
 struct ShippingLineDef {
@@ -182,7 +185,7 @@ struct ShipmentDef {
     supplier_idx: usize,
     origin_port_idx: usize,
     dest_port_idx: usize,
-    via_port_indices: Vec<usize>, // intermediate ports
+    via_port_indices: Vec<usize>,  // intermediate ports
     carrier_idx: usize,
     containers: i64,
     value_usd: f64,
@@ -195,166 +198,26 @@ struct ShipmentDef {
 
 fn port_data() -> Vec<PortDef> {
     vec![
-        PortDef {
-            name: "Shanghai",
-            country: "China",
-            region: "East Asia",
-            capacity_teu: 47000,
-            lat: 31.23,
-            lon: 121.47,
-        },
-        PortDef {
-            name: "Singapore",
-            country: "Singapore",
-            region: "Southeast Asia",
-            capacity_teu: 37000,
-            lat: 1.29,
-            lon: 103.85,
-        },
-        PortDef {
-            name: "Rotterdam",
-            country: "Netherlands",
-            region: "Europe",
-            capacity_teu: 14500,
-            lat: 51.92,
-            lon: 4.48,
-        },
-        PortDef {
-            name: "Hamburg",
-            country: "Germany",
-            region: "Europe",
-            capacity_teu: 8700,
-            lat: 53.55,
-            lon: 9.99,
-        },
-        PortDef {
-            name: "Los Angeles",
-            country: "USA",
-            region: "North America",
-            capacity_teu: 9600,
-            lat: 33.74,
-            lon: -118.27,
-        },
-        PortDef {
-            name: "Long Beach",
-            country: "USA",
-            region: "North America",
-            capacity_teu: 9100,
-            lat: 33.77,
-            lon: -118.19,
-        },
-        PortDef {
-            name: "Busan",
-            country: "South Korea",
-            region: "East Asia",
-            capacity_teu: 22000,
-            lat: 35.10,
-            lon: 129.04,
-        },
-        PortDef {
-            name: "Hong Kong",
-            country: "China",
-            region: "East Asia",
-            capacity_teu: 18000,
-            lat: 22.29,
-            lon: 114.15,
-        },
-        PortDef {
-            name: "Shenzhen",
-            country: "China",
-            region: "East Asia",
-            capacity_teu: 27700,
-            lat: 22.54,
-            lon: 114.06,
-        },
-        PortDef {
-            name: "Jebel Ali (Dubai)",
-            country: "UAE",
-            region: "Middle East",
-            capacity_teu: 14500,
-            lat: 25.01,
-            lon: 55.06,
-        },
-        PortDef {
-            name: "Antwerp",
-            country: "Belgium",
-            region: "Europe",
-            capacity_teu: 12000,
-            lat: 51.26,
-            lon: 4.40,
-        },
-        PortDef {
-            name: "Tanjung Pelepas",
-            country: "Malaysia",
-            region: "Southeast Asia",
-            capacity_teu: 11000,
-            lat: 1.37,
-            lon: 103.55,
-        },
-        PortDef {
-            name: "Felixstowe",
-            country: "UK",
-            region: "Europe",
-            capacity_teu: 3800,
-            lat: 51.96,
-            lon: 1.35,
-        },
-        PortDef {
-            name: "Yokohama",
-            country: "Japan",
-            region: "East Asia",
-            capacity_teu: 2900,
-            lat: 35.44,
-            lon: 139.64,
-        },
-        PortDef {
-            name: "Santos",
-            country: "Brazil",
-            region: "South America",
-            capacity_teu: 4300,
-            lat: -23.95,
-            lon: -46.31,
-        },
-        PortDef {
-            name: "Colombo",
-            country: "Sri Lanka",
-            region: "South Asia",
-            capacity_teu: 7200,
-            lat: 6.94,
-            lon: 79.85,
-        },
-        PortDef {
-            name: "Piraeus",
-            country: "Greece",
-            region: "Europe",
-            capacity_teu: 5400,
-            lat: 37.94,
-            lon: 23.65,
-        },
-        PortDef {
-            name: "Nhava Sheva",
-            country: "India",
-            region: "South Asia",
-            capacity_teu: 5600,
-            lat: 18.95,
-            lon: 72.95,
-        },
-        PortDef {
-            name: "Laem Chabang",
-            country: "Thailand",
-            region: "Southeast Asia",
-            capacity_teu: 8300,
-            lat: 13.08,
-            lon: 100.88,
-        },
-        PortDef {
-            name: "Kaohsiung",
-            country: "Taiwan",
-            region: "East Asia",
-            capacity_teu: 9900,
-            lat: 22.62,
-            lon: 120.30,
-        },
+        PortDef { name: "Shanghai",          country: "China",       region: "East Asia",       capacity_teu: 47000, lat: 31.23, lon: 121.47 },
+        PortDef { name: "Singapore",         country: "Singapore",   region: "Southeast Asia",  capacity_teu: 37000, lat:  1.29, lon: 103.85 },
+        PortDef { name: "Rotterdam",         country: "Netherlands", region: "Europe",          capacity_teu: 14500, lat: 51.92, lon:  4.48 },
+        PortDef { name: "Hamburg",            country: "Germany",     region: "Europe",          capacity_teu:  8700, lat: 53.55, lon:  9.99 },
+        PortDef { name: "Los Angeles",       country: "USA",         region: "North America",   capacity_teu: 9600,  lat: 33.74, lon: -118.27 },
+        PortDef { name: "Long Beach",        country: "USA",         region: "North America",   capacity_teu: 9100,  lat: 33.77, lon: -118.19 },
+        PortDef { name: "Busan",             country: "South Korea", region: "East Asia",       capacity_teu: 22000, lat: 35.10, lon: 129.04 },
+        PortDef { name: "Hong Kong",         country: "China",       region: "East Asia",       capacity_teu: 18000, lat: 22.29, lon: 114.15 },
+        PortDef { name: "Shenzhen",          country: "China",       region: "East Asia",       capacity_teu: 27700, lat: 22.54, lon: 114.06 },
+        PortDef { name: "Jebel Ali (Dubai)", country: "UAE",         region: "Middle East",     capacity_teu: 14500, lat: 25.01, lon: 55.06 },
+        PortDef { name: "Antwerp",           country: "Belgium",     region: "Europe",          capacity_teu: 12000, lat: 51.26, lon:  4.40 },
+        PortDef { name: "Tanjung Pelepas",   country: "Malaysia",    region: "Southeast Asia",  capacity_teu: 11000, lat:  1.37, lon: 103.55 },
+        PortDef { name: "Felixstowe",        country: "UK",          region: "Europe",          capacity_teu:  3800, lat: 51.96, lon:  1.35 },
+        PortDef { name: "Yokohama",          country: "Japan",       region: "East Asia",       capacity_teu:  2900, lat: 35.44, lon: 139.64 },
+        PortDef { name: "Santos",            country: "Brazil",      region: "South America",   capacity_teu:  4300, lat: -23.95, lon: -46.31 },
+        PortDef { name: "Colombo",           country: "Sri Lanka",   region: "South Asia",      capacity_teu:  7200, lat:  6.94, lon: 79.85 },
+        PortDef { name: "Piraeus",           country: "Greece",      region: "Europe",          capacity_teu:  5400, lat: 37.94, lon: 23.65 },
+        PortDef { name: "Nhava Sheva",       country: "India",       region: "South Asia",      capacity_teu:  5600, lat: 18.95, lon: 72.95 },
+        PortDef { name: "Laem Chabang",      country: "Thailand",    region: "Southeast Asia",  capacity_teu:  8300, lat: 13.08, lon: 100.88 },
+        PortDef { name: "Kaohsiung",         country: "Taiwan",      region: "East Asia",       capacity_teu:  9900, lat: 22.62, lon: 120.30 },
     ]
 }
 
@@ -407,915 +270,130 @@ fn supplier_data() -> Vec<SupplierDef> {
 
 fn product_data() -> Vec<ProductDef> {
     vec![
-        ProductDef {
-            name: "Metformin",
-            category: "Diabetes",
-            cold_chain: false,
-            unit_value: 0.15,
-            annual_demand_m: 1500.0,
-        },
-        ProductDef {
-            name: "Atorvastatin",
-            category: "Cardiovascular",
-            cold_chain: false,
-            unit_value: 0.30,
-            annual_demand_m: 1200.0,
-        },
-        ProductDef {
-            name: "Lisinopril",
-            category: "Cardiovascular",
-            cold_chain: false,
-            unit_value: 0.12,
-            annual_demand_m: 900.0,
-        },
-        ProductDef {
-            name: "Amoxicillin",
-            category: "Antibiotic",
-            cold_chain: false,
-            unit_value: 0.25,
-            annual_demand_m: 2000.0,
-        },
-        ProductDef {
-            name: "Omeprazole",
-            category: "GI",
-            cold_chain: false,
-            unit_value: 0.20,
-            annual_demand_m: 800.0,
-        },
-        ProductDef {
-            name: "Losartan",
-            category: "Cardiovascular",
-            cold_chain: false,
-            unit_value: 0.18,
-            annual_demand_m: 700.0,
-        },
-        ProductDef {
-            name: "Amlodipine",
-            category: "Cardiovascular",
-            cold_chain: false,
-            unit_value: 0.10,
-            annual_demand_m: 1100.0,
-        },
-        ProductDef {
-            name: "Gabapentin",
-            category: "Neurology",
-            cold_chain: false,
-            unit_value: 0.35,
-            annual_demand_m: 500.0,
-        },
-        ProductDef {
-            name: "Sertraline",
-            category: "Psychiatry",
-            cold_chain: false,
-            unit_value: 0.22,
-            annual_demand_m: 600.0,
-        },
-        ProductDef {
-            name: "Montelukast",
-            category: "Respiratory",
-            cold_chain: false,
-            unit_value: 0.28,
-            annual_demand_m: 450.0,
-        },
-        ProductDef {
-            name: "Ibuprofen",
-            category: "Pain",
-            cold_chain: false,
-            unit_value: 0.08,
-            annual_demand_m: 3000.0,
-        },
-        ProductDef {
-            name: "Acetaminophen",
-            category: "Pain",
-            cold_chain: false,
-            unit_value: 0.06,
-            annual_demand_m: 4000.0,
-        },
-        ProductDef {
-            name: "Ozempic",
-            category: "Diabetes",
-            cold_chain: true,
-            unit_value: 850.00,
-            annual_demand_m: 25.0,
-        }, // biologic
-        ProductDef {
-            name: "Keytruda",
-            category: "Oncology",
-            cold_chain: true,
-            unit_value: 4800.00,
-            annual_demand_m: 5.0,
-        }, // biologic
-        ProductDef {
-            name: "Humira",
-            category: "Immunology",
-            cold_chain: true,
-            unit_value: 2700.00,
-            annual_demand_m: 12.0,
-        }, // biologic
-        ProductDef {
-            name: "Remdesivir",
-            category: "Antiviral",
-            cold_chain: true,
-            unit_value: 520.00,
-            annual_demand_m: 8.0,
-        }, // biologic
-        ProductDef {
-            name: "Paxlovid",
-            category: "Antiviral",
-            cold_chain: false,
-            unit_value: 530.00,
-            annual_demand_m: 15.0,
-        },
-        ProductDef {
-            name: "Eliquis",
-            category: "Cardiovascular",
-            cold_chain: false,
-            unit_value: 7.50,
-            annual_demand_m: 200.0,
-        },
-        ProductDef {
-            name: "Jardiance",
-            category: "Diabetes",
-            cold_chain: false,
-            unit_value: 15.00,
-            annual_demand_m: 100.0,
-        },
-        ProductDef {
-            name: "Dupixent",
-            category: "Immunology",
-            cold_chain: true,
-            unit_value: 3200.00,
-            annual_demand_m: 6.0,
-        }, // biologic
+        ProductDef { name: "Metformin",      category: "Diabetes",       cold_chain: false, unit_value: 0.15,    annual_demand_m: 1500.0 },
+        ProductDef { name: "Atorvastatin",   category: "Cardiovascular", cold_chain: false, unit_value: 0.30,    annual_demand_m: 1200.0 },
+        ProductDef { name: "Lisinopril",     category: "Cardiovascular", cold_chain: false, unit_value: 0.12,    annual_demand_m: 900.0 },
+        ProductDef { name: "Amoxicillin",    category: "Antibiotic",     cold_chain: false, unit_value: 0.25,    annual_demand_m: 2000.0 },
+        ProductDef { name: "Omeprazole",     category: "GI",             cold_chain: false, unit_value: 0.20,    annual_demand_m: 800.0 },
+        ProductDef { name: "Losartan",       category: "Cardiovascular", cold_chain: false, unit_value: 0.18,    annual_demand_m: 700.0 },
+        ProductDef { name: "Amlodipine",     category: "Cardiovascular", cold_chain: false, unit_value: 0.10,    annual_demand_m: 1100.0 },
+        ProductDef { name: "Gabapentin",     category: "Neurology",      cold_chain: false, unit_value: 0.35,    annual_demand_m: 500.0 },
+        ProductDef { name: "Sertraline",     category: "Psychiatry",     cold_chain: false, unit_value: 0.22,    annual_demand_m: 600.0 },
+        ProductDef { name: "Montelukast",    category: "Respiratory",    cold_chain: false, unit_value: 0.28,    annual_demand_m: 450.0 },
+        ProductDef { name: "Ibuprofen",      category: "Pain",           cold_chain: false, unit_value: 0.08,    annual_demand_m: 3000.0 },
+        ProductDef { name: "Acetaminophen",  category: "Pain",           cold_chain: false, unit_value: 0.06,    annual_demand_m: 4000.0 },
+        ProductDef { name: "Ozempic",        category: "Diabetes",       cold_chain: true,  unit_value: 850.00,  annual_demand_m: 25.0 },   // biologic
+        ProductDef { name: "Keytruda",       category: "Oncology",       cold_chain: true,  unit_value: 4800.00, annual_demand_m: 5.0 },   // biologic
+        ProductDef { name: "Humira",         category: "Immunology",     cold_chain: true,  unit_value: 2700.00, annual_demand_m: 12.0 },  // biologic
+        ProductDef { name: "Remdesivir",     category: "Antiviral",      cold_chain: true,  unit_value: 520.00,  annual_demand_m: 8.0 },   // biologic
+        ProductDef { name: "Paxlovid",       category: "Antiviral",      cold_chain: false, unit_value: 530.00,  annual_demand_m: 15.0 },
+        ProductDef { name: "Eliquis",        category: "Cardiovascular", cold_chain: false, unit_value: 7.50,    annual_demand_m: 200.0 },
+        ProductDef { name: "Jardiance",      category: "Diabetes",       cold_chain: false, unit_value: 15.00,   annual_demand_m: 100.0 },
+        ProductDef { name: "Dupixent",       category: "Immunology",     cold_chain: true,  unit_value: 3200.00, annual_demand_m: 6.0 },   // biologic
     ]
 }
 
 fn shipping_line_data() -> Vec<ShippingLineDef> {
     vec![
-        ShippingLineDef {
-            name: "Maersk",
-            fleet_size: 730,
-            headquarter: "Denmark",
-        },
-        ShippingLineDef {
-            name: "MSC",
-            fleet_size: 760,
-            headquarter: "Switzerland",
-        },
-        ShippingLineDef {
-            name: "CMA CGM",
-            fleet_size: 590,
-            headquarter: "France",
-        },
-        ShippingLineDef {
-            name: "COSCO",
-            fleet_size: 480,
-            headquarter: "China",
-        },
-        ShippingLineDef {
-            name: "Hapag-Lloyd",
-            fleet_size: 260,
-            headquarter: "Germany",
-        },
-        ShippingLineDef {
-            name: "ONE",
-            fleet_size: 210,
-            headquarter: "Japan",
-        },
-        ShippingLineDef {
-            name: "Evergreen",
-            fleet_size: 200,
-            headquarter: "Taiwan",
-        },
-        ShippingLineDef {
-            name: "Yang Ming",
-            fleet_size: 90,
-            headquarter: "Taiwan",
-        },
-        ShippingLineDef {
-            name: "HMM",
-            fleet_size: 80,
-            headquarter: "South Korea",
-        },
-        ShippingLineDef {
-            name: "ZIM",
-            fleet_size: 110,
-            headquarter: "Israel",
-        },
-        ShippingLineDef {
-            name: "PIL",
-            fleet_size: 95,
-            headquarter: "Singapore",
-        },
-        ShippingLineDef {
-            name: "Wan Hai",
-            fleet_size: 75,
-            headquarter: "Taiwan",
-        },
-        ShippingLineDef {
-            name: "IRISL",
-            fleet_size: 50,
-            headquarter: "Iran",
-        },
-        ShippingLineDef {
-            name: "KMTC",
-            fleet_size: 65,
-            headquarter: "South Korea",
-        },
-        ShippingLineDef {
-            name: "SM Line",
-            fleet_size: 55,
-            headquarter: "South Korea",
-        },
+        ShippingLineDef { name: "Maersk",        fleet_size: 730, headquarter: "Denmark" },
+        ShippingLineDef { name: "MSC",            fleet_size: 760, headquarter: "Switzerland" },
+        ShippingLineDef { name: "CMA CGM",        fleet_size: 590, headquarter: "France" },
+        ShippingLineDef { name: "COSCO",          fleet_size: 480, headquarter: "China" },
+        ShippingLineDef { name: "Hapag-Lloyd",    fleet_size: 260, headquarter: "Germany" },
+        ShippingLineDef { name: "ONE",             fleet_size: 210, headquarter: "Japan" },
+        ShippingLineDef { name: "Evergreen",      fleet_size: 200, headquarter: "Taiwan" },
+        ShippingLineDef { name: "Yang Ming",      fleet_size: 90,  headquarter: "Taiwan" },
+        ShippingLineDef { name: "HMM",             fleet_size: 80,  headquarter: "South Korea" },
+        ShippingLineDef { name: "ZIM",             fleet_size: 110, headquarter: "Israel" },
+        ShippingLineDef { name: "PIL",             fleet_size: 95,  headquarter: "Singapore" },
+        ShippingLineDef { name: "Wan Hai",        fleet_size: 75,  headquarter: "Taiwan" },
+        ShippingLineDef { name: "IRISL",          fleet_size: 50,  headquarter: "Iran" },
+        ShippingLineDef { name: "KMTC",            fleet_size: 65,  headquarter: "South Korea" },
+        ShippingLineDef { name: "SM Line",        fleet_size: 55,  headquarter: "South Korea" },
     ]
 }
 
 fn shipment_data() -> Vec<ShipmentDef> {
     vec![
         // India -> Europe routes (via Suez)
-        ShipmentDef {
-            id: "SH-001",
-            product_idx: 0,
-            supplier_idx: 0,
-            origin_port_idx: 17,
-            dest_port_idx: 2,
-            via_port_indices: vec![9, 16],
-            carrier_idx: 0,
-            containers: 45,
-            value_usd: 2_250_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-002",
-            product_idx: 1,
-            supplier_idx: 4,
-            origin_port_idx: 17,
-            dest_port_idx: 3,
-            via_port_indices: vec![9, 16],
-            carrier_idx: 4,
-            containers: 30,
-            value_usd: 1_800_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-003",
-            product_idx: 3,
-            supplier_idx: 3,
-            origin_port_idx: 17,
-            dest_port_idx: 12,
-            via_port_indices: vec![15, 9],
-            carrier_idx: 1,
-            containers: 55,
-            value_usd: 3_300_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-004",
-            product_idx: 2,
-            supplier_idx: 1,
-            origin_port_idx: 17,
-            dest_port_idx: 10,
-            via_port_indices: vec![9],
-            carrier_idx: 2,
-            containers: 25,
-            value_usd: 900_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-005",
-            product_idx: 14,
-            supplier_idx: 2,
-            origin_port_idx: 17,
-            dest_port_idx: 4,
-            via_port_indices: vec![1],
-            carrier_idx: 0,
-            containers: 8,
-            value_usd: 21_600_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-001", product_idx: 0,  supplier_idx: 0,  origin_port_idx: 17, dest_port_idx: 2,  via_port_indices: vec![9, 16], carrier_idx: 0,  containers: 45, value_usd: 2_250_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-002", product_idx: 1,  supplier_idx: 4,  origin_port_idx: 17, dest_port_idx: 3,  via_port_indices: vec![9, 16], carrier_idx: 4,  containers: 30, value_usd: 1_800_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-003", product_idx: 3,  supplier_idx: 3,  origin_port_idx: 17, dest_port_idx: 12, via_port_indices: vec![15, 9], carrier_idx: 1,  containers: 55, value_usd: 3_300_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-004", product_idx: 2,  supplier_idx: 1,  origin_port_idx: 17, dest_port_idx: 10, via_port_indices: vec![9],     carrier_idx: 2,  containers: 25, value_usd: 900_000.0,    status: "In Transit" },
+        ShipmentDef { id: "SH-005", product_idx: 14, supplier_idx: 2,  origin_port_idx: 17, dest_port_idx: 4,  via_port_indices: vec![1],     carrier_idx: 0,  containers: 8,  value_usd: 21_600_000.0, status: "In Transit" },
         // China -> USA routes (trans-Pacific)
-        ShipmentDef {
-            id: "SH-006",
-            product_idx: 11,
-            supplier_idx: 19,
-            origin_port_idx: 0,
-            dest_port_idx: 4,
-            via_port_indices: vec![],
-            carrier_idx: 3,
-            containers: 80,
-            value_usd: 1_920_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-007",
-            product_idx: 10,
-            supplier_idx: 17,
-            origin_port_idx: 8,
-            dest_port_idx: 5,
-            via_port_indices: vec![],
-            carrier_idx: 3,
-            containers: 70,
-            value_usd: 1_680_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-008",
-            product_idx: 4,
-            supplier_idx: 18,
-            origin_port_idx: 0,
-            dest_port_idx: 5,
-            via_port_indices: vec![19],
-            carrier_idx: 6,
-            containers: 40,
-            value_usd: 1_600_000.0,
-            status: "Loading",
-        },
-        ShipmentDef {
-            id: "SH-009",
-            product_idx: 15,
-            supplier_idx: 18,
-            origin_port_idx: 0,
-            dest_port_idx: 4,
-            via_port_indices: vec![],
-            carrier_idx: 3,
-            containers: 12,
-            value_usd: 6_240_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-006", product_idx: 11, supplier_idx: 19, origin_port_idx: 0,  dest_port_idx: 4,  via_port_indices: vec![],      carrier_idx: 3,  containers: 80, value_usd: 1_920_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-007", product_idx: 10, supplier_idx: 17, origin_port_idx: 8,  dest_port_idx: 5,  via_port_indices: vec![],      carrier_idx: 3,  containers: 70, value_usd: 1_680_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-008", product_idx: 4,  supplier_idx: 18, origin_port_idx: 0,  dest_port_idx: 5,  via_port_indices: vec![19],    carrier_idx: 6,  containers: 40, value_usd: 1_600_000.0,  status: "Loading" },
+        ShipmentDef { id: "SH-009", product_idx: 15, supplier_idx: 18, origin_port_idx: 0,  dest_port_idx: 4,  via_port_indices: vec![],      carrier_idx: 3,  containers: 12, value_usd: 6_240_000.0,  status: "In Transit" },
         // China -> Europe routes (via Suez)
-        ShipmentDef {
-            id: "SH-010",
-            product_idx: 5,
-            supplier_idx: 17,
-            origin_port_idx: 0,
-            dest_port_idx: 2,
-            via_port_indices: vec![1, 9],
-            carrier_idx: 1,
-            containers: 50,
-            value_usd: 1_800_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-011",
-            product_idx: 6,
-            supplier_idx: 19,
-            origin_port_idx: 8,
-            dest_port_idx: 3,
-            via_port_indices: vec![1, 9, 16],
-            carrier_idx: 2,
-            containers: 35,
-            value_usd: 700_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-012",
-            product_idx: 7,
-            supplier_idx: 17,
-            origin_port_idx: 0,
-            dest_port_idx: 10,
-            via_port_indices: vec![7, 1, 9],
-            carrier_idx: 4,
-            containers: 28,
-            value_usd: 1_960_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-010", product_idx: 5,  supplier_idx: 17, origin_port_idx: 0,  dest_port_idx: 2,  via_port_indices: vec![1, 9],  carrier_idx: 1,  containers: 50, value_usd: 1_800_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-011", product_idx: 6,  supplier_idx: 19, origin_port_idx: 8,  dest_port_idx: 3,  via_port_indices: vec![1, 9, 16], carrier_idx: 2, containers: 35, value_usd: 700_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-012", product_idx: 7,  supplier_idx: 17, origin_port_idx: 0,  dest_port_idx: 10, via_port_indices: vec![7, 1, 9], carrier_idx: 4, containers: 28, value_usd: 1_960_000.0, status: "In Transit" },
         // Japan -> USA
-        ShipmentDef {
-            id: "SH-013",
-            product_idx: 12,
-            supplier_idx: 20,
-            origin_port_idx: 13,
-            dest_port_idx: 4,
-            via_port_indices: vec![],
-            carrier_idx: 5,
-            containers: 6,
-            value_usd: 5_100_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-014",
-            product_idx: 13,
-            supplier_idx: 22,
-            origin_port_idx: 13,
-            dest_port_idx: 5,
-            via_port_indices: vec![],
-            carrier_idx: 5,
-            containers: 4,
-            value_usd: 19_200_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-013", product_idx: 12, supplier_idx: 20, origin_port_idx: 13, dest_port_idx: 4,  via_port_indices: vec![],      carrier_idx: 5,  containers: 6,  value_usd: 5_100_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-014", product_idx: 13, supplier_idx: 22, origin_port_idx: 13, dest_port_idx: 5,  via_port_indices: vec![],      carrier_idx: 5,  containers: 4,  value_usd: 19_200_000.0, status: "In Transit" },
         // Germany -> USA
-        ShipmentDef {
-            id: "SH-015",
-            product_idx: 18,
-            supplier_idx: 7,
-            origin_port_idx: 3,
-            dest_port_idx: 4,
-            via_port_indices: vec![],
-            carrier_idx: 4,
-            containers: 20,
-            value_usd: 6_000_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-016",
-            product_idx: 19,
-            supplier_idx: 25,
-            origin_port_idx: 3,
-            dest_port_idx: 5,
-            via_port_indices: vec![],
-            carrier_idx: 0,
-            containers: 5,
-            value_usd: 16_000_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-015", product_idx: 18, supplier_idx: 7,  origin_port_idx: 3,  dest_port_idx: 4,  via_port_indices: vec![],      carrier_idx: 4,  containers: 20, value_usd: 6_000_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-016", product_idx: 19, supplier_idx: 25, origin_port_idx: 3,  dest_port_idx: 5,  via_port_indices: vec![],      carrier_idx: 0,  containers: 5,  value_usd: 16_000_000.0, status: "In Transit" },
         // USA -> Europe
-        ShipmentDef {
-            id: "SH-017",
-            product_idx: 13,
-            supplier_idx: 12,
-            origin_port_idx: 4,
-            dest_port_idx: 2,
-            via_port_indices: vec![],
-            carrier_idx: 0,
-            containers: 3,
-            value_usd: 14_400_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-018",
-            product_idx: 16,
-            supplier_idx: 9,
-            origin_port_idx: 4,
-            dest_port_idx: 12,
-            via_port_indices: vec![],
-            carrier_idx: 9,
-            containers: 15,
-            value_usd: 7_950_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-017", product_idx: 13, supplier_idx: 12, origin_port_idx: 4,  dest_port_idx: 2,  via_port_indices: vec![],      carrier_idx: 0,  containers: 3,  value_usd: 14_400_000.0, status: "In Transit" },
+        ShipmentDef { id: "SH-018", product_idx: 16, supplier_idx: 9,  origin_port_idx: 4,  dest_port_idx: 12, via_port_indices: vec![],      carrier_idx: 9,  containers: 15, value_usd: 7_950_000.0,  status: "In Transit" },
         // Switzerland -> USA
-        ShipmentDef {
-            id: "SH-019",
-            product_idx: 14,
-            supplier_idx: 14,
-            origin_port_idx: 2,
-            dest_port_idx: 4,
-            via_port_indices: vec![],
-            carrier_idx: 1,
-            containers: 10,
-            value_usd: 27_000_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-019", product_idx: 14, supplier_idx: 14, origin_port_idx: 2,  dest_port_idx: 4,  via_port_indices: vec![],      carrier_idx: 1,  containers: 10, value_usd: 27_000_000.0, status: "In Transit" },
         // India -> USA (Pacific route)
-        ShipmentDef {
-            id: "SH-020",
-            product_idx: 0,
-            supplier_idx: 0,
-            origin_port_idx: 17,
-            dest_port_idx: 5,
-            via_port_indices: vec![1, 7],
-            carrier_idx: 10,
-            containers: 60,
-            value_usd: 2_700_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-020", product_idx: 0,  supplier_idx: 0,  origin_port_idx: 17, dest_port_idx: 5,  via_port_indices: vec![1, 7],  carrier_idx: 10, containers: 60, value_usd: 2_700_000.0,  status: "In Transit" },
         // Korea -> Europe
-        ShipmentDef {
-            id: "SH-021",
-            product_idx: 14,
-            supplier_idx: 29,
-            origin_port_idx: 6,
-            dest_port_idx: 2,
-            via_port_indices: vec![1, 9],
-            carrier_idx: 8,
-            containers: 7,
-            value_usd: 18_900_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-021", product_idx: 14, supplier_idx: 29, origin_port_idx: 6,  dest_port_idx: 2,  via_port_indices: vec![1, 9],  carrier_idx: 8,  containers: 7,  value_usd: 18_900_000.0, status: "In Transit" },
         // China -> South America
-        ShipmentDef {
-            id: "SH-022",
-            product_idx: 11,
-            supplier_idx: 19,
-            origin_port_idx: 0,
-            dest_port_idx: 14,
-            via_port_indices: vec![],
-            carrier_idx: 3,
-            containers: 40,
-            value_usd: 960_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-022", product_idx: 11, supplier_idx: 19, origin_port_idx: 0,  dest_port_idx: 14, via_port_indices: vec![],      carrier_idx: 3,  containers: 40, value_usd: 960_000.0,    status: "In Transit" },
         // UK -> India
-        ShipmentDef {
-            id: "SH-023",
-            product_idx: 19,
-            supplier_idx: 25,
-            origin_port_idx: 12,
-            dest_port_idx: 17,
-            via_port_indices: vec![9],
-            carrier_idx: 0,
-            containers: 3,
-            value_usd: 9_600_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-023", product_idx: 19, supplier_idx: 25, origin_port_idx: 12, dest_port_idx: 17, via_port_indices: vec![9],     carrier_idx: 0,  containers: 3,  value_usd: 9_600_000.0,  status: "In Transit" },
         // France -> Japan
-        ShipmentDef {
-            id: "SH-024",
-            product_idx: 12,
-            supplier_idx: 25,
-            origin_port_idx: 2,
-            dest_port_idx: 13,
-            via_port_indices: vec![9, 1],
-            carrier_idx: 2,
-            containers: 5,
-            value_usd: 4_250_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-024", product_idx: 12, supplier_idx: 25, origin_port_idx: 2,  dest_port_idx: 13, via_port_indices: vec![9, 1],  carrier_idx: 2,  containers: 5,  value_usd: 4_250_000.0,  status: "In Transit" },
         // India -> Singapore
-        ShipmentDef {
-            id: "SH-025",
-            product_idx: 3,
-            supplier_idx: 0,
-            origin_port_idx: 17,
-            dest_port_idx: 1,
-            via_port_indices: vec![15],
-            carrier_idx: 10,
-            containers: 35,
-            value_usd: 1_750_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-025", product_idx: 3,  supplier_idx: 0,  origin_port_idx: 17, dest_port_idx: 1,  via_port_indices: vec![15],    carrier_idx: 10, containers: 35, value_usd: 1_750_000.0,  status: "In Transit" },
         // Thailand -> Europe
-        ShipmentDef {
-            id: "SH-026",
-            product_idx: 4,
-            supplier_idx: 20,
-            origin_port_idx: 18,
-            dest_port_idx: 2,
-            via_port_indices: vec![1, 9],
-            carrier_idx: 6,
-            containers: 25,
-            value_usd: 1_000_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-026", product_idx: 4,  supplier_idx: 20, origin_port_idx: 18, dest_port_idx: 2,  via_port_indices: vec![1, 9],  carrier_idx: 6,  containers: 25, value_usd: 1_000_000.0,  status: "In Transit" },
         // USA -> Brazil
-        ShipmentDef {
-            id: "SH-027",
-            product_idx: 13,
-            supplier_idx: 12,
-            origin_port_idx: 5,
-            dest_port_idx: 14,
-            via_port_indices: vec![],
-            carrier_idx: 9,
-            containers: 2,
-            value_usd: 9_600_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-027", product_idx: 13, supplier_idx: 12, origin_port_idx: 5,  dest_port_idx: 14, via_port_indices: vec![],      carrier_idx: 9,  containers: 2,  value_usd: 9_600_000.0,  status: "In Transit" },
         // Germany -> Singapore
-        ShipmentDef {
-            id: "SH-028",
-            product_idx: 18,
-            supplier_idx: 5,
-            origin_port_idx: 3,
-            dest_port_idx: 1,
-            via_port_indices: vec![9],
-            carrier_idx: 4,
-            containers: 18,
-            value_usd: 5_400_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-028", product_idx: 18, supplier_idx: 5,  origin_port_idx: 3,  dest_port_idx: 1,  via_port_indices: vec![9],     carrier_idx: 4,  containers: 18, value_usd: 5_400_000.0,  status: "In Transit" },
         // China -> Middle East
-        ShipmentDef {
-            id: "SH-029",
-            product_idx: 10,
-            supplier_idx: 19,
-            origin_port_idx: 8,
-            dest_port_idx: 9,
-            via_port_indices: vec![1],
-            carrier_idx: 3,
-            containers: 45,
-            value_usd: 1_080_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-029", product_idx: 10, supplier_idx: 19, origin_port_idx: 8,  dest_port_idx: 9,  via_port_indices: vec![1],     carrier_idx: 3,  containers: 45, value_usd: 1_080_000.0,  status: "In Transit" },
         // India -> Greece
-        ShipmentDef {
-            id: "SH-030",
-            product_idx: 0,
-            supplier_idx: 4,
-            origin_port_idx: 17,
-            dest_port_idx: 16,
-            via_port_indices: vec![9],
-            carrier_idx: 2,
-            containers: 30,
-            value_usd: 1_350_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-030", product_idx: 0,  supplier_idx: 4,  origin_port_idx: 17, dest_port_idx: 16, via_port_indices: vec![9],     carrier_idx: 2,  containers: 30, value_usd: 1_350_000.0,  status: "In Transit" },
         // Additional high-value biologic shipments
-        ShipmentDef {
-            id: "SH-031",
-            product_idx: 12,
-            supplier_idx: 13,
-            origin_port_idx: 4,
-            dest_port_idx: 3,
-            via_port_indices: vec![],
-            carrier_idx: 0,
-            containers: 4,
-            value_usd: 3_400_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-032",
-            product_idx: 19,
-            supplier_idx: 25,
-            origin_port_idx: 2,
-            dest_port_idx: 13,
-            via_port_indices: vec![9, 1],
-            carrier_idx: 2,
-            containers: 3,
-            value_usd: 9_600_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-033",
-            product_idx: 14,
-            supplier_idx: 10,
-            origin_port_idx: 4,
-            dest_port_idx: 1,
-            via_port_indices: vec![],
-            carrier_idx: 1,
-            containers: 6,
-            value_usd: 16_200_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-034",
-            product_idx: 13,
-            supplier_idx: 15,
-            origin_port_idx: 2,
-            dest_port_idx: 17,
-            via_port_indices: vec![16, 9],
-            carrier_idx: 1,
-            containers: 2,
-            value_usd: 9_600_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-035",
-            product_idx: 15,
-            supplier_idx: 9,
-            origin_port_idx: 4,
-            dest_port_idx: 13,
-            via_port_indices: vec![],
-            carrier_idx: 5,
-            containers: 8,
-            value_usd: 4_160_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-031", product_idx: 12, supplier_idx: 13, origin_port_idx: 4,  dest_port_idx: 3,  via_port_indices: vec![],      carrier_idx: 0,  containers: 4,  value_usd: 3_400_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-032", product_idx: 19, supplier_idx: 25, origin_port_idx: 2,  dest_port_idx: 13, via_port_indices: vec![9, 1],  carrier_idx: 2,  containers: 3,  value_usd: 9_600_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-033", product_idx: 14, supplier_idx: 10, origin_port_idx: 4,  dest_port_idx: 1,  via_port_indices: vec![],      carrier_idx: 1,  containers: 6,  value_usd: 16_200_000.0, status: "In Transit" },
+        ShipmentDef { id: "SH-034", product_idx: 13, supplier_idx: 15, origin_port_idx: 2,  dest_port_idx: 17, via_port_indices: vec![16, 9], carrier_idx: 1,  containers: 2,  value_usd: 9_600_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-035", product_idx: 15, supplier_idx: 9,  origin_port_idx: 4,  dest_port_idx: 13, via_port_indices: vec![],      carrier_idx: 5,  containers: 8,  value_usd: 4_160_000.0,  status: "In Transit" },
         // Intra-Asia routes
-        ShipmentDef {
-            id: "SH-036",
-            product_idx: 8,
-            supplier_idx: 1,
-            origin_port_idx: 17,
-            dest_port_idx: 0,
-            via_port_indices: vec![1],
-            carrier_idx: 10,
-            containers: 20,
-            value_usd: 880_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-037",
-            product_idx: 9,
-            supplier_idx: 20,
-            origin_port_idx: 13,
-            dest_port_idx: 1,
-            via_port_indices: vec![],
-            carrier_idx: 5,
-            containers: 15,
-            value_usd: 840_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-038",
-            product_idx: 17,
-            supplier_idx: 9,
-            origin_port_idx: 4,
-            dest_port_idx: 6,
-            via_port_indices: vec![],
-            carrier_idx: 9,
-            containers: 22,
-            value_usd: 3_300_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-039",
-            product_idx: 7,
-            supplier_idx: 21,
-            origin_port_idx: 13,
-            dest_port_idx: 18,
-            via_port_indices: vec![],
-            carrier_idx: 13,
-            containers: 10,
-            value_usd: 700_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-040",
-            product_idx: 0,
-            supplier_idx: 17,
-            origin_port_idx: 0,
-            dest_port_idx: 11,
-            via_port_indices: vec![],
-            carrier_idx: 11,
-            containers: 50,
-            value_usd: 1_500_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-036", product_idx: 8,  supplier_idx: 1,  origin_port_idx: 17, dest_port_idx: 0,  via_port_indices: vec![1],     carrier_idx: 10, containers: 20, value_usd: 880_000.0,    status: "In Transit" },
+        ShipmentDef { id: "SH-037", product_idx: 9,  supplier_idx: 20, origin_port_idx: 13, dest_port_idx: 1,  via_port_indices: vec![],      carrier_idx: 5,  containers: 15, value_usd: 840_000.0,    status: "In Transit" },
+        ShipmentDef { id: "SH-038", product_idx: 17, supplier_idx: 9,  origin_port_idx: 4,  dest_port_idx: 6,  via_port_indices: vec![],      carrier_idx: 9,  containers: 22, value_usd: 3_300_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-039", product_idx: 7,  supplier_idx: 21, origin_port_idx: 13, dest_port_idx: 18, via_port_indices: vec![],      carrier_idx: 13, containers: 10, value_usd: 700_000.0,    status: "In Transit" },
+        ShipmentDef { id: "SH-040", product_idx: 0,  supplier_idx: 17, origin_port_idx: 0,  dest_port_idx: 11, via_port_indices: vec![],      carrier_idx: 11, containers: 50, value_usd: 1_500_000.0,  status: "In Transit" },
         // Europe intra-routes
-        ShipmentDef {
-            id: "SH-041",
-            product_idx: 18,
-            supplier_idx: 6,
-            origin_port_idx: 3,
-            dest_port_idx: 16,
-            via_port_indices: vec![10],
-            carrier_idx: 4,
-            containers: 12,
-            value_usd: 3_600_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-042",
-            product_idx: 1,
-            supplier_idx: 8,
-            origin_port_idx: 2,
-            dest_port_idx: 12,
-            via_port_indices: vec![],
-            carrier_idx: 0,
-            containers: 18,
-            value_usd: 1_080_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-041", product_idx: 18, supplier_idx: 6,  origin_port_idx: 3,  dest_port_idx: 16, via_port_indices: vec![10],    carrier_idx: 4,  containers: 12, value_usd: 3_600_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-042", product_idx: 1,  supplier_idx: 8,  origin_port_idx: 2,  dest_port_idx: 12, via_port_indices: vec![],      carrier_idx: 0,  containers: 18, value_usd: 1_080_000.0,  status: "In Transit" },
         // More trans-Pacific
-        ShipmentDef {
-            id: "SH-043",
-            product_idx: 16,
-            supplier_idx: 12,
-            origin_port_idx: 5,
-            dest_port_idx: 19,
-            via_port_indices: vec![],
-            carrier_idx: 7,
-            containers: 10,
-            value_usd: 5_300_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-044",
-            product_idx: 5,
-            supplier_idx: 30,
-            origin_port_idx: 16,
-            dest_port_idx: 4,
-            via_port_indices: vec![9],
-            carrier_idx: 9,
-            containers: 20,
-            value_usd: 720_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-043", product_idx: 16, supplier_idx: 12, origin_port_idx: 5,  dest_port_idx: 19, via_port_indices: vec![],      carrier_idx: 7,  containers: 10, value_usd: 5_300_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-044", product_idx: 5,  supplier_idx: 30, origin_port_idx: 16, dest_port_idx: 4,  via_port_indices: vec![9],     carrier_idx: 9,  containers: 20, value_usd: 720_000.0,    status: "In Transit" },
         // Additional bulk generics
-        ShipmentDef {
-            id: "SH-045",
-            product_idx: 3,
-            supplier_idx: 0,
-            origin_port_idx: 17,
-            dest_port_idx: 14,
-            via_port_indices: vec![15, 1],
-            carrier_idx: 10,
-            containers: 40,
-            value_usd: 2_000_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-046",
-            product_idx: 11,
-            supplier_idx: 17,
-            origin_port_idx: 0,
-            dest_port_idx: 9,
-            via_port_indices: vec![1],
-            carrier_idx: 3,
-            containers: 55,
-            value_usd: 1_320_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-047",
-            product_idx: 10,
-            supplier_idx: 19,
-            origin_port_idx: 0,
-            dest_port_idx: 15,
-            via_port_indices: vec![1],
-            carrier_idx: 11,
-            containers: 30,
-            value_usd: 720_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-048",
-            product_idx: 6,
-            supplier_idx: 3,
-            origin_port_idx: 17,
-            dest_port_idx: 18,
-            via_port_indices: vec![15],
-            carrier_idx: 10,
-            containers: 25,
-            value_usd: 500_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-049",
-            product_idx: 2,
-            supplier_idx: 0,
-            origin_port_idx: 17,
-            dest_port_idx: 2,
-            via_port_indices: vec![9, 16],
-            carrier_idx: 1,
-            containers: 35,
-            value_usd: 1_260_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-050",
-            product_idx: 4,
-            supplier_idx: 4,
-            origin_port_idx: 17,
-            dest_port_idx: 4,
-            via_port_indices: vec![1],
-            carrier_idx: 0,
-            containers: 30,
-            value_usd: 1_200_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-045", product_idx: 3,  supplier_idx: 0,  origin_port_idx: 17, dest_port_idx: 14, via_port_indices: vec![15, 1], carrier_idx: 10, containers: 40, value_usd: 2_000_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-046", product_idx: 11, supplier_idx: 17, origin_port_idx: 0,  dest_port_idx: 9,  via_port_indices: vec![1],     carrier_idx: 3,  containers: 55, value_usd: 1_320_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-047", product_idx: 10, supplier_idx: 19, origin_port_idx: 0,  dest_port_idx: 15, via_port_indices: vec![1],     carrier_idx: 11, containers: 30, value_usd: 720_000.0,    status: "In Transit" },
+        ShipmentDef { id: "SH-048", product_idx: 6,  supplier_idx: 3,  origin_port_idx: 17, dest_port_idx: 18, via_port_indices: vec![15],    carrier_idx: 10, containers: 25, value_usd: 500_000.0,    status: "In Transit" },
+        ShipmentDef { id: "SH-049", product_idx: 2,  supplier_idx: 0,  origin_port_idx: 17, dest_port_idx: 2,  via_port_indices: vec![9, 16], carrier_idx: 1,  containers: 35, value_usd: 1_260_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-050", product_idx: 4,  supplier_idx: 4,  origin_port_idx: 17, dest_port_idx: 4,  via_port_indices: vec![1],     carrier_idx: 0,  containers: 30, value_usd: 1_200_000.0,  status: "In Transit" },
         // Hamburg-bound shipments (for port strike scenario)
-        ShipmentDef {
-            id: "SH-051",
-            product_idx: 17,
-            supplier_idx: 14,
-            origin_port_idx: 2,
-            dest_port_idx: 3,
-            via_port_indices: vec![],
-            carrier_idx: 4,
-            containers: 15,
-            value_usd: 2_250_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-052",
-            product_idx: 9,
-            supplier_idx: 23,
-            origin_port_idx: 12,
-            dest_port_idx: 3,
-            via_port_indices: vec![],
-            carrier_idx: 0,
-            containers: 12,
-            value_usd: 672_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-053",
-            product_idx: 8,
-            supplier_idx: 30,
-            origin_port_idx: 16,
-            dest_port_idx: 3,
-            via_port_indices: vec![9],
-            carrier_idx: 9,
-            containers: 20,
-            value_usd: 880_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-054",
-            product_idx: 14,
-            supplier_idx: 29,
-            origin_port_idx: 6,
-            dest_port_idx: 3,
-            via_port_indices: vec![1, 9],
-            carrier_idx: 8,
-            containers: 5,
-            value_usd: 13_500_000.0,
-            status: "In Transit",
-        },
-        ShipmentDef {
-            id: "SH-055",
-            product_idx: 0,
-            supplier_idx: 17,
-            origin_port_idx: 0,
-            dest_port_idx: 3,
-            via_port_indices: vec![1, 9],
-            carrier_idx: 3,
-            containers: 60,
-            value_usd: 1_800_000.0,
-            status: "In Transit",
-        },
+        ShipmentDef { id: "SH-051", product_idx: 17, supplier_idx: 14, origin_port_idx: 2,  dest_port_idx: 3,  via_port_indices: vec![],      carrier_idx: 4,  containers: 15, value_usd: 2_250_000.0,  status: "In Transit" },
+        ShipmentDef { id: "SH-052", product_idx: 9,  supplier_idx: 23, origin_port_idx: 12, dest_port_idx: 3,  via_port_indices: vec![],      carrier_idx: 0,  containers: 12, value_usd: 672_000.0,    status: "In Transit" },
+        ShipmentDef { id: "SH-053", product_idx: 8,  supplier_idx: 30, origin_port_idx: 16, dest_port_idx: 3,  via_port_indices: vec![9],     carrier_idx: 9,  containers: 20, value_usd: 880_000.0,    status: "In Transit" },
+        ShipmentDef { id: "SH-054", product_idx: 14, supplier_idx: 29, origin_port_idx: 6,  dest_port_idx: 3,  via_port_indices: vec![1, 9],  carrier_idx: 8,  containers: 5,  value_usd: 13_500_000.0, status: "In Transit" },
+        ShipmentDef { id: "SH-055", product_idx: 0,  supplier_idx: 17, origin_port_idx: 0,  dest_port_idx: 3,  via_port_indices: vec![1, 9],  carrier_idx: 3,  containers: 60, value_usd: 1_800_000.0,  status: "In Transit" },
     ]
 }
 
@@ -1333,26 +411,26 @@ fn route_connections() -> Vec<(usize, usize)> {
         (17, 9),  // Nhava Sheva -> Dubai
         (1, 9),   // Singapore -> Dubai
         // Trans-Pacific
-        (0, 4),  // Shanghai -> LA
-        (0, 5),  // Shanghai -> Long Beach
-        (8, 4),  // Shenzhen -> LA
-        (8, 5),  // Shenzhen -> Long Beach
-        (6, 4),  // Busan -> LA
-        (13, 4), // Yokohama -> LA
-        (13, 5), // Yokohama -> Long Beach
-        (19, 4), // Kaohsiung -> LA
+        (0, 4),   // Shanghai -> LA
+        (0, 5),   // Shanghai -> Long Beach
+        (8, 4),   // Shenzhen -> LA
+        (8, 5),   // Shenzhen -> Long Beach
+        (6, 4),   // Busan -> LA
+        (13, 4),  // Yokohama -> LA
+        (13, 5),  // Yokohama -> Long Beach
+        (19, 4),  // Kaohsiung -> LA
         // Intra-Asia
-        (0, 1),  // Shanghai -> Singapore
-        (0, 7),  // Shanghai -> Hong Kong
-        (0, 6),  // Shanghai -> Busan
-        (0, 19), // Shanghai -> Kaohsiung
-        (8, 7),  // Shenzhen -> Hong Kong
-        (8, 1),  // Shenzhen -> Singapore
-        (1, 11), // Singapore -> Tanjung Pelepas
-        (1, 15), // Singapore -> Colombo
-        (1, 18), // Singapore -> Laem Chabang
-        (13, 6), // Yokohama -> Busan
-        (7, 19), // Hong Kong -> Kaohsiung
+        (0, 1),   // Shanghai -> Singapore
+        (0, 7),   // Shanghai -> Hong Kong
+        (0, 6),   // Shanghai -> Busan
+        (0, 19),  // Shanghai -> Kaohsiung
+        (8, 7),   // Shenzhen -> Hong Kong
+        (8, 1),   // Shenzhen -> Singapore
+        (1, 11),  // Singapore -> Tanjung Pelepas
+        (1, 15),  // Singapore -> Colombo
+        (1, 18),  // Singapore -> Laem Chabang
+        (13, 6),  // Yokohama -> Busan
+        (7, 19),  // Hong Kong -> Kaohsiung
         // Europe intra
         (2, 3),   // Rotterdam -> Hamburg
         (2, 10),  // Rotterdam -> Antwerp
@@ -1360,12 +438,12 @@ fn route_connections() -> Vec<(usize, usize)> {
         (10, 3),  // Antwerp -> Hamburg
         (10, 12), // Antwerp -> Felixstowe
         // Americas
-        (4, 5),  // LA -> Long Beach
-        (4, 14), // LA -> Santos
-        (5, 14), // Long Beach -> Santos
+        (4, 5),   // LA -> Long Beach
+        (4, 14),  // LA -> Santos
+        (5, 14),  // Long Beach -> Santos
         // Cross links
-        (0, 11), // Shanghai -> Tanjung Pelepas
-        (17, 1), // Nhava Sheva -> Singapore
+        (0, 11),  // Shanghai -> Tanjung Pelepas
+        (17, 1),  // Nhava Sheva -> Singapore
     ]
 }
 
@@ -1373,76 +451,47 @@ fn route_connections() -> Vec<(usize, usize)> {
 fn supply_links() -> Vec<(usize, usize)> {
     vec![
         // India suppliers -> generics
-        (0, 0),
-        (0, 3),
-        (0, 2), // Aurobindo -> Metformin, Amoxicillin, Lisinopril
-        (1, 1),
-        (1, 8),
-        (1, 6),  // Sun Pharma -> Atorvastatin, Sertraline, Amlodipine
-        (2, 14), // Dr. Reddy's -> Humira (biosimilar)
-        (3, 3),
-        (3, 9), // Cipla -> Amoxicillin, Montelukast
-        (4, 0),
-        (4, 5),
-        (4, 1), // Lupin -> Metformin, Losartan, Atorvastatin
+        (0, 0), (0, 3), (0, 2),        // Aurobindo -> Metformin, Amoxicillin, Lisinopril
+        (1, 1), (1, 8), (1, 6),        // Sun Pharma -> Atorvastatin, Sertraline, Amlodipine
+        (2, 14),                        // Dr. Reddy's -> Humira (biosimilar)
+        (3, 3), (3, 9),                // Cipla -> Amoxicillin, Montelukast
+        (4, 0), (4, 5), (4, 1),        // Lupin -> Metformin, Losartan, Atorvastatin
         // Germany
-        (5, 18), // Merck KGaA -> Jardiance
-        (6, 1),
-        (6, 17), // Bayer -> Atorvastatin, Eliquis
-        (7, 18),
-        (7, 19), // Boehringer -> Jardiance, Dupixent
-        (8, 4),
-        (8, 7), // BASF Pharma -> Omeprazole, Gabapentin
+        (5, 18),                        // Merck KGaA -> Jardiance
+        (6, 1), (6, 17),               // Bayer -> Atorvastatin, Eliquis
+        (7, 18), (7, 19),              // Boehringer -> Jardiance, Dupixent
+        (8, 4), (8, 7),                // BASF Pharma -> Omeprazole, Gabapentin
         // USA
-        (9, 16),
-        (9, 15),  // Pfizer -> Paxlovid, Remdesivir
-        (10, 14), // J&J -> Humira
-        (11, 11), // Abbott -> Acetaminophen
-        (12, 13),
-        (12, 16), // Merck & Co -> Keytruda, Paxlovid
-        (13, 12),
-        (13, 18), // Eli Lilly -> Ozempic, Jardiance
+        (9, 16), (9, 15),              // Pfizer -> Paxlovid, Remdesivir
+        (10, 14),                       // J&J -> Humira
+        (11, 11),                       // Abbott -> Acetaminophen
+        (12, 13), (12, 16),            // Merck & Co -> Keytruda, Paxlovid
+        (13, 12), (13, 18),            // Eli Lilly -> Ozempic, Jardiance
         // Switzerland
-        (14, 14),
-        (14, 17), // Novartis -> Humira, Eliquis
-        (15, 13),
-        (15, 19), // Roche -> Keytruda, Dupixent
-        (16, 14),
-        (16, 13), // Lonza -> Humira (CDMO), Keytruda (CDMO)
+        (14, 14), (14, 17),            // Novartis -> Humira, Eliquis
+        (15, 13), (15, 19),            // Roche -> Keytruda, Dupixent
+        (16, 14), (16, 13),            // Lonza -> Humira (CDMO), Keytruda (CDMO)
         // China
-        (17, 0),
-        (17, 5),
-        (17, 10), // Zhejiang Hisun -> Metformin, Losartan, Ibuprofen
-        (18, 15), // Fosun Pharma -> Remdesivir
-        (19, 11),
-        (19, 10),
-        (19, 6), // Shanghai Pharma -> Acetaminophen, Ibuprofen, Amlodipine
+        (17, 0), (17, 5), (17, 10),    // Zhejiang Hisun -> Metformin, Losartan, Ibuprofen
+        (18, 15),                       // Fosun Pharma -> Remdesivir
+        (19, 11), (19, 10), (19, 6),   // Shanghai Pharma -> Acetaminophen, Ibuprofen, Amlodipine
         // Japan
-        (20, 12),
-        (20, 4),  // Takeda -> Ozempic, Omeprazole
-        (21, 7),  // Astellas -> Gabapentin
-        (22, 13), // Daiichi Sankyo -> Keytruda
+        (20, 12), (20, 4),             // Takeda -> Ozempic, Omeprazole
+        (21, 7),                        // Astellas -> Gabapentin
+        (22, 13),                       // Daiichi Sankyo -> Keytruda
         // UK
-        (23, 3),
-        (23, 9), // GSK -> Amoxicillin, Montelukast
-        (24, 17),
-        (24, 19), // AstraZeneca -> Eliquis, Dupixent
+        (23, 3), (23, 9),              // GSK -> Amoxicillin, Montelukast
+        (24, 17), (24, 19),            // AstraZeneca -> Eliquis, Dupixent
         // France
-        (25, 12),
-        (25, 19),
-        (25, 14), // Sanofi -> Ozempic, Dupixent, Humira
-        (26, 1),
-        (26, 5), // Servier -> Atorvastatin, Losartan
+        (25, 12), (25, 19), (25, 14),  // Sanofi -> Ozempic, Dupixent, Humira
+        (26, 1), (26, 5),              // Servier -> Atorvastatin, Losartan
         // Ireland
-        (27, 7),
-        (27, 8), // Allergan -> Gabapentin, Sertraline
-        (28, 8), // Jazz -> Sertraline
+        (27, 7), (27, 8),              // Allergan -> Gabapentin, Sertraline
+        (28, 8),                        // Jazz -> Sertraline
         // Korea
-        (29, 14), // Samsung Biologics -> Humira (CDMO)
+        (29, 14),                       // Samsung Biologics -> Humira (CDMO)
         // Israel
-        (30, 0),
-        (30, 8),
-        (30, 2), // Teva -> Metformin, Sertraline, Lisinopril
+        (30, 0), (30, 8), (30, 2),     // Teva -> Metformin, Sertraline, Lisinopril
     ]
 }
 
@@ -1511,57 +560,32 @@ async fn main() {
             }
             port_ids.push(id);
         }
-        println!(
-            "  [+] Created {} Port nodes across {} countries",
+        println!("  [+] Created {} Port nodes across {} countries",
             port_ids.len(),
-            ports
-                .iter()
-                .map(|p| p.country)
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-        );
+            ports.iter().map(|p| p.country).collect::<std::collections::HashSet<_>>().len());
 
         // -- Suppliers with vector embeddings --
-        store
-            .create_vector_index("Supplier", "capabilities_vec", 64, DistanceMetric::Cosine)
-            .unwrap();
+        store.create_vector_index("Supplier", "capabilities_vec", 64, DistanceMetric::Cosine).unwrap();
 
         for s in &suppliers {
             let emb = mock_embedding(s.capabilities, 64);
             let mut props = PropertyMap::new();
-            props.insert(
-                "name".to_string(),
-                PropertyValue::String(s.name.to_string()),
-            );
-            props.insert(
-                "country".to_string(),
-                PropertyValue::String(s.country.to_string()),
-            );
-            props.insert(
-                "capabilities".to_string(),
-                PropertyValue::String(s.capabilities.to_string()),
-            );
-            props.insert(
-                "annual_revenue_m".to_string(),
-                PropertyValue::Integer(s.annual_revenue_m),
-            );
-            props.insert(
-                "gmp_certified".to_string(),
-                PropertyValue::Boolean(s.gmp_certified),
-            );
+            props.insert("name".to_string(), PropertyValue::String(s.name.to_string()));
+            props.insert("country".to_string(), PropertyValue::String(s.country.to_string()));
+            props.insert("capabilities".to_string(), PropertyValue::String(s.capabilities.to_string()));
+            props.insert("annual_revenue_m".to_string(), PropertyValue::Integer(s.annual_revenue_m));
+            props.insert("gmp_certified".to_string(), PropertyValue::Boolean(s.gmp_certified));
             props.insert("capabilities_vec".to_string(), PropertyValue::Vector(emb));
-            let id = store.create_node_with_properties(tenant, vec![Label::new("Supplier")], props);
+            let id = store.create_node_with_properties(
+                tenant,
+                vec![Label::new("Supplier")],
+                props,
+            );
             supplier_ids.push(id);
         }
-        println!(
-            "  [+] Created {} Supplier nodes with 64-dim capability embeddings across {} countries",
+        println!("  [+] Created {} Supplier nodes with 64-dim capability embeddings across {} countries",
             supplier_ids.len(),
-            suppliers
-                .iter()
-                .map(|s| s.country)
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-        );
+            suppliers.iter().map(|s| s.country).collect::<std::collections::HashSet<_>>().len());
 
         // -- Products --
         for p in &products {
@@ -1581,11 +605,9 @@ async fn main() {
             }
             product_ids.push(id);
         }
-        println!(
-            "  [+] Created {} Product nodes ({} require cold chain)",
+        println!("  [+] Created {} Product nodes ({} require cold chain)",
             product_ids.len(),
-            products.iter().filter(|p| p.cold_chain).count()
-        );
+            products.iter().filter(|p| p.cold_chain).count());
 
         // -- Shipping Lines --
         for l in &lines {
@@ -1619,51 +641,31 @@ async fn main() {
 
         // ROUTES_THROUGH: port -> port
         for (a, b) in route_connections() {
-            store
-                .create_edge(port_ids[a], port_ids[b], "ROUTES_THROUGH")
-                .unwrap();
-            store
-                .create_edge(port_ids[b], port_ids[a], "ROUTES_THROUGH")
-                .unwrap();
+            store.create_edge(port_ids[a], port_ids[b], "ROUTES_THROUGH").unwrap();
+            store.create_edge(port_ids[b], port_ids[a], "ROUTES_THROUGH").unwrap();
             edge_count += 2;
         }
 
         // SUPPLIES: supplier -> product
         for (si, pi) in supply_links() {
-            store
-                .create_edge(supplier_ids[si], product_ids[pi], "SUPPLIES")
-                .unwrap();
+            store.create_edge(supplier_ids[si], product_ids[pi], "SUPPLIES").unwrap();
             edge_count += 1;
         }
 
         // MANUFACTURES: supplier -> product (same as SUPPLIES for pharma context)
         // We mark a subset as MANUFACTURES (primary manufacturer vs distributor)
         let mfg_links = [
-            (0, 0),
-            (1, 1),
-            (3, 3),
-            (9, 16),
-            (12, 13),
-            (13, 12),
-            (14, 14),
-            (17, 10),
-            (19, 11),
-            (20, 4),
-            (23, 9),
-            (25, 19),
+            (0, 0), (1, 1), (3, 3), (9, 16), (12, 13), (13, 12),
+            (14, 14), (17, 10), (19, 11), (20, 4), (23, 9), (25, 19),
         ];
         for (si, pi) in mfg_links {
-            store
-                .create_edge(supplier_ids[si], product_ids[pi], "MANUFACTURES")
-                .unwrap();
+            store.create_edge(supplier_ids[si], product_ids[pi], "MANUFACTURES").unwrap();
             edge_count += 1;
         }
 
         // BASED_AT: supplier -> nearest port
         for (i, s) in suppliers.iter().enumerate() {
-            store
-                .create_edge(supplier_ids[i], port_ids[s.nearest_port_idx], "BASED_AT")
-                .unwrap();
+            store.create_edge(supplier_ids[i], port_ids[s.nearest_port_idx], "BASED_AT").unwrap();
             edge_count += 1;
         }
 
@@ -1672,41 +674,28 @@ async fn main() {
         // CONTAINS: shipment -> product
         for (i, s) in shipments.iter().enumerate() {
             // Origin
-            store
-                .create_edge(shipment_ids[i], port_ids[s.origin_port_idx], "SHIPS_FROM")
-                .unwrap();
+            store.create_edge(shipment_ids[i], port_ids[s.origin_port_idx], "SHIPS_FROM").unwrap();
             edge_count += 1;
             // Destination
-            store
-                .create_edge(shipment_ids[i], port_ids[s.dest_port_idx], "SHIPS_TO")
-                .unwrap();
+            store.create_edge(shipment_ids[i], port_ids[s.dest_port_idx], "SHIPS_TO").unwrap();
             edge_count += 1;
             // Via ports
             for &via in &s.via_port_indices {
-                store
-                    .create_edge(shipment_ids[i], port_ids[via], "SHIPS_VIA")
-                    .unwrap();
+                store.create_edge(shipment_ids[i], port_ids[via], "SHIPS_VIA").unwrap();
                 edge_count += 1;
             }
             // Carrier
-            store
-                .create_edge(line_ids[s.carrier_idx], shipment_ids[i], "CARRIES")
-                .unwrap();
+            store.create_edge(line_ids[s.carrier_idx], shipment_ids[i], "CARRIES").unwrap();
             edge_count += 1;
             // Product
-            store
-                .create_edge(shipment_ids[i], product_ids[s.product_idx], "CONTAINS")
-                .unwrap();
+            store.create_edge(shipment_ids[i], product_ids[s.product_idx], "CONTAINS").unwrap();
             edge_count += 1;
         }
     } // drop store write lock
 
     let build_time = start.elapsed();
-    let total_nodes = port_ids.len()
-        + supplier_ids.len()
-        + product_ids.len()
-        + line_ids.len()
-        + shipment_ids.len();
+    let total_nodes = port_ids.len() + supplier_ids.len() + product_ids.len()
+        + line_ids.len() + shipment_ids.len();
 
     println!("  [+] Created {} relationships", edge_count);
     println!();
@@ -1729,31 +718,13 @@ async fn main() {
     println!();
 
     // Cypher verification
-    let r1 = client
-        .query_readonly(tenant, "MATCH (p:Port) RETURN p")
-        .await
-        .unwrap();
-    let r2 = client
-        .query_readonly(tenant, "MATCH (s:Supplier) RETURN s")
-        .await
-        .unwrap();
-    let r3 = client
-        .query_readonly(tenant, "MATCH (sh:Shipment) RETURN sh")
-        .await
-        .unwrap();
+    let r1 = client.query_readonly(tenant, "MATCH (p:Port) RETURN p").await.unwrap();
+    let r2 = client.query_readonly(tenant, "MATCH (s:Supplier) RETURN s").await.unwrap();
+    let r3 = client.query_readonly(tenant, "MATCH (sh:Shipment) RETURN sh").await.unwrap();
     println!("  Cypher Verification:");
-    println!(
-        "    MATCH (p:Port) RETURN p       -> {} results",
-        r1.records.len()
-    );
-    println!(
-        "    MATCH (s:Supplier) RETURN s   -> {} results",
-        r2.records.len()
-    );
-    println!(
-        "    MATCH (sh:Shipment) RETURN sh -> {} results",
-        r3.records.len()
-    );
+    println!("    MATCH (p:Port) RETURN p       -> {} results", r1.records.len());
+    println!("    MATCH (s:Supplier) RETURN s   -> {} results", r2.records.len());
+    println!("    MATCH (sh:Shipment) RETURN sh -> {} results", r3.records.len());
     println!();
 
     // ======================================================================
@@ -1795,8 +766,7 @@ async fn main() {
     println!("  | Country              | Count  | Combined Rev $M |");
     println!("  +----------------------+--------+-----------------+");
     for (country, count) in &country_sorted {
-        let total_rev: i64 = suppliers
-            .iter()
+        let total_rev: i64 = suppliers.iter()
             .filter(|s| s.country == *country)
             .map(|s| s.annual_revenue_m)
             .sum();
@@ -1831,10 +801,7 @@ async fn main() {
     println!("  Active Shipment Summary:");
     println!("    Total shipments:      {}", shipments.len());
     println!("    Total containers:     {}", total_containers);
-    println!(
-        "    Total cargo value:    ${:.2}M",
-        total_value / 1_000_000.0
-    );
+    println!("    Total cargo value:    ${:.2}M", total_value / 1_000_000.0);
     println!("    Average per shipment: ${:.2}M", avg_value / 1_000_000.0);
     println!();
 
@@ -1866,16 +833,9 @@ async fn main() {
     let affected_containers_b: i64 = affected_shipments_b.iter().map(|(_, s)| s.containers).sum();
 
     println!("  Impact Assessment:");
-    println!(
-        "    Shipments affected:   {}/{}",
-        affected_shipments_b.len(),
-        shipments.len()
-    );
+    println!("    Shipments affected:   {}/{}", affected_shipments_b.len(), shipments.len());
     println!("    Containers at risk:   {}", affected_containers_b);
-    println!(
-        "    Cargo value at risk:  ${:.2}M",
-        affected_value_b / 1_000_000.0
-    );
+    println!("    Cargo value at risk:  ${:.2}M", affected_value_b / 1_000_000.0);
     println!();
 
     println!("  +--------+----------------------+--------+--------------+------------------+");
@@ -1885,42 +845,27 @@ async fn main() {
         let pname = products[s.product_idx].name;
         let origin = ports[s.origin_port_idx].name;
         let dest = ports[s.dest_port_idx].name;
-        let route_str = format!(
-            "{}->{}",
-            &origin[..6.min(origin.len())],
-            &dest[..6.min(dest.len())]
-        );
-        println!(
-            "  | {:<6} | {:<20} | {:>6} | {:>12.0} | {:<16} |",
-            s.id, pname, s.containers, s.value_usd, route_str
-        );
+        let route_str = format!("{}->{}", &origin[..6.min(origin.len())], &dest[..6.min(dest.len())]);
+        println!("  | {:<6} | {:<20} | {:>6} | {:>12.0} | {:<16} |",
+            s.id, pname, s.containers, s.value_usd, route_str);
     }
     if affected_shipments_b.len() > 15 {
-        println!(
-            "  | ...    | ({} more shipments)   |        |              |                  |",
-            affected_shipments_b.len() - 15
-        );
+        println!("  | ...    | ({} more shipments)   |        |              |                  |",
+            affected_shipments_b.len() - 15);
     }
     println!("  +--------+----------------------+--------+--------------+------------------+");
     println!();
 
     // Cold chain risk
-    let cold_chain_affected: Vec<_> = affected_shipments_b
-        .iter()
+    let cold_chain_affected: Vec<_> = affected_shipments_b.iter()
         .filter(|(_, s)| products[s.product_idx].cold_chain)
         .collect();
     if !cold_chain_affected.is_empty() {
-        println!(
-            "  COLD CHAIN ALERT: {} temperature-sensitive shipments affected!",
-            cold_chain_affected.len()
-        );
+        println!("  COLD CHAIN ALERT: {} temperature-sensitive shipments affected!",
+            cold_chain_affected.len());
         for (_, s) in &cold_chain_affected {
-            println!(
-                "    - {} ({}) -- Value: ${:.2}M -- Extended transit may compromise integrity",
-                s.id,
-                products[s.product_idx].name,
-                s.value_usd / 1_000_000.0
-            );
+            println!("    - {} ({}) -- Value: ${:.2}M -- Extended transit may compromise integrity",
+                s.id, products[s.product_idx].name, s.value_usd / 1_000_000.0);
         }
         println!();
     }
@@ -1937,14 +882,12 @@ async fn main() {
     let hamburg_idx = 3;
     {
         let mut store = client.store_write().await;
-        store
-            .set_node_property(
-                tenant,
-                port_ids[hamburg_idx],
-                "status",
-                PropertyValue::String("Strike - Closed".to_string()),
-            )
-            .unwrap();
+        store.set_node_property(
+            tenant,
+            port_ids[hamburg_idx],
+            "status",
+            PropertyValue::String("Strike - Closed".to_string()),
+        ).unwrap();
     }
 
     println!("  Hamburg port status changed to: Strike - Closed");
@@ -1960,14 +903,8 @@ async fn main() {
 
     let hamburg_value: f64 = hamburg_shipments.iter().map(|(_, s)| s.value_usd).sum();
 
-    println!(
-        "  Shipments destined for Hamburg: {}",
-        hamburg_shipments.len()
-    );
-    println!(
-        "  Total value at risk: ${:.2}M",
-        hamburg_value / 1_000_000.0
-    );
+    println!("  Shipments destined for Hamburg: {}", hamburg_shipments.len());
+    println!("  Total value at risk: ${:.2}M", hamburg_value / 1_000_000.0);
     println!();
 
     println!("  +--------+----------------------+--------+--------------+-----------+");
@@ -1976,10 +913,8 @@ async fn main() {
     for (_, s) in &hamburg_shipments {
         let pname = products[s.product_idx].name;
         let carrier = lines[s.carrier_idx].name;
-        println!(
-            "  | {:<6} | {:<20} | {:>6} | {:>12.0} | {:<9} |",
-            s.id, pname, s.containers, s.value_usd, carrier
-        );
+        println!("  | {:<6} | {:<20} | {:>6} | {:>12.0} | {:<9} |",
+            s.id, pname, s.containers, s.value_usd, carrier);
     }
     println!("  +--------+----------------------+--------+--------------+-----------+");
     println!();
@@ -1991,10 +926,8 @@ async fn main() {
     println!("  | Alternative Port   | Country   | Capacity (kTEU)|");
     println!("  +--------------------+-----------+---------------+");
     for &pi in &alt_ports {
-        println!(
-            "  | {:<18} | {:<9} | {:>13} |",
-            ports[pi].name, ports[pi].country, ports[pi].capacity_teu
-        );
+        println!("  | {:<18} | {:<9} | {:>13} |",
+            ports[pi].name, ports[pi].country, ports[pi].capacity_teu);
     }
     println!("  +--------------------+-----------+---------------+");
     println!();
@@ -2005,23 +938,14 @@ async fn main() {
         let store = client.store_read().await;
         for &pi in &alt_ports {
             let edges = store.get_outgoing_edges(port_ids[pi]);
-            let connections: Vec<String> = edges
-                .iter()
+            let connections: Vec<String> = edges.iter()
                 .filter(|e| e.edge_type.as_str() == "ROUTES_THROUGH")
                 .map(|e| node_string(&store, e.target, "name"))
                 .filter(|name| !name.is_empty())
                 .collect();
-            println!(
-                "    {} -> {} connected ports: {}",
-                ports[pi].name,
-                connections.len(),
-                connections
-                    .iter()
-                    .take(5)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+            println!("    {} -> {} connected ports: {}",
+                ports[pi].name, connections.len(),
+                connections.iter().take(5).cloned().collect::<Vec<_>>().join(", "));
         }
     }
     println!();
@@ -2055,9 +979,7 @@ async fn main() {
         let route = if s.via_port_indices.is_empty() {
             format!("{} -> {}", origin, dest)
         } else {
-            let via_names: Vec<&str> = s
-                .via_port_indices
-                .iter()
+            let via_names: Vec<&str> = s.via_port_indices.iter()
                 .map(|&idx| ports[idx].name)
                 .collect();
             format!("{} -> {} -> {}", origin, via_names.join(" -> "), dest)
@@ -2067,29 +989,18 @@ async fn main() {
         } else {
             route
         };
-        println!(
-            "  | {:<6} | {:<18} | {:>6} | {:>12.0} | {:<19} |",
-            s.id, pname, s.containers, s.value_usd, route_display
-        );
+        println!("  | {:<6} | {:<18} | {:>6} | {:>12.0} | {:<19} |",
+            s.id, pname, s.containers, s.value_usd, route_display);
     }
     println!("  +--------+--------------------+--------+--------------+---------------------+");
     println!();
     println!("  Cold-chain summary:");
-    println!(
-        "    Total cold-chain shipments:  {}",
-        cold_chain_shipments.len()
-    );
-    println!(
-        "    Total cold-chain value:      ${:.2}M",
-        cold_value / 1_000_000.0
-    );
+    println!("    Total cold-chain shipments:  {}", cold_chain_shipments.len());
+    println!("    Total cold-chain value:      ${:.2}M", cold_value / 1_000_000.0);
     println!("    Products requiring cold chain:");
     for p in &products {
         if p.cold_chain {
-            println!(
-                "      - {} ({}, ${:.2}/unit)",
-                p.name, p.category, p.unit_value
-            );
+            println!("      - {} ({}, ${:.2}/unit)", p.name, p.category, p.unit_value);
         }
     }
     println!();
@@ -2106,26 +1017,16 @@ async fn main() {
 
     // PageRank on the full graph
     let view = client.build_view(None, None, None).await;
-    let pr_scores = client
-        .page_rank(
-            PageRankConfig {
-                damping_factor: 0.85,
-                iterations: 30,
-                tolerance: 0.0001,
-                ..Default::default()
-            },
-            None,
-            None,
-        )
-        .await;
+    let pr_scores = client.page_rank(PageRankConfig {
+        damping_factor: 0.85,
+        iterations: 30,
+        tolerance: 0.0001,
+        ..Default::default()
+    }, None, None).await;
     let pr_time = start.elapsed();
 
-    println!(
-        "  PageRank computed in {:.2?} ({} nodes, {} edges in view)",
-        pr_time,
-        view.node_count,
-        view.out_targets.len()
-    );
+    println!("  PageRank computed in {:.2?} ({} nodes, {} edges in view)",
+        pr_time, view.node_count, view.out_targets.len());
     println!();
 
     // Port criticality
@@ -2141,13 +1042,8 @@ async fn main() {
     println!("  | Rank | Port               | Country      | PageRank |");
     println!("  +------+--------------------+--------------+----------+");
     for (rank, (name, country, score)) in port_ranks.iter().take(10).enumerate() {
-        println!(
-            "  | {:>4} | {:<18} | {:<12} | {:>8.6} |",
-            rank + 1,
-            name,
-            country,
-            score
-        );
+        println!("  | {:>4} | {:<18} | {:<12} | {:>8.6} |",
+            rank + 1, name, country, score);
     }
     println!("  +------+--------------------+--------------+----------+");
     println!();
@@ -2170,13 +1066,8 @@ async fn main() {
         } else {
             name.to_string()
         };
-        println!(
-            "  | {:>4} | {:<22} | {:<12} | {:>8.6} |",
-            rank + 1,
-            name_disp,
-            country,
-            score
-        );
+        println!("  | {:>4} | {:<22} | {:<12} | {:>8.6} |",
+            rank + 1, name_disp, country, score);
     }
     println!("  +------+------------------------+--------------+----------+");
     // Suppliers only have outgoing edges (SUPPLIES, MANUFACTURES, BASED_AT), so
@@ -2194,11 +1085,8 @@ async fn main() {
     println!("  Graph Connectivity (WCC):");
     println!("    Connected components: {}", wcc.components.len());
     let max_comp = wcc.components.values().map(|v| v.len()).max().unwrap_or(0);
-    println!(
-        "    Largest component:    {} nodes ({:.1}% of graph)",
-        max_comp,
-        max_comp as f64 / total_nodes as f64 * 100.0
-    );
+    println!("    Largest component:    {} nodes ({:.1}% of graph)",
+        max_comp, max_comp as f64 / total_nodes as f64 * 100.0);
     println!();
 
     // ======================================================================
@@ -2208,21 +1096,15 @@ async fn main() {
     println!("  | SCENARIO F: Route Optimization (Jaya Algorithm)         |");
     println!("  +---------------------------------------------------------+");
     println!();
-    println!(
-        "  Problem: Allocate {} containers from Hamburg-bound shipments",
-        hamburg_shipments
-            .iter()
-            .map(|(_, s)| s.containers)
-            .sum::<i64>()
-    );
+    println!("  Problem: Allocate {} containers from Hamburg-bound shipments",
+        hamburg_shipments.iter().map(|(_, s)| s.containers).sum::<i64>());
     println!("  across 3 alternative European ports, minimizing total cost.");
     println!();
     println!("  Cost model: base_cost * containers + congestion_factor * containers^2");
     println!("  Ports: Rotterdam (idx 0), Antwerp (idx 1), Felixstowe (idx 2)");
     println!();
 
-    let total_hamburg_containers: f64 = hamburg_shipments
-        .iter()
+    let total_hamburg_containers: f64 = hamburg_shipments.iter()
         .map(|(_, s)| s.containers as f64)
         .sum();
 
@@ -2233,9 +1115,9 @@ async fn main() {
 
     let reroute_problem = RerouteProblem {
         target_containers: total_hamburg_containers,
-        base_costs: [45.0, 52.0, 65.0],         // $/container base
-        congestion_factors: [0.15, 0.10, 0.05], // quadratic congestion
-        port_capacities: [80.0, 60.0, 40.0],    // max containers
+        base_costs: [45.0, 52.0, 65.0],              // $/container base
+        congestion_factors: [0.15, 0.10, 0.05],       // quadratic congestion
+        port_capacities: [80.0, 60.0, 40.0],          // max containers
     };
 
     let start = Instant::now();
@@ -2265,34 +1147,23 @@ async fn main() {
     for i in 0..3 {
         let cost_i = reroute_problem.base_costs[i] * allocated[i]
             + reroute_problem.congestion_factors[i] * allocated[i] * allocated[i];
-        println!(
-            "  | {:<18} | {:>11.0} | {:>11.2} |",
-            alt_port_names[i], allocated[i], cost_i
-        );
+        println!("  | {:<18} | {:>11.0} | {:>11.2} |",
+            alt_port_names[i], allocated[i], cost_i);
     }
     println!("  +--------------------+-------------+-------------+");
-    println!(
-        "  | TOTAL              | {:>11.0} | {:>11.2} |",
-        total_allocated, routing_cost
-    );
+    println!("  | TOTAL              | {:>11.0} | {:>11.2} |",
+        total_allocated, routing_cost);
     println!("  +--------------------+-------------+-------------+");
     println!();
 
     let total_capacity: f64 = reroute_problem.port_capacities.iter().sum();
     if reroute_problem.is_fully_allocated(total_allocated) {
-        println!(
-            "  All {} containers successfully rerouted.",
-            total_hamburg_containers as i64
-        );
+        println!("  All {} containers successfully rerouted.", total_hamburg_containers as i64);
     } else {
-        println!(
-            "  Shortfall: {:.0} of {:.0} containers placed; the alternative ports hold {:.0}.",
-            total_allocated, total_hamburg_containers, total_capacity
-        );
-        println!(
-            "  Unplaced containers carry a ${:.2} penalty in the solver's fitness.",
-            shortfall_penalty
-        );
+        println!("  Shortfall: {:.0} of {:.0} containers placed; the alternative ports hold {:.0}.",
+            total_allocated, total_hamburg_containers, total_capacity);
+        println!("  Unplaced containers carry a ${:.2} penalty in the solver's fitness.",
+            shortfall_penalty);
     }
     println!();
 
@@ -2306,29 +1177,20 @@ async fn main() {
 
     // Scenario: A primary supplier is disrupted. Find alternatives with similar capabilities.
     let disrupted_suppliers = [
-        (0, "Aurobindo Pharma"), // India generic giant
-        (9, "Pfizer"),           // mRNA/oncology
-        (14, "Novartis"),        // Gene therapy/CAR-T
+        (0, "Aurobindo Pharma"),    // India generic giant
+        (9, "Pfizer"),              // mRNA/oncology
+        (14, "Novartis"),           // Gene therapy/CAR-T
     ];
 
     for (si, disrupted_name) in &disrupted_suppliers {
         let query_capabilities = suppliers[*si].capabilities;
         let query_vec = mock_embedding(query_capabilities, 64);
 
-        println!(
-            "  Disrupted supplier: {} ({})",
-            disrupted_name, suppliers[*si].country
-        );
-        println!(
-            "  Capabilities: \"{}...\"",
-            &query_capabilities[..60.min(query_capabilities.len())]
-        );
+        println!("  Disrupted supplier: {} ({})", disrupted_name, suppliers[*si].country);
+        println!("  Capabilities: \"{}...\"", &query_capabilities[..60.min(query_capabilities.len())]);
         println!();
 
-        let results = client
-            .vector_search("Supplier", "capabilities_vec", &query_vec, 6)
-            .await
-            .unwrap();
+        let results = client.vector_search("Supplier", "capabilities_vec", &query_vec, 6).await.unwrap();
 
         // The index returns cosine *distance* (1 - similarity): lower is closer.
         println!("  Top alternative suppliers by capability similarity (cosine distance, lower = closer):");
@@ -2354,10 +1216,8 @@ async fn main() {
                     } else {
                         name
                     };
-                    println!(
-                        "  | {:>4} | {:<22} | {:<12} | {:>8.4} |",
-                        rank, name_disp, country, score
-                    );
+                    println!("  | {:>4} | {:<22} | {:<12} | {:>8.4} |",
+                        rank, name_disp, country, score);
                     if rank >= 5 {
                         break;
                     }
@@ -2371,8 +1231,7 @@ async fn main() {
     // Also do a manual cosine similarity comparison for validation
     println!("  Manual cosine similarity validation (Aurobindo vs top matches):");
     let aurobindo_emb = mock_embedding(suppliers[0].capabilities, 64);
-    let mut all_sims: Vec<(&str, &str, f32)> = suppliers
-        .iter()
+    let mut all_sims: Vec<(&str, &str, f32)> = suppliers.iter()
         .filter(|s| s.name != "Aurobindo Pharma")
         .map(|s| {
             let emb = mock_embedding(s.capabilities, 64);
@@ -2382,10 +1241,7 @@ async fn main() {
     all_sims.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
 
     for (name, country, sim) in all_sims.iter().take(5) {
-        println!(
-            "    {} ({}) -- cosine similarity: {:.4}",
-            name, country, sim
-        );
+        println!("    {} ({}) -- cosine similarity: {:.4}", name, country, sim);
     }
     println!();
 
@@ -2409,10 +1265,7 @@ async fn main() {
             model: String::new(),
             api_key: None,
             api_base_url: None,
-            system_prompt: Some(
-                "You are a Cypher query expert for a pharmaceutical supply chain knowledge graph."
-                    .to_string(),
-            ),
+            system_prompt: Some("You are a Cypher query expert for a pharmaceutical supply chain knowledge graph.".to_string()),
         };
 
         let schema_summary = "Node labels: Port, Supplier, Product, ShippingLine, Shipment\n\
@@ -2455,8 +1308,7 @@ async fn main() {
         let mut policies = HashMap::new();
         policies.insert(
             "Supplier".to_string(),
-            "When a Supplier entity is missing, enrich with capabilities and port connections."
-                .to_string(),
+            "When a Supplier entity is missing, enrich with capabilities and port connections.".to_string(),
         );
 
         let agent_config = AgentConfig {
@@ -2465,9 +1317,7 @@ async fn main() {
             model: String::new(),
             api_key: None,
             api_base_url: None,
-            system_prompt: Some(
-                "You are a pharmaceutical supply chain knowledge graph builder.".to_string(),
-            ),
+            system_prompt: Some("You are a pharmaceutical supply chain knowledge graph builder.".to_string()),
             tools: vec![],
             policies,
         };
@@ -2482,14 +1332,10 @@ async fn main() {
                                  First CREATE nodes, then MATCH...CREATE edges.\n\
                                  MATCH format: MATCH (a:Label {prop: 'val'}), (b:Label {prop: 'val'}) CREATE (a)-[:REL]->(b)";
 
-        match runtime
-            .process_trigger(enrichment_prompt, "supply_nlq")
-            .await
-        {
+        match runtime.process_trigger(enrichment_prompt, "supply_nlq").await {
             Ok(response) => {
                 println!("  Claude generated enrichment:");
-                let stmts: Vec<String> = response
-                    .lines()
+                let stmts: Vec<String> = response.lines()
                     .map(|l| l.trim().to_string())
                     .filter(|l| {
                         let u = l.to_uppercase();
@@ -2497,11 +1343,7 @@ async fn main() {
                     })
                     .collect();
                 for stmt in &stmts {
-                    let display = if stmt.len() > 78 {
-                        &stmt[..78]
-                    } else {
-                        stmt.as_str()
-                    };
+                    let display = if stmt.len() > 78 { &stmt[..78] } else { stmt.as_str() };
                     println!("    | {}", display);
                 }
                 println!("  Parsed {} Cypher statements", stmts.len());
@@ -2539,32 +1381,15 @@ async fn main() {
     println!("                                           (Port)");
     println!();
     println!("  Capabilities Demonstrated:");
-    println!(
-        "    [A] Knowledge graph construction ({} nodes, {} edges)",
-        total_nodes, edge_count
-    );
-    println!(
-        "    [B] Suez Canal disruption analysis ({} shipments, ${:.1}M at risk)",
-        affected_shipments_b.len(),
-        affected_value_b / 1_000_000.0
-    );
-    println!(
-        "    [C] Hamburg port strike with rerouting ({} shipments, ${:.1}M value)",
-        hamburg_shipments.len(),
-        hamburg_value / 1_000_000.0
-    );
-    println!(
-        "    [D] Cold-chain monitoring ({} temperature-sensitive shipments)",
-        cold_chain_shipments.len()
-    );
-    println!(
-        "    [E] PageRank criticality ({} nodes analyzed)",
-        view.node_count
-    );
-    println!(
-        "    [F] Jaya optimization ({:.0} containers across 3 ports)",
-        total_hamburg_containers
-    );
+    println!("    [A] Knowledge graph construction ({} nodes, {} edges)", total_nodes, edge_count);
+    println!("    [B] Suez Canal disruption analysis ({} shipments, ${:.1}M at risk)",
+        affected_shipments_b.len(), affected_value_b / 1_000_000.0);
+    println!("    [C] Hamburg port strike with rerouting ({} shipments, ${:.1}M value)",
+        hamburg_shipments.len(), hamburg_value / 1_000_000.0);
+    println!("    [D] Cold-chain monitoring ({} temperature-sensitive shipments)",
+        cold_chain_shipments.len());
+    println!("    [E] PageRank criticality ({} nodes analyzed)", view.node_count);
+    println!("    [F] Jaya optimization ({:.0} containers across 3 ports)", total_hamburg_containers);
     println!("    [G] Vector search for alternative suppliers (64-dim embeddings)");
     // H and I need the Claude Code CLI; say so rather than claim a step that was skipped.
     if claude_available {

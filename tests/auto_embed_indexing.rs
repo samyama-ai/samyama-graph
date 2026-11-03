@@ -87,11 +87,7 @@ async fn auto_embed_indexes_under_the_target_property() {
     let err = vector_index
         .search("Person", "headline", &vec![0.1f32; MOCK_DIM], 5)
         .expect_err("no index should exist under the source property");
-    assert!(
-        err.to_string()
-            .contains("no vector index on :Person(headline)"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("no vector index on :Person(headline)"), "{err}");
 }
 
 #[tokio::test]
@@ -189,16 +185,13 @@ async fn an_auto_embedded_vector_survives_a_rebuild() {
     let before = vector_index
         .search("Person", "embedding", &vec![0.1f32; MOCK_DIM], 5)
         .expect("search");
-    assert_eq!(
-        before.len(),
-        1,
-        "the embedding should be indexed to begin with"
-    );
+    assert_eq!(before.len(), 1, "the embedding should be indexed to begin with");
 
     // the property is what a rebuild reads, so it has to be on the node
     {
         let guard = store.read().await;
-        let stored = guard.node_property(id, "embedding");
+        let stored = guard
+            .node_property(id, "embedding");
         assert!(
             stored.is_some_and(|v| v.to_vector().is_some_and(|v| v.len() == MOCK_DIM)),
             "the embedding should be stored on the node, not only in the index"

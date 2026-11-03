@@ -200,9 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            eprintln!(
-                "--data-dir <path> is required (this example needs input; see the header comment)"
-            );
+            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
             std::process::exit(2)
         });
 
@@ -238,19 +236,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .execute(&q)
                 .ok()
                 .map(|o| {
-                    o.records
-                        .iter()
+                    o.records.iter()
                         .filter_map(|r| r.values().next().and_then(|v| v.node_id()))
                         .collect()
                 })
                 .unwrap_or_default()
         };
-        println!(
+            println!(
             "  size_of Value={} PropertyValue={}  (each eval_expression returns one by value)",
             std::mem::size_of::<samyama::query::executor::Value>(),
             std::mem::size_of::<samyama::graph::PropertyValue>(),
         );
-        println!("--- property-read microbenchmark ({} ids) ---", ids.len());
+    println!("--- property-read microbenchmark ({} ids) ---", ids.len());
         if !ids.is_empty() {
             let reps = 20usize;
 
@@ -259,9 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for _ in 0..reps {
                 for id in &ids {
                     let v = graph.node_columns.get_property(id.as_u64() as usize, "id");
-                    if !v.is_null() {
-                        sink += 1;
-                    }
+                    if !v.is_null() { sink += 1; }
                 }
             }
             let per = t.elapsed().as_secs_f64() / (reps * ids.len()) as f64 * 1e9;
@@ -271,9 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut found = 0u64;
             for _ in 0..reps {
                 for id in &ids {
-                    if graph.get_node(*id).is_some() {
-                        found += 1;
-                    }
+                    if graph.get_node(*id).is_some() { found += 1; }
                 }
             }
             let per = t.elapsed().as_secs_f64() / (reps * ids.len()) as f64 * 1e9;
@@ -317,14 +310,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let stages = [
             ("scan only", "MATCH (a:Person) RETURN count(a) AS n"),
-            (
-                "scan + 1 expand",
-                "MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN count(a) AS n",
-            ),
-            (
-                "scan + 2 expands",
-                "MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person) RETURN count(a) AS n",
-            ),
+            ("scan + 1 expand", "MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN count(a) AS n"),
+            ("scan + 2 expands",
+             "MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person) RETURN count(a) AS n"),
         ];
         let mut prev: Option<(f64, i64)> = None;
         for (label, cypher) in stages {

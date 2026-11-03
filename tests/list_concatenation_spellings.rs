@@ -39,12 +39,8 @@ fn graph() -> GraphStore {
         let arr = |v: &Vec<i64>| {
             PropertyValue::Array(v.iter().map(|x| PropertyValue::Integer(*x)).collect())
         };
-        store
-            .set_node_property("default", n, "list", arr(&list))
-            .unwrap();
-        store
-            .set_node_property("default", n, "list2", arr(&list2))
-            .unwrap();
+        store.set_node_property("default", n, "list", arr(&list)).unwrap();
+        store.set_node_property("default", n, "list2", arr(&list2)).unwrap();
     }
     store
 }
@@ -55,10 +51,7 @@ fn one_col(store: &GraphStore, cypher: &str) -> Vec<Value> {
         .execute(&q)
         .unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
     let c = r.columns[0].clone();
-    r.records
-        .iter()
-        .map(|rec| rec.get(&c).cloned().unwrap_or(Value::Null))
-        .collect()
+    r.records.iter().map(|rec| rec.get(&c).cloned().unwrap_or(Value::Null)).collect()
 }
 
 /// The label of each row, for readable assertions.
@@ -89,10 +82,8 @@ fn a_list_built_from_expressions_concatenates() {
 fn descending_orders_by_the_key_rather_than_by_nothing() {
     let store = graph();
     assert_eq!(
-        labels(
-            &store,
-            &format!("MATCH (a) WITH a ORDER BY {KEY} DESC LIMIT 3 RETURN labels(a) AS l")
-        ),
+        labels(&store, &format!(
+            "MATCH (a) WITH a ORDER BY {KEY} DESC LIMIT 3 RETURN labels(a) AS l")),
         ["E", "D", "A"],
     );
 }
@@ -104,10 +95,8 @@ fn ascending_still_agrees_and_now_for_the_right_reason() {
     // order A,B,C is the same *set* as the expected C,B,A. Asserting the
     // sequence, not the set, is what makes it a real check.
     assert_eq!(
-        labels(
-            &store,
-            &format!("MATCH (a) WITH a ORDER BY {KEY} ASC LIMIT 3 RETURN labels(a) AS l")
-        ),
+        labels(&store, &format!(
+            "MATCH (a) WITH a ORDER BY {KEY} ASC LIMIT 3 RETURN labels(a) AS l")),
         ["C", "B", "A"],
     );
 }
@@ -124,11 +113,7 @@ fn a_value_is_appended_and_prepended() {
     let store = graph();
     for (q, n) in [("RETURN [1,2] + 3 AS c", 3), ("RETURN 1 + [2,3] AS c", 3)] {
         let got = one_col(&store, q);
-        assert_eq!(
-            format!("{:?}", got[0]).matches("Integer(").count(),
-            n,
-            "{q}"
-        );
+        assert_eq!(format!("{:?}", got[0]).matches("Integer(").count(), n, "{q}");
     }
 }
 
@@ -147,16 +132,9 @@ fn a_list_of_nodes_concatenates_without_being_flattened_to_properties() {
     // The reason `Value::List` exists: a `PropertyValue` cannot hold an
     // entity. Concatenating at the `Value` level keeps them; narrowing first
     // would have destroyed them.
-    let got = one_col(
-        &store,
-        "MATCH (a) WITH collect(a) AS ns RETURN ns + ns AS c",
-    );
+    let got = one_col(&store, "MATCH (a) WITH collect(a) AS ns RETURN ns + ns AS c");
     let s = format!("{:?}", got[0]);
-    assert_eq!(
-        s.matches("NodeRef").count() + s.matches("Node(").count(),
-        10,
-        "got {s}"
-    );
+    assert_eq!(s.matches("NodeRef").count() + s.matches("Node(").count(), 10, "got {s}");
 }
 
 #[test]
@@ -172,18 +150,9 @@ fn the_result_keeps_the_narrow_spelling_so_in_and_slicing_still_read_it() {
         ("RETURN [1]+[2] IN [3]+[[1,2]] AS a", "Boolean(true)"),
     ] {
         let got = one_col(&store, q);
-        assert!(
-            format!("{:?}", got[0]).contains(want),
-            "{q}: got {:?}",
-            got[0]
-        );
+        assert!(format!("{:?}", got[0]).contains(want), "{q}: got {:?}", got[0]);
     }
     // A slice of a concatenation is still sliceable.
     let got = one_col(&store, "RETURN ([1,2,3] + [4,5])[1..3] AS a");
-    assert_eq!(
-        format!("{:?}", got[0]).matches("Integer(").count(),
-        2,
-        "got {:?}",
-        got[0]
-    );
+    assert_eq!(format!("{:?}", got[0]).matches("Integer(").count(), 2, "got {:?}", got[0]);
 }

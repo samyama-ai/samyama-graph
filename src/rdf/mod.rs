@@ -36,32 +36,47 @@
 //! assert_eq!(results.len(), 1);
 //! ```
 
+mod types;
+mod store;
 mod mapping;
 mod mapping_impl;
 mod namespace;
-mod schema;
 mod serialization;
-mod store;
-mod types;
+mod schema;
 
 pub use types::{
-    BlankNode, Literal, NamedNode, Quad, QuadPattern, RdfObject, RdfPredicate, RdfSubject, RdfTerm,
-    Triple, TriplePattern,
+    RdfTerm, RdfSubject, RdfPredicate, RdfObject,
+    NamedNode, BlankNode, Literal, Triple, Quad,
+    TriplePattern, QuadPattern,
 };
 
-pub use store::{RdfStore, RdfStoreError, RdfStoreResult, TripleIterator};
+pub use store::{
+    RdfStore, RdfStoreError, RdfStoreResult,
+    TripleIterator,
+};
 
-pub use mapping::{GraphToRdfMapper, MappingConfig, MappingError, MappingResult, RdfToGraphMapper};
+pub use mapping::{
+    GraphToRdfMapper, RdfToGraphMapper,
+    MappingConfig, MappingError, MappingResult,
+};
 
 pub use mapping_impl::{RdfImportReport, SyncReport, IRI_PROPERTY};
 
-pub use namespace::{Namespace, NamespaceManager, PrefixError, PrefixResult};
-
-pub use serialization::{
-    ParseError, ParseResult, RdfFormat, RdfParser, RdfSerializer, SerializeError, SerializeResult,
+pub use namespace::{
+    NamespaceManager, Namespace,
+    PrefixError, PrefixResult,
 };
 
-pub use schema::{InferenceRule, RdfsReasoner, ReasoningError, ReasoningResult};
+pub use serialization::{
+    RdfFormat, RdfParser, RdfSerializer,
+    ParseError, ParseResult,
+    SerializeError, SerializeResult,
+};
+
+pub use schema::{
+    RdfsReasoner, InferenceRule,
+    ReasoningError, ReasoningResult,
+};
 
 #[cfg(test)]
 mod tests {

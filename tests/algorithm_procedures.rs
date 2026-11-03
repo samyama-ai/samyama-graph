@@ -23,8 +23,7 @@ fn fixture() -> GraphStore {
         engine
             .execute_mut(
                 &format!("MATCH (a:N {{id: {a}}}), (b:N {{id: {b}}}) CREATE (a)-[:R]->(b)"),
-                &mut store,
-                "default",
+                &mut store, "default",
             )
             .unwrap();
     }
@@ -58,10 +57,7 @@ fn pagerank_actually_ranks() {
     let engine = QueryEngine::new();
 
     let batch = engine
-        .execute(
-            "CALL pagerank() YIELD node, score RETURN node, score",
-            &store,
-        )
+        .execute("CALL pagerank() YIELD node, score RETURN node, score", &store)
         .unwrap();
 
     let scores: Vec<f64> = batch
@@ -77,10 +73,7 @@ fn pagerank_actually_ranks() {
     let mut distinct: Vec<String> = scores.iter().map(|s| format!("{s:.6}")).collect();
     distinct.sort();
     distinct.dedup();
-    assert!(
-        distinct.len() > 1,
-        "all scores identical — did it run? {scores:?}"
-    );
+    assert!(distinct.len() > 1, "all scores identical — did it run? {scores:?}");
 
     let max = scores.iter().cloned().fold(f64::MIN, f64::max);
     let min = scores.iter().cloned().fold(f64::MAX, f64::min);
@@ -93,19 +86,13 @@ fn other_algorithms_are_reachable_too() {
     let engine = QueryEngine::new();
 
     let wcc = engine
-        .execute(
-            "CALL algo.wcc() YIELD node, componentId RETURN node, componentId",
-            &store,
-        )
+        .execute("CALL algo.wcc() YIELD node, componentId RETURN node, componentId", &store)
         .expect("wcc");
     assert_eq!(wcc.records.len(), 5);
 
     // case-insensitive here as well
     let wcc_upper = engine
-        .execute(
-            "CALL algo.WCC() YIELD node, componentId RETURN node, componentId",
-            &store,
-        )
+        .execute("CALL algo.WCC() YIELD node, componentId RETURN node, componentId", &store)
         .expect("WCC");
     assert_eq!(wcc_upper.records.len(), 5);
 }

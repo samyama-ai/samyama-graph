@@ -101,10 +101,7 @@ fn keys_over_a_node_is_sorted() {
 #[test]
 fn reverse_takes_a_list_as_well_as_a_string() {
     assert_eq!(ints("RETURN reverse([1,2,3]) AS r"), vec![3, 2, 1]);
-    assert_eq!(
-        one("RETURN reverse(\"abc\") AS r"),
-        PropertyValue::String("cba".into())
-    );
+    assert_eq!(one("RETURN reverse(\"abc\") AS r"), PropertyValue::String("cba".into()));
     assert_eq!(ints("RETURN reverse([]) AS r"), Vec::<i64>::new());
     assert_eq!(one("RETURN reverse(null) AS r"), PropertyValue::Null);
 }
@@ -115,10 +112,7 @@ fn a_list_comprehension_may_omit_its_projection() {
     // commonly written form and it did not parse.
     assert_eq!(ints("RETURN [x IN [1,2,3,4] WHERE x > 2] AS r"), vec![3, 4]);
     // The explicit form still works, and agrees.
-    assert_eq!(
-        ints("RETURN [x IN [1,2,3,4] WHERE x > 2 | x] AS r"),
-        vec![3, 4]
-    );
+    assert_eq!(ints("RETURN [x IN [1,2,3,4] WHERE x > 2 | x] AS r"), vec![3, 4]);
 }
 
 #[test]
@@ -139,10 +133,7 @@ fn the_power_operator_works() {
     assert_eq!(one("RETURN 2 ^ 3 AS r"), PropertyValue::Float(8.0));
     // Float even over integers, which is why `2 ^ -1` must not truncate.
     assert_eq!(one("RETURN 2 ^ -1 AS r"), PropertyValue::Float(0.5));
-    assert_eq!(
-        one("RETURN 2.0 ^ 0.5 AS r"),
-        PropertyValue::Float(2.0f64.sqrt())
-    );
+    assert_eq!(one("RETURN 2.0 ^ 0.5 AS r"), PropertyValue::Float(2.0f64.sqrt()));
     assert_eq!(one("RETURN null ^ 2 AS r"), PropertyValue::Null);
 }
 
@@ -166,16 +157,8 @@ fn the_power_operator_binds_tightest_and_associates_left() {
 #[test]
 fn plus_concatenates_lists() {
     assert_eq!(ints("RETURN [1,2] + [3] AS r"), vec![1, 2, 3]);
-    assert_eq!(
-        ints("RETURN [1,2] + 3 AS r"),
-        vec![1, 2, 3],
-        "appending a scalar"
-    );
-    assert_eq!(
-        ints("RETURN 1 + [2,3] AS r"),
-        vec![1, 2, 3],
-        "prepending a scalar"
-    );
+    assert_eq!(ints("RETURN [1,2] + 3 AS r"), vec![1, 2, 3], "appending a scalar");
+    assert_eq!(ints("RETURN 1 + [2,3] AS r"), vec![1, 2, 3], "prepending a scalar");
     assert_eq!(ints("RETURN [] + [1] AS r"), vec![1]);
 }
 
@@ -185,10 +168,7 @@ fn plus_still_adds_numbers_and_joins_strings() {
     // cases are the thing most at risk.
     assert_eq!(one("RETURN 1 + 2 AS r"), PropertyValue::Integer(3));
     assert_eq!(one("RETURN 1.5 + 1 AS r"), PropertyValue::Float(2.5));
-    assert_eq!(
-        one("RETURN \"a\" + \"b\" AS r"),
-        PropertyValue::String("ab".into())
-    );
+    assert_eq!(one("RETURN \"a\" + \"b\" AS r"), PropertyValue::String("ab".into()));
     // And a null operand still makes the result null (#457), rather than being
     // appended to a list.
     assert_eq!(one("RETURN [1,2] + null AS r"), PropertyValue::Null);
@@ -197,32 +177,17 @@ fn plus_still_adds_numbers_and_joins_strings() {
 
 #[test]
 fn xor_works_and_sits_between_or_and_and() {
-    assert_eq!(
-        one("RETURN true XOR false AS r"),
-        PropertyValue::Boolean(true)
-    );
-    assert_eq!(
-        one("RETURN true XOR true AS r"),
-        PropertyValue::Boolean(false)
-    );
-    assert_eq!(
-        one("RETURN false XOR false AS r"),
-        PropertyValue::Boolean(false)
-    );
+    assert_eq!(one("RETURN true XOR false AS r"), PropertyValue::Boolean(true));
+    assert_eq!(one("RETURN true XOR true AS r"), PropertyValue::Boolean(false));
+    assert_eq!(one("RETURN false XOR false AS r"), PropertyValue::Boolean(false));
     assert_eq!(one("RETURN null XOR true AS r"), PropertyValue::Null);
 
     // AND binds tighter: `true XOR true AND false` is `true XOR (true AND false)`
     // = true. Grouped the other way it would be false.
-    assert_eq!(
-        one("RETURN true XOR true AND false AS r"),
-        PropertyValue::Boolean(true)
-    );
+    assert_eq!(one("RETURN true XOR true AND false AS r"), PropertyValue::Boolean(true));
     // OR binds looser: `false OR true XOR true` is `false OR (true XOR true)`
     // = false. Grouped the other way it would be true.
-    assert_eq!(
-        one("RETURN false OR true XOR true AS r"),
-        PropertyValue::Boolean(false)
-    );
+    assert_eq!(one("RETURN false OR true XOR true AS r"), PropertyValue::Boolean(false));
 }
 
 #[test]
@@ -235,10 +200,7 @@ fn explain_renders_the_new_operators() {
 
     for (cypher, expected) in [
         ("EXPLAIN MATCH (n:N) WHERE n.v ^ 2 > 3 RETURN n", "^"),
-        (
-            "EXPLAIN MATCH (n:N) WHERE n.v > 1 XOR n.v < 0 RETURN n",
-            "XOR",
-        ),
+        ("EXPLAIN MATCH (n:N) WHERE n.v > 1 XOR n.v < 0 RETURN n", "XOR"),
     ] {
         let query = parse_query(cypher).unwrap();
         let batch = QueryExecutor::new(&store).execute(&query).unwrap();
@@ -246,9 +208,6 @@ fn explain_renders_the_new_operators() {
             Some(Value::Property(PropertyValue::String(t))) => t.clone(),
             other => panic!("{other:?}"),
         };
-        assert!(
-            text.contains(expected),
-            "{cypher} should render {expected}:\n{text}"
-        );
+        assert!(text.contains(expected), "{cypher} should render {expected}:\n{text}");
     }
 }

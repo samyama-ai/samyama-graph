@@ -37,11 +37,8 @@ fn one_index_on_a_label_names_its_own_property() {
         .filter(|k| k.label == "Doc")
         .map(|k| k.property_key)
         .collect();
-    assert_eq!(
-        found,
-        vec!["emb".to_string()],
-        "the resolution has exactly one candidate and it is not `embedding`"
-    );
+    assert_eq!(found, vec!["emb".to_string()],
+               "the resolution has exactly one candidate and it is not `embedding`");
 }
 
 /// Two indexes is the case a default cannot serve, and where the old code
@@ -56,11 +53,8 @@ fn two_indexes_on_a_label_are_both_visible_so_the_caller_can_be_asked() {
         .map(|k| k.property_key)
         .collect();
     found.sort();
-    assert_eq!(
-        found,
-        vec!["a".to_string(), "b".to_string()],
-        "an ambiguous label must expose every candidate, not pick one"
-    );
+    assert_eq!(found, vec!["a".to_string(), "b".to_string()],
+               "an ambiguous label must expose every candidate, not pick one");
 }
 
 /// A label with no vector index must not become an error: the endpoint still
@@ -74,25 +68,15 @@ fn a_label_with_no_index_has_no_candidates() {
         .filter(|k| k.label == "Absent")
         .map(|k| k.property_key)
         .collect();
-    assert!(
-        found.is_empty(),
-        "no index on the label means no candidate to resolve"
-    );
+    assert!(found.is_empty(), "no index on the label means no candidate to resolve");
 }
 
 /// Indexes on other labels must not leak into another label's resolution.
 #[test]
 fn resolution_is_scoped_to_the_label_asked_about() {
     let m = manager_with(&[("A", "emb"), ("B", "other"), ("B", "third")]);
-    let a: Vec<String> = m
-        .list_indices()
-        .into_iter()
-        .filter(|k| k.label == "A")
-        .map(|k| k.property_key)
-        .collect();
-    assert_eq!(
-        a,
-        vec!["emb".to_string()],
-        "B's two indexes must not make A ambiguous"
-    );
+    let a: Vec<String> = m.list_indices().into_iter()
+        .filter(|k| k.label == "A").map(|k| k.property_key).collect();
+    assert_eq!(a, vec!["emb".to_string()],
+               "B's two indexes must not make A ambiguous");
 }

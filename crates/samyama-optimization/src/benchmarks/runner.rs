@@ -2,8 +2,8 @@
 
 use super::multi_objective::{MOProblemSpec, DTLZ, ZDT};
 use super::single_objective::SOProblemSpec;
-use crate::algorithms::*;
 use crate::common::MultiObjectiveProblem;
+use crate::algorithms::*;
 use crate::common::{MultiObjectiveResult, OptimizationResult, SolverConfig};
 use crate::moo::{fast_non_dominated_sort, hypervolume_2d, igd};
 use serde::Serialize;
@@ -39,101 +39,66 @@ pub struct MORecord {
 pub fn so_solver_names() -> Vec<&'static str> {
     vec![
         // Rao family + parents
-        "Jaya",
-        "Rao-1",
-        "Rao-2",
-        "Rao-3",
-        "TLBO",
-        "ITLBO",
-        "BMR",
-        "BWR",
-        "BMWR",
-        "QO-Jaya",
-        "QO-Rao",
-        "SAMP-Jaya",
-        "EHR-Jaya",
-        "SAPHR",
+        "Jaya", "Rao-1", "Rao-2", "Rao-3", "TLBO", "ITLBO",
+        "BMR", "BWR", "BMWR", "QO-Jaya", "QO-Rao", "SAMP-Jaya", "EHR-Jaya", "SAPHR",
         // Comparison baselines
-        "GA",
-        "DE",
-        "PSO",
-        "GWO",
-        "SA",
-        "ABC",
+        "GA", "DE", "PSO", "GWO", "SA", "ABC",
     ]
 }
 
 /// List of MO solvers reported in the paper.
 pub fn mo_solver_names() -> Vec<&'static str> {
-    vec![
-        "NSGA-II",
-        "MOTLBO",
-        "MO-BMWR",
-        "MO-BMR",
-        "MO-BWR",
-        "MO-Rao+DE",
-    ]
+    vec!["NSGA-II", "MOTLBO", "MO-BMWR", "MO-BMR", "MO-BWR", "MO-Rao+DE"]
 }
 
 fn solve_so(name: &str, cfg: &SolverConfig, spec: &SOProblemSpec) -> OptimizationResult {
     let p = spec.to_problem();
     match name {
-        "Jaya" => JayaSolver::new(cfg.clone()).solve(&p),
-        "Rao-1" => RaoSolver::new(cfg.clone(), RaoVariant::Rao1).solve(&p),
-        "Rao-2" => RaoSolver::new(cfg.clone(), RaoVariant::Rao2).solve(&p),
-        "Rao-3" => RaoSolver::new(cfg.clone(), RaoVariant::Rao3).solve(&p),
-        "TLBO" => TLBOSolver::new(cfg.clone()).solve(&p),
-        "ITLBO" => ITLBOSolver::new(cfg.clone()).solve(&p),
-        "BMR" => BMRSolver::new(cfg.clone()).solve(&p),
-        "BWR" => BWRSolver::new(cfg.clone()).solve(&p),
-        "BMWR" => BMWRSolver::new(cfg.clone()).solve(&p),
-        "QO-Jaya" => QOJayaSolver::new(cfg.clone()).solve(&p),
-        "QO-Rao" => QORaoSolver::new(cfg.clone(), RaoVariant::Rao1).solve(&p),
+        "Jaya"      => JayaSolver::new(cfg.clone()).solve(&p),
+        "Rao-1"     => RaoSolver::new(cfg.clone(), RaoVariant::Rao1).solve(&p),
+        "Rao-2"     => RaoSolver::new(cfg.clone(), RaoVariant::Rao2).solve(&p),
+        "Rao-3"     => RaoSolver::new(cfg.clone(), RaoVariant::Rao3).solve(&p),
+        "TLBO"      => TLBOSolver::new(cfg.clone()).solve(&p),
+        "ITLBO"     => ITLBOSolver::new(cfg.clone()).solve(&p),
+        "BMR"       => BMRSolver::new(cfg.clone()).solve(&p),
+        "BWR"       => BWRSolver::new(cfg.clone()).solve(&p),
+        "BMWR"      => BMWRSolver::new(cfg.clone()).solve(&p),
+        "QO-Jaya"   => QOJayaSolver::new(cfg.clone()).solve(&p),
+        "QO-Rao"    => QORaoSolver::new(cfg.clone(), RaoVariant::Rao1).solve(&p),
         "SAMP-Jaya" => SAMPJayaSolver::new(cfg.clone()).solve(&p),
-        "EHR-Jaya" => EHRJayaSolver::new(cfg.clone()).solve(&p),
-        "SAPHR" => SAPHRSolver::new(cfg.clone()).solve(&p),
-        "GA" => GASolver::new(cfg.clone()).solve(&p),
-        "DE" => DESolver::new(cfg.clone()).solve(&p),
-        "PSO" => PSOSolver::new(cfg.clone()).solve(&p),
-        "GWO" => GWOSolver::new(cfg.clone()).solve(&p),
-        "SA" => SASolver::new(cfg.clone()).solve(&p),
-        "ABC" => ABCSolver::new(cfg.clone()).solve(&p),
-        _ => panic!("unknown SO solver: {}", name),
+        "EHR-Jaya"  => EHRJayaSolver::new(cfg.clone()).solve(&p),
+        "SAPHR"     => SAPHRSolver::new(cfg.clone()).solve(&p),
+        "GA"        => GASolver::new(cfg.clone()).solve(&p),
+        "DE"        => DESolver::new(cfg.clone()).solve(&p),
+        "PSO"       => PSOSolver::new(cfg.clone()).solve(&p),
+        "GWO"       => GWOSolver::new(cfg.clone()).solve(&p),
+        "SA"        => SASolver::new(cfg.clone()).solve(&p),
+        "ABC"       => ABCSolver::new(cfg.clone()).solve(&p),
+        _           => panic!("unknown SO solver: {}", name),
     }
 }
 
-fn solve_mo_inner<P: MultiObjectiveProblem>(
-    name: &str,
-    cfg: &SolverConfig,
-    p: &P,
-) -> MultiObjectiveResult {
+fn solve_mo_inner<P: MultiObjectiveProblem>(name: &str, cfg: &SolverConfig, p: &P) -> MultiObjectiveResult {
     match name {
-        "NSGA-II" => NSGA2Solver::new(cfg.clone()).solve(p),
-        "MOTLBO" => MOTLBOSolver::new(cfg.clone()).solve(p),
-        "MO-BMWR" => MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMWR).solve(p),
-        "MO-BMR" => MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMR).solve(p),
-        "MO-BWR" => MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBWR).solve(p),
+        "NSGA-II"   => NSGA2Solver::new(cfg.clone()).solve(p),
+        "MOTLBO"    => MOTLBOSolver::new(cfg.clone()).solve(p),
+        "MO-BMWR"   => MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMWR).solve(p),
+        "MO-BMR"    => MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBMR).solve(p),
+        "MO-BWR"    => MOBMWRSolver::new(cfg.clone(), MOBMWRVariant::MOBWR).solve(p),
         "MO-Rao+DE" => MORaoDESolver::new(cfg.clone()).solve(p),
-        _ => panic!("unknown MO solver: {}", name),
+        _           => panic!("unknown MO solver: {}", name),
     }
 }
 
 fn solve_mo(name: &str, cfg: &SolverConfig, spec: &MOProblemSpec) -> MultiObjectiveResult {
     if let Some(rest) = spec.name.strip_prefix("ZDT") {
         let variant: u8 = rest.parse().expect("ZDT variant");
-        let p = ZDT {
-            variant,
-            dim: spec.dim,
-        };
+        let p = ZDT { variant, dim: spec.dim };
         return solve_mo_inner(name, cfg, &p);
     }
     if let Some(rest) = spec.name.strip_prefix("DTLZ") {
         let variant: u8 = rest.parse().expect("DTLZ variant");
-        let p = DTLZ {
-            variant,
-            dim: spec.dim,
-            m: spec.num_objectives,
-        };
+        let p = DTLZ { variant, dim: spec.dim, m: spec.num_objectives };
         return solve_mo_inner(name, cfg, &p);
     }
     panic!("unknown MO problem {}", spec.name)
@@ -183,9 +148,7 @@ pub fn run_mo_suite(
                 let mut r = solve_mo(solver, cfg, spec);
                 let wall_ms = t0.elapsed().as_millis();
                 fast_non_dominated_sort(&mut r.pareto_front);
-                let front: Vec<&[f64]> = r
-                    .pareto_front
-                    .iter()
+                let front: Vec<&[f64]> = r.pareto_front.iter()
                     .filter(|i| i.rank == 0)
                     .map(|i| i.fitness.as_slice())
                     .collect();
@@ -200,9 +163,7 @@ pub fn run_mo_suite(
                         .collect();
                     let igd_val = igd(&front_owned, &ref_pts);
                     (Some(hv), Some(igd_val))
-                } else {
-                    (None, None)
-                };
+                } else { (None, None) };
                 let pareto_size = front_owned.len();
                 out.push(MORecord {
                     solver: solver.to_string(),
@@ -225,24 +186,11 @@ pub fn run_mo_suite(
 pub fn write_so_csv(records: &[SORecord], path: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)?;
-    writeln!(
-        f,
-        "solver,problem,dim,seed,best_fitness,global_minimum,gap,iterations,wall_ms"
-    )?;
+    writeln!(f, "solver,problem,dim,seed,best_fitness,global_minimum,gap,iterations,wall_ms")?;
     for r in records {
-        writeln!(
-            f,
-            "{},{},{},{},{},{},{},{},{}",
-            r.solver,
-            r.problem,
-            r.dim,
-            r.seed_index,
-            r.best_fitness,
-            r.global_minimum,
-            r.gap,
-            r.iterations,
-            r.wall_ms
-        )?;
+        writeln!(f, "{},{},{},{},{},{},{},{},{}",
+            r.solver, r.problem, r.dim, r.seed_index,
+            r.best_fitness, r.global_minimum, r.gap, r.iterations, r.wall_ms)?;
     }
     Ok(())
 }
@@ -250,24 +198,14 @@ pub fn write_so_csv(records: &[SORecord], path: &std::path::Path) -> std::io::Re
 pub fn write_mo_csv(records: &[MORecord], path: &std::path::Path) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)?;
-    writeln!(
-        f,
-        "solver,problem,dim,num_objectives,seed,pareto_size,hypervolume,igd,wall_ms"
-    )?;
+    writeln!(f, "solver,problem,dim,num_objectives,seed,pareto_size,hypervolume,igd,wall_ms")?;
     for r in records {
-        writeln!(
-            f,
-            "{},{},{},{},{},{},{},{},{}",
-            r.solver,
-            r.problem,
-            r.dim,
-            r.num_objectives,
-            r.seed_index,
+        writeln!(f, "{},{},{},{},{},{},{},{},{}",
+            r.solver, r.problem, r.dim, r.num_objectives, r.seed_index,
             r.pareto_size,
             r.hypervolume.map(|v| v.to_string()).unwrap_or_default(),
             r.igd.map(|v| v.to_string()).unwrap_or_default(),
-            r.wall_ms
-        )?;
+            r.wall_ms)?;
     }
     Ok(())
 }

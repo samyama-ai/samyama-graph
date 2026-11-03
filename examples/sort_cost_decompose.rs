@@ -182,12 +182,8 @@ fn extract_keys<'s>(
 fn generic_order(keys: &[SortKey<'_>], asc: &[bool]) -> Vec<u32> {
     let mut order: Vec<u32> = (0..keys.len() as u32).collect();
     order.sort_unstable_by(|x, y| {
-        cmp_keys(
-            keys[*x as usize].as_slice(),
-            keys[*y as usize].as_slice(),
-            asc,
-        )
-        .then(x.cmp(y))
+        cmp_keys(keys[*x as usize].as_slice(), keys[*y as usize].as_slice(), asc)
+            .then(x.cmp(y))
     });
     order
 }
@@ -197,12 +193,8 @@ fn generic_order(keys: &[SortKey<'_>], asc: &[bool]) -> Vec<u32> {
 fn fast_order(keys: &[SortKey<'_>], asc: &[bool]) -> Vec<u32> {
     let mut order: Vec<u32> = (0..keys.len() as u32).collect();
     order.sort_unstable_by(|x, y| {
-        cmp_keys_fast(
-            keys[*x as usize].as_slice(),
-            keys[*y as usize].as_slice(),
-            asc,
-        )
-        .then(x.cmp(y))
+        cmp_keys_fast(keys[*x as usize].as_slice(), keys[*y as usize].as_slice(), asc)
+            .then(x.cmp(y))
     });
     order
 }
@@ -285,58 +277,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let args: Vec<String> = std::env::args().collect();
-    let one = |flag: &str| {
-        args.iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1))
-    };
+    let one = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1));
     let runs: usize = one("--runs").map(|s| s.parse()).transpose()?.unwrap_or(301);
-    if runs == 0 {
-        return Err("--runs must be positive".into());
-    }
+    if runs == 0 { return Err("--runs must be positive".into()); }
     let mut graph = GraphStore::new();
     if args.iter().any(|a| a == "--synthetic") {
         println!("dataset: deterministic synthetic anchors; NOT LDBC SF1");
-        for (anchor, count) in [(1i64, 5usize), (2, 142), (3, 920)] {
-            let p = graph.create_node("Person");
-            graph.set_node_property("default", p, "id", anchor)?;
+        for (anchor, count) in [(1i64,5usize),(2,142),(3,920)] {
+            let p=graph.create_node("Person");
+            graph.set_node_property("default",p,"id",anchor)?;
             for i in 0..count {
-                let f = graph.create_node("Person");
+                let f=graph.create_node("Person");
                 // Match the real LDBC loader's column-backed property path.
-                graph.set_node_property("default", f, "id", anchor * 10000 + i as i64)?;
-                graph.set_node_property(
-                    "default",
-                    f,
-                    "firstName",
-                    format!("name{:04}", (i * 73) % count),
-                )?;
-                graph.set_node_property(
-                    "default",
-                    f,
-                    "lastName",
-                    format!("family{:04}", (i * 37) % count),
-                )?;
-                graph.create_edge(p, f, "KNOWS")?;
+                graph.set_node_property("default",f,"id",anchor*10000+i as i64)?;
+                graph.set_node_property("default",f,"firstName",format!("name{:04}",(i*73)%count))?;
+                graph.set_node_property("default",f,"lastName",format!("family{:04}",(i*37)%count))?;
+                graph.create_edge(p,f,"KNOWS")?;
             }
         }
     } else {
-        let data_dir = one("--data-dir")
-            .map(PathBuf::from)
+        let data_dir = one("--data-dir").map(PathBuf::from)
             .ok_or("--data-dir <path> or --synthetic is required")?;
         eprintln!("loading {} ...", data_dir.display());
-        let t = Instant::now();
-        ldbc_common::load_dataset(&mut graph, &data_dir)?;
-        eprintln!("loaded in {:.1}s", t.elapsed().as_secs_f64());
+        let t=Instant::now();
+        ldbc_common::load_dataset(&mut graph,&data_dir)?;
+        eprintln!("loaded in {:.1}s",t.elapsed().as_secs_f64());
     }
-    for label in [
-        "Person",
-        "Post",
-        "Comment",
-        "Forum",
-        "Place",
-        "Organisation",
-        "Tag",
-    ] {
+    for label in ["Person", "Post", "Comment", "Forum", "Place", "Organisation", "Tag"] {
         let q = parse_query(&format!("CREATE INDEX ON :{label}(id)"))?;
         MutQueryExecutor::new(&mut graph, "default".to_string()).execute(&q)?;
     }
@@ -363,10 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut anchors: Vec<Anchor> = Vec::new();
     for target in [5i64, 142, 920] {
-        let Some((person, _)) = degrees
-            .iter()
-            .min_by_key(|(_, n)| (n - target).abs())
-            .copied()
+        let Some((person, _)) = degrees.iter().min_by_key(|(_, n)| (n - target).abs()).copied()
         else {
             continue;
         };
@@ -386,16 +350,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let shapes = [
-        Shape {
-            name: "int1  ORDER BY f.id",
-            props: &["id"],
-            integer: true,
-        },
-        Shape {
-            name: "str1  ORDER BY f.firstName",
-            props: &["firstName"],
-            integer: false,
-        },
+        Shape { name: "int1  ORDER BY f.id", props: &["id"], integer: true },
+        Shape { name: "str1  ORDER BY f.firstName", props: &["firstName"], integer: false },
         Shape {
             name: "str2  IS3's own ORDER BY",
             props: &["firstName", "lastName"],
@@ -503,13 +459,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (sorted - extract) / comparisons as f64,
             );
         }
-        println!(
-            "    (clone-only baseline {:.1} ns/row, excluded from every column above)",
+        println!("    (clone-only baseline {:.1} ns/row, excluded from every column above)",
             median_ns(runs, || {
                 let rows = a.rows.clone();
                 std::hint::black_box(&rows);
-            }) / nf
-        );
+            }) / nf);
 
         // The engine's own numbers for the same anchor, interleaved, so the
         // replica above is pinned against the product rather than trusted.

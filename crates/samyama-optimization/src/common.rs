@@ -24,7 +24,7 @@ impl Individual {
 pub trait Problem: Send + Sync {
     /// The objective function to minimize.
     fn objective(&self, variables: &Array1<f64>) -> f64;
-
+    
     /// Optional constraints. Returns a penalty score (0 if all satisfied).
     fn penalty(&self, _variables: &Array1<f64>) -> f64 {
         0.0
@@ -61,12 +61,12 @@ pub struct MultiObjectiveIndividual {
 
 impl MultiObjectiveIndividual {
     pub fn new(variables: Array1<f64>, fitness: Vec<f64>, constraint_violation: f64) -> Self {
-        Self {
-            variables,
-            fitness,
+        Self { 
+            variables, 
+            fitness, 
             constraint_violation,
-            rank: 0,
-            crowding_distance: 0.0,
+            rank: 0, 
+            crowding_distance: 0.0 
         }
     }
 }
@@ -127,7 +127,7 @@ pub fn descending_nan_last(a: f64, b: f64) -> std::cmp::Ordering {
 pub trait MultiObjectiveProblem: Send + Sync {
     /// Multiple objective functions to minimize.
     fn objectives(&self, variables: &Array1<f64>) -> Vec<f64>;
-
+    
     /// Optional constraints. Returns a vector of penalties.
     fn penalties(&self, _variables: &Array1<f64>) -> Vec<f64> {
         vec![]
@@ -138,7 +138,7 @@ pub trait MultiObjectiveProblem: Send + Sync {
 
     /// Lower and upper bounds for each variable.
     fn bounds(&self) -> (Array1<f64>, Array1<f64>);
-
+    
     /// Number of objectives.
     fn num_objectives(&self) -> usize;
 
@@ -211,7 +211,7 @@ pub mod rng {
         match seed {
             Some(s) => StdRng::seed_from_u64(
                 s ^ (iteration as u64).wrapping_mul(ITER_ODD)
-                    ^ (index as u64).wrapping_mul(INDEX_ODD),
+                  ^ (index as u64).wrapping_mul(INDEX_ODD),
             ),
             None => StdRng::from_entropy(),
         }
@@ -271,9 +271,8 @@ pub fn duration_ms(elapsed: std::time::Duration) -> f64 {
 }
 
 /// A simple problem defined by a closure.
-pub struct SimpleProblem<F>
-where
-    F: Fn(&Array1<f64>) -> f64 + Send + Sync,
+pub struct SimpleProblem<F> 
+where F: Fn(&Array1<f64>) -> f64 + Send + Sync
 {
     pub objective_func: F,
     pub dim: usize,
@@ -281,17 +280,14 @@ where
     pub upper: Array1<f64>,
 }
 
-impl<F> Problem for SimpleProblem<F>
-where
-    F: Fn(&Array1<f64>) -> f64 + Send + Sync,
+impl<F> Problem for SimpleProblem<F> 
+where F: Fn(&Array1<f64>) -> f64 + Send + Sync
 {
     fn objective(&self, variables: &Array1<f64>) -> f64 {
         (self.objective_func)(variables)
     }
 
-    fn dim(&self) -> usize {
-        self.dim
-    }
+    fn dim(&self) -> usize { self.dim }
 
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (self.lower.clone(), self.upper.clone())

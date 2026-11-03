@@ -85,16 +85,9 @@ fn a_backwards_partial_month_stays_in_days() {
 /// edit: the value still looks like a duration.
 #[test]
 fn negative_components_share_a_sign() {
-    let got =
-        rendered("duration.between(localdatetime('2015-07-21T21:40:32.142'), date('2015-06-24'))");
-    assert!(
-        !got.contains("T2H"),
-        "the clock part borrowed the wrong way: {got}"
-    );
-    assert!(
-        got.contains("-32.142S"),
-        "the fraction lost its sign: {got}"
-    );
+    let got = rendered("duration.between(localdatetime('2015-07-21T21:40:32.142'), date('2015-06-24'))");
+    assert!(!got.contains("T2H"), "the clock part borrowed the wrong way: {got}");
+    assert!(got.contains("-32.142S"), "the fraction lost its sign: {got}");
 }
 
 /// A month boundary one day apart still crosses a month — the threshold is a
@@ -128,18 +121,9 @@ fn time_only_pairs_use_the_plain_difference() {
 /// between two instants that were never comparable.
 #[test]
 fn a_date_and_a_time_compare_only_their_clocks() {
-    assert_eq!(
-        rendered("duration.between(date('1984-10-11'), localtime('16:30'))"),
-        "PT16H30M"
-    );
-    assert_eq!(
-        rendered("duration.between(date('1984-10-11'), time('16:30+0100'))"),
-        "PT16H30M"
-    );
-    assert_eq!(
-        rendered("duration.between(localtime('14:30'), date('2015-06-24'))"),
-        "PT-14H-30M"
-    );
+    assert_eq!(rendered("duration.between(date('1984-10-11'), localtime('16:30'))"), "PT16H30M");
+    assert_eq!(rendered("duration.between(date('1984-10-11'), time('16:30+0100'))"), "PT16H30M");
+    assert_eq!(rendered("duration.between(localtime('14:30'), date('2015-06-24'))"), "PT-14H-30M");
 }
 
 /// **Offsets are applied only when both sides carry one.**
@@ -154,14 +138,8 @@ fn a_date_and_a_time_compare_only_their_clocks() {
 /// permits the other to regress.
 #[test]
 fn offsets_apply_only_when_both_sides_are_zoned() {
-    assert_eq!(
-        rendered("duration.between(time('14:30'), time('16:30+0100'))"),
-        "PT1H"
-    );
-    assert_eq!(
-        rendered("duration.between(localtime('14:30'), time('16:30+0100'))"),
-        "PT2H"
-    );
+    assert_eq!(rendered("duration.between(time('14:30'), time('16:30+0100'))"), "PT1H");
+    assert_eq!(rendered("duration.between(localtime('14:30'), time('16:30+0100'))"), "PT2H");
 }
 
 /// A local date-time against a zoned time also compares local readings.
@@ -184,19 +162,13 @@ fn a_localdatetime_against_a_zoned_time_uses_local_readings() {
 /// leaving the remainder as days that should not be there at all.
 #[test]
 fn in_months_counts_calendar_months_only() {
-    assert_eq!(
-        rendered("duration.inMonths(date('1984-10-11'), date('2015-06-24'))"),
-        "P30Y8M"
-    );
+    assert_eq!(rendered("duration.inMonths(date('1984-10-11'), date('2015-06-24'))"), "P30Y8M");
     assert_eq!(
         rendered("duration.inMonths(date('1984-10-11'), localdatetime('2016-07-21T21:45:22.142'))"),
         "P31Y9M"
     );
     // Under a month is zero months, not a rounded one.
-    assert_eq!(
-        rendered("duration.inMonths(date('1984-10-11'), localtime('16:30'))"),
-        "PT0S"
-    );
+    assert_eq!(rendered("duration.inMonths(date('1984-10-11'), localtime('16:30'))"), "PT0S");
 }
 
 /// **Two zoned datetimes compare as instants, not wall clocks.**
@@ -223,15 +195,10 @@ fn two_zoned_datetimes_compare_as_instants() {
 /// `inDays` and `inSeconds` use elapsed time, and truncate rather than round.
 #[test]
 fn in_days_and_in_seconds_truncate_elapsed_time() {
-    assert_eq!(
-        rendered("duration.inDays(date('2017-10-11'), date('2017-10-13'))"),
-        "P2D"
-    );
+    assert_eq!(rendered("duration.inDays(date('2017-10-11'), date('2017-10-13'))"), "P2D");
     // 30 hours is one day, not one and a quarter.
     assert_eq!(
-        rendered(
-            "duration.inDays(localdatetime('2018-01-01T00:00'), localdatetime('2018-01-02T06:00'))"
-        ),
+        rendered("duration.inDays(localdatetime('2018-01-01T00:00'), localdatetime('2018-01-02T06:00'))"),
         "P1D"
     );
     assert_eq!(

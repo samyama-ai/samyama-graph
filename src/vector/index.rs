@@ -46,9 +46,9 @@
 
 use crate::graph::NodeId;
 use half::f16;
-use hnsw_rs::prelude::*;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use hnsw_rs::prelude::*;
 use thiserror::Error;
 
 /// Vector index errors
@@ -65,11 +65,9 @@ pub enum VectorError {
     // dimension nobody chose -- CREATE VECTOR INDEX defaults to 1536 when
     // `dimensions` is omitted (#474). Point at the index configuration, since
     // that is the side that is adjustable and the side that is usually wrong.
-    #[error(
-        "Dimension mismatch: the index expects {expected}-dimensional vectors, got {got}. \
+    #[error("Dimension mismatch: the index expects {expected}-dimensional vectors, got {got}. \
 Set the index dimension with CREATE VECTOR INDEX ... OPTIONS {{dimensions: {got}}} \
-(the default is 1536 when `dimensions` is omitted)."
-    )]
+(the default is 1536 when `dimensions` is omitted).")]
     DimensionMismatch { expected: usize, got: usize },
 
     #[error("Search failed: {0}")]
@@ -105,17 +103,17 @@ impl Distance<f32> for CosineDistance {
         let mut dot = 0.0;
         let mut norm_a = 0.0;
         let mut norm_b = 0.0;
-
+        
         for (a, b) in va.iter().zip(vb.iter()) {
             dot += a * b;
             norm_a += a * a;
             norm_b += b * b;
         }
-
+        
         if norm_a <= 0.0 || norm_b <= 0.0 {
             return 1.0;
         }
-
+        
         // Cosine distance = 1.0 - cosine similarity.
         // Cosine similarity is mathematically in [-1, 1], but floating-point
         // rounding on near-duplicate vectors can push it just past 1.0, yielding a
@@ -267,11 +265,7 @@ impl MetricDistance {
     fn reported(self, rank: f32) -> f32 {
         match self.0 {
             DistanceMetric::InnerProduct => {
-                let dot = if rank <= 1.0 {
-                    1.0 / rank - 1.0
-                } else {
-                    1.0 - rank
-                };
+                let dot = if rank <= 1.0 { 1.0 / rank - 1.0 } else { 1.0 - rank };
                 1.0 - dot
             }
             _ => rank,
@@ -389,12 +383,12 @@ impl VectorIndex {
         // cosine, whatever `similarity` said.
         let distance = MetricDistance(metric);
         let backend = match quantization {
-            Quantization::None => {
-                Backend::F32(Hnsw::new(m, max_elements, 16, ef_construction, distance))
-            }
-            Quantization::Fp16 => {
-                Backend::F16(Hnsw::new(m, max_elements, 16, ef_construction, distance))
-            }
+            Quantization::None => Backend::F32(Hnsw::new(
+                m, max_elements, 16, ef_construction, distance,
+            )),
+            Quantization::Fp16 => Backend::F16(Hnsw::new(
+                m, max_elements, 16, ef_construction, distance,
+            )),
         };
         Self {
             dimensions,
@@ -439,11 +433,7 @@ impl VectorIndex {
             // Per link: the `Arc<PointWithOrder>` in the list (one pointer), and
             // the `PointWithOrder` it points to (an `Arc<Point>`, an f32
             // distance) behind an Arc header of two counters.
-            const LINK: usize = size_of::<usize>()
-                + 2 * size_of::<usize>()
-                + size_of::<usize>()
-                + size_of::<f32>()
-                + 4;
+            const LINK: usize = size_of::<usize>() + 2 * size_of::<usize>() + size_of::<usize>() + size_of::<f32>() + 4;
             let mut bytes = 0usize;
             for point in indexation {
                 // The point record behind its Arc, and its neighbour table's
@@ -468,11 +458,7 @@ impl VectorIndex {
     pub fn resident_bytes(&self) -> usize {
         use std::mem::size_of;
         let exact: usize = self.exact.capacity() * (size_of::<u64>() + size_of::<Vec<usize>>() + 1)
-            + self
-                .exact
-                .values()
-                .map(|v| v.capacity() * size_of::<usize>())
-                .sum::<usize>();
+            + self.exact.values().map(|v| v.capacity() * size_of::<usize>()).sum::<usize>();
         let records = self.stored_f32.capacity() * size_of::<StoredVector>()
             + self.stored_f16.capacity() * size_of::<(u64, Vec<f16>)>();
         self.vector_bytes() + self.graph_bytes() + exact + records
@@ -486,7 +472,7 @@ impl VectorIndex {
                 got: vector.len(),
             });
         }
-
+        
         // Not wrapped in catch_unwind on purpose: hnsw_rs registers the point in its
         // layer index before doing any of the work that could panic, so catching would
         // leave a half-linked point live in the graph while this function returns Err
@@ -573,12 +559,7 @@ impl VectorIndex {
     pub fn compact(&mut self) {
         let live: Vec<StoredVector> = self.iter_stored().collect();
         let max_elements = (live.len() + 10_000).max(100_000);
-        let mut fresh = Self::build(
-            self.dimensions,
-            self.metric,
-            self.quantization,
-            max_elements,
-        );
+        let mut fresh = Self::build(self.dimensions, self.metric, self.quantization, max_elements);
         for sv in &live {
             // Every entry here was accepted at this dimension already.
             let _ = fresh.add(NodeId::new(sv.node_id), &sv.vector);
@@ -594,7 +575,7 @@ impl VectorIndex {
                 got: query.len(),
             });
         }
-
+        
         // ef_search drives recall (HNSW only returns from the ef candidate set), so
         // floor it for small k. But it must NOT exceed the number of indexed vectors
         // or hnsw_rs panics in search_layer (hnsw_rs 0.2.1 hnsw.rs:938); clamp both ef
@@ -706,10 +687,7 @@ impl VectorIndex {
         match self.quantization {
             Quantization::None => {
                 let key = bits_key(query, |v: f32| v.to_bits() as u64);
-                self.exact
-                    .get(&key)
-                    .into_iter()
-                    .flatten()
+                self.exact.get(&key).into_iter().flatten()
                     .filter(|&&i| self.is_current(i))
                     .map(|&i| &self.stored_f32[i])
                     .filter(|sv| sv.vector.as_slice() == query)
@@ -719,10 +697,7 @@ impl VectorIndex {
             Quantization::Fp16 => {
                 let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
                 let key = bits_key(&q, |v: f16| v.to_bits() as u64);
-                self.exact
-                    .get(&key)
-                    .into_iter()
-                    .flatten()
+                self.exact.get(&key).into_iter().flatten()
                     .filter(|&&i| self.is_current(i))
                     .map(|&i| &self.stored_f16[i])
                     .filter(|(_, v)| v.iter().zip(&q).all(|(a, b)| a.to_bits() == b.to_bits()))
@@ -738,20 +713,10 @@ impl VectorIndex {
     /// rounded one otherwise. That is what was stored, and what a reload must
     /// reproduce.
     fn iter_stored(&self) -> impl Iterator<Item = StoredVector> + '_ {
-        let f32s = self
-            .stored_f32
-            .iter()
-            .enumerate()
-            .map(|(i, sv)| (i, sv.clone()));
+        let f32s = self.stored_f32.iter().enumerate().map(|(i, sv)| (i, sv.clone()));
         let f16s = self.stored_f16.iter().enumerate().map(|(i, (id, v))| {
             let vector = v.iter().map(|x| x.to_f32()).collect();
-            (
-                i,
-                StoredVector {
-                    node_id: *id,
-                    vector,
-                },
-            )
+            (i, StoredVector { node_id: *id, vector })
         });
         f32s.chain(f16s)
             .filter(|(i, _)| self.is_current(*i))
@@ -872,12 +837,12 @@ mod tests {
     #[test]
     fn test_vector_index_basic() {
         let mut index = VectorIndex::new(3, DistanceMetric::Cosine);
-
+        
         // Add some vectors
         index.add(NodeId::new(1), &vec![1.0, 0.0, 0.0]).unwrap();
         index.add(NodeId::new(2), &vec![0.0, 1.0, 0.0]).unwrap();
         index.add(NodeId::new(3), &vec![0.0, 0.1, 0.9]).unwrap();
-
+        
         // Search — HNSW is approximate and may return fewer than k results on very small graphs
         let results = index.search(&[1.0, 0.1, 0.0], 2).unwrap();
         assert!(results.len() >= 1 && results.len() <= 2);
@@ -918,10 +883,10 @@ mod tests {
 
         let cosine = CosineDistance;
         // Orthogonal
-        assert!((cosine.eval(&v1, &v2) - 1.0).abs() < 1e-6);
+        assert!((cosine.eval(&v1, &v2) - 1.0).abs() < 1e-6); 
         // Same
         assert!((cosine.eval(&v1, &v1) - 0.0).abs() < 1e-6);
-
+        
         let inner = InnerProductDistance;
         // Dot product = 0
         assert!((inner.eval(&v1, &v2) - 1.0).abs() < 1e-6); // 1.0 - 0.0

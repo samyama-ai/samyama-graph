@@ -20,16 +20,12 @@ fn graph(edges: &[(&str, &str)]) -> GraphStore {
     names.sort_unstable();
     names.dedup();
     for n in names {
-        engine
-            .execute_mut(&format!("CREATE (:N {{eid: \"{n}\"}})"), &mut store, T)
-            .unwrap();
+        engine.execute_mut(&format!("CREATE (:N {{eid: \"{n}\"}})"), &mut store, T).unwrap();
     }
     for &(a, b) in edges {
         engine
             .execute_mut(
-                &format!(
-                    "MATCH (x:N {{eid: \"{a}\"}}), (y:N {{eid: \"{b}\"}}) CREATE (x)-[:E]->(y)"
-                ),
+                &format!("MATCH (x:N {{eid: \"{a}\"}}), (y:N {{eid: \"{b}\"}}) CREATE (x)-[:E]->(y)"),
                 &mut store,
                 T,
             )
@@ -50,15 +46,8 @@ fn rows(store: &GraphStore, query: &str) -> usize {
 const TRIANGLE: &[(&str, &str)] = &[("a", "b"), ("b", "c"), ("c", "a")];
 
 /// Two 2-hop routes and one 3-hop route from `a` to `d`.
-const LADDER: &[(&str, &str)] = &[
-    ("a", "b"),
-    ("b", "d"),
-    ("a", "c"),
-    ("c", "d"),
-    ("a", "e"),
-    ("e", "f"),
-    ("f", "d"),
-];
+const LADDER: &[(&str, &str)] =
+    &[("a", "b"), ("b", "d"), ("a", "c"), ("c", "d"), ("a", "e"), ("e", "f"), ("f", "d")];
 
 /// The four restrictors are four different questions, and a cycle separates them.
 ///
@@ -67,8 +56,9 @@ const LADDER: &[(&str, &str)] = &[
 #[test]
 fn the_restrictors_disagree_on_a_cycle() {
     let g = graph(TRIANGLE);
-    let q =
-        |m: &str, hops: &str| format!("MATCH {m}(x:N {{eid: \"a\"}})-[:E{hops}]->(y) RETURN y.eid");
+    let q = |m: &str, hops: &str| {
+        format!("MATCH {m}(x:N {{eid: \"a\"}})-[:E{hops}]->(y) RETURN y.eid")
+    };
 
     // TRAIL may revisit a node, so three hops returns to `a`: b, c, a.
     assert_eq!(rows(&g, &q("TRAIL ", "*1..3")), 3);
@@ -106,15 +96,13 @@ fn the_restrictors_disagree_on_a_cycle() {
 #[test]
 fn a_simple_path_that_closes_cannot_be_extended() {
     let g = graph(TRIANGLE);
-    let q = |hops: &str| format!("MATCH SIMPLE (x:N {{eid: \"a\"}})-[:E{hops}]->(y) RETURN y.eid");
+    let q = |hops: &str| {
+        format!("MATCH SIMPLE (x:N {{eid: \"a\"}})-[:E{hops}]->(y) RETURN y.eid")
+    };
     // b, c, a at *1..3 — and nothing further at *1..4 or *1..5, because the only
     // way onward is through `a`, which is now interior.
     assert_eq!(rows(&g, &q("*1..3")), 3);
-    assert_eq!(
-        rows(&g, &q("*1..4")),
-        3,
-        "extending a closed simple path is not allowed"
-    );
+    assert_eq!(rows(&g, &q("*1..4")), 3, "extending a closed simple path is not allowed");
     assert_eq!(rows(&g, &q("*1..5")), 3);
 }
 
@@ -128,11 +116,7 @@ fn the_selectors_choose_among_candidates_per_endpoint_pair() {
     // Three paths a->d: two of length 2, one of length 3.
     assert_eq!(rows(&g, &q("")), 3, "ALL is the default");
     assert_eq!(rows(&g, &q("ALL ")), 3);
-    assert_eq!(
-        rows(&g, &q("ALL SHORTEST ")),
-        2,
-        "both length-2 paths, not the length-3"
-    );
+    assert_eq!(rows(&g, &q("ALL SHORTEST ")), 2, "both length-2 paths, not the length-3");
     assert_eq!(rows(&g, &q("ANY ")), 1);
     assert_eq!(rows(&g, &q("ANY SHORTEST ")), 1);
 }
@@ -146,11 +130,7 @@ fn a_selector_and_a_restrictor_compose() {
     assert_eq!(rows(&g, all), 2, "ACYCLIC candidates: b, c");
     // One per endpoint pair, and the pairs are (a,b) and (a,c) — so ANY does not
     // reduce this to one row. A selector partitions; it does not take a global head.
-    assert_eq!(
-        rows(&g, any),
-        2,
-        "ANY is one path per endpoint pair, not one overall"
-    );
+    assert_eq!(rows(&g, any), 2, "ANY is one path per endpoint pair, not one overall");
 }
 
 /// An unbounded WALK is refused rather than served from a capped subset.
@@ -209,9 +189,7 @@ fn an_unbounded_walk_is_refused_and_the_alternatives_are_not() {
         "MATCH TRAIL (a)-[:E*]->(b) RETURN b",
         "MATCH ACYCLIC (a)-[:E*]->(b) RETURN b",
     ] {
-        engine
-            .execute(ok, &g)
-            .unwrap_or_else(|e| panic!("{ok} must be allowed: {e}"));
+        engine.execute(ok, &g).unwrap_or_else(|e| panic!("{ok} must be allowed: {e}"));
     }
 }
 

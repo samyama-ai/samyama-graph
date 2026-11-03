@@ -28,11 +28,7 @@ fn fixture() -> GraphStore {
     let mut store = GraphStore::new();
     for n in ["a", "b", "c"] {
         engine
-            .execute_mut(
-                &format!("CREATE (:N {{eid: \"{n}\", name: \"{n}\"}})"),
-                &mut store,
-                T,
-            )
+            .execute_mut(&format!("CREATE (:N {{eid: \"{n}\", name: \"{n}\"}})"), &mut store, T)
             .unwrap();
     }
     for (from, to) in [("a", "b"), ("a", "b"), ("b", "c"), ("c", "a")] {
@@ -83,16 +79,8 @@ fn an_explicit_restrictor_wins_in_either_dialect() {
     let trail = "MATCH TRAIL (x:N)-[:E*1..4]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid";
     let walk = "MATCH WALK (x:N)-[:E*1..4]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid";
     assert_eq!(rows(&s, trail, Dialect::Cypher), 8);
-    assert_eq!(
-        rows(&s, trail, Dialect::Gql),
-        8,
-        "GQL must not override an explicit TRAIL"
-    );
-    assert_eq!(
-        rows(&s, walk, Dialect::Cypher),
-        10,
-        "Cypher must not override an explicit WALK"
-    );
+    assert_eq!(rows(&s, trail, Dialect::Gql), 8, "GQL must not override an explicit TRAIL");
+    assert_eq!(rows(&s, walk, Dialect::Cypher), 10, "Cypher must not override an explicit WALK");
     assert_eq!(rows(&s, walk, Dialect::Gql), 10);
 }
 
@@ -146,10 +134,7 @@ fn the_two_spellings_agree_within_a_dialect() {
     let zero = "MATCH TRAIL (x:N)-[:E*0..]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid";
     let one = "MATCH TRAIL (x:N)-[:E*1..]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid";
     assert_eq!(rows(&s, bare, Dialect::Gql), rows(&s, zero, Dialect::Gql));
-    assert_eq!(
-        rows(&s, bare, Dialect::Cypher),
-        rows(&s, one, Dialect::Cypher)
-    );
+    assert_eq!(rows(&s, bare, Dialect::Cypher), rows(&s, one, Dialect::Cypher));
 }
 
 // ---------------------------------------------------------------------------
@@ -159,11 +144,7 @@ fn the_two_spellings_agree_within_a_dialect() {
 #[test]
 fn execute_without_a_dialect_is_cypher() {
     let s = fixture();
-    let plain = QueryEngine::new()
-        .execute(BOUNDED, &s)
-        .unwrap()
-        .records
-        .len();
+    let plain = QueryEngine::new().execute(BOUNDED, &s).unwrap().records.len();
     assert_eq!(plain, rows(&s, BOUNDED, Dialect::Cypher));
 }
 
@@ -185,9 +166,7 @@ fn gql_does_not_smuggle_an_unbounded_walk_past_validation() {
     let s = fixture();
     let q = "MATCH (x:N)-[:E*]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid";
     // Well-formed under openCypher: the implicit TRAIL bounds it.
-    assert!(QueryEngine::new()
-        .execute_with_dialect(q, &s, Dialect::Cypher)
-        .is_ok());
+    assert!(QueryEngine::new().execute_with_dialect(q, &s, Dialect::Cypher).is_ok());
     // Ill-formed under GQL, and refused rather than run.
     let err = QueryEngine::new()
         .execute_with_dialect(q, &s, Dialect::Gql)
@@ -207,9 +186,5 @@ fn an_explicit_restrictor_keeps_an_unbounded_quantifier_runnable() {
     let s = fixture();
     let q = "MATCH TRAIL (x:N)-[:E*]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid";
     assert_eq!(rows(&s, q, Dialect::Cypher), 8);
-    assert_eq!(
-        rows(&s, q, Dialect::Gql),
-        9,
-        "GQL reads the bare * as {{0,}}"
-    );
+    assert_eq!(rows(&s, q, Dialect::Gql), 9, "GQL reads the bare * as {{0,}}");
 }

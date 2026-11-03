@@ -39,36 +39,27 @@ fn fails(cypher: &str) -> bool {
 
 #[test]
 fn from_epoch_keeps_nanosecond_precision() {
-    assert_eq!(
-        text("RETURN toString(datetime.fromepoch(416779, 999999999)) AS d"),
-        "1970-01-05T19:46:19.999999999Z"
-    );
+    assert_eq!(text("RETURN toString(datetime.fromepoch(416779, 999999999)) AS d"),
+               "1970-01-05T19:46:19.999999999Z");
 }
 
 #[test]
 fn from_epoch_millis() {
-    assert_eq!(
-        text("RETURN toString(datetime.fromepochmillis(237821673987)) AS d"),
-        "1977-07-15T13:34:33.987Z"
-    );
+    assert_eq!(text("RETURN toString(datetime.fromepochmillis(237821673987)) AS d"),
+               "1977-07-15T13:34:33.987Z");
 }
 
 #[test]
 fn a_negative_epoch_millisecond_is_an_instant_before_1970() {
     // `div_euclid`, not `/`. Truncating toward zero would put -1ms in second
     // zero with a negative nanosecond remainder, which is not a time.
-    assert_eq!(
-        text("RETURN toString(datetime.fromepochmillis(-1)) AS d"),
-        "1969-12-31T23:59:59.999Z"
-    );
+    assert_eq!(text("RETURN toString(datetime.fromepochmillis(-1)) AS d"),
+               "1969-12-31T23:59:59.999Z");
 }
 
 #[test]
 fn the_epoch_itself() {
-    assert_eq!(
-        text("RETURN toString(datetime.fromepoch(0, 0)) AS d"),
-        "1970-01-01T00:00Z"
-    );
+    assert_eq!(text("RETURN toString(datetime.fromepoch(0, 0)) AS d"), "1970-01-01T00:00Z");
 }
 
 #[test]

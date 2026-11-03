@@ -18,9 +18,7 @@ fn eval(expr: &str) -> String {
     let q = format!("RETURN toString({expr}) AS d");
     let store = GraphStore::new();
     let parsed = parse_query(&q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(&store)
-        .execute(&parsed)
-        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(&store).execute(&parsed).unwrap_or_else(|e| panic!("`{q}`: {e}"));
     match out.records[0].get("d") {
         Some(Value::Property(PropertyValue::String(s))) => s.clone(),
         other => panic!("`{q}` gave {other:?}"),
@@ -40,13 +38,7 @@ fn between(a: &str, b: &str) -> String {
 /// The issue's case: midnight to the next day's date across the fall-back.
 #[test]
 fn the_25_hour_day_is_one_day() {
-    assert_eq!(
-        between(
-            &sthlm(10, 29, 0, 0),
-            "date({year: 2017, month: 10, day: 30})"
-        ),
-        "P1D"
-    );
+    assert_eq!(between(&sthlm(10, 29, 0, 0), "date({year: 2017, month: 10, day: 30})"), "P1D");
     assert_eq!(between(&sthlm(10, 29, 0, 0), &sthlm(10, 30, 0, 0)), "P1D");
 }
 
@@ -58,25 +50,13 @@ fn the_23_hour_day_is_one_day() {
 /// Twenty-four elapsed hours inside the long day are not a calendar day.
 #[test]
 fn twenty_four_hours_on_the_long_day_stay_hours() {
-    assert_eq!(
-        between(&sthlm(10, 29, 0, 0), &sthlm(10, 29, 23, 0)),
-        "PT24H"
-    );
+    assert_eq!(between(&sthlm(10, 29, 0, 0), &sthlm(10, 29, 23, 0)), "PT24H");
 }
 
 #[test]
 fn the_month_path_counts_days_locally_too() {
-    assert_eq!(
-        between(&sthlm(10, 28, 12, 0), &sthlm(11, 29, 12, 0)),
-        "P1M1D"
-    );
-    assert_eq!(
-        between(
-            &sthlm(9, 29, 0, 0),
-            "date({year: 2017, month: 10, day: 30})"
-        ),
-        "P1M1D"
-    );
+    assert_eq!(between(&sthlm(10, 28, 12, 0), &sthlm(11, 29, 12, 0)), "P1M1D");
+    assert_eq!(between(&sthlm(9, 29, 0, 0), "date({year: 2017, month: 10, day: 30})"), "P1M1D");
 }
 
 #[test]
@@ -101,24 +81,9 @@ fn a_day_that_lands_in_the_gap_is_one_day() {
 #[test]
 fn in_seconds_and_fixed_offsets_stay_elapsed() {
     assert_eq!(
-        eval(&format!(
-            "duration.inSeconds({}, date({{year: 2017, month: 10, day: 30}}))",
-            sthlm(10, 29, 0, 0)
-        )),
+        eval(&format!("duration.inSeconds({}, date({{year: 2017, month: 10, day: 30}}))", sthlm(10, 29, 0, 0))),
         "PT25H"
     );
-    assert_eq!(
-        between(
-            "datetime('2017-10-29T00:00+02:00')",
-            "datetime('2017-10-30T00:00+01:00')"
-        ),
-        "P1DT1H"
-    );
-    assert_eq!(
-        between(
-            &sthlm(10, 20, 0, 0),
-            "date({year: 2017, month: 10, day: 21})"
-        ),
-        "P1D"
-    );
+    assert_eq!(between("datetime('2017-10-29T00:00+02:00')", "datetime('2017-10-30T00:00+01:00')"), "P1DT1H");
+    assert_eq!(between(&sthlm(10, 20, 0, 0), "date({year: 2017, month: 10, day: 21})"), "P1D");
 }

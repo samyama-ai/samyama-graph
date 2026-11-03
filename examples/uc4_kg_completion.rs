@@ -23,19 +23,21 @@
 #[global_allocator]
 static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
 
-use samyama_sdk::{Array1, EmbeddedClient, Problem, QOJayaSolver, SamyamaClient, SolverConfig};
+use samyama_sdk::{
+    Array1, EmbeddedClient, Problem, QOJayaSolver, SamyamaClient, SolverConfig,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 // ── Fixture ────────────────────────────────────────────────────────────
 
 const GENES: &[&str] = &[
-    "G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9", "G10", "G11", "G12", "G13", "G14",
-    "G15", "G16", "G17", "G18", "G19",
+    "G0","G1","G2","G3","G4","G5","G6","G7","G8","G9",
+    "G10","G11","G12","G13","G14","G15","G16","G17","G18","G19",
 ];
 const DISEASES: &[&str] = &[
-    "D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12", "D13", "D14",
-    "D15", "D16", "D17", "D18", "D19",
+    "D0","D1","D2","D3","D4","D5","D6","D7","D8","D9",
+    "D10","D11","D12","D13","D14","D15","D16","D17","D18","D19",
 ];
 
 /// All TREATS edges (gene → disease). Structured so there are clusters:
@@ -44,78 +46,34 @@ const DISEASES: &[&str] = &[
 /// should recover them from cluster-mates.
 const TREATS: &[(&str, &str)] = &[
     // Cluster A
-    ("G0", "D0"),
-    ("G0", "D1"),
-    ("G0", "D2"),
-    ("G1", "D0"),
-    ("G1", "D1"),
-    ("G1", "D3"),
-    ("G2", "D1"),
-    ("G2", "D2"),
-    ("G2", "D4"),
-    ("G3", "D0"),
-    ("G3", "D3"),
-    ("G3", "D5"),
-    ("G4", "D2"),
-    ("G4", "D4"),
-    ("G4", "D6"),
-    ("G5", "D1"),
-    ("G5", "D5"),
-    ("G5", "D7"),
-    ("G6", "D3"),
-    ("G6", "D6"),
-    ("G6", "D8"),
-    ("G7", "D4"),
-    ("G7", "D7"),
-    ("G7", "D9"),
-    ("G8", "D5"),
-    ("G8", "D8"),
-    ("G9", "D6"),
-    ("G9", "D9"),
+    ("G0","D0"), ("G0","D1"), ("G0","D2"),
+    ("G1","D0"), ("G1","D1"), ("G1","D3"),
+    ("G2","D1"), ("G2","D2"), ("G2","D4"),
+    ("G3","D0"), ("G3","D3"), ("G3","D5"),
+    ("G4","D2"), ("G4","D4"), ("G4","D6"),
+    ("G5","D1"), ("G5","D5"), ("G5","D7"),
+    ("G6","D3"), ("G6","D6"), ("G6","D8"),
+    ("G7","D4"), ("G7","D7"), ("G7","D9"),
+    ("G8","D5"), ("G8","D8"),
+    ("G9","D6"), ("G9","D9"),
     // Cluster B
-    ("G10", "D10"),
-    ("G10", "D11"),
-    ("G10", "D12"),
-    ("G11", "D10"),
-    ("G11", "D11"),
-    ("G11", "D13"),
-    ("G12", "D11"),
-    ("G12", "D12"),
-    ("G12", "D14"),
-    ("G13", "D10"),
-    ("G13", "D13"),
-    ("G13", "D15"),
-    ("G14", "D12"),
-    ("G14", "D14"),
-    ("G14", "D16"),
-    ("G15", "D11"),
-    ("G15", "D15"),
-    ("G15", "D17"),
-    ("G16", "D13"),
-    ("G16", "D16"),
-    ("G16", "D18"),
-    ("G17", "D14"),
-    ("G17", "D17"),
-    ("G17", "D19"),
-    ("G18", "D15"),
-    ("G18", "D18"),
-    ("G19", "D16"),
-    ("G19", "D19"),
+    ("G10","D10"), ("G10","D11"), ("G10","D12"),
+    ("G11","D10"), ("G11","D11"), ("G11","D13"),
+    ("G12","D11"), ("G12","D12"), ("G12","D14"),
+    ("G13","D10"), ("G13","D13"), ("G13","D15"),
+    ("G14","D12"), ("G14","D14"), ("G14","D16"),
+    ("G15","D11"), ("G15","D15"), ("G15","D17"),
+    ("G16","D13"), ("G16","D16"), ("G16","D18"),
+    ("G17","D14"), ("G17","D17"), ("G17","D19"),
+    ("G18","D15"), ("G18","D18"),
+    ("G19","D16"), ("G19","D19"),
 ];
 
 /// (gene, disease) pairs held out from training; never materialised as
 /// a :TREATS_TRAIN edge. Every gene here still has other train edges.
 const HELD_OUT: &[(&str, &str)] = &[
-    ("G0", "D1"),
-    ("G2", "D2"),
-    ("G4", "D4"),
-    ("G6", "D3"),
-    ("G8", "D5"),
-    ("G10", "D11"),
-    ("G12", "D12"),
-    ("G14", "D14"),
-    ("G16", "D13"),
-    ("G18", "D15"),
+    ("G0","D1"),   ("G2","D2"),   ("G4","D4"),   ("G6","D3"),   ("G8","D5"),
+    ("G10","D11"), ("G12","D12"), ("G14","D14"), ("G16","D13"), ("G18","D15"),
 ];
 
 const TOP_K: usize = 5;
@@ -142,18 +100,13 @@ struct KgCompletionProblem {
 }
 
 impl Problem for KgCompletionProblem {
-    fn dim(&self) -> usize {
-        4
-    }
+    fn dim(&self) -> usize { 4 }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
-        (
-            Array1::from(vec![0.0, 0.0, 0.0, 1.0]),
-            Array1::from(vec![1.0, 1.0, 1.0, 3.0]),
-        )
+        (Array1::from(vec![0.0, 0.0, 0.0, 1.0]),
+         Array1::from(vec![1.0, 1.0, 1.0, 3.0]))
     }
     fn objective(&self, x: &Array1<f64>) -> f64 {
-        self.call_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let w_cn = x[0];
         let w_pa = x[1];
         let w_path = x[2];
@@ -174,22 +127,13 @@ impl Problem for KgCompletionProblem {
         for (g, true_d) in &self.held_out {
             let mut scored: Vec<(&str, f64)> = Vec::with_capacity(DISEASES.len());
             for cand in DISEASES {
-                let cn_v = cn
-                    .get(&((*g).to_string(), (*cand).to_string()))
-                    .copied()
-                    .unwrap_or(0.0);
+                let cn_v = cn.get(&((*g).to_string(), (*cand).to_string())).copied().unwrap_or(0.0);
                 let gd = gene_deg.get(*g).copied().unwrap_or(0.0);
                 let dd = disease_deg.get(*cand).copied().unwrap_or(0.0);
                 let pa = (gd * dd) / (gdeg_max * ddeg_max).max(1.0);
                 let p3 = if max_hops >= 3 {
-                    path3
-                        .get(&((*g).to_string(), (*cand).to_string()))
-                        .copied()
-                        .unwrap_or(0.0)
-                        / path_max
-                } else {
-                    0.0
-                };
+                    path3.get(&((*g).to_string(), (*cand).to_string())).copied().unwrap_or(0.0) / path_max
+                } else { 0.0 };
                 let score = w_cn * (cn_v / cn_max) + w_pa * pa + w_path * p3;
                 scored.push((cand, score));
             }
@@ -204,12 +148,12 @@ impl Problem for KgCompletionProblem {
     }
 }
 
-async fn materialise_features(client: &EmbeddedClient, held_out: &[(&str, &str)]) -> Features {
-    let gene_list = held_out
-        .iter()
-        .map(|(g, _)| format!("\"{g}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
+async fn materialise_features(
+    client: &EmbeddedClient,
+    held_out: &[(&str, &str)],
+) -> Features {
+    let gene_list = held_out.iter().map(|(g, _)| format!("\"{g}\""))
+        .collect::<Vec<_>>().join(", ");
 
     let q_cn = format!(
         "MATCH (g:Gene)-[:TREATS_TRAIN]->(:Disease)<-[:TREATS_TRAIN]-(g2:Gene)-[:TREATS_TRAIN]->(d:Disease) \
@@ -237,11 +181,7 @@ async fn materialise_features(client: &EmbeddedClient, held_out: &[(&str, &str)]
         let kind = row[0].as_str().unwrap_or("");
         let id = row[1].as_str().unwrap_or("").to_string();
         let d = row[2].as_i64().unwrap_or(0) as f64;
-        if kind == "g" {
-            gene_deg.insert(id, d);
-        } else {
-            disease_deg.insert(id, d);
-        }
+        if kind == "g" { gene_deg.insert(id, d); } else { disease_deg.insert(id, d); }
     }
 
     let q_p3 = format!(
@@ -264,10 +204,7 @@ async fn materialise_features(client: &EmbeddedClient, held_out: &[(&str, &str)]
         path_max: path3.values().copied().fold(1.0_f64, f64::max),
         gdeg_max: gene_deg.values().copied().fold(1.0_f64, f64::max),
         ddeg_max: disease_deg.values().copied().fold(1.0_f64, f64::max),
-        cn,
-        path3,
-        gene_deg,
-        disease_deg,
+        cn, path3, gene_deg, disease_deg,
     }
 }
 
@@ -299,14 +236,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             disease_id.insert(*d, nid);
         }
         for (g, d) in TREATS {
-            let edge_type = if held_set.contains(&(*g, *d)) {
-                "TREATS_HELD"
-            } else {
-                "TREATS_TRAIN"
-            };
-            store
-                .create_edge(gene_id[g], disease_id[d], edge_type)
-                .unwrap();
+            let edge_type = if held_set.contains(&(*g, *d)) { "TREATS_HELD" } else { "TREATS_TRAIN" };
+            store.create_edge(gene_id[g], disease_id[d], edge_type).unwrap();
         }
     }
     println!(
@@ -335,7 +266,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Baseline: uniform weights at max_hops=2.
     let baseline = Array1::from(vec![0.5, 0.5, 0.5, 2.0]);
     let baseline_fit = -problem.objective(&baseline);
-    println!("[baseline] w_cn=0.5 w_pa=0.5 w_path=0.5 max_hops=2 → Hits@{TOP_K}={baseline_fit:.3}");
+    println!(
+        "[baseline] w_cn=0.5 w_pa=0.5 w_path=0.5 max_hops=2 → Hits@{TOP_K}={baseline_fit:.3}"
+    );
 
     let solver = QOJayaSolver::new(SolverConfig {
         population_size: 14,
@@ -352,9 +285,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     println!(
         "[done] {} cypher evaluations, wall {} ms ({:.2} ms/eval)",
-        calls,
-        wall_ms,
-        wall_ms as f64 / calls.max(1) as f64
+        calls, wall_ms, wall_ms as f64 / calls.max(1) as f64
     );
 
     let best_fit = -best.best_fitness;

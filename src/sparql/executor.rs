@@ -1,7 +1,7 @@
 //! SPARQL query executor
 
-use super::results::SparqlResults;
 use crate::rdf::RdfStore;
+use super::results::SparqlResults;
 use thiserror::Error;
 
 /// Execution errors

@@ -15,7 +15,7 @@
 //! The two truncation points are tested separately because they took different
 //! code paths and only one of them was right.
 
-use samyama::persistence::wal::{Wal, WalEntry};
+use samyama::persistence::wal::{WalEntry, Wal};
 use std::fs::OpenOptions;
 
 fn entry(id: u64) -> WalEntry {

@@ -122,15 +122,9 @@ fn quantifiers_range_over_a_list_of_entities() {
     assert_eq!(value_of(&store, &q("any(n IN ns WHERE n.name = 'a')")), t);
     assert_eq!(value_of(&store, &q("none(n IN ns WHERE n.name = 'a')")), f);
     assert_eq!(value_of(&store, &q("all(n IN ns WHERE n.name = 'a')")), f);
-    assert_eq!(
-        value_of(&store, &q("single(n IN ns WHERE n.name = 'a')")),
-        t
-    );
+    assert_eq!(value_of(&store, &q("single(n IN ns WHERE n.name = 'a')")), t);
 
     // And the all-true / all-false ends, so a fix cannot just invert.
-    assert_eq!(
-        value_of(&store, &q("all(n IN ns WHERE n.name IS NOT NULL)")),
-        t
-    );
+    assert_eq!(value_of(&store, &q("all(n IN ns WHERE n.name IS NOT NULL)")), t);
     assert_eq!(value_of(&store, &q("none(n IN ns WHERE n.name = 'zz')")), t);
 }

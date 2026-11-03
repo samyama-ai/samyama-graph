@@ -38,10 +38,10 @@
 //! [`RecordBatch`] is the final output container -- a vector of [`Record`]s plus column
 //! names, returned to the caller after query execution completes.
 
-use crate::graph::{Edge, EdgeId, EdgeType, GraphStore, Node, NodeId, PropertyValue};
+use crate::graph::{Edge, Node, NodeId, EdgeId, EdgeType, PropertyValue, GraphStore};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::hash::{Hash, Hasher};
 
 /// A single record flowing through the query pipeline
 #[derive(Debug, Clone)]
@@ -159,26 +159,15 @@ impl PartialEq for Value {
             // Node variants compare by ID
             (Value::Node(id1, _), Value::Node(id2, _)) => id1 == id2,
             (Value::NodeRef(id1), Value::NodeRef(id2)) => id1 == id2,
-            (Value::Node(id1, _), Value::NodeRef(id2))
-            | (Value::NodeRef(id2), Value::Node(id1, _)) => id1 == id2,
+            (Value::Node(id1, _), Value::NodeRef(id2)) | (Value::NodeRef(id2), Value::Node(id1, _)) => id1 == id2,
             // Edge variants compare by ID
             (Value::Edge(id1, _), Value::Edge(id2, _)) => id1 == id2,
             (Value::EdgeRef(id1, ..), Value::EdgeRef(id2, ..)) => id1 == id2,
-            (Value::Edge(id1, _), Value::EdgeRef(id2, ..))
-            | (Value::EdgeRef(id2, ..), Value::Edge(id1, _)) => id1 == id2,
+            (Value::Edge(id1, _), Value::EdgeRef(id2, ..)) | (Value::EdgeRef(id2, ..), Value::Edge(id1, _)) => id1 == id2,
             // Property and Null
             (Value::Property(p1), Value::Property(p2)) => p1 == p2,
             // Path
-            (
-                Value::Path {
-                    nodes: n1,
-                    edges: e1,
-                },
-                Value::Path {
-                    nodes: n2,
-                    edges: e2,
-                },
-            ) => n1 == n2 && e1 == e2,
+            (Value::Path { nodes: n1, edges: e1 }, Value::Path { nodes: n2, edges: e2 }) => n1 == n2 && e1 == e2,
             (Value::Null, Value::Null) => true,
             // Lists and maps had no arm at all, so they fell to `_ => false`
             // and **no two lists were ever equal** -- `[] == []` included, and
@@ -197,15 +186,14 @@ impl PartialEq for Value {
             (Value::List(a), Value::Property(PropertyValue::Array(b)))
             | (Value::Property(PropertyValue::Array(b)), Value::List(a)) => {
                 a.len() == b.len()
-                    && a.iter()
-                        .zip(b)
-                        .all(|(x, y)| *x == Value::Property(y.clone()))
+                    && a.iter().zip(b).all(|(x, y)| *x == Value::Property(y.clone()))
             }
             (Value::Map(a), Value::Property(PropertyValue::Map(b)))
             | (Value::Property(PropertyValue::Map(b)), Value::Map(a)) => {
                 a.len() == b.len()
-                    && a.iter()
-                        .all(|(k, v)| b.get(k).is_some_and(|w| *v == Value::Property(w.clone())))
+                    && a.iter().all(|(k, v)| {
+                        b.get(k).is_some_and(|w| *v == Value::Property(w.clone()))
+                    })
             }
             _ => false,
         }
@@ -229,51 +217,29 @@ impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Use semantic tags so NodeRef and Node hash the same
         match self {
-            Value::Node(id, _) | Value::NodeRef(id) => {
-                0u8.hash(state);
-                id.hash(state);
-            }
-            Value::Edge(id, _) | Value::EdgeRef(id, ..) => {
-                1u8.hash(state);
-                id.hash(state);
-            }
+            Value::Node(id, _) | Value::NodeRef(id) => { 0u8.hash(state); id.hash(state); }
+            Value::Edge(id, _) | Value::EdgeRef(id, ..) => { 1u8.hash(state); id.hash(state); }
             // A property that is a list or a map hashes as the list or map it
             // is, not as "a property".
             Value::Property(PropertyValue::Array(items)) => {
                 5u8.hash(state);
                 items.len().hash(state);
-                for item in items {
-                    Value::Property(item.clone()).hash(state);
-                }
+                for item in items { Value::Property(item.clone()).hash(state); }
             }
             Value::Property(PropertyValue::Map(entries)) => {
-                hash_map_entries(
-                    state,
-                    entries.iter().map(|(k, v)| (k, Value::Property(v.clone()))),
-                );
+                hash_map_entries(state, entries.iter().map(|(k, v)| (k, Value::Property(v.clone()))));
             }
-            Value::Property(p) => {
-                2u8.hash(state);
-                p.hash(state);
-            }
-            Value::Path { nodes, edges } => {
-                3u8.hash(state);
-                nodes.hash(state);
-                edges.hash(state);
-            }
+            Value::Property(p) => { 2u8.hash(state); p.hash(state); }
+            Value::Path { nodes, edges } => { 3u8.hash(state); nodes.hash(state); edges.hash(state); }
             Value::List(items) => {
                 5u8.hash(state);
                 items.len().hash(state);
-                for item in items {
-                    item.hash(state);
-                }
+                for item in items { item.hash(state); }
             }
             Value::Map(entries) => {
                 hash_map_entries(state, entries.iter().map(|(k, v)| (k, v.clone())));
             }
-            Value::Null => {
-                4u8.hash(state);
-            }
+            Value::Null => { 4u8.hash(state); }
         }
     }
 }
@@ -291,10 +257,7 @@ fn hash_map_entries<'a, H: Hasher>(
     let mut pairs: Vec<(&String, Value)> = entries.collect();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     pairs.len().hash(state);
-    for (k, v) in pairs {
-        k.hash(state);
-        v.hash(state);
-    }
+    for (k, v) in pairs { k.hash(state); v.hash(state); }
 }
 
 impl Record {
@@ -320,10 +283,7 @@ impl Record {
     pub fn clone_with_capacity(&self, extra: usize) -> Record {
         let mut bindings = Vec::with_capacity(self.bindings.len() + extra);
         bindings.extend(self.bindings.iter().cloned());
-        Record {
-            bindings,
-            used_edges: self.used_edges.clone(),
-        }
+        Record { bindings, used_edges: self.used_edges.clone() }
     }
 
     /// Has this relationship already been traversed by the current pattern?
@@ -570,46 +530,34 @@ impl Value {
     pub fn resolve_property(&self, property: &str, store: &GraphStore) -> PropertyValue {
         match self {
             Value::Node(id, node) => {
-                let prop = store
-                    .node_columns
-                    .get_property(id.as_u64() as usize, property);
+                let prop = store.node_columns.get_property(id.as_u64() as usize, property);
                 if !prop.is_null() {
                     prop
                 } else {
-                    node.get_property(property)
-                        .cloned()
-                        .unwrap_or(PropertyValue::Null)
+                    node.get_property(property).cloned().unwrap_or(PropertyValue::Null)
                 }
             }
             Value::NodeRef(id) => {
-                let prop = store
-                    .node_columns
-                    .get_property(id.as_u64() as usize, property);
+                let prop = store.node_columns.get_property(id.as_u64() as usize, property);
                 if !prop.is_null() {
                     prop
                 } else if let Some(node) = store.get_node(*id) {
-                    node.get_property(property)
-                        .cloned()
-                        .unwrap_or(PropertyValue::Null)
+                    node.get_property(property).cloned().unwrap_or(PropertyValue::Null)
                 } else {
                     PropertyValue::Null
                 }
             }
             Value::Edge(id, edge) => {
-                let prop = store
-                    .edge_columns
-                    .get_property(id.as_u64() as usize, property);
+                let prop = store.edge_columns.get_property(id.as_u64() as usize, property);
                 if !prop.is_null() {
                     prop
                 } else {
-                    edge.get_property(property)
-                        .cloned()
-                        .unwrap_or(PropertyValue::Null)
+                    edge.get_property(property).cloned().unwrap_or(PropertyValue::Null)
                 }
             }
-            Value::EdgeRef(id, ..) => store
-                .edge_property(*id, property)
-                .unwrap_or(PropertyValue::Null),
+            Value::EdgeRef(id, ..) => {
+                store.edge_property(*id, property).unwrap_or(PropertyValue::Null)
+            }
             // Map property access: `m.a` where `m` is a map, from a literal, an
             // `UNWIND` over a list of maps, or a map-valued node property.
             //
@@ -632,16 +580,14 @@ impl Value {
             // return real types would have silently removed `dt.year` — which
             // the suite caught, and which is Cypher-required behaviour rather
             // than a test encoding the old shape.
-            Value::Property(
-                p @ (PropertyValue::Date(_)
+            Value::Property(p @ (PropertyValue::Date(_)
                 | PropertyValue::LocalTime(_)
                 | PropertyValue::Time { .. }
                 | PropertyValue::LocalDateTime { .. }
-                | PropertyValue::ZonedDateTime { .. }),
-            ) => temporal_component(p, property),
+                | PropertyValue::ZonedDateTime { .. })) => temporal_component(p, property),
             // Temporal component access: dt.year, dt.month, dur.days, etc.
             Value::Property(PropertyValue::DateTime(millis)) => {
-                use chrono::{Datelike, TimeZone, Timelike};
+                use chrono::{Datelike, Timelike, TimeZone};
                 match chrono::Utc.timestamp_millis_opt(*millis).single() {
                     Some(dt) => match property {
                         "year" => PropertyValue::Integer(dt.year() as i64),
@@ -650,21 +596,14 @@ impl Value {
                         "hour" => PropertyValue::Integer(dt.hour() as i64),
                         "minute" => PropertyValue::Integer(dt.minute() as i64),
                         "second" => PropertyValue::Integer(dt.second() as i64),
-                        "millisecond" => {
-                            PropertyValue::Integer(dt.timestamp_subsec_millis() as i64)
-                        }
+                        "millisecond" => PropertyValue::Integer(dt.timestamp_subsec_millis() as i64),
                         "epochMillis" => PropertyValue::Integer(*millis),
                         _ => PropertyValue::Null,
                     },
                     None => PropertyValue::Null,
                 }
             }
-            Value::Property(PropertyValue::Duration {
-                months,
-                days,
-                seconds,
-                nanos,
-            }) => {
+            Value::Property(PropertyValue::Duration { months, days, seconds, nanos }) => {
                 // Duration accessors come in two families, and the difference
                 // is the whole design (#819):
                 //
@@ -736,20 +675,10 @@ impl Value {
     /// the value rather than multiply rows by a constant.
     pub fn approx_heap_bytes(&self) -> usize {
         match self {
-            Value::Node(_, n) => {
-                std::mem::size_of_val(&**n)
-                    + n.properties
-                        .iter()
-                        .map(|(k, v)| k.capacity() + v.approx_heap_bytes())
-                        .sum::<usize>()
-            }
-            Value::Edge(_, e) => {
-                std::mem::size_of_val(&**e)
-                    + e.properties
-                        .iter()
-                        .map(|(k, v)| k.capacity() + v.approx_heap_bytes())
-                        .sum::<usize>()
-            }
+            Value::Node(_, n) => std::mem::size_of_val(&**n)
+                + n.properties.iter().map(|(k, v)| k.capacity() + v.approx_heap_bytes()).sum::<usize>(),
+            Value::Edge(_, e) => std::mem::size_of_val(&**e)
+                + e.properties.iter().map(|(k, v)| k.capacity() + v.approx_heap_bytes()).sum::<usize>(),
             Value::Property(p) => p.approx_heap_bytes(),
             Value::Path { nodes, edges } => {
                 nodes.capacity() * std::mem::size_of::<crate::graph::types::NodeId>()
@@ -802,11 +731,7 @@ impl RecordBatch {
     /// 32.8 GB at the same setting (`benches/result_cache_gain.rs`).
     pub fn approx_heap_bytes(&self) -> usize {
         self.records.capacity() * std::mem::size_of::<Record>()
-            + self
-                .records
-                .iter()
-                .map(|r| r.approx_heap_bytes())
-                .sum::<usize>()
+            + self.records.iter().map(|r| r.approx_heap_bytes()).sum::<usize>()
             + self.columns.capacity() * std::mem::size_of::<String>()
             + self.columns.iter().map(|c| c.capacity()).sum::<usize>()
     }
@@ -893,10 +818,7 @@ mod tests {
 
     #[test]
     fn test_value_types() {
-        let node_val = Value::Node(
-            NodeId::new(1),
-            Box::new(Node::new(NodeId::new(1), Label::new("Test"))),
-        );
+        let node_val = Value::Node(NodeId::new(1), Box::new(Node::new(NodeId::new(1), Label::new("Test"))));
         assert!(node_val.as_node().is_some());
         assert!(node_val.as_edge().is_none());
 
@@ -952,9 +874,7 @@ mod tests {
 
         // Non-node variants
         assert!(Value::Null.node_id().is_none());
-        assert!(Value::Property(PropertyValue::Integer(42))
-            .node_id()
-            .is_none());
+        assert!(Value::Property(PropertyValue::Integer(42)).node_id().is_none());
     }
 
     #[test]
@@ -992,10 +912,7 @@ mod tests {
             crate::graph::EdgeType::new("E"),
         );
         let val = Value::Edge(EdgeId::new(1), Box::new(edge));
-        assert_eq!(
-            val.edge_endpoints(),
-            Some((NodeId::new(10), NodeId::new(20)))
-        );
+        assert_eq!(val.edge_endpoints(), Some((NodeId::new(10), NodeId::new(20))));
 
         // From EdgeRef
         let val = Value::EdgeRef(
@@ -1004,10 +921,7 @@ mod tests {
             NodeId::new(40),
             crate::graph::EdgeType::new("E"),
         );
-        assert_eq!(
-            val.edge_endpoints(),
-            Some((NodeId::new(30), NodeId::new(40)))
-        );
+        assert_eq!(val.edge_endpoints(), Some((NodeId::new(30), NodeId::new(40))));
 
         // Non-edge
         assert!(Value::Null.edge_endpoints().is_none());
@@ -1044,19 +958,14 @@ mod tests {
         assert!(!Value::Property(PropertyValue::Integer(1)).is_node());
 
         let edge = crate::graph::Edge::new(
-            EdgeId::new(1),
-            NodeId::new(1),
-            NodeId::new(2),
+            EdgeId::new(1), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
         );
         assert!(Value::Edge(EdgeId::new(1), Box::new(edge)).is_edge());
         assert!(Value::EdgeRef(
-            EdgeId::new(1),
-            NodeId::new(1),
-            NodeId::new(2),
+            EdgeId::new(1), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
-        )
-        .is_edge());
+        ).is_edge());
         assert!(!Value::Null.is_edge());
     }
 
@@ -1101,8 +1010,9 @@ mod tests {
         let eid = store.create_edge(a, b, "KNOWS").unwrap();
 
         // EdgeRef materializes to Edge
-        let val = Value::EdgeRef(eid, a, b, crate::graph::EdgeType::new("KNOWS"))
-            .materialize_edge(&store);
+        let val = Value::EdgeRef(
+            eid, a, b, crate::graph::EdgeType::new("KNOWS"),
+        ).materialize_edge(&store);
         match &val {
             Value::Edge(id, edge) => {
                 assert_eq!(*id, eid);
@@ -1113,8 +1023,9 @@ mod tests {
         }
 
         // Non-existent EdgeRef becomes Null
-        let val = Value::EdgeRef(EdgeId::new(9999), a, b, crate::graph::EdgeType::new("X"))
-            .materialize_edge(&store);
+        let val = Value::EdgeRef(
+            EdgeId::new(9999), a, b, crate::graph::EdgeType::new("X"),
+        ).materialize_edge(&store);
         assert!(val.is_null());
 
         // Non-edge value is returned unchanged
@@ -1146,10 +1057,10 @@ mod tests {
     fn test_resolve_property_noderef() {
         let mut store = GraphStore::new();
         let id = store.create_node("Person");
-        store
-            .get_node_mut(id)
-            .unwrap()
-            .set_property("age".to_string(), PropertyValue::Integer(30));
+        store.get_node_mut(id).unwrap().set_property(
+            "age".to_string(),
+            PropertyValue::Integer(30),
+        );
 
         let val = Value::NodeRef(id);
         let prop = val.resolve_property("age", &store);
@@ -1169,9 +1080,7 @@ mod tests {
 
         let mut props = std::collections::HashMap::new();
         props.insert("since".to_string(), PropertyValue::Integer(2020));
-        let eid = store
-            .create_edge_with_properties(a, b, "KNOWS", props)
-            .unwrap();
+        let eid = store.create_edge_with_properties(a, b, "KNOWS", props).unwrap();
 
         // From Edge
         let edge = store.get_edge(eid).unwrap();
@@ -1188,16 +1097,16 @@ mod tests {
 
         let mut props = std::collections::HashMap::new();
         props.insert("weight".to_string(), PropertyValue::Float(0.5));
-        let eid = store
-            .create_edge_with_properties(a, b, "KNOWS", props)
-            .unwrap();
+        let eid = store.create_edge_with_properties(a, b, "KNOWS", props).unwrap();
 
         let val = Value::EdgeRef(eid, a, b, crate::graph::EdgeType::new("KNOWS"));
         let prop = val.resolve_property("weight", &store);
         assert_eq!(prop, PropertyValue::Float(0.5));
 
         // Non-existent EdgeRef
-        let val = Value::EdgeRef(EdgeId::new(9999), a, b, crate::graph::EdgeType::new("X"));
+        let val = Value::EdgeRef(
+            EdgeId::new(9999), a, b, crate::graph::EdgeType::new("X"),
+        );
         let prop = val.resolve_property("weight", &store);
         assert_eq!(prop, PropertyValue::Null);
     }
@@ -1206,10 +1115,7 @@ mod tests {
     fn test_resolve_property_non_node_edge() {
         let store = GraphStore::new();
         let val = Value::Null;
-        assert_eq!(
-            val.resolve_property("anything", &store),
-            PropertyValue::Null
-        );
+        assert_eq!(val.resolve_property("anything", &store), PropertyValue::Null);
 
         let val = Value::Property(PropertyValue::Integer(42));
         assert_eq!(val.resolve_property("x", &store), PropertyValue::Null);
@@ -1258,15 +1164,8 @@ mod tests {
         let mut r = Record::new();
         r.bind("x".to_string(), Value::Property(PropertyValue::Integer(1)));
         r.bind("x".to_string(), Value::Property(PropertyValue::Integer(2)));
-        assert_eq!(
-            r.bindings().len(),
-            1,
-            "a flat vector must not accumulate duplicates"
-        );
-        assert_eq!(
-            r.get("x"),
-            Some(&Value::Property(PropertyValue::Integer(2)))
-        );
+        assert_eq!(r.bindings().len(), 1, "a flat vector must not accumulate duplicates");
+        assert_eq!(r.get("x"), Some(&Value::Property(PropertyValue::Integer(2))));
     }
 
     #[test]
@@ -1296,14 +1195,8 @@ mod tests {
 
         a.merge(b);
         assert_eq!(a.bindings().len(), 2);
-        assert_eq!(
-            a.get("x"),
-            Some(&Value::Property(PropertyValue::Integer(2)))
-        );
-        assert_eq!(
-            a.get("y"),
-            Some(&Value::Property(PropertyValue::Integer(9)))
-        );
+        assert_eq!(a.get("x"), Some(&Value::Property(PropertyValue::Integer(2))));
+        assert_eq!(a.get("y"), Some(&Value::Property(PropertyValue::Integer(9))));
     }
 
     #[test]
@@ -1327,16 +1220,12 @@ mod tests {
 
         // Edge == EdgeRef with same ID
         let edge = crate::graph::Edge::new(
-            EdgeId::new(1),
-            NodeId::new(1),
-            NodeId::new(2),
+            EdgeId::new(1), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
         );
         let ev1 = Value::Edge(EdgeId::new(1), Box::new(edge));
         let ev2 = Value::EdgeRef(
-            EdgeId::new(1),
-            NodeId::new(1),
-            NodeId::new(2),
+            EdgeId::new(1), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
         );
         assert_eq!(ev1, ev2);
@@ -1347,18 +1236,9 @@ mod tests {
         assert_ne!(Value::Null, v1);
 
         // Path equality
-        let p1 = Value::Path {
-            nodes: vec![NodeId::new(1)],
-            edges: vec![EdgeId::new(1)],
-        };
-        let p2 = Value::Path {
-            nodes: vec![NodeId::new(1)],
-            edges: vec![EdgeId::new(1)],
-        };
-        let p3 = Value::Path {
-            nodes: vec![NodeId::new(2)],
-            edges: vec![EdgeId::new(1)],
-        };
+        let p1 = Value::Path { nodes: vec![NodeId::new(1)], edges: vec![EdgeId::new(1)] };
+        let p2 = Value::Path { nodes: vec![NodeId::new(1)], edges: vec![EdgeId::new(1)] };
+        let p3 = Value::Path { nodes: vec![NodeId::new(2)], edges: vec![EdgeId::new(1)] };
         assert_eq!(p1, p2);
         assert_ne!(p1, p3);
     }
@@ -1381,16 +1261,12 @@ mod tests {
 
         // Edge and EdgeRef with same ID should hash the same
         let edge = crate::graph::Edge::new(
-            EdgeId::new(3),
-            NodeId::new(1),
-            NodeId::new(2),
+            EdgeId::new(3), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
         );
         let ev1 = Value::Edge(EdgeId::new(3), Box::new(edge));
         let ev2 = Value::EdgeRef(
-            EdgeId::new(3),
-            NodeId::new(1),
-            NodeId::new(2),
+            EdgeId::new(3), NodeId::new(1), NodeId::new(2),
             crate::graph::EdgeType::new("E"),
         );
         assert_eq!(hash_value(&ev1), hash_value(&ev2));
@@ -1470,10 +1346,7 @@ impl PropertyCursor {
                 }
                 // The column has no value here. Row storage may still.
                 match store.get_node(*id) {
-                    Some(node) => node
-                        .get_property(&self.property)
-                        .cloned()
-                        .unwrap_or(PropertyValue::Null),
+                    Some(node) => node.get_property(&self.property).cloned().unwrap_or(PropertyValue::Null),
                     None => PropertyValue::Null,
                 }
             }
@@ -1529,15 +1402,11 @@ impl PropertyCursor {
                         found
                     }
                 };
-                let is_str = *self
-                    .node_str
-                    .get_or_insert_with(|| store.node_columns.is_str_column(column));
+                let is_str = *self.node_str.get_or_insert_with(|| store.node_columns.is_str_column(column));
                 if !is_str {
                     return None;
                 }
-                store
-                    .node_columns
-                    .get_str_by_id(column, id.as_u64() as usize)
+                store.node_columns.get_str_by_id(column, id.as_u64() as usize)
             }
             Some(Value::EdgeRef(id, ..)) | Some(Value::Edge(id, _)) => {
                 let column = match self.edge_column {
@@ -1548,15 +1417,11 @@ impl PropertyCursor {
                         found
                     }
                 };
-                let is_str = *self
-                    .edge_str
-                    .get_or_insert_with(|| store.edge_columns.is_str_column(column));
+                let is_str = *self.edge_str.get_or_insert_with(|| store.edge_columns.is_str_column(column));
                 if !is_str {
                     return None;
                 }
-                store
-                    .edge_columns
-                    .get_str_by_id(column, id.as_u64() as usize)
+                store.edge_columns.get_str_by_id(column, id.as_u64() as usize)
             }
             _ => None,
         }
@@ -1613,22 +1478,16 @@ fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
     let (days, tod, offset, zone) = match v {
         PropertyValue::Date(d) => (Some(*d as i64), None, None, None),
         PropertyValue::LocalTime(n) => (None, Some(*n), None, None),
-        PropertyValue::Time {
-            nanos,
-            offset_seconds,
-        } => (None, Some(*nanos), Some(*offset_seconds), None),
+        PropertyValue::Time { nanos, offset_seconds } => {
+            (None, Some(*nanos), Some(*offset_seconds), None)
+        }
         PropertyValue::LocalDateTime { secs, nanos } => (
             Some(secs.div_euclid(86_400)),
             Some(secs.rem_euclid(86_400) * 1_000_000_000 + *nanos as i64),
             None,
             None,
         ),
-        PropertyValue::ZonedDateTime {
-            secs,
-            nanos,
-            offset_seconds,
-            zone,
-        } => {
+        PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
             let local = secs + *offset_seconds as i64;
             (
                 Some(local.div_euclid(86_400)),
@@ -1649,9 +1508,7 @@ fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
         "year" => date.map_or(PropertyValue::Null, |d| int(d.year() as i64)),
         "month" => date.map_or(PropertyValue::Null, |d| int(d.month() as i64)),
         "day" => date.map_or(PropertyValue::Null, |d| int(d.day() as i64)),
-        "quarter" => date.map_or(PropertyValue::Null, |d| {
-            int(((d.month() - 1) / 3 + 1) as i64)
-        }),
+        "quarter" => date.map_or(PropertyValue::Null, |d| int(((d.month() - 1) / 3 + 1) as i64)),
         "dayOfQuarter" => date.map_or(PropertyValue::Null, |d| {
             let qm = (d.month() - 1) / 3 * 3 + 1;
             let start = chrono::NaiveDate::from_ymd_opt(d.year(), qm, 1);
@@ -1776,7 +1633,8 @@ pub fn cypher_order_value(a: &Value, b: &Value) -> std::cmp::Ordering {
         // array: same rank, different spelling. Compare by sorted key, then by
         // the value under it, so the two spellings interleave.
         (Value::Map(x), Value::Map(y)) => {
-            let (mut xk, mut yk): (Vec<_>, Vec<_>) = (x.keys().collect(), y.keys().collect());
+            let (mut xk, mut yk): (Vec<_>, Vec<_>) =
+                (x.keys().collect(), y.keys().collect());
             xk.sort();
             yk.sort();
             for (kx, ky) in xk.iter().zip(yk.iter()) {
@@ -1803,9 +1661,10 @@ fn entity_id(v: &Value) -> (u64, usize) {
         Value::Node(id, _) | Value::NodeRef(id) => (id.as_u64(), 0),
         Value::Edge(id, _) | Value::EdgeRef(id, ..) => (id.as_u64(), 0),
         // A path has no id; length then first node orders it deterministically.
-        Value::Path { nodes, edges } => {
-            (nodes.first().map(|n| n.as_u64()).unwrap_or(0), edges.len())
-        }
+        Value::Path { nodes, edges } => (
+            nodes.first().map(|n| n.as_u64()).unwrap_or(0),
+            edges.len(),
+        ),
         _ => (0, 0),
     }
 }

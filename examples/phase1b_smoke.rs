@@ -31,12 +31,12 @@ use std::time::Instant;
 
 use samyama_sdk::{EmbeddedClient, NodeId, PropertyValue, SamyamaClient};
 
-#[path = "common/aact_biomarker_common.rs"]
-mod aact_biomarker_common;
-#[path = "common/civic_common.rs"]
-mod civic_common;
 #[path = "common/hgnc_ensembl_common.rs"]
 mod hgnc_ensembl_common;
+#[path = "common/civic_common.rs"]
+mod civic_common;
+#[path = "common/aact_biomarker_common.rs"]
+mod aact_biomarker_common;
 
 type Error = Box<dyn std::error::Error>;
 
@@ -170,11 +170,7 @@ async fn main() -> Result<(), Error> {
     );
     {
         let mut graph = client.store_write().await;
-        let bridge = if uniprot_idx.is_empty() {
-            None
-        } else {
-            Some(&uniprot_idx)
-        };
+        let bridge = if uniprot_idx.is_empty() { None } else { Some(&uniprot_idx) };
         let res = hgnc_ensembl_common::load_hgnc_tsv(&mut graph, &hgnc, bridge, 0)?;
         eprintln!(
             "HGNC: {} :Gene nodes, {} SAME_AS edges to :Protein",
@@ -232,7 +228,13 @@ async fn main() -> Result<(), Error> {
             fmt_num(clinvar_idx.len())
         );
         let mut graph = client.store_write().await;
-        let res = civic_common::load_civic_variants_tsv(&mut graph, p, &gene_idx, &clinvar_idx, 0)?;
+        let res = civic_common::load_civic_variants_tsv(
+            &mut graph,
+            p,
+            &gene_idx,
+            &clinvar_idx,
+            0,
+        )?;
         eprintln!(
             "CIViC: {} :Variant nodes, {} HAS_VARIANT edges, {} SAME_AS edges",
             fmt_num(res.variant_nodes),
@@ -258,7 +260,8 @@ async fn main() -> Result<(), Error> {
              RETURN toUpper(g.symbol) AS k, id(g) AS v",
         )
         .await?;
-        let gene_set: std::collections::HashSet<String> = gene_pairs.keys().cloned().collect();
+        let gene_set: std::collections::HashSet<String> =
+            gene_pairs.keys().cloned().collect();
         eprintln!(
             "AACT bridges in store: {} :ClinicalTrial nct_ids, {} :Gene symbols",
             fmt_num(trial_pairs.len()),

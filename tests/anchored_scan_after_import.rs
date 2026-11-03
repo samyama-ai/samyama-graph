@@ -25,20 +25,12 @@ fn imported_store() -> GraphStore {
     let mut source = GraphStore::new();
     for i in 0..5000 {
         engine
-            .execute_mut(
-                &format!("CREATE (:Article {{pmid: \"{i}\"}})"),
-                &mut source,
-                "default",
-            )
+            .execute_mut(&format!("CREATE (:Article {{pmid: \"{i}\"}})"), &mut source, "default")
             .unwrap();
     }
     for i in 0..50 {
         engine
-            .execute_mut(
-                &format!("CREATE (:Author {{id: {i}}})"),
-                &mut source,
-                "default",
-            )
+            .execute_mut(&format!("CREATE (:Author {{id: {i}}})"), &mut source, "default")
             .unwrap();
     }
     for i in 0..50 {
@@ -48,8 +40,7 @@ fn imported_store() -> GraphStore {
                     "MATCH (a:Article {{pmid: \"{i}\"}}), (x:Author {{id: {i}}}) \
                      CREATE (a)-[:AUTHORED_BY]->(x)"
                 ),
-                &mut source,
-                "default",
+                &mut source, "default",
             )
             .unwrap();
     }
@@ -113,15 +104,9 @@ fn an_anchored_hop_seeds_from_the_anchor_index_not_the_target_label() {
     let store = imported_store();
 
     for (name, query) in [
-        (
-            "present anchor",
-            "MATCH (a:Article {pmid: \"10\"})-[:AUTHORED_BY]->(au:Author) RETURN au",
-        ),
+        ("present anchor", "MATCH (a:Article {pmid: \"10\"})-[:AUTHORED_BY]->(au:Author) RETURN au"),
         // the anchor value does not exist: this must resolve from the index, not scan
-        (
-            "absent anchor",
-            "MATCH (a:Article {pmid: \"999999\"})-[:AUTHORED_BY]->(au:Author) RETURN au",
-        ),
+        ("absent anchor", "MATCH (a:Article {pmid: \"999999\"})-[:AUTHORED_BY]->(au:Author) RETURN au"),
     ] {
         let plan = plan_for(&store, query);
         assert!(
@@ -142,18 +127,12 @@ fn the_anchored_hop_still_returns_the_right_rows() {
     let engine = QueryEngine::new();
 
     let hit = engine
-        .execute(
-            "MATCH (a:Article {pmid: \"10\"})-[:AUTHORED_BY]->(au:Author) RETURN au.id AS id",
-            &store,
-        )
+        .execute("MATCH (a:Article {pmid: \"10\"})-[:AUTHORED_BY]->(au:Author) RETURN au.id AS id", &store)
         .expect("query");
     assert_eq!(hit.records.len(), 1);
 
     let miss = engine
-        .execute(
-            "MATCH (a:Article {pmid: \"999999\"})-[:AUTHORED_BY]->(au:Author) RETURN au.id AS id",
-            &store,
-        )
+        .execute("MATCH (a:Article {pmid: \"999999\"})-[:AUTHORED_BY]->(au:Author) RETURN au.id AS id", &store)
         .expect("query");
     assert_eq!(miss.records.len(), 0);
 }

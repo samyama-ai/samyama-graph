@@ -59,18 +59,13 @@ use samyama::query::parser::parse_query;
 /// row count anyone can check by hand.
 fn fixture() -> GraphStore {
     let mut store = GraphStore::new();
-    write(
-        &mut store,
-        "CREATE (:P {n: 'a'}), (:P {n: 'b'}), (:P {n: 'c'})",
-    );
+    write(&mut store, "CREATE (:P {n: 'a'}), (:P {n: 'b'}), (:P {n: 'c'})");
     store
 }
 
 fn write(store: &mut GraphStore, cypher: &str) {
     let q = parse_query(cypher).expect("query should parse");
-    MutQueryExecutor::new(store, "default".to_string())
-        .execute(&q)
-        .expect("query should run");
+    MutQueryExecutor::new(store, "default".to_string()).execute(&q).expect("query should run");
 }
 
 fn cell(record: &samyama::query::executor::Record, key: &str) -> String {
@@ -86,14 +81,9 @@ fn cell(record: &samyama::query::executor::Record, key: &str) -> String {
 /// through `MutQueryExecutor` would compare one executor against itself.
 fn rows_by_kind(store: &GraphStore, cypher: &str) -> Vec<String> {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .expect("query should run");
-    let mut out: Vec<String> = batch
-        .records
-        .iter()
-        .map(|r| format!("{}|{}", cell(r, "u"), cell(r, "v")))
-        .collect();
+    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
+    let mut out: Vec<String> =
+        batch.records.iter().map(|r| format!("{}|{}", cell(r, "u"), cell(r, "v"))).collect();
     out.sort();
     out
 }
@@ -104,26 +94,19 @@ fn rows_pipeline(cypher: &str) -> Vec<String> {
     let batch = MutQueryExecutor::new(&mut store, "default".to_string())
         .execute(&q)
         .expect("query should run");
-    let mut out: Vec<String> = batch
-        .records
-        .iter()
-        .map(|r| format!("{}|{}", cell(r, "u"), cell(r, "v")))
-        .collect();
+    let mut out: Vec<String> =
+        batch.records.iter().map(|r| format!("{}|{}", cell(r, "u"), cell(r, "v"))).collect();
     out.sort();
     out
 }
 
 fn plan(store: &GraphStore, cypher: &str) -> String {
     let q = parse_query(&format!("EXPLAIN {cypher}")).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .expect("EXPLAIN should run");
+    let batch = QueryExecutor::new(store).execute(&q).expect("EXPLAIN should run");
     match batch.records[0].get("plan") {
-        Some(Value::Property(PropertyValue::String(t))) => t
-            .lines()
-            .take_while(|l| !l.starts_with("---"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Some(Value::Property(PropertyValue::String(t))) => {
+            t.lines().take_while(|l| !l.starts_with("---")).collect::<Vec<_>>().join("\n")
+        }
         other => panic!("expected a plan string, got {other:?}"),
     }
 }
@@ -141,9 +124,7 @@ fn predicates(plan_text: &str) -> Vec<String> {
             // Keep only the predicate text: the scan's var/label detail differs
             // between a FilteredNodeScan and an IndexScan and is not the subject.
             match l.find("predicate=") {
-                Some(i) => l[i + "predicate=".len()..]
-                    .trim_end_matches(')')
-                    .to_string(),
+                Some(i) => l[i + "predicate=".len()..].trim_end_matches(')').to_string(),
                 None => l.to_string(),
             }
         })
@@ -210,10 +191,8 @@ fn plan_pair(reading_prefix: &str, projection: &str) -> (String, String) {
 ///    would pass against the unfixed planner.
 #[test]
 fn the_prefix_fold_is_the_path_under_test() {
-    let (by_kind, pipeline) = pair(
-        "MATCH (a:P) WHERE a.n = 'a' MATCH (b:P) WHERE b.n = 'b'",
-        "a.n AS u, b.n AS v",
-    );
+    let (by_kind, pipeline) =
+        pair("MATCH (a:P) WHERE a.n = 'a' MATCH (b:P) WHERE b.n = 'b'", "a.n AS u, b.n AS v");
 
     assert!(
         parse_query(&by_kind).unwrap().clauses.is_empty(),
@@ -221,10 +200,7 @@ fn the_prefix_fold_is_the_path_under_test() {
     );
 
     let piped = parse_query(&pipeline).unwrap();
-    assert!(
-        !piped.clauses.is_empty(),
-        "the pipeline sample no longer reaches the pipeline"
-    );
+    assert!(!piped.clauses.is_empty(), "the pipeline sample no longer reaches the pipeline");
     assert!(
         matches!(piped.clauses.first(), Some(Clause::Match(_))),
         "the pipeline sample must open with a reading clause or the prefix fold \
@@ -234,13 +210,12 @@ fn the_prefix_fold_is_the_path_under_test() {
     let leading_wheres = piped
         .clauses
         .iter()
-        .take_while(|c| matches!(c, Clause::Match(_) | Clause::Where(_) | Clause::Unwind(_)))
+        .take_while(|c| {
+            matches!(c, Clause::Match(_) | Clause::Where(_) | Clause::Unwind(_))
+        })
         .filter(|c| matches!(c, Clause::Where(_)))
         .count();
-    assert_eq!(
-        leading_wheres, 2,
-        "the leading reading run must carry two WHEREs: {pipeline}"
-    );
+    assert_eq!(leading_wheres, 2, "the leading reading run must carry two WHEREs: {pipeline}");
 
     // #1823's own suggested shape does *not* reach the fold. Recorded so the
     // next reader does not spend the time twice.
@@ -268,17 +243,11 @@ fn the_prefix_fold_is_the_path_under_test() {
 /// `NodeScan (var=a)` with no predicate at all.
 #[test]
 fn a_dropped_where_returns_rows_the_predicate_excludes() {
-    let (by_kind, pipeline) = pair(
-        "MATCH (a:P) WHERE a.n = 'a' MATCH (b:P) WHERE b.n = 'b'",
-        "a.n AS u, b.n AS v",
-    );
+    let (by_kind, pipeline) =
+        pair("MATCH (a:P) WHERE a.n = 'a' MATCH (b:P) WHERE b.n = 'b'", "a.n AS u, b.n AS v");
     let store = fixture();
 
-    assert_eq!(
-        rows_by_kind(&store, &by_kind),
-        vec!["a|b".to_string()],
-        "by-kind baseline"
-    );
+    assert_eq!(rows_by_kind(&store, &by_kind), vec!["a|b".to_string()], "by-kind baseline");
     assert_eq!(
         rows_pipeline(&pipeline),
         vec!["a|b".to_string()],
@@ -293,20 +262,13 @@ fn a_dropped_where_returns_rows_the_predicate_excludes() {
 #[test]
 fn the_dropped_predicate_also_changed_what_was_written() {
     let mut store = fixture();
-    let (_, pipeline) = pair(
-        "MATCH (a:P) WHERE a.n = 'a' MATCH (b:P) WHERE b.n = 'b'",
-        "a.n AS u, b.n AS v",
-    );
+    let (_, pipeline) =
+        pair("MATCH (a:P) WHERE a.n = 'a' MATCH (b:P) WHERE b.n = 'b'", "a.n AS u, b.n AS v");
     let q = parse_query(&pipeline).unwrap();
-    MutQueryExecutor::new(&mut store, "default".to_string())
-        .execute(&q)
-        .unwrap();
+    MutQueryExecutor::new(&mut store, "default".to_string()).execute(&q).unwrap();
 
     let markers = rows_by_kind(&store, "MATCH (m:Marker) RETURN 'm' AS u, 'm' AS v").len();
-    assert_eq!(
-        markers, 1,
-        "one row, one marker — three means `a` was unfiltered"
-    );
+    assert_eq!(markers, 1, "one row, one marker — three means `a` was unfiltered");
 }
 
 // ---------------------------------------------------------------------------
@@ -324,11 +286,7 @@ fn the_dropped_predicate_also_changed_what_was_written() {
 fn one_two_and_three_wheres_agree_across_the_shapes() {
     let store = fixture();
     let cases: Vec<(&str, &str, Vec<&str>)> = vec![
-        (
-            "MATCH (a:P) WHERE a.n = 'a' MATCH (b:P)",
-            "a.n AS u, b.n AS v",
-            vec!["a|a", "a|b", "a|c"],
-        ),
+        ("MATCH (a:P) WHERE a.n = 'a' MATCH (b:P)", "a.n AS u, b.n AS v", vec!["a|a", "a|b", "a|c"]),
         (
             "MATCH (a:P) WHERE a.n = 'a' MATCH (b:P) WHERE b.n = 'b'",
             "a.n AS u, b.n AS v",
@@ -345,23 +303,11 @@ fn one_two_and_three_wheres_agree_across_the_shapes() {
         let (by_kind, pipeline) = pair(prefix, projection);
         let want: Vec<String> = want.into_iter().map(str::to_string).collect();
 
-        assert_eq!(
-            rows_by_kind(&store, &by_kind),
-            want,
-            "by-kind rows: `{by_kind}`"
-        );
-        assert_eq!(
-            rows_pipeline(&pipeline),
-            want,
-            "pipeline rows: `{pipeline}`"
-        );
+        assert_eq!(rows_by_kind(&store, &by_kind), want, "by-kind rows: `{by_kind}`");
+        assert_eq!(rows_pipeline(&pipeline), want, "pipeline rows: `{pipeline}`");
 
         let (_, visible) = plan_pair(prefix, projection);
-        assert_eq!(
-            rows_pipeline(&visible),
-            want,
-            "pipeline rows (SET form): `{visible}`"
-        );
+        assert_eq!(rows_pipeline(&visible), want, "pipeline rows (SET form): `{visible}`");
         assert_eq!(
             predicates(&plan(&store, &by_kind)),
             predicates(&plan(&store, &visible)),
@@ -400,16 +346,8 @@ fn the_and_chain_nests_as_the_parser_nests() {
         plan(&store, &by_kind),
         plan(&store, &pipeline),
     );
-    assert_eq!(
-        rows_by_kind(&store, &by_kind),
-        rows_pipeline(&pipeline),
-        "rows: `{pipeline}`"
-    );
-    assert_eq!(
-        rows_pipeline(&pipeline),
-        vec!["a|c".to_string()],
-        "a < b < c, three nodes"
-    );
+    assert_eq!(rows_by_kind(&store, &by_kind), rows_pipeline(&pipeline), "rows: `{pipeline}`");
+    assert_eq!(rows_pipeline(&pipeline), vec!["a|c".to_string()], "a < b < c, three nodes");
 }
 
 // ---------------------------------------------------------------------------
@@ -466,11 +404,7 @@ fn an_optional_where_and_a_required_where_in_one_run() {
     );
 
     let want: Vec<String> = vec!["a|c".to_string(), "b|c".to_string(), "c|c".to_string()];
-    assert_eq!(
-        rows_by_kind(&store, &by_kind),
-        want,
-        "by-kind baseline: `{by_kind}`"
-    );
+    assert_eq!(rows_by_kind(&store, &by_kind), want, "by-kind baseline: `{by_kind}`");
     assert_eq!(
         rows_pipeline(&pipeline),
         want,
@@ -497,11 +431,7 @@ fn an_optional_predicate_that_matches_still_joins() {
         "a.n AS u, b.n AS v",
     );
 
-    assert_eq!(
-        rows_by_kind(&store, &by_kind),
-        vec!["a|c".to_string()],
-        "by-kind baseline"
-    );
+    assert_eq!(rows_by_kind(&store, &by_kind), vec!["a|c".to_string()], "by-kind baseline");
     assert_eq!(
         rows_pipeline(&pipeline),
         vec!["a|c".to_string()],

@@ -1,7 +1,9 @@
 //! JSON-LD format implementation (Basic)
 
-use super::{ParseError, ParseResult, SerializeError, SerializeResult};
-use crate::rdf::{RdfObject, Triple};
+use crate::rdf::{
+    Triple, RdfObject
+};
+use super::{ParseResult, SerializeResult, ParseError, SerializeError};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -14,9 +16,7 @@ impl JsonLdParserWrapper {
         // Full JSON-LD parsing requires a complex processor (expansion/compaction).
         // Without a dedicated crate like json-ld or sophia_jsonld, this is non-trivial.
         // For now, we return an error indicating it's not yet implemented.
-        Err(ParseError::Parse(
-            "JSON-LD parsing not yet supported without external crate".to_string(),
-        ))
+        Err(ParseError::Parse("JSON-LD parsing not yet supported without external crate".to_string()))
     }
 }
 
@@ -35,31 +35,23 @@ impl JsonLdSerializerWrapper {
             let s_str = triple.subject.to_string();
             // Basic cleanup: remove < > if named node, keep _: if blank
             let s_key = if triple.subject.is_named_node() {
-                triple
-                    .subject
-                    .to_string()
-                    .trim_matches(|c| c == '<' || c == '>')
-                    .to_string()
+                 triple.subject.to_string().trim_matches(|c| c == '<' || c == '>').to_string()
             } else {
                 triple.subject.to_string()
             };
 
-            let p_key = triple
-                .predicate
-                .to_string()
-                .trim_matches(|c| c == '<' || c == '>')
-                .to_string();
+            let p_key = triple.predicate.to_string().trim_matches(|c| c == '<' || c == '>').to_string();
 
             let o_val = match &triple.object {
                 RdfObject::NamedNode(n) => {
                     json!({ "@id": n.as_str() })
-                }
+                },
                 RdfObject::BlankNode(b) => {
                     json!({ "@id": format!("_:{}", b.as_str()) })
-                }
+                },
                 RdfObject::Literal(l) => {
                     if let Some(lang) = l.language() {
-                        json!({ "@value": l.value(), "@language": lang })
+                         json!({ "@value": l.value(), "@language": lang })
                     } else {
                         let dt = l.datatype();
                         if dt.as_str() == "http://www.w3.org/2001/XMLSchema#string" {
@@ -87,14 +79,15 @@ impl JsonLdSerializerWrapper {
             output.push(node);
         }
 
-        serde_json::to_string_pretty(&output).map_err(|e| SerializeError::Serialize(e.to_string()))
+        serde_json::to_string_pretty(&output)
+            .map_err(|e| SerializeError::Serialize(e.to_string()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rdf::{Literal, NamedNode, RdfPredicate};
+    use crate::rdf::{NamedNode, RdfPredicate, Literal};
 
     #[test]
     fn test_jsonld_serialization() {
@@ -102,7 +95,11 @@ mod tests {
         let predicate = RdfPredicate::new("http://xmlns.com/foaf/0.1/name").unwrap();
         let object = Literal::new_simple_literal("Alice");
 
-        let triple = Triple::new(subject.into(), predicate, object.into());
+        let triple = Triple::new(
+            subject.into(),
+            predicate,
+            object.into(),
+        );
 
         let json = JsonLdSerializerWrapper::serialize(&[triple]).unwrap();
         assert!(json.contains("@id"));

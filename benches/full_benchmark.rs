@@ -7,12 +7,12 @@
 //! 4. Graph Algorithm Performance (PageRank, WCC, BFS)
 //! 5. Mixed Workload (80% read, 20% write)
 
-use rand::Rng;
-use samyama::algo::{bfs, build_view, page_rank, weakly_connected_components, PageRankConfig};
+use samyama::{GraphStore, Label, PropertyValue, QueryEngine, DistanceMetric};
+use samyama::algo::{build_view, page_rank, weakly_connected_components, bfs, PageRankConfig};
 use samyama::persistence::TenantManager;
-use samyama::{DistanceMetric, GraphStore, Label, PropertyValue, QueryEngine};
-use std::sync::Arc;
 use std::time::Instant;
+use std::sync::Arc;
+use rand::Rng;
 
 #[path = "common/bench_setup.rs"]
 mod bench_setup;
@@ -45,10 +45,7 @@ async fn main() {
     println!();
     println!("  Configuration:");
     println!("  - Nodes:      {:>10}", format_number(NUM_NODES));
-    println!(
-        "  - Edges:      ~{:>9}",
-        format_number(NUM_NODES * EDGES_PER_NODE)
-    );
+    println!("  - Edges:      ~{:>9}", format_number(NUM_NODES * EDGES_PER_NODE));
     println!("  - Vector dim: {:>10}", VECTOR_DIM);
     println!("  - Search k:   {:>10}", SEARCH_K);
     println!();
@@ -87,22 +84,10 @@ async fn main() {
     println!("╔══════════════════════════════════════════════════════════════════╗");
     println!("║   Benchmark Summary                                            ║");
     println!("╠══════════════════════════════════════════════════════════════════╣");
-    println!(
-        "║  Total duration: {:>10.2?}                                   ║",
-        total
-    );
-    println!(
-        "║  Nodes:          {:>10}                                   ║",
-        format_number(NUM_NODES)
-    );
-    println!(
-        "║  Edges:         ~{:>10}                                   ║",
-        format_number(NUM_NODES * EDGES_PER_NODE)
-    );
-    println!(
-        "║  Vector dim:     {:>10}                                   ║",
-        VECTOR_DIM
-    );
+    println!("║  Total duration: {:>10.2?}                                   ║", total);
+    println!("║  Nodes:          {:>10}                                   ║", format_number(NUM_NODES));
+    println!("║  Edges:         ~{:>10}                                   ║", format_number(NUM_NODES * EDGES_PER_NODE));
+    println!("║  Vector dim:     {:>10}                                   ║", VECTOR_DIM);
     println!("╚══════════════════════════════════════════════════════════════════╝");
 }
 
@@ -111,9 +96,7 @@ async fn benchmark_ingestion(store: &mut GraphStore) -> Vec<samyama::graph::Node
     println!("│ Benchmark 1: Data Ingestion                                     │");
     println!("└──────────────────────────────────────────────────────────────────┘");
 
-    store
-        .create_vector_index("Entity", "embedding", VECTOR_DIM, DistanceMetric::Cosine)
-        .unwrap();
+    store.create_vector_index("Entity", "embedding", VECTOR_DIM, DistanceMetric::Cosine).unwrap();
 
     let mut rng = rand::thread_rng();
     let mut node_ids = Vec::with_capacity(NUM_NODES);
@@ -127,22 +110,12 @@ async fn benchmark_ingestion(store: &mut GraphStore) -> Vec<samyama::graph::Node
         let vec: Vec<f32> = (0..VECTOR_DIM).map(|_| rng.gen::<f32>()).collect();
         let mut props = samyama::PropertyMap::new();
         props.insert("id".to_string(), PropertyValue::Integer(i as i64));
-        props.insert(
-            "name".to_string(),
-            PropertyValue::String(format!("{}-{}", label, i)),
-        );
+        props.insert("name".to_string(), PropertyValue::String(format!("{}-{}", label, i)));
         props.insert("embedding".to_string(), PropertyValue::Vector(vec));
         props.insert("score".to_string(), PropertyValue::Float(rng.gen::<f64>()));
-        props.insert(
-            "active".to_string(),
-            PropertyValue::Boolean(rng.gen_bool(0.9)),
-        );
+        props.insert("active".to_string(), PropertyValue::Boolean(rng.gen_bool(0.9)));
 
-        let id = store.create_node_with_properties(
-            "default",
-            vec![Label::new(label), Label::new("Entity")],
-            props,
-        );
+        let id = store.create_node_with_properties("default", vec![Label::new(label), Label::new("Entity")], props);
         node_ids.push(id);
     }
     let node_time = start.elapsed();
@@ -167,18 +140,12 @@ async fn benchmark_ingestion(store: &mut GraphStore) -> Vec<samyama::graph::Node
     println!("  Node ingestion:");
     println!("    Nodes:      {:>10}", format_number(NUM_NODES));
     println!("    Duration:   {:>10.2?}", node_time);
-    println!(
-        "    Throughput: {:>10.0} nodes/sec",
-        NUM_NODES as f64 / node_time.as_secs_f64()
-    );
+    println!("    Throughput: {:>10.0} nodes/sec", NUM_NODES as f64 / node_time.as_secs_f64());
     println!();
     println!("  Edge ingestion:");
     println!("    Edges:      {:>10}", format_number(edge_count));
     println!("    Duration:   {:>10.2?}", edge_time);
-    println!(
-        "    Throughput: {:>10.0} edges/sec",
-        edge_count as f64 / edge_time.as_secs_f64()
-    );
+    println!("    Throughput: {:>10.0} edges/sec", edge_count as f64 / edge_time.as_secs_f64());
     println!();
 
     // Wait for background indexing
@@ -199,14 +166,8 @@ fn benchmark_vector_search(store: &GraphStore) {
     let k_values = [1, 5, 10, 20, 50];
     let num_searches = 1000;
 
-    println!(
-        "  {:>6} {:>12} {:>14} {:>10}",
-        "k", "Avg Latency", "QPS", "p99"
-    );
-    println!(
-        "  {:>6} {:>12} {:>14} {:>10}",
-        "-", "-----------", "---", "---"
-    );
+    println!("  {:>6} {:>12} {:>14} {:>10}", "k", "Avg Latency", "QPS", "p99");
+    println!("  {:>6} {:>12} {:>14} {:>10}", "-", "-----------", "---", "---");
 
     for &k in &k_values {
         let mut latencies = Vec::with_capacity(num_searches);
@@ -214,9 +175,7 @@ fn benchmark_vector_search(store: &GraphStore) {
         for _ in 0..num_searches {
             let query: Vec<f32> = (0..VECTOR_DIM).map(|_| rng.gen::<f32>()).collect();
             let t = Instant::now();
-            let _ = store
-                .vector_search("Entity", "embedding", &query, k)
-                .unwrap();
+            let _ = store.vector_search("Entity", "embedding", &query, k).unwrap();
             latencies.push(t.elapsed());
         }
 
@@ -240,24 +199,12 @@ fn benchmark_k_hop(store: &GraphStore, engine: &QueryEngine) {
     let num_queries = 100;
 
     let queries = [
-        (
-            "1-hop",
-            "MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = {} RETURN b.id",
-        ),
-        (
-            "2-hop",
-            "MATCH (a:Entity)-[:LINKS_TO]->(b)-[:LINKS_TO]->(c:Entity) WHERE a.id = {} RETURN c.id",
-        ),
+        ("1-hop", "MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = {} RETURN b.id"),
+        ("2-hop", "MATCH (a:Entity)-[:LINKS_TO]->(b)-[:LINKS_TO]->(c:Entity) WHERE a.id = {} RETURN c.id"),
     ];
 
-    println!(
-        "  {:>8} {:>12} {:>14} {:>12}",
-        "Hops", "Avg Latency", "QPS", "Queries"
-    );
-    println!(
-        "  {:>8} {:>12} {:>14} {:>12}",
-        "----", "-----------", "---", "-------"
-    );
+    println!("  {:>8} {:>12} {:>14} {:>12}", "Hops", "Avg Latency", "QPS", "Queries");
+    println!("  {:>8} {:>12} {:>14} {:>12}", "----", "-----------", "---", "-------");
 
     for (name, query_template) in &queries {
         let start = Instant::now();
@@ -275,10 +222,7 @@ fn benchmark_k_hop(store: &GraphStore, engine: &QueryEngine) {
         let avg = duration / num_queries as u32;
         let qps = num_queries as f64 / duration.as_secs_f64();
 
-        println!(
-            "  {:>8} {:>10.2?} {:>12.0}/s {:>12}",
-            name, avg, qps, success
-        );
+        println!("  {:>8} {:>10.2?} {:>12.0}/s {:>12}", name, avg, qps, success);
     }
 
     // Multi-hop via graph API (3-hop BFS)
@@ -303,13 +247,9 @@ fn benchmark_k_hop(store: &GraphStore, engine: &QueryEngine) {
         }
     }
     let hop3_time = start.elapsed();
-    println!(
-        "  {:>8} {:>10.2?} {:>12.0}/s {:>12}",
-        "3-hop",
-        hop3_time / num_queries as u32,
-        num_queries as f64 / hop3_time.as_secs_f64(),
-        num_queries
-    );
+    println!("  {:>8} {:>10.2?} {:>12.0}/s {:>12}",
+        "3-hop", hop3_time / num_queries as u32,
+        num_queries as f64 / hop3_time.as_secs_f64(), num_queries);
 
     println!();
 }
@@ -323,12 +263,9 @@ fn benchmark_graph_algorithms(store: &GraphStore) {
     let view_start = Instant::now();
     let view = build_view(store, Some("Entity"), Some("LINKS_TO"), None);
     let view_time = view_start.elapsed();
-    println!(
-        "  View built in {:?} ({} nodes, {} edges)",
-        view_time,
-        view.node_count,
-        view.out_offsets.last().copied().unwrap_or(0)
-    );
+    println!("  View built in {:?} ({} nodes, {} edges)",
+        view_time, view.node_count,
+        view.out_offsets.last().copied().unwrap_or(0));
     println!();
 
     println!("  {:>15} {:>12} {:>20}", "Algorithm", "Duration", "Result");
@@ -339,23 +276,15 @@ fn benchmark_graph_algorithms(store: &GraphStore) {
     let scores = page_rank(&view, PageRankConfig::default());
     let pr_time = start.elapsed();
     let max_score = scores.values().cloned().fold(0.0f64, f64::max);
-    println!(
-        "  {:>15} {:>10.2?} {:>20}",
-        "PageRank",
-        pr_time,
-        format!("max={:.6}", max_score)
-    );
+    println!("  {:>15} {:>10.2?} {:>20}",
+        "PageRank", pr_time, format!("max={:.6}", max_score));
 
     // WCC
     let start = Instant::now();
     let wcc = weakly_connected_components(&view);
     let wcc_time = start.elapsed();
-    println!(
-        "  {:>15} {:>10.2?} {:>20}",
-        "WCC",
-        wcc_time,
-        format!("{} components", wcc.components.len())
-    );
+    println!("  {:>15} {:>10.2?} {:>20}",
+        "WCC", wcc_time, format!("{} components", wcc.components.len()));
 
     // BFS from node 0 to a random target
     if view.node_count > 1 {
@@ -367,12 +296,8 @@ fn benchmark_graph_algorithms(store: &GraphStore) {
             Some(path) => (path.path.len(), true),
             None => (0, false),
         };
-        println!(
-            "  {:>15} {:>10.2?} {:>20}",
-            "BFS",
-            bfs_time,
-            format!("found={}, depth={}", found, depth)
-        );
+        println!("  {:>15} {:>10.2?} {:>20}",
+            "BFS", bfs_time, format!("found={}, depth={}", found, depth));
     }
 
     // Multiple PageRank iterations benchmark
@@ -382,12 +307,8 @@ fn benchmark_graph_algorithms(store: &GraphStore) {
         let _ = page_rank(&view, PageRankConfig::default());
     }
     let multi_pr_time = start.elapsed();
-    println!(
-        "  {:>15} {:>10.2?} {:>20}",
-        "PageRank x10",
-        multi_pr_time,
-        format!("{:.2?}/iter", multi_pr_time / iterations as u32)
-    );
+    println!("  {:>15} {:>10.2?} {:>20}",
+        "PageRank x10", multi_pr_time, format!("{:.2?}/iter", multi_pr_time / iterations as u32));
 
     println!();
 }
@@ -433,32 +354,13 @@ fn benchmark_mixed_workload(store: &mut GraphStore, engine: &QueryEngine) {
 
     println!("  Total operations: {:>10}", format_number(total_ops));
     println!("  Duration:         {:>10.2?}", total_time);
-    println!(
-        "  Overall QPS:      {:>10.0}",
-        total_ops as f64 / total_time.as_secs_f64()
-    );
+    println!("  Overall QPS:      {:>10.0}", total_ops as f64 / total_time.as_secs_f64());
     println!();
-    println!(
-        "  {:>8} {:>10} {:>12} {:>14}",
-        "Type", "Count", "Total Time", "Avg Latency"
-    );
-    println!(
-        "  {:>8} {:>10} {:>12} {:>14}",
-        "----", "-----", "----------", "-----------"
-    );
-    println!(
-        "  {:>8} {:>10} {:>10.2?} {:>12.2?}",
-        "Read",
-        format_number(reads),
-        read_time,
-        read_time / reads as u32
-    );
-    println!(
-        "  {:>8} {:>10} {:>10.2?} {:>12.2?}",
-        "Write",
-        format_number(writes),
-        write_time,
-        write_time / writes as u32
-    );
+    println!("  {:>8} {:>10} {:>12} {:>14}", "Type", "Count", "Total Time", "Avg Latency");
+    println!("  {:>8} {:>10} {:>12} {:>14}", "----", "-----", "----------", "-----------");
+    println!("  {:>8} {:>10} {:>10.2?} {:>12.2?}",
+        "Read", format_number(reads), read_time, read_time / reads as u32);
+    println!("  {:>8} {:>10} {:>10.2?} {:>12.2?}",
+        "Write", format_number(writes), write_time, write_time / writes as u32);
     println!();
 }

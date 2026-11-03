@@ -12,10 +12,7 @@ use tokio::sync::oneshot;
 
 /// Answer one request with `status` and a JSON `body`; hand back the raw
 /// request so the test can check what was sent.
-async fn respond_once(
-    status: &'static str,
-    body: &'static str,
-) -> (String, oneshot::Receiver<String>) {
+async fn respond_once(status: &'static str, body: &'static str) -> (String, oneshot::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let (tx, rx) = oneshot::channel();
@@ -36,8 +33,7 @@ async fn respond_once(
                     .lines()
                     .find_map(|l| {
                         let (k, v) = l.split_once(':')?;
-                        k.eq_ignore_ascii_case("content-length")
-                            .then(|| v.trim().parse::<usize>().ok())?
+                        k.eq_ignore_ascii_case("content-length").then(|| v.trim().parse::<usize>().ok())?
                     })
                     .unwrap_or(0);
                 if buf.len() >= end + 4 + len {
@@ -57,8 +53,7 @@ async fn respond_once(
 
 #[tokio::test]
 async fn posts_the_question_to_the_nlq_route_and_returns_the_cypher() {
-    let (url, request) =
-        respond_once("200 OK", r#"{"cypher":"MATCH (p:Person) RETURN p.name"}"#).await;
+    let (url, request) = respond_once("200 OK", r#"{"cypher":"MATCH (p:Person) RETURN p.name"}"#).await;
     let client = RemoteClient::new(&url);
 
     let cypher = client.nlq("Who is in the graph?").await.expect("nlq");
@@ -68,17 +63,18 @@ async fn posts_the_question_to_the_nlq_route_and_returns_the_cypher() {
     assert!(raw.starts_with("POST /api/nlq "), "wrong route: {raw}");
     let body = &raw[raw.find("\r\n\r\n").expect("header end") + 4..];
     let json: serde_json::Value = serde_json::from_str(body).expect("JSON body");
-    assert_eq!(
-        json,
-        serde_json::json!({ "question": "Who is in the graph?" })
-    );
+    assert_eq!(json, serde_json::json!({ "question": "Who is in the graph?" }));
 }
 
 #[tokio::test]
 async fn a_server_refusal_carries_the_servers_message() {
     // What the handler returns when `NLQ_PROVIDER` is unset, or when the
     // generated query fails the read-only check.
-    let (url, _) = respond_once("400 Bad Request", r#"{"error":"NLQ_PROVIDER is not set."}"#).await;
+    let (url, _) = respond_once(
+        "400 Bad Request",
+        r#"{"error":"NLQ_PROVIDER is not set."}"#,
+    )
+    .await;
     let client = RemoteClient::new(&url);
 
     match client.nlq("anything").await {

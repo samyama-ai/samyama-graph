@@ -19,12 +19,7 @@ fn fixture() -> GraphStore {
     let people: Vec<_> = (0..60)
         .map(|i| {
             let id = store.create_node("Person");
-            let _ = store.set_node_property(
-                "default",
-                id,
-                "age".to_string(),
-                PropertyValue::Integer(i % 50),
-            );
+            let _ = store.set_node_property("default", id, "age".to_string(), PropertyValue::Integer(i % 50));
             let _ = store.set_node_property(
                 "default",
                 id,
@@ -42,9 +37,7 @@ fn fixture() -> GraphStore {
 
 fn plan_unchecked(store: &GraphStore, cypher: &str) -> String {
     let query = parse_query(&format!("EXPLAIN {cypher}")).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("EXPLAIN should run");
+    let batch = QueryExecutor::new(store).execute(&query).expect("EXPLAIN should run");
     match batch.records[0].get("plan") {
         Some(Value::Property(PropertyValue::String(t))) => t.clone(),
         other => panic!("expected a plan string, got {other:?}"),
@@ -77,21 +70,13 @@ fn plan(store: &GraphStore, cypher: &str) -> String {
 fn count_filters(plan: &str) -> usize {
     plan.lines()
         .take_while(|l| !l.starts_with("---"))
-        .filter(|l| {
-            l.trim_start()
-                .trim_start_matches("+- ")
-                .starts_with("Filter")
-        })
+        .filter(|l| l.trim_start().trim_start_matches("+- ").starts_with("Filter"))
         .count()
 }
 
 fn rows(store: &GraphStore, cypher: &str) -> usize {
     let query = parse_query(cypher).expect("query should parse");
-    QueryExecutor::new(store)
-        .execute(&query)
-        .expect("query should run")
-        .records
-        .len()
+    QueryExecutor::new(store).execute(&query).expect("query should run").records.len()
 }
 
 #[test]
@@ -111,10 +96,7 @@ fn a_compound_where_on_one_match_plans_one_filter() {
 #[test]
 fn a_query_with_no_where_plans_no_filter() {
     let store = fixture();
-    let text = plan(
-        &store,
-        "MATCH (p:Person)-[:KNOWS]->(f:Person) RETURN f.name",
-    );
+    let text = plan(&store, "MATCH (p:Person)-[:KNOWS]->(f:Person) RETURN f.name");
     assert_eq!(count_filters(&text), 0, "{text}");
 }
 
@@ -133,22 +115,13 @@ fn deduplicating_does_not_change_the_answer() {
     // than assuming.
     let store = fixture();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (p:Person) WHERE p.age > 10 AND p.age < 40 RETURN p.name"
-        ),
-        rows(
-            &store,
-            "MATCH (p:Person) WHERE p.age > 10 AND p.age < 40 RETURN p.name"
-        ),
+        rows(&store, "MATCH (p:Person) WHERE p.age > 10 AND p.age < 40 RETURN p.name"),
+        rows(&store, "MATCH (p:Person) WHERE p.age > 10 AND p.age < 40 RETURN p.name"),
     );
 
     let expected = (0..60).filter(|i| (i % 50) > 10 && (i % 50) < 40).count();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (p:Person) WHERE p.age > 10 AND p.age < 40 RETURN p.name"
-        ),
+        rows(&store, "MATCH (p:Person) WHERE p.age > 10 AND p.age < 40 RETURN p.name"),
         expected
     );
 }
@@ -163,11 +136,7 @@ fn a_predicate_split_across_two_variables_plans_each_conjunct_once() {
         &store,
         "MATCH (p:Person)-[:KNOWS]->(f:Person) WHERE p.age > 10 AND f.age < 40 RETURN f.name",
     );
-    assert_eq!(
-        count_filters(&text),
-        2,
-        "one filter per conjunct, no re-application:\n{text}"
-    );
+    assert_eq!(count_filters(&text), 2, "one filter per conjunct, no re-application:\n{text}");
 }
 
 #[test]
@@ -189,20 +158,14 @@ fn a_where_after_an_optional_match_scopes_to_the_optional_match() {
     let a = store.create_node("Person");
     let _ = store.set_node_property("default", a, "age".to_string(), PropertyValue::Integer(20));
     let lonely = store.create_node("Person");
-    let _ = store.set_node_property(
-        "default",
-        lonely,
-        "age".to_string(),
-        PropertyValue::Integer(20),
-    );
+    let _ = store.set_node_property("default", lonely, "age".to_string(), PropertyValue::Integer(20));
     let b = store.create_node("Person");
     let _ = store.set_node_property("default", b, "age".to_string(), PropertyValue::Integer(90));
     let _ = store.create_edge(a, b, "KNOWS");
 
     // Every person survives: `a` with `f` bound to the 90-year-old, `lonely`
     // and `b` with `f` NULL because nothing satisfied the predicate.
-    let cypher =
-        "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 50 RETURN p";
+    let cypher = "MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(f:Person) WHERE f.age > 50 RETURN p";
     assert_eq!(
         rows(&store, cypher),
         3,
@@ -229,8 +192,7 @@ fn a_predicate_spanning_two_matches_still_gets_its_own_filter() {
 #[test]
 fn a_where_that_is_only_partly_pushable_keeps_the_top_level_filter() {
     let store = fixture();
-    let cypher =
-        "MATCH (a:Person), (b:Person) WHERE a.age > 40 AND a.age > b.age RETURN a.name LIMIT 3";
+    let cypher = "MATCH (a:Person), (b:Person) WHERE a.age > 40 AND a.age > b.age RETURN a.name LIMIT 3";
     assert!(count_filters(&plan(&store, cypher)) >= 1);
     assert_eq!(rows(&store, cypher), 3);
 }

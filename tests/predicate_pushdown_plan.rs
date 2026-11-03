@@ -20,12 +20,7 @@ fn fixture() -> GraphStore {
     let mut store = GraphStore::new();
     let mut person = |store: &mut GraphStore, i: i64| -> NodeId {
         let id = store.create_node("Person");
-        let _ = store.set_node_property(
-            "default",
-            id,
-            "age".to_string(),
-            PropertyValue::Integer(i % 60),
-        );
+        let _ = store.set_node_property("default", id, "age".to_string(), PropertyValue::Integer(i % 60));
         id
     };
     let people: Vec<NodeId> = (0..40).map(|i| person(&mut store, i)).collect();
@@ -53,9 +48,7 @@ fn fixture() -> GraphStore {
                 PropertyValue::Integer(((i * 5 + j) % 100) as i64),
             );
             store.create_edge(p, post, "WROTE").unwrap();
-            store
-                .create_edge(post, tags[(i + j) % tags.len()], "HAS_TAG")
-                .unwrap();
+            store.create_edge(post, tags[(i + j) % tags.len()], "HAS_TAG").unwrap();
         }
     }
     store
@@ -63,15 +56,11 @@ fn fixture() -> GraphStore {
 
 fn plan_unchecked(store: &GraphStore, cypher: &str) -> String {
     let query = parse_query(&format!("EXPLAIN {cypher}")).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("EXPLAIN should run");
+    let batch = QueryExecutor::new(store).execute(&query).expect("EXPLAIN should run");
     match batch.records[0].get("plan") {
-        Some(Value::Property(PropertyValue::String(t))) => t
-            .lines()
-            .take_while(|l| !l.starts_with("---"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Some(Value::Property(PropertyValue::String(t))) => {
+            t.lines().take_while(|l| !l.starts_with("---")).collect::<Vec<_>>().join("\n")
+        }
         other => panic!("expected a plan string, got {other:?}"),
     }
 }
@@ -95,11 +84,7 @@ fn plan(store: &GraphStore, cypher: &str) -> String {
 
 fn rows(store: &GraphStore, cypher: &str) -> usize {
     let query = parse_query(cypher).expect("query should parse");
-    QueryExecutor::new(store)
-        .execute(&query)
-        .expect("query should run")
-        .records
-        .len()
+    QueryExecutor::new(store).execute(&query).expect("query should run").records.len()
 }
 
 /// Line index of the first row matching **every** fragment in `needles`.
@@ -185,10 +170,7 @@ fn a_predicate_spanning_two_variables_waits_for_the_second() {
     // that binds the second of them.
     let filter = depth_of(&text, &["p.age < post.created"]);
     let wrote = depth_of(&text, &["Expand", "WROTE"]);
-    assert!(
-        filter < wrote,
-        "the predicate must not run before both are bound:\n{text}"
-    );
+    assert!(filter < wrote, "the predicate must not run before both are bound:\n{text}");
     // And it still answers.
     assert!(rows(&store, cypher) > 0);
 }
@@ -196,8 +178,7 @@ fn a_predicate_spanning_two_variables_waits_for_the_second() {
 #[test]
 fn a_single_hop_pattern_is_unchanged() {
     let store = fixture();
-    let cypher =
-        "MATCH (p:Person)-[:WROTE]->(post:Post) WHERE post.created > 90 RETURN post.created";
+    let cypher = "MATCH (p:Person)-[:WROTE]->(post:Post) WHERE post.created > 90 RETURN post.created";
     let expected = (0..200).filter(|k| (k % 100) > 90).count();
     assert_eq!(rows(&store, cypher), expected);
 }
@@ -217,19 +198,9 @@ fn an_optional_match_keeps_its_null_rows() {
     let a = store.create_node("Person");
     let _ = store.set_node_property("default", a, "age".to_string(), PropertyValue::Integer(20));
     let lonely = store.create_node("Person");
-    let _ = store.set_node_property(
-        "default",
-        lonely,
-        "age".to_string(),
-        PropertyValue::Integer(20),
-    );
+    let _ = store.set_node_property("default", lonely, "age".to_string(), PropertyValue::Integer(20));
     let post = store.create_node("Post");
-    let _ = store.set_node_property(
-        "default",
-        post,
-        "created".to_string(),
-        PropertyValue::Integer(99),
-    );
+    let _ = store.set_node_property("default", post, "created".to_string(), PropertyValue::Integer(99));
     store.create_edge(a, post, "WROTE").unwrap();
 
     let cypher = "MATCH (p:Person) OPTIONAL MATCH (p)-[:WROTE]->(m:Post) \

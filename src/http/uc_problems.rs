@@ -50,30 +50,18 @@ const UC2_DRUGS: &[(&str, &str, f64)] = &[
     ("D5", "warfarin", 10.0),
 ];
 const UC2_TARGETS: &[(&str, &str)] = &[
-    ("D0", "AMPK"),
-    ("D0", "GLUT4"),
-    ("D1", "DPP4"),
-    ("D2", "SGLT2"),
-    ("D3", "HMGCR"),
-    ("D4", "50S"),
-    ("D5", "VKOR"),
+    ("D0", "AMPK"), ("D0", "GLUT4"), ("D1", "DPP4"), ("D2", "SGLT2"),
+    ("D3", "HMGCR"), ("D4", "50S"), ("D5", "VKOR"),
 ];
 const UC2_PART_OF: &[(&str, &str)] = &[
-    ("AMPK", "glucose_homeostasis"),
-    ("GLUT4", "glucose_homeostasis"),
-    ("DPP4", "glucose_homeostasis"),
-    ("SGLT2", "glucose_homeostasis"),
-    ("HMGCR", "lipid_metabolism"),
-    ("50S", "antibiotic"),
-    ("VKOR", "coagulation"),
+    ("AMPK", "glucose_homeostasis"), ("GLUT4", "glucose_homeostasis"),
+    ("DPP4", "glucose_homeostasis"), ("SGLT2", "glucose_homeostasis"),
+    ("HMGCR", "lipid_metabolism"), ("50S", "antibiotic"), ("VKOR", "coagulation"),
 ];
 const UC2_IMPLICATED: &[(&str, &str)] = &[("glucose_homeostasis", UC2_DISEASE)];
 const UC2_INTERACTIONS: &[(&str, &str, f64)] = &[
-    ("D0", "D1", 0.1),
-    ("D0", "D2", 0.1),
-    ("D1", "D2", 0.1),
-    ("D0", "D3", 0.3),
-    ("D3", "D5", 0.7),
+    ("D0", "D1", 0.1), ("D0", "D2", 0.1), ("D1", "D2", 0.1),
+    ("D0", "D3", 0.3), ("D3", "D5", 0.7),
     ("D3", "D4", 1.0), // contraindicated
     ("D4", "D5", 0.3),
 ];
@@ -92,54 +80,36 @@ impl UC2DosingProblem {
             drug_id.insert(*did, nid);
         }
         let mut genes: Vec<&str> = UC2_TARGETS.iter().map(|(_, g)| *g).collect();
-        genes.sort();
-        genes.dedup();
+        genes.sort(); genes.dedup();
         let mut gene_id = HashMap::<&str, crate::graph::NodeId>::new();
         for g in &genes {
             let nid = store.create_node("Gene");
-            if let Some(n) = store.get_node_mut(nid) {
-                n.set_property("gid", *g);
-            }
+            if let Some(n) = store.get_node_mut(nid) { n.set_property("gid", *g); }
             gene_id.insert(*g, nid);
         }
         let mut pathways: Vec<&str> = UC2_PART_OF.iter().map(|(_, p)| *p).collect();
-        pathways.sort();
-        pathways.dedup();
+        pathways.sort(); pathways.dedup();
         let mut pathway_id = HashMap::<&str, crate::graph::NodeId>::new();
         for p in &pathways {
             let nid = store.create_node("Pathway");
-            if let Some(n) = store.get_node_mut(nid) {
-                n.set_property("pid", *p);
-            }
+            if let Some(n) = store.get_node_mut(nid) { n.set_property("pid", *p); }
             pathway_id.insert(*p, nid);
         }
         let dz = store.create_node("Disease");
-        if let Some(n) = store.get_node_mut(dz) {
-            n.set_property("did", UC2_DISEASE);
-        }
+        if let Some(n) = store.get_node_mut(dz) { n.set_property("did", UC2_DISEASE); }
 
         for (d, g) in UC2_TARGETS {
-            store
-                .create_edge(drug_id[d], gene_id[g], "TARGETS")
-                .unwrap();
+            store.create_edge(drug_id[d], gene_id[g], "TARGETS").unwrap();
         }
         for (g, p) in UC2_PART_OF {
-            store
-                .create_edge(gene_id[g], pathway_id[p], "PART_OF")
-                .unwrap();
+            store.create_edge(gene_id[g], pathway_id[p], "PART_OF").unwrap();
         }
         for (p, _) in UC2_IMPLICATED {
-            store
-                .create_edge(pathway_id[p], dz, "IMPLICATED_IN")
-                .unwrap();
+            store.create_edge(pathway_id[p], dz, "IMPLICATED_IN").unwrap();
         }
         for (a, b, sev) in UC2_INTERACTIONS {
-            let eid = store
-                .create_edge(drug_id[a], drug_id[b], "INTERACTS_WITH")
-                .unwrap();
-            store
-                .set_edge_property(eid, "severity_score", *sev)
-                .unwrap();
+            let eid = store.create_edge(drug_id[a], drug_id[b], "INTERACTS_WITH").unwrap();
+            store.set_edge_property(eid, "severity_score", *sev).unwrap();
         }
 
         let mut problem = Self {
@@ -175,25 +145,17 @@ impl UC2DosingProblem {
 
     fn run(&self, q: &str) -> crate::query::RecordBatch {
         let s = self.store.read().unwrap();
-        self.engine
-            .execute(q, &*s)
-            .unwrap_or_else(|e| panic!("uc2 cypher: {e}\n{q}"))
+        self.engine.execute(q, &*s).unwrap_or_else(|e| panic!("uc2 cypher: {e}\n{q}"))
     }
 }
 
 impl Default for UC2DosingProblem {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl MultiObjectiveProblem for UC2DosingProblem {
-    fn dim(&self) -> usize {
-        self.drug_dids.len()
-    }
-    fn num_objectives(&self) -> usize {
-        3
-    }
+    fn dim(&self) -> usize { self.drug_dids.len() }
+    fn num_objectives(&self) -> usize { 3 }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (Array1::zeros(self.dim()), Array1::ones(self.dim()))
     }
@@ -221,14 +183,8 @@ impl MultiObjectiveProblem for UC2DosingProblem {
         let r1 = self.run(&q1);
         let mut coverage = HashMap::<String, f64>::new();
         for rec in &r1.records {
-            let did = match rec.get("did") {
-                Some(V::Property(P::String(s))) => s.clone(),
-                _ => continue,
-            };
-            let cov = match rec.get("coverage") {
-                Some(V::Property(P::Integer(i))) => *i as f64,
-                _ => 0.0,
-            };
+            let did = match rec.get("did") { Some(V::Property(P::String(s))) => s.clone(), _ => continue };
+            let cov = match rec.get("coverage") { Some(V::Property(P::Integer(i))) => *i as f64, _ => 0.0 };
             coverage.insert(did, cov);
         }
 
@@ -239,30 +195,17 @@ impl MultiObjectiveProblem for UC2DosingProblem {
         );
         let r2 = self.run(&q2);
 
-        let efficacy: f64 = active_idx
-            .iter()
-            .map(|&i| {
-                let cov = coverage.get(self.drug_dids[i]).copied().unwrap_or(0.0);
-                x[i] * cov
-            })
-            .sum();
+        let efficacy: f64 = active_idx.iter().map(|&i| {
+            let cov = coverage.get(self.drug_dids[i]).copied().unwrap_or(0.0);
+            x[i] * cov
+        }).sum();
 
-        let did_to_idx: HashMap<&str, usize> = self
-            .drug_dids
-            .iter()
-            .enumerate()
-            .map(|(i, &d)| (d, i))
-            .collect();
+        let did_to_idx: HashMap<&str, usize> = self.drug_dids.iter().enumerate()
+            .map(|(i, &d)| (d, i)).collect();
         let mut risk = 0.0_f64;
         for rec in &r2.records {
-            let a = match rec.get("a") {
-                Some(V::Property(P::String(s))) => s.as_str(),
-                _ => continue,
-            };
-            let b = match rec.get("b") {
-                Some(V::Property(P::String(s))) => s.as_str(),
-                _ => continue,
-            };
+            let a = match rec.get("a") { Some(V::Property(P::String(s))) => s.as_str(), _ => continue };
+            let b = match rec.get("b") { Some(V::Property(P::String(s))) => s.as_str(), _ => continue };
             let sev = match rec.get("sev") {
                 Some(V::Property(P::Float(f))) => *f,
                 Some(V::Property(P::Integer(i))) => *i as f64,

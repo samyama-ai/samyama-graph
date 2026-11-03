@@ -17,28 +17,16 @@ use samyama::query::parser::parse_query;
 fn run(cypher: &str) -> Result<Vec<String>, String> {
     let store = GraphStore::new();
     let q = parse_query(cypher).map_err(|e| format!("parse: {e}"))?;
-    let out = QueryExecutor::new(&store)
-        .execute(&q)
-        .map_err(|e| e.to_string())?;
+    let out = QueryExecutor::new(&store).execute(&q).map_err(|e| e.to_string())?;
     Ok(out
         .records
         .iter()
-        .map(|r| {
-            format!(
-                "{:?}",
-                out.columns
-                    .iter()
-                    .map(|c| r.get(c).cloned())
-                    .collect::<Vec<_>>()
-            )
-        })
+        .map(|r| format!("{:?}", out.columns.iter().map(|c| r.get(c).cloned()).collect::<Vec<_>>()))
         .collect())
 }
 
 fn ints(vals: &[i64]) -> Vec<String> {
-    vals.iter()
-        .map(|v| format!("[Some(Property(Integer({v})))]"))
-        .collect()
+    vals.iter().map(|v| format!("[Some(Property(Integer({v})))]")).collect()
 }
 
 #[test]
@@ -73,22 +61,10 @@ fn a_failing_with_order_by_key_is_an_error() {
 
 #[test]
 fn valid_keys_still_sort() {
-    assert_eq!(
-        run("UNWIND [3, 1, 2] AS x RETURN x ORDER BY x").unwrap(),
-        ints(&[1, 2, 3])
-    );
-    assert_eq!(
-        run("UNWIND [3, 1, 2] AS x RETURN x ORDER BY -x").unwrap(),
-        ints(&[3, 2, 1])
-    );
-    assert_eq!(
-        run("UNWIND [3, 1, 2] AS x WITH x ORDER BY x DESC RETURN x").unwrap(),
-        ints(&[3, 2, 1])
-    );
-    assert_eq!(
-        run("UNWIND [3, 1, 2] AS x RETURN x ORDER BY x LIMIT 2").unwrap(),
-        ints(&[1, 2])
-    );
+    assert_eq!(run("UNWIND [3, 1, 2] AS x RETURN x ORDER BY x").unwrap(), ints(&[1, 2, 3]));
+    assert_eq!(run("UNWIND [3, 1, 2] AS x RETURN x ORDER BY -x").unwrap(), ints(&[3, 2, 1]));
+    assert_eq!(run("UNWIND [3, 1, 2] AS x WITH x ORDER BY x DESC RETURN x").unwrap(), ints(&[3, 2, 1]));
+    assert_eq!(run("UNWIND [3, 1, 2] AS x RETURN x ORDER BY x LIMIT 2").unwrap(), ints(&[1, 2]));
 }
 
 /// A sort key that repeats a projected aggregate inside arithmetic resolves to
@@ -103,29 +79,14 @@ fn a_projected_aggregate_inside_an_order_by_key_sorts() {
     let got = run(q).unwrap_or_else(|e| panic!("`{q}` should run: {e}"));
     let groups: Vec<&str> = got
         .iter()
-        .map(|r| {
-            if r.contains("\"b\"") {
-                "b"
-            } else if r.contains("\"c\"") {
-                "c"
-            } else {
-                "a"
-            }
-        })
+        .map(|r| if r.contains("\"b\"") { "b" } else if r.contains("\"c\"") { "c" } else { "a" })
         .collect();
-    assert_eq!(
-        groups,
-        vec!["b", "c", "a"],
-        "not sorted by descending average: {got:?}"
-    );
+    assert_eq!(groups, vec!["b", "c", "a"], "not sorted by descending average: {got:?}");
     let q = "UNWIND [{g: 'a', v: 1}, {g: 'b', v: 9}, {g: 'c', v: 5}, {g: 'a', v: 3}] AS m \
              WITH m.g AS g, m.v AS v \
              RETURN g, avg(v) AS a ORDER BY 38 + avg(v) - 1000";
     let got = run(q).unwrap_or_else(|e| panic!("`{q}` should run: {e}"));
-    assert!(
-        got[0].contains("\"a\"") && got[2].contains("\"b\""),
-        "not sorted by ascending average: {got:?}"
-    );
+    assert!(got[0].contains("\"a\"") && got[2].contains("\"b\""), "not sorted by ascending average: {got:?}");
 }
 
 /// Absent is not an error: a missing map key sorts as null, last ascending.
@@ -140,8 +101,7 @@ fn a_missing_value_is_still_null_and_still_sorts() {
             "[Some(Property(Null))]".to_string(),
         ]
     );
-    let got =
-        run("UNWIND [{a: 2}, {b: 9}, {a: 1}] AS m WITH m ORDER BY m.a RETURN m.a AS a").unwrap();
+    let got = run("UNWIND [{a: 2}, {b: 9}, {a: 1}] AS m WITH m ORDER BY m.a RETURN m.a AS a").unwrap();
     assert_eq!(got.len(), 3);
     assert_eq!(got[0], "[Some(Property(Integer(1)))]");
 }

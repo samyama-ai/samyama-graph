@@ -9,8 +9,8 @@
 //! No API keys required. All data is synthetic and deterministic.
 
 use samyama_sdk::{
-    AlgorithmClient, DistanceMetric, EmbeddedClient, NodeId, PcaConfig, PropertyValue,
-    SamyamaClient, VectorClient,
+    EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
+    NodeId, DistanceMetric, PcaConfig, PropertyValue,
 };
 use std::collections::HashMap;
 
@@ -144,12 +144,9 @@ async fn main() {
                 let target_domain = if pseudo_random(i * 100 + r, 200) < 0.7 {
                     src_domain
                 } else {
-                    (pseudo_random(i * 100 + r, 300) * DOMAINS.len() as f64) as usize
-                        % DOMAINS.len()
+                    (pseudo_random(i * 100 + r, 300) * DOMAINS.len() as f64) as usize % DOMAINS.len()
                 };
-                let target_paper = (pseudo_random(i * 100 + r, 400) * papers_per_domain as f64)
-                    as usize
-                    % papers_per_domain;
+                let target_paper = (pseudo_random(i * 100 + r, 400) * papers_per_domain as f64) as usize % papers_per_domain;
                 let target_idx = target_domain * papers_per_domain + target_paper;
 
                 if target_idx != i && target_idx < total_papers {
@@ -163,11 +160,7 @@ async fn main() {
         }
     }
 
-    println!(
-        "  Created {} papers across {} domains",
-        total_papers,
-        DOMAINS.len()
-    );
+    println!("  Created {} papers across {} domains", total_papers, DOMAINS.len());
     println!("  Created {} CITES edges", edge_count);
     println!();
 
@@ -179,25 +172,20 @@ async fn main() {
 
     let n_components = 3;
 
-    let pca_result = client
-        .pca(
-            Some("Paper"),
-            &FEATURES.iter().map(|s| *s).collect::<Vec<_>>(),
-            PcaConfig {
-                n_components,
-                max_iterations: 200,
-                tolerance: 1e-8,
-                center: true,
-                scale: true, // Scale since features have very different ranges
-                ..Default::default()
-            },
-        )
-        .await;
+    let pca_result = client.pca(
+        Some("Paper"),
+        &FEATURES.iter().map(|s| *s).collect::<Vec<_>>(),
+        PcaConfig {
+            n_components,
+            max_iterations: 200,
+            tolerance: 1e-8,
+            center: true,
+            scale: true, // Scale since features have very different ranges
+            ..Default::default()
+        },
+    ).await;
 
-    println!(
-        "  Samples: {}, Features: {}",
-        pca_result.n_samples, pca_result.n_features
-    );
+    println!("  Samples: {}, Features: {}", pca_result.n_samples, pca_result.n_features);
     println!("  Components extracted: {}", pca_result.components.len());
     println!("  Converged in {} iterations", pca_result.iterations_used);
     println!();
@@ -221,8 +209,7 @@ async fn main() {
     println!("  Component Loadings (which features contribute to each PC):");
     for (i, component) in pca_result.components.iter().enumerate() {
         println!("    PC{}:", i + 1);
-        let mut loadings: Vec<(usize, f64)> =
-            component.iter().enumerate().map(|(j, &v)| (j, v)).collect();
+        let mut loadings: Vec<(usize, f64)> = component.iter().enumerate().map(|(j, &v)| (j, v)).collect();
         loadings.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
         for (j, val) in loadings.iter().take(4) {
             let bar_len = (val.abs() * 30.0) as usize;
@@ -249,14 +236,13 @@ async fn main() {
         for &pid in &paper_ids {
             let nid = NodeId::new(pid);
             if let Some(node) = store.get_node(nid) {
-                let row: Vec<f64> = FEATURES
-                    .iter()
-                    .map(|&f| match node.get_property(f) {
+                let row: Vec<f64> = FEATURES.iter().map(|&f| {
+                    match node.get_property(f) {
                         Some(samyama_sdk::PropertyValue::Float(v)) => *v,
                         Some(samyama_sdk::PropertyValue::Integer(v)) => *v as f64,
                         _ => 0.0,
-                    })
-                    .collect();
+                    }
+                }).collect();
                 feature_matrix.push(row);
             }
         }
@@ -289,24 +275,19 @@ async fn main() {
     println!("Step 4: Building HNSW Index with 3D PCA Vectors");
     separator();
 
-    client
-        .create_vector_index("Paper", "pca_embedding", n_components, DistanceMetric::L2)
+    client.create_vector_index("Paper", "pca_embedding", n_components, DistanceMetric::L2)
         .await
         .expect("Failed to create PCA vector index");
 
     for (i, &pid) in paper_ids.iter().enumerate() {
         let nid = NodeId::new(pid);
         let embedding: Vec<f32> = projected[i].iter().map(|&x| x as f32).collect();
-        client
-            .add_vector("Paper", "pca_embedding", nid, &embedding)
+        client.add_vector("Paper", "pca_embedding", nid, &embedding)
             .await
             .expect("Failed to add PCA vector");
     }
 
-    println!(
-        "  Created HNSW index: dimension={}, metric=L2",
-        n_components
-    );
+    println!("  Created HNSW index: dimension={}, metric=L2", n_components);
     println!("  Indexed {} papers with PCA vectors", total_papers);
     println!();
 
@@ -327,8 +308,7 @@ async fn main() {
 
     // Search using PCA vectors
     let query_vec: Vec<f32> = projected[query_idx].iter().map(|&x| x as f32).collect();
-    let pca_neighbors = client
-        .vector_search("Paper", "pca_embedding", &query_vec, 10)
+    let pca_neighbors = client.vector_search("Paper", "pca_embedding", &query_vec, 10)
         .await
         .expect("PCA vector search failed");
 
@@ -337,11 +317,7 @@ async fn main() {
         let pid = nid.as_u64();
         let title = paper_titles.get(&pid).map(|s| s.as_str()).unwrap_or("?");
         let domain = paper_domains.get(&pid).map(|s| s.as_str()).unwrap_or("?");
-        let marker = if domain == query_domain.as_str() {
-            "*"
-        } else {
-            " "
-        };
+        let marker = if domain == query_domain.as_str() { "*" } else { " " };
         println!(
             "    {:2}. [dist={:.4}] {} \"{}\" ({})",
             rank + 1,
@@ -361,13 +337,7 @@ async fn main() {
     separator();
 
     // Build full-dimensional HNSW index for comparison
-    client
-        .create_vector_index(
-            "Paper",
-            "full_embedding",
-            FEATURES.len(),
-            DistanceMetric::L2,
-        )
+    client.create_vector_index("Paper", "full_embedding", FEATURES.len(), DistanceMetric::L2)
         .await
         .expect("Failed to create full vector index");
 
@@ -387,8 +357,7 @@ async fn main() {
                 scaled as f32
             })
             .collect();
-        client
-            .add_vector("Paper", "full_embedding", nid, &embedding)
+        client.add_vector("Paper", "full_embedding", nid, &embedding)
             .await
             .expect("Failed to add full vector");
     }
@@ -408,8 +377,7 @@ async fn main() {
         })
         .collect();
 
-    let full_neighbors = client
-        .vector_search("Paper", "full_embedding", &query_full, 10)
+    let full_neighbors = client.vector_search("Paper", "full_embedding", &query_full, 10)
         .await
         .expect("Full vector search failed");
 
@@ -421,11 +389,7 @@ async fn main() {
     let overlap = pca_set.intersection(&full_set).count();
 
     println!("  Full 8D neighbors vs PCA 3D neighbors:");
-    println!(
-        "    Overlap in top-10: {}/10 ({:.0}%)",
-        overlap,
-        overlap as f64 * 10.0
-    );
+    println!("    Overlap in top-10: {}/10 ({:.0}%)", overlap, overlap as f64 * 10.0);
     println!();
 
     // Side-by-side comparison
@@ -433,24 +397,12 @@ async fn main() {
     println!("  {:40}  |  {:40}", "-".repeat(40), "-".repeat(40));
     for rank in 0..10 {
         let (f_nid, f_dist) = &full_neighbors[rank];
-        let f_title = paper_titles
-            .get(&f_nid.as_u64())
-            .map(|s| s.as_str())
-            .unwrap_or("?");
-        let f_domain = paper_domains
-            .get(&f_nid.as_u64())
-            .map(|s| s.as_str())
-            .unwrap_or("?");
+        let f_title = paper_titles.get(&f_nid.as_u64()).map(|s| s.as_str()).unwrap_or("?");
+        let f_domain = paper_domains.get(&f_nid.as_u64()).map(|s| s.as_str()).unwrap_or("?");
 
         let (p_nid, p_dist) = &pca_neighbors[rank];
-        let p_title = paper_titles
-            .get(&p_nid.as_u64())
-            .map(|s| s.as_str())
-            .unwrap_or("?");
-        let p_domain = paper_domains
-            .get(&p_nid.as_u64())
-            .map(|s| s.as_str())
-            .unwrap_or("?");
+        let p_title = paper_titles.get(&p_nid.as_u64()).map(|s| s.as_str()).unwrap_or("?");
+        let p_domain = paper_domains.get(&p_nid.as_u64()).map(|s| s.as_str()).unwrap_or("?");
 
         let f_label = format!("{}. {:.3} {}", rank + 1, f_dist, truncate(f_title, 20));
         let p_label = format!("{}. {:.3} {}", rank + 1, p_dist, truncate(p_title, 20));
@@ -472,9 +424,7 @@ async fn main() {
         let domain = paper_domains.get(&pid).unwrap().clone();
         let coords = &projected[i];
 
-        let centroid = domain_centroids
-            .entry(domain.clone())
-            .or_insert_with(|| vec![0.0; n_components]);
+        let centroid = domain_centroids.entry(domain.clone()).or_insert_with(|| vec![0.0; n_components]);
         for (j, &c) in coords.iter().enumerate() {
             centroid[j] += c;
         }
@@ -494,21 +444,15 @@ async fn main() {
     sorted_domains.sort_by(|a, b| a.1[0].partial_cmp(&b.1[0]).unwrap());
 
     println!("  Domain centroids in PCA space (sorted by PC1):");
-    println!(
-        "  {:25} {:>10} {:>10} {:>10}",
-        "Domain", "PC1", "PC2", "PC3"
-    );
-    println!(
-        "  {:25} {:>10} {:>10} {:>10}",
-        "-".repeat(25),
-        "-".repeat(10),
-        "-".repeat(10),
-        "-".repeat(10)
-    );
+    println!("  {:25} {:>10} {:>10} {:>10}", "Domain", "PC1", "PC2", "PC3");
+    println!("  {:25} {:>10} {:>10} {:>10}", "-".repeat(25), "-".repeat(10), "-".repeat(10), "-".repeat(10));
     for (domain, centroid) in &sorted_domains {
         println!(
             "  {:25} {:>10.3} {:>10.3} {:>10.3}",
-            domain, centroid[0], centroid[1], centroid[2],
+            domain,
+            centroid[0],
+            centroid[1],
+            centroid[2],
         );
     }
     println!();
@@ -522,12 +466,7 @@ async fn main() {
         for j in (i + 1)..domains_vec.len() {
             let c1 = &domain_centroids[domains_vec[i]];
             let c2 = &domain_centroids[domains_vec[j]];
-            let dist: f64 = c1
-                .iter()
-                .zip(c2.iter())
-                .map(|(a, b)| (a - b).powi(2))
-                .sum::<f64>()
-                .sqrt();
+            let dist: f64 = c1.iter().zip(c2.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
             all_pairs.push((dist, domains_vec[i], domains_vec[j]));
         }
     }
@@ -561,12 +500,7 @@ async fn main() {
             let title = row[0].as_str().unwrap_or("?");
             let cites = &row[1];
             let domain = row[2].as_str().unwrap_or("?");
-            println!(
-                "    {} (citations: {}, domain: {})",
-                truncate(title, 40),
-                cites,
-                domain
-            );
+            println!("    {} (citations: {}, domain: {})", truncate(title, 40), cites, domain);
         }
     }
     println!();
@@ -595,17 +529,8 @@ async fn main() {
     println!("============================================================================================");
     println!("  Summary");
     println!("============================================================================================");
-    println!(
-        "  Graph: {} papers, {} citations across {} domains",
-        total_papers,
-        edge_count,
-        DOMAINS.len()
-    );
-    println!(
-        "  PCA: Reduced {}D features -> {}D components",
-        FEATURES.len(),
-        n_components
-    );
+    println!("  Graph: {} papers, {} citations across {} domains", total_papers, edge_count, DOMAINS.len());
+    println!("  PCA: Reduced {}D features -> {}D components", FEATURES.len(), n_components);
     let total_var: f64 = pca_result.explained_variance_ratio.iter().sum();
     println!(
         "  Explained variance: {:.1}% in {} components",
@@ -613,10 +538,7 @@ async fn main() {
         n_components,
     );
     println!("  Top-10 neighbor overlap (full vs PCA): {}/10", overlap);
-    println!(
-        "  HNSW index: {}D vectors, {} papers indexed",
-        n_components, total_papers
-    );
+    println!("  HNSW index: {}D vectors, {} papers indexed", n_components, total_papers);
     println!();
 }
 

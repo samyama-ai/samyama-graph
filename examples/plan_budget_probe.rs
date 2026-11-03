@@ -20,8 +20,7 @@ fn fixture(n: usize) -> GraphStore {
     let mut s = GraphStore::new();
     for i in 0..n {
         let node = s.create_node_with_labels([Label::new("N")]);
-        s.set_node_property("default", node, "i", PropertyValue::Integer(i as i64))
-            .unwrap();
+        s.set_node_property("default", node, "i", PropertyValue::Integer(i as i64)).unwrap();
     }
     s
 }
@@ -66,15 +65,9 @@ fn main() {
         .next()
         .unwrap_or_default()
         .to_string();
-    let exposes_rows = [
-        "estimated_rows",
-        "est_rows",
-        "est. rows",
-        "cardinality",
-        "estimated rows",
-    ]
-    .iter()
-    .any(|k| without_budget.contains(k));
+    let exposes_rows = ["estimated_rows", "est_rows", "est. rows", "cardinality", "estimated rows"]
+        .iter()
+        .any(|k| without_budget.contains(k));
     // Does it expose a budget, a spill, or a re-plan -- the three things
     // PERF-05 names as the response to an exploding intermediate?
     let exposes_budget = ["budget", "spill", "re-plan", "replan"]
@@ -94,11 +87,7 @@ fn main() {
     let started = std::time::Instant::now();
     let outcome = match engine.execute(blowup, &store) {
         Ok(b) => {
-            let n = b
-                .records
-                .first()
-                .and_then(|r| r.get("count(*)"))
-                .map(|v| format!("{v:?}"));
+            let n = b.records.first().and_then(|r| r.get("count(*)")).map(|v| format!("{v:?}"));
             format!("completed, count={}", n.unwrap_or_else(|| "?".into()))
         }
         Err(e) => {
@@ -106,23 +95,13 @@ fn main() {
             // A budget refusing the query is the *pass* case, and it must be
             // distinguishable from the query merely failing.
             let budgeted = ["budget", "too many rows", "cardinality", "exceeds"]
-                .iter()
-                .any(|k| msg.to_lowercase().contains(k));
-            format!(
-                "refused ({}) budget_related={budgeted}",
-                msg.chars().take(90).collect::<String>()
-            )
+                .iter().any(|k| msg.to_lowercase().contains(k));
+            format!("refused ({}) budget_related={budgeted}", msg.chars().take(90).collect::<String>())
         }
     };
     println!(
         "PERF-05 unbounded_product_of_{NODES}_nodes: {outcome} in {:?}",
         started.elapsed()
     );
-    println!(
-        "PERF-05 plan_head: {}",
-        plan.chars()
-            .take(160)
-            .collect::<String>()
-            .replace('\n', " | ")
-    );
+    println!("PERF-05 plan_head: {}", plan.chars().take(160).collect::<String>().replace('\n', " | "));
 }

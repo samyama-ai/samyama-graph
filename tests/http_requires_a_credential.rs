@@ -28,10 +28,7 @@ const TOKEN: &str = "s3cret-token";
 
 fn digest_of(token: &str) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(token.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A fresh file per call. Keyed on a counter rather than on the content,
@@ -50,10 +47,8 @@ fn creds_file(body: &str) -> std::path::PathBuf {
 }
 
 fn credentials(tokens: &[(&str, &str)]) -> Vec<Credential> {
-    let body: String = tokens
-        .iter()
-        .map(|(n, t)| format!("{n}:{}\n", digest_of(t)))
-        .collect();
+    let body: String =
+        tokens.iter().map(|(n, t)| format!("{n}:{}\n", digest_of(t))).collect();
     read_credentials(&creds_file(&body)).expect("parse")
 }
 
@@ -82,19 +77,12 @@ async fn without_a_credential_the_api_is_open_as_before() {
     // The default. Every deployment that exists today runs this way, and an
     // upgrade that started refusing their traffic would be a worse failure than
     // the one this fixes.
-    assert_eq!(
-        status_of(app(Vec::new()), get("/api/status", None)).await,
-        StatusCode::OK
-    );
+    assert_eq!(status_of(app(Vec::new()), get("/api/status", None)).await, StatusCode::OK);
 }
 
 #[tokio::test]
 async fn a_configured_server_refuses_a_request_with_no_credential() {
-    let s = status_of(
-        app(credentials(&[("ops", TOKEN)])),
-        get("/api/status", None),
-    )
-    .await;
+    let s = status_of(app(credentials(&[("ops", TOKEN)])), get("/api/status", None)).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
@@ -139,10 +127,10 @@ async fn any_of_several_credentials_is_accepted() {
 async fn the_scheme_must_be_bearer_and_the_header_must_be_well_formed() {
     let creds = credentials(&[("ops", TOKEN)]);
     for header in [
-        format!("Basic {TOKEN}"), // right token, wrong scheme
-        TOKEN.to_string(),        // no scheme at all
-        format!("Bearer{TOKEN}"), // no separator
-        "Bearer".to_string(),     // scheme with nothing after it
+        format!("Basic {TOKEN}"),          // right token, wrong scheme
+        TOKEN.to_string(),                 // no scheme at all
+        format!("Bearer{TOKEN}"),          // no separator
+        "Bearer".to_string(),              // scheme with nothing after it
     ] {
         let req = Request::builder()
             .method("GET")
@@ -209,10 +197,7 @@ async fn the_preflight_is_answered_without_a_credential() {
         .header("access-control-request-method", "POST")
         .body(Body::empty())
         .expect("request");
-    let res = app(credentials(&[("ops", TOKEN)]))
-        .oneshot(req)
-        .await
-        .expect("response");
+    let res = app(credentials(&[("ops", TOKEN)])).oneshot(req).await.expect("response");
     assert!(
         res.status().is_success(),
         "the preflight was refused with {}",
@@ -271,11 +256,7 @@ fn basic(user: &str, password: &str) -> String {
     let raw = format!("{user}:{password}").into_bytes();
     let mut out = String::new();
     for chunk in raw.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
         let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
         for i in 0..4 {
             if i <= chunk.len() {
@@ -307,28 +288,16 @@ async fn a_user_authenticates_with_a_password() {
     // "MUST support authentication (username/password minimum)".
     let creds = user_credentials("alice", "hunter2");
     assert_eq!(
-        status_of(
-            app(creds.clone()),
-            with_header("/api/status", &basic("alice", "hunter2"))
-        )
-        .await,
+        status_of(app(creds.clone()), with_header("/api/status", &basic("alice", "hunter2"))).await,
         StatusCode::OK
     );
     assert_eq!(
-        status_of(
-            app(creds.clone()),
-            with_header("/api/status", &basic("alice", "wrong"))
-        )
-        .await,
+        status_of(app(creds.clone()), with_header("/api/status", &basic("alice", "wrong"))).await,
         StatusCode::UNAUTHORIZED,
         "a wrong password must not authenticate"
     );
     assert_eq!(
-        status_of(
-            app(creds),
-            with_header("/api/status", &basic("bob", "hunter2"))
-        )
-        .await,
+        status_of(app(creds), with_header("/api/status", &basic("bob", "hunter2"))).await,
         StatusCode::UNAUTHORIZED,
         "the right password under the wrong name must not authenticate"
     );
@@ -369,11 +338,7 @@ async fn tokens_and_users_live_in_one_file() {
         "the machine token still works"
     );
     assert_eq!(
-        status_of(
-            app(creds),
-            with_header("/api/status", &basic("alice", "hunter2"))
-        )
-        .await,
+        status_of(app(creds), with_header("/api/status", &basic("alice", "hunter2"))).await,
         StatusCode::OK,
         "and so does the password"
     );
@@ -449,27 +414,15 @@ async fn a_line_with_no_roles_can_still_do_everything() {
     // Files written before roles existed have no `roles=`. They must keep the
     // access they had, or the upgrade refuses every request they send.
     let creds = role_credentials("");
-    assert_eq!(
-        status_of(app(creds.clone()), query("CREATE (:T)")).await,
-        StatusCode::OK
-    );
-    assert_eq!(
-        status_of(app(creds), query("MATCH (n) RETURN n")).await,
-        StatusCode::OK
-    );
+    assert_eq!(status_of(app(creds.clone()), query("CREATE (:T)")).await, StatusCode::OK);
+    assert_eq!(status_of(app(creds), query("MATCH (n) RETURN n")).await, StatusCode::OK);
 }
 
 #[tokio::test]
 async fn a_read_credential_reads_and_is_refused_a_write() {
     let creds = role_credentials(":roles=read");
-    assert_eq!(
-        status_of(app(creds.clone()), query("MATCH (n) RETURN n")).await,
-        StatusCode::OK
-    );
-    assert_eq!(
-        status_of(app(creds.clone()), query("CREATE (:T)")).await,
-        StatusCode::FORBIDDEN
-    );
+    assert_eq!(status_of(app(creds.clone()), query("MATCH (n) RETURN n")).await, StatusCode::OK);
+    assert_eq!(status_of(app(creds.clone()), query("CREATE (:T)")).await, StatusCode::FORBIDDEN);
     let export = post_json(
         "/api/query/export",
         serde_json::json!({ "query": "CREATE (:T) RETURN 1", "format": "csv" }),
@@ -493,11 +446,7 @@ async fn every_mutating_route_needs_more_than_read() {
         "/api/tenants",
     ] {
         let s = status_of(app(creds.clone()), post_json(path, serde_json::json!({}))).await;
-        assert_eq!(
-            s,
-            StatusCode::FORBIDDEN,
-            "{path} let a read credential through"
-        );
+        assert_eq!(s, StatusCode::FORBIDDEN, "{path} let a read credential through");
     }
     let s = status_of(app(creds.clone()), get("/api/tenants", Some(TOKEN))).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "tenant listing is admin-only");
@@ -518,29 +467,16 @@ async fn every_mutating_route_needs_more_than_read() {
 #[tokio::test]
 async fn a_write_credential_writes_but_cannot_manage_tenants() {
     let creds = role_credentials(":roles=write");
-    assert_eq!(
-        status_of(app(creds.clone()), query("CREATE (:T)")).await,
-        StatusCode::OK
-    );
-    assert_eq!(
-        status_of(app(creds.clone()), query("MATCH (n) RETURN n")).await,
-        StatusCode::OK
-    );
-    let s = status_of(
-        app(creds),
-        post_json("/api/snapshot/import", serde_json::json!({})),
-    )
-    .await;
+    assert_eq!(status_of(app(creds.clone()), query("CREATE (:T)")).await, StatusCode::OK);
+    assert_eq!(status_of(app(creds.clone()), query("MATCH (n) RETURN n")).await, StatusCode::OK);
+    let s = status_of(app(creds), post_json("/api/snapshot/import", serde_json::json!({}))).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
 async fn a_tenant_bound_credential_cannot_address_another_graph() {
     let creds = role_credentials(":tenant=acme");
-    let r = post_json(
-        "/api/query",
-        serde_json::json!({ "query": "RETURN 1", "graph": "default" }),
-    );
+    let r = post_json("/api/query", serde_json::json!({ "query": "RETURN 1", "graph": "default" }));
     assert_eq!(status_of(app(creds), r).await, StatusCode::FORBIDDEN);
 }
 

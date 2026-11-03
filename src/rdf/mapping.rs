@@ -16,8 +16,8 @@
 //! - Property triples → node/edge properties
 //! - Reified statements → edges with properties
 
-use super::{Literal, NamedNode, RdfObject, RdfPredicate, RdfStore, RdfSubject, Triple};
-use crate::graph::{Edge, EdgeType, GraphStore, Label, Node, PropertyValue};
+use crate::graph::{GraphStore, Node, Edge, Label, EdgeType, PropertyValue};
+use super::{RdfStore, Triple, NamedNode, RdfPredicate, RdfObject, Literal, RdfSubject};
 use thiserror::Error;
 
 /// Mapping errors
@@ -178,26 +178,16 @@ mod tests {
         let mapper = GraphToRdfMapper::new("http://example.org/");
         let mut graph = GraphStore::new();
         let node_id = graph.create_node("Person");
-        graph
-            .set_node_property("default", node_id, "name", "Ada")
-            .unwrap();
-        let node = graph
-            .get_node(node_id)
-            .expect("the node just created")
-            .clone();
+        graph.set_node_property("default", node_id, "name", "Ada").unwrap();
+        let node = graph.get_node(node_id).expect("the node just created").clone();
 
         let triples = mapper.map_node(&graph, &node).expect("map_node");
         let text: Vec<String> = triples.iter().map(|t| t.to_string()).collect();
         assert_eq!(triples.len(), 2, "one rdf:type and one property: {text:?}");
         assert!(
-            text.iter()
-                .any(|t| t.contains("rdf-syntax-ns#type") && t.contains("class/Person")),
+            text.iter().any(|t| t.contains("rdf-syntax-ns#type") && t.contains("class/Person")),
             "{text:?}"
         );
-        assert!(
-            text.iter()
-                .any(|t| t.contains("prop/name") && t.contains("Ada")),
-            "{text:?}"
-        );
+        assert!(text.iter().any(|t| t.contains("prop/name") && t.contains("Ada")), "{text:?}");
     }
 }

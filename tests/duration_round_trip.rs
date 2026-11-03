@@ -43,22 +43,13 @@ fn every_duration_survives_a_round_trip() {
         ("{seconds: -2, milliseconds: 1}", "PT-1.999S"),
         ("{seconds: -60, milliseconds: -1}", "PT-1M-0.001S"),
         ("{seconds: -60, milliseconds: 1}", "PT-59.999S"),
-        (
-            "{years: 12, months: 5, days: -14, hours: 16}",
-            "P12Y5M-14DT16H",
-        ),
+        ("{years: 12, months: 5, days: -14, hours: 16}", "P12Y5M-14DT16H"),
         ("{seconds: 2, milliseconds: -1}", "PT1.999S"),
         ("{nanoseconds: -1}", "PT-0.000000001S"),
     ] {
+        assert_eq!(rendered(&format!("toString(duration({map}))")), format!("\"{text}\""), "{map}");
         assert_eq!(
-            rendered(&format!("toString(duration({map}))")),
-            format!("\"{text}\""),
-            "{map}"
-        );
-        assert_eq!(
-            one(&format!(
-                "WITH duration({map}) AS d RETURN duration(toString(d)) = d AS r"
-            )),
+            one(&format!("WITH duration({map}) AS d RETURN duration(toString(d)) = d AS r")),
             PropertyValue::Boolean(true),
             "round trip of {map} (rendered {text})"
         );
@@ -97,10 +88,7 @@ fn a_time_drops_the_date_part_of_a_duration() {
 
     // A zoned time keeps its offset while its clock moves.
     let t = "time({hour: 12, minute: 31, second: 14, nanosecond: 1, timezone: '+01:00'})";
-    assert_eq!(
-        rendered(&format!("{t} + duration({{hours: 1}})")),
-        "13:31:14.000000001+01:00"
-    );
+    assert_eq!(rendered(&format!("{t} + duration({{hours: 1}})")), "13:31:14.000000001+01:00");
 }
 
 /// A date-time still applies **both** parts, so the two mirrored rules cannot

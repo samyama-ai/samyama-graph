@@ -21,9 +21,7 @@ use samyama::query::parser::parse_query;
 fn value(cypher: &str) -> Result<String, String> {
     let store = GraphStore::new();
     let q = parse_query(cypher).map_err(|e| e.to_string())?;
-    let r = QueryExecutor::new(&store)
-        .execute(&q)
-        .map_err(|e| format!("{e:?}"))?;
+    let r = QueryExecutor::new(&store).execute(&q).map_err(|e| format!("{e:?}"))?;
     let c = r.columns[0].clone();
     Ok(format!("{:?}", r.records[0].get(&c)))
 }

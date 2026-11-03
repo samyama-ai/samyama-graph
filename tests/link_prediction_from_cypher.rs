@@ -33,8 +33,7 @@ fn hub_and_quiet() -> (GraphStore, Vec<NodeId>) {
     let mut ids = Vec::new();
     for n in ["a", "b", "c", "d", "hub", "quiet"] {
         let x = s.create_node_with_labels([Label::new("P")]);
-        s.set_node_property("default", x, "name", PropertyValue::String(n.into()))
-            .unwrap();
+        s.set_node_property("default", x, "name", PropertyValue::String(n.into())).unwrap();
         ids.push(x);
     }
     let (a, b, c, d, hub, quiet) = (ids[0], ids[1], ids[2], ids[3], ids[4], ids[5]);
@@ -51,20 +50,17 @@ fn rows(store: &GraphStore, cypher: &str) -> Vec<(String, String, f64)> {
     let r = QueryExecutor::new(store)
         .execute(&q)
         .unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
-    r.records
-        .iter()
-        .map(|rec| {
-            let name = |k: &str| match rec.get(k) {
-                Some(Value::Property(PropertyValue::String(s))) => s.clone(),
-                other => format!("{other:?}"),
-            };
-            let sc = match rec.get("score") {
-                Some(Value::Property(PropertyValue::Float(f))) => *f,
-                other => panic!("score was {other:?}"),
-            };
-            (name("n1"), name("n2"), sc)
-        })
-        .collect()
+    r.records.iter().map(|rec| {
+        let name = |k: &str| match rec.get(k) {
+            Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+            other => format!("{other:?}"),
+        };
+        let sc = match rec.get("score") {
+            Some(Value::Property(PropertyValue::Float(f))) => *f,
+            other => panic!("score was {other:?}"),
+        };
+        (name("n1"), name("n2"), sc)
+    }).collect()
 }
 
 const RANK: &str = "CALL algo.%({limit: 20}) YIELD node1, node2, score \
@@ -78,9 +74,7 @@ fn pair(s: &GraphStore, algo: &str, a: NodeId, b: NodeId) -> f64 {
     let q = format!(
         "CALL algo.{algo}({}, {}) YIELD node1, node2, score \
          RETURN node1.name AS n1, node2.name AS n2, score",
-        a.as_u64(),
-        b.as_u64()
-    );
+        a.as_u64(), b.as_u64());
     rows(s, &q)[0].2
 }
 
@@ -97,10 +91,7 @@ fn a_rare_shared_neighbour_counts_for_more_than_a_hub() {
     // Under raw counting a–b is worth twice a–c. Under Adamic-Adar it is worth
     // more than twice, because `quiet` has degree 2 and `hub` has degree 4:
     // 1/ln(2) is much larger than 1/ln(4).
-    assert!(
-        ab > 2.0 * ac,
-        "adamic-adar should reward the rare neighbour: {ab} vs {ac}"
-    );
+    assert!(ab > 2.0 * ac, "adamic-adar should reward the rare neighbour: {ab} vs {ac}");
 }
 
 #[test]
@@ -118,24 +109,14 @@ fn jaccard_normalises_by_how_connected_the_pair_is() {
 #[test]
 fn the_ranking_excludes_pairs_that_are_already_connected() {
     let (s, ids) = hub_and_quiet();
-    let names: Vec<(String, String)> = rank(&s, "commonNeighbors")
-        .into_iter()
-        .map(|(a, b, _)| (a, b))
-        .collect();
+    let names: Vec<(String, String)> =
+        rank(&s, "commonNeighbors").into_iter().map(|(a, b, _)| (a, b)).collect();
     // `hub` is joined to a, b, c and d, so none of those pairs may appear.
-    for joined in [
-        ("hub", "a"),
-        ("hub", "b"),
-        ("hub", "c"),
-        ("hub", "d"),
-        ("quiet", "a"),
-        ("quiet", "b"),
-    ] {
+    for joined in [("hub", "a"), ("hub", "b"), ("hub", "c"), ("hub", "d"),
+                   ("quiet", "a"), ("quiet", "b")] {
         assert!(
-            !names
-                .iter()
-                .any(|(x, y)| (x.as_str(), y.as_str()) == joined
-                    || (y.as_str(), x.as_str()) == joined),
+            !names.iter().any(|(x, y)| (x.as_str(), y.as_str()) == joined
+                || (y.as_str(), x.as_str()) == joined),
             "an existing edge appeared as a prediction: {joined:?} in {names:?}"
         );
     }
@@ -147,14 +128,8 @@ fn the_ranking_is_sorted_and_respects_its_limit() {
     let (s, _) = hub_and_quiet();
     for algo in ["commonNeighbors", "jaccard", "adamicAdar"] {
         let v = rank(&s, algo);
-        assert!(
-            v.windows(2).all(|w| w[0].2 >= w[1].2),
-            "{algo} not sorted: {v:?}"
-        );
-        let two = rows(
-            &s,
-            &RANK.replace('%', algo).replace("limit: 20", "limit: 2"),
-        );
+        assert!(v.windows(2).all(|w| w[0].2 >= w[1].2), "{algo} not sorted: {v:?}");
+        let two = rows(&s, &RANK.replace('%', algo).replace("limit: 20", "limit: 2"));
         assert!(two.len() <= 2, "{algo} ignored its limit: {two:?}");
     }
 }
@@ -169,15 +144,10 @@ fn the_two_spellings_of_common_neighbours_agree() {
 fn a_node_outside_the_projection_is_refused() {
     let (s, ids) = hub_and_quiet();
     let q = format!(
-        "CALL algo.jaccard({}, 99999) YIELD score RETURN score",
-        ids[0].as_u64()
-    );
+        "CALL algo.jaccard({}, 99999) YIELD score RETURN score", ids[0].as_u64());
     let parsed = parse_query(&q).unwrap();
     let e = QueryExecutor::new(&s).execute(&parsed).unwrap_err();
-    assert!(
-        format!("{e:?}").contains("not in the projected graph"),
-        "{e:?}"
-    );
+    assert!(format!("{e:?}").contains("not in the projected graph"), "{e:?}");
 }
 
 #[test]
@@ -188,8 +158,7 @@ fn two_isolated_nodes_score_zero_rather_than_perfect_similarity() {
     let mut ids = Vec::new();
     for n in ["i1", "i2"] {
         let x = s.create_node_with_labels([Label::new("P")]);
-        s.set_node_property("default", x, "name", PropertyValue::String(n.into()))
-            .unwrap();
+        s.set_node_property("default", x, "name", PropertyValue::String(n.into())).unwrap();
         ids.push(x);
     }
     assert_eq!(pair(&s, "jaccard", ids[0], ids[1]), 0.0);

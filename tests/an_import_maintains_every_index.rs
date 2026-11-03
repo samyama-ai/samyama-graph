@@ -46,10 +46,7 @@ fn store_with_index() -> GraphStore {
 }
 
 fn hits(s: &GraphStore, term: &str) -> usize {
-    s.fulltext
-        .search("ft", term, 10)
-        .map(|v| v.len())
-        .unwrap_or(0)
+    s.fulltext.search("ft", term, 10).map(|v| v.len()).unwrap_or(0)
 }
 
 #[test]
@@ -57,13 +54,8 @@ fn the_setter_maintains_the_full_text_index() {
     // The control: the path that always worked.
     let mut s = store_with_index();
     let n = s.create_node("Doc");
-    s.set_node_property(
-        T,
-        n,
-        "body",
-        PropertyValue::String("quick brown fox".into()),
-    )
-    .expect("set");
+    s.set_node_property(T, n, "body", PropertyValue::String("quick brown fox".into()))
+        .expect("set");
     assert_eq!(hits(&s, "quick"), 1);
 }
 
@@ -76,10 +68,7 @@ fn setting_through_get_node_mut_does_not_maintain_it() {
     let mut s = store_with_index();
     let n = s.create_node("Doc");
     if let Some(node) = s.get_node_mut(n) {
-        node.set_property(
-            "body".to_string(),
-            PropertyValue::String("quick brown fox".into()),
-        );
+        node.set_property("body".to_string(), PropertyValue::String("quick brown fox".into()));
     }
     assert_eq!(
         hits(&s, "quick"),
@@ -94,25 +83,15 @@ fn a_node_written_the_way_the_importers_write_is_searchable() {
     let mut s = store_with_index();
     let n = s.create_node("Doc");
     let props = vec![
-        (
-            "body".to_string(),
-            PropertyValue::String("quick brown fox".into()),
-        ),
-        (
-            "title".to_string(),
-            PropertyValue::String("untouched".into()),
-        ),
+        ("body".to_string(), PropertyValue::String("quick brown fox".into())),
+        ("title".to_string(), PropertyValue::String("untouched".into())),
     ];
     for (k, v) in props {
         s.set_node_property(T, n, k, v).expect("set");
     }
     assert_eq!(hits(&s, "quick"), 1);
     assert_eq!(hits(&s, "fox"), 1);
-    assert_eq!(
-        hits(&s, "untouched"),
-        0,
-        "only the indexed property is indexed"
-    );
+    assert_eq!(hits(&s, "untouched"), 0, "only the indexed property is indexed");
 }
 
 #[test]
@@ -122,13 +101,8 @@ fn many_imported_rows_are_all_searchable() {
     let mut s = store_with_index();
     for i in 0..200u64 {
         let n = s.create_node("Doc");
-        s.set_node_property(
-            T,
-            n,
-            "body",
-            PropertyValue::String(format!("document {i} about graphs")),
-        )
-        .expect("set");
+        s.set_node_property(T, n, "body", PropertyValue::String(format!("document {i} about graphs")))
+            .expect("set");
     }
     assert_eq!(hits(&s, "graphs"), 10, "search caps at the limit asked for");
     assert_eq!(hits(&s, "nonexistentterm"), 0);
@@ -139,19 +113,10 @@ fn an_index_created_after_the_rows_still_finds_them() {
     // The other order, which the endpoints allow: import first, declare after.
     let mut s = GraphStore::new();
     let n = s.create_node("Doc");
-    s.set_node_property(
-        T,
-        n,
-        "body",
-        PropertyValue::String("quick brown fox".into()),
-    )
-    .expect("set");
+    s.set_node_property(T, n, "body", PropertyValue::String("quick brown fox".into()))
+        .expect("set");
     s.create_fulltext_index("ft", "Doc", "body");
-    assert_eq!(
-        hits(&s, "quick"),
-        1,
-        "declaring the index did not backfill it"
-    );
+    assert_eq!(hits(&s, "quick"), 1, "declaring the index did not backfill it");
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +135,9 @@ use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-fn import_app(store: GraphStore) -> (axum::Router, Arc<tokio::sync::RwLock<GraphStore>>) {
+fn import_app(
+    store: GraphStore,
+) -> (axum::Router, Arc<tokio::sync::RwLock<GraphStore>>) {
     let store = Arc::new(tokio::sync::RwLock::new(store));
     let state = samyama::http::server::AppState {
         store: store.clone(),
@@ -242,11 +209,7 @@ async fn a_corpus_imported_over_http_is_searchable() {
 async fn an_http_import_into_a_store_with_no_index_still_works() {
     // The change must not make an import depend on an index existing.
     let (app, store) = import_app(GraphStore::new());
-    let status = post_json(
-        &app,
-        json!({"label": "Doc", "nodes": [{"body": "no index here"}]}),
-    )
-    .await;
+    let status = post_json(&app, json!({"label": "Doc", "nodes": [{"body": "no index here"}]})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(store.read().await.node_count(), 1);
 }
@@ -270,8 +233,5 @@ async fn an_http_import_still_writes_every_property_it_used_to() {
     assert_eq!(p.get("i"), Some(&PropertyValue::Integer(42)));
     assert_eq!(p.get("f"), Some(&PropertyValue::Float(1.5)));
     assert_eq!(p.get("b"), Some(&PropertyValue::Boolean(true)));
-    assert!(
-        p.get("skipped").is_none(),
-        "a null is still skipped, as before"
-    );
+    assert!(p.get("skipped").is_none(), "a null is still skipped, as before");
 }

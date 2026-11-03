@@ -13,14 +13,16 @@
 //! Smaller fixture (3 facilities, 30 iters) to keep the test under a
 //! second on M1.
 
-use samyama_sdk::{Array1, BMRSolver, EmbeddedClient, Problem, SamyamaClient, SolverConfig};
+use samyama_sdk::{
+    Array1, BMRSolver, EmbeddedClient, Problem, SamyamaClient, SolverConfig,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
 const FACILITIES: &[(&str, f64, f64, f64, f64)] = &[
     ("H0", 120.0, 150.0, 20.0, 2400.0),
-    ("H1", 80.0, 96.0, 13.0, 1800.0),
+    ("H1",  80.0,  96.0, 13.0, 1800.0),
     ("H2", 200.0, 260.0, 34.0, 4200.0),
 ];
 const MEAN_SERVICE_DAYS: f64 = 4.0;
@@ -62,38 +64,28 @@ struct CapacityProblem {
 }
 
 impl Problem for CapacityProblem {
-    fn dim(&self) -> usize {
-        3 * self.fids.len()
-    }
+    fn dim(&self) -> usize { 3 * self.fids.len() }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         let n = self.fids.len();
         let mut lo = Array1::zeros(3 * n);
         let mut hi = Array1::zeros(3 * n);
         for i in 0..n {
-            lo[3 * i] = -5.0;
-            hi[3 * i] = 30.0;
-            lo[3 * i + 1] = -10.0;
-            hi[3 * i + 1] = 40.0;
-            lo[3 * i + 2] = -2.0;
-            hi[3 * i + 2] = 8.0;
+            lo[3 * i] = -5.0;     hi[3 * i] = 30.0;
+            lo[3 * i + 1] = -10.0; hi[3 * i + 1] = 40.0;
+            lo[3 * i + 2] = -2.0;  hi[3 * i + 2] = 8.0;
         }
         (lo, hi)
     }
     fn objective(&self, x: &Array1<f64>) -> f64 {
-        let id_list = self
-            .fids
-            .iter()
-            .map(|f| format!("\"{f}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let id_list = self.fids.iter().map(|f| format!("\"{f}\""))
+            .collect::<Vec<_>>().join(", ");
         let q = format!(
             "MATCH (f:Facility) WHERE f.fid IN [{id_list}] \
              RETURN f.fid AS fid, f.beds AS beds, f.nurses AS nurses, \
                     f.doctors AS doctors, f.admissions AS admissions"
         );
         let client = self.client.clone();
-        let r = self
-            .handle
+        let r = self.handle
             .block_on(async move { client.query_readonly("default", &q).await })
             .expect("cypher");
 
@@ -116,32 +108,19 @@ impl Problem for CapacityProblem {
         let mut ratio_pen = 0.0;
         let mut nonneg_pen = 0.0;
         for (i, fid) in self.fids.iter().enumerate() {
-            let (beds, nurses, doctors, adm) =
-                state.get(*fid).copied().unwrap_or((0.0, 0.0, 0.0, 0.0));
-            let nb = beds + x[3 * i];
-            let nn = nurses + x[3 * i + 1];
-            let nd = doctors + x[3 * i + 2];
-            cost += COST_BED * x[3 * i].max(0.0)
-                + COST_NURSE * x[3 * i + 1].max(0.0)
-                + COST_DOCTOR * x[3 * i + 2].max(0.0);
-            if nb <= 0.0 {
-                nonneg_pen += (-nb + 1.0) * 1e6;
-            }
-            if nn < 0.0 {
-                nonneg_pen += -nn * 1e6;
-            }
-            if nd < 0.0 {
-                nonneg_pen += -nd * 1e6;
-            }
+            let (beds, nurses, doctors, adm) = state.get(*fid).copied().unwrap_or((0.0,0.0,0.0,0.0));
+            let nb = beds + x[3*i];
+            let nn = nurses + x[3*i+1];
+            let nd = doctors + x[3*i+2];
+            cost += COST_BED * x[3*i].max(0.0) + COST_NURSE * x[3*i+1].max(0.0) + COST_DOCTOR * x[3*i+2].max(0.0);
+            if nb <= 0.0 { nonneg_pen += (-nb + 1.0) * 1e6; }
+            if nn < 0.0 { nonneg_pen += -nn * 1e6; }
+            if nd < 0.0 { nonneg_pen += -nd * 1e6; }
             if nb > 0.0 {
                 let r = nn / nb;
-                if r < NURSE_BED_FLOOR {
-                    ratio_pen += (NURSE_BED_FLOOR - r) * 5e5 * nb.max(1.0);
-                }
+                if r < NURSE_BED_FLOOR { ratio_pen += (NURSE_BED_FLOOR - r) * 5e5 * nb.max(1.0); }
                 let r = nd / nb;
-                if r < DOCTOR_BED_FLOOR {
-                    ratio_pen += (DOCTOR_BED_FLOOR - r) * 5e5 * nb.max(1.0);
-                }
+                if r < DOCTOR_BED_FLOOR { ratio_pen += (DOCTOR_BED_FLOOR - r) * 5e5 * nb.max(1.0); }
             }
             let lambda = adm * DEMAND_SURGE / QUARTER_DAYS;
             wait_pd += mmc_wait(lambda, mu, nb.max(0.1)) * (adm * DEMAND_SURGE);
@@ -151,11 +130,7 @@ impl Problem for CapacityProblem {
     }
 }
 
-async fn solve_at_budget(
-    client: Arc<EmbeddedClient>,
-    fids: Vec<&'static str>,
-    budget: f64,
-) -> (Vec<f64>, f64) {
+async fn solve_at_budget(client: Arc<EmbeddedClient>, fids: Vec<&'static str>, budget: f64) -> (Vec<f64>, f64) {
     let problem = Arc::new(CapacityProblem {
         client,
         handle: Handle::current(),
@@ -168,12 +143,8 @@ async fn solve_at_budget(
     });
     let p = problem.clone();
     let res = tokio::task::spawn_blocking(move || solver.solve(&*p))
-        .await
-        .unwrap();
-    (
-        res.best_variables.iter().copied().collect(),
-        res.best_fitness,
-    )
+        .await.unwrap();
+    (res.best_variables.iter().copied().collect(), res.best_fitness)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -197,10 +168,8 @@ async fn uc3_more_budget_lowers_wait() {
     let (plan_small, fit_small) = solve_at_budget(client.clone(), fids.clone(), 3_000_000.0).await;
     let (plan_large, fit_large) = solve_at_budget(client.clone(), fids.clone(), 30_000_000.0).await;
 
-    assert!(
-        fit_small.is_finite() && fit_large.is_finite(),
-        "non-finite fitness: small={fit_small} large={fit_large}"
-    );
+    assert!(fit_small.is_finite() && fit_large.is_finite(),
+        "non-finite fitness: small={fit_small} large={fit_large}");
 
     // More budget must not produce a worse plan (allow tiny stochastic slack).
     assert!(
@@ -217,24 +186,14 @@ async fn uc3_more_budget_lowers_wait() {
 
     // Sanity: ratio floors hold on the large-budget plan.
     for (i, (_, beds, nurses, doctors, _)) in FACILITIES.iter().enumerate() {
-        let nb = beds + plan_large[3 * i];
-        let nn = nurses + plan_large[3 * i + 1];
-        let nd = doctors + plan_large[3 * i + 2];
+        let nb = beds + plan_large[3*i];
+        let nn = nurses + plan_large[3*i+1];
+        let nd = doctors + plan_large[3*i+2];
         if nb > 0.0 {
-            assert!(
-                nn / nb >= NURSE_BED_FLOOR - 0.05,
-                "nurse/bed ratio violated at facility {i}: {} / {} = {}",
-                nn,
-                nb,
-                nn / nb
-            );
-            assert!(
-                nd / nb >= DOCTOR_BED_FLOOR - 0.02,
-                "doctor/bed ratio violated at facility {i}: {} / {} = {}",
-                nd,
-                nb,
-                nd / nb
-            );
+            assert!(nn / nb >= NURSE_BED_FLOOR - 0.05,
+                "nurse/bed ratio violated at facility {i}: {} / {} = {}", nn, nb, nn/nb);
+            assert!(nd / nb >= DOCTOR_BED_FLOOR - 0.02,
+                "doctor/bed ratio violated at facility {i}: {} / {} = {}", nd, nb, nd/nb);
         }
     }
     let _ = plan_small;

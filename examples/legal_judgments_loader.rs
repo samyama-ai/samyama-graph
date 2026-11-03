@@ -43,9 +43,7 @@ async fn main() -> Result<(), Error> {
                 .expect("--data-dir requires a path argument"),
         )
     } else {
-        eprintln!(
-            "Usage: cargo run --release --example legal_judgments_loader -- --data-dir <PATH>"
-        );
+        eprintln!("Usage: cargo run --release --example legal_judgments_loader -- --data-dir <PATH>");
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --data-dir PATH    Directory containing the judgment CSV files (required)");
@@ -53,9 +51,7 @@ async fn main() -> Result<(), Error> {
         eprintln!("  --query            Enter interactive Cypher REPL after loading");
         eprintln!();
         eprintln!("Required files:");
-        eprintln!(
-            "  judges.csv        cases.csv         parties.csv     acts.csv       topics.csv"
-        );
+        eprintln!("  judges.csv        cases.csv         parties.csv     acts.csv       topics.csv");
         eprintln!("  edge_decided.csv  edge_party_in.csv edge_cites.csv  edge_about.csv");
         eprintln!();
         eprintln!("Download from: https://huggingface.co/datasets/Shreyasrao/Indian-law-supreme-court-judgements-2016");

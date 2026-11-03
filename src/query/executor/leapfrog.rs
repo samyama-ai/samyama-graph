@@ -13,12 +13,12 @@
 //! - Sorted adjacency lists (guaranteed by CSR FrozenAdjacency + sorted Vec-of-Vec)
 //! - Binary search support (FrozenAdjacency::find_neighbor already exists)
 
-use super::operator::{OperatorBox, OperatorDescription, PhysicalOperator};
+use crate::graph::types::{NodeId, EdgeId};
+use crate::graph::store::GraphStore;
+use crate::query::ast::Direction;
+use super::operator::{PhysicalOperator, OperatorBox, OperatorDescription};
 use super::record::{Record, Value};
 use super::ExecutionResult;
-use crate::graph::store::GraphStore;
-use crate::graph::types::{EdgeId, NodeId};
-use crate::query::ast::Direction;
 
 /// A seekable iterator over sorted (NodeId, EdgeId) pairs.
 /// Supports `seek(target)` for O(log n) jumping — the core of LeapFrog.
@@ -121,8 +121,7 @@ impl<'a> LeapFrogJoin<'a> {
             self.iters.clear(); // force empty result
         }
         // Sort by current key
-        self.iters
-            .sort_by_key(|it| it.key().unwrap_or(NodeId::new(u64::MAX)));
+        self.iters.sort_by_key(|it| it.key().unwrap_or(NodeId::new(u64::MAX)));
         self.initialized = true;
     }
 
@@ -161,8 +160,9 @@ impl<'a> LeapFrogJoin<'a> {
                 if k > 1 && !self.iters[0].at_end() {
                     let new_key = self.iters[0].key().unwrap_or(NodeId::new(u64::MAX));
                     // Find insertion point
-                    let insert_pos = self.iters[1..]
-                        .partition_point(|it| it.key().unwrap_or(NodeId::new(u64::MAX)) < new_key);
+                    let insert_pos = self.iters[1..].partition_point(|it| {
+                        it.key().unwrap_or(NodeId::new(u64::MAX)) < new_key
+                    });
                     if insert_pos > 0 {
                         self.iters[..=insert_pos].rotate_left(1);
                     }
@@ -174,8 +174,9 @@ impl<'a> LeapFrogJoin<'a> {
                 // Re-sort after seek
                 if !self.iters[0].at_end() {
                     let new_key = self.iters[0].key().unwrap_or(NodeId::new(u64::MAX));
-                    let insert_pos = self.iters[1..]
-                        .partition_point(|it| it.key().unwrap_or(NodeId::new(u64::MAX)) < new_key);
+                    let insert_pos = self.iters[1..].partition_point(|it| {
+                        it.key().unwrap_or(NodeId::new(u64::MAX)) < new_key
+                    });
                     if insert_pos > 0 {
                         self.iters[..=insert_pos].rotate_left(1);
                     }
@@ -291,11 +292,7 @@ impl TrieJoinOperator {
     }
 
     /// Build sorted neighbor lists for each constraint given the current record.
-    fn build_neighbor_lists(
-        &self,
-        record: &Record,
-        store: &GraphStore,
-    ) -> Vec<Vec<(NodeId, EdgeId)>> {
+    fn build_neighbor_lists(&self, record: &Record, store: &GraphStore) -> Vec<Vec<(NodeId, EdgeId)>> {
         let mut lists = Vec::with_capacity(self.constraints.len());
 
         for constraint in &self.constraints {
@@ -375,8 +372,7 @@ impl PhysicalOperator for TrieJoinOperator {
                         if let Ok(pos) = list.binary_search_by_key(&matched_node, |&(nid, _)| nid) {
                             let (_, edge_id) = list[pos];
                             if let Some(et) = store.get_edge_type(edge_id) {
-                                let bound_id = record
-                                    .get(&constraint.bound_var)
+                                let bound_id = record.get(&constraint.bound_var)
                                     .and_then(|v| v.node_id())
                                     .unwrap_or(NodeId::new(0));
                                 let (src, tgt) = match constraint.direction {
@@ -384,8 +380,7 @@ impl PhysicalOperator for TrieJoinOperator {
                                     Direction::Incoming => (matched_node, bound_id),
                                     Direction::Both => (bound_id, matched_node),
                                 };
-                                record
-                                    .bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, et));
+                                record.bind(edge_var.clone(), Value::EdgeRef(edge_id, src, tgt, et));
                             }
                         }
                     }
@@ -413,8 +408,7 @@ impl PhysicalOperator for TrieJoinOperator {
             }
 
             let matches = {
-                let iters: Vec<AdjacencyIterator> = neighbor_lists
-                    .iter()
+                let iters: Vec<AdjacencyIterator> = neighbor_lists.iter()
                     .map(|list| AdjacencyIterator::new(list.as_slice()))
                     .collect();
                 let mut join = LeapFrogJoin::new(iters);
@@ -437,22 +431,16 @@ impl PhysicalOperator for TrieJoinOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
-        let constraints_str: Vec<String> = self
-            .constraints
-            .iter()
-            .map(|c| {
-                let dir = match c.direction {
-                    Direction::Outgoing => format!("N_out({})", c.bound_var),
-                    Direction::Incoming => format!("N_in({})", c.bound_var),
-                    Direction::Both => format!("N_both({})", c.bound_var),
-                };
-                if c.edge_types.is_empty() {
-                    dir
-                } else {
-                    format!("{}[:{}]", dir, c.edge_types.join("|"))
-                }
-            })
-            .collect();
+        let constraints_str: Vec<String> = self.constraints.iter().map(|c| {
+            let dir = match c.direction {
+                Direction::Outgoing => format!("N_out({})", c.bound_var),
+                Direction::Incoming => format!("N_in({})", c.bound_var),
+                Direction::Both => format!("N_both({})", c.bound_var),
+            };
+            if c.edge_types.is_empty() { dir } else {
+                format!("{}[:{}]", dir, c.edge_types.join("|"))
+            }
+        }).collect();
 
         OperatorDescription {
             name: "TrieJoin".to_string(),
@@ -471,10 +459,7 @@ mod tests {
     use super::*;
 
     fn make_entries(node_ids: &[u64]) -> Vec<(NodeId, EdgeId)> {
-        node_ids
-            .iter()
-            .map(|&id| (NodeId::new(id), EdgeId::new(id * 100)))
-            .collect()
+        node_ids.iter().map(|&id| (NodeId::new(id), EdgeId::new(id * 100))).collect()
     }
 
     #[test]
@@ -616,8 +601,8 @@ mod tests {
     // TrieJoinOperator integration tests
     // ========================================================
 
-    use super::super::operator::ExpandOperator;
     use super::super::operator::NodeScanOperator;
+    use super::super::operator::ExpandOperator;
     use crate::graph::types::Label;
 
     /// Build a triangle graph: a->b, b->c, c->a
@@ -641,7 +626,7 @@ mod tests {
         let b = g.create_node("Node"); // 2
         let c = g.create_node("Node"); // 3
         let d = g.create_node("Node"); // 4
-                                       // Triangle 1: a->b->c->a
+        // Triangle 1: a->b->c->a
         g.create_edge(a, b, "EDGE").unwrap();
         g.create_edge(b, c, "EDGE").unwrap();
         g.create_edge(c, a, "EDGE").unwrap();
@@ -659,10 +644,7 @@ mod tests {
         // Input: scan all "Node" as a, expand to b
         // TrieJoin: find c where c ∈ N_out(b) ∩ N_in(a)
 
-        let scan = Box::new(NodeScanOperator::new(
-            "a".to_string(),
-            vec![Label::new("Node")],
-        ));
+        let scan = Box::new(NodeScanOperator::new("a".to_string(), vec![Label::new("Node")]));
         let expand = Box::new(ExpandOperator::new(
             scan,
             "a".to_string(),
@@ -702,12 +684,7 @@ mod tests {
 
         // Single triangle: 3 nodes × 1 rotation each = 3 triangles
         // (1,2,3), (2,3,1), (3,1,2)
-        assert_eq!(
-            results.len(),
-            3,
-            "Expected 3 triangle instances, got {:?}",
-            results
-        );
+        assert_eq!(results.len(), 3, "Expected 3 triangle instances, got {:?}", results);
 
         // All three rotations should be present
         assert!(results.contains(&(1, 2, 3)));
@@ -722,10 +699,7 @@ mod tests {
         // T1: (1)->(2)->(3)->(1)
         // T2: (1)->(2)->(4)->(1)
 
-        let scan = Box::new(NodeScanOperator::new(
-            "a".to_string(),
-            vec![Label::new("Node")],
-        ));
+        let scan = Box::new(NodeScanOperator::new("a".to_string(), vec![Label::new("Node")]));
         let expand = Box::new(ExpandOperator::new(
             scan,
             "a".to_string(),
@@ -760,10 +734,7 @@ mod tests {
         }
 
         // 2 triangles × 3 rotations = 6 total triangle instances
-        assert_eq!(
-            count, 6,
-            "Expected 6 triangle instances in double-triangle graph"
-        );
+        assert_eq!(count, 6, "Expected 6 triangle instances in double-triangle graph");
     }
 
     #[test]
@@ -777,10 +748,7 @@ mod tests {
         g.create_edge(b, c, "EDGE").unwrap();
         g.compact_adjacency();
 
-        let scan = Box::new(NodeScanOperator::new(
-            "a".to_string(),
-            vec![Label::new("Node")],
-        ));
+        let scan = Box::new(NodeScanOperator::new("a".to_string(), vec![Label::new("Node")]));
         let expand = Box::new(ExpandOperator::new(
             scan,
             "a".to_string(),
@@ -816,12 +784,7 @@ mod tests {
         assert_eq!(count, 0, "Chain graph should have no triangles");
     }
 
-    fn constraint(
-        bound: &str,
-        direction: Direction,
-        types: &[&str],
-        edge_var: Option<&str>,
-    ) -> PhysicalTrieConstraint {
+    fn constraint(bound: &str, direction: Direction, types: &[&str], edge_var: Option<&str>) -> PhysicalTrieConstraint {
         PhysicalTrieConstraint {
             bound_var: bound.to_string(),
             direction,
@@ -831,10 +794,7 @@ mod tests {
     }
 
     fn a_to_b(edge_type: &str) -> OperatorBox {
-        let scan = Box::new(NodeScanOperator::new(
-            "a".to_string(),
-            vec![Label::new("Node")],
-        ));
+        let scan = Box::new(NodeScanOperator::new("a".to_string(), vec![Label::new("Node")]));
         Box::new(ExpandOperator::new(
             scan,
             "a".to_string(),
@@ -925,15 +885,9 @@ mod tests {
         let mut tj = TrieJoinOperator::new(
             a_to_b("EDGE"),
             "c".to_string(),
-            vec![
-                constraint("b", Direction::Outgoing, &[], None),
-                constraint("a", Direction::Incoming, &[], None),
-            ],
+            vec![constraint("b", Direction::Outgoing, &[], None), constraint("a", Direction::Incoming, &[], None)],
         );
-        assert_eq!(
-            triangles(&mut tj, &g),
-            vec![(1, 2, 3), (2, 3, 1), (3, 1, 2)]
-        );
+        assert_eq!(triangles(&mut tj, &g), vec![(1, 2, 3), (2, 3, 1), (3, 1, 2)]);
     }
 
     #[test]
@@ -950,23 +904,14 @@ mod tests {
         let mut typed = TrieJoinOperator::new(
             a_to_b("EDGE"),
             "c".to_string(),
-            vec![
-                constraint("b", Direction::Outgoing, &["EDGE"], None),
-                constraint("a", Direction::Incoming, &["EDGE"], None),
-            ],
+            vec![constraint("b", Direction::Outgoing, &["EDGE"], None), constraint("a", Direction::Incoming, &["EDGE"], None)],
         );
-        assert!(
-            triangles(&mut typed, &g).is_empty(),
-            "the closing edge is OTHER, not EDGE"
-        );
+        assert!(triangles(&mut typed, &g).is_empty(), "the closing edge is OTHER, not EDGE");
 
         let mut either = TrieJoinOperator::new(
             a_to_b("EDGE"),
             "c".to_string(),
-            vec![
-                constraint("b", Direction::Outgoing, &["EDGE"], None),
-                constraint("a", Direction::Incoming, &["EDGE", "OTHER"], None),
-            ],
+            vec![constraint("b", Direction::Outgoing, &["EDGE"], None), constraint("a", Direction::Incoming, &["EDGE", "OTHER"], None)],
         );
         assert_eq!(triangles(&mut either, &g), vec![(1, 2, 3)]);
     }
@@ -977,10 +922,7 @@ mod tests {
         let mut tj = TrieJoinOperator::new(
             a_to_b("EDGE"),
             "c".to_string(),
-            vec![
-                constraint("b", Direction::Outgoing, &[], Some("r2")),
-                constraint("a", Direction::Incoming, &[], Some("r3")),
-            ],
+            vec![constraint("b", Direction::Outgoing, &[], Some("r2")), constraint("a", Direction::Incoming, &[], Some("r3"))],
         );
         let mut rows = 0;
         while let Some(r) = tj.next(&store).unwrap() {
@@ -991,13 +933,7 @@ mod tests {
             // r2 : b -> c, r3 : c -> a
             assert_eq!(r.get("r2").unwrap().edge_endpoints(), Some((b, c)));
             assert_eq!(r.get("r3").unwrap().edge_endpoints(), Some((c, a)));
-            assert_eq!(
-                r.get("r2")
-                    .unwrap()
-                    .edge_type()
-                    .map(|t| t.as_str().to_string()),
-                Some("EDGE".to_string())
-            );
+            assert_eq!(r.get("r2").unwrap().edge_type().map(|t| t.as_str().to_string()), Some("EDGE".to_string()));
         }
         assert_eq!(rows, 3);
     }
@@ -1009,10 +945,7 @@ mod tests {
         let mut tj = TrieJoinOperator::new(
             a_to_b("EDGE"),
             "c".to_string(),
-            vec![
-                constraint("b", Direction::Both, &[], Some("rb")),
-                constraint("a", Direction::Incoming, &[], None),
-            ],
+            vec![constraint("b", Direction::Both, &[], Some("rb")), constraint("a", Direction::Incoming, &[], None)],
         );
         let rows = triangles(&mut tj, &store);
         // For a=1,b=2: N_both(2) = {1,3}; N_in(1) = {3} -> c = 3.
@@ -1026,10 +959,7 @@ mod tests {
         let mut tj = TrieJoinOperator::new(
             a_to_b("EDGE"),
             "c".to_string(),
-            vec![
-                constraint("b", Direction::Both, &[], Some("rb")),
-                constraint("a", Direction::Incoming, &[], None),
-            ],
+            vec![constraint("b", Direction::Both, &[], Some("rb")), constraint("a", Direction::Incoming, &[], None)],
         );
         let r = tj.next(&store).unwrap().expect("at least one row");
         let b = r.get("b").unwrap().node_id().unwrap();
@@ -1043,10 +973,7 @@ mod tests {
         let mut tj = TrieJoinOperator::new(
             a_to_b("EDGE"),
             "c".to_string(),
-            vec![
-                constraint("missing", Direction::Outgoing, &[], None),
-                constraint("a", Direction::Incoming, &[], None),
-            ],
+            vec![constraint("missing", Direction::Outgoing, &[], None), constraint("a", Direction::Incoming, &[], None)],
         );
         assert!(tj.next(&store).unwrap().is_none());
     }
@@ -1057,10 +984,7 @@ mod tests {
         let mut tj = TrieJoinOperator::new(
             a_to_b("EDGE"),
             "c".to_string(),
-            vec![
-                constraint("b", Direction::Outgoing, &[], None),
-                constraint("a", Direction::Incoming, &[], None),
-            ],
+            vec![constraint("b", Direction::Outgoing, &[], None), constraint("a", Direction::Incoming, &[], None)],
         );
         let first = triangles(&mut tj, &store);
         tj.reset();
@@ -1080,11 +1004,7 @@ mod tests {
     #[test]
     fn test_trie_join_describe_both_direction() {
         let scan = Box::new(NodeScanOperator::new("a".to_string(), vec![]));
-        let tj = TrieJoinOperator::new(
-            scan,
-            "c".to_string(),
-            vec![constraint("b", Direction::Both, &["X", "Y"], None)],
-        );
+        let tj = TrieJoinOperator::new(scan, "c".to_string(), vec![constraint("b", Direction::Both, &["X", "Y"], None)]);
         let desc = tj.describe();
         assert_eq!(desc.details, "c ∈ N_both(b)[:X|Y]");
         assert_eq!(desc.children.len(), 1);
@@ -1114,20 +1034,8 @@ mod tests {
 
         let desc = tj.describe();
         assert_eq!(desc.name, "TrieJoin");
-        assert!(
-            desc.details.contains("N_out(b)"),
-            "Should show N_out(b): {}",
-            desc.details
-        );
-        assert!(
-            desc.details.contains("N_in(a)"),
-            "Should show N_in(a): {}",
-            desc.details
-        );
-        assert!(
-            desc.details.contains("KNOWS"),
-            "Should show edge type: {}",
-            desc.details
-        );
+        assert!(desc.details.contains("N_out(b)"), "Should show N_out(b): {}", desc.details);
+        assert!(desc.details.contains("N_in(a)"), "Should show N_in(a): {}", desc.details);
+        assert!(desc.details.contains("KNOWS"), "Should show edge type: {}", desc.details);
     }
 }

@@ -25,10 +25,7 @@ fn schema_summary_lists_scalar_properties_of_a_restored_graph() {
     let store = restored(r#"CREATE (:Doc {title: "a", year: 2024, emb: [0.1, 0.2]})"#);
     let s = store.schema_summary();
     for key in ["title", "year", "emb"] {
-        assert!(
-            s.contains(key),
-            "schema omits `{key}` on a restored graph:\n{s}"
-        );
+        assert!(s.contains(key), "schema omits `{key}` on a restored graph:\n{s}");
     }
 }
 
@@ -58,8 +55,7 @@ fn vector_discovery_finds_an_embedding_held_only_in_the_column() {
         "precondition: the row must be empty for this test to mean anything"
     );
     assert_eq!(
-        store.rebuild_vector_index_full(),
-        1,
+        store.rebuild_vector_index_full(), 1,
         "an embedding held only in the column registered no vector index"
     );
 }

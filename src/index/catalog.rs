@@ -36,11 +36,7 @@ pub enum IndexDefinition {
     /// `CREATE FULLTEXT INDEX name FOR (n:Label) ON (n.property)`. The name is
     /// part of the definition: `db.index.fulltext.queryNodes` addresses an index
     /// by name and by nothing else.
-    FullText {
-        name: String,
-        label: String,
-        property: String,
-    },
+    FullText { name: String, label: String, property: String },
     /// `CREATE VECTOR INDEX name FOR (n:Label) ON (n.property)`.
     ///
     /// `dimensions` and `metric` must be carried because an index rebuilt at the
@@ -58,11 +54,7 @@ pub enum IndexDefinition {
     },
     /// `CREATE POINT INDEX name FOR (n:Label) ON (n.property)` (#1618). Last,
     /// so a catalog written before it still decodes.
-    Point {
-        name: String,
-        label: String,
-        property: String,
-    },
+    Point { name: String, label: String, property: String },
 }
 
 /// Every index declaration a tenant has, as one record.

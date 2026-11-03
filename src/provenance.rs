@@ -363,9 +363,7 @@ mod tests {
     fn node(store: &mut GraphStore, label: &str, props: &[(&str, PropertyValue)]) -> NodeId {
         let id = store.create_node(label);
         for (k, v) in props {
-            store
-                .set_node_property("default", id, *k, v.clone())
-                .unwrap();
+            store.set_node_property("default", id, *k, v.clone()).unwrap();
         }
         id
     }
@@ -411,11 +409,7 @@ mod tests {
             (None, Redistributable::Unknown),
         ];
         for (v, want) in cases {
-            let props: Vec<(&str, PropertyValue)> = v
-                .clone()
-                .map(|v| (REDISTRIBUTABLE, v))
-                .into_iter()
-                .collect();
+            let props: Vec<(&str, PropertyValue)> = v.clone().map(|v| (REDISTRIBUTABLE, v)).into_iter().collect();
             let n = node(&mut g, "F", &props);
             assert_eq!(redistributable(&g, n), want, "{v:?}");
         }
@@ -427,11 +421,7 @@ mod tests {
         let fact = node(&mut g, "Fact", &[]);
         let a = node(&mut g, "Source", &[(SOURCE_URI, s("a"))]);
         let b = node(&mut g, "Source", &[]);
-        let deep = node(
-            &mut g,
-            "Dump",
-            &[(REDISTRIBUTABLE, PropertyValue::Boolean(false))],
-        );
+        let deep = node(&mut g, "Dump", &[(REDISTRIBUTABLE, PropertyValue::Boolean(false))]);
         let unrelated = node(&mut g, "X", &[]);
         g.create_edge(fact, a, DERIVED_FROM).unwrap();
         g.create_edge(fact, b, DERIVED_FROM).unwrap();
@@ -443,11 +433,7 @@ mod tests {
         let got: Vec<(u64, usize)> = path.iter().map(|d| (d.node, d.depth)).collect();
         assert_eq!(got.len(), 4);
         assert_eq!(got[0], (fact.as_u64(), 0));
-        let mut depth1: Vec<u64> = got
-            .iter()
-            .filter(|(_, d)| *d == 1)
-            .map(|(n, _)| *n)
-            .collect();
+        let mut depth1: Vec<u64> = got.iter().filter(|(_, d)| *d == 1).map(|(n, _)| *n).collect();
         depth1.sort();
         assert_eq!(depth1, vec![a.as_u64(), b.as_u64()]);
         assert_eq!(got[3], (deep.as_u64(), 2));
@@ -474,31 +460,17 @@ mod tests {
                 (LICENSE, s("MIT")),
             ],
         );
-        let no = node(
-            &mut g,
-            "F",
-            &[(REDISTRIBUTABLE, s("false")), (LICENSE, s("Proprietary"))],
-        );
+        let no = node(&mut g, "F", &[(REDISTRIBUTABLE, s("false")), (LICENSE, s("Proprietary"))]);
         let unknown = node(&mut g, "F", &[(LICENSE, s("MIT"))]);
         let all = [yes, no, unknown];
 
         let (kept, r) = screen(&g, &all, ExportPolicy::CountOnly);
         assert_eq!(kept, all.to_vec());
         assert_eq!(
-            (
-                r.nodes_considered,
-                r.marked_redistributable,
-                r.marked_not_redistributable,
-                r.unmarked,
-                r.withheld,
-                r.reproducible
-            ),
+            (r.nodes_considered, r.marked_redistributable, r.marked_not_redistributable, r.unmarked, r.withheld, r.reproducible),
             (3, 1, 1, 1, 0, 1)
         );
-        assert_eq!(
-            r.licenses,
-            vec!["MIT".to_string(), "Proprietary".to_string()]
-        );
+        assert_eq!(r.licenses, vec!["MIT".to_string(), "Proprietary".to_string()]);
 
         let (kept, r) = screen(&g, &all, ExportPolicy::WithholdForbidden);
         assert_eq!(kept, vec![yes, unknown]);

@@ -103,11 +103,7 @@ pub fn hits(view: &GraphView, max_iter: usize, tol: f64) -> Option<(Vec<f64>, Ve
             }
         }
         normalise_sum(&mut hubs);
-        let err: f64 = hubs
-            .iter()
-            .zip(&last_hubs)
-            .map(|(a, b)| (a - b).abs())
-            .sum();
+        let err: f64 = hubs.iter().zip(&last_hubs).map(|(a, b)| (a - b).abs()).sum();
         if err < tol {
             return Some((hubs, auth));
         }
@@ -231,11 +227,7 @@ pub fn vote_rank(view: &GraphView, k: usize) -> Vec<usize> {
         // Ties broken by index, so two runs elect the same set. An unstable
         // seed set makes a campaign unreproducible for no reason.
         let (best, best_score) = (0..n).fold((usize::MAX, f64::NEG_INFINITY), |(bi, bs), i| {
-            if score[i] > bs {
-                (i, score[i])
-            } else {
-                (bi, bs)
-            }
+            if score[i] > bs { (i, score[i]) } else { (bi, bs) }
         });
         if best == usize::MAX || best_score <= 0.0 {
             break;
@@ -256,11 +248,7 @@ pub fn ranked_scores(view: &GraphView, scores: &[f64]) -> Vec<(NodeId, f64)> {
         .enumerate()
         .map(|(i, &s)| (view.index_to_node[i], s))
         .collect();
-    out.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.0.cmp(&b.0))
-    });
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
     out
 }
 
@@ -285,7 +273,8 @@ mod tests {
 
     fn view(n: usize, edges: &[(usize, usize)]) -> GraphView {
         let index_to_node: Vec<NodeId> = (0..n).map(|i| i as NodeId).collect();
-        let node_to_index: HashMap<NodeId, usize> = (0..n).map(|i| (i as NodeId, i)).collect();
+        let node_to_index: HashMap<NodeId, usize> =
+            (0..n).map(|i| (i as NodeId, i)).collect();
         let mut out = vec![Vec::new(); n];
         let mut inc = vec![Vec::new(); n];
         for &(a, b) in edges {
@@ -336,10 +325,7 @@ mod tests {
         // teleport does not go there.
         let g = view(4, &[(0, 1), (2, 3)]);
         let r = personalised_page_rank(&g, &[0], 0.85, 500, 1e-12);
-        assert!(
-            r[0] + r[1] > 0.99,
-            "mass should stay in the source component: {r:?}"
-        );
+        assert!(r[0] + r[1] > 0.99, "mass should stay in the source component: {r:?}");
         assert!(r[2] + r[3] < 0.01, "{r:?}");
     }
 

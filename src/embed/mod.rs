@@ -4,9 +4,9 @@
 
 pub mod client;
 
-use crate::graph::PropertyValue;
-use crate::persistence::tenant::AutoEmbedConfig;
 use serde::{Deserialize, Serialize};
+use crate::persistence::tenant::AutoEmbedConfig;
+use crate::graph::PropertyValue;
 use thiserror::Error;
 
 /// Embed errors
@@ -67,25 +67,23 @@ impl EmbedPipeline {
     pub async fn process_text(&self, text: &str) -> EmbedResult<Vec<TextChunk>> {
         // 1. Split text into chunks
         let texts = self.split_text(text);
-
+        
         // 2. Generate embeddings for chunks
         let embeddings = self.client.generate_embeddings(&texts).await?;
-
+        
         // 3. Combine into TextChunks
         let mut chunks = Vec::new();
-        for (i, (chunk_text, embedding)) in
-            texts.into_iter().zip(embeddings.into_iter()).enumerate()
-        {
+        for (i, (chunk_text, embedding)) in texts.into_iter().zip(embeddings.into_iter()).enumerate() {
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("chunk_index".to_string(), i.to_string());
-
+            
             chunks.push(TextChunk {
                 text: chunk_text,
                 embedding,
                 metadata,
             });
         }
-
+        
         Ok(chunks)
     }
 
@@ -109,10 +107,7 @@ impl EmbedPipeline {
             }
             i
         };
-        let step = self
-            .config
-            .chunk_size
-            .saturating_sub(self.config.chunk_overlap);
+        let step = self.config.chunk_size.saturating_sub(self.config.chunk_overlap);
 
         let mut chunks = Vec::new();
         let mut start = 0;

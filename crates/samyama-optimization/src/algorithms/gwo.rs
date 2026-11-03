@@ -10,7 +10,8 @@ pub struct GWOSolver {
 
 impl GWOSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { seed: None, config }
+        Self {
+            seed: None, config }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -40,7 +41,7 @@ impl GWOSolver {
         let mut alpha = population[0].clone();
         let mut beta = population[0].clone();
         let mut delta = population[0].clone();
-
+        
         // Reset fitness to infinity (minimization)
         alpha.fitness = f64::INFINITY;
         beta.fitness = f64::INFINITY;

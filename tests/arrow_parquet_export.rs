@@ -40,10 +40,7 @@ fn fixture() -> GraphStore {
         r#"CREATE (:Doc {ord: 1, title: "café — naïve 日本語 🌏", score: 1.5,
                          live: true, tags: ["a", "b"], counts: [1, 2, 3]})"#,
     );
-    run(
-        &mut store,
-        r#"CREATE (:Doc {ord: 2, title: "plain", live: false})"#,
-    );
+    run(&mut store, r#"CREATE (:Doc {ord: 2, title: "plain", live: false})"#);
     run(
         &mut store,
         r#"CREATE (:Doc {ord: 3, title: "", score: -0.25,
@@ -59,10 +56,7 @@ fn fixture() -> GraphStore {
         .get_nodes_by_label(&samyama::graph::types::Label::new("Doc"))
         .iter()
         .filter(|n| {
-            !matches!(
-                store.node_property(n.id, "ord"),
-                Some(PropertyValue::Integer(2))
-            )
+            !matches!(store.node_property(n.id, "ord"), Some(PropertyValue::Integer(2)))
         })
         .map(|n| n.id)
         .collect();
@@ -90,24 +84,14 @@ fn every_column_gets_the_type_its_values_need() {
     let batch = to_arrow(&query(&store, Q)).expect("export");
 
     assert_eq!(batch.num_rows(), 3);
-    let f = |name: &str| {
-        batch
-            .schema()
-            .field_with_name(name)
-            .unwrap()
-            .data_type()
-            .clone()
-    };
+    let f = |name: &str| batch.schema().field_with_name(name).unwrap().data_type().clone();
 
     assert_eq!(f("ord"), DataType::Int64, "whole numbers stay integers");
     assert_eq!(f("title"), DataType::Utf8);
     // 1.5 and -0.25 with a null between them: still a float column.
     assert_eq!(f("score"), DataType::Float64);
     assert_eq!(f("live"), DataType::Boolean);
-    assert!(
-        matches!(f("tags"), DataType::List(_)),
-        "a list of strings is a list"
-    );
+    assert!(matches!(f("tags"), DataType::List(_)), "a list of strings is a list");
     match f("counts") {
         DataType::List(field) => assert_eq!(
             field.data_type(),
@@ -117,10 +101,7 @@ fn every_column_gets_the_type_its_values_need() {
         ),
         other => panic!("counts should be a list, got {other:?}"),
     }
-    assert!(
-        matches!(f("embedding"), DataType::List(_)),
-        "a vector is a list of floats"
-    );
+    assert!(matches!(f("embedding"), DataType::List(_)), "a vector is a list of floats");
 
     // Every column is nullable, because a Cypher projection always can be.
     for field in batch.schema().fields() {
@@ -133,59 +114,29 @@ fn the_values_survive_including_the_awkward_ones() {
     let store = fixture();
     let batch = to_arrow(&query(&store, Q)).expect("export");
 
-    let ord = batch
-        .column_by_name("ord")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
+    let ord = batch.column_by_name("ord").unwrap()
+        .as_any().downcast_ref::<Int64Array>().unwrap();
     assert_eq!(ord.values(), &[1, 2, 3]);
 
-    let title = batch
-        .column_by_name("title")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    assert_eq!(
-        title.value(0),
-        "café — naïve 日本語 🌏",
-        "unicode survives byte-for-byte"
-    );
+    let title = batch.column_by_name("title").unwrap()
+        .as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(title.value(0), "café — naïve 日本語 🌏", "unicode survives byte-for-byte");
     assert_eq!(title.value(2), "", "an empty string is not a null");
     assert!(!title.is_null(2));
 
-    let score = batch
-        .column_by_name("score")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap();
+    let score = batch.column_by_name("score").unwrap()
+        .as_any().downcast_ref::<Float64Array>().unwrap();
     assert_eq!(score.value(0), 1.5);
-    assert!(
-        score.is_null(1),
-        "the row that never set `score` is null, not 0.0"
-    );
+    assert!(score.is_null(1), "the row that never set `score` is null, not 0.0");
     assert_eq!(score.value(2), -0.25);
 
-    let live = batch
-        .column_by_name("live")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .unwrap();
+    let live = batch.column_by_name("live").unwrap()
+        .as_any().downcast_ref::<BooleanArray>().unwrap();
     assert!(live.value(0) && !live.value(1) && live.value(2));
 
     let counts = batch.column_by_name("counts").unwrap().as_list::<i32>();
-    assert!(
-        counts.is_null(1),
-        "an absent list is null, not an empty list"
-    );
-    let first: Vec<i64> = counts
-        .value(0)
-        .as_primitive::<Int64Type>()
-        .values()
-        .to_vec();
+    assert!(counts.is_null(1), "an absent list is null, not an empty list");
+    let first: Vec<i64> = counts.value(0).as_primitive::<Int64Type>().values().to_vec();
     assert_eq!(first, vec![1, 2, 3], "a list of integers stays integers");
 
     let tags = batch.column_by_name("tags").unwrap().as_list::<i32>();
@@ -199,11 +150,7 @@ fn the_values_survive_including_the_awkward_ones() {
 
     let emb = batch.column_by_name("embedding").unwrap().as_list::<i32>();
     let v: Vec<f64> = emb.value(0).as_primitive::<Float64Type>().values().to_vec();
-    assert_eq!(
-        v,
-        vec![0.5, -1.5, 2.0],
-        "a vector keeps its values and its order"
-    );
+    assert_eq!(v, vec![0.5, -1.5, 2.0], "a vector keeps its values and its order");
     assert!(emb.is_null(1));
 }
 
@@ -225,35 +172,19 @@ fn parquet_reads_back_as_what_was_written() {
     let back = &back[0];
 
     assert_eq!(back.num_rows(), written.num_rows());
-    assert_eq!(
-        back.schema().fields().len(),
-        written.schema().fields().len()
-    );
+    assert_eq!(back.schema().fields().len(), written.schema().fields().len());
     let back_schema = back.schema();
     for field in written.schema().fields() {
         let there = back_schema
             .field_with_name(field.name())
             .expect("column survives");
-        assert_eq!(
-            there.data_type(),
-            field.data_type(),
-            "{} type",
-            field.name()
-        );
+        assert_eq!(there.data_type(), field.data_type(), "{} type", field.name());
     }
-    let title = back
-        .column_by_name("title")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
+    let title = back.column_by_name("title").unwrap()
+        .as_any().downcast_ref::<StringArray>().unwrap();
     assert_eq!(title.value(0), "café — naïve 日本語 🌏");
-    let score = back
-        .column_by_name("score")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap();
+    let score = back.column_by_name("score").unwrap()
+        .as_any().downcast_ref::<Float64Array>().unwrap();
     assert!(score.is_null(1));
 }
 
@@ -291,12 +222,8 @@ fn a_mixed_column_falls_back_to_json_rather_than_guessing() {
         &DataType::Utf8,
         "an integer and a string in one column cannot be Int64 or Utf8-as-text"
     );
-    let v = batch
-        .column_by_name("v")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
+    let v = batch.column_by_name("v").unwrap()
+        .as_any().downcast_ref::<StringArray>().unwrap();
     assert_eq!(v.value(0), "7", "JSON, so the integer is not quoted");
     assert_eq!(v.value(1), "\"seven\"", "and the string is");
 }
@@ -307,12 +234,8 @@ fn an_entity_column_becomes_json_and_says_what_it_is() {
     run(&mut store, r#"CREATE (:P {name: "Ada"})"#);
     let batch = to_arrow(&query(&store, "MATCH (p:P) RETURN p")).expect("export");
 
-    let col = batch
-        .column_by_name("p")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
+    let col = batch.column_by_name("p").unwrap()
+        .as_any().downcast_ref::<StringArray>().unwrap();
     let parsed: serde_json::Value = serde_json::from_str(col.value(0)).expect("valid JSON");
     assert_eq!(parsed["labels"][0], "P");
     assert_eq!(parsed["properties"]["name"], "Ada");
@@ -321,25 +244,15 @@ fn an_entity_column_becomes_json_and_says_what_it_is() {
 #[test]
 fn an_empty_result_keeps_its_schema() {
     let store = fixture();
-    let batch = to_arrow(&query(
-        &store,
-        "MATCH (d:Doc) WHERE d.ord > 99 RETURN d.ord AS ord",
-    ))
-    .expect("export");
+    let batch = to_arrow(&query(&store, "MATCH (d:Doc) WHERE d.ord > 99 RETURN d.ord AS ord"))
+        .expect("export");
     assert_eq!(batch.num_rows(), 0);
-    assert_eq!(
-        batch.schema().fields().len(),
-        1,
-        "no rows is not no columns"
-    );
+    assert_eq!(batch.schema().fields().len(), 1, "no rows is not no columns");
     // And it still writes: a reader that gets zero bytes cannot tell an empty
     // answer from a failed one.
-    assert!(!to_parquet(&query(
-        &store,
-        "MATCH (d:Doc) WHERE d.ord > 99 RETURN d.ord AS ord"
-    ))
-    .expect("parquet")
-    .is_empty());
+    assert!(!to_parquet(&query(&store, "MATCH (d:Doc) WHERE d.ord > 99 RETURN d.ord AS ord"))
+        .expect("parquet")
+        .is_empty());
 }
 
 /// Export and import are the same shape: what goes out comes back (#1098).
@@ -418,18 +331,13 @@ fn a_null_cell_creates_no_property() {
         matches!(
             rec.get("score"),
             None | Some(samyama::query::executor::Value::Null)
-                | Some(samyama::query::executor::Value::Property(
-                    PropertyValue::Null
-                ))
+                | Some(samyama::query::executor::Value::Property(PropertyValue::Null))
         ),
         "the row that never had a score still has none"
     );
     match rec.get("n") {
         Some(samyama::query::executor::Value::Property(PropertyValue::Integer(n))) => {
-            assert_eq!(
-                *n, 3,
-                "ord, title and live — not the three nulls beside them"
-            )
+            assert_eq!(*n, 3, "ord, title and live — not the three nulls beside them")
         }
         other => panic!("expected a count, got {other:?}"),
     }

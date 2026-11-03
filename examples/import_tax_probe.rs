@@ -36,10 +36,7 @@ use std::time::Instant;
 fn cpu_seconds() -> f64 {
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
     // utime and stime are fields 14 and 15, after the parenthesised comm.
-    let tail = match stat.rfind(')') {
-        Some(i) => &stat[i + 1..],
-        None => return 0.0,
-    };
+    let tail = match stat.rfind(')') { Some(i) => &stat[i + 1..], None => return 0.0 };
     let f: Vec<&str> = tail.split_whitespace().collect();
     let hz = 100.0; // CLK_TCK on Linux x86_64
     let utime: f64 = f.get(11).and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -69,13 +66,7 @@ fn build(nodes: usize, edges: usize, segments: usize) -> GraphStore {
 /// maps, and merging one map is one thread's work. A federation of 22 KGs has
 /// hundreds of triples. Both are worth measuring, and 2/1 is kept as the
 /// default so the #1807 numbers stay comparable.
-fn build_shaped(
-    nodes: usize,
-    edges: usize,
-    segments: usize,
-    labels: usize,
-    types: usize,
-) -> GraphStore {
+fn build_shaped(nodes: usize, edges: usize, segments: usize, labels: usize, types: usize) -> GraphStore {
     let mut g = GraphStore::new();
     let label_names: Vec<String> = (0..labels.max(1)).map(|i| format!("L{i}")).collect();
     let type_names: Vec<String> = (0..types.max(1)).map(|i| format!("REL{i}")).collect();
@@ -177,34 +168,11 @@ fn main() {
     let (cat, cat_c) = timed(|| g.rebuild_catalog());
     let (vec_i, vec_c) = timed(|| g.rebuild_vector_index());
 
-    println!(
-        "PROBE nodes={} edges={} segments_before={} labels={} types={} build_s={:.1} threads={}",
-        g.node_count(),
-        g.edge_count(),
-        st.frozen_segments,
-        labels,
-        types,
-        build_s,
-        rayon::current_num_threads()
-    );
-    println!(
-        "  compact_adjacency      {:8.3} s  {:5.2} cores",
-        compact, compact_c
-    );
-    println!(
-        "  rebuild_edge_type_index{:8.3} s  {:5.2} cores",
-        eti, eti_c
-    );
-    println!(
-        "  rebuild_catalog        {:8.3} s  {:5.2} cores",
-        cat, cat_c
-    );
-    println!(
-        "  rebuild_vector_index   {:8.3} s  {:5.2} cores",
-        vec_i, vec_c
-    );
-    println!(
-        "  TOTAL finish_bulk_load {:8.3} s",
-        compact + eti + cat + vec_i
-    );
+    println!("PROBE nodes={} edges={} segments_before={} labels={} types={} build_s={:.1} threads={}",
+        g.node_count(), g.edge_count(), st.frozen_segments, labels, types, build_s, rayon::current_num_threads());
+    println!("  compact_adjacency      {:8.3} s  {:5.2} cores", compact, compact_c);
+    println!("  rebuild_edge_type_index{:8.3} s  {:5.2} cores", eti, eti_c);
+    println!("  rebuild_catalog        {:8.3} s  {:5.2} cores", cat, cat_c);
+    println!("  rebuild_vector_index   {:8.3} s  {:5.2} cores", vec_i, vec_c);
+    println!("  TOTAL finish_bulk_load {:8.3} s", compact + eti + cat + vec_i);
 }

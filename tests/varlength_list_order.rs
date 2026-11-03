@@ -42,10 +42,7 @@ fn nums(store: &GraphStore, cypher: &str, col: &str) -> Vec<i64> {
     let batch = QueryExecutor::new(store)
         .execute(&query)
         .unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
-    let rec = batch
-        .records
-        .first()
-        .unwrap_or_else(|| panic!("{cypher}: no rows"));
+    let rec = batch.records.first().unwrap_or_else(|| panic!("{cypher}: no rows"));
     let items = match rec.get(col) {
         Some(Value::List(items)) => items.clone(),
         other => panic!("{cypher}: {other:?}"),
@@ -71,10 +68,7 @@ fn the_list_reads_in_the_pattern_direction_when_the_far_end_is_anchored() {
     // `b:End` is labelled and the near end is not, so the planner anchors
     // there and walks backwards. The list must still read 1, 2.
     let store = chain();
-    assert_eq!(
-        nums(&store, "MATCH (a)-[r:REL*2..2]->(b:End) RETURN r", "r"),
-        vec![1, 2]
-    );
+    assert_eq!(nums(&store, "MATCH (a)-[r:REL*2..2]->(b:End) RETURN r", "r"), vec![1, 2]);
 }
 
 #[test]
@@ -82,21 +76,14 @@ fn the_list_reads_in_the_pattern_direction_when_the_near_end_is_anchored() {
     // The same walk in the direction it is written. This one always worked,
     // and is asserted so a fix cannot trade one direction for the other.
     let store = chain();
-    assert_eq!(
-        nums(&store, "MATCH (a:A)-[r:REL*2..2]->(b) RETURN r", "r"),
-        vec![1, 2]
-    );
+    assert_eq!(nums(&store, "MATCH (a:A)-[r:REL*2..2]->(b) RETURN r", "r"), vec![1, 2]);
 }
 
 #[test]
 fn a_named_path_carries_its_relationships_in_the_same_order() {
     let store = chain();
     assert_eq!(
-        nums(
-            &store,
-            "MATCH p = (a)-[:REL*2..2]->(b:End) RETURN relationships(p) AS r",
-            "r"
-        ),
+        nums(&store, "MATCH p = (a)-[:REL*2..2]->(b:End) RETURN relationships(p) AS r", "r"),
         vec![1, 2]
     );
 }
@@ -115,8 +102,7 @@ fn the_path_nodes_run_from_the_start_of_the_pattern() {
                     other => panic!("{other:?}"),
                 };
                 let node = store.get_node(id).unwrap();
-                let mut ls: Vec<String> =
-                    node.labels.iter().map(|l| l.as_str().to_string()).collect();
+                let mut ls: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
                 ls.sort();
                 ls.join(":")
             })
@@ -129,10 +115,7 @@ fn the_path_nodes_run_from_the_start_of_the_pattern() {
 #[test]
 fn a_single_hop_is_unaffected() {
     let store = chain();
-    assert_eq!(
-        nums(&store, "MATCH (a)-[r:REL*1..1]->(b:B) RETURN r", "r"),
-        vec![1]
-    );
+    assert_eq!(nums(&store, "MATCH (a)-[r:REL*1..1]->(b:B) RETURN r", "r"), vec![1]);
 }
 
 #[test]
@@ -142,11 +125,7 @@ fn the_pairs_are_the_same_whichever_end_is_anchored() {
     let store = chain();
     let count = |q: &str| {
         let query = parse_query(q).unwrap();
-        QueryExecutor::new(&store)
-            .execute(&query)
-            .unwrap()
-            .records
-            .len()
+        QueryExecutor::new(&store).execute(&query).unwrap().records.len()
     };
     assert_eq!(count("MATCH (a)-[r:REL*2..2]->(b:End) RETURN r"), 1);
     assert_eq!(count("MATCH (a:A)-[r:REL*2..2]->(b) RETURN r"), 1);

@@ -91,22 +91,14 @@ pub fn parse_chromosome(location: &str) -> String {
     }
     let mut out = String::new();
     for c in trimmed.chars() {
-        if c == 'p'
-            || c == 'q'
-            || c == ' '
-            || c == '.'
-            || c.is_ascii_digit()
-                && !out.is_empty()
-                && out.ends_with(|x: char| x == 'p' || x == 'q')
-        {
+        if c == 'p' || c == 'q' || c == ' ' || c == '.' || c.is_ascii_digit() && !out.is_empty() && out.ends_with(|x: char| x == 'p' || x == 'q') {
             break;
         }
         out.push(c);
     }
     // Strip trailing band digits (e.g. "11q13" -> we already broke at 'q', but
     // also handle pure-digit chromosomes that fell through).
-    out.trim_end_matches(|c: char| c == 'p' || c == 'q')
-        .to_string()
+    out.trim_end_matches(|c: char| c == 'p' || c == 'q').to_string()
 }
 
 /// Parse a single HGNC TSV header + data row pair into a typed row.
@@ -362,10 +354,7 @@ pub fn load_ensembl_gff3(
         set_bool(graph, tid, "is_canonical", row.is_canonical);
         transcript_to_node.insert(row.transcript_id.clone(), tid);
         transcripts += 1;
-        if graph
-            .create_edge(parent_node, tid, "HAS_TRANSCRIPT")
-            .is_ok()
-        {
+        if graph.create_edge(parent_node, tid, "HAS_TRANSCRIPT").is_ok() {
             edges += 1;
         }
         count += 1;
@@ -444,10 +433,7 @@ mod tests {
         let lines: Vec<&str> = FIXTURE.lines().collect();
         let headers = parse_header(lines[0]);
         let fields: Vec<&str> = lines[4].split('\t').collect();
-        assert!(
-            parse_row(&headers, &fields).is_none(),
-            "row missing symbol must be rejected"
-        );
+        assert!(parse_row(&headers, &fields).is_none(), "row missing symbol must be rejected");
     }
 
     #[test]
@@ -497,14 +483,8 @@ mod tests {
     #[test]
     fn parses_gff3_attributes_into_map() {
         let m = parse_gff3_attributes("ID=transcript:ENST00000357654;Parent=gene:ENSG00000012048;biotype=protein_coding;tag=Ensembl_canonical");
-        assert_eq!(
-            m.get("ID").map(String::as_str),
-            Some("transcript:ENST00000357654")
-        );
-        assert_eq!(
-            m.get("Parent").map(String::as_str),
-            Some("gene:ENSG00000012048")
-        );
+        assert_eq!(m.get("ID").map(String::as_str), Some("transcript:ENST00000357654"));
+        assert_eq!(m.get("Parent").map(String::as_str), Some("gene:ENSG00000012048"));
         assert_eq!(m.get("biotype").map(String::as_str), Some("protein_coding"));
         assert_eq!(m.get("tag").map(String::as_str), Some("Ensembl_canonical"));
     }
@@ -543,13 +523,9 @@ mod tests {
         let mut g = GraphStore::new();
         // Pre-create two :Gene nodes mirroring HGNC pass for BRCA1 and BRCA2.
         let brca1 = g.create_node("Gene");
-        g.get_node_mut(brca1)
-            .unwrap()
-            .set_property("symbol", PropertyValue::String("BRCA1".into()));
+        g.get_node_mut(brca1).unwrap().set_property("symbol", PropertyValue::String("BRCA1".into()));
         let brca2 = g.create_node("Gene");
-        g.get_node_mut(brca2)
-            .unwrap()
-            .set_property("symbol", PropertyValue::String("BRCA2".into()));
+        g.get_node_mut(brca2).unwrap().set_property("symbol", PropertyValue::String("BRCA2".into()));
         let mut ensembl_map = HashMap::new();
         ensembl_map.insert("ENSG00000012048".to_string(), brca1);
         ensembl_map.insert("ENSG00000139618".to_string(), brca2);
@@ -562,20 +538,13 @@ mod tests {
 
     fn tempdir() -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "hgnc_test_{}_{}",
-            std::process::id(),
-            rand_suffix()
-        ));
+        p.push(format!("hgnc_test_{}_{}", std::process::id(), rand_suffix()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
     fn rand_suffix() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
         format!("{}", nanos)
     }
 }

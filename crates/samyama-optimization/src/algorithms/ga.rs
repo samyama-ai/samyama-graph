@@ -60,7 +60,7 @@ impl GASolver {
 
             // 2. Evolution
             let mut new_population = Vec::with_capacity(self.config.population_size);
-
+            
             // Elitism: carry over the best
             new_population.push(population[best_idx].clone());
 
@@ -83,7 +83,7 @@ impl GASolver {
                 // Add to new population
                 let f1 = crate::common::evaluate(problem, &c1_vars);
                 new_population.push(Individual::new(c1_vars, f1));
-
+                
                 if new_population.len() < self.config.population_size {
                     let f2 = crate::common::evaluate(problem, &c2_vars);
                     new_population.push(Individual::new(c2_vars, f2));
@@ -112,7 +112,7 @@ impl GASolver {
     fn select<'a>(&self, population: &'a [Individual], rng: &mut impl Rng) -> &'a Individual {
         let i1 = rng.gen_range(0..population.len());
         let i2 = rng.gen_range(0..population.len());
-
+        
         if population[i1].fitness < population[i2].fitness {
             &population[i1]
         } else {
@@ -157,9 +157,7 @@ impl GASolver {
                 // Small Gaussian mutation or random reset?
                 // Let's use Gaussian mutation for continuous space
                 let range = upper[i] - lower[i];
-                let delta = rand_distr::Normal::new(0.0, range * 0.1)
-                    .unwrap()
-                    .sample(rng);
+                let delta = rand_distr::Normal::new(0.0, range * 0.1).unwrap().sample(rng);
                 vars[i] = (vars[i] + delta).clamp(lower[i], upper[i]);
             }
         }

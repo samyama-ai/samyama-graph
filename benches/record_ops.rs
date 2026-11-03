@@ -145,19 +145,15 @@ fn main() {
     });
 
     // Binding, which every operator does to derive a row.
-    let grow_ns = time(
-        "clone, then bind a 4th (clone sized exactly)",
-        n / 5,
-        || {
-            let mut acc = 0u64;
-            for i in 0..(n / 5) {
-                let mut copy = record.clone();
-                copy.bind("extra", Value::Property(PropertyValue::Integer(i as i64)));
-                acc = acc.wrapping_add(copy.bindings().len() as u64);
-            }
-            acc
-        },
-    );
+    let grow_ns = time("clone, then bind a 4th (clone sized exactly)", n / 5, || {
+        let mut acc = 0u64;
+        for i in 0..(n / 5) {
+            let mut copy = record.clone();
+            copy.bind("extra", Value::Property(PropertyValue::Integer(i as i64)));
+            acc = acc.wrapping_add(copy.bindings().len() as u64);
+        }
+        acc
+    });
 
     let reserved_ns = time("clone_with_capacity(1), then bind a 4th", n / 5, || {
         let mut acc = 0u64;
@@ -184,20 +180,14 @@ fn main() {
     println!();
     println!("Deriving a row: {grow_ns:.1} ns to clone and bind against {reserved_ns:.1} ns when the clone");
     println!("reserves the room first. `Vec::clone` allocates exact capacity, so the next bind");
-    println!(
-        "reallocates -- and clone-then-bind is how nearly every operator derives a row (#562)."
-    );
+    println!("reallocates -- and clone-then-bind is how nearly every operator derives a row (#562).");
     println!();
     println!("Lookup: {last:.1} ns by name against {by_slot:.1} ns by slot, and a name that is");
     println!("not bound costs {missing:.1} ns because the scan has to finish. Position matters --");
     println!("{first:.1} ns first against {last:.1} ns last -- which an index would not.");
     println!();
-    println!(
-        "Clone: {clone_ns:.1} ns per record, of which {arc_ns:.1} ns is Arc refcount traffic on"
-    );
-    println!(
-        "the names alone, against {slot_clone:.1} ns for the values by themselves. That refcount"
-    );
+    println!("Clone: {clone_ns:.1} ns per record, of which {arc_ns:.1} ns is Arc refcount traffic on");
+    println!("the names alone, against {slot_clone:.1} ns for the values by themselves. That refcount");
     println!("traffic is atomic and on cache lines every thread shares, which is why parallel");
     println!("filtering lost 3.6-5.6x (#559) and why PERF-06 (#479) needs this first.");
 

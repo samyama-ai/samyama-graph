@@ -17,9 +17,7 @@ async fn nlq_round_trips_through_the_real_handler_and_the_cypher_runs() {
 
     let store = Arc::new(RwLock::new(GraphStore::new()));
     let app = HttpServer::new(store, 0).router();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");
@@ -31,9 +29,6 @@ async fn nlq_round_trips_through_the_real_handler_and_the_cypher_runs() {
     assert_eq!(cypher, "MATCH (n) RETURN n LIMIT 10");
 
     // What the caller does next: the generated query is runnable as-is.
-    let result = client
-        .query_readonly("default", &cypher)
-        .await
-        .expect("query");
+    let result = client.query_readonly("default", &cypher).await.expect("query");
     assert_eq!(result.columns, vec!["n".to_string()]);
 }

@@ -16,17 +16,14 @@ fn main() {
     let mut ids = Vec::new();
     for i in 0..40_000i64 {
         let n = s.create_node_with_labels([Label::new("Account")]);
-        s.set_node_property("default", n, "id", PropertyValue::Integer(i))
-            .unwrap();
+        s.set_node_property("default", n, "id", PropertyValue::Integer(i)).unwrap();
         ids.push(n);
     }
     for i in 0..(ids.len() - 1) {
         let _ = s.create_edge(ids[i], ids[i + 1], "TRANSFER");
     }
     let idx = parse_query("CREATE INDEX ON :Account(id)").unwrap();
-    MutQueryExecutor::new(&mut s, "default".to_string())
-        .execute(&idx)
-        .unwrap();
+    MutQueryExecutor::new(&mut s, "default".to_string()).execute(&idx).unwrap();
 
     for (label, q) in [
         ("inline properties (what CR-3 writes)",

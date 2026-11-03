@@ -22,16 +22,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use samyama_graph_algorithms::{
-    a_star, all_shortest_paths, average_neighbour_degree, bellman_ford, betweenness_centrality,
-    biconnected_components, bipartite_sets, closeness_centrality, constraint, core_number,
-    count_triangles, dag_longest_path, degree_assortativity, degree_centrality, diameter,
-    eccentricity, effective_size, eigenvector_centrality, global_efficiency, harmonic_centrality,
-    hits, k_truss, katz_centrality,
+    all_shortest_paths, a_star, louvain, modularity, yens_k_shortest,
+    hits, katz_centrality, personalised_page_rank,
+    bellman_ford, dag_longest_path, transitive_closure, wiener_index,
+    biconnected_components, bipartite_sets, global_efficiency, k_truss,
+    rich_club_coefficient, square_clustering, transitivity,
+    constraint, effective_size, reciprocity,
+    betweenness_centrality, closeness_centrality, core_number, count_triangles,
+    degree_centrality, eigenvector_centrality, harmonic_centrality,
     link_prediction::{score_one, LinkScore},
-    local_clustering_coefficient, local_clustering_coefficient_directed, louvain, modularity,
-    page_rank, personalised_page_rank, prim_mst, radius, reciprocity, rich_club_coefficient,
-    square_clustering, strongly_connected_components, transitive_closure, transitivity,
-    weakly_connected_components, wiener_index, yens_k_shortest, GraphView, NodeId, PageRankConfig,
+    average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius,
+    local_clustering_coefficient, local_clustering_coefficient_directed, page_rank, prim_mst,
+    strongly_connected_components, weakly_connected_components, GraphView, NodeId,
+    PageRankConfig,
 };
 
 /// Per-algorithm, and documented rather than one global epsilon: "within
@@ -71,14 +74,7 @@ fn view_of(nodes: usize, edges: &[(usize, usize, f64)], directed: bool) -> Graph
             incoming[a].push(b);
         }
     }
-    GraphView::from_adjacency_list(
-        nodes,
-        index_to_node,
-        node_to_index,
-        outgoing,
-        incoming,
-        Some(weights),
-    )
+    GraphView::from_adjacency_list(nodes, index_to_node, node_to_index, outgoing, incoming, Some(weights))
 }
 
 /// A view storing each edge exactly once, as `build_view` does in the engine.
@@ -107,12 +103,7 @@ fn view_single_weighted(nodes: usize, edges: &[(usize, usize, f64)]) -> GraphVie
         incoming[b].push(a);
     }
     GraphView::from_adjacency_list(
-        nodes,
-        index_to_node,
-        node_to_index,
-        outgoing,
-        incoming,
-        Some(weights),
+        nodes, index_to_node, node_to_index, outgoing, incoming, Some(weights),
     )
 }
 
@@ -125,19 +116,12 @@ fn view_single(nodes: usize, edges: &[(usize, usize, f64)]) -> GraphView {
         outgoing[a].push(b);
         incoming[b].push(a);
     }
-    GraphView::from_adjacency_list(
-        nodes,
-        index_to_node,
-        node_to_index,
-        outgoing,
-        incoming,
-        None,
-    )
+    GraphView::from_adjacency_list(nodes, index_to_node, node_to_index, outgoing, incoming, None)
 }
 
 fn main() {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/algo-parity-reference.json");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/algo-parity-reference.json");
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => {
@@ -185,14 +169,10 @@ fn main() {
                 (0..nodes).all(|i| ecc[i] == te[i.to_string()].as_i64())
             };
             checks += 1;
-            if !ok_e {
-                failures.push(format!("{name} eccentricity disagrees"));
-            }
+            if !ok_e { failures.push(format!("{name} eccentricity disagrees")); }
 
-            for (algo, ours) in [
-                ("diameter", diameter(&single, true)),
-                ("radius", radius(&single, true)),
-            ] {
+            for (algo, ours) in [("diameter", diameter(&single, true)),
+                                 ("radius", radius(&single, true))] {
                 checks += 1;
                 if ours != want[algo].as_i64() {
                     failures.push(format!("{name} {algo}: ours {ours:?} vs {:?}", want[algo]));
@@ -207,9 +187,7 @@ fn main() {
                 checks += 1;
             }
             if d > TOL_CENTRALITY {
-                failures.push(format!(
-                    "{name} average_neighbor_degree max |delta| {d:.3e}"
-                ));
+                failures.push(format!("{name} average_neighbor_degree max |delta| {d:.3e}"));
             }
 
             // `null` here means NetworkX returned NaN -- every edge joins
@@ -225,19 +203,10 @@ fn main() {
                 _ => false,
             };
             if !ok_a {
-                failures.push(format!(
-                    "{name} degree_assortativity: ours {ours_a:?} vs {theirs_a:?}"
-                ));
+                failures.push(format!("{name} degree_assortativity: ours {ours_a:?} vs {theirs_a:?}"));
             }
-            println!(
-                "  {}    {name:14} {:12} ecc/diam/rad/avgnbr/assort",
-                if ok_e && ok_a && d <= TOL_CENTRALITY {
-                    "ok"
-                } else {
-                    "FAIL"
-                },
-                "shape"
-            );
+            println!("  {}    {name:14} {:12} ecc/diam/rad/avgnbr/assort",
+                     if ok_e && ok_a && d <= TOL_CENTRALITY { "ok" } else { "FAIL" }, "shape");
         }
 
         // Link prediction, over the same unconnected pairs the recorder used.
@@ -248,18 +217,12 @@ fn main() {
             ("jaccard", LinkScore::Jaccard),
             ("adamic_adar", LinkScore::AdamicAdar),
         ] {
-            let Some(theirs) = want.get(algo).and_then(|v| v.as_object()) else {
-                continue;
-            };
+            let Some(theirs) = want.get(algo).and_then(|v| v.as_object()) else { continue };
             let single = view_single(nodes, &edges);
             let (mut worst, mut at) = (0.0f64, String::new());
             for (key, t) in theirs {
-                let Some((a, b)) = key.split_once('-') else {
-                    continue;
-                };
-                let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) else {
-                    continue;
-                };
+                let Some((a, b)) = key.split_once('-') else { continue };
+                let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) else { continue };
                 let ours = score_one(&single, which, a, b).unwrap_or(f64::NAN);
                 let t = t.as_f64().unwrap_or(f64::NAN);
                 checks += 1;
@@ -269,21 +232,11 @@ fn main() {
                     at = key.clone();
                 }
                 if d > TOL_CENTRALITY {
-                    failures.push(format!(
-                        "{name} {algo} pair {key}: ours {ours} vs networkx {t}"
-                    ));
+                    failures.push(format!("{name} {algo} pair {key}: ours {ours} vs networkx {t}"));
                 }
             }
-            println!(
-                "  {}    {name:14} {algo:12} max |delta| {worst:.3e} at pair {at} \
-                      ({} pairs)",
-                if worst <= TOL_CENTRALITY {
-                    "ok"
-                } else {
-                    "FAIL"
-                },
-                theirs.len()
-            );
+            println!("  {}    {name:14} {algo:12} max |delta| {worst:.3e} at pair {at} \
+                      ({} pairs)", if worst <= TOL_CENTRALITY { "ok" } else { "FAIL" }, theirs.len());
         }
 
         // Centrality is checked against a view built the way the *engine*
@@ -301,62 +254,33 @@ fn main() {
         let single = view_single(nodes, &edges);
         let bidir = !directed;
         for (algo, ours, tol) in [
-            (
-                "degree_centrality",
-                degree_centrality(&single, bidir),
-                TOL_CENTRALITY,
-            ),
-            (
-                "closeness_centrality",
-                closeness_centrality(&single, bidir),
-                TOL_CENTRALITY,
-            ),
-            (
-                "betweenness_centrality",
-                betweenness_centrality(&single, bidir),
-                TOL_CENTRALITY,
-            ),
-            (
-                "harmonic_centrality",
-                harmonic_centrality(&single, bidir),
-                TOL_CENTRALITY,
-            ),
+            ("degree_centrality", degree_centrality(&single, bidir), TOL_CENTRALITY),
+            ("closeness_centrality", closeness_centrality(&single, bidir), TOL_CENTRALITY),
+            ("betweenness_centrality", betweenness_centrality(&single, bidir), TOL_CENTRALITY),
+            ("harmonic_centrality", harmonic_centrality(&single, bidir), TOL_CENTRALITY),
             // Integers, so exact. A core number off by one is a different
             // answer, not a rounding difference.
-            (
-                "core_number",
-                core_number(&single, bidir)
-                    .iter()
-                    .map(|&c| c as f64)
-                    .collect(),
-                0.0,
-            ),
+            ("core_number", core_number(&single, bidir).iter().map(|&c| c as f64).collect(), 0.0),
             // Power iteration, so looser than the exact ones but far tighter
             // than the differences that matter. `None` here means it did not
             // converge, which is reported rather than compared -- see below.
-            (
-                "eigenvector_centrality",
-                eigenvector_centrality(&single, bidir, 1000, 1e-10).unwrap_or_default(),
-                TOL_EIGENVECTOR,
-            ),
+            ("eigenvector_centrality",
+             eigenvector_centrality(&single, bidir, 1000, 1e-10).unwrap_or_default(),
+             TOL_EIGENVECTOR),
         ] {
             // A recorded `null` means NetworkX itself declined to answer, and
             // there is nothing to compare against. Skipping is right; scoring
             // it as agreement would be a check that cannot fail.
             if want.get(algo).is_some_and(|v| v.is_null()) {
-                println!(
-                    "  skip  {name:14} {:12} networkx did not converge",
-                    algo.trim_end_matches("_centrality")
-                );
+                println!("  skip  {name:14} {:12} networkx did not converge",
+                         algo.trim_end_matches("_centrality"));
                 continue;
             }
             if ours.is_empty() {
                 failures.push(format!("{name} {algo}: did not converge"));
                 continue;
             }
-            let Some(theirs) = want.get(algo) else {
-                continue;
-            };
+            let Some(theirs) = want.get(algo) else { continue };
             let (mut worst, mut at) = (0.0f64, 0usize);
             for i in 0..nodes {
                 let t = theirs[i.to_string()].as_f64().unwrap_or(f64::NAN);
@@ -410,11 +334,7 @@ fn main() {
             }
         };
 
-        let tight = PageRankConfig {
-            iterations: 200,
-            tolerance: 1e-12,
-            ..Default::default()
-        };
+        let tight = PageRankConfig { iterations: 200, tolerance: 1e-12, ..Default::default() };
         check_map("pagerank", &page_rank(&view, tight), TOL_PAGERANK);
 
         let lcc = if directed {
@@ -425,9 +345,7 @@ fn main() {
         check_map("clustering", &lcc.coefficients, TOL_CLUSTERING);
 
         let mut check_exact = |label: &str, ours: i64| {
-            let Some(w) = want[label].as_i64() else {
-                return;
-            };
+            let Some(w) = want[label].as_i64() else { return };
             checks += 1;
             let ok = ours == w;
             println!(
@@ -442,15 +360,9 @@ fn main() {
                 failures.push(format!("{name}/{label}: ours={ours} recorded={w}"));
             }
         };
-        check_exact(
-            "wcc_count",
-            weakly_connected_components(&view).components.len() as i64,
-        );
+        check_exact("wcc_count", weakly_connected_components(&view).components.len() as i64);
         if directed {
-            check_exact(
-                "scc_count",
-                strongly_connected_components(&view).components.len() as i64,
-            );
+            check_exact("scc_count", strongly_connected_components(&view).components.len() as i64);
         }
         check_exact("triangles", count_triangles(&view) as i64);
 
@@ -498,13 +410,12 @@ fn main() {
                     match a_star(&view, sv, tv, &zero)
                         .expect("the parity graphs are built with non-negative weights")
                     {
-                        Some((_, cost))
-                            if (cost - want_w).abs() / want_w.abs().max(1e-12) <= TOL_PATH => {}
+                        Some((_, cost)) if (cost - want_w).abs()
+                            / want_w.abs().max(1e-12) <= TOL_PATH => {}
                         Some((_, cost)) => failures.push(format!(
-                            "{name}/a_star {key}: ours={cost} recorded={want_w}"
-                        )),
-                        None => failures
-                            .push(format!("{name}/a_star {key}: no path, recorded={want_w}")),
+                            "{name}/a_star {key}: ours={cost} recorded={want_w}")),
+                        None => failures.push(format!(
+                            "{name}/a_star {key}: no path, recorded={want_w}")),
                     }
                 }
             }
@@ -517,20 +428,15 @@ fn main() {
                 for (key, lens) in obj {
                     let mut it = key.split('-').map(|x| x.parse::<usize>().unwrap());
                     let (sv, tv) = (it.next().unwrap(), it.next().unwrap());
-                    let want_lens: Vec<f64> = lens
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|x| x.as_f64().unwrap())
-                        .collect();
+                    let want_lens: Vec<f64> =
+                        lens.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
                     let ours = yens_k_shortest(&view, sv, tv, want_lens.len())
                         .expect("the parity graphs are built with non-negative weights");
                     checks += 1;
                     let ok = ours.len() == want_lens.len()
-                        && ours
-                            .iter()
-                            .zip(&want_lens)
-                            .all(|((_, c), w)| (c - w).abs() / w.abs().max(1e-12) <= TOL_PATH);
+                        && ours.iter().zip(&want_lens).all(|((_, c), w)| {
+                            (c - w).abs() / w.abs().max(1e-12) <= TOL_PATH
+                        });
                     if !ok {
                         failures.push(format!(
                             "{name}/yens {key}: ours={:?} recorded={want_lens:?}",
@@ -550,10 +456,10 @@ fn main() {
                 checks += 1;
                 match modularity(&single, &parts) {
                     Some(q) if (q - want_q).abs() <= TOL_MODULARITY => {}
-                    Some(q) => {
-                        failures.push(format!("{name}/modularity: ours={q} recorded={want_q}"))
-                    }
-                    None => failures.push(format!("{name}/modularity: refused, recorded={want_q}")),
+                    Some(q) => failures.push(format!(
+                        "{name}/modularity: ours={q} recorded={want_q}")),
+                    None => failures.push(format!(
+                        "{name}/modularity: refused, recorded={want_q}")),
                 }
 
                 // Louvain's own answer is not compared to NetworkX's -- see
@@ -567,8 +473,7 @@ fn main() {
                     Some(q) if q >= want_q - TOL_MODULARITY => {}
                     Some(q) => failures.push(format!(
                         "{name}/louvain: Q={q} is worse than the arbitrary \
-                         partition's {want_q}"
-                    )),
+                         partition's {want_q}")),
                     None => failures.push(format!("{name}/louvain: partition incomplete")),
                 }
             }
@@ -586,9 +491,7 @@ fn main() {
             "mst_weight"
         );
         if !ok {
-            failures.push(format!(
-                "{name}/mst_weight: ours={ours_mst} recorded={want_mst}"
-            ));
+            failures.push(format!("{name}/mst_weight: ours={ours_mst} recorded={want_mst}"));
         }
         // ---- The twenty-five added for H2.
         //
@@ -613,21 +516,9 @@ fn main() {
             };
             cmp_scalar("wiener_index", wiener_index(&view), "wiener_index");
             cmp_scalar("transitivity", transitivity(&single, bidir), "transitivity");
-            cmp_scalar(
-                "global_efficiency",
-                global_efficiency(&single, bidir),
-                "global_efficiency",
-            );
-            cmp_scalar(
-                "rich_club_1",
-                rich_club_coefficient(&single, 1, bidir),
-                "rich_club_1",
-            );
-            cmp_scalar(
-                "reciprocity",
-                if directed { reciprocity(&view) } else { None },
-                "reciprocity",
-            );
+            cmp_scalar("global_efficiency", global_efficiency(&single, bidir), "global_efficiency");
+            cmp_scalar("rich_club_1", rich_club_coefficient(&single, 1, bidir), "rich_club_1");
+            cmp_scalar("reciprocity", if directed { reciprocity(&view) } else { None }, "reciprocity");
 
             checks += 1;
             let ours_bip = bipartite_sets(&single, bidir).is_some();
@@ -638,16 +529,12 @@ fn main() {
             checks += 1;
             let ours_bcc = biconnected_components(&single, bidir).len() as u64;
             if Some(ours_bcc) != want["biconnected_component_count"].as_u64() {
-                failures.push(format!(
-                    "{name}/biconnected_component_count: ours={ours_bcc}"
-                ));
+                failures.push(format!("{name}/biconnected_component_count: ours={ours_bcc}"));
             }
 
             checks += 1;
-            let ours_tc = transitive_closure(&view)
-                .into_iter()
-                .filter(|(a, b)| a != b)
-                .count() as u64;
+            let ours_tc = transitive_closure(&view).into_iter()
+                .filter(|(a, b)| a != b).count() as u64;
             if Some(ours_tc) != want["transitive_closure_pairs"].as_u64() {
                 failures.push(format!("{name}/transitive_closure_pairs: ours={ours_tc}"));
             }
@@ -661,42 +548,31 @@ fn main() {
             checks += 1;
             let mut ours_truss = k_truss(&single, 3, bidir);
             ours_truss.sort_unstable();
-            let want_truss: Vec<usize> = want["k_truss_3_nodes"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_u64().map(|v| v as usize))
-                        .collect()
-                })
+            let want_truss: Vec<usize> = want["k_truss_3_nodes"].as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_u64().map(|v| v as usize)).collect())
                 .unwrap_or_default();
             if ours_truss != want_truss {
                 failures.push(format!("{name}/k_truss_3_nodes: ours={ours_truss:?}"));
             }
 
             // Per-node vectors, compared over the keys the reference carries.
-            let mut cmp_vec =
-                |label: &str, ours: &dyn Fn(usize) -> Option<f64>, key: &str, tol: f64| {
-                    let Some(obj) = want[key].as_object() else {
-                        return;
+            let mut cmp_vec = |label: &str, ours: &dyn Fn(usize) -> Option<f64>, key: &str, tol: f64| {
+                let Some(obj) = want[key].as_object() else { return };
+                for (k, v) in obj {
+                    let Ok(i) = k.parse::<usize>() else { continue };
+                    checks += 1;
+                    let (a, b) = (ours(i), v.as_f64());
+                    let ok = match (a, b) {
+                        (Some(x), Some(y)) => (x - y).abs() <= tol * y.abs().max(1.0),
+                        (None, None) => true,
+                        _ => false,
                     };
-                    for (k, v) in obj {
-                        let Ok(i) = k.parse::<usize>() else { continue };
-                        checks += 1;
-                        let (a, b) = (ours(i), v.as_f64());
-                        let ok = match (a, b) {
-                            (Some(x), Some(y)) => (x - y).abs() <= tol * y.abs().max(1.0),
-                            (None, None) => true,
-                            _ => false,
-                        };
-                        if !ok {
-                            failures
-                                .push(format!("{name}/{label}[{i}]: ours={a:?} recorded={b:?}"));
-                        }
+                    if !ok {
+                        failures.push(format!("{name}/{label}[{i}]: ours={a:?} recorded={b:?}"));
                     }
-                };
-            let sq: Vec<Option<f64>> = (0..nodes)
-                .map(|i| square_clustering(&single, i, bidir))
-                .collect();
+                }
+            };
+            let sq: Vec<Option<f64>> = (0..nodes).map(|i| square_clustering(&single, i, bidir)).collect();
             cmp_vec("square_clustering", &|i| sq[i], "square_clustering", 1e-9);
             let es: Vec<Option<f64>> = (0..nodes).map(|i| effective_size(&single, i)).collect();
             cmp_vec("effective_size", &|i| es[i], "effective_size", 1e-9);
@@ -706,40 +582,17 @@ fn main() {
             let kz = katz_centrality(&view, 0.05, 1.0, 5000, 1e-12);
             cmp_vec("katz", &|i| kz.as_ref().map(|v| v[i]), "katz", 1e-6);
             let hp = hits(&view, 5000, 1e-12);
-            cmp_vec(
-                "hits_hubs",
-                &|i| hp.as_ref().map(|(h, _)| h[i]),
-                "hits_hubs",
-                1e-6,
-            );
-            cmp_vec(
-                "hits_authorities",
-                &|i| hp.as_ref().map(|(_, a)| a[i]),
-                "hits_authorities",
-                1e-6,
-            );
+            cmp_vec("hits_hubs", &|i| hp.as_ref().map(|(h, _)| h[i]), "hits_hubs", 1e-6);
+            cmp_vec("hits_authorities", &|i| hp.as_ref().map(|(_, a)| a[i]), "hits_authorities", 1e-6);
             let ppr = personalised_page_rank(&view, &[0], 0.85, 500, 1e-12);
-            cmp_vec(
-                "personalised_pagerank",
-                &|i| Some(ppr[i]),
-                "personalised_pagerank",
-                1e-6,
-            );
+            cmp_vec("personalised_pagerank", &|i| Some(ppr[i]), "personalised_pagerank", 1e-6);
             let bf = bellman_ford(&view, 0);
-            cmp_vec(
-                "bellman_ford_from_0",
-                &|i| bf.as_ref().and_then(|d| d[i]),
-                "bellman_ford_from_0",
-                1e-9,
-            );
+            cmp_vec("bellman_ford_from_0", &|i| bf.as_ref().and_then(|d| d[i]),
+                    "bellman_ford_from_0", 1e-9);
         }
     }
 
-    println!(
-        "\n{}/{} checks agree with the recorded answers",
-        checks - failures.len(),
-        checks
-    );
+    println!("\n{}/{} checks agree with the recorded answers", checks - failures.len(), checks);
     if !failures.is_empty() {
         println!("\nthe algorithms have drifted from what NetworkX recorded:");
         for f in &failures {

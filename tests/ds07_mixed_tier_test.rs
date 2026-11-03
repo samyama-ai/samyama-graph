@@ -13,17 +13,11 @@ use samyama::QueryEngine;
 fn build_and_export_snapshot() -> Vec<u8> {
     let mut store = GraphStore::new();
     let alice = store.create_node("Person");
-    store
-        .get_node_mut(alice)
-        .unwrap()
-        .set_property("name", "Alice");
+    store.get_node_mut(alice).unwrap().set_property("name", "Alice");
     let bob = store.create_node("Person");
     store.get_node_mut(bob).unwrap().set_property("name", "Bob");
     let carol = store.create_node("Person");
-    store
-        .get_node_mut(carol)
-        .unwrap()
-        .set_property("name", "Carol");
+    store.get_node_mut(carol).unwrap().set_property("name", "Carol");
 
     store.create_edge(alice, bob, "KNOWS").unwrap();
     store.create_edge(bob, carol, "KNOWS").unwrap();
@@ -40,14 +34,8 @@ fn snapshot_import_populates_frozen_tier_not_buffer() {
     import_tenant(&mut store, bytes.as_slice()).expect("import");
 
     let stats = store.adjacency_stats();
-    assert_eq!(
-        stats.frozen_edges, 2,
-        "imported edges must land in frozen tier"
-    );
-    assert_eq!(
-        stats.buffer_edges, 0,
-        "write buffer must be empty after import"
-    );
+    assert_eq!(stats.frozen_edges, 2, "imported edges must land in frozen tier");
+    assert_eq!(stats.buffer_edges, 0, "write buffer must be empty after import");
     assert!(stats.frozen_segments >= 1);
 }
 
@@ -60,10 +48,7 @@ fn post_import_creates_go_to_write_buffer() {
     let alice_id = find_person_by_name(&store, "Alice").expect("Alice in import");
 
     let dave = store.create_node("Person");
-    store
-        .get_node_mut(dave)
-        .unwrap()
-        .set_property("name", "Dave");
+    store.get_node_mut(dave).unwrap().set_property("name", "Dave");
     store.create_edge(alice_id, dave, "KNOWS").unwrap();
 
     let stats = store.adjacency_stats();
@@ -75,9 +60,7 @@ fn find_person_by_name(store: &GraphStore, name: &str) -> Option<NodeId> {
     // Imports store properties in the columnar column store, not on the
     // Node struct — scan that directly.
     for node in store.get_nodes_by_label(&Label::new("Person")) {
-        let pv = store
-            .node_columns
-            .get_property(node.id.as_u64() as usize, "name");
+        let pv = store.node_columns.get_property(node.id.as_u64() as usize, "name");
         if pv.as_string().map_or(false, |s| s == name) {
             return Some(node.id);
         }
@@ -94,10 +77,7 @@ fn match_query_sees_both_tiers() {
     let carol_id = find_person_by_name(&store, "Carol").expect("Carol in import");
 
     let dave = store.create_node("Person");
-    store
-        .get_node_mut(dave)
-        .unwrap()
-        .set_property("name", "Dave");
+    store.get_node_mut(dave).unwrap().set_property("name", "Dave");
     store.create_edge(carol_id, dave, "KNOWS").unwrap();
 
     let stats = store.adjacency_stats();
@@ -112,11 +92,7 @@ fn match_query_sees_both_tiers() {
         )
         .expect("query");
 
-    assert_eq!(
-        result.len(),
-        1,
-        "expected one 3-hop path spanning both tiers"
-    );
+    assert_eq!(result.len(), 1, "expected one 3-hop path spanning both tiers");
     let name = result.records[0]
         .get("name")
         .unwrap()

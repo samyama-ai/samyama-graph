@@ -122,85 +122,31 @@ struct Case {
 }
 
 const CASES: &[Case] = &[
-    Case {
-        name: "pageRank",
-        frontier: true,
-        uses_rayon: true,
-        small: false,
-        run: |v| {
-            page_rank(v, PageRankConfig::default());
-        },
-    },
-    Case {
-        name: "cdlp",
-        frontier: true,
-        uses_rayon: true,
-        small: false,
-        run: |v| {
-            cdlp(v, &CdlpConfig::default());
-        },
-    },
-    Case {
-        name: "lcc",
-        frontier: true,
-        uses_rayon: true,
-        small: false,
-        run: |v| {
-            local_clustering_coefficient(v);
-        },
-    },
-    Case {
-        name: "triangleCount",
-        frontier: true,
-        uses_rayon: true,
-        small: false,
-        run: |v| {
-            count_triangles(v);
-        },
-    },
-    Case {
-        name: "wcc",
-        frontier: true,
-        uses_rayon: false,
-        small: false,
-        run: |v| {
-            weakly_connected_components(v);
-        },
-    },
+    Case { name: "pageRank", frontier: true, uses_rayon: true, small: false,
+           run: |v| { page_rank(v, PageRankConfig::default()); } },
+    Case { name: "cdlp", frontier: true, uses_rayon: true, small: false,
+           run: |v| { cdlp(v, &CdlpConfig::default()); } },
+    Case { name: "lcc", frontier: true, uses_rayon: true, small: false,
+           run: |v| { local_clustering_coefficient(v); } },
+    Case { name: "triangleCount", frontier: true, uses_rayon: true, small: false,
+           run: |v| { count_triangles(v); } },
+    Case { name: "wcc", frontier: true, uses_rayon: false, small: false,
+           run: |v| { weakly_connected_components(v); } },
     // O(n*m): a graph big enough for the others would run for hours.
-    Case {
-        name: "betweenness",
-        frontier: true,
-        uses_rayon: false,
-        small: true,
-        run: |v| {
-            betweenness_centrality(v, false);
-        },
-    },
-    Case {
-        name: "closeness",
-        frontier: true,
-        uses_rayon: false,
-        small: true,
-        run: |v| {
-            closeness_centrality(v, false);
-        },
-    },
+    Case { name: "betweenness", frontier: true, uses_rayon: false, small: true,
+           run: |v| { betweenness_centrality(v, false); } },
+    Case { name: "closeness", frontier: true, uses_rayon: false, small: true,
+           run: |v| { closeness_centrality(v, false); } },
 ];
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| -> Option<String> {
-        args.iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1))
-            .cloned()
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
     };
     let json_out = arg("--json");
     let reps: usize = arg("--reps").and_then(|v| v.parse().ok()).unwrap_or(3);
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let mut threads: Vec<usize> = vec![1, 2, 4, 8, 16];
     threads.retain(|t| *t <= cores);
     if !threads.contains(&cores) {
@@ -209,17 +155,16 @@ fn main() {
 
     let big = build(200_000, 2_000_000, 12345);
     let small = build(3_000, 30_000, 777);
-    eprintln!("cores={cores} threads={threads:?} reps={reps} big=200k/2M small=3k/30k");
+    eprintln!(
+        "cores={cores} threads={threads:?} reps={reps} big=200k/2M small=3k/30k"
+    );
 
     let mut runs = Vec::new();
     for case in CASES {
         let view = if case.small { &small } else { &big };
         let mut baseline = 0.0_f64;
         for &t in &threads {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(t)
-                .build()
-                .unwrap();
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(t).build().unwrap();
             let ms = pool.install(|| time_ms(reps, || (case.run)(view)));
             if t == 1 {
                 baseline = ms;
@@ -227,11 +172,7 @@ fn main() {
             let speedup = if ms > 0.0 { baseline / ms } else { 0.0 };
             eprintln!(
                 "{:>14} t={:>2} {:>9.1} ms  speedup {:>5.2}x  efficiency {:>4.2}",
-                case.name,
-                t,
-                ms,
-                speedup,
-                speedup / t as f64
+                case.name, t, ms, speedup, speedup / t as f64
             );
             runs.push(serde_json::json!({
                 "algorithm": case.name,

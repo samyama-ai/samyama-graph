@@ -25,36 +25,15 @@ fn store() -> GraphStore {
 
 fn rows(s: &GraphStore, q: &str) -> Result<usize, String> {
     let p = parse_query(q).map_err(|e| format!("{e:?}"))?;
-    QueryExecutor::new(s)
-        .execute(&p)
-        .map(|r| r.records.len())
-        .map_err(|e| e.to_string())
+    QueryExecutor::new(s).execute(&p).map(|r| r.records.len()).map_err(|e| e.to_string())
 }
 
 #[test]
 fn an_aliased_yield_column_can_be_referenced() {
     let s = store();
-    assert_eq!(
-        rows(
-            &s,
-            "CALL algo.pageRank() YIELD node AS a, score AS b RETURN a, b"
-        ),
-        Ok(3)
-    );
-    assert_eq!(
-        rows(
-            &s,
-            "CALL algo.pageRank() YIELD node AS a, score RETURN a, score"
-        ),
-        Ok(3)
-    );
-    assert_eq!(
-        rows(
-            &s,
-            "CALL algo.pageRank() YIELD node, score AS b RETURN node, b"
-        ),
-        Ok(3)
-    );
+    assert_eq!(rows(&s, "CALL algo.pageRank() YIELD node AS a, score AS b RETURN a, b"), Ok(3));
+    assert_eq!(rows(&s, "CALL algo.pageRank() YIELD node AS a, score RETURN a, score"), Ok(3));
+    assert_eq!(rows(&s, "CALL algo.pageRank() YIELD node, score AS b RETURN node, b"), Ok(3));
 }
 
 #[test]
@@ -62,23 +41,14 @@ fn the_alias_works_for_other_algorithms_too() {
     // The rename is applied where both execution paths converge, so an
     // algorithm added later inherits it rather than having to remember.
     let s = store();
-    assert_eq!(
-        rows(
-            &s,
-            "CALL algo.wcc() YIELD node AS n, componentId AS c RETURN n, c"
-        ),
-        Ok(3)
-    );
+    assert_eq!(rows(&s, "CALL algo.wcc() YIELD node AS n, componentId AS c RETURN n, c"), Ok(3));
 }
 
 #[test]
 fn an_alias_survives_order_by_and_limit() {
     let s = store();
     assert_eq!(
-        rows(
-            &s,
-            "CALL algo.pageRank() YIELD node AS a, score AS b RETURN b ORDER BY b DESC LIMIT 2"
-        ),
+        rows(&s, "CALL algo.pageRank() YIELD node AS a, score AS b RETURN b ORDER BY b DESC LIMIT 2"),
         Ok(2)
     );
 }
@@ -88,17 +58,8 @@ fn the_original_column_name_still_works_unaliased() {
     // The failure this guards is a rename that *moves* the binding instead of
     // adding one, which would break every query that does not alias.
     let s = store();
-    assert_eq!(
-        rows(
-            &s,
-            "CALL algo.pageRank() YIELD node, score RETURN node, score"
-        ),
-        Ok(3)
-    );
-    assert_eq!(
-        rows(&s, "CALL algo.wcc() YIELD node, componentId RETURN node"),
-        Ok(3)
-    );
+    assert_eq!(rows(&s, "CALL algo.pageRank() YIELD node, score RETURN node, score"), Ok(3));
+    assert_eq!(rows(&s, "CALL algo.wcc() YIELD node, componentId RETURN node"), Ok(3));
 }
 
 #[test]

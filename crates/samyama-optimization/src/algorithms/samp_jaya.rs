@@ -22,10 +22,7 @@ pub struct SAMPJayaSolver {
 impl SAMPJayaSolver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
-            seed: None,
-            config,
-            m_max: None,
-        }
+            seed: None, config, m_max: None }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -82,13 +79,14 @@ impl SAMPJayaSolver {
                 let updated: Vec<Individual> = sub
                     .par_iter()
                     .enumerate()
-                    .map(|(__idx, ind)| {
+                .map(|(__idx, ind)| {
                         let mut local_rng = crate::common::rng::child_rng(self.seed, iter, __idx);
                         let r1: f64 = local_rng.gen();
                         let r2: f64 = local_rng.gen();
                         let mut new_vars = Array1::zeros(dim);
                         for j in 0..dim {
-                            let val = ind.variables[j] + r1 * (sb_vars[j] - ind.variables[j].abs())
+                            let val = ind.variables[j]
+                                + r1 * (sb_vars[j] - ind.variables[j].abs())
                                 - r2 * (sw_vars[j] - ind.variables[j].abs());
                             new_vars[j] = val.clamp(lower[j], upper[j]);
                         }

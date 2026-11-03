@@ -213,6 +213,7 @@ fn simple_reads() -> Vec<FinBenchQuery> {
 MATCH (a:Account {id: 1})
 RETURN a.id, a.createTime, a.isBlocked, a.accountType",
         },
+
         FinBenchQuery {
             id: "SR-2",
             name: "Account Transfers in Window",
@@ -225,6 +226,7 @@ RETURN dst.id, t.amount, t.timestamp
 ORDER BY t.timestamp DESC
 LIMIT 10",
         },
+
         FinBenchQuery {
             id: "SR-3",
             name: "Person's Accounts",
@@ -235,6 +237,7 @@ MATCH (p:Person {id: 1})-[:OWN]->(a:Account)
 RETURN a.id, a.accountType, a.isBlocked, a.createTime
 ORDER BY a.id",
         },
+
         FinBenchQuery {
             id: "SR-4",
             name: "Transfer-In Accounts",
@@ -247,6 +250,7 @@ RETURN src.id, t.amount, t.timestamp
 ORDER BY t.timestamp DESC
 LIMIT 10",
         },
+
         FinBenchQuery {
             id: "SR-5",
             name: "Transfer-Out Accounts",
@@ -259,6 +263,7 @@ RETURN dst.id, t.amount, t.timestamp
 ORDER BY t.timestamp DESC
 LIMIT 10",
         },
+
         FinBenchQuery {
             id: "SR-6",
             name: "Loan by ID",
@@ -280,6 +285,7 @@ fn read_writes() -> Vec<FinBenchQuery> {
             // Block an account and then read its transfers
             cypher: "MATCH (a:Account {id: 2}) SET a.isBlocked = true RETURN a.id, a.isBlocked",
         },
+
         FinBenchQuery {
             id: "RW-2",
             name: "Block Medium + Find Accounts",
@@ -287,13 +293,13 @@ fn read_writes() -> Vec<FinBenchQuery> {
             // Block a medium then find connected accounts
             cypher: "MATCH (m:Medium {id: 2}) SET m.isBlocked = true RETURN m.id, m.isBlocked",
         },
+
         FinBenchQuery {
             id: "RW-3",
             name: "Block Person + Accounts",
             category: "readwrite",
             // Block a person (their accounts would need separate queries in real FinBench)
-            cypher:
-                "MATCH (p:Person {id: 2}) SET p.isBlocked = true RETURN p.id, p.name, p.isBlocked",
+            cypher: "MATCH (p:Person {id: 2}) SET p.isBlocked = true RETURN p.id, p.name, p.isBlocked",
         },
     ]
 }
@@ -453,6 +459,7 @@ fn format_ms(d: Duration) -> String {
     }
 }
 
+
 /// Ids taken from the data, for the queries that cannot be pinned to a literal.
 ///
 /// CR-4, CR-5 and CR-9 were written against `{id: 1}`. The synthetic generator
@@ -489,29 +496,17 @@ impl Anchors {
     /// probe than the query uses would put the query back where it started.
     async fn derive(client: &EmbeddedClient) -> Self {
         Self {
-            cycle_account: first_id(
-                client,
-                "\
+            cycle_account: first_id(client, "\
 MATCH (a:Account)-[:TRANSFER]->(b:Account)-[:TRANSFER]->(c:Account)-[:TRANSFER]->(a)
 WHERE b.id <> a.id AND c.id <> a.id AND b.id <> c.id
-RETURN a.id LIMIT 1",
-            )
-            .await,
-            owned_account: first_id(
-                client,
-                "\
+RETURN a.id LIMIT 1").await,
+            owned_account: first_id(client, "\
 MATCH (owner)-[:OWN]->(a:Account)
 MATCH (owner)-[:OWN]->(other:Account)-[:TRANSFER]->(:Account)
 WHERE other.id <> a.id
-RETURN a.id LIMIT 1",
-            )
-            .await,
-            guarantor_company: first_id(
-                client,
-                "\
-MATCH (c:Company)-[:GUARANTEE]->() RETURN c.id LIMIT 1",
-            )
-            .await,
+RETURN a.id LIMIT 1").await,
+            guarantor_company: first_id(client, "\
+MATCH (c:Company)-[:GUARANTEE]->() RETURN c.id LIMIT 1").await,
         }
     }
 
@@ -523,21 +518,9 @@ MATCH (c:Company)-[:GUARANTEE]->() RETURN c.id LIMIT 1",
     fn bind(&self, cypher: &str) -> Result<String, &'static str> {
         let mut out = cypher.to_string();
         for (token, value, what) in [
-            (
-                "$cycleAccount",
-                self.cycle_account,
-                "no account lies on a 3-hop transfer cycle",
-            ),
-            (
-                "$ownedAccount",
-                self.owned_account,
-                "no owner has a second account that transfers",
-            ),
-            (
-                "$guarantorCompany",
-                self.guarantor_company,
-                "no company guarantees anyone",
-            ),
+            ("$cycleAccount", self.cycle_account, "no account lies on a 3-hop transfer cycle"),
+            ("$ownedAccount", self.owned_account, "no owner has a second account that transfers"),
+            ("$guarantorCompany", self.guarantor_company, "no company guarantees anyone"),
         ] {
             if out.contains(token) {
                 match value {
@@ -637,29 +620,19 @@ async fn main() -> Result<(), Error> {
     let args: Vec<String> = std::env::args().collect();
 
     let data_dir = if let Some(pos) = args.iter().position(|a| a == "--data-dir") {
-        Some(PathBuf::from(
-            args.get(pos + 1)
-                .expect("--data-dir requires a path argument"),
-        ))
+        Some(PathBuf::from(args.get(pos + 1).expect("--data-dir requires a path argument")))
     } else {
         None
     };
 
     let runs: usize = if let Some(pos) = args.iter().position(|a| a == "--runs") {
-        args.get(pos + 1)
-            .expect("--runs requires a number")
-            .parse()
-            .expect("--runs must be a positive integer")
+        args.get(pos + 1).expect("--runs requires a number").parse().expect("--runs must be a positive integer")
     } else {
         5
     };
 
     let filter_query: Option<String> = if let Some(pos) = args.iter().position(|a| a == "--query") {
-        Some(
-            args.get(pos + 1)
-                .expect("--query requires a query ID (e.g. CR-1, SR-3)")
-                .to_uppercase(),
-        )
+        Some(args.get(pos + 1).expect("--query requires a query ID (e.g. CR-1, SR-3)").to_uppercase())
     } else {
         None
     };
@@ -696,12 +669,10 @@ async fn main() -> Result<(), Error> {
     let load_time = load_start.elapsed();
 
     eprintln!();
-    eprintln!(
-        "Dataset: {} nodes, {} edges (loaded in {})",
+    eprintln!("Dataset: {} nodes, {} edges (loaded in {})",
         format_num(load_result.total_nodes),
         format_num(load_result.total_edges),
-        format_duration(load_time)
-    );
+        format_duration(load_time));
     // Build property indexes on `id` for the labels the queries anchor on.
     //
     // Without these every `MATCH (a:Account {id: ...})` is a full label scan.
@@ -721,10 +692,8 @@ async fn main() -> Result<(), Error> {
             eprintln!("  WARN: index {label}(id) failed: {e}");
         }
     }
-    eprintln!(
-        "Indexes built in {} (Account/Person/Company/Loan/Medium on id)",
-        format_duration(idx_start.elapsed())
-    );
+    eprintln!("Indexes built in {} (Account/Person/Company/Loan/Medium on id)",
+        format_duration(idx_start.elapsed()));
     eprintln!("Runs per query: {}", runs);
     eprintln!();
 
@@ -740,19 +709,13 @@ async fn main() -> Result<(), Error> {
     }
 
     let queries: Vec<&FinBenchQuery> = if let Some(ref filter) = filter_query {
-        all_queries
-            .iter()
-            .filter(|q| q.id == filter.as_str())
-            .collect()
+        all_queries.iter().filter(|q| q.id == filter.as_str()).collect()
     } else {
         all_queries.iter().collect()
     };
 
     if queries.is_empty() {
-        eprintln!(
-            "ERROR: No matching query found for filter '{}'",
-            filter_query.unwrap_or_default()
-        );
+        eprintln!("ERROR: No matching query found for filter '{}'", filter_query.unwrap_or_default());
         eprintln!("Available: CR-1..CR-12, SR-1..SR-6, RW-1..RW-3, W-1..W-19 (with --writes)");
         std::process::exit(1);
     }
@@ -762,20 +725,10 @@ async fn main() -> Result<(), Error> {
     // ========================================================================
 
     // Print header
-    println!(
-        "{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  {}",
-        "ID", "Name", "Rows", "Min", "Median", "Max", "Status"
-    );
-    println!(
-        "{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  {}",
-        "------",
-        "------------------------------------",
-        "------",
-        "----------",
-        "----------",
-        "----------",
-        "------"
-    );
+    println!("{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  {}",
+        "ID", "Name", "Rows", "Min", "Median", "Max", "Status");
+    println!("{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  {}",
+        "------", "------------------------------------", "------", "----------", "----------", "----------", "------");
 
     // Anchors first: three queries are written against ids the generator does
     // not guarantee, and running them unbound is what produced "21/21 passed"
@@ -786,15 +739,9 @@ async fn main() -> Result<(), Error> {
     // same question of the same nodes.
     println!(
         "Anchors derived from the data: cycleAccount={}, ownedAccount={}, guarantorCompany={}",
-        anchors
-            .cycle_account
-            .map_or("none".to_string(), |v| v.to_string()),
-        anchors
-            .owned_account
-            .map_or("none".to_string(), |v| v.to_string()),
-        anchors
-            .guarantor_company
-            .map_or("none".to_string(), |v| v.to_string()),
+        anchors.cycle_account.map_or("none".to_string(), |v| v.to_string()),
+        anchors.owned_account.map_or("none".to_string(), |v| v.to_string()),
+        anchors.guarantor_company.map_or("none".to_string(), |v| v.to_string()),
     );
 
     let mut passed = 0usize;
@@ -810,15 +757,13 @@ async fn main() -> Result<(), Error> {
     for query in &queries {
         // Print section separator when category changes
         if query.category != last_category {
-            if !last_category.is_empty() {
-                println!();
-            }
+            if !last_category.is_empty() { println!(); }
             let label = match query.category {
-                "complex" => "--- Complex Reads (CR) ---",
-                "simple" => "--- Simple Reads (SR) ---",
+                "complex"   => "--- Complex Reads (CR) ---",
+                "simple"    => "--- Simple Reads (SR) ---",
                 "readwrite" => "--- Read-Write Operations (RW) ---",
-                "write" => "--- Write Operations (W) ---",
-                other => other,
+                "write"     => "--- Write Operations (W) ---",
+                other       => other,
             };
             println!("{}", label);
             last_category = query.category;
@@ -833,10 +778,8 @@ async fn main() -> Result<(), Error> {
         let cypher = match anchors.bind(query.cypher) {
             Ok(c) => c,
             Err(why) => {
-                println!(
-                    "{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  SKIPPED",
-                    query.id, query.name, "-", "-", "-", "-"
-                );
+                println!("{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  SKIPPED",
+                    query.id, query.name, "-", "-", "-", "-");
                 eprintln!("       not run: {}", why);
                 skipped.push((query.id, why));
                 continue;
@@ -846,22 +789,17 @@ async fn main() -> Result<(), Error> {
         let result = run_benchmark(&client, query, &cypher, runs).await;
 
         if let Some(ref err) = result.error {
-            println!(
-                "{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  ERROR",
-                result.id, result.name, "-", "-", "-", "-"
-            );
+            println!("{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  ERROR",
+                result.id, result.name, "-", "-", "-", "-");
             eprintln!("       {}", err);
             errors += 1;
         } else {
-            println!(
-                "{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  OK",
-                result.id,
-                result.name,
+            println!("{:<8}{:<36}{:>8}{:>12}{:>12}{:>12}  OK",
+                result.id, result.name,
                 result.rows,
                 format_ms(result.min),
                 format_ms(result.median),
-                format_ms(result.max)
-            );
+                format_ms(result.max));
             passed += 1;
             if result.rows == 0 && matches!(query.category, "complex" | "simple") {
                 empty_reads.push(query.id);
@@ -875,24 +813,16 @@ async fn main() -> Result<(), Error> {
     // Summary
     // ========================================================================
     println!();
-    println!(
-        "Summary: {}/{} passed, {} errors (total benchmark time: {})",
-        passed,
-        queries.len(),
-        errors,
-        format_duration(bench_time)
-    );
+    println!("Summary: {}/{} passed, {} errors (total benchmark time: {})",
+        passed, queries.len(), errors, format_duration(bench_time));
     if !skipped.is_empty() {
         // Its own line, and not folded into `passed`: a query that could not be
         // anchored has not passed, and the count that says so is the point.
         println!(
             "SKIPPED: {} query(ies) had no anchor in this data and were not run: {}",
             skipped.len(),
-            skipped
-                .iter()
-                .map(|(id, why)| format!("{id} ({why})"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            skipped.iter().map(|(id, why)| format!("{id} ({why})"))
+                .collect::<Vec<_>>().join(", ")
         );
     }
     // A read that returns nothing exercised the parser and the planner and
@@ -911,11 +841,7 @@ async fn main() -> Result<(), Error> {
 
     // Cache stats
     let stats = client.cache_stats();
-    println!(
-        "AST cache: {} hits, {} misses",
-        stats.hits(),
-        stats.misses()
-    );
+    println!("AST cache: {} hits, {} misses", stats.hits(), stats.misses());
 
     if errors > 0 {
         std::process::exit(1);

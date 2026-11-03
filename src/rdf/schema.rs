@@ -121,21 +121,12 @@ mod tests {
         let mut store = RdfStore::new();
         assert_eq!(RdfsReasoner::default().reason(&mut store).unwrap(), 0);
         assert_eq!(store.len(), 0);
-        assert_eq!(
-            RdfsReasoner::default().enabled_rules,
-            RdfsReasoner::new().enabled_rules
-        );
+        assert_eq!(RdfsReasoner::default().enabled_rules, RdfsReasoner::new().enabled_rules);
     }
 
     #[test]
     fn reasoning_error_messages() {
-        assert_eq!(
-            ReasoningError::InvalidRule("r".into()).to_string(),
-            "Invalid rule: r"
-        );
-        assert_eq!(
-            ReasoningError::InferenceError("e".into()).to_string(),
-            "Inference error: e"
-        );
+        assert_eq!(ReasoningError::InvalidRule("r".into()).to_string(), "Invalid rule: r");
+        assert_eq!(ReasoningError::InferenceError("e".into()).to_string(), "Inference error: e");
     }
 }

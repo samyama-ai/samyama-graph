@@ -37,9 +37,7 @@ fn skewed_cities() -> GraphStore {
 
 fn column(store: &GraphStore, cypher: &str, name: &str) -> Vec<String> {
     let query = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("query should execute");
+    let batch = QueryExecutor::new(store).execute(&query).expect("query should execute");
     batch
         .records
         .iter()
@@ -97,11 +95,7 @@ fn skip_and_limit_together_count_distinct_rows() {
 
 #[test]
 fn distinct_without_a_slice_is_unchanged() {
-    let mut rows = column(
-        &skewed_cities(),
-        "MATCH (p:Person) RETURN DISTINCT p.city AS c",
-        "c",
-    );
+    let mut rows = column(&skewed_cities(), "MATCH (p:Person) RETURN DISTINCT p.city AS c", "c");
     rows.sort();
     assert_eq!(rows, vec!["Amsterdam", "Berlin", "Cairo"]);
 }
@@ -121,16 +115,8 @@ fn ordering_survives_deduplication() {
 
 #[test]
 fn limit_without_distinct_is_unaffected() {
-    let rows = column(
-        &skewed_cities(),
-        "MATCH (p:Person) RETURN p.city AS c LIMIT 3",
-        "c",
-    );
-    assert_eq!(
-        rows.len(),
-        3,
-        "a plain LIMIT still returns raw rows: {rows:?}"
-    );
+    let rows = column(&skewed_cities(), "MATCH (p:Person) RETURN p.city AS c LIMIT 3", "c");
+    assert_eq!(rows.len(), 3, "a plain LIMIT still returns raw rows: {rows:?}");
 }
 
 #[test]
@@ -152,22 +138,12 @@ fn distinct_over_several_columns_deduplicates_on_the_whole_row() {
             "city".to_string(),
             PropertyValue::String(city.to_string()),
         );
-        let _ = store.set_node_property(
-            "default",
-            id,
-            "band".to_string(),
-            PropertyValue::Integer(band),
-        );
+        let _ = store.set_node_property("default", id, "band".to_string(), PropertyValue::Integer(band));
     }
 
-    let query =
-        parse_query("MATCH (p:Person) RETURN DISTINCT p.city AS c, p.band AS b LIMIT 3").unwrap();
+    let query = parse_query("MATCH (p:Person) RETURN DISTINCT p.city AS c, p.band AS b LIMIT 3").unwrap();
     let batch = QueryExecutor::new(&store).execute(&query).unwrap();
-    assert_eq!(
-        batch.records.len(),
-        3,
-        "three distinct (city, band) pairs exist"
-    );
+    assert_eq!(batch.records.len(), 3, "three distinct (city, band) pairs exist");
 }
 
 #[test]
@@ -176,8 +152,7 @@ fn the_plan_puts_distinct_below_the_limit() {
     // back above the slice, this fails without needing a fixture skewed the
     // right way to expose it.
     let store = skewed_cities();
-    let query =
-        parse_query("EXPLAIN MATCH (p:Person) RETURN DISTINCT p.city AS c LIMIT 3").unwrap();
+    let query = parse_query("EXPLAIN MATCH (p:Person) RETURN DISTINCT p.city AS c LIMIT 3").unwrap();
     let batch = QueryExecutor::new(&store).execute(&query).unwrap();
     let plan = match batch.records[0].get("plan") {
         Some(Value::Property(PropertyValue::String(t))) => t.clone(),
@@ -185,9 +160,7 @@ fn the_plan_puts_distinct_below_the_limit() {
     };
 
     let limit_at = plan.find("Limit").expect("plan should contain a Limit");
-    let distinct_at = plan
-        .find("Distinct")
-        .expect("plan should contain a Distinct");
+    let distinct_at = plan.find("Distinct").expect("plan should contain a Distinct");
     assert!(
         limit_at < distinct_at,
         "Limit must sit above Distinct in the tree, so Distinct runs first:\n{plan}"

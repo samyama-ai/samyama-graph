@@ -21,8 +21,9 @@ fn router() -> axum::Router {
 
 async fn body_to_json(body: Body) -> Value {
     let bytes = body.collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&bytes)
-        .unwrap_or_else(|e| panic!("body not JSON: {e}: {}", String::from_utf8_lossy(&bytes)))
+    serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+        panic!("body not JSON: {e}: {}", String::from_utf8_lossy(&bytes))
+    })
 }
 
 #[tokio::test]
@@ -41,11 +42,7 @@ async fn algorithms_endpoint_lists_rao_family_and_baselines() {
 
     let v = body_to_json(res.into_body()).await;
     let arr = v.as_array().expect("expected top-level array");
-    assert!(
-        arr.len() >= 20,
-        "expected 20+ algorithms, got {}",
-        arr.len()
-    );
+    assert!(arr.len() >= 20, "expected 20+ algorithms, got {}", arr.len());
 
     // Spot-check shape + membership
     let names: Vec<String> = arr
@@ -53,32 +50,12 @@ async fn algorithms_endpoint_lists_rao_family_and_baselines() {
         .map(|a| a["id"].as_str().unwrap().to_string())
         .collect();
     for required in [
-        "jaya",
-        "rao1",
-        "rao2",
-        "rao3",
-        "tlbo",
-        "bmr",
-        "bwr",
-        "bmwr",
-        "samp_jaya",
-        "qo_rao",
-        "ehrjaya",
-        "saphr",
-        "mo_bmr",
-        "mo_bwr",
-        "mo_bmwr",
-        "mo_rao_de",
-        "pso",
-        "de",
-        "lshade",
-        "ga",
-        "nsga2",
+        "jaya", "rao1", "rao2", "rao3", "tlbo", "bmr", "bwr", "bmwr",
+        "samp_jaya", "qo_rao", "ehrjaya", "saphr",
+        "mo_bmr", "mo_bwr", "mo_bmwr", "mo_rao_de",
+        "pso", "de", "lshade", "ga", "nsga2",
     ] {
-        assert!(
-            names.iter().any(|n| n == required),
-            "missing algorithm: {required}"
-        );
+        assert!(names.iter().any(|n| n == required), "missing algorithm: {required}");
     }
 
     // Shape check on the Jaya entry.
@@ -110,27 +87,11 @@ async fn benchmarks_endpoint_lists_standard_functions() {
         .map(|b| b["id"].as_str().unwrap().to_string())
         .collect();
     for required in [
-        "sphere",
-        "rastrigin",
-        "ackley",
-        "rosenbrock",
-        "zdt1",
-        "zdt2",
-        "zdt3",
-        "zdt4",
-        "zdt6",
-        "dtlz1",
-        "dtlz2",
-        "dtlz3",
-        "dtlz4",
-        "dtlz5",
-        "dtlz6",
-        "dtlz7",
+        "sphere", "rastrigin", "ackley", "rosenbrock",
+        "zdt1", "zdt2", "zdt3", "zdt4", "zdt6",
+        "dtlz1", "dtlz2", "dtlz3", "dtlz4", "dtlz5", "dtlz6", "dtlz7",
     ] {
-        assert!(
-            ids.iter().any(|i| i == required),
-            "missing benchmark: {required}"
-        );
+        assert!(ids.iter().any(|i| i == required), "missing benchmark: {required}");
     }
 
     let zdt1 = arr.iter().find(|b| b["id"] == "zdt1").unwrap();
@@ -193,10 +154,7 @@ async fn solve_then_stream_jaya_sphere_converges() {
 
     // We expect at least one "iteration" event and one "done" event.
     let iter_events = text.matches("event: iteration").count();
-    assert!(
-        iter_events >= 10,
-        "expected >=10 iteration events, got {iter_events}"
-    );
+    assert!(iter_events >= 10, "expected >=10 iteration events, got {iter_events}");
     assert!(text.contains("event: done"), "no 'done' event: {text}");
 
     // Extract the final_fitness from the done event and assert convergence.
@@ -330,10 +288,7 @@ async fn nsga2_zdt1_last_iteration_event_carries_pareto_front() {
         )
         .await
         .unwrap();
-    let job_id = body_to_json(res.into_body()).await["job_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let job_id = body_to_json(res.into_body()).await["job_id"].as_str().unwrap().to_string();
 
     let stream_res = tokio::time::timeout(Duration::from_secs(20), async {
         app.oneshot(
@@ -354,14 +309,8 @@ async fn nsga2_zdt1_last_iteration_event_carries_pareto_front() {
     let iter_payloads: Vec<Value> = text
         .lines()
         .scan(false, |is_iter, line| {
-            if line.starts_with("event: iteration") {
-                *is_iter = true;
-                return Some(None);
-            }
-            if line.starts_with("event:") {
-                *is_iter = false;
-                return Some(None);
-            }
+            if line.starts_with("event: iteration") { *is_iter = true; return Some(None); }
+            if line.starts_with("event:") { *is_iter = false; return Some(None); }
             if *is_iter && line.starts_with("data: ") {
                 let v: Value = serde_json::from_str(line.trim_start_matches("data: ")).unwrap();
                 return Some(Some(v));
@@ -371,16 +320,11 @@ async fn nsga2_zdt1_last_iteration_event_carries_pareto_front() {
         .flatten()
         .collect();
 
-    assert!(
-        iter_payloads.len() >= 10,
-        "expected many iteration payloads"
-    );
+    assert!(iter_payloads.len() >= 10, "expected many iteration payloads");
     // All non-final iterations should have null pareto_front.
     for p in iter_payloads.iter().take(iter_payloads.len() - 1) {
-        assert!(
-            p["pareto_front"].is_null(),
-            "non-final iteration should not carry pareto_front, got {p}"
-        );
+        assert!(p["pareto_front"].is_null(),
+            "non-final iteration should not carry pareto_front, got {p}");
     }
     // The last iteration should carry the populated pareto_front.
     let last = iter_payloads.last().unwrap();
@@ -407,9 +351,7 @@ async fn benchmarks_endpoint_exposes_uc2_dosing() {
     assert_eq!(res.status(), StatusCode::OK);
     let v = body_to_json(res.into_body()).await;
     let arr = v.as_array().unwrap();
-    let uc2 = arr
-        .iter()
-        .find(|b| b["id"] == "uc2_dosing")
+    let uc2 = arr.iter().find(|b| b["id"] == "uc2_dosing")
         .expect("uc2_dosing must be listed in /optimize/benchmarks");
     assert_eq!(uc2["num_objectives"], 3);
     assert_eq!(uc2["type"], "usecase");
@@ -704,10 +646,7 @@ async fn solve_rejects_the_near_miss_names_a_caller_would_reach_for() {
         }))
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: body was {text}");
-        assert!(
-            text.contains(field),
-            "the 400 must name {field}; got: {text}"
-        );
+        assert!(text.contains(field), "the 400 must name {field}; got: {text}");
     }
 }
 

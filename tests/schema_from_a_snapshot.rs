@@ -65,18 +65,10 @@ fn relationships_are_reported_as_endpoint_labels_with_counts() {
         Some(&2)
     );
     assert_eq!(
-        s.triples.get(&(
-            "Person".to_string(),
-            "KNOWS".to_string(),
-            "Person".to_string()
-        )),
+        s.triples.get(&("Person".to_string(), "KNOWS".to_string(), "Person".to_string())),
         Some(&1)
     );
-    assert_eq!(
-        s.triples.len(),
-        2,
-        "two distinct relationships, not three edges"
-    );
+    assert_eq!(s.triples.len(), 2, "two distinct relationships, not three edges");
     assert_eq!(s.edge_types.get("WORKS_AT"), Some(&2));
 }
 
@@ -145,10 +137,7 @@ fn a_label_that_is_not_a_mermaid_identifier_still_renders() {
     let s = schema_of(awkward);
     let m = s.to_mermaid();
     assert!(m.contains("Clinical_Trial["), "{m}");
-    assert!(
-        m.contains("n2ndary_Outcome["),
-        "an id may not start with a digit: {m}"
-    );
+    assert!(m.contains("n2ndary_Outcome["), "an id may not start with a digit: {m}");
     // The human-readable name survives inside the node box.
     assert!(m.contains("Clinical Trial<br/>"), "{m}");
     assert!(m.starts_with("```mermaid\ngraph LR\n"));

@@ -13,11 +13,7 @@ pub struct ITLBOSolver {
 impl ITLBOSolver {
     pub fn new(config: SolverConfig) -> Self {
         let elite_size = std::cmp::max(1, config.population_size / 10); // 10% elite
-        Self {
-            config,
-            elite_size,
-            seed: None,
-        }
+        Self { config, elite_size, seed: None }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -50,18 +46,14 @@ impl ITLBOSolver {
                 break;
             }
             if iter % 10 == 0 {
-                println!(
-                    "ITLBO Solver: Iteration {}/{}",
-                    iter, self.config.max_iterations
-                );
+                println!("ITLBO Solver: Iteration {}/{}", iter, self.config.max_iterations);
             }
             // Sort to find elites
             population.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
-
+            
             // Save elites
-            let elites: Vec<Individual> =
-                population.iter().take(self.elite_size).cloned().collect();
-
+            let elites: Vec<Individual> = population.iter().take(self.elite_size).cloned().collect();
+            
             let best_fitness = population[0].fitness;
             let teacher_vars = population[0].variables.clone();
             let mean_vars = self.calculate_mean(&population, dim);
@@ -74,9 +66,9 @@ impl ITLBOSolver {
                 .enumerate()
                 .map(|(__idx, mut ind)| {
                     let mut local_rng = crate::common::rng::child_rng(self.seed, iter, __idx);
-                    // Adaptive TF: Usually between 1 and 2.
-                    let tf: f64 = local_rng.gen_range(1.0..2.0);
-
+                    // Adaptive TF: Usually between 1 and 2. 
+                    let tf: f64 = local_rng.gen_range(1.0..2.0); 
+                    
                     let mut new_vars = Array1::zeros(dim);
                     for j in 0..dim {
                         let r: f64 = local_rng.gen();
@@ -95,23 +87,21 @@ impl ITLBOSolver {
 
             // 2. Learner Phase (Enhanced)
             let pop_len = population.len();
-
-            // Note: Parallel learner phase needs safe random access.
+            
+            // Note: Parallel learner phase needs safe random access. 
             // We'll clone the "old" population for reading to allow parallel updates.
             let old_population = population.clone();
-
+            
             population = population
                 .into_par_iter()
                 .enumerate()
                 .map(|(i, mut ind)| {
                     let mut local_rng = crate::common::rng::child_rng(self.seed, iter, i);
-
+                    
                     let mut learner_j_idx;
                     loop {
                         learner_j_idx = local_rng.gen_range(0..pop_len);
-                        if learner_j_idx != i {
-                            break;
-                        }
+                        if learner_j_idx != i { break; }
                     }
                     let ind_j = &old_population[learner_j_idx];
 
@@ -138,7 +128,7 @@ impl ITLBOSolver {
             // 3. Elitism: Replace worst individuals with preserved elites
             // We need to sort again to find the worst
             population.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
-
+            
             let len = population.len();
             for k in 0..self.elite_size {
                 // If the elite is better than the worst

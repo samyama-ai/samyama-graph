@@ -62,11 +62,8 @@ struct Query {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let reps = arg_value(&args, "--reps")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5usize);
-    let out = arg_value(&args, "--out")
-        .unwrap_or_else(|| "benchmarks/hier/results/results.csv".to_string());
+    let reps = arg_value(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(5usize);
+    let out = arg_value(&args, "--out").unwrap_or_else(|| "benchmarks/hier/results/results.csv".to_string());
     let corpus_path =
         arg_value(&args, "--corpus").unwrap_or_else(|| "benchmarks/hier/queries.json".to_string());
     let filter = arg_value(&args, "--class");
@@ -130,8 +127,9 @@ fn main() {
     };
     eprintln!("[hier] running {} queries × {reps} reps…", corpus.len());
 
-    let mut rows: Vec<String> =
-        vec!["id,class,name,indexed_ms,baseline_ms,speedup,rows,agree".to_string()];
+    let mut rows: Vec<String> = vec![
+        "id,class,name,indexed_ms,baseline_ms,speedup,rows,agree".to_string(),
+    ];
     let mut by_class: BTreeMap<String, (usize, usize, f64, f64)> = BTreeMap::new();
     let mut mismatches: Vec<String> = Vec::new();
     // Queries whose two arms were not asked the same question — see the note below.
@@ -143,10 +141,7 @@ fn main() {
     for q in &corpus {
         if let Some(s) = &q.skip {
             // Run it anyway. A skip is a claim about the engine; check the claim.
-            let outcome = engine
-                .execute(&q.cypher, &indexed)
-                .map(|_| ())
-                .map_err(|e| e.to_string());
+            let outcome = engine.execute(&q.cypher, &indexed).map(|_| ()).map_err(|e| e.to_string());
             let verdict = classify(s, outcome);
             if let Some(msg) = describe_failure(&q.id, s, &verdict) {
                 broken_skips.push(msg);
@@ -213,11 +208,7 @@ fn main() {
             ));
         }
 
-        let speedup = if indexed_ms > 0.0 {
-            baseline_ms / indexed_ms
-        } else {
-            0.0
-        };
+        let speedup = if indexed_ms > 0.0 { baseline_ms / indexed_ms } else { 0.0 };
         rows.push(format!(
             "{},{},\"{}\",{:.4},{:.4},{:.2},{},{}",
             q.id,
@@ -227,11 +218,7 @@ fn main() {
             baseline_ms,
             speedup,
             rows_out,
-            if comparable {
-                agree.to_string()
-            } else {
-                "uncontrolled".to_string()
-            }
+            if comparable { agree.to_string() } else { "uncontrolled".to_string() }
         ));
         if !comparable {
             continue;
@@ -247,10 +234,7 @@ fn main() {
 
     // --- report -------------------------------------------------------------
     println!();
-    println!(
-        "HIER benchmark — {} queries, {reps} reps, median of each",
-        corpus.len()
-    );
+    println!("HIER benchmark — {} queries, {reps} reps, median of each", corpus.len());
     println!("{}", "-".repeat(78));
     println!(
         "{:<6} {:>5} {:>7} {:>12} {:>12} {:>9}",
@@ -339,14 +323,10 @@ fn main() {
             .unwrap_or_default()
     };
     let whole_file = |path: &str| -> String {
-        std::fs::read_to_string(path)
-            .map(|t| t.trim().to_string())
-            .unwrap_or_default()
+        std::fs::read_to_string(path).map(|t| t.trim().to_string()).unwrap_or_default()
     };
     let dirty = !git(&["status", "--porcelain"]).is_empty();
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(0);
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
     let load = std::fs::read_to_string("/proc/loadavg")
         .ok()
         .and_then(|s| s.split_whitespace().next().map(|v| v.to_string()))
@@ -379,10 +359,7 @@ fn main() {
 
     if !skipped.is_empty() {
         println!();
-        println!(
-            "{} corpus queries specified but not runnable on this engine:",
-            skipped.len()
-        );
+        println!("{} corpus queries specified but not runnable on this engine:", skipped.len());
         for (id, reason) in &skipped {
             println!("  {id}: {reason}");
         }
@@ -415,10 +392,7 @@ fn main() {
 
     if !mismatches.is_empty() {
         eprintln!();
-        eprintln!(
-            "[hier] {} DISAGREEMENTS — the index is wrong, not fast:",
-            mismatches.len()
-        );
+        eprintln!("[hier] {} DISAGREEMENTS — the index is wrong, not fast:", mismatches.len());
         for m in mismatches.iter().take(20) {
             eprintln!("  {m}");
         }
@@ -472,10 +446,7 @@ fn prefilter_difference(
 }
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
 }
 
 /// Run `q` `reps` times and return the median wall time in ms plus one result.
@@ -552,8 +523,8 @@ fn cell_i64(b: &RecordBatch, row: usize, col: &str) -> i64 {
 }
 
 fn load_corpus(path: &str) -> Vec<Query> {
-    let text =
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read corpus {path}: {e}"));
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read corpus {path}: {e}"));
     let json: serde_json::Value = serde_json::from_str(&text).expect("corpus is not valid JSON");
     json["queries"]
         .as_array()

@@ -112,12 +112,8 @@ fn to_boolean_answers_null_for_a_string_that_is_not_one() {
     assert_eq!(rows.len(), 4);
     for row in &rows {
         assert!(
-            matches!(
-                row.get("b"),
-                Some(Value::Null) | Some(Value::Property(PropertyValue::Null))
-            ),
-            "{:?}",
-            row.get("b")
+            matches!(row.get("b"), Some(Value::Null) | Some(Value::Property(PropertyValue::Null))),
+            "{:?}", row.get("b")
         );
     }
 
@@ -126,12 +122,6 @@ fn to_boolean_answers_null_for_a_string_that_is_not_one() {
         .execute(&q)
         .expect("runs")
         .records;
-    assert_eq!(
-        rows[0].get("b"),
-        Some(&Value::Property(PropertyValue::Boolean(true)))
-    );
-    assert_eq!(
-        rows[1].get("b"),
-        Some(&Value::Property(PropertyValue::Boolean(false)))
-    );
+    assert_eq!(rows[0].get("b"), Some(&Value::Property(PropertyValue::Boolean(true))));
+    assert_eq!(rows[1].get("b"), Some(&Value::Property(PropertyValue::Boolean(false))));
 }

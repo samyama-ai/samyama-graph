@@ -4,7 +4,7 @@
 /// relationship patterns were ignored. E.g.:
 ///   MATCH (t:Trial)-[:STUDIES]->(d:Disease {name: 'Diabetes'})
 /// would return ALL diseases, not just Diabetes.
-use samyama::{GraphStore, PropertyValue, QueryEngine};
+use samyama::{GraphStore, QueryEngine, PropertyValue};
 
 /// Set up a clinical trials graph with multiple diseases and trials
 fn setup_trials_graph() -> GraphStore {
@@ -28,10 +28,7 @@ fn setup_trials_graph() -> GraphStore {
     ];
 
     for (trial_id, phase, disease) in &trials {
-        let q = format!(
-            "CREATE (t:Trial {{trial_id: '{}', phase: '{}'}})",
-            trial_id, phase
-        );
+        let q = format!("CREATE (t:Trial {{trial_id: '{}', phase: '{}'}})", trial_id, phase);
         engine.execute_mut(&q, &mut store, "default").unwrap();
 
         let q = format!(
@@ -54,25 +51,10 @@ fn test_target_node_property_filter() {
     let result = engine.execute(query, &store).unwrap();
 
     // Phase3 trials studying Diabetes: T001, T006
-    assert_eq!(
-        result.len(),
-        2,
-        "Expected 2 results but got {}",
-        result.len()
-    );
+    assert_eq!(result.len(), 2, "Expected 2 results but got {}", result.len());
 
-    let disease_names: Vec<String> = result
-        .records
-        .iter()
-        .map(|r| {
-            r.get("d.name")
-                .unwrap()
-                .as_property()
-                .unwrap()
-                .as_string()
-                .unwrap()
-                .to_string()
-        })
+    let disease_names: Vec<String> = result.records.iter()
+        .map(|r| r.get("d.name").unwrap().as_property().unwrap().as_string().unwrap().to_string())
         .collect();
 
     // All results must be Diabetes
@@ -80,18 +62,8 @@ fn test_target_node_property_filter() {
         assert_eq!(name, "Diabetes", "Expected Diabetes but got {}", name);
     }
 
-    let trial_ids: Vec<String> = result
-        .records
-        .iter()
-        .map(|r| {
-            r.get("t.trial_id")
-                .unwrap()
-                .as_property()
-                .unwrap()
-                .as_string()
-                .unwrap()
-                .to_string()
-        })
+    let trial_ids: Vec<String> = result.records.iter()
+        .map(|r| r.get("t.trial_id").unwrap().as_property().unwrap().as_string().unwrap().to_string())
         .collect();
 
     assert!(trial_ids.contains(&"T001".to_string()));
@@ -104,15 +76,9 @@ fn test_target_node_label_filter() {
     let engine = QueryEngine::new();
 
     // Create nodes of different labels
-    engine
-        .execute_mut("CREATE (p:Person {name: 'Alice'})", &mut store, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE (c:Company {name: 'Acme'})", &mut store, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE (c:City {name: 'Boston'})", &mut store, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (p:Person {name: 'Alice'})", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE (c:Company {name: 'Acme'})", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE (c:City {name: 'Boston'})", &mut store, "default").unwrap();
 
     // Alice works at Acme, Alice lives in Boston
     engine.execute_mut(
@@ -128,13 +94,7 @@ fn test_target_node_label_filter() {
     let query = "MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN c.name";
     let result = engine.execute(query, &store).unwrap();
     assert_eq!(result.len(), 1);
-    let name = result.records[0]
-        .get("c.name")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    let name = result.records[0].get("c.name").unwrap().as_property().unwrap().as_string().unwrap();
     assert_eq!(name, "Acme");
 }
 
@@ -148,12 +108,7 @@ fn test_target_property_filter_no_match() {
     let result = engine.execute(query, &store).unwrap();
 
     // Asthma only has a Phase1 trial (T005), no Phase3 trials
-    assert_eq!(
-        result.len(),
-        0,
-        "Expected 0 results for Phase3+Asthma but got {}",
-        result.len()
-    );
+    assert_eq!(result.len(), 0, "Expected 0 results for Phase3+Asthma but got {}", result.len());
 }
 
 #[test]
@@ -166,25 +121,10 @@ fn test_target_property_filter_all_phases() {
     let result = engine.execute(query, &store).unwrap();
 
     // T001 (Phase3), T003 (Phase2), T006 (Phase3)
-    assert_eq!(
-        result.len(),
-        3,
-        "Expected 3 Diabetes trials but got {}",
-        result.len()
-    );
+    assert_eq!(result.len(), 3, "Expected 3 Diabetes trials but got {}", result.len());
 
-    let ids: Vec<String> = result
-        .records
-        .iter()
-        .map(|r| {
-            r.get("t.trial_id")
-                .unwrap()
-                .as_property()
-                .unwrap()
-                .as_string()
-                .unwrap()
-                .to_string()
-        })
+    let ids: Vec<String> = result.records.iter()
+        .map(|r| r.get("t.trial_id").unwrap().as_property().unwrap().as_string().unwrap().to_string())
         .collect();
     assert!(ids.contains(&"T001".to_string()));
     assert!(ids.contains(&"T003".to_string()));
@@ -197,36 +137,12 @@ fn test_multi_hop_with_target_properties() {
     let engine = QueryEngine::new();
 
     // Build: Person -[:WORKS_AT]-> Company -[:IN_SECTOR]-> Sector
-    engine
-        .execute_mut("CREATE (p:Person {name: 'Alice'})", &mut store, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE (p:Person {name: 'Bob'})", &mut store, "default")
-        .unwrap();
-    engine
-        .execute_mut(
-            "CREATE (c:Company {name: 'TechCorp', size: 'large'})",
-            &mut store,
-            "default",
-        )
-        .unwrap();
-    engine
-        .execute_mut(
-            "CREATE (c:Company {name: 'SmallCo', size: 'small'})",
-            &mut store,
-            "default",
-        )
-        .unwrap();
-    engine
-        .execute_mut(
-            "CREATE (s:Sector {name: 'Technology'})",
-            &mut store,
-            "default",
-        )
-        .unwrap();
-    engine
-        .execute_mut("CREATE (s:Sector {name: 'Finance'})", &mut store, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (p:Person {name: 'Alice'})", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE (p:Person {name: 'Bob'})", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE (c:Company {name: 'TechCorp', size: 'large'})", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE (c:Company {name: 'SmallCo', size: 'small'})", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE (s:Sector {name: 'Technology'})", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE (s:Sector {name: 'Finance'})", &mut store, "default").unwrap();
 
     // Alice -> TechCorp -> Technology
     engine.execute_mut(
@@ -253,13 +169,7 @@ fn test_multi_hop_with_target_properties() {
     let result = engine.execute(query, &store).unwrap();
 
     assert_eq!(result.len(), 1);
-    let name = result.records[0]
-        .get("p.name")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    let name = result.records[0].get("p.name").unwrap().as_property().unwrap().as_string().unwrap();
     assert_eq!(name, "Alice");
 }
 
@@ -274,18 +184,8 @@ fn test_target_property_with_where_clause() {
 
     // Same as test_target_node_property_filter but with phase filter in WHERE instead of inline
     assert_eq!(result.len(), 2);
-    let ids: Vec<String> = result
-        .records
-        .iter()
-        .map(|r| {
-            r.get("t.trial_id")
-                .unwrap()
-                .as_property()
-                .unwrap()
-                .as_string()
-                .unwrap()
-                .to_string()
-        })
+    let ids: Vec<String> = result.records.iter()
+        .map(|r| r.get("t.trial_id").unwrap().as_property().unwrap().as_string().unwrap().to_string())
         .collect();
     assert!(ids.contains(&"T001".to_string()));
     assert!(ids.contains(&"T006".to_string()));
@@ -297,34 +197,10 @@ fn test_target_multiple_properties() {
     let engine = QueryEngine::new();
 
     // Create products with multiple properties
-    engine
-        .execute_mut(
-            "CREATE (s:Store {name: 'MainStreet'})",
-            &mut store,
-            "default",
-        )
-        .unwrap();
-    engine
-        .execute_mut(
-            "CREATE (p:Product {name: 'Widget', color: 'red', size: 'large'})",
-            &mut store,
-            "default",
-        )
-        .unwrap();
-    engine
-        .execute_mut(
-            "CREATE (p:Product {name: 'Gadget', color: 'red', size: 'small'})",
-            &mut store,
-            "default",
-        )
-        .unwrap();
-    engine
-        .execute_mut(
-            "CREATE (p:Product {name: 'Doohickey', color: 'blue', size: 'large'})",
-            &mut store,
-            "default",
-        )
-        .unwrap();
+    engine.execute_mut("CREATE (s:Store {name: 'MainStreet'})", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE (p:Product {name: 'Widget', color: 'red', size: 'large'})", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE (p:Product {name: 'Gadget', color: 'red', size: 'small'})", &mut store, "default").unwrap();
+    engine.execute_mut("CREATE (p:Product {name: 'Doohickey', color: 'blue', size: 'large'})", &mut store, "default").unwrap();
 
     // Store sells all products
     for product in &["Widget", "Gadget", "Doohickey"] {
@@ -339,13 +215,7 @@ fn test_target_multiple_properties() {
     let result = engine.execute(query, &store).unwrap();
 
     assert_eq!(result.len(), 1);
-    let name = result.records[0]
-        .get("p.name")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    let name = result.records[0].get("p.name").unwrap().as_property().unwrap().as_string().unwrap();
     assert_eq!(name, "Widget");
 }
 
@@ -360,13 +230,7 @@ fn test_start_and_target_both_filtered() {
 
     // Only T003 is Phase2 + Diabetes
     assert_eq!(result.len(), 1);
-    let id = result.records[0]
-        .get("t.trial_id")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    let id = result.records[0].get("t.trial_id").unwrap().as_property().unwrap().as_string().unwrap();
     assert_eq!(id, "T003");
 }
 
@@ -380,11 +244,7 @@ fn test_target_property_with_count() {
     let result = engine.execute(query, &store).unwrap();
 
     assert_eq!(result.len(), 1);
-    let count = result.records[0]
-        .get("count(t)")
-        .unwrap()
-        .as_property()
-        .unwrap();
+    let count = result.records[0].get("count(t)").unwrap().as_property().unwrap();
     if let PropertyValue::Integer(c) = count {
         assert_eq!(*c, 2);
     } else {
@@ -399,24 +259,12 @@ fn setup_multi_path_graph() -> GraphStore {
 
     // Countries
     for country in &["India", "USA", "UK"] {
-        engine
-            .execute_mut(
-                &format!("CREATE (c:Country {{name: '{}'}})", country),
-                &mut store,
-                "default",
-            )
-            .unwrap();
+        engine.execute_mut(&format!("CREATE (c:Country {{name: '{}'}})", country), &mut store, "default").unwrap();
     }
 
     // Disease categories
     for disease in &["Diabetes", "Cancer", "Respiratory"] {
-        engine
-            .execute_mut(
-                &format!("CREATE (d:DiseaseCategory {{name: '{}'}})", disease),
-                &mut store,
-                "default",
-            )
-            .unwrap();
+        engine.execute_mut(&format!("CREATE (d:DiseaseCategory {{name: '{}'}})", disease), &mut store, "default").unwrap();
     }
 
     // Trials with country + disease relationships
@@ -429,13 +277,7 @@ fn setup_multi_path_graph() -> GraphStore {
     ];
 
     for (tid, country, disease) in &trials {
-        engine
-            .execute_mut(
-                &format!("CREATE (t:Trial {{trial_id: '{}'}})", tid),
-                &mut store,
-                "default",
-            )
-            .unwrap();
+        engine.execute_mut(&format!("CREATE (t:Trial {{trial_id: '{}'}})", tid), &mut store, "default").unwrap();
         engine.execute_mut(
             &format!("MATCH (t:Trial {{trial_id: '{}'}}), (c:Country {{name: '{}'}}) CREATE (t)-[:CONDUCTED_IN]->(c)", tid, country),
             &mut store, "default"
@@ -459,33 +301,12 @@ fn test_multi_path_join_shared_variable() {
     let result = engine.execute(query, &store).unwrap();
 
     // India trials: T001 (Diabetes), T002 (Cancer), T005 (Respiratory)
-    assert_eq!(
-        result.len(),
-        3,
-        "Expected 3 India trials but got {}",
-        result.len()
-    );
+    assert_eq!(result.len(), 3, "Expected 3 India trials but got {}", result.len());
 
-    let mut trial_disease: Vec<(String, String)> = result
-        .records
-        .iter()
+    let mut trial_disease: Vec<(String, String)> = result.records.iter()
         .map(|r| {
-            let tid = r
-                .get("t.trial_id")
-                .unwrap()
-                .as_property()
-                .unwrap()
-                .as_string()
-                .unwrap()
-                .to_string();
-            let disease = r
-                .get("d.name")
-                .unwrap()
-                .as_property()
-                .unwrap()
-                .as_string()
-                .unwrap()
-                .to_string();
+            let tid = r.get("t.trial_id").unwrap().as_property().unwrap().as_string().unwrap().to_string();
+            let disease = r.get("d.name").unwrap().as_property().unwrap().as_string().unwrap().to_string();
             (tid, disease)
         })
         .collect();
@@ -506,19 +327,8 @@ fn test_multi_path_join_with_both_target_filters() {
     let result = engine.execute(query, &store).unwrap();
 
     // Only T001 is India + Diabetes
-    assert_eq!(
-        result.len(),
-        1,
-        "Expected 1 result but got {}",
-        result.len()
-    );
-    let tid = result.records[0]
-        .get("t.trial_id")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    assert_eq!(result.len(), 1, "Expected 1 result but got {}", result.len());
+    let tid = result.records[0].get("t.trial_id").unwrap().as_property().unwrap().as_string().unwrap();
     assert_eq!(tid, "T001");
 }
 
@@ -533,20 +343,8 @@ fn test_multi_path_no_shared_variable() {
 
     // 1 country x 1 disease = 1 result
     assert_eq!(result.len(), 1);
-    let country = result.records[0]
-        .get("c.name")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
-    let disease = result.records[0]
-        .get("d.name")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    let country = result.records[0].get("c.name").unwrap().as_property().unwrap().as_string().unwrap();
+    let disease = result.records[0].get("d.name").unwrap().as_property().unwrap().as_string().unwrap();
     assert_eq!(country, "India");
     assert_eq!(disease, "Diabetes");
 }
@@ -575,26 +373,9 @@ fn test_cross_path_where_predicate() {
 
     // India trials: T001 (Diabetes), T002 (Cancer), T005 (Respiratory)
     // Excluding Cancer: T001 (Diabetes), T005 (Respiratory) = 2 results
-    assert_eq!(
-        result.len(),
-        2,
-        "Expected 2 results (India, not Cancer), got {}",
-        result.len()
-    );
-    let tid1 = result.records[0]
-        .get("t.trial_id")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
-    let tid2 = result.records[1]
-        .get("t.trial_id")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_string()
-        .unwrap();
+    assert_eq!(result.len(), 2, "Expected 2 results (India, not Cancer), got {}", result.len());
+    let tid1 = result.records[0].get("t.trial_id").unwrap().as_property().unwrap().as_string().unwrap();
+    let tid2 = result.records[1].get("t.trial_id").unwrap().as_property().unwrap().as_string().unwrap();
     assert_eq!(tid1, "T001");
     assert_eq!(tid2, "T005");
 }
@@ -607,60 +388,24 @@ fn test_cross_match_where_predicate() {
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
 
-    engine
-        .execute_mut(
-            "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})",
-            &mut store,
-            "default",
-        )
-        .unwrap();
+    engine.execute_mut(
+        "CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})",
+        &mut store, "default"
+    ).unwrap();
 
     // Cross-MATCH predicate: p1.name <> p2.name
     let query = "MATCH (p1:Person) MATCH (p2:Person) WHERE p1.name <> p2.name RETURN p1.name, p2.name ORDER BY p1.name, p2.name";
     let result = engine.execute(query, &store).unwrap();
 
     // Alice-Bob and Bob-Alice = 2 pairs
-    assert_eq!(
-        result.len(),
-        2,
-        "Expected 2 cross pairs, got {}",
-        result.len()
-    );
+    assert_eq!(result.len(), 2, "Expected 2 cross pairs, got {}", result.len());
     let pair1 = (
-        result.records[0]
-            .get("p1.name")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap()
-            .to_string(),
-        result.records[0]
-            .get("p2.name")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap()
-            .to_string(),
+        result.records[0].get("p1.name").unwrap().as_property().unwrap().as_string().unwrap().to_string(),
+        result.records[0].get("p2.name").unwrap().as_property().unwrap().as_string().unwrap().to_string(),
     );
     let pair2 = (
-        result.records[1]
-            .get("p1.name")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap()
-            .to_string(),
-        result.records[1]
-            .get("p2.name")
-            .unwrap()
-            .as_property()
-            .unwrap()
-            .as_string()
-            .unwrap()
-            .to_string(),
+        result.records[1].get("p1.name").unwrap().as_property().unwrap().as_string().unwrap().to_string(),
+        result.records[1].get("p2.name").unwrap().as_property().unwrap().as_string().unwrap().to_string(),
     );
     assert_eq!(pair1, ("Alice".to_string(), "Bob".to_string()));
     assert_eq!(pair2, ("Bob".to_string(), "Alice".to_string()));

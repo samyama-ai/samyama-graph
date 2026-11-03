@@ -207,10 +207,7 @@ pub fn load_dataset(
             ratings.insert(tconst.to_string(), (avg, votes));
         }
     }
-    eprintln!(
-        "  Titles with sufficient votes: {}",
-        format_num(ratings.len())
-    );
+    eprintln!("  Titles with sufficient votes: {}", format_num(ratings.len()));
 
     // ========================================================================
     // Phase 2: Load titles → Movie/Series/Genre/Rating nodes
@@ -219,13 +216,13 @@ pub fn load_dataset(
     let basics_path = data_dir.join("title.basics.tsv");
     {
         let (headers, reader) = open_tsv(&basics_path)?;
-        let c_tconst = col_idx(&headers, "tconst")?;
-        let c_type = col_idx(&headers, "titleType")?;
-        let c_title = col_idx(&headers, "primaryTitle")?;
-        let c_year = col_idx(&headers, "startYear")?;
-        let c_end = col_idx(&headers, "endYear")?;
+        let c_tconst  = col_idx(&headers, "tconst")?;
+        let c_type    = col_idx(&headers, "titleType")?;
+        let c_title   = col_idx(&headers, "primaryTitle")?;
+        let c_year    = col_idx(&headers, "startYear")?;
+        let c_end     = col_idx(&headers, "endYear")?;
         let c_runtime = col_idx(&headers, "runtimeMinutes")?;
-        let c_genres = col_idx(&headers, "genres")?;
+        let c_genres  = col_idx(&headers, "genres")?;
 
         let mut processed = 0usize;
         let t0 = Instant::now();
@@ -233,10 +230,10 @@ pub fn load_dataset(
         for line in reader.lines() {
             let line = line?;
             let f: Vec<&str> = line.split('\t').collect();
-            let tconst = tsv_field(&f, c_tconst);
+            let tconst     = tsv_field(&f, c_tconst);
             let title_type = tsv_field(&f, c_type);
 
-            let is_movie = matches!(title_type, "movie" | "tvMovie");
+            let is_movie  = matches!(title_type, "movie" | "tvMovie");
             let is_series = title_type == "tvSeries";
             if !is_movie && !is_series {
                 continue;
@@ -247,11 +244,7 @@ pub fn load_dataset(
                 None => continue,
             };
 
-            let threshold = if is_movie {
-                min_votes
-            } else {
-                min_votes_series
-            };
+            let threshold = if is_movie { min_votes } else { min_votes_series };
             if num_votes < threshold {
                 continue;
             }
@@ -374,9 +367,9 @@ pub fn load_dataset(
     let mut nconst_set: HashSet<String> = HashSet::new();
     {
         let (headers, reader) = open_tsv(&principals_path)?;
-        let c_tconst = col_idx(&headers, "tconst")?;
-        let c_nconst = col_idx(&headers, "nconst")?;
-        let c_category = col_idx(&headers, "category")?;
+        let c_tconst     = col_idx(&headers, "tconst")?;
+        let c_nconst     = col_idx(&headers, "nconst")?;
+        let c_category   = col_idx(&headers, "category")?;
         let c_characters = col_idx(&headers, "characters")?;
 
         let mut scanned = 0usize;
@@ -385,7 +378,7 @@ pub fn load_dataset(
         for line in reader.lines() {
             let line = line?;
             let f: Vec<&str> = line.split('\t').collect();
-            let tconst = tsv_field(&f, c_tconst);
+            let tconst   = tsv_field(&f, c_tconst);
             let category = tsv_field(&f, c_category);
 
             scanned += 1;
@@ -411,10 +404,7 @@ pub fn load_dataset(
             if !maps.title.contains_key(tconst) {
                 continue;
             }
-            if !matches!(
-                category,
-                "actor" | "actress" | "director" | "writer" | "producer"
-            ) {
+            if !matches!(category, "actor" | "actress" | "director" | "writer" | "producer") {
                 continue;
             }
 
@@ -453,9 +443,9 @@ pub fn load_dataset(
     {
         let (headers, reader) = open_tsv(&names_path)?;
         let c_nconst = col_idx(&headers, "nconst")?;
-        let c_name = col_idx(&headers, "primaryName")?;
-        let c_birth = col_idx(&headers, "birthYear")?;
-        let c_death = col_idx(&headers, "deathYear")?;
+        let c_name   = col_idx(&headers, "primaryName")?;
+        let c_birth  = col_idx(&headers, "birthYear")?;
+        let c_death  = col_idx(&headers, "deathYear")?;
 
         let mut scanned = 0usize;
         let t0 = Instant::now();
@@ -549,11 +539,11 @@ pub fn load_dataset(
     if let Some(akas) = akas_path {
         eprintln!("Phase 5/{total_phases}: Loading alternate titles ...");
         let (headers, reader) = open_tsv(akas)?;
-        let c_title_id = col_idx(&headers, "titleId")?;
-        let c_title = col_idx(&headers, "title")?;
-        let c_region = col_idx(&headers, "region")?;
-        let c_language = col_idx(&headers, "language")?;
-        let c_original = col_idx(&headers, "isOriginalTitle")?;
+        let c_title_id   = col_idx(&headers, "titleId")?;
+        let c_title      = col_idx(&headers, "title")?;
+        let c_region     = col_idx(&headers, "region")?;
+        let c_language   = col_idx(&headers, "language")?;
+        let c_original   = col_idx(&headers, "isOriginalTitle")?;
 
         let mut scanned = 0usize;
         let t0 = Instant::now();

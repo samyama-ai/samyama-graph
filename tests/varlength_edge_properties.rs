@@ -47,20 +47,11 @@ fn rows(store: &GraphStore, cypher: &str) -> usize {
 fn the_predicate_narrows_the_paths() {
     let store = artists();
     // Unconstrained: 3 one-hop + 2 two-hop + 1 three-hop = 6.
-    assert_eq!(
-        rows(
-            &store,
-            "MATCH (a:Artist)-[:WORKED_WITH*]->(b:Artist) RETURN a, b"
-        ),
-        6
-    );
+    assert_eq!(rows(&store, "MATCH (a:Artist)-[:WORKED_WITH*]->(b:Artist) RETURN a, b"), 6);
     // Only the b→c and c→d hops are 1988, and they are adjacent, so: two
     // one-hop paths and one two-hop path.
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (a:Artist)-[:WORKED_WITH* {year: 1988}]->(b:Artist) RETURN a, b"
-        ),
+        rows(&store, "MATCH (a:Artist)-[:WORKED_WITH* {year: 1988}]->(b:Artist) RETURN a, b"),
         3
     );
 }
@@ -73,10 +64,7 @@ fn every_hop_must_satisfy_it_not_just_the_first() {
     // come back too.
     let store = artists();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (a:Artist)-[:WORKED_WITH* {year: 1987}]->(b:Artist) RETURN a, b"
-        ),
+        rows(&store, "MATCH (a:Artist)-[:WORKED_WITH* {year: 1987}]->(b:Artist) RETURN a, b"),
         1
     );
 }
@@ -85,10 +73,7 @@ fn every_hop_must_satisfy_it_not_just_the_first() {
 fn a_predicate_nothing_satisfies_returns_nothing() {
     let store = artists();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (a:Artist)-[:WORKED_WITH* {year: 1066}]->(b:Artist) RETURN a, b"
-        ),
+        rows(&store, "MATCH (a:Artist)-[:WORKED_WITH* {year: 1066}]->(b:Artist) RETURN a, b"),
         0
     );
 }
@@ -109,17 +94,11 @@ fn it_applies_whichever_end_the_planner_anchors() {
 fn a_bounded_length_is_constrained_too() {
     let store = artists();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (a:Artist)-[:WORKED_WITH*1..1 {year: 1988}]->(b:Artist) RETURN a, b"
-        ),
+        rows(&store, "MATCH (a:Artist)-[:WORKED_WITH*1..1 {year: 1988}]->(b:Artist) RETURN a, b"),
         2
     );
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (a:Artist)-[:WORKED_WITH*2..2 {year: 1988}]->(b:Artist) RETURN a, b"
-        ),
+        rows(&store, "MATCH (a:Artist)-[:WORKED_WITH*2..2 {year: 1988}]->(b:Artist) RETURN a, b"),
         1
     );
 }
@@ -128,18 +107,6 @@ fn a_bounded_length_is_constrained_too() {
 fn an_unconstrained_segment_is_unaffected() {
     // The predicate is opt-in; a pattern without one must not start filtering.
     let store = artists();
-    assert_eq!(
-        rows(
-            &store,
-            "MATCH (a:Artist)-[:WORKED_WITH*1..1]->(b:Artist) RETURN a, b"
-        ),
-        3
-    );
-    assert_eq!(
-        rows(
-            &store,
-            "MATCH (a:Artist)-[:WORKED_WITH*2..3]->(b:Artist) RETURN a, b"
-        ),
-        3
-    );
+    assert_eq!(rows(&store, "MATCH (a:Artist)-[:WORKED_WITH*1..1]->(b:Artist) RETURN a, b"), 3);
+    assert_eq!(rows(&store, "MATCH (a:Artist)-[:WORKED_WITH*2..3]->(b:Artist) RETURN a, b"), 3);
 }

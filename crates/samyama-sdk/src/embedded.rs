@@ -3,16 +3,16 @@
 //! Uses GraphStore and QueryEngine directly, no network needed.
 
 use async_trait::async_trait;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use std::collections::HashMap;
 
 use samyama::graph::GraphStore;
-use samyama::query::{QueryEngine, RecordBatch, Value};
+use samyama::query::{QueryEngine, Value, RecordBatch};
 
 use crate::client::SamyamaClient;
 use crate::error::{SamyamaError, SamyamaResult};
-use crate::models::{QueryResult, SdkEdge, SdkNode, ServerStatus, StorageStats};
+use crate::models::{QueryResult, SdkNode, SdkEdge, ServerStatus, StorageStats};
 
 /// In-process client that wraps a GraphStore directly.
 ///
@@ -130,8 +130,7 @@ impl EmbeddedClient {
         path: &std::path::Path,
         dedup_keys: &[&str],
     ) -> Result<samyama::snapshot::format::ImportStats, Box<dyn std::error::Error>> {
-        self.import_snapshot_dedup_options(_tenant, path, dedup_keys, false)
-            .await
+        self.import_snapshot_dedup_options(_tenant, path, dedup_keys, false).await
     }
 
     /// Import with explicit permission to merge conflicting identifiers.
@@ -142,14 +141,7 @@ impl EmbeddedClient {
         dedup_keys: &[&str],
         allow_conflicts: bool,
     ) -> Result<samyama::snapshot::format::ImportStats, Box<dyn std::error::Error>> {
-        self.import_snapshot_merge_policy(
-            _tenant,
-            path,
-            dedup_keys,
-            allow_conflicts,
-            samyama::snapshot::MergeEdges::default(),
-        )
-        .await
+        self.import_snapshot_merge_policy(_tenant, path, dedup_keys, allow_conflicts, samyama::snapshot::MergeEdges::default()).await
     }
 
     /// Import with an explicit policy for parallel edges introduced by merging.
@@ -164,13 +156,7 @@ impl EmbeddedClient {
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let mut store_guard = self.store.write().await;
-        let stats = samyama::snapshot::import_tenant_with_merge_policy(
-            &mut store_guard,
-            reader,
-            dedup_keys,
-            allow_conflicts,
-            merge_edges,
-        )?;
+        let stats = samyama::snapshot::import_tenant_with_merge_policy(&mut store_guard, reader, dedup_keys, allow_conflicts, merge_edges)?;
         Ok(stats)
     }
 
@@ -314,8 +300,7 @@ fn value_to_json(
                 for (k, v) in &node.properties {
                     props.insert(k.clone(), v.to_json());
                 }
-                let lbls: Vec<String> =
-                    node.labels.iter().map(|l| l.as_str().to_string()).collect();
+                let lbls: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
                 let json = serde_json::json!({
                     "id": id_str,
                     "labels": lbls,
@@ -380,10 +365,7 @@ fn value_to_json(
             edge_json
         }
         Value::Property(p) => p.to_json(),
-        Value::Path {
-            nodes: path_nodes,
-            edges: path_edges,
-        } => serde_json::json!({
+        Value::Path { nodes: path_nodes, edges: path_edges } => serde_json::json!({
             "nodes": path_nodes.iter().map(|n| n.as_u64().to_string()).collect::<Vec<_>>(),
             "edges": path_edges.iter().map(|e| e.as_u64().to_string()).collect::<Vec<_>>(),
             "length": path_edges.len(),
@@ -411,16 +393,12 @@ impl SamyamaClient for EmbeddedClient {
     async fn query(&self, graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
         if is_write_query(cypher) {
             let mut store_guard = self.store.write().await;
-            let batch = self
-                .engine
-                .execute_mut(cypher, &mut *store_guard, graph)
+            let batch = self.engine.execute_mut(cypher, &mut *store_guard, graph)
                 .map_err(|e| SamyamaError::QueryError(e.to_string()))?;
             Ok(record_batch_to_query_result(&batch, &*store_guard))
         } else {
             let store_guard = self.store.read().await;
-            let batch = self
-                .engine
-                .execute(cypher, &*store_guard)
+            let batch = self.engine.execute(cypher, &*store_guard)
                 .map_err(|e| SamyamaError::QueryError(e.to_string()))?;
             Ok(record_batch_to_query_result(&batch, &*store_guard))
         }
@@ -428,9 +406,7 @@ impl SamyamaClient for EmbeddedClient {
 
     async fn query_readonly(&self, _graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
         let store_guard = self.store.read().await;
-        let batch = self
-            .engine
-            .execute(cypher, &*store_guard)
+        let batch = self.engine.execute(cypher, &*store_guard)
             .map_err(|e| SamyamaError::QueryError(e.to_string()))?;
         Ok(record_batch_to_query_result(&batch, &*store_guard))
     }
@@ -486,20 +462,14 @@ mod tests {
         let client = EmbeddedClient::new();
 
         // Create nodes
-        client
-            .query("default", r#"CREATE (n:Person {name: "Alice", age: 30})"#)
-            .await
-            .unwrap();
-        client
-            .query("default", r#"CREATE (n:Person {name: "Bob", age: 25})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (n:Person {name: "Alice", age: 30})"#)
+            .await.unwrap();
+        client.query("default", r#"CREATE (n:Person {name: "Bob", age: 25})"#)
+            .await.unwrap();
 
         // Query
-        let result = client
-            .query_readonly("default", "MATCH (n:Person) RETURN n.name, n.age")
-            .await
-            .unwrap();
+        let result = client.query_readonly("default", "MATCH (n:Person) RETURN n.name, n.age")
+            .await.unwrap();
         assert_eq!(result.columns.len(), 2);
         assert_eq!(result.records.len(), 2);
 
@@ -512,10 +482,8 @@ mod tests {
     async fn test_embedded_delete_graph() {
         let client = EmbeddedClient::new();
 
-        client
-            .query("default", r#"CREATE (n:Person {name: "Alice"})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (n:Person {name: "Alice"})"#)
+            .await.unwrap();
 
         let status = client.status().await.unwrap();
         assert_eq!(status.storage.nodes, 1);
@@ -537,21 +505,13 @@ mod tests {
     async fn test_embedded_query_with_edges() {
         let client = EmbeddedClient::new();
 
-        client
-            .query(
-                "default",
-                r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
-            )
-            .await
-            .unwrap();
+        client.query("default",
+            r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#
+        ).await.unwrap();
 
-        let result = client
-            .query_readonly(
-                "default",
-                "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name",
-            )
-            .await
-            .unwrap();
+        let result = client.query_readonly("default",
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name"
+        ).await.unwrap();
 
         assert_eq!(result.records.len(), 1);
     }
@@ -567,10 +527,8 @@ mod tests {
         let store = Arc::new(RwLock::new(store));
         let client = EmbeddedClient::with_store(store);
 
-        let result = client
-            .query_readonly("default", "MATCH (n:Person) RETURN n.name")
-            .await
-            .unwrap();
+        let result = client.query_readonly("default", "MATCH (n:Person) RETURN n.name")
+            .await.unwrap();
         assert_eq!(result.records.len(), 1);
     }
 
@@ -587,10 +545,8 @@ mod tests {
     #[tokio::test]
     async fn test_embedded_store_read() {
         let client = EmbeddedClient::new();
-        client
-            .query("default", r#"CREATE (n:Person {name: "Alice"})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (n:Person {name: "Alice"})"#)
+            .await.unwrap();
 
         let guard = client.store_read().await;
         assert_eq!(guard.node_count(), 1);
@@ -607,10 +563,8 @@ mod tests {
             }
         }
 
-        let result = client
-            .query_readonly("default", "MATCH (n:Person) RETURN n.name")
-            .await
-            .unwrap();
+        let result = client.query_readonly("default", "MATCH (n:Person) RETURN n.name")
+            .await.unwrap();
         assert_eq!(result.records.len(), 1);
     }
 
@@ -635,19 +589,13 @@ mod tests {
     #[tokio::test]
     async fn test_embedded_cache_stats_after_queries() {
         let client = EmbeddedClient::new();
-        client
-            .query("default", r#"CREATE (n:Person {name: "Alice"})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (n:Person {name: "Alice"})"#)
+            .await.unwrap();
         // Same query twice should potentially hit cache
-        client
-            .query_readonly("default", "MATCH (n:Person) RETURN n.name")
-            .await
-            .unwrap();
-        client
-            .query_readonly("default", "MATCH (n:Person) RETURN n.name")
-            .await
-            .unwrap();
+        client.query_readonly("default", "MATCH (n:Person) RETURN n.name")
+            .await.unwrap();
+        client.query_readonly("default", "MATCH (n:Person) RETURN n.name")
+            .await.unwrap();
 
         let stats = client.cache_stats();
         // At least one miss for the first time, then a hit
@@ -681,15 +629,11 @@ mod tests {
     #[tokio::test]
     async fn test_embedded_query_returns_nodes() {
         let client = EmbeddedClient::new();
-        client
-            .query("default", r#"CREATE (n:Person {name: "Alice", age: 30})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (n:Person {name: "Alice", age: 30})"#)
+            .await.unwrap();
 
-        let result = client
-            .query_readonly("default", "MATCH (n:Person) RETURN n")
-            .await
-            .unwrap();
+        let result = client.query_readonly("default", "MATCH (n:Person) RETURN n")
+            .await.unwrap();
         assert_eq!(result.records.len(), 1);
         assert!(!result.nodes.is_empty());
         // Check that the node has properties
@@ -704,10 +648,9 @@ mod tests {
             r#"CREATE (a:Person {name: "Alice"})-[:KNOWS {since: 2020}]->(b:Person {name: "Bob"})"#
         ).await.unwrap();
 
-        let result = client
-            .query_readonly("default", "MATCH (a)-[r:KNOWS]->(b) RETURN r")
-            .await
-            .unwrap();
+        let result = client.query_readonly("default",
+            "MATCH (a)-[r:KNOWS]->(b) RETURN r"
+        ).await.unwrap();
         assert_eq!(result.records.len(), 1);
         assert!(!result.edges.is_empty());
         let edge = &result.edges[0];
@@ -717,16 +660,12 @@ mod tests {
     #[tokio::test]
     async fn test_embedded_query_returns_null() {
         let client = EmbeddedClient::new();
-        client
-            .query("default", r#"CREATE (n:Person {name: "Alice"})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (n:Person {name: "Alice"})"#)
+            .await.unwrap();
 
         // Query for a property that does not exist
-        let result = client
-            .query_readonly("default", "MATCH (n:Person) RETURN n.missing")
-            .await
-            .unwrap();
+        let result = client.query_readonly("default", "MATCH (n:Person) RETURN n.missing")
+            .await.unwrap();
         assert_eq!(result.records.len(), 1);
         // The value should be JSON null
         assert_eq!(result.records[0][0], serde_json::Value::Null);
@@ -737,16 +676,13 @@ mod tests {
         let client = EmbeddedClient::new();
 
         for i in 0..5 {
-            client
-                .query("default", &format!(r#"CREATE (n:Item {{id: {}}})"#, i))
-                .await
-                .unwrap();
+            client.query("default",
+                &format!(r#"CREATE (n:Item {{id: {}}})"#, i)
+            ).await.unwrap();
         }
 
-        let result = client
-            .query_readonly("default", "MATCH (n:Item) RETURN n.id")
-            .await
-            .unwrap();
+        let result = client.query_readonly("default", "MATCH (n:Item) RETURN n.id")
+            .await.unwrap();
         assert_eq!(result.records.len(), 5);
     }
 
@@ -754,20 +690,16 @@ mod tests {
     async fn test_embedded_delete_graph_and_recreate() {
         let client = EmbeddedClient::new();
 
-        client
-            .query("default", r#"CREATE (n:Person {name: "Alice"})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (n:Person {name: "Alice"})"#)
+            .await.unwrap();
         assert_eq!(client.status().await.unwrap().storage.nodes, 1);
 
         client.delete_graph("default").await.unwrap();
         assert_eq!(client.status().await.unwrap().storage.nodes, 0);
 
         // Recreate
-        client
-            .query("default", r#"CREATE (n:Person {name: "Bob"})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (n:Person {name: "Bob"})"#)
+            .await.unwrap();
         assert_eq!(client.status().await.unwrap().storage.nodes, 1);
     }
 
@@ -776,10 +708,8 @@ mod tests {
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let client = EmbeddedClient::with_store(Arc::clone(&store));
 
-        client
-            .query("default", r#"CREATE (n:Person {name: "Alice"})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (n:Person {name: "Alice"})"#)
+            .await.unwrap();
 
         // Store should reflect the changes made via client
         let guard = store.read().await;
@@ -807,21 +737,13 @@ mod tests {
     #[tokio::test]
     async fn test_embedded_query_property_values() {
         let client = EmbeddedClient::new();
-        client
-            .query(
-                "default",
-                r#"CREATE (n:Person {name: "Alice", age: 30, score: 95.5, active: true})"#,
-            )
-            .await
-            .unwrap();
+        client.query("default",
+            r#"CREATE (n:Person {name: "Alice", age: 30, score: 95.5, active: true})"#
+        ).await.unwrap();
 
-        let result = client
-            .query_readonly(
-                "default",
-                "MATCH (n:Person) RETURN n.name, n.age, n.score, n.active",
-            )
-            .await
-            .unwrap();
+        let result = client.query_readonly("default",
+            "MATCH (n:Person) RETURN n.name, n.age, n.score, n.active"
+        ).await.unwrap();
         assert_eq!(result.records.len(), 1);
         assert_eq!(result.columns.len(), 4);
     }

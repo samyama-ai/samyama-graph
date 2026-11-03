@@ -99,10 +99,7 @@ fn a_predicate_on_the_optional_clause_alone_still_pushes_down() {
     // cost that. #667's own caveat.
     let store = chain();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (n) WITH n LIMIT 1 OPTIONAL MATCH (b:Nope) WHERE b.x = 1 RETURN n, b"
-        ),
+        rows(&store, "MATCH (n) WITH n LIMIT 1 OPTIONAL MATCH (b:Nope) WHERE b.x = 1 RETURN n, b"),
         1
     );
 }
@@ -112,10 +109,7 @@ fn a_pre_with_optional_match_is_unchanged() {
     // #667's original case, which already worked.
     let store = chain();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (x:A) OPTIONAL MATCH (x)-[:T]->(y) WHERE y.val > 4 RETURN x, y"
-        ),
+        rows(&store, "MATCH (x:A) OPTIONAL MATCH (x)-[:T]->(y) WHERE y.val > 4 RETURN x, y"),
         1
     );
 }

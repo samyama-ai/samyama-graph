@@ -30,30 +30,18 @@ const DRUGS: &[(&str, f64)] = &[
     ("D5", 10.0),
 ];
 const TARGETS: &[(&str, &str)] = &[
-    ("D0", "AMPK"),
-    ("D0", "GLUT4"),
-    ("D1", "DPP4"),
-    ("D2", "SGLT2"),
-    ("D3", "HMGCR"),
-    ("D4", "50S"),
-    ("D5", "VKOR"),
+    ("D0", "AMPK"), ("D0", "GLUT4"), ("D1", "DPP4"), ("D2", "SGLT2"),
+    ("D3", "HMGCR"), ("D4", "50S"), ("D5", "VKOR"),
 ];
 const PART_OF: &[(&str, &str)] = &[
-    ("AMPK", "glucose_homeostasis"),
-    ("GLUT4", "glucose_homeostasis"),
-    ("DPP4", "glucose_homeostasis"),
-    ("SGLT2", "glucose_homeostasis"),
-    ("HMGCR", "lipid_metabolism"),
-    ("50S", "antibiotic"),
-    ("VKOR", "coagulation"),
+    ("AMPK", "glucose_homeostasis"), ("GLUT4", "glucose_homeostasis"),
+    ("DPP4", "glucose_homeostasis"), ("SGLT2", "glucose_homeostasis"),
+    ("HMGCR", "lipid_metabolism"), ("50S", "antibiotic"), ("VKOR", "coagulation"),
 ];
 const IMPLICATED_IN: &[(&str, &str)] = &[("glucose_homeostasis", DISEASE_ID)];
 const INTERACTIONS: &[(&str, &str, f64)] = &[
-    ("D0", "D1", 0.1),
-    ("D0", "D2", 0.1),
-    ("D1", "D2", 0.1),
-    ("D0", "D3", 0.3),
-    ("D3", "D5", 0.7),
+    ("D0", "D1", 0.1), ("D0", "D2", 0.1), ("D1", "D2", 0.1),
+    ("D0", "D3", 0.3), ("D3", "D5", 0.7),
     ("D3", "D4", 1.0), // contraindicated
     ("D4", "D5", 0.3),
 ];
@@ -65,27 +53,19 @@ struct ComboDosingProblem {
 }
 
 impl MultiObjectiveProblem for ComboDosingProblem {
-    fn dim(&self) -> usize {
-        self.drug_dids.len()
-    }
-    fn num_objectives(&self) -> usize {
-        3
-    }
+    fn dim(&self) -> usize { self.drug_dids.len() }
+    fn num_objectives(&self) -> usize { 3 }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (Array1::zeros(self.dim()), Array1::ones(self.dim()))
     }
     fn objectives(&self, x: &Array1<f64>) -> Vec<f64> {
-        let active_idx: Vec<usize> = (0..self.drug_dids.len())
-            .filter(|&i| x[i] >= 0.05)
-            .collect();
+        let active_idx: Vec<usize> = (0..self.drug_dids.len()).filter(|&i| x[i] >= 0.05).collect();
         if active_idx.is_empty() {
             return vec![0.0, 0.0, 0.0];
         }
-        let id_list = active_idx
-            .iter()
+        let id_list = active_idx.iter()
             .map(|&i| format!("\"{}\"", self.drug_dids[i]))
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>().join(", ");
 
         let q1 = format!(
             "MATCH (d:Drug)-[:TARGETS]->(:Gene)-[:PART_OF]->(p:Pathway)-[:IMPLICATED_IN]->(dz:Disease) \
@@ -107,20 +87,13 @@ impl MultiObjectiveProblem for ComboDosingProblem {
         );
         let r2 = self.run_cypher(&q2);
 
-        let efficacy: f64 = active_idx
-            .iter()
-            .map(|&i| {
-                let cov = coverage.get(self.drug_dids[i]).copied().unwrap_or(0.0);
-                x[i] * cov
-            })
-            .sum();
+        let efficacy: f64 = active_idx.iter().map(|&i| {
+            let cov = coverage.get(self.drug_dids[i]).copied().unwrap_or(0.0);
+            x[i] * cov
+        }).sum();
 
-        let did_to_idx: HashMap<&str, usize> = self
-            .drug_dids
-            .iter()
-            .enumerate()
-            .map(|(i, &d)| (d, i))
-            .collect();
+        let did_to_idx: HashMap<&str, usize> = self.drug_dids.iter().enumerate()
+            .map(|(i, &d)| (d, i)).collect();
         let mut risk = 0.0_f64;
         let mut bad = false;
         for row in &r2.records {
@@ -165,8 +138,7 @@ async fn uc2_pareto_avoids_contraindicated_pair() {
             drug_id.insert(*did, nid);
         }
         let mut genes: Vec<&str> = TARGETS.iter().map(|(_, g)| *g).collect();
-        genes.sort();
-        genes.dedup();
+        genes.sort(); genes.dedup();
         let mut gene_id = HashMap::<&str, samyama::graph::NodeId>::new();
         for g in &genes {
             let nid = store.create_node("Gene");
@@ -176,8 +148,7 @@ async fn uc2_pareto_avoids_contraindicated_pair() {
             gene_id.insert(*g, nid);
         }
         let mut pathways: Vec<&str> = PART_OF.iter().map(|(_, p)| *p).collect();
-        pathways.sort();
-        pathways.dedup();
+        pathways.sort(); pathways.dedup();
         let mut pathway_id = HashMap::<&str, samyama::graph::NodeId>::new();
         for p in &pathways {
             let nid = store.create_node("Pathway");
@@ -192,27 +163,17 @@ async fn uc2_pareto_avoids_contraindicated_pair() {
         }
 
         for (drug, gene) in TARGETS {
-            store
-                .create_edge(drug_id[drug], gene_id[gene], "TARGETS")
-                .unwrap();
+            store.create_edge(drug_id[drug], gene_id[gene], "TARGETS").unwrap();
         }
         for (gene, pathway) in PART_OF {
-            store
-                .create_edge(gene_id[gene], pathway_id[pathway], "PART_OF")
-                .unwrap();
+            store.create_edge(gene_id[gene], pathway_id[pathway], "PART_OF").unwrap();
         }
         for (pathway, _disease) in IMPLICATED_IN {
-            store
-                .create_edge(pathway_id[pathway], dz_node, "IMPLICATED_IN")
-                .unwrap();
+            store.create_edge(pathway_id[pathway], dz_node, "IMPLICATED_IN").unwrap();
         }
         for (a, b, sev) in INTERACTIONS {
-            let eid = store
-                .create_edge(drug_id[a], drug_id[b], "INTERACTS_WITH")
-                .unwrap();
-            store
-                .set_edge_property(eid, "severity_score", *sev)
-                .unwrap();
+            let eid = store.create_edge(drug_id[a], drug_id[b], "INTERACTS_WITH").unwrap();
+            store.set_edge_property(eid, "severity_score", *sev).unwrap();
         }
     }
 
@@ -233,11 +194,7 @@ async fn uc2_pareto_avoids_contraindicated_pair() {
         .unwrap();
 
     assert!(!front.is_empty(), "Pareto front must be non-empty");
-    assert!(
-        front.len() >= 2,
-        "Expected diverse front; got {} plans",
-        front.len()
-    );
+    assert!(front.len() >= 2, "Expected diverse front; got {} plans", front.len());
 
     // Critical: penalty (1e6) must keep contraindicated pair off the front.
     for ind in &front {
@@ -246,31 +203,15 @@ async fn uc2_pareto_avoids_contraindicated_pair() {
         assert!(
             !(d3_active && d4_active),
             "Pareto plan has both D3 and D4 active: vars={:?} fitness={:?}",
-            ind.variables,
-            ind.fitness,
+            ind.variables, ind.fitness,
         );
         for v in &ind.fitness {
-            assert!(
-                v.is_finite(),
-                "non-finite fitness leaked: {:?}",
-                ind.fitness
-            );
-            assert!(
-                *v < 1e5,
-                "penalty leaked into Pareto front: {:?}",
-                ind.fitness
-            );
+            assert!(v.is_finite(), "non-finite fitness leaked: {:?}", ind.fitness);
+            assert!(*v < 1e5, "penalty leaked into Pareto front: {:?}", ind.fitness);
         }
     }
 
     // Optimizer must reach non-trivial efficacy (i.e. not stuck at all-zero).
-    let max_efficacy = front
-        .iter()
-        .map(|ind| -ind.fitness[0])
-        .fold(0.0_f64, f64::max);
-    assert!(
-        max_efficacy > 0.5,
-        "best efficacy on front {} is too low",
-        max_efficacy
-    );
+    let max_efficacy = front.iter().map(|ind| -ind.fitness[0]).fold(0.0_f64, f64::max);
+    assert!(max_efficacy > 0.5, "best efficacy on front {} is too low", max_efficacy);
 }

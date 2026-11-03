@@ -204,19 +204,11 @@ fn main() {
     }
 
     println!();
-    println!(
-        "TOTAL {} probes: {} supported, {} unsupported",
-        probes.len(),
-        supported,
-        unsupported
-    );
+    println!("TOTAL {} probes: {} supported, {} unsupported", probes.len(), supported, unsupported);
 
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--json") {
-        let path = args
-            .get(i + 1)
-            .cloned()
-            .unwrap_or_else(|| "cypher_matrix.json".to_string());
+        let path = args.get(i + 1).cloned().unwrap_or_else(|| "cypher_matrix.json".to_string());
         let commit = engine_commit();
         // The run id is derived from what was measured, not from a clock: the
         // same engine over the same fixture is the same run, and re-running it
@@ -225,9 +217,7 @@ fn main() {
 
         let mut probe_json = String::new();
         for (i, (cat, feature, ok, err)) in outcomes.iter().enumerate() {
-            if i > 0 {
-                probe_json.push_str(",\n");
-            }
+            if i > 0 { probe_json.push_str(",\n"); }
             probe_json.push_str(&format!(
                 "      {{\"category\": \"{}\", \"feature\": \"{}\", \"supported\": {}, \"error\": \"{}\"}}",
                 json_escape(cat), json_escape(feature), ok, json_escape(err)

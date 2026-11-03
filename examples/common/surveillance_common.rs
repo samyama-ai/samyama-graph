@@ -230,7 +230,10 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &Path) -> Result<LoadResul
                     "indicator_code",
                     PropertyValue::String(d.indicator_code.clone()),
                 );
-                n.set_property("name", PropertyValue::String(clean_str(&d.indicator_name)));
+                n.set_property(
+                    "name",
+                    PropertyValue::String(clean_str(&d.indicator_name)),
+                );
             }
             disease_map.insert(d.indicator_code.clone(), id);
             disease_nodes += 1;
@@ -316,7 +319,11 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &Path) -> Result<LoadResul
                 Some(v) => v,
                 None => continue,
             };
-            let antigen = rec.indicator_name.as_deref().unwrap_or("").to_string();
+            let antigen = rec
+                .indicator_name
+                .as_deref()
+                .unwrap_or("")
+                .to_string();
 
             let vid = format!(
                 "VC-{}-{}-{}",
@@ -381,7 +388,10 @@ pub fn load_dataset(graph: &mut GraphStore, data_dir: &Path) -> Result<LoadResul
                     "indicator_code",
                     PropertyValue::String(indicator_code.to_string()),
                 );
-                n.set_property("name", PropertyValue::String(clean_str(indicator_name)));
+                n.set_property(
+                    "name",
+                    PropertyValue::String(clean_str(indicator_name)),
+                );
                 if let Ok(y) = year.parse::<i64>() {
                     n.set_property("year", PropertyValue::Integer(y));
                 }

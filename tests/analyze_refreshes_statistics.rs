@@ -71,9 +71,7 @@ fn seed() -> GraphStore {
 
 fn analyze(store: &GraphStore) -> std::collections::HashMap<String, Value> {
     let q = parse_query("ANALYZE").expect("ANALYZE must parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .expect("ANALYZE must run");
+    let batch = QueryExecutor::new(store).execute(&q).expect("ANALYZE must run");
     assert_eq!(batch.records.len(), 1, "ANALYZE returns exactly one row");
     let rec = &batch.records[0];
     ["nodes", "edges", "labels", "edge_types", "cache_was_stale"]

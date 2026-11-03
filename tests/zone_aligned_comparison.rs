@@ -87,16 +87,10 @@ fn daylight_saving_is_resolved_at_each_side_s_own_clock() {
     let stockholm_midnight =
         "datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: 'Europe/Stockholm'})";
     assert_eq!(
-        in_seconds(
-            stockholm_midnight,
-            "localdatetime({year: 2017, month: 10, day: 29, hour: 4})"
-        ),
+        in_seconds(stockholm_midnight, "localdatetime({year: 2017, month: 10, day: 29, hour: 4})"),
         "PT5H"
     );
-    assert_eq!(
-        in_seconds(stockholm_midnight, "localtime({hour: 4})"),
-        "PT5H"
-    );
+    assert_eq!(in_seconds(stockholm_midnight, "localtime({hour: 4})"), "PT5H");
     // Crossing midnight into a day that is 25 hours long.
     assert_eq!(
         in_seconds(stockholm_midnight, "date({year: 2017, month: 10, day: 30})"),
@@ -134,19 +128,10 @@ fn zoned_and_unzoned_times_still_differ() {
 /// no clock and a time has no date, so only what they share is compared.
 #[test]
 fn local_only_comparisons_are_untouched() {
-    assert_eq!(
-        between(
-            "date({year: 1984, month: 10, day: 11})",
-            "localtime('16:30')"
-        ),
-        "PT16H30M"
-    );
+    assert_eq!(between("date({year: 1984, month: 10, day: 11})", "localtime('16:30')"), "PT16H30M");
     assert_eq!(between("localtime('14:30')", "localtime('16:30')"), "PT2H");
     assert_eq!(
-        between(
-            "localdatetime('2018-01-01T12:00')",
-            "localdatetime('2018-01-02T10:00')"
-        ),
+        between("localdatetime('2018-01-01T12:00')", "localdatetime('2018-01-02T10:00')"),
         "PT22H"
     );
 }

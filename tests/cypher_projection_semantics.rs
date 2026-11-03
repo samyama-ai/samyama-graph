@@ -723,7 +723,10 @@ fn a_second_match_joins_on_every_shared_variable() {
     );
     assert_eq!(
         r,
-        vec!["fp32=MA32 int8=MA8 model=MA", "fp32=MB32 int8=MB8 model=MB",],
+        vec![
+            "fp32=MA32 int8=MA8 model=MA",
+            "fp32=MB32 int8=MB8 model=MB",
+        ],
         "a variant must pair only with its own model's other variant: {r:?}"
     );
 }
@@ -786,11 +789,7 @@ fn comparisons_against_a_missing_property_are_unknown_not_true() {
     let engine = QueryEngine::new();
     for id in ["a", "b", "c"] {
         engine
-            .execute_mut(
-                &format!("CREATE (:Blank {{id: \"{id}\"}})"),
-                &mut s,
-                "default",
-            )
+            .execute_mut(&format!("CREATE (:Blank {{id: \"{id}\"}})"), &mut s, "default")
             .unwrap();
     }
 
@@ -833,17 +832,11 @@ fn comparisons_against_a_missing_property_are_unknown_not_true() {
     // A present property still compares normally — the null rule must not swallow real
     // predicates.
     assert_eq!(
-        scalar(
-            &s,
-            "MATCH (n:Blank) WHERE n.id <> \"a\" RETURN count(n) AS n"
-        ),
+        scalar(&s, "MATCH (n:Blank) WHERE n.id <> \"a\" RETURN count(n) AS n"),
         "n=2"
     );
     assert_eq!(
-        scalar(
-            &s,
-            "MATCH (n:Blank) WHERE n.id = \"a\" RETURN count(n) AS n"
-        ),
+        scalar(&s, "MATCH (n:Blank) WHERE n.id = \"a\" RETURN count(n) AS n"),
         "n=1"
     );
 }
@@ -874,11 +867,7 @@ fn create_wires_edges_even_when_endpoints_are_anonymous() {
         let mut s = GraphStore::new();
         engine.execute_mut(pattern, &mut s, "default").unwrap();
         assert_eq!(edge_count(&s), "n=1", "no edge created by: {pattern}");
-        assert_eq!(
-            scalar(&s, "MATCH (n) RETURN count(n) AS n"),
-            "n=2",
-            "{pattern}"
-        );
+        assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "{pattern}");
     }
 
     // Multi-segment paths wire every segment, named or not.
@@ -902,11 +891,7 @@ fn create_honours_the_direction_the_pattern_was_written_in() {
 
     let mut s = GraphStore::new();
     engine
-        .execute_mut(
-            "CREATE (a:A {id: 1})<-[:R]-(b:B {id: 2})",
-            &mut s,
-            "default",
-        )
+        .execute_mut("CREATE (a:A {id: 1})<-[:R]-(b:B {id: 2})", &mut s, "default")
         .unwrap();
     assert_eq!(edge_count(&s), "n=1");
     assert_eq!(
@@ -933,11 +918,7 @@ fn create_honours_the_direction_the_pattern_was_written_in() {
     // And the forward form is unchanged.
     let mut s = GraphStore::new();
     engine
-        .execute_mut(
-            "CREATE (a:A {id: 1})-[:R]->(b:B {id: 2})",
-            &mut s,
-            "default",
-        )
+        .execute_mut("CREATE (a:A {id: 1})-[:R]->(b:B {id: 2})", &mut s, "default")
         .unwrap();
     assert_eq!(
         scalar(&s, "MATCH (a:A)-[:R]->(b:B) RETURN count(*) AS n"),
@@ -968,11 +949,7 @@ fn match_create_creates_the_unbound_nodes_in_its_pattern() {
             .unwrap();
         engine.execute_mut(pattern, &mut s, "default").unwrap();
 
-        assert_eq!(
-            scalar(&s, "MATCH (n) RETURN count(n) AS n"),
-            "n=2",
-            "{pattern}"
-        );
+        assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "{pattern}");
         assert_eq!(edge_count(&s), "n=1", "{pattern}");
         let fwd = scalar(&s, "MATCH (:P)-[:R]->(:C) RETURN count(*) AS n");
         let rev = scalar(&s, "MATCH (:C)-[:R]->(:P) RETURN count(*) AS n");
@@ -990,11 +967,7 @@ fn match_create_creates_the_unbound_nodes_in_its_pattern() {
             .unwrap();
     }
     engine
-        .execute_mut(
-            "MATCH (p:P) CREATE (p)-[:R]->(:C {tag: 1})",
-            &mut s,
-            "default",
-        )
+        .execute_mut("MATCH (p:P) CREATE (p)-[:R]->(:C {tag: 1})", &mut s, "default")
         .unwrap();
     assert_eq!(scalar(&s, "MATCH (c:C) RETURN count(c) AS n"), "n=3");
     assert_eq!(edge_count(&s), "n=3");
@@ -1009,11 +982,7 @@ fn match_where_groups_chain_beyond_two() {
     let mut s = GraphStore::new();
     let engine = QueryEngine::new();
     // p1 has all three attachments, p2 two, p3 one.
-    for (p, drug, lab) in [
-        ("p1", true, true),
-        ("p2", true, false),
-        ("p3", false, false),
-    ] {
+    for (p, drug, lab) in [("p1", true, true), ("p2", true, false), ("p3", false, false)] {
         engine
             .execute_mut(&format!("CREATE (:P {{n: \"{p}\"}})"), &mut s, "default")
             .unwrap();
@@ -1029,15 +998,9 @@ fn match_where_groups_chain_beyond_two() {
                 &mut s, "default").unwrap();
         }
         if lab {
-            engine
-                .execute_mut(
-                    &format!(
-                        "MATCH (p:P {{n: \"{p}\"}}) CREATE (p)-[:MEASURED]->(:M {{z: \"HbA1c\"}})"
-                    ),
-                    &mut s,
-                    "default",
-                )
-                .unwrap();
+            engine.execute_mut(
+                &format!("MATCH (p:P {{n: \"{p}\"}}) CREATE (p)-[:MEASURED]->(:M {{z: \"HbA1c\"}})"),
+                &mut s, "default").unwrap();
         }
     }
 
@@ -1046,41 +1009,24 @@ fn match_where_groups_chain_beyond_two() {
     assert_eq!(scalar(&s, &format!("{base} RETURN count(p) AS n")), "n=2");
     // third group: parses *and* narrows
     assert_eq!(
-        scalar(
-            &s,
-            &format!("{base} MATCH (p)-[:MEASURED]->(m:M) RETURN count(p) AS n")
-        ),
+        scalar(&s, &format!("{base} MATCH (p)-[:MEASURED]->(m:M) RETURN count(p) AS n")),
         "n=1"
     );
     assert_eq!(
-        scalar(
-            &s,
-            &format!(
-                "{base} MATCH (p)-[:MEASURED]->(m:M) WHERE m.z = \"HbA1c\" RETURN count(p) AS n"
-            )
-        ),
+        scalar(&s, &format!("{base} MATCH (p)-[:MEASURED]->(m:M) WHERE m.z = \"HbA1c\" RETURN count(p) AS n")),
         "n=1"
     );
     // a predicate in the third group must be able to exclude everything — proving it is
     // applied rather than parsed and discarded
     assert_eq!(
-        scalar(
-            &s,
-            &format!(
-                "{base} MATCH (p)-[:MEASURED]->(m:M) WHERE m.z = \"NOPE\" RETURN count(p) AS n"
-            )
-        ),
+        scalar(&s, &format!("{base} MATCH (p)-[:MEASURED]->(m:M) WHERE m.z = \"NOPE\" RETURN count(p) AS n")),
         "n=0"
     );
     // and an earlier group's predicate is still ANDed in, not overwritten
     assert_eq!(
-        scalar(
-            &s,
-            &"MATCH (p:P)-[:HAS_CONDITION]->(c:C) WHERE c.x CONTAINS \"Diabetes\" \
+        scalar(&s, &"MATCH (p:P)-[:HAS_CONDITION]->(c:C) WHERE c.x CONTAINS \"Diabetes\" \
                      MATCH (p)-[:PRESCRIBED]->(d:D) WHERE d.y = \"NOPE\" \
-                     MATCH (p)-[:MEASURED]->(m:M) RETURN count(p) AS n"
-                .to_string()
-        ),
+                     MATCH (p)-[:MEASURED]->(m:M) RETURN count(p) AS n".to_string()),
         "n=0"
     );
 }
@@ -1106,31 +1052,17 @@ fn merge_on_a_relationship_pattern_creates_and_then_matches_the_whole_pattern() 
             )
             .unwrap();
         // idempotent: the second and third runs must match, not create again
-        assert_eq!(
-            scalar(&s, "MATCH (n) RETURN count(n) AS n"),
-            "n=2",
-            "run {run}"
-        );
+        assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "run {run}");
         assert_eq!(edge_count(&s), "n=1", "run {run}");
     }
 
     // direction comes from the pattern
     let mut s = GraphStore::new();
     engine
-        .execute_mut(
-            "MERGE (a:X {k: 1})<-[:R]-(b:Y {k: 2}) RETURN a.k AS k",
-            &mut s,
-            "default",
-        )
+        .execute_mut("MERGE (a:X {k: 1})<-[:R]-(b:Y {k: 2}) RETURN a.k AS k", &mut s, "default")
         .unwrap();
-    assert_eq!(
-        scalar(&s, "MATCH (:Y)-[:R]->(:X) RETURN count(*) AS n"),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (:X)-[:R]->(:Y) RETURN count(*) AS n"),
-        "n=0"
-    );
+    assert_eq!(scalar(&s, "MATCH (:Y)-[:R]->(:X) RETURN count(*) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (:X)-[:R]->(:Y) RETURN count(*) AS n"), "n=0");
 
     // multi-segment paths, also idempotent
     let mut s = GraphStore::new();
@@ -1138,8 +1070,7 @@ fn merge_on_a_relationship_pattern_creates_and_then_matches_the_whole_pattern() 
         engine
             .execute_mut(
                 "MERGE (a:X {k: 1})-[:R]->(b:Y {k: 2})-[:R2]->(c:Z {k: 3}) RETURN a.k AS k",
-                &mut s,
-                "default",
+                &mut s, "default",
             )
             .unwrap();
     }
@@ -1148,20 +1079,8 @@ fn merge_on_a_relationship_pattern_creates_and_then_matches_the_whole_pattern() 
 
     // a pattern differing only in edge type is a *different* pattern, so it is created
     let mut s = GraphStore::new();
-    engine
-        .execute_mut(
-            "MERGE (a:X {k: 1})-[:R]->(b:Y {k: 2}) RETURN a.k AS k",
-            &mut s,
-            "default",
-        )
-        .unwrap();
-    engine
-        .execute_mut(
-            "MERGE (a:X {k: 1})-[:OTHER]->(b:Y {k: 2}) RETURN a.k AS k",
-            &mut s,
-            "default",
-        )
-        .unwrap();
+    engine.execute_mut("MERGE (a:X {k: 1})-[:R]->(b:Y {k: 2}) RETURN a.k AS k", &mut s, "default").unwrap();
+    engine.execute_mut("MERGE (a:X {k: 1})-[:OTHER]->(b:Y {k: 2}) RETURN a.k AS k", &mut s, "default").unwrap();
     assert_eq!(edge_count(&s), "n=2");
 }
 
@@ -1173,26 +1092,17 @@ fn merge_between_already_bound_nodes_reuses_them() {
     // openCypher behaviour.
     let mut s = GraphStore::new();
     let engine = QueryEngine::new();
-    engine
-        .execute_mut("CREATE (:Repro {k: 10})", &mut s, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE (:Repro {k: 11})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (:Repro {k: 10})", &mut s, "default").unwrap();
+    engine.execute_mut("CREATE (:Repro {k: 11})", &mut s, "default").unwrap();
 
     for _ in 0..2 {
         engine
             .execute_mut(
                 "MATCH (a:Repro {k: 10}), (b:Repro {k: 11}) MERGE (a)-[:R]->(b) RETURN a.k AS k",
-                &mut s,
-                "default",
+                &mut s, "default",
             )
             .unwrap();
-        assert_eq!(
-            scalar(&s, "MATCH (n) RETURN count(n) AS n"),
-            "n=2",
-            "must not duplicate nodes"
-        );
+        assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "must not duplicate nodes");
         assert_eq!(edge_count(&s), "n=1", "must not duplicate the edge");
     }
 }
@@ -1217,11 +1127,7 @@ fn merge_on_create_and_on_match_fire_on_the_right_branch() {
         )
         .unwrap();
     assert_eq!(scalar(&s, "MATCH (a:X) RETURN a.tag AS tag"), "tag=matched");
-    assert_eq!(
-        scalar(&s, "MATCH (n) RETURN count(n) AS n"),
-        "n=2",
-        "the second MERGE matched"
-    );
+    assert_eq!(scalar(&s, "MATCH (n) RETURN count(n) AS n"), "n=2", "the second MERGE matched");
 }
 
 // ---------------------------------------------------------------------------
@@ -1235,59 +1141,34 @@ fn a_relationship_pattern_can_be_used_as_a_predicate() {
     // gap analysis. Both were parse errors, forcing the OPTIONAL MATCH + count = 0 idiom.
     let mut s = GraphStore::new();
     let engine = QueryEngine::new();
-    engine
-        .execute_mut("CREATE (:Op {name: \"op1\"})", &mut s, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE (:Op {name: \"op2\"})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (:Op {name: \"op1\"})", &mut s, "default").unwrap();
+    engine.execute_mut("CREATE (:Op {name: \"op2\"})", &mut s, "default").unwrap();
     engine
         .execute_mut(
             "MATCH (o:Op {name: \"op1\"}) CREATE (:Acc {name: \"a1\"})-[:SUPPORTS]->(o)",
-            &mut s,
-            "default",
+            &mut s, "default",
         )
         .unwrap();
 
     assert_eq!(
-        bag(
-            &s,
-            "MATCH (o:Op) WHERE (:Acc)-[:SUPPORTS]->(o) RETURN o.name AS name"
-        ),
+        bag(&s, "MATCH (o:Op) WHERE (:Acc)-[:SUPPORTS]->(o) RETURN o.name AS name"),
         vec!["name=op1"]
     );
     assert_eq!(
-        bag(
-            &s,
-            "MATCH (o:Op) WHERE NOT (:Acc)-[:SUPPORTS]->(o) RETURN o.name AS name"
-        ),
+        bag(&s, "MATCH (o:Op) WHERE NOT (:Acc)-[:SUPPORTS]->(o) RETURN o.name AS name"),
         vec!["name=op2"]
     );
     // must agree with the EXISTS { } form it desugars to
     assert_eq!(
-        bag(
-            &s,
-            "MATCH (o:Op) WHERE EXISTS { MATCH (:Acc)-[:SUPPORTS]->(o) } RETURN o.name AS name"
-        ),
+        bag(&s, "MATCH (o:Op) WHERE EXISTS { MATCH (:Acc)-[:SUPPORTS]->(o) } RETURN o.name AS name"),
         vec!["name=op1"]
     );
 
     // Parenthesised expressions must not be mistaken for patterns.
     let mut s2 = GraphStore::new();
-    engine
-        .execute_mut("CREATE (:N {a: 1, b: 2})", &mut s2, "default")
-        .unwrap();
-    assert_eq!(
-        scalar(
-            &s2,
-            "MATCH (n:N) WHERE (n.a + n.b) = 3 RETURN count(n) AS n"
-        ),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s2, "MATCH (n:N) RETURN (n.a * (n.b + 1)) AS v"),
-        "v=3"
-    );
+    engine.execute_mut("CREATE (:N {a: 1, b: 2})", &mut s2, "default").unwrap();
+    assert_eq!(scalar(&s2, "MATCH (n:N) WHERE (n.a + n.b) = 3 RETURN count(n) AS n"), "n=1");
+    assert_eq!(scalar(&s2, "MATCH (n:N) RETURN (n.a * (n.b + 1)) AS v"), "v=3");
 }
 
 #[test]
@@ -1314,69 +1195,39 @@ fn unique_constraints_accept_modern_syntax_and_are_actually_enforced() {
 
     let mut s = GraphStore::new();
     engine
-        .execute_mut(
-            "CREATE CONSTRAINT FOR (n:Kernel) REQUIRE n.id IS UNIQUE",
-            &mut s,
-            "default",
-        )
+        .execute_mut("CREATE CONSTRAINT FOR (n:Kernel) REQUIRE n.id IS UNIQUE", &mut s, "default")
         .unwrap();
-    engine
-        .execute_mut("CREATE (:Kernel {id: 1})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (:Kernel {id: 1})", &mut s, "default").unwrap();
 
     // the duplicate is rejected ...
-    assert!(engine
-        .execute_mut("CREATE (:Kernel {id: 1})", &mut s, "default")
-        .is_err());
+    assert!(engine.execute_mut("CREATE (:Kernel {id: 1})", &mut s, "default").is_err());
     // ... and leaves nothing behind: a rejected statement must not half-apply
     assert_eq!(scalar(&s, "MATCH (k:Kernel) RETURN count(k) AS n"), "n=1");
 
     // a distinct value is fine
-    engine
-        .execute_mut("CREATE (:Kernel {id: 2})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (:Kernel {id: 2})", &mut s, "default").unwrap();
     assert_eq!(scalar(&s, "MATCH (k:Kernel) RETURN count(k) AS n"), "n=2");
 
     // re-setting a node's own value is not a violation; taking another's is
     engine
-        .execute_mut(
-            "MATCH (k:Kernel {id: 2}) SET k.id = 2 RETURN k.id AS i",
-            &mut s,
-            "default",
-        )
+        .execute_mut("MATCH (k:Kernel {id: 2}) SET k.id = 2 RETURN k.id AS i", &mut s, "default")
         .unwrap();
     assert!(engine
-        .execute_mut(
-            "MATCH (k:Kernel {id: 2}) SET k.id = 1 RETURN k.id AS i",
-            &mut s,
-            "default"
-        )
+        .execute_mut("MATCH (k:Kernel {id: 2}) SET k.id = 1 RETURN k.id AS i", &mut s, "default")
         .is_err());
 
     // graphs with no constraints are unaffected
     let mut s2 = GraphStore::new();
-    engine
-        .execute_mut("CREATE (:Free {id: 1})", &mut s2, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE (:Free {id: 1})", &mut s2, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (:Free {id: 1})", &mut s2, "default").unwrap();
+    engine.execute_mut("CREATE (:Free {id: 1})", &mut s2, "default").unwrap();
     assert_eq!(scalar(&s2, "MATCH (f:Free) RETURN count(f) AS n"), "n=2");
 
     // creating a constraint over pre-existing duplicates still fails
     let mut s3 = GraphStore::new();
-    engine
-        .execute_mut("CREATE (:K {id: 1})", &mut s3, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE (:K {id: 1})", &mut s3, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (:K {id: 1})", &mut s3, "default").unwrap();
+    engine.execute_mut("CREATE (:K {id: 1})", &mut s3, "default").unwrap();
     assert!(engine
-        .execute_mut(
-            "CREATE CONSTRAINT FOR (n:K) REQUIRE n.id IS UNIQUE",
-            &mut s3,
-            "default"
-        )
+        .execute_mut("CREATE CONSTRAINT FOR (n:K) REQUIRE n.id IS UNIQUE", &mut s3, "default")
         .is_err());
 }
 
@@ -1391,12 +1242,8 @@ fn unwind_can_lead_a_statement() {
     // parameterized writes are written in.
     let mut s = GraphStore::new();
     let engine = QueryEngine::new();
-    engine
-        .execute_mut("CREATE (:P {name: \"a\", n: 1})", &mut s, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE (:P {name: \"b\", n: 2})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (:P {name: \"a\", n: 1})", &mut s, "default").unwrap();
+    engine.execute_mut("CREATE (:P {name: \"b\", n: 2})", &mut s, "default").unwrap();
 
     assert_eq!(bag(&s, "UNWIND [1, 2, 3] AS x RETURN x").len(), 3);
     assert_eq!(bag(&s, "UNWIND [] AS x RETURN x").len(), 0);
@@ -1405,55 +1252,33 @@ fn unwind_can_lead_a_statement() {
         bag(&s, "UNWIND [\"a\", \"b\"] AS s RETURN s"),
         vec!["s=a", "s=b"]
     );
-    assert_eq!(
-        scalar(&s, "UNWIND [1, 2, 3] AS x RETURN count(x) AS n"),
-        "n=3"
-    );
+    assert_eq!(scalar(&s, "UNWIND [1, 2, 3] AS x RETURN count(x) AS n"), "n=3");
 
     // A leading UNWIND feeding a MATCH: the predicate references the unwound variable, so
     // the Unwind must be planned *below* the filter. It was previously pushed above it,
     // and the query died with "Variable not found: x".
     assert_eq!(
-        bag(
-            &s,
-            "UNWIND [1, 2] AS x MATCH (p:P) WHERE p.n = x RETURN p.name AS name"
-        )
-        .len(),
+        bag(&s, "UNWIND [1, 2] AS x MATCH (p:P) WHERE p.n = x RETURN p.name AS name").len(),
         2
     );
     assert_eq!(
-        bag(
-            &s,
-            "UNWIND [1] AS x MATCH (p:P) WHERE p.n = x RETURN p.name AS name"
-        ),
+        bag(&s, "UNWIND [1] AS x MATCH (p:P) WHERE p.n = x RETURN p.name AS name"),
         vec!["name=a"]
     );
     // ... and a value matching nothing yields nothing, so the predicate is really applied
     assert_eq!(
-        bag(
-            &s,
-            "UNWIND [99] AS x MATCH (p:P) WHERE p.n = x RETURN p.name AS name"
-        )
-        .len(),
+        bag(&s, "UNWIND [99] AS x MATCH (p:P) WHERE p.n = x RETURN p.name AS name").len(),
         0
     );
 
     // A trailing UNWIND still cross-products, unchanged.
     assert_eq!(
-        bag(
-            &s,
-            "MATCH (p:P) UNWIND [1, 2] AS x RETURN p.name AS name, x"
-        )
-        .len(),
+        bag(&s, "MATCH (p:P) UNWIND [1, 2] AS x RETURN p.name AS name, x").len(),
         4
     );
     // and one fed from an aggregate still works
     assert_eq!(
-        bag(
-            &s,
-            "MATCH (p:P) WITH collect(p.n) AS ns UNWIND ns AS x RETURN x"
-        )
-        .len(),
+        bag(&s, "MATCH (p:P) WITH collect(p.n) AS ns UNWIND ns AS x RETURN x").len(),
         2
     );
 }
@@ -1476,10 +1301,7 @@ fn string_literals_support_escape_sequences() {
     assert_eq!(scalar(&s, r#"RETURN "back\\slash" AS v"#), "v=back\\slash");
     assert_eq!(scalar(&s, r#"RETURN "ABC" AS v"#), "v=ABC");
     // a quote of the *other* kind needs no escape
-    assert_eq!(
-        scalar(&s, r#"RETURN "single 'inside'" AS v"#),
-        "v=single 'inside'"
-    );
+    assert_eq!(scalar(&s, r#"RETURN "single 'inside'" AS v"#), "v=single 'inside'");
     // unescaped strings are untouched
     assert_eq!(scalar(&s, r#"RETURN "plain" AS v"#), "v=plain");
 
@@ -1491,10 +1313,7 @@ fn string_literals_support_escape_sequences() {
         .unwrap();
     assert_eq!(scalar(&s, "MATCH (n:S) RETURN n.v AS v"), "v=say \"hi\"");
     assert_eq!(
-        scalar(
-            &s,
-            r#"MATCH (n:S) WHERE n.v = "say \"hi\"" RETURN count(n) AS n"#
-        ),
+        scalar(&s, r#"MATCH (n:S) WHERE n.v = "say \"hi\"" RETURN count(n) AS n"#),
         "n=1"
     );
 }
@@ -1535,33 +1354,19 @@ fn where_can_filter_yielded_variables_directly() {
             .unwrap();
     }
 
+    assert_eq!(bag(&s, "CALL db.labels() YIELD label RETURN label").len(), 3);
     assert_eq!(
-        bag(&s, "CALL db.labels() YIELD label RETURN label").len(),
-        3
-    );
-    assert_eq!(
-        bag(
-            &s,
-            "CALL db.labels() YIELD label WHERE label = \"P\" RETURN label"
-        ),
+        bag(&s, "CALL db.labels() YIELD label WHERE label = \"P\" RETURN label"),
         vec!["label=P"]
     );
     // a predicate matching nothing must return nothing -- otherwise the filter is being
     // ignored rather than applied
     assert_eq!(
-        bag(
-            &s,
-            "CALL db.labels() YIELD label WHERE label = \"ZZZ\" RETURN label"
-        )
-        .len(),
+        bag(&s, "CALL db.labels() YIELD label WHERE label = \"ZZZ\" RETURN label").len(),
         0
     );
     assert_eq!(
-        bag(
-            &s,
-            "CALL db.labels() YIELD label WHERE label <> \"P\" RETURN label"
-        )
-        .len(),
+        bag(&s, "CALL db.labels() YIELD label WHERE label <> \"P\" RETURN label").len(),
         2
     );
 }
@@ -1600,22 +1405,15 @@ fn projecting_several_properties_across_a_relationship_keeps_them_on_one_node() 
                      CREATE (a)-[:SAME_AS]->(b)",
                     i + 1
                 ),
-                &mut s,
-                "default",
+                &mut s, "default",
             )
             .unwrap();
     }
 
     // control: an isolated node has no email and no relationship
+    assert_eq!(scalar(&s, "MATCH (p:Person {key: \"k299\"}) RETURN p.email AS e"), "e=NULL");
     assert_eq!(
-        scalar(&s, "MATCH (p:Person {key: \"k299\"}) RETURN p.email AS e"),
-        "e=NULL"
-    );
-    assert_eq!(
-        scalar(
-            &s,
-            "MATCH (p:Person {key: \"k298\"})-[:SAME_AS]-(x) RETURN count(x) AS n"
-        ),
+        scalar(&s, "MATCH (p:Person {key: \"k298\"})-[:SAME_AS]-(x) RETURN count(x) AS n"),
         "n=0"
     );
 
@@ -1634,10 +1432,7 @@ fn projecting_several_properties_across_a_relationship_keeps_them_on_one_node() 
                 .find_map(|c| c.strip_prefix("akey="))
                 .unwrap_or_else(|| panic!("no akey in {row:?}"));
             let i: usize = key[1..].parse().unwrap();
-            assert!(
-                i < LINKED,
-                "phantom endpoint: {key} has no SAME_AS edge ({q})"
-            );
+            assert!(i < LINKED, "phantom endpoint: {key} has no SAME_AS edge ({q})");
             let expected = if i % 2 == 0 {
                 format!("aemail=e{i}@x")
             } else {
@@ -1657,14 +1452,8 @@ fn projecting_several_properties_across_a_relationship_keeps_them_on_one_node() 
     );
     assert_eq!(r.len(), LINKED / 2);
     for row in &r {
-        let akey = row
-            .split_whitespace()
-            .find_map(|c| c.strip_prefix("akey="))
-            .unwrap();
-        let bkey = row
-            .split_whitespace()
-            .find_map(|c| c.strip_prefix("bkey="))
-            .unwrap();
+        let akey = row.split_whitespace().find_map(|c| c.strip_prefix("akey=")).unwrap();
+        let bkey = row.split_whitespace().find_map(|c| c.strip_prefix("bkey=")).unwrap();
         let (ai, bi): (usize, usize) = (akey[1..].parse().unwrap(), bkey[1..].parse().unwrap());
         assert_eq!(bi, ai + 1, "endpoints paired wrongly: {row:?}");
         assert!(row.contains(&format!("aemail=e{ai}@x")), "{row:?}");
@@ -1690,23 +1479,14 @@ fn keys_and_properties_see_columnar_values_after_a_snapshot_import() {
     engine
         .execute_mut(
             "CREATE (:Player {name: \"Alice\", player_id: \"P-1\", age: 30})",
-            &mut s,
-            "default",
+            &mut s, "default",
         )
         .unwrap();
     engine
-        .execute_mut(
-            "CREATE (:Team {name: \"Reds\", city: \"X\"})",
-            &mut s,
-            "default",
-        )
+        .execute_mut("CREATE (:Team {name: \"Reds\", city: \"X\"})", &mut s, "default")
         .unwrap();
     engine
-        .execute_mut(
-            "MATCH (p:Player) SET p.embedding = [0.1, 0.2, 0.3]",
-            &mut s,
-            "default",
-        )
+        .execute_mut("MATCH (p:Player) SET p.embedding = [0.1, 0.2, 0.3]", &mut s, "default")
         .unwrap();
 
     let mut buf: Vec<u8> = Vec::new();
@@ -1715,10 +1495,7 @@ fn keys_and_properties_see_columnar_values_after_a_snapshot_import() {
     samyama::snapshot::import_tenant(&mut imported, &buf[..]).expect("import");
 
     // scalar access always worked; it is the aggregate views that did not
-    assert_eq!(
-        scalar(&imported, "MATCH (p:Player) RETURN p.name AS v"),
-        "v=Alice"
-    );
+    assert_eq!(scalar(&imported, "MATCH (p:Player) RETURN p.name AS v"), "v=Alice");
 
     let keys = scalar(&imported, "MATCH (p:Player) RETURN keys(p) AS v");
     for expected in ["name", "player_id", "age", "embedding"] {
@@ -1727,19 +1504,13 @@ fn keys_and_properties_see_columnar_values_after_a_snapshot_import() {
 
     let props = scalar(&imported, "MATCH (p:Player) RETURN properties(p) AS v");
     for expected in ["name", "player_id", "age"] {
-        assert!(
-            props.contains(expected),
-            "properties() lost {expected}: {props}"
-        );
+        assert!(props.contains(expected), "properties() lost {expected}: {props}");
     }
 
     // the node without an embedding must be just as complete
     let team_keys = scalar(&imported, "MATCH (t:Team) RETURN keys(t) AS v");
     for expected in ["name", "city"] {
-        assert!(
-            team_keys.contains(expected),
-            "keys() lost {expected}: {team_keys}"
-        );
+        assert!(team_keys.contains(expected), "keys() lost {expected}: {team_keys}");
     }
 
     // and nothing regressed for a graph that was never exported
@@ -1760,14 +1531,8 @@ fn integer_list_literals_stay_integers() {
     // to be a vector when it actually contains a float.
     let s = GraphStore::new();
 
-    assert_eq!(
-        bag(&s, "UNWIND [1, 2, 3] AS x RETURN x"),
-        vec!["x=1", "x=2", "x=3"]
-    );
-    assert_eq!(
-        bag(&s, "UNWIND [10, 20] AS x RETURN x + 1 AS y"),
-        vec!["y=11", "y=21"]
-    );
+    assert_eq!(bag(&s, "UNWIND [1, 2, 3] AS x RETURN x"), vec!["x=1", "x=2", "x=3"]);
+    assert_eq!(bag(&s, "UNWIND [10, 20] AS x RETURN x + 1 AS y"), vec!["y=11", "y=21"]);
 
     // a float anywhere still makes it a vector, so embeddings are unaffected
     let v = scalar(&s, "RETURN [0.1, 0.2] AS v");
@@ -1786,27 +1551,15 @@ fn an_embedding_written_with_whole_numbers_is_still_indexable() {
     let mut s = GraphStore::new();
     let engine = QueryEngine::new();
     engine
-        .execute_mut(
-            "CREATE (:D {name: \"a\", emb: [1, 0, 0]})",
-            &mut s,
-            "default",
-        )
+        .execute_mut("CREATE (:D {name: \"a\", emb: [1, 0, 0]})", &mut s, "default")
         .unwrap();
     engine
-        .execute_mut(
-            "CREATE (:D {name: \"b\", emb: [0, 1, 0]})",
-            &mut s,
-            "default",
-        )
+        .execute_mut("CREATE (:D {name: \"b\", emb: [0, 1, 0]})", &mut s, "default")
         .unwrap();
 
     // unnamed form: the optional index name used to swallow `FOR`, so this was rejected
     engine
-        .execute_mut(
-            "CREATE VECTOR INDEX FOR (d:D) ON (d.emb)",
-            &mut s,
-            "default",
-        )
+        .execute_mut("CREATE VECTOR INDEX FOR (d:D) ON (d.emb)", &mut s, "default")
         .unwrap();
     s.rebuild_vector_index();
     assert_eq!(scalar(&s, "MATCH (d:D) RETURN count(d) AS n"), "n=2");
@@ -1817,11 +1570,7 @@ fn an_embedding_written_with_whole_numbers_is_still_indexable() {
         .execute_mut("CREATE (:D {emb: [0.5, 0.5]})", &mut s2, "default")
         .unwrap();
     engine
-        .execute_mut(
-            "CREATE VECTOR INDEX myidx FOR (d:D) ON (d.emb)",
-            &mut s2,
-            "default",
-        )
+        .execute_mut("CREATE VECTOR INDEX myidx FOR (d:D) ON (d.emb)", &mut s2, "default")
         .unwrap();
 }
 
@@ -1840,25 +1589,17 @@ fn create_can_derive_property_values_from_bound_variables() {
         .execute_mut("CREATE (:P {n: 1, name: \"a\"})", &mut s, "default")
         .unwrap();
 
-    engine
-        .execute_mut("MATCH (p:P) CREATE (:Q {n: p.n})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("MATCH (p:P) CREATE (:Q {n: p.n})", &mut s, "default").unwrap();
     assert_eq!(scalar(&s, "MATCH (q:Q) RETURN q.n AS v"), "v=1");
 
-    engine
-        .execute_mut("MATCH (p:P) CREATE (:R {n: p.n + 10})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("MATCH (p:P) CREATE (:R {n: p.n + 10})", &mut s, "default").unwrap();
     assert_eq!(scalar(&s, "MATCH (r:R) RETURN r.n AS v"), "v=11");
 
-    engine
-        .execute_mut("MATCH (p:P) CREATE (:S {label: p.name})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("MATCH (p:P) CREATE (:S {label: p.name})", &mut s, "default").unwrap();
     assert_eq!(scalar(&s, "MATCH (x:S) RETURN x.label AS v"), "v=a");
 
     // literals are unaffected
-    engine
-        .execute_mut("MATCH (p:P) CREATE (:T {n: 5})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("MATCH (p:P) CREATE (:T {n: 5})", &mut s, "default").unwrap();
     assert_eq!(scalar(&s, "MATCH (t:T) RETURN t.n AS v"), "v=5");
 }
 
@@ -1870,11 +1611,7 @@ fn unwind_drives_a_batch_create() {
     let engine = QueryEngine::new();
 
     engine
-        .execute_mut(
-            "UNWIND [1, 2, 3] AS x CREATE (:N {id: x})",
-            &mut s,
-            "default",
-        )
+        .execute_mut("UNWIND [1, 2, 3] AS x CREATE (:N {id: x})", &mut s, "default")
         .unwrap();
 
     assert_eq!(scalar(&s, "MATCH (n:N) RETURN count(n) AS n"), "n=3");
@@ -1884,11 +1621,7 @@ fn unwind_drives_a_batch_create() {
 
     // one row per unwound value, each carrying its own value — not three copies of one
     engine
-        .execute_mut(
-            "UNWIND [7, 8] AS x CREATE (:M {id: x, doubled: x * 2})",
-            &mut s,
-            "default",
-        )
+        .execute_mut("UNWIND [7, 8] AS x CREATE (:M {id: x, doubled: x * 2})", &mut s, "default")
         .unwrap();
     let mut rows = bag(&s, "MATCH (m:M) RETURN m.id AS id, m.doubled AS doubled");
     rows.sort();
@@ -1901,9 +1634,7 @@ fn a_constant_expression_is_allowed_but_an_unbound_variable_is_refused() {
     let engine = QueryEngine::new();
 
     // nothing bound, but a constant needs nothing bound
-    engine
-        .execute_mut("CREATE (:C {n: 1 + 2})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (:C {n: 1 + 2})", &mut s, "default").unwrap();
     assert_eq!(scalar(&s, "MATCH (c:C) RETURN c.n AS v"), "v=3");
 
     // a variable that is not bound must be an error, not a silent null — storing nothing
@@ -1931,61 +1662,29 @@ fn match_filters_on_a_non_literal_property_value_and_merge_evaluates_it() {
     // than a node factory.
     let mut s = GraphStore::new();
     let engine = QueryEngine::new();
-    engine
-        .execute_mut("CREATE (:P {n: 1})", &mut s, "default")
-        .unwrap();
-    engine
-        .execute_mut("CREATE (:P {n: 2})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("CREATE (:P {n: 1})", &mut s, "default").unwrap();
+    engine.execute_mut("CREATE (:P {n: 2})", &mut s, "default").unwrap();
 
     // One row, not both `:P`: the constraint is applied, not dropped.
-    assert_eq!(
-        bag(&s, "UNWIND [1] AS x MATCH (p:P {n: x}) RETURN p.n AS v"),
-        vec!["v=1"]
-    );
+    assert_eq!(bag(&s, "UNWIND [1] AS x MATCH (p:P {n: x}) RETURN p.n AS v"), vec!["v=1"]);
 
     // OPTIONAL MATCH: the constraint is applied too, never silently widened, and
     // a row it finds nothing for is kept (#1229).
-    assert_eq!(
-        bag(
-            &s,
-            "UNWIND [1] AS x OPTIONAL MATCH (p:P {n: x}) RETURN p.n AS v"
-        ),
-        vec!["v=1"]
-    );
-    assert_eq!(
-        scalar(
-            &s,
-            "UNWIND [1, 9] AS x OPTIONAL MATCH (p:P {n: x}) RETURN count(*) AS n"
-        ),
-        "n=2"
-    );
-    assert_eq!(
-        scalar(
-            &s,
-            "UNWIND [1, 9] AS x OPTIONAL MATCH (p:P {n: x}) RETURN count(p) AS n"
-        ),
-        "n=1"
-    );
+    assert_eq!(bag(&s, "UNWIND [1] AS x OPTIONAL MATCH (p:P {n: x}) RETURN p.n AS v"), vec!["v=1"]);
+    assert_eq!(scalar(&s, "UNWIND [1, 9] AS x OPTIONAL MATCH (p:P {n: x}) RETURN count(*) AS n"), "n=2");
+    assert_eq!(scalar(&s, "UNWIND [1, 9] AS x OPTIONAL MATCH (p:P {n: x}) RETURN count(p) AS n"), "n=1");
 
     // the WHERE form it points at does work
     assert_eq!(
-        bag(
-            &s,
-            "UNWIND [1] AS x MATCH (p:P) WHERE p.n = x RETURN p.n AS v"
-        ),
+        bag(&s, "UNWIND [1] AS x MATCH (p:P) WHERE p.n = x RETURN p.n AS v"),
         vec!["v=1"]
     );
 
     // MERGE keys on the row: one `:M` per distinct `p.n`, and running it again
     // adds nothing.
-    engine
-        .execute_mut("MATCH (p:P) MERGE (:M {n: p.n})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("MATCH (p:P) MERGE (:M {n: p.n})", &mut s, "default").unwrap();
     assert_eq!(scalar(&s, "MATCH (m:M) RETURN count(m) AS n"), "n=2");
-    engine
-        .execute_mut("MATCH (p:P) MERGE (:M {n: p.n})", &mut s, "default")
-        .unwrap();
+    engine.execute_mut("MATCH (p:P) MERGE (:M {n: p.n})", &mut s, "default").unwrap();
     assert_eq!(
         scalar(&s, "MATCH (m:M) RETURN count(m) AS n"),
         "n=2",
@@ -2008,19 +1707,12 @@ fn a_yielded_variable_can_be_referenced_by_a_later_where() {
     let engine = QueryEngine::new();
     for i in 0..5 {
         engine
-            .execute_mut(
-                &format!("CREATE (:Term {{code: \"T{i}\"}})"),
-                &mut s,
-                "default",
-            )
+            .execute_mut(&format!("CREATE (:Term {{code: \"T{i}\"}})"), &mut s, "default")
             .unwrap();
     }
 
     // db.labels() yields exactly one row here: "Term"
-    assert_eq!(
-        bag(&s, "CALL db.labels() YIELD label RETURN label"),
-        vec!["label=Term"]
-    );
+    assert_eq!(bag(&s, "CALL db.labels() YIELD label RETURN label"), vec!["label=Term"]);
 
     // The predicate must *filter*, not merely parse. `t.code` is T0..T4 and `label` is
     // "Term", so this is never true -- a dropped predicate would give 5.
@@ -2070,17 +1762,11 @@ fn a_yielded_variable_can_be_referenced_by_a_later_where() {
 
     // and the previously-working shapes are unchanged
     assert_eq!(
-        scalar(
-            &s,
-            "CALL db.labels() YIELD label MATCH (t:Term) RETURN count(t) AS n"
-        ),
+        scalar(&s, "CALL db.labels() YIELD label MATCH (t:Term) RETURN count(t) AS n"),
         "n=5"
     );
     assert_eq!(
-        scalar(
-            &s,
-            "CALL db.labels() YIELD label WHERE label = \"Term\" RETURN count(*) AS n"
-        ),
+        scalar(&s, "CALL db.labels() YIELD label WHERE label = \"Term\" RETURN count(*) AS n"),
         "n=1"
     );
 }
@@ -2104,30 +1790,15 @@ fn single_quoted_strings_work_wherever_double_quoted_ones_do() {
         .execute_mut("CREATE (:P {name: 'bob', age: 40})", &mut s, "default")
         .unwrap();
 
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.name = 'alice' RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P {name: 'alice'}) RETURN count(p) AS n"), "n=1");
     assert_eq!(
-        scalar(
-            &s,
-            "MATCH (p:P) WHERE p.name = 'alice' RETURN count(p) AS n"
-        ),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P {name: 'alice'}) RETURN count(p) AS n"),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(
-            &s,
-            "MATCH (p:P) WHERE p.name STARTS WITH 'al' RETURN count(p) AS n"
-        ),
+        scalar(&s, "MATCH (p:P) WHERE p.name STARTS WITH 'al' RETURN count(p) AS n"),
         "n=1"
     );
     assert_eq!(scalar(&s, "RETURN 'hello' AS v"), "v=hello");
     // the single-quoted CREATE above must have stored a real value
-    assert_eq!(
-        scalar(&s, "MATCH (p:P {name: 'bob'}) RETURN p.age AS v"),
-        "v=40"
-    );
+    assert_eq!(scalar(&s, "MATCH (p:P {name: 'bob'}) RETURN p.age AS v"), "v=40");
 }
 
 #[test]
@@ -2140,61 +1811,26 @@ fn integers_and_floats_compare_across_types() {
     let mut s = GraphStore::new();
     let engine = QueryEngine::new();
     engine
-        .execute_mut(
-            "CREATE (:P {name: \"alice\", age: 30, score: 9.5})",
-            &mut s,
-            "default",
-        )
+        .execute_mut("CREATE (:P {name: \"alice\", age: 30, score: 9.5})", &mut s, "default")
         .unwrap();
     engine
-        .execute_mut(
-            "CREATE (:P {name: \"bob\", age: 40, score: 8.0})",
-            &mut s,
-            "default",
-        )
+        .execute_mut("CREATE (:P {name: \"bob\", age: 40, score: 8.0})", &mut s, "default")
         .unwrap();
 
     // integer property
-    assert_eq!(
-        scalar(&s, "MATCH (p:P) WHERE p.age = 30 RETURN count(p) AS n"),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P) WHERE p.age = 30.0 RETURN count(p) AS n"),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P) WHERE p.age > 35.5 RETURN count(p) AS n"),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P) WHERE p.age < 35 RETURN count(p) AS n"),
-        "n=1"
-    );
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.age = 30 RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.age = 30.0 RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.age > 35.5 RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.age < 35 RETURN count(p) AS n"), "n=1");
 
     // float property
-    assert_eq!(
-        scalar(&s, "MATCH (p:P) WHERE p.score = 8 RETURN count(p) AS n"),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P) WHERE p.score = 8.0 RETURN count(p) AS n"),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P) WHERE p.score > 9 RETURN count(p) AS n"),
-        "n=1"
-    );
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.score = 8 RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.score = 8.0 RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.score > 9 RETURN count(p) AS n"), "n=1");
 
     // and a comparison that should genuinely match nothing still does
-    assert_eq!(
-        scalar(&s, "MATCH (p:P) WHERE p.age = 99 RETURN count(p) AS n"),
-        "n=0"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P) WHERE p.score > 100.0 RETURN count(p) AS n"),
-        "n=0"
-    );
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.age = 99 RETURN count(p) AS n"), "n=0");
+    assert_eq!(scalar(&s, "MATCH (p:P) WHERE p.score > 100.0 RETURN count(p) AS n"), "n=0");
 }
 
 #[test]
@@ -2213,43 +1849,21 @@ fn counting_with_an_inline_property_filter_counts_only_the_matching_rows() {
         engine
             .execute_mut(
                 &format!("CREATE (:P {{name: \"{name}\", age: {age}}})"),
-                &mut s,
-                "default",
+                &mut s, "default",
             )
             .unwrap();
     }
 
     // the filtered forms
-    assert_eq!(
-        scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN count(p) AS n"),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN count(*) AS n"),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P {age: 30}) RETURN count(p) AS n"),
-        "n=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P {name: \"nobody\"}) RETURN count(p) AS n"),
-        "n=0"
-    );
+    assert_eq!(scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN count(*) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P {age: 30}) RETURN count(p) AS n"), "n=1");
+    assert_eq!(scalar(&s, "MATCH (p:P {name: \"nobody\"}) RETURN count(p) AS n"), "n=0");
 
     // consistency across projections of the *same* pattern — the property that was violated
-    assert_eq!(
-        bag(&s, "MATCH (p:P {name: \"alice\"}) RETURN p.name AS v"),
-        vec!["v=alice"]
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN min(p.age) AS n"),
-        "n=30"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN sum(p.age) AS n"),
-        "n=30"
-    );
+    assert_eq!(bag(&s, "MATCH (p:P {name: \"alice\"}) RETURN p.name AS v"), vec!["v=alice"]);
+    assert_eq!(scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN min(p.age) AS n"), "n=30");
+    assert_eq!(scalar(&s, "MATCH (p:P {name: \"alice\"}) RETURN sum(p.age) AS n"), "n=30");
 
     // and the shortcut must still apply when the pattern really is unadorned
     assert_eq!(scalar(&s, "MATCH (p:P) RETURN count(p) AS n"), "n=3");
@@ -2276,35 +1890,23 @@ fn nested_map_fixture() -> GraphStore {
 
 #[test]
 fn chained_list_index() {
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN [[1,2],[3,4]][0][1] AS v"),
-        "v=2"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [[1,2],[3,4]][0][1] AS v"), "v=2");
 }
 
 #[test]
 fn chained_index_three_deep() {
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN [[[5]]][0][0][0] AS v"),
-        "v=5"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [[[5]]][0][0][0] AS v"), "v=5");
 }
 
 #[test]
 fn chained_list_then_map_key() {
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN [{a:1}][0][\"a\"] AS v"),
-        "v=1"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [{a:1}][0][\"a\"] AS v"), "v=1");
 }
 
 #[test]
 fn chained_map_keys_on_stored_property() {
     assert_eq!(
-        scalar(
-            &nested_map_fixture(),
-            "MATCH (d:D) RETURN d.meta[\"c\"][\"d\"] AS v"
-        ),
+        scalar(&nested_map_fixture(), "MATCH (d:D) RETURN d.meta[\"c\"][\"d\"] AS v"),
         "v=9"
     );
 }
@@ -2331,22 +1933,13 @@ fn index_then_slice_composes() {
 #[test]
 fn is_null_applies_to_indexed_element_not_container() {
     // The out-of-range element is null even though the list itself is not.
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN [1,2][5] IS NULL AS v"),
-        "v=true"
-    );
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN [1,2][0] IS NULL AS v"),
-        "v=false"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [1,2][5] IS NULL AS v"), "v=true");
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [1,2][0] IS NULL AS v"), "v=false");
 }
 
 #[test]
 fn is_null_on_missing_map_key() {
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN {a:1}[\"z\"] IS NULL AS v"),
-        "v=true"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN {a:1}[\"z\"] IS NULL AS v"), "v=true");
     assert_eq!(
         scalar(&GraphStore::new(), "RETURN {a:1}[\"a\"] IS NOT NULL AS v"),
         "v=true"
@@ -2356,10 +1949,7 @@ fn is_null_on_missing_map_key() {
 #[test]
 fn single_subscript_and_slice_still_work() {
     assert_eq!(scalar(&GraphStore::new(), "RETURN [1,2][0] AS v"), "v=1");
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN [1,2,3][0..2] AS v"),
-        "v=[1,2]"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN [1,2,3][0..2] AS v"), "v=[1,2]");
 }
 
 // ---------------------------------------------------------------------------
@@ -2392,17 +1982,12 @@ fn arithmetic_with_null_yields_null_not_an_error() {
 fn a_missing_property_nulls_only_its_own_row() {
     let e = QueryEngine::new();
     let mut s = GraphStore::new();
-    e.execute_mut("CREATE (:P {a: 1})", &mut s, "default")
-        .unwrap();
-    e.execute_mut("CREATE (:P {a: 2, b: 10})", &mut s, "default")
-        .unwrap();
+    e.execute_mut("CREATE (:P {a: 1})", &mut s, "default").unwrap();
+    e.execute_mut("CREATE (:P {a: 2, b: 10})", &mut s, "default").unwrap();
 
     // The row lacking `b` is null; the row that has it still computes. Before
     // the fix this raised a type error and neither row came back.
-    assert_eq!(
-        bag(&s, "MATCH (p:P) RETURN p.a + p.b AS v"),
-        vec!["v=12", "v=NULL"]
-    );
+    assert_eq!(bag(&s, "MATCH (p:P) RETURN p.a + p.b AS v"), vec!["v=12", "v=NULL"]);
 }
 
 #[test]
@@ -2437,8 +2022,7 @@ fn three_p_nodes() -> GraphStore {
     let e = QueryEngine::new();
     let mut s = GraphStore::new();
     for n in [1, 2, 2] {
-        e.execute_mut(&format!("CREATE (:P {{n: {n}}})"), &mut s, "default")
-            .unwrap();
+        e.execute_mut(&format!("CREATE (:P {{n: {n}}})"), &mut s, "default").unwrap();
     }
     s
 }
@@ -2446,19 +2030,13 @@ fn three_p_nodes() -> GraphStore {
 #[test]
 fn call_subquery_exports_its_columns() {
     // No graph access at all -- the simplest case, which also failed before.
-    assert_eq!(
-        scalar(&GraphStore::new(), "CALL { RETURN 1 AS n } RETURN n"),
-        "n=1"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "CALL { RETURN 1 AS n } RETURN n"), "n=1");
 }
 
 #[test]
 fn call_subquery_over_a_match_exports_every_row() {
     assert_eq!(
-        bag(
-            &three_p_nodes(),
-            "CALL { MATCH (p:P) RETURN p.n AS n } RETURN n"
-        ),
+        bag(&three_p_nodes(), "CALL { MATCH (p:P) RETURN p.n AS n } RETURN n"),
         vec!["n=1", "n=2", "n=2"]
     );
 }
@@ -2475,17 +2053,11 @@ fn bare_call_subquery_yields_its_own_rows() {
 #[test]
 fn call_subquery_respects_outer_distinct_and_where() {
     assert_eq!(
-        bag(
-            &three_p_nodes(),
-            "CALL { MATCH (p:P) RETURN p.n AS n } RETURN DISTINCT n"
-        ),
+        bag(&three_p_nodes(), "CALL { MATCH (p:P) RETURN p.n AS n } RETURN DISTINCT n"),
         vec!["n=1", "n=2"]
     );
     assert_eq!(
-        bag(
-            &three_p_nodes(),
-            "CALL { MATCH (p:P) RETURN p.n AS n } WHERE n > 1 RETURN n"
-        ),
+        bag(&three_p_nodes(), "CALL { MATCH (p:P) RETURN p.n AS n } WHERE n > 1 RETURN n"),
         vec!["n=2", "n=2"]
     );
 }
@@ -2493,10 +2065,7 @@ fn call_subquery_respects_outer_distinct_and_where() {
 #[test]
 fn call_subquery_can_aggregate_inside() {
     assert_eq!(
-        scalar(
-            &three_p_nodes(),
-            "CALL { MATCH (p:P) RETURN count(p) AS c } RETURN c"
-        ),
+        scalar(&three_p_nodes(), "CALL { MATCH (p:P) RETURN count(p) AS c } RETURN c"),
         "c=3"
     );
 }
@@ -2509,10 +2078,7 @@ fn unsupported_call_shapes_fail_loudly_rather_than_partially() {
     // A subquery followed by more pattern matching needs a real join; refusing
     // is correct, silently dropping the MATCH would not be.
     let err = e
-        .execute(
-            "CALL { MATCH (p:P) RETURN p.n AS n } MATCH (q:P) RETURN n",
-            &s,
-        )
+        .execute("CALL { MATCH (p:P) RETURN p.n AS n } MATCH (q:P) RETURN n", &s)
         .unwrap_err()
         .to_string();
     assert!(err.contains("not supported"), "{err}");
@@ -2537,11 +2103,7 @@ fn call_subquery_works_on_the_write_path_too() {
     let e = QueryEngine::new();
     let mut s = three_p_nodes();
     let batch = e
-        .execute_mut(
-            "CALL { MATCH (p:P) RETURN p.n AS n } RETURN n",
-            &mut s,
-            "default",
-        )
+        .execute_mut("CALL { MATCH (p:P) RETURN p.n AS n } RETURN n", &mut s, "default")
         .unwrap();
     assert_eq!(batch.records.len(), 3);
 }
@@ -2568,34 +2130,19 @@ fn map_property_fixture() -> GraphStore {
 
 #[test]
 fn dot_access_reaches_one_level_into_a_map() {
-    assert_eq!(
-        scalar(&map_property_fixture(), "MATCH (d:D) RETURN d.meta.a AS v"),
-        "v=1"
-    );
+    assert_eq!(scalar(&map_property_fixture(), "MATCH (d:D) RETURN d.meta.a AS v"), "v=1");
 }
 
 #[test]
 fn dot_access_chains_arbitrarily_deep() {
-    assert_eq!(
-        scalar(
-            &map_property_fixture(),
-            "MATCH (d:D) RETURN d.meta.c.d AS v"
-        ),
-        "v=9"
-    );
+    assert_eq!(scalar(&map_property_fixture(), "MATCH (d:D) RETURN d.meta.c.d AS v"), "v=9");
 }
 
 #[test]
 fn dot_access_works_in_a_predicate() {
     let s = map_property_fixture();
-    assert_eq!(
-        scalar(&s, "MATCH (d:D) WHERE d.meta.a = 1 RETURN count(d) AS v"),
-        "v=1"
-    );
-    assert_eq!(
-        scalar(&s, "MATCH (d:D) WHERE d.meta.c.d = 9 RETURN count(d) AS v"),
-        "v=1"
-    );
+    assert_eq!(scalar(&s, "MATCH (d:D) WHERE d.meta.a = 1 RETURN count(d) AS v"), "v=1");
+    assert_eq!(scalar(&s, "MATCH (d:D) WHERE d.meta.c.d = 9 RETURN count(d) AS v"), "v=1");
 }
 
 #[test]
@@ -2610,34 +2157,19 @@ fn dot_and_bracket_access_are_the_same_path() {
 
 #[test]
 fn a_missing_map_key_is_null_not_an_error() {
-    assert_eq!(
-        scalar(
-            &map_property_fixture(),
-            "MATCH (d:D) RETURN d.meta.nope AS v"
-        ),
-        "v=NULL"
-    );
+    assert_eq!(scalar(&map_property_fixture(), "MATCH (d:D) RETURN d.meta.nope AS v"), "v=NULL");
 }
 
 #[test]
 fn plain_property_access_is_unaffected() {
-    assert_eq!(
-        scalar(&map_property_fixture(), "MATCH (d:D) RETURN d.plain AS v"),
-        "v=5"
-    );
+    assert_eq!(scalar(&map_property_fixture(), "MATCH (d:D) RETURN d.plain AS v"), "v=5");
 }
 
 #[test]
 fn keys_enumerates_a_map_and_still_a_node() {
     let s = map_property_fixture();
-    assert_eq!(
-        bag(&s, "MATCH (d:D) RETURN keys(d.meta) AS v"),
-        vec!["v=[a,c]"]
-    );
-    assert_eq!(
-        bag(&s, "MATCH (d:D) RETURN keys(d) AS v"),
-        vec!["v=[meta,plain]"]
-    );
+    assert_eq!(bag(&s, "MATCH (d:D) RETURN keys(d.meta) AS v"), vec!["v=[a,c]"]);
+    assert_eq!(bag(&s, "MATCH (d:D) RETURN keys(d) AS v"), vec!["v=[meta,plain]"]);
 }
 
 #[test]
@@ -2647,19 +2179,11 @@ fn writing_through_a_map_path_is_still_rejected() {
     // worse than refusing it.
     let e = QueryEngine::new();
     let mut s = map_property_fixture();
-    assert!(e
-        .execute_mut("MATCH (d:D) SET d.meta.a = 5", &mut s, "default")
-        .is_err());
-    assert!(e
-        .execute_mut("MATCH (d:D) REMOVE d.meta.a", &mut s, "default")
-        .is_err());
+    assert!(e.execute_mut("MATCH (d:D) SET d.meta.a = 5", &mut s, "default").is_err());
+    assert!(e.execute_mut("MATCH (d:D) REMOVE d.meta.a", &mut s, "default").is_err());
     // Ordinary single-segment SET/REMOVE keep working.
-    assert!(e
-        .execute_mut("MATCH (d:D) SET d.plain = 6", &mut s, "default")
-        .is_ok());
-    assert!(e
-        .execute_mut("MATCH (d:D) REMOVE d.plain", &mut s, "default")
-        .is_ok());
+    assert!(e.execute_mut("MATCH (d:D) SET d.plain = 6", &mut s, "default").is_ok());
+    assert!(e.execute_mut("MATCH (d:D) REMOVE d.plain", &mut s, "default").is_ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -2668,54 +2192,36 @@ fn writing_through_a_map_path_is_still_rejected() {
 
 #[test]
 fn split_on_a_single_character() {
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN split(\"a,b,c\", \",\") AS v"),
-        "v=[a,b,c]"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN split(\"a,b,c\", \",\") AS v"), "v=[a,b,c]");
 }
 
 #[test]
 fn split_on_a_multi_character_delimiter() {
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN split(\"a::b\", \"::\") AS v"),
-        "v=[a,b]"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN split(\"a::b\", \"::\") AS v"), "v=[a,b]");
 }
 
 #[test]
 fn split_that_matches_nothing_returns_the_whole_string() {
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN split(\"abc\", \",\") AS v"),
-        "v=[abc]"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN split(\"abc\", \",\") AS v"), "v=[abc]");
 }
 
 #[test]
 fn split_on_an_empty_delimiter_yields_characters() {
     // Cypher splits into single characters here. Rust's split("") would also
     // emit an empty string at each end, which is why this is special-cased.
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN split(\"abc\", \"\") AS v"),
-        "v=[a,b,c]"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN split(\"abc\", \"\") AS v"), "v=[a,b,c]");
 }
 
 #[test]
 fn split_keeps_the_empty_field_a_trailing_delimiter_creates() {
     // "a," is two fields, the second empty -- dropping it would lose information.
-    assert_eq!(
-        scalar(&GraphStore::new(), "RETURN size(split(\"a,\", \",\")) AS v"),
-        "v=2"
-    );
+    assert_eq!(scalar(&GraphStore::new(), "RETURN size(split(\"a,\", \",\")) AS v"), "v=2");
 }
 
 #[test]
 fn split_composes_with_size_and_indexing() {
     let s = GraphStore::new();
-    assert_eq!(
-        scalar(&s, "RETURN size(split(\"a,b,c\", \",\")) AS v"),
-        "v=3"
-    );
+    assert_eq!(scalar(&s, "RETURN size(split(\"a,b,c\", \",\")) AS v"), "v=3");
     assert_eq!(scalar(&s, "RETURN split(\"a,b,c\", \",\")[1] AS v"), "v=b");
 }
 
@@ -2747,23 +2253,16 @@ fn algo_error(q: &str) -> String {
 fn unknown_algorithm_lists_the_available_ones_with_their_arguments() {
     let err = algo_error("CALL algo.nonsense() YIELD nodeId RETURN count(*) AS v");
     assert!(err.contains("shortestPath(source, target)"), "{err}");
-    assert!(
-        err.contains("weightedPath(source, target, weightProperty)"),
-        "{err}"
-    );
+    assert!(err.contains("weightedPath(source, target, weightProperty)"), "{err}");
     assert!(err.contains("pageRank({config})"), "{err}");
 }
 
 #[test]
 fn common_wrong_names_are_redirected_to_the_right_procedure() {
-    assert!(
-        algo_error("CALL algo.bfs() YIELD nodeId RETURN count(*) AS v")
-            .contains("use algo.shortestPath")
-    );
-    assert!(
-        algo_error("CALL algo.dijkstra() YIELD nodeId RETURN count(*) AS v")
-            .contains("use algo.weightedPath")
-    );
+    assert!(algo_error("CALL algo.bfs() YIELD nodeId RETURN count(*) AS v")
+        .contains("use algo.shortestPath"));
+    assert!(algo_error("CALL algo.dijkstra() YIELD nodeId RETURN count(*) AS v")
+        .contains("use algo.weightedPath"));
     // `algo.louvain` used to be redirected to cdlp because it did not exist.
     // It does now, so the redirect was removed and asserting it would pin the
     // engine to a gap that has been closed. `bfs` and `dijkstra` above are
@@ -2771,10 +2270,7 @@ fn common_wrong_names_are_redirected_to_the_right_procedure() {
     // weightedPath and the redirect is the permanent answer.
     assert!(
         QueryEngine::new()
-            .execute(
-                "CALL algo.louvain() YIELD communityId RETURN count(*) AS v",
-                &GraphStore::new()
-            )
+            .execute("CALL algo.louvain() YIELD communityId RETURN count(*) AS v", &GraphStore::new())
             .is_ok(),
         "louvain is implemented and must not be redirected",
     );
@@ -2812,10 +2308,7 @@ fn foreach_create_stores_the_loop_variable() {
     // The property must exist as a key, not merely read back as null -- before
     // the fix it was never created at all.
     assert_eq!(bag(&s, "MATCH (t:T) RETURN t.i AS v"), vec!["v=7", "v=8"]);
-    assert_eq!(
-        bag(&s, "MATCH (t:T) RETURN t.lit AS v"),
-        vec!["v=99", "v=99"]
-    );
+    assert_eq!(bag(&s, "MATCH (t:T) RETURN t.lit AS v"), vec!["v=99", "v=99"]);
 }
 
 #[test]
@@ -2830,10 +2323,7 @@ fn foreach_create_handles_the_canonical_tag_case() {
         "default",
     )
     .unwrap();
-    assert_eq!(
-        bag(&s, "MATCH (t:Tag) RETURN t.name AS v"),
-        vec!["v=a", "v=b"]
-    );
+    assert_eq!(bag(&s, "MATCH (t:Tag) RETURN t.name AS v"), vec!["v=a", "v=b"]);
 }
 
 #[test]
@@ -2846,10 +2336,7 @@ fn foreach_create_evaluates_expressions_over_the_loop_variable() {
         "default",
     )
     .unwrap();
-    assert_eq!(
-        bag(&s, "MATCH (c:Calc) RETURN c.v AS v"),
-        vec!["v=10", "v=20"]
-    );
+    assert_eq!(bag(&s, "MATCH (c:Calc) RETURN c.v AS v"), vec!["v=10", "v=20"]);
 }
 
 #[test]
@@ -2857,12 +2344,7 @@ fn foreach_set_still_binds_the_loop_variable() {
     // SET was always correct; pin it so the CREATE fix cannot regress it.
     let e = QueryEngine::new();
     let mut s = foreach_store();
-    e.execute_mut(
-        "MATCH (p:P) FOREACH (i IN [5] | SET p.n = i)",
-        &mut s,
-        "default",
-    )
-    .unwrap();
+    e.execute_mut("MATCH (p:P) FOREACH (i IN [5] | SET p.n = i)", &mut s, "default").unwrap();
     assert_eq!(scalar(&s, "MATCH (p:P) RETURN p.n AS v"), "v=5");
 }
 
@@ -2876,19 +2358,11 @@ fn foreach_create_of_a_relationship_wires_the_bound_node_not_an_orphan() {
     let mut s = foreach_store();
     let before = s.node_count();
     let p = scalar(&s, "MATCH (p:P) RETURN count(p) AS v");
-    e.execute_mut(
-        "MATCH (p:P) FOREACH (i IN [1] | CREATE (p)-[:R]->(:X))",
-        &mut s,
-        "default",
-    )
-    .unwrap();
+    e.execute_mut("MATCH (p:P) FOREACH (i IN [1] | CREATE (p)-[:R]->(:X))", &mut s, "default")
+        .unwrap();
     assert_eq!(scalar(&s, "MATCH (:P)-[:R]->(x:X) RETURN count(x) AS v"), p);
     let p: usize = p.trim_start_matches("v=").parse().unwrap();
-    assert_eq!(
-        s.node_count(),
-        before + p,
-        "one :X per row, and nothing else"
-    );
+    assert_eq!(s.node_count(), before + p, "one :X per row, and nothing else");
 }
 
 #[test]
@@ -2896,12 +2370,8 @@ fn foreach_over_an_empty_list_is_a_no_op() {
     let e = QueryEngine::new();
     let mut s = foreach_store();
     let before = s.node_count();
-    e.execute_mut(
-        "MATCH (p:P) FOREACH (i IN [] | CREATE (:Empty {i: i}))",
-        &mut s,
-        "default",
-    )
-    .unwrap();
+    e.execute_mut("MATCH (p:P) FOREACH (i IN [] | CREATE (:Empty {i: i}))", &mut s, "default")
+        .unwrap();
     assert_eq!(s.node_count(), before);
 }
 
@@ -2918,24 +2388,15 @@ fn foreach_over_an_empty_list_is_a_no_op() {
 fn leading_foreach_creates_with_the_loop_variable_bound() {
     let e = QueryEngine::new();
     let mut s = GraphStore::new();
-    e.execute_mut(
-        "FOREACH (i IN [1,2,3] | CREATE (:L {i: i}))",
-        &mut s,
-        "default",
-    )
-    .unwrap();
-    assert_eq!(
-        bag(&s, "MATCH (l:L) RETURN l.i AS v"),
-        vec!["v=1", "v=2", "v=3"]
-    );
+    e.execute_mut("FOREACH (i IN [1,2,3] | CREATE (:L {i: i}))", &mut s, "default").unwrap();
+    assert_eq!(bag(&s, "MATCH (l:L) RETURN l.i AS v"), vec!["v=1", "v=2", "v=3"]);
 }
 
 #[test]
 fn leading_foreach_over_an_empty_list_is_a_no_op() {
     let e = QueryEngine::new();
     let mut s = GraphStore::new();
-    e.execute_mut("FOREACH (i IN [] | CREATE (:Z {i: i}))", &mut s, "default")
-        .unwrap();
+    e.execute_mut("FOREACH (i IN [] | CREATE (:Z {i: i}))", &mut s, "default").unwrap();
     assert_eq!(s.node_count(), 0);
 }
 
@@ -2945,22 +2406,15 @@ fn leading_foreach_is_a_write_and_the_read_executor_refuses_it() {
     // than running it and discarding the effects.
     let e = QueryEngine::new();
     let s = GraphStore::new();
-    assert!(e
-        .execute("FOREACH (i IN [1] | CREATE (:RO {i: i}))", &s)
-        .is_err());
+    assert!(e.execute("FOREACH (i IN [1] | CREATE (:RO {i: i}))", &s).is_err());
 }
 
 #[test]
 fn trailing_foreach_is_unaffected_by_the_leading_form() {
     let e = QueryEngine::new();
     let mut s = GraphStore::new();
-    e.execute_mut("CREATE (:P {n: 0})", &mut s, "default")
+    e.execute_mut("CREATE (:P {n: 0})", &mut s, "default").unwrap();
+    e.execute_mut("MATCH (p:P) FOREACH (i IN [9] | CREATE (:M2 {i: i}))", &mut s, "default")
         .unwrap();
-    e.execute_mut(
-        "MATCH (p:P) FOREACH (i IN [9] | CREATE (:M2 {i: i}))",
-        &mut s,
-        "default",
-    )
-    .unwrap();
     assert_eq!(scalar(&s, "MATCH (m:M2) RETURN m.i AS v"), "v=9");
 }

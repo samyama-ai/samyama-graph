@@ -41,23 +41,14 @@ fn derives_a_usable_parameter_set_from_the_shipped_sf1_extract() {
     // belong to a different datagen run, producing a suite that reports
     // "passed" while measuring nothing (#449, #450, #502).
     assert!(d.person_id > 0, "anchor person must be a real id");
-    assert_ne!(
-        d.person2_id, d.person_id,
-        "path queries need two distinct people"
-    );
+    assert_ne!(d.person2_id, d.person_id, "path queries need two distinct people");
     assert!(!d.first_name.is_empty());
     assert!(!d.tag_name.is_empty());
     assert!(!d.country_x.is_empty());
     assert!(!d.tag_class_name.is_empty());
     assert!(!d.organisation_name.is_empty());
-    assert!(
-        d.start_date < d.end_date,
-        "the date window must be non-empty"
-    );
-    assert!(
-        d.end_date <= d.max_date,
-        "maxDate must not exclude the window"
-    );
+    assert!(d.start_date < d.end_date, "the date window must be non-empty");
+    assert!(d.end_date <= d.max_date, "maxDate must not exclude the window");
 }
 
 #[test]
@@ -72,8 +63,7 @@ fn every_derived_id_resolves_to_a_row_its_query_can_answer() {
 
     let d = params::derive(&dir, 50).unwrap();
 
-    let replies =
-        std::fs::read_to_string(dir.join("dynamic/comment_replyOf_post_0_0.csv")).unwrap();
+    let replies = std::fs::read_to_string(dir.join("dynamic/comment_replyOf_post_0_0.csv")).unwrap();
     let post_has_replies = replies.lines().skip(1).any(|line| {
         line.split('|')
             .nth(1)
@@ -93,11 +83,7 @@ fn every_derived_id_resolves_to_a_row_its_query_can_answer() {
         let b = f.next().unwrap_or("");
         a == d.person_id.to_string() || b == d.person_id.to_string()
     });
-    assert!(
-        anchor_has_friends,
-        "personId {} has no KNOWS edges",
-        d.person_id
-    );
+    assert!(anchor_has_friends, "personId {} has no KNOWS edges", d.person_id);
 }
 
 #[test]
@@ -114,10 +100,7 @@ fn the_median_anchor_is_not_the_busiest_person() {
     let d = params::derive(&dir, 50).unwrap();
     let p = &d.provenance;
 
-    assert_eq!(
-        p.person_degree, p.median_degree,
-        "p50 must land on the median degree"
-    );
+    assert_eq!(p.person_degree, p.median_degree, "p50 must land on the median degree");
     assert!(
         p.person_degree < p.max_degree,
         "the median must be below the maximum ({} vs {}) or this dataset has no skew to avoid",
@@ -166,10 +149,7 @@ fn derivation_is_deterministic() {
     assert_eq!(a.country_y, b.country_y);
     assert_eq!(a.tag_class_name, b.tag_class_name);
     assert_eq!(a.organisation_name, b.organisation_name);
-    assert_eq!(
-        (a.start_date, a.end_date, a.max_date),
-        (b.start_date, b.end_date, b.max_date)
-    );
+    assert_eq!((a.start_date, a.end_date, a.max_date), (b.start_date, b.end_date, b.max_date));
 }
 
 #[test]
@@ -192,9 +172,7 @@ fn the_written_json_round_trips_into_the_benchmark_and_carries_its_origin() {
     // came from, or it becomes the next set of unattributed magic numbers.
     let provenance = parsed["_provenance"].as_array().expect("_provenance block");
     assert!(
-        provenance
-            .iter()
-            .any(|l| l.as_str().is_some_and(|s| s.contains("p50"))),
+        provenance.iter().any(|l| l.as_str().is_some_and(|s| s.contains("p50"))),
         "the percentile must survive into the file: {json}"
     );
 }
@@ -203,8 +181,5 @@ fn the_written_json_round_trips_into_the_benchmark_and_carries_its_origin() {
 fn a_directory_without_ldbc_csvs_is_an_error_not_a_panic() {
     let err = params::derive(std::path::Path::new("/nonexistent-ldbc-extract"), 50)
         .expect_err("a missing extract must be reported, not unwrapped");
-    assert!(
-        err.contains("person_knows_person"),
-        "the error should name what it looked for: {err}"
-    );
+    assert!(err.contains("person_knows_person"), "the error should name what it looked for: {err}");
 }

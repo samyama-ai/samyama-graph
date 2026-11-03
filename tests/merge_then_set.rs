@@ -13,17 +13,13 @@ use samyama::query::parser::parse_query;
 
 fn write(s: &mut GraphStore, q: &str) {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    MutQueryExecutor::new(s, "default".into())
-        .execute(&p)
-        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    MutQueryExecutor::new(s, "default".into()).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
 }
 
 /// Column `c` of every row, sorted.
 fn column(s: &GraphStore, q: &str) -> Vec<String> {
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(s)
-        .execute(&p)
-        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let mut v: Vec<String> = out
         .records
         .iter()
@@ -40,10 +36,7 @@ fn column(s: &GraphStore, q: &str) -> Vec<String> {
 #[test]
 fn unwind_merge_then_set_writes_the_merged_node() {
     let mut s = GraphStore::new();
-    write(
-        &mut s,
-        "UNWIND [{id: 1, x: 'a'}, {id: 2, x: 'b'}] AS r MERGE (n:N {id: r.id}) SET n.x = r.x",
-    );
+    write(&mut s, "UNWIND [{id: 1, x: 'a'}, {id: 2, x: 'b'}] AS r MERGE (n:N {id: r.id}) SET n.x = r.x");
     assert_eq!(column(&s, "MATCH (n:N) RETURN n.x AS c"), vec!["a", "b"]);
 }
 
@@ -52,10 +45,7 @@ fn unwind_merge_then_set_writes_the_merged_node() {
 fn set_after_merge_applies_on_match_and_on_create() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:N {id: 1})");
-    write(
-        &mut s,
-        "UNWIND [{id: 1, x: 'a'}, {id: 2, x: 'b'}] AS r MERGE (n:N {id: r.id}) SET n.x = r.x",
-    );
+    write(&mut s, "UNWIND [{id: 1, x: 'a'}, {id: 2, x: 'b'}] AS r MERGE (n:N {id: r.id}) SET n.x = r.x");
     assert_eq!(column(&s, "MATCH (n:N) RETURN n.x AS c"), vec!["a", "b"]);
     assert_eq!(column(&s, "MATCH (n:N) RETURN count(n) AS c"), vec!["2"]);
 }
@@ -73,10 +63,7 @@ fn merge_then_remove_removes_from_the_merged_node() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:N {id: 1, y: 1})");
     write(&mut s, "UNWIND [1] AS i MERGE (n:N {id: i}) REMOVE n.y");
-    assert_eq!(
-        column(&s, "MATCH (n:N) WHERE n.y IS NULL RETURN count(n) AS c"),
-        vec!["1"]
-    );
+    assert_eq!(column(&s, "MATCH (n:N) WHERE n.y IS NULL RETURN count(n) AS c"), vec!["1"]);
 }
 
 /// TCK Unwind1 [14], with the parameter as a literal.
@@ -88,26 +75,14 @@ fn tck_unwind_with_merge() {
          MERGE (p:Person {login: prop.login}) SET p.name = prop.name RETURN p.name AS c",
     )
     .unwrap();
-    let out = MutQueryExecutor::new(&mut s, "default".into())
-        .execute(&p)
-        .unwrap();
-    let mut names: Vec<String> = out
-        .records
-        .iter()
-        .map(|r| format!("{:?}", r.get("c")))
-        .collect();
+    let out = MutQueryExecutor::new(&mut s, "default".into()).execute(&p).unwrap();
+    let mut names: Vec<String> = out.records.iter().map(|r| format!("{:?}", r.get("c"))).collect();
     names.sort();
     assert_eq!(
         names,
         vec![
-            format!(
-                "{:?}",
-                Some(Value::Property(PropertyValue::String("name1".into())))
-            ),
-            format!(
-                "{:?}",
-                Some(Value::Property(PropertyValue::String("name2".into())))
-            ),
+            format!("{:?}", Some(Value::Property(PropertyValue::String("name1".into())))),
+            format!("{:?}", Some(Value::Property(PropertyValue::String("name2".into())))),
         ]
     );
 }

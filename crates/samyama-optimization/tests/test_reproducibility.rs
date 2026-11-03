@@ -17,55 +17,31 @@ use samyama_optimization::common::*;
 
 struct SphereProblem;
 impl Problem for SphereProblem {
-    fn objective(&self, v: &Array1<f64>) -> f64 {
-        v.iter().map(|&x| x * x).sum()
-    }
-    fn dim(&self) -> usize {
-        2
-    }
-    fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
-        (array![-10.0, -10.0], array![10.0, 10.0])
-    }
+    fn objective(&self, v: &Array1<f64>) -> f64 { v.iter().map(|&x| x * x).sum() }
+    fn dim(&self) -> usize { 2 }
+    fn bounds(&self) -> (Array1<f64>, Array1<f64>) { (array![-10.0, -10.0], array![10.0, 10.0]) }
 }
 
 fn cfg() -> SolverConfig {
-    SolverConfig {
-        population_size: 30,
-        max_iterations: 60,
-    }
+    SolverConfig { population_size: 30, max_iterations: 60 }
 }
 
 /// Same seed twice, then a different seed. Returns (a, b, c).
 macro_rules! three_runs {
     ($build:expr) => {{
-        let a = {
-            let s = $build;
-            s.with_seed(12345).solve(&SphereProblem)
-        };
-        let b = {
-            let s = $build;
-            s.with_seed(12345).solve(&SphereProblem)
-        };
-        let c = {
-            let s = $build;
-            s.with_seed(99999).solve(&SphereProblem)
-        };
+        let a = { let s = $build; s.with_seed(12345).solve(&SphereProblem) };
+        let b = { let s = $build; s.with_seed(12345).solve(&SphereProblem) };
+        let c = { let s = $build; s.with_seed(99999).solve(&SphereProblem) };
         (a, b, c)
     }};
 }
 
-fn assert_reproducible(
-    name: &str,
-    a: OptimizationResult,
-    b: OptimizationResult,
-    c: OptimizationResult,
-) {
+fn assert_reproducible(name: &str, a: OptimizationResult, b: OptimizationResult, c: OptimizationResult) {
     assert_eq!(
         a.best_fitness.to_bits(),
         b.best_fitness.to_bits(),
         "{name}: same seed produced different results ({} vs {})",
-        a.best_fitness,
-        b.best_fitness
+        a.best_fitness, b.best_fitness
     );
     assert_eq!(
         a.best_variables, b.best_variables,
@@ -84,10 +60,7 @@ fn assert_reproducible(
     // optimum (QORao reaches 0.0 on Sphere under any seed) would otherwise look
     // like it was ignoring its input when it was not.
     let bits = |r: &OptimizationResult| {
-        (
-            r.best_fitness.to_bits(),
-            r.history.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
-        )
+        (r.best_fitness.to_bits(), r.history.iter().map(|f| f.to_bits()).collect::<Vec<_>>())
     };
     assert_ne!(
         bits(&a),
@@ -115,20 +88,12 @@ repro_test!(bat_is_reproducible, "Bat", BatSolver::new(cfg()));
 repro_test!(abc_is_reproducible, "ABC", ABCSolver::new(cfg()));
 repro_test!(fpa_is_reproducible, "FPA", FPASolver::new(cfg()));
 repro_test!(cuckoo_is_reproducible, "Cuckoo", CuckooSolver::new(cfg()));
-repro_test!(
-    firefly_is_reproducible,
-    "Firefly",
-    FireflySolver::new(cfg())
-);
+repro_test!(firefly_is_reproducible, "Firefly", FireflySolver::new(cfg()));
 repro_test!(gwo_is_reproducible, "GWO", GWOSolver::new(cfg()));
 
 // Solvers whose population update runs under rayon -- the cases where naive
 // seeding would look right and not be.
-repro_test!(
-    rao_is_reproducible,
-    "Rao3",
-    RaoSolver::new(cfg(), RaoVariant::Rao3)
-);
+repro_test!(rao_is_reproducible, "Rao3", RaoSolver::new(cfg(), RaoVariant::Rao3));
 repro_test!(de_is_reproducible, "DE", DESolver::new(cfg()));
 repro_test!(jaya_is_reproducible, "Jaya", JayaSolver::new(cfg()));
 repro_test!(qojaya_is_reproducible, "QOJaya", QOJayaSolver::new(cfg()));
@@ -139,21 +104,9 @@ repro_test!(pso_is_reproducible, "PSO", PSOSolver::new(cfg()));
 repro_test!(bmr_is_reproducible, "BMR", BMRSolver::new(cfg()));
 repro_test!(bwr_is_reproducible, "BWR", BWRSolver::new(cfg()));
 repro_test!(bmwr_is_reproducible, "BMWR", BMWRSolver::new(cfg()));
-repro_test!(
-    samp_jaya_is_reproducible,
-    "SAMPJaya",
-    SAMPJayaSolver::new(cfg())
-);
-repro_test!(
-    ehrjaya_is_reproducible,
-    "EHRJaya",
-    EHRJayaSolver::new(cfg())
-);
-repro_test!(
-    qorao_is_reproducible,
-    "QORao",
-    QORaoSolver::new(cfg(), RaoVariant::Rao1)
-);
+repro_test!(samp_jaya_is_reproducible, "SAMPJaya", SAMPJayaSolver::new(cfg()));
+repro_test!(ehrjaya_is_reproducible, "EHRJaya", EHRJayaSolver::new(cfg()));
+repro_test!(qorao_is_reproducible, "QORao", QORaoSolver::new(cfg(), RaoVariant::Rao1));
 
 #[test]
 fn an_unseeded_solver_still_varies() {
@@ -174,14 +127,8 @@ fn reproducibility_holds_across_thread_counts() {
     // index): the answer must not depend on how rayon schedules the work.
     // Running the same seed under a 1-thread and a many-thread pool is the
     // direct test of that.
-    let single = rayon::ThreadPoolBuilder::new()
-        .num_threads(1)
-        .build()
-        .unwrap();
-    let many = rayon::ThreadPoolBuilder::new()
-        .num_threads(8)
-        .build()
-        .unwrap();
+    let single = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let many = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap();
 
     let one = single.install(|| DESolver::new(cfg()).with_seed(4242).solve(&SphereProblem));
     let eight = many.install(|| DESolver::new(cfg()).with_seed(4242).solve(&SphereProblem));
@@ -190,7 +137,6 @@ fn reproducibility_holds_across_thread_counts() {
         one.best_fitness.to_bits(),
         eight.best_fitness.to_bits(),
         "DE gave {} on 1 thread and {} on 8 -- the result depends on scheduling",
-        one.best_fitness,
-        eight.best_fitness
+        one.best_fitness, eight.best_fitness
     );
 }

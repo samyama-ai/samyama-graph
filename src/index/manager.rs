@@ -2,8 +2,8 @@
 //!
 //! Handles creation, deletion, and access to property indices.
 
-use super::property_index::PropertyIndex;
 use crate::graph::{Label, NodeId, PropertyValue};
+use super::property_index::PropertyIndex;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -55,9 +55,7 @@ impl IndexManager {
     pub fn create_index(&self, label: Label, property: String) {
         let key = PropertyIndexKey { label, property };
         let mut indices = self.indices.write().unwrap();
-        indices
-            .entry(key)
-            .or_insert_with(|| Arc::new(RwLock::new(PropertyIndex::new())));
+        indices.entry(key).or_insert_with(|| Arc::new(RwLock::new(PropertyIndex::new())));
     }
 
     /// Drop an index
@@ -71,13 +69,7 @@ impl IndexManager {
     }
 
     /// Update index when a node property is set/changed
-    pub fn index_insert(
-        &self,
-        label: &Label,
-        property: &str,
-        value: PropertyValue,
-        node_id: NodeId,
-    ) {
+    pub fn index_insert(&self, label: &Label, property: &str, value: PropertyValue, node_id: NodeId) {
         let key = PropertyIndexKey {
             label: label.clone(),
             property: property.to_string(),
@@ -89,13 +81,7 @@ impl IndexManager {
     }
 
     /// Update index when a node property is removed (or old value replaced)
-    pub fn index_remove(
-        &self,
-        label: &Label,
-        property: &str,
-        value: &PropertyValue,
-        node_id: NodeId,
-    ) {
+    pub fn index_remove(&self, label: &Label, property: &str, value: &PropertyValue, node_id: NodeId) {
         let key = PropertyIndexKey {
             label: label.clone(),
             property: property.to_string(),
@@ -126,10 +112,7 @@ impl IndexManager {
 
     /// List all indexes
     pub fn list_indexes(&self) -> Vec<(Label, String)> {
-        self.indices
-            .read()
-            .unwrap()
-            .keys()
+        self.indices.read().unwrap().keys()
             .map(|k| (k.label.clone(), k.property.clone()))
             .collect()
     }
@@ -165,14 +148,9 @@ impl IndexManager {
 
     /// Create a unique constraint (also creates an index)
     pub fn create_unique_constraint(&self, label: Label, property: String) {
-        let key = PropertyIndexKey {
-            label: label.clone(),
-            property: property.clone(),
-        };
+        let key = PropertyIndexKey { label: label.clone(), property: property.clone() };
         let mut constraints = self.unique_constraints.write().unwrap();
-        constraints
-            .entry(key)
-            .or_insert_with(|| Arc::new(RwLock::new(PropertyIndex::new())));
+        constraints.entry(key).or_insert_with(|| Arc::new(RwLock::new(PropertyIndex::new())));
         // Also create a regular index for query performance
         self.create_index(label, property);
     }
@@ -202,12 +180,7 @@ impl IndexManager {
     }
 
     /// Check unique constraint before insert. Returns Ok if unique or no constraint.
-    pub fn check_unique_constraint(
-        &self,
-        label: &Label,
-        property: &str,
-        value: &PropertyValue,
-    ) -> Result<(), String> {
+    pub fn check_unique_constraint(&self, label: &Label, property: &str, value: &PropertyValue) -> Result<(), String> {
         let key = PropertyIndexKey {
             label: label.clone(),
             property: property.to_string(),
@@ -219,9 +192,7 @@ impl IndexManager {
             if !existing.is_empty() {
                 return Err(format!(
                     "Unique constraint violation: :{}({}) already has value {:?}",
-                    label.as_str(),
-                    property,
-                    value
+                    label.as_str(), property, value
                 ));
             }
         }
@@ -281,13 +252,7 @@ impl IndexManager {
     }
 
     /// Insert into unique constraint index
-    pub fn constraint_insert(
-        &self,
-        label: &Label,
-        property: &str,
-        value: PropertyValue,
-        node_id: NodeId,
-    ) {
+    pub fn constraint_insert(&self, label: &Label, property: &str, value: PropertyValue, node_id: NodeId) {
         let key = PropertyIndexKey {
             label: label.clone(),
             property: property.to_string(),
@@ -323,10 +288,7 @@ impl IndexManager {
 
     /// List all constraints
     pub fn list_constraints(&self) -> Vec<(Label, String)> {
-        self.unique_constraints
-            .read()
-            .unwrap()
-            .keys()
+        self.unique_constraints.read().unwrap().keys()
             .map(|k| (k.label.clone(), k.property.clone()))
             .collect()
     }
@@ -340,10 +302,7 @@ impl IndexManager {
 
     /// Get all indexed properties for a label
     pub fn get_indexed_properties(&self, label: &Label) -> Vec<String> {
-        self.indices
-            .read()
-            .unwrap()
-            .keys()
+        self.indices.read().unwrap().keys()
             .filter(|k| &k.label == label)
             .map(|k| k.property.clone())
             .collect()
@@ -411,18 +370,8 @@ mod tests {
         let label = Label::new("Person");
         mgr.create_index(label.clone(), "name".to_string());
 
-        mgr.index_insert(
-            &label,
-            "name",
-            PropertyValue::String("Alice".to_string()),
-            NodeId::new(1),
-        );
-        mgr.index_insert(
-            &label,
-            "name",
-            PropertyValue::String("Bob".to_string()),
-            NodeId::new(2),
-        );
+        mgr.index_insert(&label, "name", PropertyValue::String("Alice".to_string()), NodeId::new(1));
+        mgr.index_insert(&label, "name", PropertyValue::String("Bob".to_string()), NodeId::new(2));
 
         let idx = mgr.get_index(&label, "name").unwrap();
         let idx_guard = idx.read().unwrap();
@@ -436,18 +385,8 @@ mod tests {
         let label = Label::new("Person");
         mgr.create_index(label.clone(), "name".to_string());
 
-        mgr.index_insert(
-            &label,
-            "name",
-            PropertyValue::String("Alice".to_string()),
-            NodeId::new(1),
-        );
-        mgr.index_remove(
-            &label,
-            "name",
-            &PropertyValue::String("Alice".to_string()),
-            NodeId::new(1),
-        );
+        mgr.index_insert(&label, "name", PropertyValue::String("Alice".to_string()), NodeId::new(1));
+        mgr.index_remove(&label, "name", &PropertyValue::String("Alice".to_string()), NodeId::new(1));
 
         let idx = mgr.get_index(&label, "name").unwrap();
         let idx_guard = idx.read().unwrap();
@@ -541,10 +480,7 @@ mod tests {
         mgr.create_index(label.clone(), "name".to_string());
         mgr.create_index(label.clone(), "name".to_string()); // Duplicate
         let indexes = mgr.list_indexes();
-        let count = indexes
-            .iter()
-            .filter(|(l, p)| l == &label && p == "name")
-            .count();
+        let count = indexes.iter().filter(|(l, p)| l == &label && p == "name").count();
         assert_eq!(count, 1);
     }
 
@@ -560,12 +496,7 @@ mod tests {
     fn test_index_insert_without_existing_index() {
         let mgr = IndexManager::new();
         let label = Label::new("Person");
-        mgr.index_insert(
-            &label,
-            "name",
-            PropertyValue::String("Alice".to_string()),
-            NodeId::new(1),
-        );
+        mgr.index_insert(&label, "name", PropertyValue::String("Alice".to_string()), NodeId::new(1));
         assert!(mgr.get_index(&label, "name").is_none());
     }
 
@@ -573,12 +504,7 @@ mod tests {
     fn test_index_remove_without_existing_index() {
         let mgr = IndexManager::new();
         let label = Label::new("Person");
-        mgr.index_remove(
-            &label,
-            "name",
-            &PropertyValue::String("Alice".to_string()),
-            NodeId::new(1),
-        );
+        mgr.index_remove(&label, "name", &PropertyValue::String("Alice".to_string()), NodeId::new(1));
     }
 
     #[test]
@@ -587,18 +513,8 @@ mod tests {
         let label = Label::new("Person");
         mgr.create_index(label.clone(), "name".to_string());
 
-        mgr.index_insert(
-            &label,
-            "name",
-            PropertyValue::String("Alice".to_string()),
-            NodeId::new(1),
-        );
-        mgr.index_insert(
-            &label,
-            "name",
-            PropertyValue::String("Alice".to_string()),
-            NodeId::new(2),
-        );
+        mgr.index_insert(&label, "name", PropertyValue::String("Alice".to_string()), NodeId::new(1));
+        mgr.index_insert(&label, "name", PropertyValue::String("Alice".to_string()), NodeId::new(2));
 
         let idx = mgr.get_index(&label, "name").unwrap();
         let idx_guard = idx.read().unwrap();
@@ -636,26 +552,14 @@ mod tests {
     fn test_constraint_insert_without_constraint() {
         let mgr = IndexManager::new();
         let label = Label::new("Person");
-        mgr.constraint_insert(
-            &label,
-            "name",
-            PropertyValue::String("test".to_string()),
-            NodeId::new(1),
-        );
+        mgr.constraint_insert(&label, "name", PropertyValue::String("test".to_string()), NodeId::new(1));
     }
 
     #[test]
     fn test_composite_index_creates_all() {
         let mgr = IndexManager::new();
         let label = Label::new("Product");
-        mgr.create_composite_index(
-            label.clone(),
-            vec![
-                "name".to_string(),
-                "price".to_string(),
-                "category".to_string(),
-            ],
-        );
+        mgr.create_composite_index(label.clone(), vec!["name".to_string(), "price".to_string(), "category".to_string()]);
 
         assert!(mgr.has_index(&label, "name"));
         assert!(mgr.has_index(&label, "price"));
@@ -769,12 +673,7 @@ mod tests {
         mgr.create_index(label.clone(), "name".to_string());
         mgr.drop_index(&label, "name");
 
-        mgr.index_insert(
-            &label,
-            "name",
-            PropertyValue::String("Alice".to_string()),
-            NodeId::new(1),
-        );
+        mgr.index_insert(&label, "name", PropertyValue::String("Alice".to_string()), NodeId::new(1));
         assert!(mgr.get_index(&label, "name").is_none());
     }
 

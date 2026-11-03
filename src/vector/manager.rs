@@ -4,7 +4,7 @@
 
 use crate::graph::NodeId;
 use crate::vector::index::Quantization;
-use crate::vector::index::{DistanceMetric, VectorError, VectorIndex, VectorResult};
+use crate::vector::index::{VectorIndex, DistanceMetric, VectorError, VectorResult};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -63,10 +63,7 @@ impl VectorIndexManager {
         if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
             self.names.write().unwrap().insert(
                 name.to_string(),
-                IndexKey {
-                    label: label.to_string(),
-                    property_key: property_key.to_string(),
-                },
+                IndexKey { label: label.to_string(), property_key: property_key.to_string() },
             );
         }
         Ok(())
@@ -74,10 +71,7 @@ impl VectorIndexManager {
 
     /// The (label, property) an index name refers to.
     pub fn resolve_name(&self, name: &str) -> Option<(String, String)> {
-        self.names
-            .read()
-            .unwrap()
-            .get(name)
+        self.names.read().unwrap().get(name)
             .map(|k| (k.label.clone(), k.property_key.clone()))
     }
 
@@ -112,14 +106,14 @@ impl VectorIndexManager {
             label: label.to_string(),
             property_key: property_key.to_string(),
         };
-
+        
         let index = VectorIndex::with_quantization(dimensions, metric, quantization);
         let mut indices = self.indices.write().unwrap();
         // A (re)created index starts empty, so whatever model built the one it
         // replaces says nothing about it.
         self.model_ids.write().unwrap().remove(&key);
         indices.insert(key, Arc::new(RwLock::new(index)));
-
+        
         Ok(())
     }
 
@@ -128,10 +122,7 @@ impl VectorIndexManager {
     /// Returns `false` (and records nothing) when no index exists for the key.
     /// An empty `model_id` clears the record, making the model unknown again.
     pub fn set_model_id(&self, label: &str, property_key: &str, model_id: &str) -> bool {
-        let key = IndexKey {
-            label: label.to_string(),
-            property_key: property_key.to_string(),
-        };
+        let key = IndexKey { label: label.to_string(), property_key: property_key.to_string() };
         if !self.indices.read().unwrap().contains_key(&key) {
             return false;
         }
@@ -149,16 +140,8 @@ impl VectorIndexManager {
     /// return the model the index is bound to afterwards (`None` when there is
     /// no such index). Used by auto-embed: the first model to write vectors
     /// into an unbound index is the one that built it.
-    pub fn bind_model_if_unset(
-        &self,
-        label: &str,
-        property_key: &str,
-        model_id: &str,
-    ) -> Option<String> {
-        let key = IndexKey {
-            label: label.to_string(),
-            property_key: property_key.to_string(),
-        };
+    pub fn bind_model_if_unset(&self, label: &str, property_key: &str, model_id: &str) -> Option<String> {
+        let key = IndexKey { label: label.to_string(), property_key: property_key.to_string() };
         if !self.indices.read().unwrap().contains_key(&key) {
             return None;
         }
@@ -167,19 +150,12 @@ impl VectorIndexManager {
         if model_id.is_empty() {
             return ids.get(&key).cloned();
         }
-        Some(
-            ids.entry(key)
-                .or_insert_with(|| model_id.to_string())
-                .clone(),
-        )
+        Some(ids.entry(key).or_insert_with(|| model_id.to_string()).clone())
     }
 
     /// The embedding model recorded for an index, if any (#275).
     pub fn model_id(&self, label: &str, property_key: &str) -> Option<String> {
-        let key = IndexKey {
-            label: label.to_string(),
-            property_key: property_key.to_string(),
-        };
+        let key = IndexKey { label: label.to_string(), property_key: property_key.to_string() };
         self.model_ids.read().unwrap().get(&key).cloned()
     }
 
@@ -189,7 +165,7 @@ impl VectorIndexManager {
             label: label.to_string(),
             property_key: property_key.to_string(),
         };
-
+        
         let indices = self.indices.read().unwrap();
         indices.get(&key).cloned()
     }
@@ -254,9 +230,7 @@ impl VectorIndexManager {
         query: &[f32],
         k: usize,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
-        let index_lock = self
-            .get_index(label, property_key)
-            .ok_or_else(|| self.missing(label, property_key))?;
+        let index_lock = self.get_index(label, property_key).ok_or_else(|| self.missing(label, property_key))?;
         let index = index_lock.read().unwrap();
         index.search(query, k)
     }
@@ -327,10 +301,7 @@ impl VectorIndexManager {
                 let index = lock.read().unwrap();
                 crate::index::IndexMemory {
                     kind: "vector",
-                    name: names
-                        .iter()
-                        .find(|(_, k)| *k == key)
-                        .map(|(n, _)| n.clone()),
+                    name: names.iter().find(|(_, k)| *k == key).map(|(n, _)| n.clone()),
                     label: key.label.clone(),
                     property: key.property_key.clone(),
                     bytes: index.resident_bytes(),
@@ -396,9 +367,7 @@ impl VectorIndexManager {
         keep: impl Fn(NodeId) -> bool,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
         // No index is an error, as in [`Self::search`] (#1660).
-        let index_lock = self
-            .get_index(label, property_key)
-            .ok_or_else(|| self.missing(label, property_key))?;
+        let index_lock = self.get_index(label, property_key).ok_or_else(|| self.missing(label, property_key))?;
         let index = index_lock.read().unwrap();
         widen(index.len(), k, |fetch| index.search(query, fetch), &keep)
     }
@@ -566,7 +535,7 @@ impl VectorIndexManager {
 
             let index_path = path.join(filename);
             let index = VectorIndex::load(&index_path, dimensions, metric)?;
-
+            
             let key = IndexKey {
                 label: label.to_string(),
                 property_key: property_key.to_string(),
@@ -635,19 +604,12 @@ mod tests {
         ));
         assert!(mgr.list_indices().is_empty());
         // Searching it is an error too, naming the index (#1660).
-        let err = mgr
-            .search("Nope", "v", &[1.0, 0.0], 3)
-            .unwrap_err()
-            .to_string();
+        let err = mgr.search("Nope", "v", &[1.0, 0.0], 3).unwrap_err().to_string();
         assert!(err.contains("no vector index on :Nope(v)"), "{err}");
         assert!(err.contains("CREATE VECTOR INDEX"), "{err}");
         // With one index present, the error says which exist.
-        mgr.create_index("Doc", "v", 2, DistanceMetric::Cosine)
-            .unwrap();
-        let err = mgr
-            .search("Nope", "v", &[1.0, 0.0], 3)
-            .unwrap_err()
-            .to_string();
+        mgr.create_index("Doc", "v", 2, DistanceMetric::Cosine).unwrap();
+        let err = mgr.search("Nope", "v", &[1.0, 0.0], 3).unwrap_err().to_string();
         assert!(err.contains(":Doc(v)"), "{err}");
     }
 

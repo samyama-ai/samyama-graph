@@ -2,15 +2,15 @@
 #[global_allocator]
 static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
 
-use samyama::embed::EmbedPipeline;
+use samyama::{GraphStore, NodeId, PropertyValue, QueryEngine, RespServer, ServerConfig};
 use samyama::http::HttpServer;
 use samyama::persistence::{AutoEmbedConfig, LLMProvider};
-use samyama::{GraphStore, NodeId, PropertyValue, QueryEngine, RespServer, ServerConfig};
+use samyama::embed::EmbedPipeline;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() {
@@ -636,14 +636,7 @@ fn cmd_schema(argv: &[String]) -> i32 {
                     s.dangling_edges
                 );
             }
-            print!(
-                "{}",
-                if markdown {
-                    s.to_markdown()
-                } else {
-                    s.to_mermaid()
-                }
-            );
+            print!("{}", if markdown { s.to_markdown() } else { s.to_mermaid() });
             0
         }
         Err(e) => {
@@ -737,10 +730,7 @@ fn cmd_auth_user(argv: &[String]) -> i32 {
 fn cmd_auth_token(argv: &[String]) -> i32 {
     use sha2::{Digest, Sha256};
 
-    let name = argv
-        .get(2)
-        .cloned()
-        .unwrap_or_else(|| "operator".to_string());
+    let name = argv.get(2).cloned().unwrap_or_else(|| "operator".to_string());
     if name.contains(':') {
         eprintln!("a credential name cannot contain `:` -- it separates the name from the digest");
         return 2;
@@ -761,10 +751,8 @@ fn cmd_auth_token(argv: &[String]) -> i32 {
         }
     }
     let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-    let digest: String = Sha256::digest(token.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let digest: String =
+        Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
 
     println!("# add this line to the file you pass to --auth-file");
     println!("{name}:{digest}");
@@ -824,14 +812,7 @@ fn cmd_convert(argv: &[String]) -> i32 {
     }
 
     // Flags that take a value, and the positional arguments around them.
-    const VALUED: [&str; 6] = [
-        "--from",
-        "--to",
-        "--missing-endpoints",
-        "--report",
-        "--mapping",
-        "--preset",
-    ];
+    const VALUED: [&str; 6] = ["--from", "--to", "--missing-endpoints", "--report", "--mapping", "--preset"];
     let mut positional = Vec::new();
     let mut values = std::collections::HashMap::new();
     let mut require_lossless = false;
@@ -862,10 +843,7 @@ fn cmd_convert(argv: &[String]) -> i32 {
         }
     }
     let [input, output] = positional[..] else {
-        eprintln!(
-            "convert: needs exactly an <input> and an <output>, got {}",
-            positional.len()
-        );
+        eprintln!("convert: needs exactly an <input> and an <output>, got {}", positional.len());
         usage();
         return 2;
     };
@@ -885,9 +863,7 @@ fn cmd_convert(argv: &[String]) -> i32 {
                 2
             }),
             None => Format::from_path(std::path::Path::new(path)).ok_or_else(|| {
-                eprintln!(
-                    "convert: cannot tell the format of {path} from its extension; pass {flag}"
-                );
+                eprintln!("convert: cannot tell the format of {path} from its extension; pass {flag}");
                 2
             }),
         }
@@ -917,9 +893,7 @@ fn cmd_convert(argv: &[String]) -> i32 {
     if let Some(report) = values.get("--report") {
         for (role, graph) in [("input", input), ("output", output)] {
             if same_path(std::path::Path::new(report), std::path::Path::new(graph)) {
-                eprintln!(
-                    "convert: --report {report} is the {role} {graph}; name a different file"
-                );
+                eprintln!("convert: --report {report} is the {role} {graph}; name a different file");
                 return 2;
             }
         }
@@ -931,24 +905,20 @@ fn cmd_convert(argv: &[String]) -> i32 {
     let is_rdf = matches!(from, Format::Turtle | Format::NTriples | Format::RdfXml);
     let mapping = match (values.get("--mapping"), values.get("--preset")) {
         (Some(_), Some(_)) => {
-            eprintln!(
-                "convert: give --mapping or --preset, not both; a mapping file can name its preset"
-            );
+            eprintln!("convert: give --mapping or --preset, not both; a mapping file can name its preset");
             return 2;
         }
         (Some(_), None) | (None, Some(_)) if !is_rdf => {
             eprintln!("convert: --mapping and --preset apply to RDF input, not {from}");
             return 2;
         }
-        (Some(path), None) => {
-            match convert::rdf_mapping::Mapping::from_path(std::path::Path::new(path)) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    eprintln!("convert: {e}");
-                    return 2;
-                }
+        (Some(path), None) => match convert::rdf_mapping::Mapping::from_path(std::path::Path::new(path)) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("convert: {e}");
+                return 2;
             }
-        }
+        },
         (None, Some(name)) => match convert::rdf_mapping::Mapping::preset(name) {
             Ok(m) => Some(m),
             Err(e) => {
@@ -961,11 +931,7 @@ fn cmd_convert(argv: &[String]) -> i32 {
 
     // Losses are judged here, after writing, so exit 1 means "converted, and
     // something was dropped" -- the report is still written.
-    let opts = Options {
-        on_missing_endpoint,
-        require_lossless: false,
-        mapping,
-    };
+    let opts = Options { on_missing_endpoint, require_lossless: false, mapping };
     let file = match std::fs::File::open(input) {
         Ok(f) => f,
         Err(e) => {
@@ -974,28 +940,15 @@ fn cmd_convert(argv: &[String]) -> i32 {
         }
     };
     let mut store = samyama::graph::GraphStore::new();
-    let name = std::path::Path::new(input)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let read = match convert::read_named(
-        from,
-        std::io::BufReader::new(file),
-        &name,
-        &mut store,
-        &opts,
-    ) {
+    let name = std::path::Path::new(input).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let read = match convert::read_named(from, std::io::BufReader::new(file), &name, &mut store, &opts) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("convert: could not read {input} as {from}: {e}");
             return 65;
         }
     };
-    eprintln!(
-        "read {from}: {} nodes, {} edges",
-        read.node_count(),
-        read.edge_count()
-    );
+    eprintln!("read {from}: {} nodes, {} edges", read.node_count(), read.edge_count());
     let written = if Format::from_path(std::path::Path::new(output)) == Some(to) {
         convert::write_path(&store, std::path::Path::new(output), &opts)
     } else {
@@ -1013,26 +966,13 @@ fn cmd_convert(argv: &[String]) -> i32 {
             return 73;
         }
     };
-    let report = convert::ConvertReport {
-        input_format: from,
-        output_format: to,
-        input: read,
-        output: written,
-    };
-    let dropped: Vec<String> = report
-        .dropped()
-        .iter()
-        .map(|d| format!("{} {}", d.count, d.what))
-        .collect();
+    let report = convert::ConvertReport { input_format: from, output_format: to, input: read, output: written };
+    let dropped: Vec<String> = report.dropped().iter().map(|d| format!("{} {}", d.count, d.what)).collect();
     eprintln!(
         "{from} → {to}: {} nodes, {} edges; dropped: {}",
         report.output.node_count(),
         report.output.edge_count(),
-        if dropped.is_empty() {
-            "nothing".to_string()
-        } else {
-            dropped.join(", ")
-        }
+        if dropped.is_empty() { "nothing".to_string() } else { dropped.join(", ") }
     );
 
     if let Some(path) = values.get("--report") {
@@ -1057,9 +997,7 @@ fn cmd_convert(argv: &[String]) -> i32 {
         }
         for (role, graph) in [("input", input), ("output", output)] {
             if same_path(report_path, std::path::Path::new(graph)) {
-                eprintln!(
-                    "convert: --report {path} is the {role} {graph}; the report was not written"
-                );
+                eprintln!("convert: --report {path} is the {role} {graph}; the report was not written");
                 return 2;
             }
         }
@@ -1067,10 +1005,7 @@ fn cmd_convert(argv: &[String]) -> i32 {
         // rather than followed onto a graph file.
         let bytes = serde_json::to_vec_pretty(&json).unwrap_or_default();
         let written = write_staged(std::path::Path::new(path), |out| {
-            std::io::Write::write_all(out, &bytes).map_err(|e| samyama::convert::ConvertError::Io {
-                path: path.into(),
-                source: e,
-            })
+            std::io::Write::write_all(out, &bytes).map_err(|e| samyama::convert::ConvertError::Io { path: path.into(), source: e })
         });
         if let Err(e) = written {
             eprintln!("convert: could not write the report {path}: {e}");
@@ -1079,10 +1014,7 @@ fn cmd_convert(argv: &[String]) -> i32 {
     }
 
     if require_lossless && !report.lossless() {
-        eprintln!(
-            "convert: --require-lossless was given and the conversion dropped {}",
-            dropped.join(", ")
-        );
+        eprintln!("convert: --require-lossless was given and the conversion dropped {}", dropped.join(", "));
         return 1;
     }
     0
@@ -1096,9 +1028,7 @@ fn write_as(
     output: &std::path::Path,
     opts: &samyama::convert::Options,
 ) -> Result<samyama::convert::FormatReport, samyama::convert::ConvertError> {
-    write_staged(output, |out| {
-        samyama::convert::write(format, store, out, opts)
-    })
+    write_staged(output, |out| samyama::convert::write(format, store, out, opts))
 }
 
 /// Write `path` through a new, uniquely named staging file beside it
@@ -1108,24 +1038,16 @@ fn write_as(
 /// file. The staging file removes itself on error.
 fn write_staged<T>(
     path: &std::path::Path,
-    write: impl FnOnce(
-        &mut std::io::BufWriter<std::fs::File>,
-    ) -> Result<T, samyama::convert::ConvertError>,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<T, samyama::convert::ConvertError>,
 ) -> Result<T, samyama::convert::ConvertError> {
     use samyama::convert::ConvertError;
-    let io = |p: &std::path::Path, source: std::io::Error| ConvertError::Io {
-        path: p.into(),
-        source,
-    };
+    let io = |p: &std::path::Path, source: std::io::Error| ConvertError::Io { path: p.into(), source };
     let parent = path
         .parent()
         .filter(|d| !d.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
     std::fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let staging = tempfile::Builder::new()
         .prefix(&format!(".{name}."))
         .suffix(".tmp")
@@ -1148,18 +1070,12 @@ fn write_staged<T>(
 fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     fn resolved(p: &std::path::Path) -> Option<std::path::PathBuf> {
         use std::path::Component;
-        let mut absolute = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            std::env::current_dir().ok()?.join(p)
-        };
+        let mut absolute = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir().ok()?.join(p) };
         // A dangling symlink does not canonicalize, but what it names is where
         // a write through it lands: follow it, by hand, to its target. Bounded
         // like the OS's own limit, so a loop of links cannot hang this.
         for _ in 0..40 {
-            let is_link = std::fs::symlink_metadata(&absolute)
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false);
+            let is_link = std::fs::symlink_metadata(&absolute).map(|m| m.file_type().is_symlink()).unwrap_or(false);
             if !is_link || std::fs::canonicalize(&absolute).is_ok() {
                 break;
             }
@@ -1210,11 +1126,7 @@ fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
 }
 
 fn cmd_verify(argv: &[String]) -> i32 {
-    let flag = |name: &str| {
-        argv.iter()
-            .position(|a| a == name)
-            .and_then(|i| argv.get(i + 1))
-    };
+    let flag = |name: &str| argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1));
     let Some(snapshot) = argv.get(2).filter(|s| !s.starts_with("--")) else {
         eprintln!("usage: samyama verify <snapshot.sgsnap> [--queries <catalog>]");
         return 64;
@@ -1301,10 +1213,7 @@ fn cmd_verify(argv: &[String]) -> i32 {
     let mut store = GraphStore::new();
     let file = match std::fs::File::open(snapshot) {
         Ok(f) => f,
-        Err(e) => {
-            eprintln!("could not open {snapshot}: {e}");
-            return 66;
-        }
+        Err(e) => { eprintln!("could not open {snapshot}: {e}"); return 66; }
     };
     if let Err(e) = samyama::snapshot::import_tenant(&mut store, file) {
         // An import that fails is already a failed restore; say so plainly
@@ -1315,10 +1224,7 @@ fn cmd_verify(argv: &[String]) -> i32 {
 
     let report = match samyama::snapshot::verify::verify(&store, &catalog) {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("{e}");
-            return 65;
-        }
+        Err(e) => { eprintln!("{e}"); return 65; }
     };
 
     let total = report.results.len();
@@ -1332,11 +1238,7 @@ fn cmd_verify(argv: &[String]) -> i32 {
             src.format,
             src.sha256,
             src.converter,
-            if src.mapping.is_some() {
-                ", with a mapping"
-            } else {
-                ""
-            }
+            if src.mapping.is_some() { ", with a mapping" } else { "" }
         );
     }
     println!("  catalog {catalog_path}: {total} entries");
@@ -1345,25 +1247,15 @@ fn cmd_verify(argv: &[String]) -> i32 {
     }
     for r in &failed {
         let class = r.failure.expect("failed entries carry a class");
-        println!(
-            "  FAIL {}  expected {} rows, got {}{}",
-            r.id,
-            r.expected_rows,
-            r.actual_rows,
-            if r.detail.is_empty() {
-                String::new()
-            } else {
-                format!("  [{}]", r.detail)
-            }
-        );
+        println!("  FAIL {}  expected {} rows, got {}{}",
+                 r.id, r.expected_rows, r.actual_rows,
+                 if r.detail.is_empty() { String::new() } else { format!("  [{}]", r.detail) });
         println!("       {}", class.explain());
     }
     if report.everything_empty {
-        println!(
-            "  FAIL every entry returned zero rows. That is what this catalog \
+        println!("  FAIL every entry returned zero rows. That is what this catalog \
                   looks like run against an empty graph, so the run is not evidence \
-                  of a good restore whatever the expectations say."
-        );
+                  of a good restore whatever the expectations say.");
     }
     // Stored answers are re-executed too (#1158): one that disagrees with
     // execution is the worst failure that design has, and verify is where a
@@ -1432,16 +1324,10 @@ fn cmd_verify(argv: &[String]) -> i32 {
 /// Rebuild with `--link` whenever the catalog changes -- the old digest no
 /// longer matches, which is the point.
 fn cmd_catalog_build(argv: &[String]) -> i32 {
-    let flag = |name: &str| {
-        argv.iter()
-            .position(|a| a == name)
-            .and_then(|i| argv.get(i + 1))
-    };
+    let flag = |name: &str| argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1));
     let Some(snapshot) = argv.get(2).filter(|s| !s.starts_with("--")) else {
-        eprintln!(
-            "usage: samyama catalog-build <snapshot.sgsnap> --queries <queries.json> \
-                   --out <catalog.sgqueries> [--link] [--release]"
-        );
+        eprintln!("usage: samyama catalog-build <snapshot.sgsnap> --queries <queries.json> \
+                   --out <catalog.sgqueries> [--link] [--release]");
         return 64;
     };
     let link = argv.iter().any(|a| a == "--link");
@@ -1458,19 +1344,13 @@ fn cmd_catalog_build(argv: &[String]) -> i32 {
         .and_then(|f| serde_json::from_reader(f).map_err(|e| e.to_string()))
     {
         Ok(q) => q,
-        Err(e) => {
-            eprintln!("could not read {queries_path}: {e}");
-            return 65;
-        }
+        Err(e) => { eprintln!("could not read {queries_path}: {e}"); return 65; }
     };
 
     let mut store = GraphStore::new();
     let file = match std::fs::File::open(snapshot) {
         Ok(f) => f,
-        Err(e) => {
-            eprintln!("could not open {snapshot}: {e}");
-            return 66;
-        }
+        Err(e) => { eprintln!("could not open {snapshot}: {e}"); return 66; }
     };
     if let Err(e) = samyama::snapshot::import_tenant(&mut store, file) {
         eprintln!("could not restore {snapshot}: {e}");
@@ -1484,10 +1364,7 @@ fn cmd_catalog_build(argv: &[String]) -> i32 {
         .map(|h| h.tenant);
 
     match samyama::snapshot::verify::build_catalog(&store, &queries, &[]) {
-        Err(e) => {
-            eprintln!("{e}");
-            1
-        }
+        Err(e) => { eprintln!("{e}"); 1 }
         Ok(mut catalog) => {
             // A release catalog leaves the building, and its sample values
             // are excerpts of the graph: one taken from a row that may not be
@@ -1627,10 +1504,8 @@ fn link_catalog(snapshot: &str, catalog: &str, bytes: &[u8]) -> i32 {
 fn cmd_catalog_gate(argv: &[String]) -> i32 {
     use samyama::snapshot::publish_gate::gate;
     let Some(path) = argv.get(2).filter(|s| !s.starts_with("--")) else {
-        eprintln!(
-            "usage: samyama catalog-gate <catalog> [--allow-observed --signoff <text>] \
-                   [--kg08] [--snapshot <snapshot.sgsnap>]"
-        );
+        eprintln!("usage: samyama catalog-gate <catalog> [--allow-observed --signoff <text>] \
+                   [--kg08] [--snapshot <snapshot.sgsnap>]");
         return 64;
     };
     let allow_observed = argv.iter().any(|a| a == "--allow-observed");
@@ -1710,17 +1585,9 @@ fn cmd_catalog_gate(argv: &[String]) -> i32 {
         v.publishable = false;
     }
     println!("catalog-gate {path}");
-    println!(
-        "  provenance: {:?}, {} entries",
-        catalog.provenance,
-        catalog.entries.len()
-    );
-    println!(
-        "  digest: {}",
-        samyama::snapshot::verify::catalog_digest(
-            &serde_json::to_string(&catalog).unwrap_or_default()
-        )
-    );
+    println!("  provenance: {:?}, {} entries", catalog.provenance, catalog.entries.len());
+    println!("  digest: {}", samyama::snapshot::verify::catalog_digest(
+        &serde_json::to_string(&catalog).unwrap_or_default()));
     let sha256 = samyama::snapshot::verify::queries_sha256(&bytes);
     println!("  sha256: {sha256}");
     println!(
@@ -1781,10 +1648,7 @@ fn cmd_catalog_gate(argv: &[String]) -> i32 {
     }
     let require_kg08 = argv.iter().any(|a| a == "--kg08");
     if require_kg08 && !kg08.is_empty() {
-        println!(
-            "  REFUSED {} KG-08 problem(s), and --kg08 was given",
-            kg08.len()
-        );
+        println!("  REFUSED {} KG-08 problem(s), and --kg08 was given", kg08.len());
         return 1;
     }
     for f in &v.findings {
@@ -1821,11 +1685,7 @@ fn demo_property_graph() {
 
     store.create_edge(alice, bob, "KNOWS").unwrap();
     println!("Created: Alice -[KNOWS]-> Bob");
-    println!(
-        "Total nodes: {}, edges: {}",
-        store.node_count(),
-        store.edge_count()
-    );
+    println!("Total nodes: {}, edges: {}", store.node_count(), store.edge_count());
 }
 
 fn demo_cypher_queries() {
@@ -1862,107 +1722,50 @@ fn build_social_network(store: &mut GraphStore) {
 
     // --- Reference data ---
     let first_names = [
-        "Alice", "Bob", "Carol", "David", "Eve", "Frank", "Grace", "Hank", "Iris", "Jack", "Karen",
-        "Leo", "Mia", "Noah", "Olivia", "Paul", "Quinn", "Rosa", "Sam", "Tara", "Uma", "Vic",
-        "Wendy", "Xander", "Yara", "Zane",
+        "Alice", "Bob", "Carol", "David", "Eve", "Frank", "Grace", "Hank",
+        "Iris", "Jack", "Karen", "Leo", "Mia", "Noah", "Olivia", "Paul",
+        "Quinn", "Rosa", "Sam", "Tara", "Uma", "Vic", "Wendy", "Xander",
+        "Yara", "Zane",
     ];
     let last_names = [
-        "Smith",
-        "Johnson",
-        "Williams",
-        "Brown",
-        "Jones",
-        "Garcia",
-        "Miller",
-        "Davis",
-        "Rodriguez",
-        "Martinez",
-        "Anderson",
-        "Taylor",
-        "Thomas",
-        "Moore",
-        "Jackson",
-        "Martin",
-        "Lee",
-        "Perez",
-        "Thompson",
-        "White",
+        "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
+        "Davis", "Rodriguez", "Martinez", "Anderson", "Taylor", "Thomas",
+        "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson", "White",
     ];
     let city_data = [
-        ("New York", "US", 8_336_817i64),
-        ("Los Angeles", "US", 3_979_576),
-        ("Chicago", "US", 2_693_976),
-        ("Houston", "US", 2_320_268),
-        ("San Francisco", "US", 873_965),
-        ("Seattle", "US", 737_015),
-        ("Austin", "US", 978_908),
-        ("Boston", "US", 675_647),
-        ("Denver", "US", 715_522),
-        ("Portland", "US", 652_503),
-        ("London", "UK", 8_982_000),
-        ("Manchester", "UK", 553_230),
-        ("Edinburgh", "UK", 524_930),
-        ("Berlin", "DE", 3_644_826),
-        ("Munich", "DE", 1_471_508),
-        ("Hamburg", "DE", 1_841_179),
-        ("Paris", "FR", 2_161_000),
-        ("Lyon", "FR", 513_275),
-        ("Toronto", "CA", 2_794_356),
-        ("Vancouver", "CA", 662_248),
-        ("Sydney", "AU", 5_312_163),
-        ("Melbourne", "AU", 5_078_193),
-        ("Tokyo", "JP", 13_960_000),
-        ("Singapore", "SG", 5_454_000),
-        ("Bangalore", "IN", 8_443_675),
-        ("Mumbai", "IN", 12_442_373),
-        ("São Paulo", "BR", 12_325_232),
-        ("Dublin", "IE", 544_107),
-        ("Amsterdam", "NL", 872_680),
-        ("Stockholm", "SE", 975_551),
+        ("New York", "US", 8_336_817i64), ("Los Angeles", "US", 3_979_576),
+        ("Chicago", "US", 2_693_976), ("Houston", "US", 2_320_268),
+        ("San Francisco", "US", 873_965), ("Seattle", "US", 737_015),
+        ("Austin", "US", 978_908), ("Boston", "US", 675_647),
+        ("Denver", "US", 715_522), ("Portland", "US", 652_503),
+        ("London", "UK", 8_982_000), ("Manchester", "UK", 553_230),
+        ("Edinburgh", "UK", 524_930), ("Berlin", "DE", 3_644_826),
+        ("Munich", "DE", 1_471_508), ("Hamburg", "DE", 1_841_179),
+        ("Paris", "FR", 2_161_000), ("Lyon", "FR", 513_275),
+        ("Toronto", "CA", 2_794_356), ("Vancouver", "CA", 662_248),
+        ("Sydney", "AU", 5_312_163), ("Melbourne", "AU", 5_078_193),
+        ("Tokyo", "JP", 13_960_000), ("Singapore", "SG", 5_454_000),
+        ("Bangalore", "IN", 8_443_675), ("Mumbai", "IN", 12_442_373),
+        ("São Paulo", "BR", 12_325_232), ("Dublin", "IE", 544_107),
+        ("Amsterdam", "NL", 872_680), ("Stockholm", "SE", 975_551),
     ];
     let company_data = [
-        ("Acme Corp", "Technology", 5000i64),
-        ("GlobalBank", "Finance", 12000),
-        ("MediCare Plus", "Healthcare", 3500),
-        ("EcoEnergy", "Energy", 2200),
-        ("DataStream", "Technology", 800),
-        ("CloudNine", "Technology", 1500),
-        ("BioGenesis", "Healthcare", 4200),
-        ("QuantumLeap", "Technology", 350),
-        ("GreenField", "Agriculture", 6000),
-        ("SkyRoute", "Logistics", 9000),
-        ("NexGen AI", "Technology", 600),
-        ("FinEdge", "Finance", 2800),
-        ("UrbanBuild", "Construction", 7500),
-        ("MediaPulse", "Media", 1200),
-        ("AeroSpace X", "Aerospace", 4500),
-        ("FoodChain", "Retail", 15000),
-        ("CyberShield", "Security", 900),
-        ("EduPath", "Education", 1800),
-        ("TravelWise", "Travel", 3200),
-        ("PharmaCore", "Healthcare", 5500),
+        ("Acme Corp", "Technology", 5000i64), ("GlobalBank", "Finance", 12000),
+        ("MediCare Plus", "Healthcare", 3500), ("EcoEnergy", "Energy", 2200),
+        ("DataStream", "Technology", 800), ("CloudNine", "Technology", 1500),
+        ("BioGenesis", "Healthcare", 4200), ("QuantumLeap", "Technology", 350),
+        ("GreenField", "Agriculture", 6000), ("SkyRoute", "Logistics", 9000),
+        ("NexGen AI", "Technology", 600), ("FinEdge", "Finance", 2800),
+        ("UrbanBuild", "Construction", 7500), ("MediaPulse", "Media", 1200),
+        ("AeroSpace X", "Aerospace", 4500), ("FoodChain", "Retail", 15000),
+        ("CyberShield", "Security", 900), ("EduPath", "Education", 1800),
+        ("TravelWise", "Travel", 3200), ("PharmaCore", "Healthcare", 5500),
     ];
     let tags = [
-        "rust",
-        "python",
-        "javascript",
-        "database",
-        "graphdb",
-        "ai",
-        "machinelearning",
-        "cloud",
-        "devops",
-        "kubernetes",
-        "startup",
-        "opensource",
-        "performance",
-        "security",
-        "data",
-        "engineering",
-        "product",
-        "design",
-        "career",
-        "remote",
+        "rust", "python", "javascript", "database", "graphdb", "ai",
+        "machinelearning", "cloud", "devops", "kubernetes", "startup",
+        "opensource", "performance", "security", "data", "engineering",
+        "product", "design", "career", "remote",
     ];
     let post_topics = [
         "Just shipped a new feature for our graph database!",
@@ -2035,14 +1838,7 @@ fn build_social_network(store: &mut GraphStore) {
         if let Some(node) = store.get_node_mut(id) {
             node.set_property("name", format!("{} {}", first, last));
             node.set_property("age", 22i64 + (i as i64 * 7) % 45);
-            node.set_property(
-                "email",
-                format!(
-                    "{}.{}@example.com",
-                    first.to_lowercase(),
-                    last.to_lowercase()
-                ),
-            );
+            node.set_property("email", format!("{}.{}@example.com", first.to_lowercase(), last.to_lowercase()));
         }
         // LIVES_IN edge: person → city
         let city = city_ids[i % city_ids.len()];
@@ -2050,25 +1846,14 @@ fn build_social_network(store: &mut GraphStore) {
         // WORKS_AT edge: person → company
         let company = company_ids[i % company_ids.len()];
         if let Ok(eid) = store.create_edge(id, company, "WORKS_AT") {
-            store.set_edge_property_sparse(
-                eid,
-                "since",
-                PropertyValue::Integer(2015i64 + (i as i64 * 3) % 11),
-            );
-            store.set_edge_property_sparse(
-                eid,
-                "role",
-                PropertyValue::String(
-                    match i % 5 {
-                        0 => "Engineer",
-                        1 => "Manager",
-                        2 => "Analyst",
-                        3 => "Designer",
-                        _ => "Director",
-                    }
-                    .to_string(),
-                ),
-            );
+            store.set_edge_property_sparse(eid, "since", PropertyValue::Integer(2015i64 + (i as i64 * 3) % 11));
+            store.set_edge_property_sparse(eid, "role", PropertyValue::String(match i % 5 {
+                0 => "Engineer",
+                1 => "Manager",
+                2 => "Analyst",
+                3 => "Designer",
+                _ => "Director",
+            }.to_string()));
         }
         person_ids.push(id);
     }
@@ -2081,10 +1866,7 @@ fn build_social_network(store: &mut GraphStore) {
         for d in 0..degree {
             let j = (i + 1 + d * 7 + i * 3) % num_persons;
             if i != j {
-                if store
-                    .create_edge(person_ids[i], person_ids[j], "KNOWS")
-                    .is_ok()
-                {
+                if store.create_edge(person_ids[i], person_ids[j], "KNOWS").is_ok() {
                     knows_count += 1;
                 }
             }
@@ -2105,13 +1887,7 @@ fn build_social_network(store: &mut GraphStore) {
                 format!("{} #{}", topic, repeat + 1)
             };
             node.set_property("title", title.as_str());
-            node.set_property(
-                "content",
-                format!(
-                    "{}. This is post #{} with detailed thoughts on the topic.",
-                    topic, i
-                ),
-            );
+            node.set_property("content", format!("{}. This is post #{} with detailed thoughts on the topic.", topic, i));
             node.set_property("created_at", 1700000000000i64 + (i as i64 * 3_600_000));
             node.set_property("views", (i as i64 * 17) % 5000);
         }
@@ -2133,10 +1909,7 @@ fn build_social_network(store: &mut GraphStore) {
     for i in 0..num_comments {
         let id = store.create_node("Comment");
         if let Some(node) = store.get_node_mut(id) {
-            node.set_property(
-                "text",
-                format!("Comment #{}: Great point! Here are my thoughts...", i),
-            );
+            node.set_property("text", format!("Comment #{}: Great point! Here are my thoughts...", i));
             node.set_property("created_at", 1700100000000i64 + (i as i64 * 1_800_000));
         }
         // WROTE edge: person → comment
@@ -2167,36 +1940,17 @@ fn build_social_network(store: &mut GraphStore) {
         }
     }
 
-    let total_nodes = city_ids.len()
-        + company_ids.len()
-        + tag_ids.len()
-        + person_ids.len()
-        + post_ids.len()
-        + comment_ids.len();
+    let total_nodes = city_ids.len() + company_ids.len() + tag_ids.len()
+        + person_ids.len() + post_ids.len() + comment_ids.len();
     println!("  Schema: 6 labels (Person, Company, City, Post, Comment, Tag)");
     println!("          8 edge types (KNOWS, WORKS_AT, LIVES_IN, LOCATED_IN, WROTE, COMMENTED, REPLIED_TO, LIKES, HAS_TAG)");
-    println!(
-        "  Nodes:  {} Person, {} Company, {} City, {} Tag, {} Post, {} Comment",
-        person_ids.len(),
-        company_ids.len(),
-        city_ids.len(),
-        tag_ids.len(),
-        post_ids.len(),
-        comment_ids.len()
-    );
-    println!(
-        "  Edges:  {} KNOWS, {} LIKES, {} Posts, {} Comments (total: {})",
-        knows_count,
-        likes_count,
-        num_posts,
-        num_comments,
-        store.edge_count()
-    );
-    println!(
-        "  Total:  {} nodes, {} edges",
-        total_nodes,
-        store.edge_count()
-    );
+    println!("  Nodes:  {} Person, {} Company, {} City, {} Tag, {} Post, {} Comment",
+             person_ids.len(), company_ids.len(), city_ids.len(),
+             tag_ids.len(), post_ids.len(), comment_ids.len());
+    println!("  Edges:  {} KNOWS, {} LIKES, {} Posts, {} Comments (total: {})",
+             knows_count, likes_count, num_posts, num_comments,
+             store.edge_count());
+    println!("  Total:  {} nodes, {} edges", total_nodes, store.edge_count());
 }
 
 /// Load a single LDBC Graphalytics dataset into the graph store.
@@ -2301,12 +2055,9 @@ fn load_graphalytics_dataset(
         }
     }
 
-    println!(
-        "  Loaded {} vertices, {} edges ({})",
-        vid_to_node.len(),
-        edge_count,
-        if directed { "directed" } else { "undirected" }
-    );
+    println!("  Loaded {} vertices, {} edges ({})",
+             vid_to_node.len(), edge_count,
+             if directed { "directed" } else { "undirected" });
     true
 }
 
@@ -2314,12 +2065,10 @@ async fn start_server() {
     let (mut graph, rx) = GraphStore::with_async_indexing();
 
     let mut config = ServerConfig::default();
-    config.address = std::env::args()
-        .find(|a| a.starts_with("--host"))
+    config.address = std::env::args().find(|a| a.starts_with("--host"))
         .and_then(|_| std::env::args().skip_while(|a| a != "--host").nth(1))
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    config.port = std::env::args()
-        .find(|a| a.starts_with("--port"))
+    config.port = std::env::args().find(|a| a.starts_with("--port"))
         .and_then(|_| std::env::args().skip_while(|a| a != "--port").nth(1))
         .and_then(|p| p.parse().ok())
         .unwrap_or(6379);
@@ -2348,9 +2097,7 @@ async fn start_server() {
         }
         if let Ok(env) = std::env::var("SAMYAMA_CORS_ORIGINS") {
             cors_origins.extend(
-                env.split(',')
-                    .map(|o| o.trim().to_string())
-                    .filter(|o| !o.is_empty()),
+                env.split(',').map(|o| o.trim().to_string()).filter(|o| !o.is_empty()),
             );
         }
     }
@@ -2544,7 +2291,10 @@ async fn start_server() {
     let persistence = if let Some(path) = &config.data_path {
         match samyama::PersistenceManager::new(path) {
             Ok(pm) => Some(Arc::new(pm)),
-            Err(e) => refuse_to_start(&format!("cannot open the data directory {}: {e}", path)),
+            Err(e) => refuse_to_start(&format!(
+                "cannot open the data directory {}: {e}",
+                path
+            )),
         }
     } else {
         None
@@ -2563,12 +2313,7 @@ async fn start_server() {
                 for tenant in &tenants {
                     match pm.recover(tenant) {
                         Ok((nodes, edges)) => {
-                            println!(
-                                "  Tenant '{}': {} nodes, {} edges",
-                                tenant,
-                                nodes.len(),
-                                edges.len()
-                            );
+                            println!("  Tenant '{}': {} nodes, {} edges", tenant, nodes.len(), edges.len());
                             for node in nodes {
                                 graph.insert_recovered_node(node);
                             }
@@ -2590,47 +2335,41 @@ async fn start_server() {
                     }
                 }
                 if refusal.is_none() {
-                    // The index definitions, after every tenant's rows are in
-                    // (#1477). A second pass rather than part of the loop above
-                    // because all tenants share one `graph` here: an index restored
-                    // at the end of tenant A's turn would not contain tenant B's
-                    // rows, and nothing maintains it as they arrive.
-                    //
-                    // Definitions were lost entirely before this. `SHOW INDEXES`
-                    // was empty on a directory that had three indexes in it, a
-                    // B-tree predicate replanned as a scan, a full-text search
-                    // errored, and a vector search returned an empty result set
-                    // with no error to say why.
-                    let mut restored_indexes = 0usize;
-                    for tenant in &tenants {
-                        match pm.restore_index_catalog(tenant, &mut graph) {
-                            Ok(r) => {
-                                restored_indexes += r.total();
-                                if r.failed > 0 {
-                                    eprintln!(
+                // The index definitions, after every tenant's rows are in
+                // (#1477). A second pass rather than part of the loop above
+                // because all tenants share one `graph` here: an index restored
+                // at the end of tenant A's turn would not contain tenant B's
+                // rows, and nothing maintains it as they arrive.
+                //
+                // Definitions were lost entirely before this. `SHOW INDEXES`
+                // was empty on a directory that had three indexes in it, a
+                // B-tree predicate replanned as a scan, a full-text search
+                // errored, and a vector search returned an empty result set
+                // with no error to say why.
+                let mut restored_indexes = 0usize;
+                for tenant in &tenants {
+                    match pm.restore_index_catalog(tenant, &mut graph) {
+                        Ok(r) => {
+                            restored_indexes += r.total();
+                            if r.failed > 0 {
+                                eprintln!(
                                     "  Warning: {} index definition(s) for '{}' could not be rebuilt",
                                     r.failed, tenant
                                 );
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("  Error restoring indexes for '{}': {}", tenant, e)
                             }
                         }
+                        Err(e) => eprintln!("  Error restoring indexes for '{}': {}", tenant, e),
                     }
-                    println!(
-                        "Recovery complete. Total: {} nodes, {} edges, {} indexes in-memory",
-                        graph.node_count(),
-                        graph.edge_count(),
-                        restored_indexes
-                    );
+                }
+                println!(
+                    "Recovery complete. Total: {} nodes, {} edges, {} indexes in-memory",
+                    graph.node_count(), graph.edge_count(), restored_indexes
+                );
                 }
             }
             Ok(_) => println!("No persisted tenants found."),
             Err(e) => {
-                refusal = Some(format!(
-                    "cannot list the tenants in the data directory: {e}"
-                ));
+                refusal = Some(format!("cannot list the tenants in the data directory: {e}"));
             }
         }
     }
@@ -2651,13 +2390,8 @@ async fn start_server() {
                 load_graphalytics_dataset(&mut graph, "wiki-Talk", true, None);
             }
             Some(other) => {
-                eprintln!(
-                    "Unknown --demo mode '{}'. Use: --demo social  or  --demo large",
-                    other
-                );
-                eprintln!(
-                    "  social  — synthetic social network (5K nodes, 6 labels, 9 edge types)"
-                );
+                eprintln!("Unknown --demo mode '{}'. Use: --demo social  or  --demo large", other);
+                eprintln!("  social  — synthetic social network (5K nodes, 6 labels, 9 edge types)");
                 eprintln!("  large   — wiki-Talk (2.4M vertices, directed discussion graph)");
             }
             None => {
@@ -2723,72 +2457,63 @@ async fn start_server() {
         }
     }
 
-    let global_embed_pipeline: Option<Arc<EmbedPipeline>> = if std::env::var("EMBED_ENABLED")
-        .map(|v| v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        // Refused, not defaulted — and this is the path that matters most,
-        // because embedding sends the property **value**, not the schema.
-        // The old arm list did not even carry `azure`, so that spelling
-        // meant OpenAI, and so did every typo.
-        let provider = match LLMProvider::parse_named(
-            "EMBED_PROVIDER",
-            &std::env::var("EMBED_PROVIDER").unwrap_or_default(),
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("EMBED_ENABLED is true but the provider is unusable: {e}");
-                exit_closing(persistence, 2);
-            }
-        };
-        let model =
-            std::env::var("EMBED_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
-        let api_key = std::env::var("EMBED_API_KEY").ok();
-        let base_url = std::env::var("EMBED_API_BASE_URL").ok();
-        let dimension = std::env::var("EMBED_DIMENSION")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(1536);
-        let chunk_size = std::env::var("EMBED_CHUNK_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(512);
-        let chunk_overlap = std::env::var("EMBED_CHUNK_OVERLAP")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(64);
+    let global_embed_pipeline: Option<Arc<EmbedPipeline>> =
+        if std::env::var("EMBED_ENABLED").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+            // Refused, not defaulted — and this is the path that matters most,
+            // because embedding sends the property **value**, not the schema.
+            // The old arm list did not even carry `azure`, so that spelling
+            // meant OpenAI, and so did every typo.
+            let provider = match LLMProvider::parse_named(
+                "EMBED_PROVIDER",
+                &std::env::var("EMBED_PROVIDER").unwrap_or_default(),
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("EMBED_ENABLED is true but the provider is unusable: {e}");
+                    exit_closing(persistence, 2);
+                }
+            };
+            let model     = std::env::var("EMBED_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
+            let api_key   = std::env::var("EMBED_API_KEY").ok();
+            let base_url  = std::env::var("EMBED_API_BASE_URL").ok();
+            let dimension = std::env::var("EMBED_DIMENSION").ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(1536);
+            let chunk_size    = std::env::var("EMBED_CHUNK_SIZE").ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(512);
+            let chunk_overlap = std::env::var("EMBED_CHUNK_OVERLAP").ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(64);
 
-        let embed_config = AutoEmbedConfig {
-            provider,
-            embedding_model: model.clone(),
-            api_key,
-            api_base_url: base_url,
-            chunk_size,
-            chunk_overlap,
-            vector_dimension: dimension,
-            embedding_policies: HashMap::new(),
-            embedding_property: "embedding".to_string(),
-        };
+            let embed_config = AutoEmbedConfig {
+                provider,
+                embedding_model: model.clone(),
+                api_key,
+                api_base_url: base_url,
+                chunk_size,
+                chunk_overlap,
+                vector_dimension: dimension,
+                embedding_policies: HashMap::new(),
+                embedding_property: "embedding".to_string(),
+            };
 
-        match EmbedPipeline::new(embed_config) {
-            Ok(pipeline) => {
-                println!(
-                    "Global embed pipeline: model={} dimension={} chunk_size={} chunk_overlap={}",
-                    model, dimension, chunk_size, chunk_overlap
-                );
-                Some(Arc::new(pipeline))
+            match EmbedPipeline::new(embed_config) {
+                Ok(pipeline) => {
+                    println!(
+                        "Global embed pipeline: model={} dimension={} chunk_size={} chunk_overlap={}",
+                        model, dimension, chunk_size, chunk_overlap
+                    );
+                    Some(Arc::new(pipeline))
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to build embed pipeline from EMBED_* vars: {}", e);
+                    None
+                }
             }
-            Err(e) => {
-                eprintln!(
-                    "Warning: failed to build embed pipeline from EMBED_* vars: {}",
-                    e
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     println!("\nServer starting on {}:{}", config.address, config.port);
 
@@ -2815,10 +2540,7 @@ async fn start_server() {
         tokio::spawn(async move {
             let (vector_index, property_index) = {
                 let guard = indexer_store.read().await;
-                (
-                    Arc::clone(&guard.vector_index),
-                    Arc::clone(&guard.property_index),
-                )
+                (Arc::clone(&guard.vector_index), Arc::clone(&guard.property_index))
             };
             samyama::graph::GraphStore::start_background_indexer_with_store(
                 rx,
@@ -2931,18 +2653,10 @@ fn quota_overrides_from_args(
         return Ok(None);
     }
     let mut q = samyama::persistence::tenant::ResourceQuotas::default();
-    if let Some(v) = nodes {
-        q.max_nodes = v;
-    }
-    if let Some(v) = edges {
-        q.max_edges = v;
-    }
-    if let Some(v) = memory {
-        q.max_memory_bytes = v;
-    }
-    if let Some(v) = storage {
-        q.max_storage_bytes = v;
-    }
+    if let Some(v) = nodes { q.max_nodes = v; }
+    if let Some(v) = edges { q.max_edges = v; }
+    if let Some(v) = memory { q.max_memory_bytes = v; }
+    if let Some(v) = storage { q.max_storage_bytes = v; }
     Ok(Some(q))
 }
 

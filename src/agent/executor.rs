@@ -19,7 +19,10 @@ pub struct PlanExecutor {
 }
 
 impl PlanExecutor {
-    pub fn new(tools: HashMap<String, Arc<dyn Tool>>, store: Arc<RwLock<GraphStore>>) -> Self {
+    pub fn new(
+        tools: HashMap<String, Arc<dyn Tool>>,
+        store: Arc<RwLock<GraphStore>>,
+    ) -> Self {
         Self { tools, store }
     }
 
@@ -32,7 +35,11 @@ impl PlanExecutor {
     /// Execute a plan. Each parallel group runs concurrently; groups
     /// run sequentially. After execution, telemetry edges are written
     /// in plan order under a single write lock.
-    pub async fn execute(&self, prompt: &str, plan: &ToolPlan) -> AgentResult<PlanRunResult> {
+    pub async fn execute(
+        &self,
+        prompt: &str,
+        plan: &ToolPlan,
+    ) -> AgentResult<PlanRunResult> {
         let qid = Self::question_id(prompt);
         let groups = plan.parallel_groups();
         let mut records: Vec<Option<ToolCallRecord>> = vec![None; plan.calls.len()];
@@ -74,7 +81,11 @@ impl PlanExecutor {
     }
 }
 
-async fn run_one(_idx: usize, call: ToolCall, tool: Option<Arc<dyn Tool>>) -> ToolCallRecord {
+async fn run_one(
+    _idx: usize,
+    call: ToolCall,
+    tool: Option<Arc<dyn Tool>>,
+) -> ToolCallRecord {
     let started = Instant::now();
     let args = call.args.clone();
     let (result, error, hit_rate) = match tool {
@@ -112,30 +123,14 @@ fn score_hit_rate(v: &serde_json::Value) -> f64 {
     match v {
         Value::Null => 0.0,
         Value::Bool(_) | Value::Number(_) => 1.0,
-        Value::String(s) => {
-            if s.is_empty() {
-                0.5
-            } else {
-                1.0
-            }
-        }
-        Value::Array(a) => {
-            if a.is_empty() {
-                0.5
-            } else {
-                1.0
-            }
-        }
+        Value::String(s) => if s.is_empty() { 0.5 } else { 1.0 },
+        Value::Array(a) => if a.is_empty() { 0.5 } else { 1.0 },
         Value::Object(o) => {
             // Common shape: {"records": [...], ...} — empty records = miss.
             if let Some(Value::Array(records)) = o.get("records") {
                 return if records.is_empty() { 0.5 } else { 1.0 };
             }
-            if o.is_empty() {
-                0.5
-            } else {
-                1.0
-            }
+            if o.is_empty() { 0.5 } else { 1.0 }
         }
     }
 }
@@ -159,28 +154,28 @@ async fn write_telemetry(
     let mut guard = store.write().await;
 
     // Find-or-create Question node by qid.
-    let q_node = find_node_by_property(&guard, "Question", "qid", qid).unwrap_or_else(|| {
-        let nid = guard.create_node("Question");
-        if let Some(node) = guard.get_node_mut(nid) {
-            node.set_property("qid", qid);
-            node.set_property("text", prompt);
-        }
-        nid
-    });
+    let q_node = find_node_by_property(&guard, "Question", "qid", qid)
+        .unwrap_or_else(|| {
+            let nid = guard.create_node("Question");
+            if let Some(node) = guard.get_node_mut(nid) {
+                node.set_property("qid", qid);
+                node.set_property("text", prompt);
+            }
+            nid
+        });
 
     // Find-or-create one Tool node per distinct tool referenced.
     let mut tool_nodes: HashMap<String, NodeId> = HashMap::new();
     for rec in records {
-        if tool_nodes.contains_key(&rec.tool) {
-            continue;
-        }
-        let nid = find_node_by_property(&guard, "Tool", "tid", &rec.tool).unwrap_or_else(|| {
-            let nid = guard.create_node("Tool");
-            if let Some(node) = guard.get_node_mut(nid) {
-                node.set_property("tid", rec.tool.as_str());
-            }
-            nid
-        });
+        if tool_nodes.contains_key(&rec.tool) { continue; }
+        let nid = find_node_by_property(&guard, "Tool", "tid", &rec.tool)
+            .unwrap_or_else(|| {
+                let nid = guard.create_node("Tool");
+                if let Some(node) = guard.get_node_mut(nid) {
+                    node.set_property("tid", rec.tool.as_str());
+                }
+                nid
+            });
         tool_nodes.insert(rec.tool.clone(), nid);
     }
 
@@ -191,24 +186,18 @@ async fn write_telemetry(
         let eid = guard
             .create_edge(q_node, tnode, "USED_TOOL")
             .map_err(|e| AgentError::ExecutionError(format!("create_edge: {e}")))?;
-        guard
-            .set_edge_property(eid, "latency_ms", rec.latency_ms as i64)
+        guard.set_edge_property(eid, "latency_ms", rec.latency_ms as i64)
             .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
-        guard
-            .set_edge_property(eid, "token_cost", rec.token_cost as i64)
+        guard.set_edge_property(eid, "token_cost", rec.token_cost as i64)
             .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
-        guard
-            .set_edge_property(eid, "hit_rate", rec.hit_rate)
+        guard.set_edge_property(eid, "hit_rate", rec.hit_rate)
             .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
-        guard
-            .set_edge_property(eid, "slot", slot as i64)
+        guard.set_edge_property(eid, "slot", slot as i64)
             .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
-        guard
-            .set_edge_property(eid, "ts_ms", now_ms)
+        guard.set_edge_property(eid, "ts_ms", now_ms)
             .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
         if let Some(err) = &rec.error {
-            guard
-                .set_edge_property(eid, "error", err.as_str())
+            guard.set_edge_property(eid, "error", err.as_str())
                 .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
         }
     }
@@ -225,9 +214,7 @@ fn find_node_by_property(
     let lbl = Label::new(label);
     for node in store.get_nodes_by_label(&lbl) {
         if let Some(PropertyValue::String(s)) = store.node_property(node.id, key) {
-            if s == value {
-                return Some(node.id);
-            }
+            if s == value { return Some(node.id); }
         }
     }
     None
@@ -236,9 +223,7 @@ fn find_node_by_property(
 fn hex_prefix(bytes: &[u8], n_chars: usize) -> String {
     let mut s = String::with_capacity(n_chars);
     for b in bytes {
-        if s.len() >= n_chars {
-            break;
-        }
+        if s.len() >= n_chars { break; }
         s.push_str(&format!("{:02x}", b));
     }
     s.truncate(n_chars);
@@ -275,10 +260,7 @@ mod tests {
             &json!({"q": "x".repeat(400)}),
             Some(&json!("y".repeat(400))),
         );
-        assert!(
-            large > small * 10,
-            "expected large>>small, got {small} vs {large}"
-        );
+        assert!(large > small * 10, "expected large>>small, got {small} vs {large}");
     }
 
     #[test]
@@ -310,15 +292,9 @@ mod tests {
     struct Echo;
     #[async_trait::async_trait]
     impl Tool for Echo {
-        fn name(&self) -> &str {
-            "echo"
-        }
-        fn description(&self) -> &str {
-            "echo args"
-        }
-        fn parameters(&self) -> serde_json::Value {
-            json!({})
-        }
+        fn name(&self) -> &str { "echo" }
+        fn description(&self) -> &str { "echo args" }
+        fn parameters(&self) -> serde_json::Value { json!({}) }
         async fn execute(&self, args: serde_json::Value) -> AgentResult<serde_json::Value> {
             Ok(json!({"records": [args]}))
         }
@@ -327,15 +303,9 @@ mod tests {
     struct Fails;
     #[async_trait::async_trait]
     impl Tool for Fails {
-        fn name(&self) -> &str {
-            "fails"
-        }
-        fn description(&self) -> &str {
-            "always fails"
-        }
-        fn parameters(&self) -> serde_json::Value {
-            json!({})
-        }
+        fn name(&self) -> &str { "fails" }
+        fn description(&self) -> &str { "always fails" }
+        fn parameters(&self) -> serde_json::Value { json!({}) }
         async fn execute(&self, _args: serde_json::Value) -> AgentResult<serde_json::Value> {
             Err(AgentError::ToolError("nope".into()))
         }
@@ -350,22 +320,14 @@ mod tests {
     }
 
     fn call(tool: &str, parallel: bool) -> ToolCall {
-        ToolCall {
-            tool: tool.into(),
-            args: json!({"t": tool}),
-            parallel_with_prev: parallel,
-        }
+        ToolCall { tool: tool.into(), args: json!({"t": tool}), parallel_with_prev: parallel }
     }
 
     #[tokio::test]
     async fn execute_records_results_errors_and_missing_tools_in_plan_order() {
         let (exec, store) = executor();
         let plan = ToolPlan {
-            calls: vec![
-                call("echo", false),
-                call("fails", true),
-                call("ghost", false),
-            ],
+            calls: vec![call("echo", false), call("fails", true), call("ghost", false)],
         };
         let run = exec.execute("what?", &plan).await.unwrap();
         assert_eq!(run.question_id, PlanExecutor::question_id("what?"));
@@ -385,19 +347,12 @@ mod tests {
 
         let ghost = &run.records[2];
         assert_eq!(ghost.error.as_deref(), Some("tool 'ghost' not registered"));
-        assert_eq!(
-            run.total_token_cost,
-            run.records.iter().map(|r| r.token_cost).sum::<u64>()
-        );
+        assert_eq!(run.total_token_cost, run.records.iter().map(|r| r.token_cost).sum::<u64>());
 
         // Telemetry: one Question, three Tool nodes, one USED_TOOL edge per call.
         let g = store.read().await;
-        let q =
-            find_node_by_property(&g, "Question", "qid", &run.question_id).expect("question node");
-        assert_eq!(
-            g.node_property(q, "text"),
-            Some(PropertyValue::String("what?".into()))
-        );
+        let q = find_node_by_property(&g, "Question", "qid", &run.question_id).expect("question node");
+        assert_eq!(g.node_property(q, "text"), Some(PropertyValue::String("what?".into())));
         assert_eq!(g.get_nodes_by_label(&Label::new("Tool")).len(), 3);
         let mut edges = g.get_outgoing_edges(q);
         edges.sort_by_key(|e| match e.properties.get("slot") {
@@ -411,25 +366,19 @@ mod tests {
             edges[1].properties.get("error"),
             Some(&PropertyValue::String("Tool error: nope".into()))
         );
-        assert_eq!(
-            edges[0].properties.get("hit_rate"),
-            Some(&PropertyValue::Float(1.0))
-        );
+        assert_eq!(edges[0].properties.get("hit_rate"), Some(&PropertyValue::Float(1.0)));
     }
 
     #[tokio::test]
     async fn repeated_prompts_reuse_question_and_tool_nodes() {
         let (exec, store) = executor();
-        let plan = ToolPlan {
-            calls: vec![call("echo", false), call("echo", false)],
-        };
+        let plan = ToolPlan { calls: vec![call("echo", false), call("echo", false)] };
         exec.execute("same", &plan).await.unwrap();
         exec.execute("same", &plan).await.unwrap();
         let g = store.read().await;
         assert_eq!(g.get_nodes_by_label(&Label::new("Question")).len(), 1);
         assert_eq!(g.get_nodes_by_label(&Label::new("Tool")).len(), 1);
-        let q = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("same"))
-            .unwrap();
+        let q = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("same")).unwrap();
         assert_eq!(g.get_outgoing_edges(q).len(), 4);
     }
 

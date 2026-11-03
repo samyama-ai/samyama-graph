@@ -32,10 +32,7 @@ fn column(store: &GraphStore, cypher: &str, name: &str) -> Vec<String> {
 #[test]
 fn a_literal_map_yields_its_value() {
     let store = GraphStore::new();
-    assert_eq!(
-        column(&store, "WITH {a: 1} AS m RETURN m.a AS a", "a"),
-        vec!["Integer(1)"]
-    );
+    assert_eq!(column(&store, "WITH {a: 1} AS m RETURN m.a AS a", "a"), vec!["Integer(1)"]);
 }
 
 #[test]
@@ -47,11 +44,7 @@ fn every_value_type_survives() {
         "a",
     );
     assert_eq!(got, vec!["Integer(1)"]);
-    for (key, expected) in [
-        ("f", "Float(1.5)"),
-        ("s", "String(\"x\")"),
-        ("b", "Boolean(true)"),
-    ] {
+    for (key, expected) in [("f", "Float(1.5)"), ("s", "String(\"x\")"), ("b", "Boolean(true)")] {
         let cypher = format!("WITH {{i: 1, f: 1.5, s: \"x\", b: true}} AS m RETURN m.{key} AS a");
         assert_eq!(column(&store, &cypher, "a"), vec![expected], "{key}");
     }
@@ -75,33 +68,20 @@ fn a_key_that_is_absent_is_null() {
     // Cypher's answer for a missing key, and the behaviour the bug made
     // universal. It has to survive the fix.
     let store = GraphStore::new();
-    assert_eq!(
-        column(&store, "WITH {a: 1} AS m RETURN m.zzz AS a", "a"),
-        vec!["Null"]
-    );
+    assert_eq!(column(&store, "WITH {a: 1} AS m RETURN m.zzz AS a", "a"), vec!["Null"]);
 }
 
 #[test]
 fn an_empty_map_is_null_for_every_key() {
     let store = GraphStore::new();
-    assert_eq!(
-        column(&store, "WITH {} AS m RETURN m.a AS a", "a"),
-        vec!["Null"]
-    );
+    assert_eq!(column(&store, "WITH {} AS m RETURN m.a AS a", "a"), vec!["Null"]);
 }
 
 #[test]
 fn a_nested_map_reads_through() {
     let store = GraphStore::new();
-    let got = column(
-        &store,
-        "WITH {outer: {inner: 7}} AS m RETURN m.outer AS a",
-        "a",
-    );
-    assert!(
-        got[0].contains("Map"),
-        "the inner map comes back as a map: {got:?}"
-    );
+    let got = column(&store, "WITH {outer: {inner: 7}} AS m RETURN m.outer AS a", "a");
+    assert!(got[0].contains("Map"), "the inner map comes back as a map: {got:?}");
 }
 
 #[test]
@@ -111,17 +91,10 @@ fn a_map_valued_node_property_reads_the_same_way() {
     let mut store = GraphStore::new();
     let id = store.create_node("N");
     let mut inner = std::collections::HashMap::new();
-    inner.insert(
-        "city".to_string(),
-        PropertyValue::String("Pune".to_string()),
-    );
+    inner.insert("city".to_string(), PropertyValue::String("Pune".to_string()));
     let _ = store.set_node_property("default", id, "addr".to_string(), PropertyValue::Map(inner));
 
-    let got = column(
-        &store,
-        "MATCH (n:N) WITH n.addr AS m RETURN m.city AS a",
-        "a",
-    );
+    let got = column(&store, "MATCH (n:N) WITH n.addr AS m RETURN m.city AS a", "a");
     assert_eq!(got, vec!["String(\"Pune\")"]);
 }
 

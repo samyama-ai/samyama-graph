@@ -27,9 +27,7 @@ fn write(store: &mut GraphStore, cypher: &str) {
 
 fn count(store: &GraphStore, cypher: &str) -> i64 {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .expect("query should run");
+    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
     match batch.records[0].get("c") {
         Some(Value::Property(PropertyValue::Integer(n))) => *n,
         other => panic!("expected an integer count, got {other:?}"),
@@ -38,19 +36,13 @@ fn count(store: &GraphStore, cypher: &str) -> i64 {
 
 fn rows(store: &GraphStore, cypher: &str) -> usize {
     let q = parse_query(cypher).expect("query should parse");
-    QueryExecutor::new(store)
-        .execute(&q)
-        .expect("query should run")
-        .records
-        .len()
+    QueryExecutor::new(store).execute(&q).expect("query should run").records.len()
 }
 
 /// Column names of the first row, sorted.
 fn columns(store: &GraphStore, cypher: &str) -> Vec<String> {
     let q = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .expect("query should run");
+    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
     let mut cols: Vec<String> = batch
         .records
         .first()
@@ -63,10 +55,7 @@ fn columns(store: &GraphStore, cypher: &str) -> Vec<String> {
 /// `A -R-> B -S-> C`: two edges, three nodes, no cycles.
 fn chain() -> GraphStore {
     let mut store = GraphStore::new();
-    write(
-        &mut store,
-        "CREATE (:A {n: 'a'})-[:R]->(:B {n: 'b'})-[:S]->(:C {n: 'c'})",
-    );
+    write(&mut store, "CREATE (:A {n: 'a'})-[:R]->(:B {n: 'b'})-[:S]->(:C {n: 'c'})");
     store
 }
 
@@ -99,17 +88,14 @@ fn a_count_over_an_undirected_pattern_agrees_with_the_rows_it_counts() {
     for pattern in ["(a)--(b)", "()--()", "(a)-[:R]-(b)", "(a)-[r]-(b)"] {
         let counted = count(&store, &format!("MATCH {pattern} RETURN count(*) AS c"));
         let listed = rows(&store, &format!("MATCH {pattern} RETURN 1 AS x")) as i64;
-        assert_eq!(
-            counted, listed,
-            "count(*) disagreed with the rows for {pattern}"
-        );
+        assert_eq!(counted, listed, "count(*) disagreed with the rows for {pattern}");
     }
 }
 
 #[test]
 fn a_count_over_a_directed_pattern_still_uses_the_fast_path_correctly() {
     let store = chain();
-    for pattern in ["(a)-->(b)", "()-->()", "(a)-[:R]->(b)"] {
+    for pattern in ["(a)-->(b)", "()-->()",  "(a)-[:R]->(b)"] {
         let counted = count(&store, &format!("MATCH {pattern} RETURN count(*) AS c"));
         let listed = rows(&store, &format!("MATCH {pattern} RETURN 1 AS x")) as i64;
         assert_eq!(counted, listed, "{pattern}");
@@ -140,14 +126,8 @@ fn a_bare_arrow_binds_the_same_endpoints_as_the_bracketed_form() {
 #[test]
 fn a_typed_edge_still_filters_by_type() {
     // Guard against the optional bracket making the type filter optional too.
-    assert_eq!(
-        count(&chain(), "MATCH (a)-[:R]->(b) RETURN count(*) AS c"),
-        1
-    );
-    assert_eq!(
-        count(&chain(), "MATCH (a)-[:NOPE]->(b) RETURN count(*) AS c"),
-        0
-    );
+    assert_eq!(count(&chain(), "MATCH (a)-[:R]->(b) RETURN count(*) AS c"), 1);
+    assert_eq!(count(&chain(), "MATCH (a)-[:NOPE]->(b) RETURN count(*) AS c"), 0);
 }
 
 // ------------------------------------------------------------- RETURN */WITH *
@@ -166,30 +146,19 @@ fn return_star_projects_every_bound_variable_including_edges() {
 fn return_star_includes_a_named_path() {
     assert_eq!(
         columns(&chain(), "MATCH p = (a)-[r]->(b) RETURN *"),
-        vec![
-            "a".to_string(),
-            "b".to_string(),
-            "p".to_string(),
-            "r".to_string()
-        ]
+        vec!["a".to_string(), "b".to_string(), "p".to_string(), "r".to_string()]
     );
 }
 
 #[test]
 fn return_star_includes_an_unwind_variable() {
-    assert_eq!(
-        columns(&GraphStore::new(), "UNWIND [1, 2] AS u RETURN *"),
-        vec!["u".to_string()]
-    );
+    assert_eq!(columns(&GraphStore::new(), "UNWIND [1, 2] AS u RETURN *"), vec!["u".to_string()]);
 }
 
 #[test]
 fn return_star_alongside_an_explicit_item_does_not_duplicate_it() {
     let store = chain();
-    assert_eq!(
-        columns(&store, "MATCH (a:A) RETURN *, a"),
-        vec!["a".to_string()]
-    );
+    assert_eq!(columns(&store, "MATCH (a:A) RETURN *, a"), vec!["a".to_string()]);
     // An aliased expression is a new column, so both survive.
     assert_eq!(
         columns(&store, "MATCH (a:A) RETURN *, a.n AS name"),
@@ -254,14 +223,8 @@ fn remove_strips_every_label_named_in_one_item() {
 /// The labels of the single node in `store`, sorted.
 fn only_node_labels(store: &GraphStore) -> Vec<String> {
     let q = parse_query("MATCH (n) RETURN labels(n) AS l").unwrap();
-    let batch = QueryExecutor::new(store)
-        .execute(&q)
-        .expect("query should run");
-    assert_eq!(
-        batch.records.len(),
-        1,
-        "fixture should hold exactly one node"
-    );
+    let batch = QueryExecutor::new(store).execute(&q).expect("query should run");
+    assert_eq!(batch.records.len(), 1, "fixture should hold exactly one node");
     match batch.records[0].get("l") {
         Some(Value::Property(PropertyValue::Array(items))) => {
             let mut got: Vec<String> = items
@@ -281,30 +244,16 @@ fn only_node_labels(store: &GraphStore) -> Vec<String> {
 #[test]
 fn merge_on_create_can_add_a_label() {
     let mut store = GraphStore::new();
-    write(
-        &mut store,
-        "MERGE (a:L) ON MATCH SET a:M1 ON CREATE SET a:M2",
-    );
-    assert_eq!(
-        only_node_labels(&store),
-        vec!["L", "M2"],
-        "the node was created"
-    );
+    write(&mut store, "MERGE (a:L) ON MATCH SET a:M1 ON CREATE SET a:M2");
+    assert_eq!(only_node_labels(&store), vec!["L", "M2"], "the node was created");
 }
 
 #[test]
 fn merge_on_match_can_add_a_label() {
     let mut store = GraphStore::new();
     write(&mut store, "CREATE (:L)");
-    write(
-        &mut store,
-        "MERGE (a:L) ON MATCH SET a:M1 ON CREATE SET a:M2",
-    );
-    assert_eq!(
-        only_node_labels(&store),
-        vec!["L", "M1"],
-        "the node already existed"
-    );
+    write(&mut store, "MERGE (a:L) ON MATCH SET a:M1 ON CREATE SET a:M2");
+    assert_eq!(only_node_labels(&store), vec!["L", "M1"], "the node already existed");
 }
 
 #[test]
@@ -314,10 +263,7 @@ fn merge_on_match_applies_on_the_path_that_has_an_input() {
     // because the first fix looked complete and was not.
     let mut store = GraphStore::new();
     write(&mut store, "CREATE (:L)");
-    write(
-        &mut store,
-        "MATCH () MERGE (a:L) ON MATCH SET a:M1 ON CREATE SET a:M2",
-    );
+    write(&mut store, "MATCH () MERGE (a:L) ON MATCH SET a:M1 ON CREATE SET a:M2");
     assert_eq!(only_node_labels(&store), vec!["L", "M1"]);
 }
 

@@ -143,6 +143,11 @@ fn main() {
     }
 }
 
+
+
+
+
+
 fn truncate(s: &str, n: usize) -> String {
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= n {
@@ -152,6 +157,8 @@ fn truncate(s: &str, n: usize) -> String {
         format!("{head}…")
     }
 }
+
+
 
 /// A JSON array of strings, without pulling the query log through serde's
 /// derive machinery — the shape is fixed and the file is the user's.

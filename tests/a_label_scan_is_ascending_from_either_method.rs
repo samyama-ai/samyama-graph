@@ -41,17 +41,11 @@ fn store(n: u64) -> GraphStore {
 }
 
 fn ids_via_nodes(s: &GraphStore) -> Vec<u64> {
-    s.get_nodes_by_label(&Label::new("P"))
-        .iter()
-        .map(|x| x.id.as_u64())
-        .collect()
+    s.get_nodes_by_label(&Label::new("P")).iter().map(|x| x.id.as_u64()).collect()
 }
 
 fn ids_via_ids(s: &GraphStore, limit: Option<usize>) -> Vec<u64> {
-    s.node_ids_by_label(&Label::new("P"), limit)
-        .iter()
-        .map(|x| x.as_u64())
-        .collect()
+    s.node_ids_by_label(&Label::new("P"), limit).iter().map(|x| x.as_u64()).collect()
 }
 
 fn ascending(v: &[u64]) -> bool {
@@ -62,14 +56,8 @@ fn ascending(v: &[u64]) -> bool {
 fn both_methods_are_ascending() {
     let s = store(200);
     assert!(ascending(&ids_via_nodes(&s)), "get_nodes_by_label");
-    assert!(
-        ascending(&ids_via_ids(&s, None)),
-        "node_ids_by_label(.., None)"
-    );
-    assert!(
-        ascending(&ids_via_ids(&s, Some(50))),
-        "node_ids_by_label(.., Some(50))"
-    );
+    assert!(ascending(&ids_via_ids(&s, None)), "node_ids_by_label(.., None)");
+    assert!(ascending(&ids_via_ids(&s, Some(50))), "node_ids_by_label(.., Some(50))");
 }
 
 #[test]
@@ -84,18 +72,8 @@ fn the_order_is_the_same_on_every_store() {
         by_nodes.insert(ids_via_nodes(&s));
         by_ids.insert(ids_via_ids(&s, None));
     }
-    assert_eq!(
-        by_nodes.len(),
-        1,
-        "get_nodes_by_label gave {} distinct orders over 12 identical stores",
-        by_nodes.len()
-    );
-    assert_eq!(
-        by_ids.len(),
-        1,
-        "node_ids_by_label gave {} distinct orders over 12 identical stores",
-        by_ids.len()
-    );
+    assert_eq!(by_nodes.len(), 1, "get_nodes_by_label gave {} distinct orders over 12 identical stores", by_nodes.len());
+    assert_eq!(by_ids.len(), 1, "node_ids_by_label gave {} distinct orders over 12 identical stores", by_ids.len());
 }
 
 #[test]
@@ -107,17 +85,8 @@ fn a_limited_scan_is_a_prefix_of_the_unlimited_one() {
     let all = ids_via_ids(&s, None);
     for k in [1usize, 7, 64, 65, 299, 300, 400] {
         let got = ids_via_ids(&s, Some(k));
-        assert_eq!(
-            got.len(),
-            k.min(all.len()),
-            "limit {k} returned {} ids",
-            got.len()
-        );
-        assert_eq!(
-            got[..],
-            all[..got.len()],
-            "limit {k} is not a prefix of the full scan"
-        );
+        assert_eq!(got.len(), k.min(all.len()), "limit {k} returned {} ids", got.len());
+        assert_eq!(got[..], all[..got.len()], "limit {k} is not a prefix of the full scan");
     }
 }
 
@@ -140,26 +109,14 @@ fn deleting_nodes_leaves_the_survivors_ascending_and_consistent() {
     // The bitset is cached; a delete has to invalidate it or the scan returns
     // an id that is no longer there.
     let mut s = store(40);
-    let victims: Vec<_> = s
-        .get_nodes_by_label(&Label::new("P"))
-        .iter()
-        .map(|n| n.id)
-        .step_by(3)
-        .collect();
+    let victims: Vec<_> = s.get_nodes_by_label(&Label::new("P")).iter().map(|n| n.id).step_by(3).collect();
     for id in &victims {
         s.delete_node("default", *id).expect("delete");
     }
     let left = ids_via_nodes(&s);
     assert!(ascending(&left), "survivors are not ascending");
-    assert_eq!(
-        left,
-        ids_via_ids(&s, None),
-        "the two methods disagree after deletes"
-    );
+    assert_eq!(left, ids_via_ids(&s, None), "the two methods disagree after deletes");
     for id in &victims {
-        assert!(
-            !left.contains(&id.as_u64()),
-            "deleted node {id:?} still in the scan"
-        );
+        assert!(!left.contains(&id.as_u64()), "deleted node {id:?} still in the scan");
     }
 }

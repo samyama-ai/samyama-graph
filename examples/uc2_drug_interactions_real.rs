@@ -57,23 +57,16 @@ struct ComboDosingProblem {
 }
 
 impl MultiObjectiveProblem for ComboDosingProblem {
-    fn dim(&self) -> usize {
-        self.drugs.len()
-    }
-    fn num_objectives(&self) -> usize {
-        3
-    }
+    fn dim(&self) -> usize { self.drugs.len() }
+    fn num_objectives(&self) -> usize { 3 }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (Array1::zeros(self.dim()), Array1::ones(self.dim()))
     }
     fn objectives(&self, x: &Array1<f64>) -> Vec<f64> {
         let active: Vec<usize> = (0..self.drugs.len()).filter(|&i| x[i] >= 0.05).collect();
-        if active.is_empty() {
-            return vec![0.0, 0.0, 0.0];
-        }
+        if active.is_empty() { return vec![0.0, 0.0, 0.0]; }
 
-        let efficacy: f64 = active
-            .iter()
+        let efficacy: f64 = active.iter()
             .map(|&i| x[i] * self.drugs[i].gene_targets)
             .sum();
 
@@ -84,10 +77,7 @@ impl MultiObjectiveProblem for ComboDosingProblem {
 
         let total_dose: f64 = (0..self.drugs.len()).map(|i| x[i]).sum();
 
-        let bad = self
-            .dangerous_pairs
-            .iter()
-            .any(|(a, b)| x[*a] >= 0.05 && x[*b] >= 0.05);
+        let bad = self.dangerous_pairs.iter().any(|(a, b)| x[*a] >= 0.05 && x[*b] >= 0.05);
         let penalty = if bad { 1e6 } else { 0.0 };
         vec![-efficacy + penalty, risk + penalty, total_dose + penalty]
     }
@@ -97,9 +87,7 @@ fn as_str(v: &serde_json::Value) -> String {
     v.as_str().map(|s| s.to_string()).unwrap_or_default()
 }
 fn as_f(v: &serde_json::Value) -> f64 {
-    v.as_f64()
-        .or_else(|| v.as_i64().map(|i| i as f64))
-        .unwrap_or(0.0)
+    v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)).unwrap_or(0.0)
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -118,39 +106,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          ORDER BY n_genes DESC LIMIT {NUM_DRUGS}"
     );
     let r = client.query_readonly(GRAPH, &q).await?;
-    let drugs: Vec<Drug> = r
-        .records
-        .iter()
-        .map(|row| Drug {
-            name: as_str(&row[0]),
-            gene_targets: as_f(&row[1]),
-        })
-        .collect();
-    println!(
-        "[probe] {} drugs indicated for \"{INDICATION}\":",
-        drugs.len()
-    );
+    let drugs: Vec<Drug> = r.records.iter().map(|row| Drug {
+        name: as_str(&row[0]),
+        gene_targets: as_f(&row[1]),
+    }).collect();
+    println!("[probe] {} drugs indicated for \"{INDICATION}\":", drugs.len());
     for (i, d) in drugs.iter().enumerate() {
         println!("  {:>3} {:<22} gene_targets={}", i, d.name, d.gene_targets);
     }
 
     // 2. Pairwise side-effect overlap — the "pharmacological risk" signal.
-    let name_list = drugs
-        .iter()
+    let name_list = drugs.iter()
         .map(|d| format!("\"{}\"", d.name.replace('"', "\\\"")))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>().join(", ");
     let q = format!(
         "MATCH (a:Drug)-[:HAS_SIDE_EFFECT]->(s:SideEffect)<-[:HAS_SIDE_EFFECT]-(b:Drug) \
          WHERE a.name IN [{name_list}] AND b.name IN [{name_list}] AND a.name < b.name \
          RETURN a.name AS a, b.name AS b, count(DISTINCT s) AS overlap"
     );
     let r = client.query_readonly(GRAPH, &q).await?;
-    let name_to_idx: HashMap<&str, usize> = drugs
-        .iter()
-        .enumerate()
-        .map(|(i, d)| (d.name.as_str(), i))
-        .collect();
+    let name_to_idx: HashMap<&str, usize> = drugs.iter().enumerate()
+        .map(|(i, d)| (d.name.as_str(), i)).collect();
     let mut pair_overlap: HashMap<(usize, usize), f64> = HashMap::new();
     let mut dangerous_pairs: Vec<(usize, usize)> = Vec::new();
     for row in &r.records {
@@ -164,20 +140,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    println!(
-        "\n[probe] {} drug-pair side-effect overlaps",
-        pair_overlap.len()
-    );
-    println!(
-        "[probe] {} \"dangerous\" pairs (overlap ≥ {DANGEROUS_OVERLAP_THRESHOLD}):",
-        dangerous_pairs.len()
-    );
+    println!("\n[probe] {} drug-pair side-effect overlaps", pair_overlap.len());
+    println!("[probe] {} \"dangerous\" pairs (overlap ≥ {DANGEROUS_OVERLAP_THRESHOLD}):", dangerous_pairs.len());
     for (a, b) in &dangerous_pairs {
         let overlap = pair_overlap[&(*a, *b)];
-        println!(
-            "  {} + {} → {} shared side effects",
-            drugs[*a].name, drugs[*b].name, overlap as i64
-        );
+        println!("  {} + {} → {} shared side effects",
+            drugs[*a].name, drugs[*b].name, overlap as i64);
     }
 
     // 3. NSGA-II.
@@ -196,41 +164,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let t0 = std::time::Instant::now();
         let res = solver.solve(&*p);
         (res.pareto_front, t0.elapsed().as_millis())
-    })
-    .await?;
+    }).await?;
     println!("[done] {} plans, wall {wall_ms} ms", front.len());
 
     let mut rows: Vec<_> = front.iter().collect();
     rows.sort_by(|a, b| a.fitness[0].partial_cmp(&b.fitness[0]).unwrap());
 
     println!("\n[pareto] top 10 by efficacy:");
-    println!(
-        "  {:>9}  {:>6}  {:>10}   active drugs (dose%)",
-        "efficacy", "risk", "total_dose"
-    );
+    println!("  {:>9}  {:>6}  {:>10}   active drugs (dose%)", "efficacy", "risk", "total_dose");
     for ind in rows.iter().take(10) {
         let active: Vec<String> = (0..drugs.len())
             .filter(|&i| ind.variables[i] >= 0.05)
             .map(|i| format!("{}={:.0}%", drugs[i].name, ind.variables[i] * 100.0))
             .collect();
-        println!(
-            "  {:>9.2}  {:>6.1}  {:>10.2}   {}",
-            -ind.fitness[0],
-            ind.fitness[1],
-            ind.fitness[2],
-            active.join(" ")
-        );
+        println!("  {:>9.2}  {:>6.1}  {:>10.2}   {}",
+            -ind.fitness[0], ind.fitness[1], ind.fitness[2], active.join(" "));
     }
 
     // Sanity: no Pareto plan has any dangerous pair both active.
-    let violations = rows
-        .iter()
-        .filter(|ind| {
-            dangerous_pairs
-                .iter()
-                .any(|(a, b)| ind.variables[*a] >= 0.05 && ind.variables[*b] >= 0.05)
-        })
-        .count();
+    let violations = rows.iter().filter(|ind| {
+        dangerous_pairs.iter().any(|(a, b)|
+            ind.variables[*a] >= 0.05 && ind.variables[*b] >= 0.05
+        )
+    }).count();
     println!("\n[check] Pareto plans with an active dangerous pair: {violations} (must be 0)");
 
     Ok(())

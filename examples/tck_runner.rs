@@ -73,10 +73,7 @@ enum Tck {
     /// the walk. Direction is the whole point: three Match6 scenarios assert
     /// that a path which exists in one direction does not match in the other,
     /// and a renderer that dropped it would pass them for the wrong reason.
-    Path {
-        nodes: Vec<Tck>,
-        rels: Vec<(Tck, bool)>,
-    },
+    Path { nodes: Vec<Tck>, rels: Vec<(Tck, bool)> },
     /// Anything this harness does not model; carries the raw text so a
     /// mismatch report is still readable.
     Opaque(String),
@@ -144,8 +141,7 @@ impl Tck {
     fn render_sorted_lists(&self) -> String {
         match self {
             Tck::List(items) => {
-                let mut inner: Vec<String> =
-                    items.iter().map(|i| i.render_sorted_lists()).collect();
+                let mut inner: Vec<String> = items.iter().map(|i| i.render_sorted_lists()).collect();
                 inner.sort();
                 format!("[{}]", inner.join(", "))
             }
@@ -162,10 +158,7 @@ impl Tck {
 }
 
 fn render_props(m: &BTreeMap<String, Tck>) -> String {
-    let inner: Vec<String> = m
-        .iter()
-        .map(|(k, v)| format!("{k}: {}", v.render()))
-        .collect();
+    let inner: Vec<String> = m.iter().map(|(k, v)| format!("{k}: {}", v.render())).collect();
     format!("{{{}}}", inner.join(", "))
 }
 
@@ -195,11 +188,7 @@ fn float_repr(f: f64) -> String {
     // both appear as distinct-but-equal-looking.
     let s = format!("{f:.9}");
     let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
-    if s.is_empty() || s == "-" {
-        "0".into()
-    } else {
-        s
-    }
+    if s.is_empty() || s == "-" { "0".into() } else { s }
 }
 
 // ------------------------------------------------- parsing a TCK literal
@@ -216,10 +205,7 @@ struct Cursor {
 
 impl Cursor {
     fn new(s: &str) -> Self {
-        Self {
-            s: s.chars().collect(),
-            i: 0,
-        }
+        Self { s: s.chars().collect(), i: 0 }
     }
     fn skip_ws(&mut self) {
         while self.i < self.s.len() && self.s[self.i].is_whitespace() {
@@ -322,9 +308,8 @@ impl Cursor {
                     'f' => out.push('\u{c}'),
                     '0' => out.push('\0'),
                     'u' => {
-                        let hex: String = (0..4)
-                            .filter_map(|k| self.s.get(self.i + k).copied())
-                            .collect();
+                        let hex: String =
+                            (0..4).filter_map(|k| self.s.get(self.i + k).copied()).collect();
                         match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
                             Some(ch) if hex.len() == 4 => {
                                 out.push(ch);
@@ -587,6 +572,7 @@ fn split_gherkin_row(line: &str) -> Vec<String> {
     cells
 }
 
+
 fn parse_expected(text: &str) -> Tck {
     let t = text.trim();
     if t.is_empty() {
@@ -613,11 +599,9 @@ fn prop_to_tck(p: &PropertyValue) -> Tck {
         PropertyValue::Float(f) => Tck::Float(float_repr(*f)),
         PropertyValue::String(s) => Tck::Str(s.clone()),
         PropertyValue::Array(items) => Tck::List(items.iter().map(prop_to_tck).collect()),
-        PropertyValue::Vector(v) => Tck::List(
-            v.iter()
-                .map(|f| Tck::Float(float_repr(*f as f64)))
-                .collect(),
-        ),
+        PropertyValue::Vector(v) => {
+            Tck::List(v.iter().map(|f| Tck::Float(float_repr(*f as f64))).collect())
+        }
         PropertyValue::Map(m) => {
             Tck::Map(m.iter().map(|(k, v)| (k.clone(), prop_to_tck(v))).collect())
         }
@@ -684,10 +668,7 @@ fn value_to_tck(v: &Value, store: &GraphStore) -> Tck {
         }
         Value::List(items) => Tck::List(items.iter().map(|i| value_to_tck(i, store)).collect()),
         Value::Map(entries) => Tck::Map(
-            entries
-                .iter()
-                .map(|(k, v)| (k.clone(), value_to_tck(v, store)))
-                .collect(),
+            entries.iter().map(|(k, v)| (k.clone(), value_to_tck(v, store))).collect(),
         ),
         Value::Path { nodes, edges } => {
             // An edge is stored with its own source and target, which need not
@@ -850,19 +831,10 @@ fn expand_outline(mut s: Scenario) -> Vec<Scenario> {
             c.name = format!("{} [{}]", s.name, row.join(", "));
             c.setup = s.setup.iter().map(|x| subst(x, header, row)).collect();
             c.query = s.query.as_ref().map(|x| subst(x, header, row));
-            c.params = s
-                .params
-                .iter()
-                .map(|(k, v)| (subst(k, header, row), subst(v, header, row)))
-                .collect();
+            c.params = s.params.iter().map(|(k, v)| (subst(k, header, row), subst(v, header, row))).collect();
             c.control_query = s.control_query.as_ref().map(|x| subst(x, header, row));
             c.expect = s.expect.as_ref().map(|e| match e {
-                Expect::Rows {
-                    header: h,
-                    rows: r,
-                    ordered,
-                    list_order_insensitive,
-                } => Expect::Rows {
+                Expect::Rows { header: h, rows: r, ordered, list_order_insensitive } => Expect::Rows {
                     header: h.iter().map(|x| subst(x, header, row)).collect(),
                     rows: r
                         .iter()
@@ -877,11 +849,7 @@ fn expand_outline(mut s: Scenario) -> Vec<Scenario> {
             out.push(c);
         }
     }
-    if out.is_empty() {
-        vec![s]
-    } else {
-        out
-    }
+    if out.is_empty() { vec![s] } else { out }
 }
 
 #[derive(Debug, PartialEq)]
@@ -895,14 +863,8 @@ enum Outcome {
 /// The setup statement for a named TCK graph, found beside the features:
 /// `<tck>/features/...` -> `<tck>/graphs/<name>/<name>.cypher`.
 fn named_graph_setup(feature: &Path, name: &str) -> Option<String> {
-    let features = feature
-        .ancestors()
-        .find(|a| a.file_name().is_some_and(|n| n == "features"))?;
-    let file = features
-        .parent()?
-        .join("graphs")
-        .join(name)
-        .join(format!("{name}.cypher"));
+    let features = feature.ancestors().find(|a| a.file_name().is_some_and(|n| n == "features"))?;
+    let file = features.parent()?.join("graphs").join(name).join(format!("{name}.cypher"));
     let text = std::fs::read_to_string(file).ok()?;
     Some(text.trim().trim_end_matches(';').trim().to_string())
 }
@@ -930,16 +892,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
 
     // The step a docstring or table belongs to.
     #[derive(PartialEq, Clone, Copy)]
-    enum Pending {
-        None,
-        Setup,
-        Query,
-        Control,
-        Result(bool),
-        Params,
-        Examples,
-        SideEffects,
-    }
+    enum Pending { None, Setup, Query, Control, Result(bool), Params, Examples, SideEffects }
     let mut pending = Pending::None;
 
     while i < lines.len() {
@@ -985,11 +938,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
             }
             let mut s = Scenario {
                 feature: feature.clone(),
-                name: line
-                    .trim_start_matches("Scenario Outline:")
-                    .trim_start_matches("Scenario:")
-                    .trim()
-                    .to_string(),
+                name: line.trim_start_matches("Scenario Outline:").trim_start_matches("Scenario:").trim().to_string(),
                 setup: background.clone(),
                 query: None,
                 control_query: None,
@@ -1006,11 +955,8 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
         }
         let Some(s) = cur.as_mut() else { continue };
 
-        if line.starts_with("Given ")
-            || line.starts_with("And ")
-            || line.starts_with("When ")
-            || line.starts_with("Then ")
-            || line.starts_with("But ")
+        if line.starts_with("Given ") || line.starts_with("And ") || line.starts_with("When ")
+            || line.starts_with("Then ") || line.starts_with("But ")
         {
             let body = line.splitn(2, ' ').nth(1).unwrap_or("").trim();
             pending = Pending::None;
@@ -1048,11 +994,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
             } else if body.starts_with("the result should be empty") {
                 s.expect = Some(Expect::Empty);
             } else if body.contains("should be raised") {
-                let kind = body
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("Error")
-                    .to_string();
+                let kind = body.split_whitespace().nth(1).unwrap_or("Error").to_string();
                 s.expect = Some(Expect::Error(kind));
             } else if body.starts_with("no side effects") {
                 s.side_effects = Some((0, 0, 0, 0));
@@ -1079,10 +1021,7 @@ fn parse_feature(path: &Path, text: &str) -> Vec<Scenario> {
                     None => s.unsupported = Some("named fixture graph".into()),
                 }
             } else if s.unsupported.is_none() {
-                s.unsupported = Some(format!(
-                    "step: {}",
-                    body.chars().take(48).collect::<String>()
-                ));
+                s.unsupported = Some(format!("step: {}", body.chars().take(48).collect::<String>()));
             }
             continue;
         }
@@ -1177,13 +1116,11 @@ fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>
     for stmt in &s.setup {
         let q = parse_query(stmt).map_err(|_| format!("setup did not parse: {stmt}"))?;
         let mut m = MutQueryExecutor::new(&mut store, "default".to_string());
-        m.execute(&q)
-            .map_err(|e| format!("setup did not run: {e}"))?;
+        m.execute(&q).map_err(|e| format!("setup did not run: {e}"))?;
     }
     let query: &String = if let Some(control) = &s.control_query {
         let q = parse_query(query).map_err(|e| format!("parse: {e}"))?;
-        let mut m =
-            MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
+        let mut m = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
         m.execute(&q).map_err(|e| format!("{e}"))?;
         control
     } else {
@@ -1194,8 +1131,7 @@ fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>
     // side effect can be checked rather than parsed and discarded (#888).
     let before = (store.node_count() as i64, store.edge_count() as i64);
     let batch = {
-        let mut m =
-            MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
+        let mut m = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
         match m.execute(&parsed) {
             Ok(b) => b,
             Err(_) => QueryExecutor::new(&store)
@@ -1225,12 +1161,7 @@ fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>
         rows.push(
             header
                 .iter()
-                .map(|c| {
-                    rec.get(c)
-                        .map(|v| value_to_tck(v, &store))
-                        .unwrap_or(Tck::Null)
-                        .render()
-                })
+                .map(|c| rec.get(c).map(|v| value_to_tck(v, &store)).unwrap_or(Tck::Null).render())
                 .collect(),
         );
     }
@@ -1252,7 +1183,11 @@ fn run_scenario_rows(s: &Scenario, header: &[String]) -> Result<Vec<Vec<String>>
 ///
 /// Skipped when the scenario has a control query, since the write then happened
 /// before this snapshot and the snapshot spans the control query instead.
-fn side_effect_mismatch(s: &Scenario, before: (i64, i64), store: &GraphStore) -> Option<String> {
+fn side_effect_mismatch(
+    s: &Scenario,
+    before: (i64, i64),
+    store: &GraphStore,
+) -> Option<String> {
     let (pn, mn, pr, mr) = s.side_effects?;
     if s.control_query.is_some() {
         return None;
@@ -1277,11 +1212,7 @@ fn scenario_params(s: &Scenario) -> Result<HashMap<String, PropertyValue>, Strin
         match v {
             Value::Property(p) => Some(p.clone()),
             Value::Null => Some(PropertyValue::Null),
-            Value::List(xs) => xs
-                .iter()
-                .map(to_prop)
-                .collect::<Option<Vec<_>>>()
-                .map(PropertyValue::Array),
+            Value::List(xs) => xs.iter().map(to_prop).collect::<Option<Vec<_>>>().map(PropertyValue::Array),
             Value::Map(m) => m
                 .iter()
                 .map(|(k, v)| to_prop(v).map(|p| (k.clone(), p)))
@@ -1298,12 +1229,7 @@ fn scenario_params(s: &Scenario) -> Result<HashMap<String, PropertyValue>, Strin
         let batch = QueryExecutor::new(&store)
             .execute(&q)
             .map_err(|_| format!("parameter literal did not evaluate: ${name}"))?;
-        let v = batch
-            .records
-            .first()
-            .and_then(|r| r.get("v"))
-            .cloned()
-            .unwrap_or(Value::Null);
+        let v = batch.records.first().and_then(|r| r.get("v")).cloned().unwrap_or(Value::Null);
         let p = to_prop(&v).ok_or_else(|| format!("parameter is not a property value: ${name}"))?;
         out.insert(name.clone(), p);
     }
@@ -1346,19 +1272,12 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
     // the control query can see.
     let query: &String = if let Some(control) = &s.control_query {
         if let Ok(q) = parse_query(query) {
-            let mut m = MutQueryExecutor::new(&mut store, "default".to_string())
-                .with_params(params.clone());
+            let mut m = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
             if m.execute(&q).is_err() {
-                return (
-                    Outcome::Errored,
-                    "the query before the control query failed".into(),
-                );
+                return (Outcome::Errored, "the query before the control query failed".into());
             }
         } else {
-            return (
-                Outcome::Errored,
-                format!("parse: {}", query.replace('\n', " ")),
-            );
+            return (Outcome::Errored, format!("parse: {}", query.replace('\n', " ")));
         }
         control
     } else {
@@ -1379,7 +1298,7 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
                     // missing. The query does.
                     format!("parse: {}", query.replace('\n', " ")),
                 ),
-            };
+            }
         }
     };
 
@@ -1395,13 +1314,10 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
     let before_counts = (store.node_count() as i64, store.edge_count() as i64);
 
     let batch = if is_write {
-        let mut m =
-            MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
+        let mut m = MutQueryExecutor::new(&mut store, "default".to_string()).with_params(params.clone());
         m.execute(&parsed)
     } else {
-        QueryExecutor::new(&store)
-            .with_params(params.clone())
-            .execute(&parsed)
+        QueryExecutor::new(&store).with_params(params.clone()).execute(&parsed)
     };
 
     let batch = match batch {
@@ -1409,10 +1325,7 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
         Err(e) => {
             return match expect {
                 Expect::Error(_) => (Outcome::Pass, String::new()),
-                _ => (
-                    Outcome::Errored,
-                    format!("exec: {}", short(&format!("{e:?}"))),
-                ),
+                _ => (Outcome::Errored, format!("exec: {}", short(&format!("{e:?}")))),
             }
         }
     };
@@ -1420,29 +1333,18 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
     match expect {
         Expect::Error(kind) => (
             Outcome::WrongResult,
-            format!(
-                "expected {kind}, query succeeded with {} rows",
-                batch.records.len()
-            ),
+            format!("expected {kind}, query succeeded with {} rows", batch.records.len()),
         ),
         Expect::Empty => {
             if !batch.records.is_empty() {
-                (
-                    Outcome::WrongResult,
-                    format!("expected empty, got {} rows", batch.records.len()),
-                )
+                (Outcome::WrongResult, format!("expected empty, got {} rows", batch.records.len()))
             } else if let Some(why) = side_effect_mismatch(s, before_counts, &store) {
                 (Outcome::WrongResult, why)
             } else {
                 (Outcome::Pass, String::new())
             }
         }
-        Expect::Rows {
-            header,
-            rows: _,
-            ordered: _,
-            list_order_insensitive,
-        } => {
+        Expect::Rows { header, rows: _, ordered: _, list_order_insensitive } => {
             if header.is_empty() {
                 return (Outcome::Skipped, "no header".into());
             }
@@ -1450,10 +1352,7 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
             for rec in &batch.records {
                 let mut row = Vec::new();
                 for col in header {
-                    let v = rec
-                        .get(col)
-                        .map(|v| value_to_tck(v, &store))
-                        .unwrap_or(Tck::Null);
+                    let v = rec.get(col).map(|v| value_to_tck(v, &store)).unwrap_or(Tck::Null);
                     row.push(if *list_order_insensitive {
                         v.render_sorted_lists()
                     } else {
@@ -1477,12 +1376,7 @@ fn run_scenario(s: &Scenario) -> (Outcome, String) {
 /// number would say nothing about either engine.
 fn compare_rendered_rows(expect: &Expect, mut actual: Vec<Vec<String>>) -> (Outcome, String) {
     match expect {
-        Expect::Rows {
-            rows,
-            ordered,
-            list_order_insensitive,
-            ..
-        } => {
+        Expect::Rows { rows, ordered, list_order_insensitive, .. } => {
             let mut expected: Vec<Vec<String>> = rows
                 .iter()
                 .map(|r| {
@@ -1522,18 +1416,12 @@ fn compare_rendered_rows(expect: &Expect, mut actual: Vec<Vec<String>>) -> (Outc
             if actual.is_empty() {
                 (Outcome::Pass, String::new())
             } else {
-                (
-                    Outcome::WrongResult,
-                    format!("expected empty, got {} rows", actual.len()),
-                )
+                (Outcome::WrongResult, format!("expected empty, got {} rows", actual.len()))
             }
         }
         Expect::Error(kind) => (
             Outcome::WrongResult,
-            format!(
-                "expected {kind}, query succeeded with {} rows",
-                actual.len()
-            ),
+            format!("expected {kind}, query succeeded with {} rows", actual.len()),
         ),
     }
 }
@@ -1543,9 +1431,7 @@ fn short(s: &str) -> String {
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -1559,10 +1445,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| -> Option<String> {
-        args.iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1))
-            .cloned()
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
     };
     let features = arg("--features").unwrap_or_else(|| {
         eprintln!("usage: tck_runner --features <path to tck/features> [--json out.json]");
@@ -1599,12 +1482,8 @@ fn main() {
             }
             let expect = s.expect.as_ref().unwrap();
             let (kind, header, ordered, loose) = match expect {
-                Expect::Rows {
-                    header,
-                    ordered,
-                    list_order_insensitive,
-                    ..
-                } => ("rows", header.clone(), *ordered, *list_order_insensitive),
+                Expect::Rows { header, ordered, list_order_insensitive, .. } =>
+                    ("rows", header.clone(), *ordered, *list_order_insensitive),
                 Expect::Empty => ("empty", Vec::new(), false, false),
                 Expect::Error(_) => ("error", Vec::new(), false, false),
             };
@@ -1704,12 +1583,7 @@ fn main() {
             let Some(actual) = by_key.get(&(s.feature.clone(), s.name.clone())) else {
                 missing += 1;
                 err += 1;
-                failures.push((
-                    s.feature.clone(),
-                    s.name.clone(),
-                    "errored",
-                    "no result reported".into(),
-                ));
+                failures.push((s.feature.clone(), s.name.clone(), "errored", "no result reported".into()));
                 continue;
             };
             let status = actual["status"].as_str().unwrap_or("error");
@@ -1737,13 +1611,7 @@ fn main() {
             }
             // Each cell arrives as TCK literal text and is put through the same
             // parse-and-render as the expected side.
-            let loose = matches!(
-                expect,
-                Expect::Rows {
-                    list_order_insensitive: true,
-                    ..
-                }
-            );
+            let loose = matches!(expect, Expect::Rows { list_order_insensitive: true, .. });
             let rows: Vec<Vec<String>> = actual["rows"]
                 .as_array()
                 .map(|rs| {
@@ -1754,11 +1622,7 @@ fn main() {
                                     cs.iter()
                                         .map(|c| {
                                             let v = parse_expected(c.as_str().unwrap_or("null"));
-                                            if loose {
-                                                v.render_sorted_lists()
-                                            } else {
-                                                v.render()
-                                            }
+                                            if loose { v.render_sorted_lists() } else { v.render() }
                                         })
                                         .collect()
                                 })
@@ -1768,10 +1632,7 @@ fn main() {
                 })
                 .unwrap_or_default();
             match compare_rendered_rows(expect, rows) {
-                (Outcome::Pass, _) => {
-                    pass += 1;
-                    entry.0 += 1;
-                }
+                (Outcome::Pass, _) => { pass += 1; entry.0 += 1; }
                 (_, detail) => {
                     wrong += 1;
                     failures.push((s.feature.clone(), s.name.clone(), "wrong_result", detail));
@@ -1783,11 +1644,7 @@ fn main() {
         println!("    pass             {pass}");
         println!("    wrong result     {wrong}");
         println!("    errored          {err}   (of which {missing} reported nothing)");
-        let rate = if evaluated > 0 {
-            pass as f64 / evaluated as f64 * 100.0
-        } else {
-            0.0
-        };
+        let rate = if evaluated > 0 { pass as f64 / evaluated as f64 * 100.0 } else { 0.0 };
         println!("\n  PASS RATE          {rate:.1}%  of evaluated scenarios");
         if let Some(m) = arg("--failures-manifest") {
             let mut lines: Vec<String> = failures
@@ -1817,36 +1674,22 @@ fn main() {
     let mut per_feature: BTreeMap<String, (usize, usize)> = BTreeMap::new();
 
     for s in &scenarios {
-        let (outcome, detail) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_scenario(s)))
-                .unwrap_or((Outcome::Errored, "panicked".into()));
+        let (outcome, detail) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_scenario(s)))
+            .unwrap_or((Outcome::Errored, "panicked".into()));
         let entry = per_feature.entry(s.feature.clone()).or_insert((0, 0));
         match outcome {
-            Outcome::Pass => {
-                pass += 1;
-                entry.0 += 1;
-                entry.1 += 1;
-            }
-            Outcome::WrongResult => {
-                wrong += 1;
-                entry.1 += 1;
-                failures.push((s.feature.clone(), s.name.clone(), "wrong_result", detail));
-            }
-            Outcome::Errored => {
-                err += 1;
-                entry.1 += 1;
-                failures.push((s.feature.clone(), s.name.clone(), "errored", detail));
-            }
+            Outcome::Pass => { pass += 1; entry.0 += 1; entry.1 += 1; }
+            Outcome::WrongResult => { wrong += 1; entry.1 += 1;
+                failures.push((s.feature.clone(), s.name.clone(), "wrong_result", detail)); }
+            Outcome::Errored => { err += 1; entry.1 += 1;
+                failures.push((s.feature.clone(), s.name.clone(), "errored", detail)); }
             Outcome::Skipped => {
                 skip += 1;
                 // Group on the category, not the whole detail. "setup did not
                 // parse" now carries the offending query so it can be fixed,
                 // and counting those verbatim would make every row unique and
                 // the histogram useless.
-                let category = detail
-                    .split_once(": ")
-                    .map_or(detail.as_str(), |(head, _)| head)
-                    .to_string();
+                let category = detail.split_once(": ").map_or(detail.as_str(), |(head, _)| head).to_string();
                 *skip_reasons.entry(category).or_insert(0) += 1;
             }
         }
@@ -1854,16 +1697,8 @@ fn main() {
 
     let total = scenarios.len();
     let evaluated = pass + wrong + err;
-    let pass_rate = if evaluated == 0 {
-        0.0
-    } else {
-        pass as f64 * 100.0 / evaluated as f64
-    };
-    let coverage = if total == 0 {
-        0.0
-    } else {
-        evaluated as f64 * 100.0 / total as f64
-    };
+    let pass_rate = if evaluated == 0 { 0.0 } else { pass as f64 * 100.0 / evaluated as f64 };
+    let coverage = if total == 0 { 0.0 } else { evaluated as f64 * 100.0 / total as f64 };
 
     println!("openCypher TCK");
     println!("  feature files      {}", files.len());
@@ -1876,10 +1711,7 @@ fn main() {
     println!("  skipped            {skip}");
     println!();
     println!("  PASS RATE          {pass_rate:.1}%  of evaluated scenarios");
-    println!(
-        "  gate CH-TCK >= 85% of evaluated: {}",
-        if pass_rate >= 85.0 { "MET" } else { "NOT MET" }
-    );
+    println!("  gate CH-TCK >= 85% of evaluated: {}", if pass_rate >= 85.0 { "MET" } else { "NOT MET" });
     println!();
     println!("  The rate is over every scenario this harness can judge, outlines");
     println!("  included. Before outlines were expanded it read 87.1% over 1,244");
@@ -1921,14 +1753,11 @@ fn main() {
             );
             std::process::exit(1);
         }
-        println!(
-            "RATCHET OK: {pass} pass, floor {min}{}.",
-            if pass > min {
-                format!(" (+{} — raise the floor)", pass - min)
-            } else {
-                String::new()
-            }
-        );
+        println!("RATCHET OK: {pass} pass, floor {min}{}.", if pass > min {
+            format!(" (+{} — raise the floor)", pass - min)
+        } else {
+            String::new()
+        });
     }
 
     println!("\nTop skip reasons:");
@@ -2023,10 +1852,8 @@ fn main() {
             println!("  [{f}] {n} ({o})\n      {d}");
         }
         if failures.len() > 60 {
-            println!(
-                "  ... and {} more; use --failures-manifest for the full list",
-                failures.len() - 60
-            );
+            println!("  ... and {} more; use --failures-manifest for the full list",
+                     failures.len() - 60);
         }
     }
 }
@@ -2098,6 +1925,7 @@ mod tests {
         }
     }
 
+
     /// An outline is a template; each `Examples:` row is one concrete scenario.
     ///
     /// Skipping them was the harness's single largest blind spot: 274 of the
@@ -2130,10 +1958,7 @@ Feature: Demo
         assert_eq!(out.len(), 2, "two example rows, two scenarios");
         assert_eq!(out[0].query.as_deref(), Some("RETURN 1 + 2 AS r"));
         assert_eq!(out[1].query.as_deref(), Some("RETURN 4 + 5 AS r"));
-        assert!(
-            out.iter().all(|s| s.unsupported.is_none()),
-            "expanded rows must run"
-        );
+        assert!(out.iter().all(|s| s.unsupported.is_none()), "expanded rows must run");
 
         // The placeholder is substituted in the *expectation* too. A harness
         // that interpolated only the query would score every row against the
@@ -2176,11 +2001,7 @@ Feature: Demo
         match out[0].expect.as_ref().expect("expectation") {
             Expect::Rows { rows, header, .. } => {
                 assert_eq!(header, &vec!["r".to_string()]);
-                assert_eq!(
-                    rows,
-                    &vec![vec!["7".to_string()]],
-                    "one row, not the examples too"
-                );
+                assert_eq!(rows, &vec![vec!["7".to_string()]], "one row, not the examples too");
             }
             other => panic!("expected rows, got {other:?}"),
         }
@@ -2215,10 +2036,7 @@ Feature: Demo
 ";
         let out = parse_feature(Path::new("Demo.feature"), text);
         assert_eq!(out.len(), 1);
-        assert_eq!(
-            out[0].unsupported.as_deref(),
-            Some("user-defined procedure")
-        );
+        assert_eq!(out[0].unsupported.as_deref(), Some("user-defined procedure"));
     }
 
     /// An outline whose `Examples:` block never arrived stays one skipped
@@ -2239,10 +2057,7 @@ Feature: Demo
 ";
         let out = parse_feature(Path::new("Demo.feature"), text);
         assert_eq!(out.len(), 1);
-        assert_eq!(
-            out[0].unsupported.as_deref(),
-            Some("Scenario Outline without Examples")
-        );
+        assert_eq!(out[0].unsupported.as_deref(), Some("Scenario Outline without Examples"));
     }
 
     /// A single outline may carry several `Examples:` blocks, with different
@@ -2322,11 +2137,7 @@ Feature: Demo
 ";
         let scenarios = parse_feature(Path::new("Demo.feature"), text);
 
-        assert_eq!(
-            scenarios.len(),
-            2,
-            "the Background must not become a scenario"
-        );
+        assert_eq!(scenarios.len(), 2, "the Background must not become a scenario");
         assert_eq!(scenarios[0].name, "[1] first");
         assert_eq!(
             scenarios[0].setup,
@@ -2335,10 +2146,7 @@ Feature: Demo
         );
         assert_eq!(
             scenarios[1].setup,
-            vec![
-                "CREATE (:A {name: 'a'})".to_string(),
-                "CREATE (:B)".to_string()
-            ],
+            vec!["CREATE (:A {name: 'a'})".to_string(), "CREATE (:B)".to_string()],
             "a scenario's own setup runs after the Background's, not instead of it"
         );
     }

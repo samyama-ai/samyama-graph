@@ -75,13 +75,8 @@ async fn main() -> Result<(), Error> {
     }
 
     for fname in &[
-        "tournaments.csv",
-        "matches.csv",
-        "teams.csv",
-        "players.csv",
-        "goals.csv",
-        "stadiums.csv",
-        "managers.csv",
+        "tournaments.csv", "matches.csv", "teams.csv", "players.csv",
+        "goals.csv", "stadiums.csv", "managers.csv",
     ] {
         let p = data_dir.join(fname);
         if !p.exists() {
@@ -144,16 +139,10 @@ async fn main() -> Result<(), Error> {
             eprint!("cypher> ");
             io::stderr().flush()?;
             let mut input = String::new();
-            if stdin.lock().read_line(&mut input)? == 0 {
-                break;
-            }
+            if stdin.lock().read_line(&mut input)? == 0 { break; }
             let query = input.trim();
-            if query.is_empty() {
-                continue;
-            }
-            if query == "quit" || query == "exit" {
-                break;
-            }
+            if query.is_empty() { continue; }
+            if query == "quit" || query == "exit" { break; }
             match client.query("default", query).await {
                 Ok(result) => {
                     if result.columns.is_empty() {

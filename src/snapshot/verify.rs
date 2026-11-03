@@ -87,12 +87,10 @@ impl ParamSpec {
         Ok(match (&self.sample, self.kind.as_str()) {
             (serde_json::Value::Bool(b), "bool") => P::Boolean(*b),
             (serde_json::Value::Number(n), "int") => P::Integer(
-                n.as_i64()
-                    .ok_or_else(|| format!("{}: sample is not an integer", self.name))?,
+                n.as_i64().ok_or_else(|| format!("{}: sample is not an integer", self.name))?,
             ),
             (serde_json::Value::Number(n), "float") => P::Float(
-                n.as_f64()
-                    .ok_or_else(|| format!("{}: sample is not a float", self.name))?,
+                n.as_f64().ok_or_else(|| format!("{}: sample is not a float", self.name))?,
             ),
             (serde_json::Value::String(v), "string") => P::String(v.clone()),
             _ => {
@@ -100,9 +98,7 @@ impl ParamSpec {
                     "{}: declared type {:?} but the sample is a {}. A mis-declared \
                      type is not caught at execution -- a string against an integer \
                      property returns zero rows and no error.",
-                    self.name,
-                    self.kind,
-                    self.sample_kind()
+                    self.name, self.kind, self.sample_kind()
                 ))
             }
         })
@@ -325,11 +321,7 @@ pub fn canonical_hash(batch: &RecordBatch) -> String {
             cells.insert(col.as_str(), format!("{:?}", rec.get(col)));
         }
         rows.push(
-            cells
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join("\u{1f}"),
+            cells.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\u{1f}"),
         );
     }
     rows.sort();
@@ -527,8 +519,7 @@ pub fn validate_entry_shape(id: &str, cypher: &str, params: &[ParamSpec]) -> Res
         if let Some(allowed) = &p.enum_values {
             if !allowed.contains(&p.sample) {
                 return Err(format!(
-                    "{}: the sample value is not in the declared enum",
-                    p.name
+                    "{}: the sample value is not in the declared enum", p.name
                 ));
             }
         }
@@ -577,9 +568,7 @@ pub fn build_catalog(
                 "{id}: returned 0 rows. A zero-row entry passes against any graph, \
                  including an empty one, so it detects nothing. Fix the query, or \
                  mark it unanswerable if returning nothing is the point.{}",
-                if q.params.is_empty() {
-                    ""
-                } else {
+                if q.params.is_empty() { "" } else {
                     " With parameters, the usual cause is a type mismatch: a string \
                      compared to an integer property matches nothing and raises no \
                      error."
@@ -638,23 +627,14 @@ pub fn verify(store: &GraphStore, catalog: &QueryCatalog) -> Result<VerifyReport
                 } else if rows == 0 && e.rows > 0 {
                     (rows, Some(FailureClass::EmptyResult), String::new())
                 } else if rows < e.rows {
-                    (
-                        rows,
-                        Some(FailureClass::PartialResult),
-                        format!("{} of {} rows", rows, e.rows),
-                    )
+                    (rows, Some(FailureClass::PartialResult),
+                     format!("{} of {} rows", rows, e.rows))
                 } else if rows > e.rows {
-                    (
-                        rows,
-                        Some(FailureClass::ExtraRows),
-                        format!("{} rows, expected {}", rows, e.rows),
-                    )
+                    (rows, Some(FailureClass::ExtraRows),
+                     format!("{} rows, expected {}", rows, e.rows))
                 } else {
-                    (
-                        rows,
-                        Some(FailureClass::ValuesDiffer),
-                        format!("hash {} != {}", hash, e.hash),
-                    )
+                    (rows, Some(FailureClass::ValuesDiffer),
+                     format!("hash {} != {}", hash, e.hash))
                 }
             }
         };
@@ -669,11 +649,9 @@ pub fn verify(store: &GraphStore, catalog: &QueryCatalog) -> Result<VerifyReport
 
     // Guard against the #449 shape: everything answered, nothing returned.
     let everything_empty = !results.is_empty() && results.iter().all(|r| r.actual_rows == 0);
-    Ok(VerifyReport {
-        results,
-        everything_empty,
-    })
+    Ok(VerifyReport { results, everything_empty })
 }
+
 
 /// Whether a catalog meets what KG-08 and DX-08 already require (#1154).
 ///
@@ -703,15 +681,11 @@ pub fn kg08_conformance(catalog: &QueryCatalog) -> Vec<String> {
     }
     for e in &catalog.entries {
         if e.question.trim().is_empty() {
-            problems.push(format!(
-                "{}: no question text; DX-08 is about the question",
-                e.id
-            ));
+            problems.push(format!("{}: no question text; DX-08 is about the question", e.id));
         }
         if !DIFFICULTIES.contains(&e.difficulty.as_str()) {
             problems.push(format!(
-                "{}: difficulty {:?} is not one of {DIFFICULTIES:?}",
-                e.id, e.difficulty
+                "{}: difficulty {:?} is not one of {DIFFICULTIES:?}", e.id, e.difficulty
             ));
         }
     }

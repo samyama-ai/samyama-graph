@@ -36,10 +36,7 @@ use samyama::index::hierarchy::{HierarchySpec, RollupOp};
 use samyama::query::QueryEngine;
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1))
-        .cloned()
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
 }
 
 fn main() {
@@ -48,16 +45,12 @@ fn main() {
         eprintln!("--mesh <mtrees.bin> is required (NLM MeSH tree file)");
         std::process::exit(2)
     });
-    let n_articles: usize = arg(&args, "--articles")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1_000_000);
-    let terms_per_article: usize = arg(&args, "--terms")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5);
+    let n_articles: usize =
+        arg(&args, "--articles").and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+    let terms_per_article: usize =
+        arg(&args, "--terms").and_then(|v| v.parse().ok()).unwrap_or(5);
     let export = arg(&args, "--export-csv");
-    let reps: usize = arg(&args, "--reps")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5);
+    let reps: usize = arg(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(5);
     // Above this corpus size the unindexed fact scan takes minutes per query, so running
     // it at every scale would cost hours to re-measure something already established. The
     // indexed query still runs at every scale; the baseline is reported as not run rather
@@ -69,14 +62,12 @@ fn main() {
     // ---- load the real MeSH tree ------------------------------------------
     let t0 = Instant::now();
     let mut store = GraphStore::new();
-    let file =
-        std::fs::File::open(&mesh_path).unwrap_or_else(|e| panic!("cannot open {mesh_path}: {e}"));
+    let file = std::fs::File::open(&mesh_path)
+        .unwrap_or_else(|e| panic!("cannot open {mesh_path}: {e}"));
     let mut tree_ids: HashMap<String, NodeId> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
-        let Some((name, tree)) = line.split_once(';') else {
-            continue;
-        };
+        let Some((name, tree)) = line.split_once(';') else { continue };
         let (name, tree) = (name.trim().to_string(), tree.trim().to_string());
         if tree.is_empty() {
             continue;
@@ -174,19 +165,10 @@ fn main() {
         "[facts] {n_articles} articles, {fact_edges} ANNOTATED_WITH edges in {:.2}s",
         t1.elapsed().as_secs_f64()
     );
-    eprintln!(
-        "[graph] {} nodes, {} edges",
-        store.node_count(),
-        mesh_edges + fact_edges
-    );
+    eprintln!("[graph] {} nodes, {} edges", store.node_count(), mesh_edges + fact_edges);
 
     if let Some(dir) = &export {
-        export_csv(
-            &store,
-            dir,
-            mesh_nodes + n_articles,
-            mesh_edges + fact_edges,
-        );
+        export_csv(&store, dir, mesh_nodes + n_articles, mesh_edges + fact_edges);
         return;
     }
 
@@ -226,15 +208,10 @@ fn main() {
     // are annotated with anything under Cardiovascular Diseases?". It has to reach the fact
     // table, so it is the one that scales with corpus size, and it is what the mega-
     // federation cannot ask today because its MeSHTerm nodes are flat.
-    let roots = [
-        "C", "C14", "C04", "C01", "D", "A", "E01", "C14.280", "G", "B",
-    ];
+    let roots = ["C", "C14", "C04", "C01", "D", "A", "E01", "C14.280", "G", "B"];
     println!();
     println!("TERM-LEVEL roll-up (index-resident; independent of corpus size)");
-    println!(
-        "{:<10} {:>9} {:>12} {:>14} {:>10}",
-        "subtree", "terms", "indexed ms", "traversal ms", "speedup"
-    );
+    println!("{:<10} {:>9} {:>12} {:>14} {:>10}", "subtree", "terms", "indexed ms", "traversal ms", "speedup");
     println!("{}", "-".repeat(60));
     let mut disagreements = 0usize;
     for root in roots {
@@ -252,10 +229,7 @@ fn main() {
         let (tms, tv) = timed(&engine, &store, &traversal, reps);
         let note = match (iv, tv) {
             (Some(a), Some(b)) if a == b => String::new(),
-            (Some(a), Some(b)) => {
-                disagreements += 1;
-                format!("  <-- DISAGREE {a} vs {b}")
-            }
+            (Some(a), Some(b)) => { disagreements += 1; format!("  <-- DISAGREE {a} vs {b}") }
             _ => "  <-- QUERY FAILED".to_string(),
         };
         println!(
@@ -267,10 +241,7 @@ fn main() {
 
     println!();
     println!("ARTICLE-LEVEL count (reaches the fact table; scales with corpus size)");
-    println!(
-        "{:<10} {:>11} {:>12} {:>14} {:>10}",
-        "subtree", "articles", "indexed ms", "fact-scan ms", "speedup"
-    );
+    println!("{:<10} {:>11} {:>12} {:>14} {:>10}", "subtree", "articles", "indexed ms", "fact-scan ms", "speedup");
     println!("{}", "-".repeat(62));
     for root in ["C", "C14", "C01", "D", "C14.280"] {
         // Driven plan: enumerate the subtree from the index, walk ANNOTATED_WITH backwards.
@@ -287,10 +258,7 @@ fn main() {
         let (ims, iv) = timed(&engine, &store, &indexed, reps);
         let shown = iv.map(|v| v.to_string()).unwrap_or_else(|| "-".into());
         if n_articles > baseline_max {
-            println!(
-                "{root:<10} {shown:>11} {ims:>12.4} {:>14} {:>10}",
-                "not run", "-"
-            );
+            println!("{root:<10} {shown:>11} {ims:>12.4} {:>14} {:>10}", "not run", "-");
             continue;
         }
         // One rep for the baseline: it is minutes per query at this size and its variance
@@ -298,10 +266,7 @@ fn main() {
         let (sms, sv) = timed(&engine, &store, &scan, 1);
         let note = match (iv, sv) {
             (Some(a), Some(b)) if a == b => String::new(),
-            (Some(a), Some(b)) => {
-                disagreements += 1;
-                format!("  <-- DISAGREE {a} vs {b}")
-            }
+            (Some(a), Some(b)) => { disagreements += 1; format!("  <-- DISAGREE {a} vs {b}") }
             _ => "  <-- QUERY FAILED".to_string(),
         };
         println!(
@@ -357,11 +322,7 @@ fn export_csv(store: &GraphStore, dir: &str, _n: usize, _e: usize) {
     let mut nodes = std::io::BufWriter::new(
         std::fs::File::create(format!("{dir}/nodes.csv")).expect("nodes.csv"),
     );
-    writeln!(
-        nodes,
-        "id:ID,code,name,level:long,pmid:long,citations:long,:LABEL"
-    )
-    .unwrap();
+    writeln!(nodes, "id:ID,code,name,level:long,pmid:long,citations:long,:LABEL").unwrap();
     for node in store.all_nodes() {
         let i = node.id.as_u64() as usize;
         let g = |k: &str| match store.node_columns.get_property(i, k) {
@@ -369,22 +330,11 @@ fn export_csv(store: &GraphStore, dir: &str, _n: usize, _e: usize) {
             PropertyValue::Integer(v) => v.to_string(),
             _ => String::new(),
         };
-        let label = node
-            .labels
-            .iter()
-            .map(|l| l.as_str())
-            .collect::<Vec<_>>()
-            .join(";");
+        let label = node.labels.iter().map(|l| l.as_str()).collect::<Vec<_>>().join(";");
         writeln!(
             nodes,
             "{},{},{},{},{},{},{}",
-            node.id.as_u64(),
-            g("code"),
-            g("name"),
-            g("level"),
-            g("pmid"),
-            g("citations"),
-            label
+            node.id.as_u64(), g("code"), g("name"), g("level"), g("pmid"), g("citations"), label
         )
         .unwrap();
     }

@@ -18,9 +18,7 @@ fn run(s: &mut GraphStore, q: &str) {
 }
 
 fn count(s: &GraphStore, q: &str) -> f64 {
-    let b = QueryExecutor::new(s)
-        .execute(&parse_query(q).unwrap())
-        .unwrap_or_else(|e| panic!("{q}: {e}"));
+    let b = QueryExecutor::new(s).execute(&parse_query(q).unwrap()).unwrap_or_else(|e| panic!("{q}: {e}"));
     match b.records[0].get("n") {
         Some(Value::Property(PropertyValue::Integer(n))) => *n as f64,
         other => panic!("{q}: {other:?}"),
@@ -28,9 +26,7 @@ fn count(s: &GraphStore, q: &str) -> f64 {
 }
 
 fn explain(s: &GraphStore, q: &str) -> String {
-    let b = QueryExecutor::new(s)
-        .execute(&parse_query(&format!("EXPLAIN {q}")).unwrap())
-        .unwrap();
+    let b = QueryExecutor::new(s).execute(&parse_query(&format!("EXPLAIN {q}")).unwrap()).unwrap();
     match b.records[0].get("plan") {
         Some(Value::Property(PropertyValue::String(t))) => t.clone(),
         other => panic!("{other:?}"),
@@ -68,16 +64,8 @@ fn ranges_on_a_skewed_property_are_within_2x() {
     let mut misses = Vec::new();
     let mut checked = 0;
     for x in 0..9i64 {
-        for (op, sym) in [
-            (BinaryOp::Lt, "<"),
-            (BinaryOp::Le, "<="),
-            (BinaryOp::Gt, ">"),
-            (BinaryOp::Ge, ">="),
-        ] {
-            let actual = count(
-                &s,
-                &format!("MATCH (p:P) WHERE p.v {sym} {x} RETURN count(p) AS n"),
-            );
+        for (op, sym) in [(BinaryOp::Lt, "<"), (BinaryOp::Le, "<="), (BinaryOp::Gt, ">"), (BinaryOp::Ge, ">=")] {
+            let actual = count(&s, &format!("MATCH (p:P) WHERE p.v {sym} {x} RETURN count(p) AS n"));
             if actual < 5.0 {
                 continue; // A handful of rows is not where a plan goes wrong.
             }
@@ -86,10 +74,7 @@ fn ranges_on_a_skewed_property_are_within_2x() {
                 .expect("v has a histogram");
             checked += 1;
             if !within_2x(sel * 1000.0, actual) {
-                misses.push(format!(
-                    "v {sym} {x}: estimate {:.0}, actual {actual}",
-                    sel * 1000.0
-                ));
+                misses.push(format!("v {sym} {x}: estimate {:.0}, actual {actual}", sel * 1000.0));
             }
         }
     }
@@ -103,22 +88,10 @@ fn less_than_and_at_most_differ_by_the_mass_at_the_value() {
     // and a histogram alone sees a run of equal bounds either way.
     let s = skewed("P", 1000);
     let stats = s.statistics();
-    let est = |op: BinaryOp| {
-        stats
-            .estimate_comparison_selectivity(&Label::new("P"), "v", &op, &PropertyValue::Integer(0))
-            .unwrap()
-    };
+    let est = |op: BinaryOp| stats.estimate_comparison_selectivity(&Label::new("P"), "v", &op, &PropertyValue::Integer(0)).unwrap();
     assert!(est(BinaryOp::Lt) < 0.01, "{}", est(BinaryOp::Lt));
-    assert!(
-        (0.4..0.6).contains(&est(BinaryOp::Le)),
-        "{}",
-        est(BinaryOp::Le)
-    );
-    assert!(
-        (0.4..0.6).contains(&est(BinaryOp::Gt)),
-        "{}",
-        est(BinaryOp::Gt)
-    );
+    assert!((0.4..0.6).contains(&est(BinaryOp::Le)), "{}", est(BinaryOp::Le));
+    assert!((0.4..0.6).contains(&est(BinaryOp::Gt)), "{}", est(BinaryOp::Gt));
     assert!(est(BinaryOp::Ge) > 0.99, "{}", est(BinaryOp::Ge));
 }
 
@@ -128,41 +101,15 @@ fn a_sampled_label_is_within_2x_too() {
     let s = skewed("P", 20_000);
     let stats = s.statistics();
     let label = Label::new("P");
-    for (op, sym, x) in [
-        (BinaryOp::Lt, "<", 300i64),
-        (BinaryOp::Ge, ">=", 900),
-        (BinaryOp::Lt, "<", 50),
-    ] {
-        let actual = count(
-            &s,
-            &format!("MATCH (p:P) WHERE p.w {sym} {x} RETURN count(p) AS n"),
-        );
-        let sel = stats
-            .estimate_comparison_selectivity(&label, "w", &op, &PropertyValue::Integer(x))
-            .unwrap();
-        assert!(
-            within_2x(sel * 20_000.0, actual),
-            "w {sym} {x}: estimate {:.0}, actual {actual}",
-            sel * 20_000.0
-        );
+    for (op, sym, x) in [(BinaryOp::Lt, "<", 300i64), (BinaryOp::Ge, ">=", 900), (BinaryOp::Lt, "<", 50)] {
+        let actual = count(&s, &format!("MATCH (p:P) WHERE p.w {sym} {x} RETURN count(p) AS n"));
+        let sel = stats.estimate_comparison_selectivity(&label, "w", &op, &PropertyValue::Integer(x)).unwrap();
+        assert!(within_2x(sel * 20_000.0, actual), "w {sym} {x}: estimate {:.0}, actual {actual}", sel * 20_000.0);
     }
-    for (op, sym, x) in [
-        (BinaryOp::Le, "<=", 1i64),
-        (BinaryOp::Gt, ">", 0),
-        (BinaryOp::Ge, ">=", 3),
-    ] {
-        let actual = count(
-            &s,
-            &format!("MATCH (p:P) WHERE p.v {sym} {x} RETURN count(p) AS n"),
-        );
-        let sel = stats
-            .estimate_comparison_selectivity(&label, "v", &op, &PropertyValue::Integer(x))
-            .unwrap();
-        assert!(
-            within_2x(sel * 20_000.0, actual),
-            "v {sym} {x}: estimate {:.0}, actual {actual}",
-            sel * 20_000.0
-        );
+    for (op, sym, x) in [(BinaryOp::Le, "<=", 1i64), (BinaryOp::Gt, ">", 0), (BinaryOp::Ge, ">=", 3)] {
+        let actual = count(&s, &format!("MATCH (p:P) WHERE p.v {sym} {x} RETURN count(p) AS n"));
+        let sel = stats.estimate_comparison_selectivity(&label, "v", &op, &PropertyValue::Integer(x)).unwrap();
+        assert!(within_2x(sel * 20_000.0, actual), "v {sym} {x}: estimate {:.0}, actual {actual}", sel * 20_000.0);
     }
 }
 
@@ -171,18 +118,9 @@ fn a_two_sided_range_uses_both_ends() {
     let s = skewed("P", 1000);
     let stats = s.statistics();
     let (lo, hi) = (PropertyValue::Integer(200), PropertyValue::Integer(260));
-    let sel = stats
-        .estimate_range_selectivity(&Label::new("P"), "w", Some((&lo, false)), Some((&hi, true)))
-        .unwrap();
-    let actual = count(
-        &s,
-        "MATCH (p:P) WHERE p.w > 200 AND p.w <= 260 RETURN count(p) AS n",
-    );
-    assert!(
-        within_2x(sel * 1000.0, actual),
-        "estimate {:.0}, actual {actual}",
-        sel * 1000.0
-    );
+    let sel = stats.estimate_range_selectivity(&Label::new("P"), "w", Some((&lo, false)), Some((&hi, true))).unwrap();
+    let actual = count(&s, "MATCH (p:P) WHERE p.w > 200 AND p.w <= 260 RETURN count(p) AS n");
+    assert!(within_2x(sel * 1000.0, actual), "estimate {:.0}, actual {actual}", sel * 1000.0);
 }
 
 #[test]
@@ -191,10 +129,7 @@ fn explain_estimates_an_index_range_scan_from_the_histogram() {
     run(&mut s, "CREATE INDEX ON :P(v)");
     let q = "MATCH (p:P) WHERE p.v >= 6 RETURN p.i";
     let plan = explain(&s, q);
-    let line = plan
-        .lines()
-        .find(|l| l.contains("IndexScan"))
-        .unwrap_or_else(|| panic!("{plan}"));
+    let line = plan.lines().find(|l| l.contains("IndexScan")).unwrap_or_else(|| panic!("{plan}"));
     let rows: f64 = line
         .split("estimated rows=")
         .nth(1)
@@ -212,27 +147,14 @@ fn the_planner_anchors_on_the_range_that_keeps_fewer_rows() {
     // third each, :B looked cheaper (200 against 333) and the plan scanned
     // nearly all of it.
     let mut s = skewed("A", 1000);
-    run(
-        &mut s,
-        "UNWIND range(0, 599) AS i CREATE (:B {j: i, w: (i * 31) % 1000})",
-    );
-    run(
-        &mut s,
-        "MATCH (a:A), (b:B) WHERE b.j = a.i % 600 AND a.i % 3 = 0 CREATE (a)-[:R]->(b)",
-    );
+    run(&mut s, "UNWIND range(0, 599) AS i CREATE (:B {j: i, w: (i * 31) % 1000})");
+    run(&mut s, "MATCH (a:A), (b:B) WHERE b.j = a.i % 600 AND a.i % 3 = 0 CREATE (a)-[:R]->(b)");
     run(&mut s, "CREATE INDEX ON :A(v)");
     run(&mut s, "CREATE INDEX ON :B(w)");
     let q = "MATCH (a:A)-[:R]->(b:B) WHERE a.v > 5 AND b.w >= 10 RETURN count(*) AS n";
     let plan = explain(&s, q);
-    let first_scan = plan
-        .lines()
-        .rev()
-        .find(|l| l.contains("Scan"))
-        .unwrap_or_else(|| panic!("{plan}"));
-    assert!(
-        first_scan.contains("var=a"),
-        "anchored on {first_scan}\n{plan}"
-    );
+    let first_scan = plan.lines().rev().find(|l| l.contains("Scan")).unwrap_or_else(|| panic!("{plan}"));
+    assert!(first_scan.contains("var=a"), "anchored on {first_scan}\n{plan}");
 }
 
 #[test]
@@ -241,74 +163,35 @@ fn histograms_order_temporal_values_and_text_on_their_own_axes() {
     let mut s = GraphStore::new();
     for i in 0..400i32 {
         let n = s.create_node_with_labels([Label::new("E")]);
-        s.set_node_property("default", n, "d", PropertyValue::Date(18_262 + i))
-            .unwrap();
-        s.set_node_property(
-            "default",
-            n,
-            "name",
-            PropertyValue::String(format!("n{}", 1000 + i)),
-        )
-        .unwrap();
+        s.set_node_property("default", n, "d", PropertyValue::Date(18_262 + i)).unwrap();
+        s.set_node_property("default", n, "name", PropertyValue::String(format!("n{}", 1000 + i))).unwrap();
     }
     let stats = s.statistics();
     let label = Label::new("E");
     let d = |iso: &str| {
-        let b = QueryExecutor::new(&s)
-            .execute(&parse_query(&format!("RETURN date('{iso}') AS d")).unwrap())
-            .unwrap();
+        let b = QueryExecutor::new(&s).execute(&parse_query(&format!("RETURN date('{iso}') AS d")).unwrap()).unwrap();
         match b.records[0].get("d") {
             Some(Value::Property(v)) => v.clone(),
             other => panic!("{other:?}"),
         }
     };
     assert_eq!(d("2020-01-01"), PropertyValue::Date(18_262));
-    let sel = stats
-        .estimate_comparison_selectivity(&label, "d", &BinaryOp::Lt, &d("2020-02-10"))
-        .unwrap();
+    let sel = stats.estimate_comparison_selectivity(&label, "d", &BinaryOp::Lt, &d("2020-02-10")).unwrap();
     assert!(within_2x(sel * 400.0, 40.0), "{sel}");
     // A number is not on a date's axis: no estimate, and the caller keeps its guess.
-    assert_eq!(
-        stats.estimate_comparison_selectivity(
-            &label,
-            "d",
-            &BinaryOp::Lt,
-            &PropertyValue::Integer(5)
-        ),
-        None
-    );
+    assert_eq!(stats.estimate_comparison_selectivity(&label, "d", &BinaryOp::Lt, &PropertyValue::Integer(5)), None);
     let sel = stats
-        .estimate_comparison_selectivity(
-            &label,
-            "name",
-            &BinaryOp::Ge,
-            &PropertyValue::String("n1300".into()),
-        )
+        .estimate_comparison_selectivity(&label, "name", &BinaryOp::Ge, &PropertyValue::String("n1300".into()))
         .unwrap();
     assert!(within_2x(sel * 400.0, 100.0), "{sel}");
 }
 
 #[test]
 fn values_of_mixed_kinds_get_no_histogram() {
-    let h = Histogram::build(&[
-        PropertyValue::Integer(1),
-        PropertyValue::String("a".into()),
-        PropertyValue::Integer(3),
-    ]);
+    let h = Histogram::build(&[PropertyValue::Integer(1), PropertyValue::String("a".into()), PropertyValue::Integer(3)]);
     assert_eq!(h, None);
-    let h = Histogram::build(&[
-        PropertyValue::Integer(1),
-        PropertyValue::Float(2.5),
-        PropertyValue::Integer(3),
-    ])
-    .unwrap();
-    assert!(matches!(
-        h,
-        Histogram::Numeric {
-            axis: HistogramAxis::Number,
-            ..
-        }
-    ));
+    let h = Histogram::build(&[PropertyValue::Integer(1), PropertyValue::Float(2.5), PropertyValue::Integer(3)]).unwrap();
+    assert!(matches!(h, Histogram::Numeric { axis: HistogramAxis::Number, .. }));
     assert_eq!(h.fraction_below(&PropertyValue::Integer(0)), Some(0.0));
     assert_eq!(h.fraction_below(&PropertyValue::Integer(9)), Some(1.0));
     assert_eq!(h.fraction_below(&PropertyValue::String("x".into())), None);

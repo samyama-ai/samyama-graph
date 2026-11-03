@@ -400,7 +400,10 @@ fn a_variable_length_pattern_declines_the_catalog() {
     assert!(!plan(&store, q).contains("source=catalog"));
     let rows = titled(&store, q);
     // A0 is reached by 3 one-hop and 1 two-hop path; A1 by 1 one-hop.
-    assert_eq!(rows, vec![("A0".to_string(), 4), ("A1".to_string(), 1)]);
+    assert_eq!(
+        rows,
+        vec![("A0".to_string(), 4), ("A1".to_string(), 1)]
+    );
 }
 
 #[test]
@@ -560,9 +563,7 @@ fn a_label_added_after_the_edge_declines_the_catalog() {
         "exact to start with"
     );
 
-    store
-        .add_label_to_node("default", citer, "Preprint")
-        .unwrap();
+    store.add_label_to_node("default", citer, "Preprint").unwrap();
     let p = plan(&store, q);
     assert!(
         !p.contains("source=catalog"),
@@ -586,9 +587,7 @@ fn labelling_a_node_that_has_no_edges_keeps_the_catalog() {
         "title".to_string(),
         PropertyValue::String("A9".to_string()),
     );
-    store
-        .add_label_to_node("default", fresh, "Preprint")
-        .unwrap();
+    store.add_label_to_node("default", fresh, "Preprint").unwrap();
     let q = "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c";
     assert!(plan(&store, q).contains("source=catalog"));
     assert_eq!(
@@ -677,9 +676,10 @@ fn the_bound_does_not_cut_the_count_itself() {
         vec![("A0".to_string(), 3)]
     );
     // No ORDER BY: nothing consumes the hint, and the counts are still whole.
-    let query =
-        parse_query("MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c LIMIT 5")
-            .unwrap();
+    let query = parse_query(
+        "MATCH (a:Article)<-[:CITES]-() RETURN a.title AS t, count(*) AS c LIMIT 5",
+    )
+    .unwrap();
     let batch = QueryExecutor::new(&store).execute(&query).unwrap();
     let mut counts: Vec<i64> = batch
         .records
@@ -736,10 +736,9 @@ fn both_ast_shapes_answer_the_same() {
         query.needs_clause_pipeline,
         "this fixture must exercise the pipeline shape, or the parity check is vacuous"
     );
-    let batch =
-        samyama::query::executor::MutQueryExecutor::new(&mut pipelined, "default".to_string())
-            .execute(&query)
-            .unwrap();
+    let batch = samyama::query::executor::MutQueryExecutor::new(&mut pipelined, "default".to_string())
+        .execute(&query)
+        .unwrap();
     let mut rows: Vec<(String, i64)> = batch
         .records
         .iter()

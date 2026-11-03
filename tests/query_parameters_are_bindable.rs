@@ -50,12 +50,8 @@ impl Http {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .expect("body");
-        let value: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            panic!(
-                "body is not JSON ({e}): {:?}",
-                String::from_utf8_lossy(&bytes)
-            )
-        });
+        let value: Value = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("body is not JSON ({e}): {:?}", String::from_utf8_lossy(&bytes)));
         (status, value)
     }
 
@@ -112,12 +108,10 @@ async fn a_bound_value_is_never_parsed_as_cypher_over_http() {
 
     // If the value were interpolated, `RETURN 1 RETURN 1` would either fail to
     // parse or produce a second projection. Bound, it is one string.
-    let v = h.scalar("RETURN $x AS x", json!({"x": "1 RETURN 1"})).await;
-    assert_eq!(
-        v,
-        json!("1 RETURN 1"),
-        "the value was not returned verbatim"
-    );
+    let v = h
+        .scalar("RETURN $x AS x", json!({"x": "1 RETURN 1"}))
+        .await;
+    assert_eq!(v, json!("1 RETURN 1"), "the value was not returned verbatim");
 
     let v = h
         .scalar("RETURN $x AS x", json!({"x": "' OR 1=1 --"}))
@@ -187,13 +181,11 @@ async fn http_maps_every_json_type() {
     // returning them whole: the HTTP renderer debug-formats container values,
     // so a whole-container assertion would test the renderer, not the binding.
     assert_eq!(
-        h.scalar("RETURN $v[1] AS v", json!({"v": [10, 20, 30]}))
-            .await,
+        h.scalar("RETURN $v[1] AS v", json!({"v": [10, 20, 30]})).await,
         json!(20)
     );
     assert_eq!(
-        h.scalar("RETURN size($v) AS v", json!({"v": [10, 20, 30]}))
-            .await,
+        h.scalar("RETURN size($v) AS v", json!({"v": [10, 20, 30]})).await,
         json!(3)
     );
     assert_eq!(
@@ -241,9 +233,7 @@ async fn the_result_cache_keys_on_the_bound_values() {
                 ))
                 .unwrap();
             let resp = app.oneshot(req).await.unwrap();
-            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-                .await
-                .unwrap();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
             let body: Value = serde_json::from_slice(&bytes).unwrap();
             body["records"][0][0].clone()
         }
@@ -265,7 +255,11 @@ async fn graph_query(
     query: &str,
     params: &[(&str, &str)],
 ) -> RespValue {
-    let mut args = vec![bulk("GRAPH.QUERY"), bulk("default"), bulk(query)];
+    let mut args = vec![
+        bulk("GRAPH.QUERY"),
+        bulk("default"),
+        bulk(query),
+    ];
     for (k, v) in params {
         args.push(bulk(k));
         args.push(bulk(v));
@@ -332,9 +326,7 @@ async fn resp_rejects_an_odd_trailing_argument() {
         bulk("RETURN $x AS x"),
         bulk("x"),
     ];
-    let reply = h
-        .handle_command(&RespValue::Array(args), &store, None)
-        .await;
+    let reply = h.handle_command(&RespValue::Array(args), &store, None).await;
     match reply {
         RespValue::Error(e) => assert!(
             e.contains("pair"),

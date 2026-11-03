@@ -82,9 +82,7 @@ fn fixture(rows: usize, groups: usize) -> GraphStore {
 /// not `Aggregate` says nothing about hash aggregation.
 fn fold_operator(store: &GraphStore, cypher: &str) -> String {
     let query = parse_query(&format!("EXPLAIN {cypher}")).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("EXPLAIN should run");
+    let batch = QueryExecutor::new(store).execute(&query).expect("EXPLAIN should run");
     let text = match batch.records[0].get("plan") {
         Some(samyama::query::executor::Value::Property(PropertyValue::String(t))) => t.clone(),
         _ => return "?".into(),
@@ -103,16 +101,12 @@ fn fold_operator(store: &GraphStore, cypher: &str) -> String {
 fn time(store: &GraphStore, cypher: &str, runs: usize) -> (usize, f64) {
     let query = parse_query(cypher).expect("query should parse");
     // Warm: the first execution pays for statistics the rest skip.
-    let warm = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("query should run");
+    let warm = QueryExecutor::new(store).execute(&query).expect("query should run");
 
     let mut samples: Vec<f64> = (0..runs)
         .map(|_| {
             let started = Instant::now();
-            let _ = QueryExecutor::new(store)
-                .execute(&query)
-                .expect("query should run");
+            let _ = QueryExecutor::new(store).execute(&query).expect("query should run");
             started.elapsed().as_secs_f64() * 1000.0
         })
         .collect();
@@ -126,10 +120,7 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| -> Option<usize> {
-        args.iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1))
-            .and_then(|v| v.parse().ok())
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok())
     };
     let rows = arg("--rows").unwrap_or(1_000_000);
     let groups = arg("--groups").unwrap_or(50_000);
@@ -181,10 +172,7 @@ fn main() {
         "{:<28} {:>8} {:>12} {:>14}  {}",
         "case", "groups", "median ms", "ns per row", "operator"
     );
-    println!(
-        "{:-<28} {:->8} {:->12} {:->14}  {:-<24}",
-        "", "", "", "", ""
-    );
+    println!("{:-<28} {:->8} {:->12} {:->14}  {:-<24}", "", "", "", "", "");
 
     for (label, cypher) in &cases {
         let (out_rows, ms) = time(&store, cypher, runs);

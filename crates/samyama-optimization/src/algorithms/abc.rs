@@ -12,7 +12,7 @@ pub struct ABCSolver {
 impl ABCSolver {
     pub fn new(config: SolverConfig) -> Self {
         // Default limit is usually pop_size * dim / 2
-        Self {
+        Self { 
             config,
             limit: 100, // Placeholder, will be adjusted in solve
             seed: None,
@@ -30,11 +30,7 @@ impl ABCSolver {
         let dim = problem.dim();
         let (lower, upper) = problem.bounds();
         let pop_size = self.config.population_size;
-        let limit = if self.limit == 100 {
-            pop_size * dim / 2
-        } else {
-            self.limit
-        };
+        let limit = if self.limit == 100 { pop_size * dim / 2 } else { self.limit };
 
         // 1. Initialize Food Sources (Population)
         let mut foods: Vec<Individual> = (0..pop_size)
@@ -49,7 +45,7 @@ impl ABCSolver {
             .collect();
 
         let mut trial_counters = vec![0; pop_size];
-
+        
         let mut best_idx = 0;
         for i in 1..pop_size {
             if foods[i].fitness < foods[best_idx].fitness {
@@ -74,15 +70,11 @@ impl ABCSolver {
                 let mut k;
                 loop {
                     k = rng.gen_range(0..pop_size);
-                    if k != i {
-                        break;
-                    }
+                    if k != i { break; }
                 }
 
                 let phi: f64 = rng.gen_range(-1.0..1.0);
-                new_vars[j] = (foods[i].variables[j]
-                    + phi * (foods[i].variables[j] - foods[k].variables[j]))
-                    .clamp(lower[j], upper[j]);
+                new_vars[j] = (foods[i].variables[j] + phi * (foods[i].variables[j] - foods[k].variables[j])).clamp(lower[j], upper[j]);
 
                 let new_fitness = crate::common::evaluate(problem, &new_vars);
                 if new_fitness < foods[i].fitness {
@@ -122,15 +114,11 @@ impl ABCSolver {
                     let mut k;
                     loop {
                         k = rng.gen_range(0..pop_size);
-                        if k != i {
-                            break;
-                        }
+                        if k != i { break; }
                     }
 
                     let phi: f64 = rng.gen_range(-1.0..1.0);
-                    new_vars[j] = (foods[i].variables[j]
-                        + phi * (foods[i].variables[j] - foods[k].variables[j]))
-                        .clamp(lower[j], upper[j]);
+                    new_vars[j] = (foods[i].variables[j] + phi * (foods[i].variables[j] - foods[k].variables[j])).clamp(lower[j], upper[j]);
 
                     let new_fitness = crate::common::evaluate(problem, &new_vars);
                     if new_fitness < foods[i].fitness {

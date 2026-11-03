@@ -33,12 +33,10 @@ fn store() -> GraphStore {
     let labels = ["A", "B", "C", "D", "E", "F", "G", "H"];
     let ids: Vec<_> = labels.iter().map(|l| s.create_node(*l)).collect();
     for (i, id) in ids.iter().enumerate().step_by(2) {
-        s.add_label_to_node("default", *id, format!("X{i}"))
-            .expect("label");
+        s.add_label_to_node("default", *id, format!("X{i}")).expect("label");
     }
     for i in 0..labels.len() {
-        s.create_edge(ids[i], ids[(i + 1) % labels.len()], "LINK")
-            .expect("edge");
+        s.create_edge(ids[i], ids[(i + 1) % labels.len()], "LINK").expect("edge");
     }
     for t in ["T1", "T2", "T3", "T4", "T5", "T6", "T7"] {
         s.create_edge(ids[0], ids[1], t).expect("edge");
@@ -48,10 +46,7 @@ fn store() -> GraphStore {
 }
 
 fn distinct<T: std::hash::Hash + Eq>(f: impl Fn(&mut GraphStore) -> T) -> usize {
-    (0..STORES)
-        .map(|_| f(&mut store()))
-        .collect::<HashSet<_>>()
-        .len()
+    (0..STORES).map(|_| f(&mut store())).collect::<HashSet<_>>().len()
 }
 
 #[test]
@@ -70,10 +65,7 @@ fn walking_every_type_gives_one_edge_order() {
             .map(|e| e.id.as_u64())
             .collect::<Vec<_>>()
     });
-    assert_eq!(
-        n, 1,
-        "{STORES} identical stores gave {n} distinct cross-type edge orders"
-    );
+    assert_eq!(n, 1, "{STORES} identical stores gave {n} distinct cross-type edge orders");
 }
 
 #[test]
@@ -103,19 +95,13 @@ fn schema_visualization_rows_are_the_same_on_every_store() {
             })
             .collect::<Vec<_>>()
     });
-    assert_eq!(
-        n, 1,
-        "{STORES} identical stores gave {n} distinct db.schema.visualization() row orders"
-    );
+    assert_eq!(n, 1, "{STORES} identical stores gave {n} distinct db.schema.visualization() row orders");
 }
 
 #[test]
 fn schema_summary_is_the_same_on_every_store() {
     let n = distinct(|s| s.schema_summary());
-    assert_eq!(
-        n, 1,
-        "{STORES} identical stores gave {n} distinct schema summaries"
-    );
+    assert_eq!(n, 1, "{STORES} identical stores gave {n} distinct schema summaries");
 }
 
 #[test]

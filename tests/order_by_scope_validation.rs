@@ -35,14 +35,8 @@ fn run(store: &mut GraphStore, cypher: &str) {
 
 fn seeded() -> GraphStore {
     let mut store = GraphStore::new();
-    run(
-        &mut store,
-        "CREATE (:Person {name: 'A', age: 13, num1: 1, num2: 4})",
-    );
-    run(
-        &mut store,
-        "CREATE (:Person {name: 'B', age: 12, num1: 5, num2: 2})",
-    );
+    run(&mut store, "CREATE (:Person {name: 'A', age: 13, num1: 1, num2: 4})");
+    run(&mut store, "CREATE (:Person {name: 'B', age: 12, num1: 5, num2: 2})");
     store
 }
 
@@ -69,10 +63,7 @@ fn assert_accepted(store: &GraphStore, cypher: &str) {
 fn distinct_removes_the_variable_from_order_by_scope() {
     // ReturnOrderBy2 [13].
     let store = seeded();
-    assert_rejected(
-        &store,
-        "MATCH (a:Person) RETURN DISTINCT a.name ORDER BY a.age",
-    );
+    assert_rejected(&store, "MATCH (a:Person) RETURN DISTINCT a.name ORDER BY a.age");
 }
 
 #[test]
@@ -107,10 +98,7 @@ fn a_projected_expression_mixed_into_an_aggregating_sort_item_is_rejected() {
 fn an_aggregation_in_order_by_without_one_in_the_projection_is_rejected() {
     // ReturnOrderBy2 [14].
     let store = seeded();
-    assert_rejected(
-        &store,
-        "MATCH (n:Person) RETURN n.num1 ORDER BY max(n.num2)",
-    );
+    assert_rejected(&store, "MATCH (n:Person) RETURN n.num1 ORDER BY max(n.num2)");
 }
 
 #[test]
@@ -129,29 +117,17 @@ fn ordinary_order_by_is_untouched() {
     let store = seeded();
     assert_accepted(&store, "MATCH (n:Person) RETURN n.name ORDER BY n.age");
     assert_accepted(&store, "MATCH (n:Person) RETURN n.name AS nm ORDER BY nm");
-    assert_accepted(
-        &store,
-        "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age DESC",
-    );
+    assert_accepted(&store, "MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age DESC");
 }
 
 #[test]
 fn sorting_by_a_grouping_key_or_an_alias_stays_legal() {
     // The common aggregate shapes. These must keep working.
     let store = seeded();
-    assert_accepted(
-        &store,
-        "MATCH (n:Person) RETURN n.name, count(*) AS c ORDER BY n.name",
-    );
-    assert_accepted(
-        &store,
-        "MATCH (n:Person) RETURN n.name, count(*) AS c ORDER BY c",
-    );
+    assert_accepted(&store, "MATCH (n:Person) RETURN n.name, count(*) AS c ORDER BY n.name");
+    assert_accepted(&store, "MATCH (n:Person) RETURN n.name, count(*) AS c ORDER BY c");
     assert_accepted(&store, "MATCH (n:Person) RETURN count(*) AS c ORDER BY c");
-    assert_accepted(
-        &store,
-        "MATCH (n:Person) WITH n.name AS nm, count(*) AS c ORDER BY nm RETURN nm, c",
-    );
+    assert_accepted(&store, "MATCH (n:Person) WITH n.name AS nm, count(*) AS c ORDER BY nm RETURN nm, c");
 }
 
 #[test]
@@ -195,14 +171,8 @@ fn distinct_on_a_whole_entity_keeps_its_properties_sortable() {
     // appeared.
     let store = seeded();
     assert_accepted(&store, "MATCH (a:Person) RETURN DISTINCT a ORDER BY a.name");
-    assert_accepted(
-        &store,
-        "MATCH (a:Person) RETURN DISTINCT a ORDER BY a.age DESC",
-    );
-    assert_accepted(
-        &store,
-        "MATCH (a:Person) WITH DISTINCT a ORDER BY a.name RETURN a.name",
-    );
+    assert_accepted(&store, "MATCH (a:Person) RETURN DISTINCT a ORDER BY a.age DESC");
+    assert_accepted(&store, "MATCH (a:Person) WITH DISTINCT a ORDER BY a.name RETURN a.name");
 }
 
 #[test]

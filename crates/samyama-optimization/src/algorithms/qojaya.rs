@@ -11,7 +11,8 @@ pub struct QOJayaSolver {
 
 impl QOJayaSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { seed: None, config }
+        Self {
+            seed: None, config }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -39,34 +40,30 @@ impl QOJayaSolver {
 
         // Apply Quasi-Oppositional Based Learning (QOBL) to initial population
         // Generate QO population and pick best N
-        let mut qo_population: Vec<Individual> = population
-            .par_iter()
-            .enumerate()
-            .map(|(__idx, ind)| {
-                let mut new_vars = Array1::zeros(dim);
-                let mut local_rng = crate::common::rng::child_rng(self.seed, 0, __idx);
-
-                for j in 0..dim {
-                    // Center point c = (a+b)/2
-                    let c = (lower[j] + upper[j]) / 2.0;
-                    // Opposite point xo = a + b - x
-                    let xo = lower[j] + upper[j] - ind.variables[j];
-
-                    // Quasi-opposite point xqo is rand(c, xo)
-                    let xqo = if c < xo {
-                        local_rng.gen_range(c..xo)
-                    } else {
-                        local_rng.gen_range(xo..c)
-                    };
-
-                    new_vars[j] = xqo.clamp(lower[j], upper[j]);
-                }
-
-                let fitness = crate::common::evaluate(problem, &new_vars);
-                Individual::new(new_vars, fitness)
-            })
-            .collect();
-
+        let mut qo_population: Vec<Individual> = population.par_iter().enumerate().map(|(__idx, ind)| {
+            let mut new_vars = Array1::zeros(dim);
+            let mut local_rng = crate::common::rng::child_rng(self.seed, 0, __idx);
+            
+            for j in 0..dim {
+                // Center point c = (a+b)/2
+                let c = (lower[j] + upper[j]) / 2.0;
+                // Opposite point xo = a + b - x
+                let xo = lower[j] + upper[j] - ind.variables[j];
+                
+                // Quasi-opposite point xqo is rand(c, xo)
+                let xqo = if c < xo {
+                    local_rng.gen_range(c..xo)
+                } else {
+                    local_rng.gen_range(xo..c)
+                };
+                
+                new_vars[j] = xqo.clamp(lower[j], upper[j]);
+            }
+            
+            let fitness = crate::common::evaluate(problem, &new_vars);
+            Individual::new(new_vars, fitness)
+        }).collect();
+        
         population.append(&mut qo_population);
         population.sort_by(|a, b| crate::common::ascending_nan_last(a.fitness, b.fitness));
         population.truncate(self.config.population_size);
@@ -78,10 +75,7 @@ impl QOJayaSolver {
                 break;
             }
             if iter % 10 == 0 {
-                println!(
-                    "QOJaya Solver: Iteration {}/{}",
-                    iter, self.config.max_iterations
-                );
+                println!("QOJaya Solver: Iteration {}/{}", iter, self.config.max_iterations);
             }
             let (best_idx, worst_idx) = self.find_best_worst(&population);
             let best_vars = population[best_idx].variables.clone();
@@ -103,7 +97,8 @@ impl QOJayaSolver {
 
                     // 1. Jaya Update
                     for j in 0..dim {
-                        let val = ind.variables[j] + r1 * (best_vars[j] - ind.variables[j].abs())
+                        let val = ind.variables[j] 
+                            + r1 * (best_vars[j] - ind.variables[j].abs()) 
                             - r2 * (worst_vars[j] - ind.variables[j].abs());
                         new_vars[j] = val.clamp(lower[j], upper[j]);
                     }
@@ -118,7 +113,7 @@ impl QOJayaSolver {
                     // Only apply with some probability (jumping rate), e.g., 0.05?
                     // The standard QOJaya applies it to the whole population occasionally or per individual.
                     // We'll apply it per individual.
-
+                    
                     let mut qo_vars = Array1::zeros(dim);
                     for j in 0..dim {
                         let c = (lower[j] + upper[j]) / 2.0;
@@ -130,7 +125,7 @@ impl QOJayaSolver {
                         };
                         qo_vars[j] = xqo.clamp(lower[j], upper[j]);
                     }
-
+                    
                     let qo_fitness = crate::common::evaluate(problem, &qo_vars);
                     if qo_fitness < ind.fitness {
                         ind.variables = qo_vars;

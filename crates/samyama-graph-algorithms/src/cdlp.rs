@@ -5,8 +5,8 @@
 //! label to the most frequent label among its neighbors.
 
 use super::common::{GraphView, NodeId};
-use rayon::prelude::*;
 use std::collections::HashMap;
+use rayon::prelude::*;
 
 /// Result of CDLP algorithm
 #[derive(Debug, Clone)]
@@ -38,10 +38,7 @@ impl Default for CdlpConfig {
 pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
     let n = view.node_count;
     if n == 0 {
-        return CdlpResult {
-            labels: HashMap::new(),
-            iterations: 0,
-        };
+        return CdlpResult { labels: HashMap::new(), iterations: 0 };
     }
 
     // GPU acceleration gate (opt-in via --features gpu; transparent CPU fallback).
@@ -51,10 +48,7 @@ pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
     #[cfg(feature = "gpu")]
     {
         if let Err(reason) = crate::gpu_dispatch::gpu_route(n) {
-            crate::cpu_fallback::note_cpu_fallback(
-                crate::cpu_fallback::GpuAlgorithm::Cdlp,
-                &reason,
-            );
+            crate::cpu_fallback::note_cpu_fallback(crate::cpu_fallback::GpuAlgorithm::Cdlp, &reason);
         } else {
             {
                 // Pass actual NodeIds as initial labels so tie-breaking matches the LDBC spec.
@@ -72,10 +66,7 @@ pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
                         let labels: HashMap<NodeId, NodeId> = (0..n)
                             .map(|idx| (view.index_to_node[idx], gpu_result.labels[idx] as NodeId))
                             .collect();
-                        return CdlpResult {
-                            labels,
-                            iterations: gpu_result.iterations,
-                        };
+                        return CdlpResult { labels, iterations: gpu_result.iterations };
                     }
                     Err(e) => crate::cpu_fallback::note_cpu_fallback(
                         crate::cpu_fallback::GpuAlgorithm::Cdlp,
@@ -98,36 +89,30 @@ pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
         iterations += 1;
 
         if use_parallel {
-            let results: Vec<(NodeId, bool)> = (0..n)
-                .into_par_iter()
-                .map(|idx| {
-                    let mut label_counts: HashMap<NodeId, usize> = HashMap::new();
-                    for &neighbor in view.successors(idx) {
-                        *label_counts.entry(labels[neighbor]).or_insert(0) += 1;
-                    }
-                    for &neighbor in view.predecessors(idx) {
-                        *label_counts.entry(labels[neighbor]).or_insert(0) += 1;
-                    }
-                    if label_counts.is_empty() {
-                        return (labels[idx], true);
-                    }
-                    let max_count = *label_counts.values().max().unwrap();
-                    let best_label = label_counts
-                        .into_iter()
-                        .filter(|(_, count)| *count == max_count)
-                        .map(|(label, _)| label)
-                        .min()
-                        .unwrap();
-                    (best_label, best_label == labels[idx])
-                })
-                .collect();
+            let results: Vec<(NodeId, bool)> = (0..n).into_par_iter().map(|idx| {
+                let mut label_counts: HashMap<NodeId, usize> = HashMap::new();
+                for &neighbor in view.successors(idx) {
+                    *label_counts.entry(labels[neighbor]).or_insert(0) += 1;
+                }
+                for &neighbor in view.predecessors(idx) {
+                    *label_counts.entry(labels[neighbor]).or_insert(0) += 1;
+                }
+                if label_counts.is_empty() {
+                    return (labels[idx], true);
+                }
+                let max_count = *label_counts.values().max().unwrap();
+                let best_label = label_counts.into_iter()
+                    .filter(|(_, count)| *count == max_count)
+                    .map(|(label, _)| label)
+                    .min()
+                    .unwrap();
+                (best_label, best_label == labels[idx])
+            }).collect();
 
             converged = true;
             for (idx, (label, same)) in results.into_iter().enumerate() {
                 new_labels[idx] = label;
-                if !same {
-                    converged = false;
-                }
+                if !same { converged = false; }
             }
         } else {
             converged = true;
@@ -144,8 +129,7 @@ pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
                     continue;
                 }
                 let max_count = *label_counts.values().max().unwrap();
-                let best_label = label_counts
-                    .into_iter()
+                let best_label = label_counts.into_iter()
                     .filter(|(_, count)| *count == max_count)
                     .map(|(label, _)| label)
                     .min()
@@ -168,17 +152,14 @@ pub fn cdlp(view: &GraphView, config: &CdlpConfig) -> CdlpResult {
         .map(|idx| (view.index_to_node[idx], labels[idx]))
         .collect();
 
-    CdlpResult {
-        labels: result_labels,
-        iterations,
-    }
+    CdlpResult { labels: result_labels, iterations }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::GraphView;
     use std::collections::HashMap;
+    use crate::common::GraphView;
 
     fn make_triangle_graph() -> GraphView {
         // Triangle: 1-2, 2-3, 1-3
@@ -200,10 +181,8 @@ mod tests {
         let result = cdlp(&view, &CdlpConfig::default());
         // In a triangle, all nodes should converge to the same label
         let labels: Vec<NodeId> = result.labels.values().cloned().collect();
-        assert!(
-            labels.iter().all(|l| *l == labels[0]),
-            "All nodes in a triangle should have the same community label"
-        );
+        assert!(labels.iter().all(|l| *l == labels[0]),
+            "All nodes in a triangle should have the same community label");
     }
 
     #[test]
@@ -215,12 +194,8 @@ mod tests {
         node_to_index.insert(2, 1);
 
         let view = GraphView::from_adjacency_list(
-            2,
-            index_to_node,
-            node_to_index,
-            vec![vec![], vec![]],
-            vec![vec![], vec![]],
-            None,
+            2, index_to_node, node_to_index,
+            vec![vec![], vec![]], vec![vec![], vec![]], None,
         );
         let result = cdlp(&view, &CdlpConfig::default());
         assert_ne!(result.labels[&1], result.labels[&2]);
@@ -228,7 +203,9 @@ mod tests {
 
     #[test]
     fn test_cdlp_empty() {
-        let view = GraphView::from_adjacency_list(0, vec![], HashMap::new(), vec![], vec![], None);
+        let view = GraphView::from_adjacency_list(
+            0, vec![], HashMap::new(), vec![], vec![], None,
+        );
         let result = cdlp(&view, &CdlpConfig::default());
         assert!(result.labels.is_empty());
     }

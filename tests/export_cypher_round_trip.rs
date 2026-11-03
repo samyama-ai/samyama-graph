@@ -22,9 +22,7 @@ fn build(statements: &[&str]) -> GraphStore {
     let mut store = GraphStore::new();
     let engine = QueryEngine::new();
     for q in statements {
-        engine
-            .execute_mut(q, &mut store, "default")
-            .unwrap_or_else(|e| panic!("{q}: {e}"));
+        engine.execute_mut(q, &mut store, "default").unwrap_or_else(|e| panic!("{q}: {e}"));
     }
     store
 }
@@ -121,16 +119,8 @@ fn a_graph_survives_the_round_trip() {
 
     assert_eq!(restored.node_count(), original.node_count(), "node count");
     assert_eq!(restored.edge_count(), original.edge_count(), "edge count");
-    assert_eq!(
-        node_shapes(&restored),
-        node_shapes(&original),
-        "nodes differ"
-    );
-    assert_eq!(
-        edge_shapes(&restored),
-        edge_shapes(&original),
-        "edges differ"
-    );
+    assert_eq!(node_shapes(&restored), node_shapes(&original), "nodes differ");
+    assert_eq!(edge_shapes(&restored), edge_shapes(&original), "edges differ");
 }
 
 #[test]

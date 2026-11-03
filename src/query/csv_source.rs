@@ -25,13 +25,13 @@ static IMPORT_ROOT: RwLock<Option<PathBuf>> = RwLock::new(None);
 /// paths, and so a root that does not exist is a configuration error rather than a
 /// clause that silently refuses everything.
 pub fn set_import_root(root: Option<&Path>) -> Result<(), CsvSourceError> {
-    let resolved =
-        match root {
-            None => None,
-            Some(p) => Some(p.canonicalize().map_err(|e| {
-                CsvSourceError::UnreadableRoot(p.display().to_string(), e.to_string())
-            })?),
-        };
+    let resolved = match root {
+        None => None,
+        Some(p) => Some(
+            p.canonicalize()
+                .map_err(|e| CsvSourceError::UnreadableRoot(p.display().to_string(), e.to_string()))?,
+        ),
+    };
     *IMPORT_ROOT.write().unwrap() = resolved;
     Ok(())
 }
@@ -48,10 +48,7 @@ pub enum CsvSourceError {
     /// A scheme this build does not fetch.
     UnsupportedScheme(String),
     /// Resolved outside the import root.
-    OutsideImportRoot {
-        path: String,
-        root: String,
-    },
+    OutsideImportRoot { path: String, root: String },
     /// The file is not there, or is not readable.
     Unreadable(String, String),
     UnreadableRoot(String, String),

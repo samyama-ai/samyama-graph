@@ -11,7 +11,8 @@ pub struct GOTLBOSolver {
 
 impl GOTLBOSolver {
     pub fn new(config: SolverConfig) -> Self {
-        Self { seed: None, config }
+        Self {
+            seed: None, config }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -70,7 +71,7 @@ impl GOTLBOSolver {
                     }
 
                     let new_fitness = crate::common::evaluate(problem, &new_vars);
-
+                    
                     // Accept if better
                     if new_fitness < ind.fitness {
                         ind.variables = new_vars;
@@ -81,8 +82,7 @@ impl GOTLBOSolver {
                     let mut opp_vars = Array1::zeros(dim);
                     for j in 0..dim {
                         // O = a + b - X
-                        opp_vars[j] =
-                            (lower[j] + upper[j] - ind.variables[j]).clamp(lower[j], upper[j]);
+                        opp_vars[j] = (lower[j] + upper[j] - ind.variables[j]).clamp(lower[j], upper[j]);
                     }
                     let opp_fitness = crate::common::evaluate(problem, &opp_vars);
 
@@ -101,14 +101,12 @@ impl GOTLBOSolver {
                 let mut learner_j_idx;
                 loop {
                     learner_j_idx = rng.gen_range(0..pop_len);
-                    if learner_j_idx != i {
-                        break;
-                    }
+                    if learner_j_idx != i { break; }
                 }
 
                 let ind_i = &population[i];
                 let ind_j = &population[learner_j_idx];
-
+                
                 let mut new_vars = Array1::zeros(dim);
                 for k in 0..dim {
                     let r: f64 = rng.gen();
@@ -130,8 +128,7 @@ impl GOTLBOSolver {
                 let ind_i_curr = &population[i];
                 let mut opp_vars = Array1::zeros(dim);
                 for k in 0..dim {
-                    opp_vars[k] =
-                        (lower[k] + upper[k] - ind_i_curr.variables[k]).clamp(lower[k], upper[k]);
+                    opp_vars[k] = (lower[k] + upper[k] - ind_i_curr.variables[k]).clamp(lower[k], upper[k]);
                 }
                 let opp_fitness = crate::common::evaluate(problem, &opp_vars);
 

@@ -24,9 +24,7 @@ fn shifted(start: &str, dur: &str) -> Vec<String> {
     );
     let store = GraphStore::new();
     let parsed = parse_query(&q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(&store)
-        .execute(&parsed)
-        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(&store).execute(&parsed).unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let r = &out.records[0];
     ["day", "hour", "minute", "off"]
         .iter()
@@ -37,46 +35,29 @@ fn shifted(start: &str, dur: &str) -> Vec<String> {
 fn expect(day: i64, hour: i64, minute: i64, off: i64) -> Vec<String> {
     [day, hour, minute, off]
         .iter()
-        .map(|v| {
-            format!(
-                "{:?}",
-                Some(samyama::query::executor::Value::Property(
-                    samyama::graph::PropertyValue::Integer(*v)
-                ))
-            )
-        })
+        .map(|v| format!("{:?}", Some(samyama::query::executor::Value::Property(samyama::graph::PropertyValue::Integer(*v)))))
         .collect()
 }
 
-const OCT29: &str =
-    "datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: 'Europe/Stockholm'})";
+const OCT29: &str = "datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: 'Europe/Stockholm'})";
 
 /// The issue's case: one calendar day across the October fall-back keeps the
 /// local midnight and takes the new offset.
 #[test]
 fn a_day_across_the_fall_back_lands_on_the_new_offset() {
-    assert_eq!(
-        shifted(OCT29, "duration({days: 1})"),
-        expect(30, 0, 0, 3600)
-    );
+    assert_eq!(shifted(OCT29, "duration({days: 1})"), expect(30, 0, 0, 3600));
 }
 
 /// Hours are exact: 24 hours after midnight on the 25-hour day is 23:00.
 #[test]
 fn twenty_four_hours_across_the_fall_back_is_exact() {
-    assert_eq!(
-        shifted(OCT29, "duration({hours: 24})"),
-        expect(29, 23, 0, 3600)
-    );
+    assert_eq!(shifted(OCT29, "duration({hours: 24})"), expect(29, 23, 0, 3600));
 }
 
 #[test]
 fn a_day_across_the_spring_forward_lands_on_the_new_offset() {
     let start = "datetime({year: 2017, month: 3, day: 25, hour: 12, timezone: 'Europe/Stockholm'})";
-    assert_eq!(
-        shifted(start, "duration({days: 1})"),
-        expect(26, 12, 0, 7200)
-    );
+    assert_eq!(shifted(start, "duration({days: 1})"), expect(26, 12, 0, 7200));
 }
 
 /// Months move the calendar too: one month from 29 September is before the
@@ -84,31 +65,19 @@ fn a_day_across_the_spring_forward_lands_on_the_new_offset() {
 #[test]
 fn months_re_resolve_the_offset_as_well() {
     let start = "datetime({year: 2017, month: 9, day: 29, hour: 0, timezone: 'Europe/Stockholm'})";
-    assert_eq!(
-        shifted(start, "duration({months: 1})"),
-        expect(29, 0, 0, 7200)
-    );
-    assert_eq!(
-        shifted(start, "duration({months: 2})"),
-        expect(29, 0, 0, 3600)
-    );
+    assert_eq!(shifted(start, "duration({months: 1})"), expect(29, 0, 0, 7200));
+    assert_eq!(shifted(start, "duration({months: 2})"), expect(29, 0, 0, 3600));
 }
 
 /// Control: no boundary crossed, nothing changes but the day.
 #[test]
 fn an_ordinary_day_keeps_its_offset() {
     let start = "datetime({year: 2017, month: 10, day: 20, hour: 0, timezone: 'Europe/Stockholm'})";
-    assert_eq!(
-        shifted(start, "duration({days: 1})"),
-        expect(21, 0, 0, 7200)
-    );
+    assert_eq!(shifted(start, "duration({days: 1})"), expect(21, 0, 0, 7200));
 }
 
 /// A fixed offset is a constant; there is nothing to re-resolve.
 #[test]
 fn a_fixed_offset_is_kept() {
-    assert_eq!(
-        shifted("datetime('2017-10-29T00:00+02:00')", "duration({days: 1})"),
-        expect(30, 0, 0, 7200)
-    );
+    assert_eq!(shifted("datetime('2017-10-29T00:00+02:00')", "duration({days: 1})"), expect(30, 0, 0, 7200));
 }

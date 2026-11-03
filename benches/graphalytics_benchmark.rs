@@ -19,14 +19,17 @@
 //!   cargo bench --release --bench graphalytics_benchmark -- --dataset example-directed --algo BFS
 //!   cargo bench --release --bench graphalytics_benchmark -- --data-dir data/graphalytics/ --all
 
+use std::collections::{HashMap, VecDeque, BinaryHeap};
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::path::Path;
 use std::time::Instant;
 
 use samyama_graph_algorithms::{
-    cdlp, local_clustering_coefficient_with, page_rank, weakly_connected_components, CdlpConfig,
-    DirectedLcc, GraphView, PageRankConfig,
+    GraphView,
+    page_rank, PageRankConfig,
+    weakly_connected_components,
+    cdlp, CdlpConfig,
+    local_clustering_coefficient_with, DirectedLcc,
 };
 
 #[path = "common/bench_setup.rs"]
@@ -34,8 +37,9 @@ mod bench_setup;
 
 mod graphalytics_common;
 use graphalytics_common::{
-    find_dataset_files, find_properties_file, format_duration, format_num,
-    load_graphalytics_dataset, load_validation, parse_properties, DatasetProperties,
+    load_graphalytics_dataset, find_dataset_files, find_properties_file,
+    parse_properties, load_validation, DatasetProperties,
+    format_num, format_duration,
 };
 
 // ============================================================================
@@ -102,10 +106,7 @@ fn sssp_single_source(view: &GraphView, source_id: u64) -> HashMap<u64, f64> {
     impl Eq for State {}
     impl Ord for State {
         fn cmp(&self, other: &Self) -> Ordering {
-            other
-                .cost
-                .partial_cmp(&self.cost)
-                .unwrap_or(Ordering::Equal)
+            other.cost.partial_cmp(&self.cost).unwrap_or(Ordering::Equal)
         }
     }
     impl PartialOrd for State {
@@ -117,10 +118,7 @@ fn sssp_single_source(view: &GraphView, source_id: u64) -> HashMap<u64, f64> {
     let mut dist: Vec<f64> = vec![f64::INFINITY; view.node_count];
     dist[source_idx] = 0.0;
     let mut heap = BinaryHeap::new();
-    heap.push(State {
-        cost: 0.0,
-        idx: source_idx,
-    });
+    heap.push(State { cost: 0.0, idx: source_idx });
 
     while let Some(State { cost, idx }) = heap.pop() {
         if cost > dist[idx] {
@@ -138,10 +136,7 @@ fn sssp_single_source(view: &GraphView, source_id: u64) -> HashMap<u64, f64> {
             let next_cost = cost + w;
             if next_cost < dist[next_idx] {
                 dist[next_idx] = next_cost;
-                heap.push(State {
-                    cost: next_cost,
-                    idx: next_idx,
-                });
+                heap.push(State { cost: next_cost, idx: next_idx });
             }
         }
     }
@@ -172,7 +167,8 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
 
-    let data_dir = get_arg(&args, "--data-dir").unwrap_or_else(|| "data/graphalytics".to_string());
+    let data_dir = get_arg(&args, "--data-dir")
+        .unwrap_or_else(|| "data/graphalytics".to_string());
     let dataset_arg = get_arg(&args, "--dataset");
     let algo_arg = get_arg(&args, "--algo");
     let size_arg = get_arg(&args, "--size");
@@ -245,10 +241,7 @@ fn main() {
     println!("  Data directory: {}", data_dir);
     println!("  Datasets:       {:?}", datasets);
     println!("  Algorithms:     {:?}", algos);
-    println!(
-        "  Validation:     {}",
-        if validate { "enabled" } else { "disabled" }
-    );
+    println!("  Validation:     {}", if validate { "enabled" } else { "disabled" });
     println!();
 
     let data_path = Path::new(&data_dir);
@@ -280,9 +273,9 @@ fn main() {
             DatasetProperties::default()
         };
 
-        let directed = props
-            .directed
-            .unwrap_or_else(|| graphalytics_common::is_directed(dataset));
+        let directed = props.directed.unwrap_or_else(|| {
+            graphalytics_common::is_directed(dataset)
+        });
 
         // Load the graph
         println!("  Loading {} (directed={})...", dataset, directed);
@@ -311,11 +304,7 @@ fn main() {
             let result = run_algorithm(algo, view, dataset, &props, data_path, validate, directed);
             if let Some(r) = result {
                 let status = if r.validated {
-                    if r.validation_passed {
-                        "  PASS"
-                    } else {
-                        "  FAIL"
-                    }
+                    if r.validation_passed { "  PASS" } else { "  FAIL" }
                 } else {
                     ""
                 };
@@ -348,11 +337,7 @@ fn main() {
         );
         for r in &results {
             let valid_str = if r.validated {
-                if r.validation_passed {
-                    "PASS"
-                } else {
-                    "FAIL"
-                }
+                if r.validation_passed { "PASS" } else { "FAIL" }
             } else {
                 "-"
             };
@@ -370,10 +355,7 @@ fn main() {
     }
 
     // Exit with non-zero status if any validations failed
-    let failures = results
-        .iter()
-        .filter(|r| r.validated && !r.validation_passed)
-        .count();
+    let failures = results.iter().filter(|r| r.validated && !r.validation_passed).count();
     if failures > 0 {
         eprintln!("  {} validation(s) FAILED", failures);
         std::process::exit(1);
@@ -406,11 +388,7 @@ fn run_algorithm(
     match algo {
         "BFS" => {
             let source_id = props.bfs_source.unwrap_or_else(|| {
-                if view.node_count > 0 {
-                    view.index_to_node[0]
-                } else {
-                    0
-                }
+                if view.node_count > 0 { view.index_to_node[0] } else { 0 }
             });
 
             let start = Instant::now();
@@ -418,12 +396,7 @@ fn run_algorithm(
             let duration = start.elapsed();
 
             let reachable = distances.values().filter(|&&d| d < u64::MAX).count();
-            let max_dist = distances
-                .values()
-                .filter(|&&d| d < u64::MAX)
-                .max()
-                .copied()
-                .unwrap_or(0);
+            let max_dist = distances.values().filter(|&&d| d < u64::MAX).max().copied().unwrap_or(0);
 
             // Validation
             let (validated, passed) = if validate {
@@ -439,9 +412,7 @@ fn run_algorithm(
                 duration,
                 summary: format!(
                     "source={}, reachable={}, max_depth={}",
-                    source_id,
-                    format_num(reachable),
-                    max_dist
+                    source_id, format_num(reachable), max_dist
                 ),
                 validated,
                 validation_passed: passed,
@@ -454,7 +425,7 @@ fn run_algorithm(
 
             let config = PageRankConfig {
                 damping_factor: damping,
-                iterations,     // Use exact iteration count from LDBC properties
+                iterations, // Use exact iteration count from LDBC properties
                 tolerance: 0.0, // No early termination — run exactly num-iterations
                 dangling_redistribution: true, // LDBC reference outputs include dangling mass redistribution
             };
@@ -509,8 +480,7 @@ fn run_algorithm(
                 duration,
                 summary: format!(
                     "components={}, largest={}",
-                    format_num(num_components),
-                    format_num(largest)
+                    format_num(num_components), format_num(largest)
                 ),
                 validated,
                 validation_passed: passed,
@@ -549,9 +519,7 @@ fn run_algorithm(
                 duration,
                 summary: format!(
                     "communities={}, largest={}, iters={}",
-                    format_num(num_communities),
-                    format_num(largest),
-                    result.iterations,
+                    format_num(num_communities), format_num(largest), result.iterations,
                 ),
                 validated,
                 validation_passed: passed,
@@ -564,11 +532,7 @@ fn run_algorithm(
             // expected-output files. The default (Fagiolo) is what
             // CH-ALGO-PARITY compares to NetworkX -- a different question with
             // a different right answer (#916).
-            let definition = if directed {
-                DirectedLcc::Ldbc
-            } else {
-                DirectedLcc::default()
-            };
+            let definition = if directed { DirectedLcc::Ldbc } else { DirectedLcc::default() };
             let result = local_clustering_coefficient_with(view, directed, definition);
             let duration = start.elapsed();
 
@@ -587,8 +551,7 @@ fn run_algorithm(
                 duration,
                 summary: format!(
                     "avg_cc={:.6}, non_zero={}",
-                    result.average,
-                    format_num(non_zero),
+                    result.average, format_num(non_zero),
                 ),
                 validated,
                 validation_passed: passed,
@@ -597,11 +560,7 @@ fn run_algorithm(
 
         "SSSP" => {
             let source_id = props.sssp_source.unwrap_or_else(|| {
-                if view.node_count > 0 {
-                    view.index_to_node[0]
-                } else {
-                    0
-                }
+                if view.node_count > 0 { view.index_to_node[0] } else { 0 }
             });
 
             let start = Instant::now();
@@ -628,9 +587,7 @@ fn run_algorithm(
                 duration,
                 summary: format!(
                     "source={}, reachable={}, max_dist={:.4}",
-                    source_id,
-                    format_num(reachable),
-                    max_dist,
+                    source_id, format_num(reachable), max_dist,
                 ),
                 validated,
                 validation_passed: passed,
@@ -652,7 +609,11 @@ fn run_algorithm(
 // ============================================================================
 
 /// Validate BFS distances against expected output.
-fn validate_bfs(actual: &HashMap<u64, u64>, data_dir: &Path, dataset: &str) -> (bool, bool) {
+fn validate_bfs(
+    actual: &HashMap<u64, u64>,
+    data_dir: &Path,
+    dataset: &str,
+) -> (bool, bool) {
     let expected = match load_validation(data_dir, dataset, "BFS") {
         Some(e) => e,
         None => return (false, false),
@@ -667,10 +628,7 @@ fn validate_bfs(actual: &HashMap<u64, u64>, data_dir: &Path, dataset: &str) -> (
         } else {
             match expected_str.parse() {
                 Ok(v) => v,
-                Err(_) => {
-                    mismatches += 1;
-                    continue;
-                }
+                Err(_) => { mismatches += 1; continue; }
             }
         };
 
@@ -713,10 +671,7 @@ fn validate_float_map(
     for (node_id, expected_str) in &expected {
         let expected_val: f64 = match expected_str.parse() {
             Ok(v) => v,
-            Err(_) => {
-                mismatches += 1;
-                continue;
-            }
+            Err(_) => { mismatches += 1; continue; }
         };
 
         let actual_val = actual.get(node_id).copied().unwrap_or(0.0);
@@ -748,7 +703,11 @@ fn validate_float_map(
 
 /// Validate WCC results: two nodes with the same expected label should be
 /// in the same component, and vice versa.
-fn validate_wcc(actual: &HashMap<u64, usize>, data_dir: &Path, dataset: &str) -> (bool, bool) {
+fn validate_wcc(
+    actual: &HashMap<u64, usize>,
+    data_dir: &Path,
+    dataset: &str,
+) -> (bool, bool) {
     let expected = match load_validation(data_dir, dataset, "WCC") {
         Some(e) => e,
         None => return (false, false),
@@ -757,10 +716,7 @@ fn validate_wcc(actual: &HashMap<u64, usize>, data_dir: &Path, dataset: &str) ->
     // Build expected partition: group nodes by their expected label
     let mut expected_groups: HashMap<String, Vec<u64>> = HashMap::new();
     for (&node_id, label) in &expected {
-        expected_groups
-            .entry(label.clone())
-            .or_default()
-            .push(node_id);
+        expected_groups.entry(label.clone()).or_default().push(node_id);
     }
 
     // Check that nodes in the same expected group share the same actual component
@@ -795,7 +751,11 @@ fn validate_wcc(actual: &HashMap<u64, usize>, data_dir: &Path, dataset: &str) ->
 }
 
 /// Validate CDLP results by exact label comparison.
-fn validate_cdlp(actual: &HashMap<u64, u64>, data_dir: &Path, dataset: &str) -> (bool, bool) {
+fn validate_cdlp(
+    actual: &HashMap<u64, u64>,
+    data_dir: &Path,
+    dataset: &str,
+) -> (bool, bool) {
     let expected = match load_validation(data_dir, dataset, "CDLP") {
         Some(e) => e,
         None => return (false, false),
@@ -807,10 +767,7 @@ fn validate_cdlp(actual: &HashMap<u64, u64>, data_dir: &Path, dataset: &str) -> 
     for (node_id, expected_str) in &expected {
         let expected_label: u64 = match expected_str.parse() {
             Ok(v) => v,
-            Err(_) => {
-                mismatches += 1;
-                continue;
-            }
+            Err(_) => { mismatches += 1; continue; }
         };
         let actual_label = actual.get(node_id).copied().unwrap_or(0);
         if actual_label != expected_label {
@@ -833,7 +790,11 @@ fn validate_cdlp(actual: &HashMap<u64, u64>, data_dir: &Path, dataset: &str) -> 
 }
 
 /// Validate SSSP distances against expected output.
-fn validate_sssp(actual: &HashMap<u64, f64>, data_dir: &Path, dataset: &str) -> (bool, bool) {
+fn validate_sssp(
+    actual: &HashMap<u64, f64>,
+    data_dir: &Path,
+    dataset: &str,
+) -> (bool, bool) {
     let expected = match load_validation(data_dir, dataset, "SSSP") {
         Some(e) => e,
         None => return (false, false),
@@ -848,10 +809,7 @@ fn validate_sssp(actual: &HashMap<u64, f64>, data_dir: &Path, dataset: &str) -> 
         } else {
             match expected_str.parse() {
                 Ok(v) => v,
-                Err(_) => {
-                    mismatches += 1;
-                    continue;
-                }
+                Err(_) => { mismatches += 1; continue; }
             }
         };
 

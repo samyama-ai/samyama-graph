@@ -23,10 +23,7 @@ use crate::query::ast::{BinaryOp, Expression, OrderByClause, Query, ReturnItem, 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     DuplicateColumn(String),
-    UnionColumnMismatch {
-        left: Vec<String>,
-        right: Vec<String>,
-    },
+    UnionColumnMismatch { left: Vec<String>, right: Vec<String> },
     MixedUnionAndUnionAll,
     CreateOnBoundVariable(String),
     CreateRelationshipWithoutType,
@@ -44,10 +41,7 @@ pub enum ValidationError {
     /// A boolean operator given an operand that cannot be a boolean.
     NonBooleanOperand(&'static str),
     /// Property access on a value that cannot carry properties.
-    PropertyAccessOnNonMap {
-        name: String,
-        what: &'static str,
-    },
+    PropertyAccessOnNonMap { name: String, what: &'static str },
     /// A pattern predicate naming a variable nothing has bound.
     UnboundPatternVariable(String),
     /// One variable bound to two different kinds of entity.
@@ -176,9 +170,10 @@ impl std::fmt::Display for ValidationError {
                 "every WITH item that is not a bare variable needs an alias: nothing \
                  downstream can name the column otherwise"
             ),
-            Self::FunctionArgumentKind(func, wanted, got) => {
-                write!(f, "`{func}()` takes {wanted}, and was given {got}")
-            }
+            Self::FunctionArgumentKind(func, wanted, got) => write!(
+                f,
+                "`{func}()` takes {wanted}, and was given {got}"
+            ),
             // Checked at compile time on purpose: as a run-time error it only
             // fired on a row that reached the call, so the same query over an
             // empty graph returned no rows and reported success.
@@ -239,9 +234,10 @@ impl std::fmt::Display for ValidationError {
                  group for this to be evaluated over -- project it as its own item, \
                  or move it past a WITH"
             ),
-            Self::AggregateNotAllowed(where_) => {
-                write!(f, "an aggregate function is not allowed {where_}")
-            }
+            Self::AggregateNotAllowed(where_) => write!(
+                f,
+                "an aggregate function is not allowed {where_}"
+            ),
             Self::OrderByUndefinedVariable(v) => write!(
                 f,
                 "`{v}` is not available to ORDER BY: the projection aggregates or is \
@@ -265,11 +261,7 @@ impl std::fmt::Display for ValidationError {
                 "a relationship pattern cannot be used as a value on the right of SET; \
                  patterns belong in MATCH, WHERE or a pattern comprehension"
             ),
-            Self::VariableKindConflict {
-                name,
-                first,
-                second,
-            } => write!(
+            Self::VariableKindConflict { name, first, second } => write!(
                 f,
                 "`{name}` is bound to {first} and then to {second} in the same scope. A \
                  variable names one entity, and an entity is a node, a relationship or a \
@@ -309,9 +301,10 @@ impl std::fmt::Display for ValidationError {
                 "a pattern is a predicate, not a value; it cannot be projected by {where_}. \
                  Use `EXISTS {{ ... }}` for a boolean, or a pattern comprehension for a list"
             ),
-            Self::InvalidDeleteTarget(what) => {
-                write!(f, "DELETE takes a node, relationship or path; {what}")
-            }
+            Self::InvalidDeleteTarget(what) => write!(
+                f,
+                "DELETE takes a node, relationship or path; {what}"
+            ),
             Self::VariableTypeConflict(name) => write!(
                 f,
                 "`{name}` is bound to a collection and cannot be used as a node or \
@@ -346,9 +339,10 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "All sub queries in an UNION must have the same column names: {left:?} vs {right:?}"
             ),
-            Self::MixedUnionAndUnionAll => {
-                write!(f, "Cannot mix UNION and UNION ALL in the same query")
-            }
+            Self::MixedUnionAndUnionAll => write!(
+                f,
+                "Cannot mix UNION and UNION ALL in the same query"
+            ),
             Self::CreateOnBoundVariable(name) => write!(
                 f,
                 "Variable `{name}` already declared; CREATE cannot add labels or properties to it"
@@ -357,12 +351,14 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "Exactly one relationship type must be specified for CREATE"
             ),
-            Self::CreateUndirectedRelationship => {
-                write!(f, "Only directed relationships are supported in CREATE")
-            }
-            Self::CreateVariableLengthRelationship => {
-                write!(f, "Variable length relationships cannot be created")
-            }
+            Self::CreateUndirectedRelationship => write!(
+                f,
+                "Only directed relationships are supported in CREATE"
+            ),
+            Self::CreateVariableLengthRelationship => write!(
+                f,
+                "Variable length relationships cannot be created"
+            ),
             Self::UnboundedWalk => write!(
                 f,
                 "an unbounded WALK under ALL has no finite answer: a walk may reuse \
@@ -531,18 +527,11 @@ fn write_patterns(query: &Query) -> Vec<(WriteKind, &crate::query::ast::Pattern,
     out
 }
 
+
 /// The aggregate functions, by the name the parser produces.
 const AGGREGATE_NAMES: &[&str] = &[
-    "count",
-    "sum",
-    "avg",
-    "min",
-    "max",
-    "collect",
-    "stdev",
-    "stdevp",
-    "percentilecont",
-    "percentiledisc",
+    "count", "sum", "avg", "min", "max", "collect", "stdev", "stdevp",
+    "percentilecont", "percentiledisc",
 ];
 
 fn is_aggregate_call(expr: &Expression) -> bool {
@@ -751,9 +740,7 @@ fn collect_leaf_exprs_outside_aggregates<'a>(expr: &'a Expression, out: &mut Vec
     match expr {
         e if is_aggregate_call(e) => {}
         Expression::Variable(_) | Expression::Property { .. } => out.push(expr),
-        other => walk_children_ref(other, &mut |e| {
-            collect_leaf_exprs_outside_aggregates(e, out)
-        }),
+        other => walk_children_ref(other, &mut |e| collect_leaf_exprs_outside_aggregates(e, out)),
     }
 }
 
@@ -801,6 +788,7 @@ fn column_name_at(item: &ReturnItem, _idx: usize) -> Option<String> {
         _ => None,
     })
 }
+
 
 /// What a pattern binds a variable to. A variable may be exactly one of these
 /// for as long as it stays in scope.
@@ -945,22 +933,15 @@ fn validate_variable_kinds(query: &Query) -> Result<(), ValidationError> {
     Ok(())
 }
 
+
 /// Variables a pattern binds.
 fn pattern_vars(pattern: &crate::query::ast::Pattern, out: &mut HashSet<String>) {
     for path in &pattern.paths {
-        if let Some(v) = &path.path_variable {
-            out.insert(v.clone());
-        }
-        if let Some(v) = &path.start.variable {
-            out.insert(v.clone());
-        }
+        if let Some(v) = &path.path_variable { out.insert(v.clone()); }
+        if let Some(v) = &path.start.variable { out.insert(v.clone()); }
         for seg in &path.segments {
-            if let Some(v) = &seg.edge.variable {
-                out.insert(v.clone());
-            }
-            if let Some(v) = &seg.node.variable {
-                out.insert(v.clone());
-            }
+            if let Some(v) = &seg.edge.variable { out.insert(v.clone()); }
+            if let Some(v) = &seg.node.variable { out.insert(v.clone()); }
         }
     }
 }
@@ -982,41 +963,16 @@ fn projected_names(items: &[ReturnItem]) -> HashSet<String> {
 fn expression_vars(e: &Expression, out: &mut HashSet<String>) {
     use Expression::*;
     match e {
-        Variable(v) => {
-            out.insert(v.clone());
-        }
-        Property { variable, .. } => {
-            out.insert(variable.clone());
-        }
-        Binary { left, right, .. } => {
-            expression_vars(left, out);
-            expression_vars(right, out);
-        }
+        Variable(v) => { out.insert(v.clone()); }
+        Property { variable, .. } => { out.insert(variable.clone()); }
+        Binary { left, right, .. } => { expression_vars(left, out); expression_vars(right, out); }
         Unary { expr, .. } => expression_vars(expr, out),
-        Function { args, .. } => {
-            for a in args {
-                expression_vars(a, out)
-            }
-        }
-        Index { expr, index } => {
-            expression_vars(expr, out);
-            expression_vars(index, out);
-        }
-        Case {
-            operand,
-            when_clauses,
-            else_result,
-        } => {
-            if let Some(o) = operand {
-                expression_vars(o, out);
-            }
-            for (w, t) in when_clauses {
-                expression_vars(w, out);
-                expression_vars(t, out);
-            }
-            if let Some(e) = else_result {
-                expression_vars(e, out);
-            }
+        Function { args, .. } => for a in args { expression_vars(a, out) },
+        Index { expr, index } => { expression_vars(expr, out); expression_vars(index, out); }
+        Case { operand, when_clauses, else_result } => {
+            if let Some(o) = operand { expression_vars(o, out); }
+            for (w, t) in when_clauses { expression_vars(w, out); expression_vars(t, out); }
+            if let Some(e) = else_result { expression_vars(e, out); }
         }
         _ => {}
     }
@@ -1105,30 +1061,12 @@ fn validate_order_by_in_scope(query: &Query) -> Result<(), ValidationError> {
 
     for clause in &query.clauses {
         match clause {
-            Clause::Match(mc) => {
-                pattern_vars(&mc.pattern, &mut scope);
-                seen_any_binding = true;
-            }
-            Clause::Create(cc) => {
-                pattern_vars(&cc.pattern, &mut scope);
-                seen_any_binding = true;
-            }
-            Clause::Merge(mc) => {
-                pattern_vars(&mc.pattern, &mut scope);
-                seen_any_binding = true;
-            }
-            Clause::Unwind(u) => {
-                scope.insert(u.variable.clone());
-                seen_any_binding = true;
-            }
-            Clause::LoadCsv(l) => {
-                scope.insert(l.variable.clone());
-                seen_any_binding = true;
-            }
-            Clause::LoadParquet(l) => {
-                scope.insert(l.variable.clone());
-                seen_any_binding = true;
-            }
+            Clause::Match(mc) => { pattern_vars(&mc.pattern, &mut scope); seen_any_binding = true; }
+            Clause::Create(cc) => { pattern_vars(&cc.pattern, &mut scope); seen_any_binding = true; }
+            Clause::Merge(mc) => { pattern_vars(&mc.pattern, &mut scope); seen_any_binding = true; }
+            Clause::Unwind(u) => { scope.insert(u.variable.clone()); seen_any_binding = true; }
+            Clause::LoadCsv(l) => { scope.insert(l.variable.clone()); seen_any_binding = true; }
+            Clause::LoadParquet(l) => { scope.insert(l.variable.clone()); seen_any_binding = true; }
             Clause::With(wc) => {
                 let projected = projected_names(&wc.items);
                 if let Some(ob) = &wc.order_by {
@@ -1173,6 +1111,7 @@ fn check_order_by(
     Ok(())
 }
 
+
 /// `AND` / `OR` / `XOR` require boolean operands, and a literal that is not one
 /// is a compile-time error.
 ///
@@ -1213,12 +1152,10 @@ fn validate_boolean_operands(query: &Query) -> Result<(), ValidationError> {
 
     fn walk(e: &Expression) -> Result<(), ValidationError> {
         if let Expression::Binary { left, op, right } = e {
-            if matches!(
-                op,
-                crate::query::ast::BinaryOp::And
-                    | crate::query::ast::BinaryOp::Or
-                    | crate::query::ast::BinaryOp::Xor
-            ) {
+            if matches!(op, crate::query::ast::BinaryOp::And
+                          | crate::query::ast::BinaryOp::Or
+                          | crate::query::ast::BinaryOp::Xor)
+            {
                 for side in [left, right] {
                     if let Some(what) = statically_non_boolean(side) {
                         return Err(ValidationError::NonBooleanOperand(what));
@@ -1246,34 +1183,19 @@ fn child_expressions(e: &Expression) -> Vec<&Expression> {
         Unary { expr, .. } => vec![expr],
         Function { args, .. } => args.iter().collect(),
         Index { expr, index } => vec![expr, index],
-        Case {
-            operand,
-            when_clauses,
-            else_result,
-        } => {
+        Case { operand, when_clauses, else_result } => {
             let mut v: Vec<&Expression> = Vec::new();
-            if let Some(o) = operand {
-                v.push(o);
-            }
-            for (w, t) in when_clauses {
-                v.push(w);
-                v.push(t);
-            }
-            if let Some(x) = else_result {
-                v.push(x);
-            }
+            if let Some(o) = operand { v.push(o); }
+            for (w, t) in when_clauses { v.push(w); v.push(t); }
+            if let Some(x) = else_result { v.push(x); }
             v
         }
         ListExpr(items) => items.iter().collect(),
         MapExpr(entries) => entries.iter().map(|(_, v)| v).collect(),
         ListSlice { expr, start, end } => {
             let mut v = vec![expr.as_ref()];
-            if let Some(s) = start {
-                v.push(s);
-            }
-            if let Some(e) = end {
-                v.push(e);
-            }
+            if let Some(s) = start { v.push(s); }
+            if let Some(e) = end { v.push(e); }
             v
         }
         _ => Vec::new(),
@@ -1291,29 +1213,17 @@ fn child_expressions(e: &Expression) -> Vec<&Expression> {
 /// ignores the rest of the body. That is a wrong answer, so it is refused.
 fn validate_exists_body_positions(query: &Query) -> Result<(), ValidationError> {
     fn is_full_exists(e: &Expression) -> bool {
-        matches!(
-            e,
-            Expression::ExistsSubquery {
-                body: Some(_),
-                count: false,
-                ..
-            }
-        )
+        matches!(e, Expression::ExistsSubquery { body: Some(_), count: false, .. })
     }
     fn conjuncts<'a>(e: &'a Expression, out: &mut Vec<&'a Expression>) {
         match e {
-            Expression::Binary {
-                left,
-                op: crate::query::ast::BinaryOp::And,
-                right,
-            } => {
+            Expression::Binary { left, op: crate::query::ast::BinaryOp::And, right } => {
                 conjuncts(left, out);
                 conjuncts(right, out);
             }
-            Expression::Unary {
-                op: crate::query::ast::UnaryOp::Not,
-                expr,
-            } if is_full_exists(expr) => out.push(expr),
+            Expression::Unary { op: crate::query::ast::UnaryOp::Not, expr } if is_full_exists(expr) => {
+                out.push(expr)
+            }
             other if is_full_exists(other) => out.push(other),
             _ => {}
         }
@@ -1388,6 +1298,7 @@ fn all_expressions(query: &Query) -> Vec<&Expression> {
     out
 }
 
+
 /// Property access on something that cannot have properties (#791).
 ///
 /// ```text
@@ -1424,26 +1335,21 @@ fn validate_property_access_targets(query: &Query) -> Result<(), ValidationError
     }
 
     // Names a projection binds to a literal of a non-map type.
-    let mut bad: std::collections::HashMap<String, &'static str> = std::collections::HashMap::new();
-    let mut note = |items: &[ReturnItem],
-                    bad: &mut std::collections::HashMap<String, &'static str>| {
+    let mut bad: std::collections::HashMap<String, &'static str> =
+        std::collections::HashMap::new();
+    let mut note = |items: &[ReturnItem], bad: &mut std::collections::HashMap<String, &'static str>| {
         for item in items {
             let Some(alias) = &item.alias else { continue };
             match non_map_literal(&item.expression) {
-                Some(what) => {
-                    bad.insert(alias.clone(), what);
-                }
+                Some(what) => { bad.insert(alias.clone(), what); }
                 // Re-binding the name to anything else clears it.
-                None => {
-                    bad.remove(alias);
-                }
+                None => { bad.remove(alias); }
             }
         }
     };
 
-    let mut check = |e: &Expression,
-                     bad: &std::collections::HashMap<String, &'static str>|
-     -> Result<(), ValidationError> {
+    let mut check = |e: &Expression, bad: &std::collections::HashMap<String, &'static str>|
+        -> Result<(), ValidationError> {
         if let Expression::Property { variable, .. } = e {
             if let Some(what) = bad.get(variable) {
                 return Err(ValidationError::PropertyAccessOnNonMap {
@@ -1459,15 +1365,11 @@ fn validate_property_access_targets(query: &Query) -> Result<(), ValidationError
         for clause in &query.clauses {
             match clause {
                 Clause::With(w) => {
-                    for item in &w.items {
-                        check(&item.expression, &bad)?;
-                    }
+                    for item in &w.items { check(&item.expression, &bad)?; }
                     note(&w.items, &mut bad);
                 }
                 Clause::Return(r) => {
-                    for item in &r.items {
-                        check(&item.expression, &bad)?;
-                    }
+                    for item in &r.items { check(&item.expression, &bad)?; }
                 }
                 Clause::Where(w) => check(&w.predicate, &bad)?,
                 _ => {}
@@ -1478,27 +1380,22 @@ fn validate_property_access_targets(query: &Query) -> Result<(), ValidationError
 
     // The by-kind shape: earlier WITHs first, then the last, then RETURN.
     for (wc, _, _, _) in &query.extra_with_stages {
-        for item in &wc.items {
-            check(&item.expression, &bad)?;
-        }
+        for item in &wc.items { check(&item.expression, &bad)?; }
         note(&wc.items, &mut bad);
     }
     if let Some(wc) = &query.with_clause {
-        for item in &wc.items {
-            check(&item.expression, &bad)?;
-        }
+        for item in &wc.items { check(&item.expression, &bad)?; }
         note(&wc.items, &mut bad);
     }
     if let Some(w) = &query.where_clause {
         check(&w.predicate, &bad)?;
     }
     if let Some(rc) = &query.return_clause {
-        for item in &rc.items {
-            check(&item.expression, &bad)?;
-        }
+        for item in &rc.items { check(&item.expression, &bad)?; }
     }
     Ok(())
 }
+
 
 /// Whether a projection binds this name to something that **cannot** be a node,
 /// relationship or path — so using it as a pattern is a type conflict.
@@ -1533,6 +1430,7 @@ fn not_an_entity(e: &Expression) -> bool {
     )
 }
 
+
 /// A pattern predicate in `WHERE` may not **introduce** variables (#798).
 ///
 /// ```text
@@ -1560,17 +1458,15 @@ fn validate_pattern_predicate_vars(query: &Query) -> Result<(), ValidationError>
     }
 
     /// Walk an expression for pattern predicates, checking each against scope.
-    fn walk(e: &Expression, bound: &HashSet<String>) -> Result<(), ValidationError> {
+    fn walk(
+        e: &Expression,
+        bound: &HashSet<String>,
+    ) -> Result<(), ValidationError> {
         // Only a *bare* pattern predicate is restricted. `EXISTS { ... }`
         // desugars to the same node and may introduce names -- that is the
         // whole difference between the two spellings, and checking both
         // rejects every `EXISTS { MATCH (n)-->(m) }` (#798).
-        if let Expression::ExistsSubquery {
-            pattern,
-            bare_pattern: true,
-            ..
-        } = e
-        {
+        if let Expression::ExistsSubquery { pattern, bare_pattern: true, .. } = e {
             for name in pattern_named(pattern) {
                 if !bound.contains(&name) {
                     return Err(ValidationError::UnboundPatternVariable(name));
@@ -1592,15 +1488,9 @@ fn validate_pattern_predicate_vars(query: &Query) -> Result<(), ValidationError>
                 Clause::Match(mc) => pattern_vars(&mc.pattern, &mut bound),
                 Clause::Create(cc) => pattern_vars(&cc.pattern, &mut bound),
                 Clause::Merge(mc) => pattern_vars(&mc.pattern, &mut bound),
-                Clause::Unwind(u) => {
-                    bound.insert(u.variable.clone());
-                }
-                Clause::LoadCsv(l) => {
-                    bound.insert(l.variable.clone());
-                }
-                Clause::LoadParquet(l) => {
-                    bound.insert(l.variable.clone());
-                }
+                Clause::Unwind(u) => { bound.insert(u.variable.clone()); }
+                Clause::LoadCsv(l) => { bound.insert(l.variable.clone()); }
+                Clause::LoadParquet(l) => { bound.insert(l.variable.clone()); }
                 Clause::With(w) => bound = projected_names(&w.items),
                 Clause::Where(w) => walk(&w.predicate, &bound)?,
                 _ => {}
@@ -1631,15 +1521,9 @@ fn validate_pattern_predicate_vars(query: &Query) -> Result<(), ValidationError>
     // Post-WITH stages get the projection's scope plus their own matches.
     for (wc, uw, matches, wh) in &query.extra_with_stages {
         bound = projected_names(&wc.items);
-        if let Some(u) = uw {
-            bound.insert(u.variable.clone());
-        }
-        for mc in matches {
-            pattern_vars(&mc.pattern, &mut bound);
-        }
-        if let Some(w) = wh {
-            walk(&w.predicate, &bound)?;
-        }
+        if let Some(u) = uw { bound.insert(u.variable.clone()); }
+        for mc in matches { pattern_vars(&mc.pattern, &mut bound); }
+        if let Some(w) = wh { walk(&w.predicate, &bound)?; }
     }
     if let Some(wc) = &query.with_clause {
         bound = projected_names(&wc.items);
@@ -1701,9 +1585,7 @@ fn validate_size_arguments(query: &Query) -> Result<(), ValidationError> {
                         // node, so the flag is what separates them -- widening
                         // this to both would reject `size(...)` nowhere and
                         // `EXISTS` everywhere, which is how #798 went wrong.
-                        Expression::ExistsSubquery {
-                            bare_pattern: true, ..
-                        } => {
+                        Expression::ExistsSubquery { bare_pattern: true, .. } => {
                             return Err(ValidationError::SizeOfNonCollection("a pattern"));
                         }
                         Expression::Variable(v) if paths.contains(v) => {
@@ -1747,18 +1629,9 @@ fn validate_size_arguments(query: &Query) -> Result<(), ValidationError> {
 fn validate_pattern_projections(query: &Query) -> Result<(), ValidationError> {
     use crate::query::ast::Clause;
 
-    fn check(
-        items: &[crate::query::ast::ReturnItem],
-        what: &'static str,
-    ) -> Result<(), ValidationError> {
+    fn check(items: &[crate::query::ast::ReturnItem], what: &'static str) -> Result<(), ValidationError> {
         for item in items {
-            if matches!(
-                item.expression,
-                Expression::ExistsSubquery {
-                    bare_pattern: true,
-                    ..
-                }
-            ) {
+            if matches!(item.expression, Expression::ExistsSubquery { bare_pattern: true, .. }) {
                 return Err(ValidationError::PatternInProjection(what));
             }
         }
@@ -1947,7 +1820,10 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
     /// redeclare", and a path name is not that. Here it is: `MATCH p = (a)-->(b)
     /// RETURN p` binds `p`, and borrowing the other collector rejected every
     /// named-path query in the suite.
-    fn pattern_and_path_variables(pattern: &crate::query::ast::Pattern, out: &mut HashSet<String>) {
+    fn pattern_and_path_variables(
+        pattern: &crate::query::ast::Pattern,
+        out: &mut HashSet<String>,
+    ) {
         pattern_variables(pattern, out);
         for path in &pattern.paths {
             if let Some(v) = &path.path_variable {
@@ -1963,11 +1839,7 @@ fn validate_variables_are_bound(query: &Query) -> Result<(), ValidationError> {
             | Expression::PredicateFunction { variable, .. } => {
                 out.insert(variable.clone());
             }
-            Expression::Reduce {
-                accumulator,
-                variable,
-                ..
-            } => {
+            Expression::Reduce { accumulator, variable, .. } => {
                 out.insert(accumulator.clone());
                 out.insert(variable.clone());
             }
@@ -2346,7 +2218,8 @@ fn validate_with_items_aliased(query: &Query) -> Result<(), ValidationError> {
 fn validate_no_property_on_path(query: &Query) -> Result<(), ValidationError> {
     use crate::query::ast::Clause;
 
-    let mut kinds: std::collections::HashMap<String, EntityKind> = std::collections::HashMap::new();
+    let mut kinds: std::collections::HashMap<String, EntityKind> =
+        std::collections::HashMap::new();
     for mc in &query.match_clauses {
         let _ = note_pattern_kinds(&mut kinds, &mc.pattern);
     }
@@ -2448,7 +2321,8 @@ fn validate_merge_null_properties(query: &Query) -> Result<(), ValidationError> 
 fn validate_predicate_patterns(query: &Query) -> Result<(), ValidationError> {
     // Which names bind an entity, so `WHERE n` can be told apart from a
     // `WHERE flag` over a boolean.
-    let mut kinds: std::collections::HashMap<String, EntityKind> = std::collections::HashMap::new();
+    let mut kinds: std::collections::HashMap<String, EntityKind> =
+        std::collections::HashMap::new();
     for mc in &query.match_clauses {
         let _ = note_pattern_kinds(&mut kinds, &mc.pattern);
     }
@@ -2471,13 +2345,9 @@ fn validate_predicate_patterns(query: &Query) -> Result<(), ValidationError> {
             match e {
                 // `WHERE (n)-->()` is the pattern shorthand and is fine; a
                 // pattern with no relationship is not a question.
-                Expression::ExistsSubquery {
-                    pattern,
-                    bare_pattern: true,
-                    where_clause,
-                    ..
-                } if pattern.paths.iter().all(|p| p.segments.is_empty())
-                    && where_clause.is_none() =>
+                Expression::ExistsSubquery { pattern, bare_pattern: true, where_clause, .. }
+                    if pattern.paths.iter().all(|p| p.segments.is_empty())
+                        && where_clause.is_none() =>
                 {
                     Err(ValidationError::InvalidPredicatePattern)
                 }
@@ -2495,10 +2365,7 @@ fn validate_predicate_patterns(query: &Query) -> Result<(), ValidationError> {
                     walk(left, kinds)?;
                     walk(right, kinds)
                 }
-                Expression::Unary {
-                    op: UnaryOp::Not,
-                    expr,
-                } => walk(expr, kinds),
+                Expression::Unary { op: UnaryOp::Not, expr } => walk(expr, kinds),
                 _ => Ok(()),
             }
         }
@@ -2665,16 +2532,8 @@ fn write_expressions(query: &Query) -> Vec<&Expression> {
         out.extend(sc.entity_items().map(|i| &i.value));
     }
     fn from_merge<'a>(mc: &'a MergeClause, out: &mut Vec<&'a Expression>) {
-        out.extend(
-            mc.on_create_set()
-                .chain(mc.on_match_set())
-                .map(|i| &i.value),
-        );
-        out.extend(
-            mc.on_create_entity_set()
-                .chain(mc.on_match_entity_set())
-                .map(|i| &i.value),
-        );
+        out.extend(mc.on_create_set().chain(mc.on_match_set()).map(|i| &i.value));
+        out.extend(mc.on_create_entity_set().chain(mc.on_match_entity_set()).map(|i| &i.value));
     }
     fn from_foreach<'a>(f: &'a ForeachClause, out: &mut Vec<&'a Expression>) {
         out.push(&f.expression);
@@ -2798,7 +2657,8 @@ fn validate_aggregation_is_unambiguous(query: &Query) -> Result<(), ValidationEr
             }
             let mut used = HashSet::new();
             free_variables_outside_aggregates(&item.expression, &mut used);
-            let mut ungrouped: Vec<&String> = used.iter().filter(|v| !keys.contains(*v)).collect();
+            let mut ungrouped: Vec<&String> =
+                used.iter().filter(|v| !keys.contains(*v)).collect();
             if let Some(v) = ungrouped.pop() {
                 // Sorted so the message is the same on every run; a HashSet
                 // would name a different variable each time and make the
@@ -2852,16 +2712,12 @@ fn validate_aggregate_placement(query: &Query) -> Result<(), ValidationError> {
 
     fn inside_comprehension(e: &Expression) -> Result<(), ValidationError> {
         let body: Vec<&Expression> = match e {
-            Expression::ListComprehension {
-                map_expr, filter, ..
-            } => {
+            Expression::ListComprehension { map_expr, filter, .. } => {
                 let mut v: Vec<&Expression> = vec![map_expr.as_ref()];
                 v.extend(filter.iter().map(|b| b.as_ref()));
                 v
             }
-            Expression::PatternComprehension {
-                projection, filter, ..
-            } => {
+            Expression::PatternComprehension { projection, filter, .. } => {
                 let mut v: Vec<&Expression> = vec![projection.as_ref()];
                 v.extend(filter.iter().map(|b| b.as_ref()));
                 v
@@ -2975,7 +2831,8 @@ fn validate_function_argument_kinds(query: &Query) -> Result<(), ValidationError
     // modelled here: a name a WITH drops is simply absent from a later
     // pattern's map too, and a name it carries keeps its kind. The coarse
     // version cannot produce a *wrong* kind, only miss one.
-    let mut kinds: std::collections::HashMap<String, EntityKind> = std::collections::HashMap::new();
+    let mut kinds: std::collections::HashMap<String, EntityKind> =
+        std::collections::HashMap::new();
     let mut note = |pattern: &crate::query::ast::Pattern,
                     kinds: &mut std::collections::HashMap<String, EntityKind>| {
         // Kind *clashes* are `validate_variable_kinds`'s job; ignored here so
@@ -3240,30 +3097,29 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
             }
             {
                 let bound = &bound;
-                let mut check =
-                    |np: &crate::query::ast::NodePattern| -> Result<(), ValidationError> {
-                        if let Some(v) = &np.variable {
-                            // A property map counts even when it is **empty**.
-                            // `CREATE (n:Foo) CREATE (n {})-[:OWNS]->(:Dog)` is a
-                            // rebinding attempt Cypher rejects, and treating `{}`
-                            // as "adds nothing" accepted it and created the
-                            // relationship anyway (#980). Writing braces at all is
-                            // the tell; a bare re-mention has `properties: None`
-                            // and stays legal, which is how
-                            // `CREATE (a)-[:R]->(b)` works.
-                            let adds_something = !np.labels.is_empty()
-                                || np.properties.is_some()
-                                || np.property_exprs.is_some();
-                            if bound.contains(v) && adds_something {
-                                return Err(if merge {
-                                    ValidationError::MergeOnBoundVariable(v.clone())
-                                } else {
-                                    ValidationError::CreateOnBoundVariable(v.clone())
-                                });
-                            }
+                let mut check = |np: &crate::query::ast::NodePattern| -> Result<(), ValidationError> {
+                    if let Some(v) = &np.variable {
+                        // A property map counts even when it is **empty**.
+                        // `CREATE (n:Foo) CREATE (n {})-[:OWNS]->(:Dog)` is a
+                        // rebinding attempt Cypher rejects, and treating `{}`
+                        // as "adds nothing" accepted it and created the
+                        // relationship anyway (#980). Writing braces at all is
+                        // the tell; a bare re-mention has `properties: None`
+                        // and stays legal, which is how
+                        // `CREATE (a)-[:R]->(b)` works.
+                        let adds_something = !np.labels.is_empty()
+                            || np.properties.is_some()
+                            || np.property_exprs.is_some();
+                        if bound.contains(v) && adds_something {
+                            return Err(if merge {
+                                ValidationError::MergeOnBoundVariable(v.clone())
+                            } else {
+                                ValidationError::CreateOnBoundVariable(v.clone())
+                            });
                         }
-                        Ok(())
-                    };
+                    }
+                    Ok(())
+                };
                 check(&path.start)?;
                 for seg in &path.segments {
                     check(&seg.node)?;
@@ -3304,9 +3160,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                 // (`SET n.deg = COUNT { (n)--() }`); only a pattern is refused.
                 Expression::ExistsSubquery { count: true, .. } => false,
                 Expression::ExistsSubquery { .. } | Expression::PatternComprehension { .. } => true,
-                Expression::Binary { left, right, .. } => {
-                    holds_pattern(left) || holds_pattern(right)
-                }
+                Expression::Binary { left, right, .. } => holds_pattern(left) || holds_pattern(right),
                 Expression::Unary { expr, .. } => holds_pattern(expr),
                 Expression::Function { args, .. } => args.iter().any(holds_pattern),
                 Expression::Index { expr, index } => holds_pattern(expr) || holds_pattern(index),
@@ -3349,9 +3203,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
             match clause {
                 Clause::With(wc) => {
                     for item in &wc.items {
-                        let Some(alias) = item.alias.as_ref() else {
-                            continue;
-                        };
+                        let Some(alias) = item.alias.as_ref() else { continue };
                         let is_collection = not_an_entity(&item.expression);
                         // Re-aliasing something else to the same name clears it.
                         if is_collection {
@@ -3366,9 +3218,7 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
                         let mut check = |v: &Option<String>| -> Result<(), ValidationError> {
                             if let Some(name) = v {
                                 if collections.contains(name) {
-                                    return Err(ValidationError::VariableTypeConflict(
-                                        name.clone(),
-                                    ));
+                                    return Err(ValidationError::VariableTypeConflict(name.clone()));
                                 }
                             }
                             Ok(())
@@ -3405,11 +3255,10 @@ pub fn validate(query: &Query) -> Result<(), ValidationError> {
         // shape missed this query entirely, because `MATCH … WITH … MATCH …
         // RETURN` is a shape the established rules already accept.
         let mut collections: HashSet<String> = HashSet::new();
-        let mut note = |wc: &crate::query::ast::WithClause, collections: &mut HashSet<String>| {
+        let mut note = |wc: &crate::query::ast::WithClause,
+                        collections: &mut HashSet<String>| {
             for item in &wc.items {
-                let Some(alias) = item.alias.as_ref() else {
-                    continue;
-                };
+                let Some(alias) = item.alias.as_ref() else { continue };
                 let is_collection = not_an_entity(&item.expression);
                 if is_collection {
                     collections.insert(alias.clone());

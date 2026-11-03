@@ -52,29 +52,21 @@ fn extreme_years_survive_construction() {
         rendered("datetime({year:1,month:1,day:1,hour:1,timezone:'+01:00'})"),
         "0001-01-01T01:00+01:00"
     );
-    assert_eq!(
-        rendered("datetime({year:9999,month:9,day:9,hour:9,timezone:'Z'})"),
-        "9999-09-09T09:00Z"
-    );
+    assert_eq!(rendered("datetime({year:9999,month:9,day:9,hour:9,timezone:'Z'})"), "9999-09-09T09:00Z");
 }
 
 /// Ordinary years are undisturbed — the fix must not shift the common case.
 #[test]
 fn ordinary_years_are_unchanged() {
     assert_eq!(
-        rendered(
-            "localdatetime({year:1984,month:10,day:11,hour:12,minute:30,second:14,nanosecond:12})"
-        ),
+        rendered("localdatetime({year:1984,month:10,day:11,hour:12,minute:30,second:14,nanosecond:12})"),
         "1984-10-11T12:30:14.000000012"
     );
     assert_eq!(
         rendered("datetime({year:2015,month:7,day:21,hour:21,minute:40,timezone:'+01:00'})"),
         "2015-07-21T21:40+01:00"
     );
-    assert_eq!(
-        rendered("localdatetime({year:1970,month:1,day:1})"),
-        "1970-01-01T00:00"
-    );
+    assert_eq!(rendered("localdatetime({year:1970,month:1,day:1})"), "1970-01-01T00:00");
 }
 
 /// **Sorting was where this showed up, and it is worth pinning there too.**

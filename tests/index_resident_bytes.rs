@@ -25,8 +25,7 @@ fn run(store: &mut GraphStore, q: &str) {
 
 fn store_with(n: usize) -> GraphStore {
     let mut s = GraphStore::new();
-    s.create_vector_index("Doc", "emb", 8, DistanceMetric::Cosine)
-        .unwrap();
+    s.create_vector_index("Doc", "emb", 8, DistanceMetric::Cosine).unwrap();
     run(&mut s, "CREATE INDEX ON :Doc(id)");
     run(&mut s, "CREATE FULLTEXT INDEX docs FOR (n:Doc) ON (n.body)");
     for i in 0..n {
@@ -36,9 +35,7 @@ fn store_with(n: usize) -> GraphStore {
             "body".to_string(),
             PropertyValue::String(format!("graph engine document number {i} about indexes")),
         );
-        let v: Vec<f32> = (0..8)
-            .map(|d| ((i * 7 + d * 3) % 11) as f32 + 0.5)
-            .collect();
+        let v: Vec<f32> = (0..8).map(|d| ((i * 7 + d * 3) % 11) as f32 + 0.5).collect();
         props.insert("emb".to_string(), PropertyValue::Vector(v));
         s.create_node_with_properties("default", vec![Label::new("Doc")], props);
     }
@@ -62,11 +59,7 @@ fn every_index_kind_reports_its_bytes() {
         assert!(bytes > 0, "{kind} reports no bytes");
         assert!(entries > 0, "{kind} reports no entries");
     }
-    let fulltext = s
-        .index_memory()
-        .into_iter()
-        .find(|r| r.kind == "fulltext")
-        .unwrap();
+    let fulltext = s.index_memory().into_iter().find(|r| r.kind == "fulltext").unwrap();
     assert_eq!(fulltext.name.as_deref(), Some("docs"));
 }
 
@@ -77,10 +70,7 @@ fn the_byte_counts_grow_with_what_is_indexed() {
     for kind in ["index", "fulltext", "vector"] {
         let (a, _) = bytes_of(&small, kind);
         let (b, _) = bytes_of(&large, kind);
-        assert!(
-            b > a,
-            "{kind}: {b} bytes for 500 documents is not more than {a} for 50"
-        );
+        assert!(b > a, "{kind}: {b} bytes for 500 documents is not more than {a} for 50");
     }
 }
 
@@ -91,20 +81,14 @@ fn the_byte_counts_grow_with_what_is_indexed() {
 #[test]
 fn a_node_created_with_its_properties_is_full_text_searchable() {
     let s = store_with(20);
-    let hits = s
-        .fulltext
-        .search("docs", "number", 50)
-        .expect("the index exists");
+    let hits = s.fulltext.search("docs", "number", 50).expect("the index exists");
     assert_eq!(hits.len(), 20, "{hits:?}");
 }
 
 #[test]
 fn the_vector_index_counts_its_hnsw_graph_not_only_its_vectors() {
     let s = store_with(300);
-    let idx = s
-        .vector_index
-        .get_index("Doc", "emb")
-        .expect("vector index");
+    let idx = s.vector_index.get_index("Doc", "emb").expect("vector index");
     let idx = idx.read().unwrap();
     let graph = idx.graph_bytes();
     assert!(graph > 0, "the HNSW graph reports no bytes over 300 points");

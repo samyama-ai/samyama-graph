@@ -127,26 +127,10 @@ mod tests {
     fn parallel_groups_partitions_correctly() {
         let plan = ToolPlan {
             calls: vec![
-                ToolCall {
-                    tool: "a".into(),
-                    args: json!(null),
-                    parallel_with_prev: false,
-                },
-                ToolCall {
-                    tool: "b".into(),
-                    args: json!(null),
-                    parallel_with_prev: true,
-                },
-                ToolCall {
-                    tool: "c".into(),
-                    args: json!(null),
-                    parallel_with_prev: true,
-                },
-                ToolCall {
-                    tool: "d".into(),
-                    args: json!(null),
-                    parallel_with_prev: false,
-                },
+                ToolCall { tool: "a".into(), args: json!(null), parallel_with_prev: false },
+                ToolCall { tool: "b".into(), args: json!(null), parallel_with_prev: true },
+                ToolCall { tool: "c".into(), args: json!(null), parallel_with_prev: true },
+                ToolCall { tool: "d".into(), args: json!(null), parallel_with_prev: false },
             ],
         };
         let groups = plan.parallel_groups();
@@ -179,11 +163,7 @@ mod tests {
     fn empty_plan_has_no_groups_and_first_call_ignores_parallel_flag() {
         assert!(ToolPlan::default().parallel_groups().is_empty());
         let plan = ToolPlan {
-            calls: vec![ToolCall {
-                tool: "a".into(),
-                args: json!(null),
-                parallel_with_prev: true,
-            }],
+            calls: vec![ToolCall { tool: "a".into(), args: json!(null), parallel_with_prev: true }],
         };
         assert_eq!(plan.parallel_groups(), vec![vec![0]]);
     }

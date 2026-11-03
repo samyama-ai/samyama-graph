@@ -38,14 +38,14 @@
 //! Users can connect with tools they already have installed (`redis-cli`) and integrate
 //! with applications using battle-tested Redis client libraries.
 
-pub mod command;
 pub mod resp;
 pub mod server;
+pub mod command;
 
 // Re-export main types
-pub use command::CommandHandler;
-pub use resp::{RespError, RespResult, RespValue};
+pub use resp::{RespValue, RespError, RespResult};
 pub use server::{RespServer, ServerConfig};
+pub use command::CommandHandler;
 
 #[cfg(test)]
 mod tests {

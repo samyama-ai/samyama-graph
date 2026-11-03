@@ -71,16 +71,10 @@ fn a_stub_loaded_graph_counts_every_edge_of_a_type() {
         6,
         "the untyped total is summed from the same short index"
     );
-    assert_eq!(
-        count(&store, "MATCH ()-[r:CITES]->() RETURN count(*) AS c"),
-        4
-    );
+    assert_eq!(count(&store, "MATCH ()-[r:CITES]->() RETURN count(*) AS c"), 4);
 
     // A type nobody carries is still 0 -- the fallback scan must not invent rows.
-    assert_eq!(
-        count(&store, "MATCH ()-[r:NOSUCH]->() RETURN count(r) AS c"),
-        0
-    );
+    assert_eq!(count(&store, "MATCH ()-[r:NOSUCH]->() RETURN count(r) AS c"), 0);
 }
 
 /// Once `rebuild_edge_type_index` has repaired the index -- what
@@ -118,22 +112,13 @@ fn an_ordinary_graph_keeps_the_metadata_shortcut() {
     let plan = format!(
         "{:?}",
         engine
-            .execute(
-                "EXPLAIN MATCH ()-[r:CITES]->() RETURN count(r) AS c",
-                &store
-            )
+            .execute("EXPLAIN MATCH ()-[r:CITES]->() RETURN count(r) AS c", &store)
             .unwrap()
             .records[0]
             .get("plan")
     );
-    assert!(
-        plan.contains("EdgeCount"),
-        "expected the O(1) path, plan was: {plan}"
-    );
-    assert_eq!(
-        count(&store, "MATCH ()-[r:CITES]->() RETURN count(r) AS c"),
-        4
-    );
+    assert!(plan.contains("EdgeCount"), "expected the O(1) path, plan was: {plan}");
+    assert_eq!(count(&store, "MATCH ()-[r:CITES]->() RETURN count(r) AS c"), 4);
 }
 
 /// The grouped form reads the same statistics, and a stub-loaded graph does not
@@ -144,10 +129,7 @@ fn the_grouped_form_is_short_a_row_without_the_guard() {
     let store = mixed();
     let engine = QueryEngine::new();
     let batch = engine
-        .execute(
-            "MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c",
-            &store,
-        )
+        .execute("MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c", &store)
         .expect("grouped count");
     let mut got: Vec<(String, i64)> = batch
         .records

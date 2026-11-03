@@ -46,16 +46,8 @@ fn a_star_projects_what_naming_the_variable_would() {
     ] {
         let mut store = GraphStore::new();
         run(&mut store, cypher);
-        assert_eq!(
-            count(&store, "MATCH (n) RETURN n"),
-            2,
-            "nodes after `{cypher}`"
-        );
-        assert_eq!(
-            count(&store, "MATCH ()-[r]->() RETURN r"),
-            1,
-            "rels after `{cypher}`"
-        );
+        assert_eq!(count(&store, "MATCH (n) RETURN n"), 2, "nodes after `{cypher}`");
+        assert_eq!(count(&store, "MATCH ()-[r]->() RETURN r"), 1, "rels after `{cypher}`");
     }
 }
 
@@ -67,11 +59,7 @@ fn a_later_with_narrows_the_scope_a_star_sees() {
     run(&mut store, "CREATE (:X {n: 1}), (:Y {n: 2})");
     let q = parse_query("MATCH (x:X), (y:Y) WITH x WITH * RETURN *").expect("parses");
     let batch = QueryExecutor::new(&store).execute(&q).expect("runs");
-    assert_eq!(
-        batch.columns,
-        vec!["x".to_string()],
-        "only x survives the narrowing WITH"
-    );
+    assert_eq!(batch.columns, vec!["x".to_string()], "only x survives the narrowing WITH");
 }
 
 /// UNWIND and MATCH bind into the pipeline's scope as well.

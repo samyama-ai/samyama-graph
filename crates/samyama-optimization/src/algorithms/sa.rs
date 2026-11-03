@@ -44,12 +44,12 @@ impl SASolver {
         let mut history = Vec::with_capacity(self.config.max_iterations);
         let mut temp = self.initial_temp;
 
-        // Since SA is typically a single-point search, we'll interpret 'population_size'
+        // Since SA is typically a single-point search, we'll interpret 'population_size' 
         // as number of trials per temperature step if we want to utilize the config.
         // Or we just run for max_iterations total.
-        // To be consistent with other solvers, let's treat population_size * max_iterations
+        // To be consistent with other solvers, let's treat population_size * max_iterations 
         // as the total number of evaluations budget.
-
+        
         let total_steps = self.config.max_iterations;
 
         for _step in 0..total_steps {
@@ -78,7 +78,7 @@ impl SASolver {
             } else {
                 next_fitness - current_fitness
             };
-
+            
             if delta_e < 0.0 || rng.gen::<f64>() < (-delta_e / temp).exp() {
                 current_vars = next_vars;
                 current_fitness = next_fitness;

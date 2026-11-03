@@ -53,9 +53,7 @@ unsafe impl GlobalAlloc for Counting {
 static G: Counting = Counting;
 
 fn live() -> usize {
-    ALLOCATED
-        .load(Ordering::Relaxed)
-        .saturating_sub(FREED.load(Ordering::Relaxed))
+    ALLOCATED.load(Ordering::Relaxed).saturating_sub(FREED.load(Ordering::Relaxed))
 }
 
 /// A transaction-shaped property mix: reference strings, amounts, timestamps,
@@ -65,16 +63,10 @@ fn props(i: usize, k: usize) -> Vec<(String, PropertyValue)> {
     let mut v = Vec::with_capacity(k);
     for p in 0..k {
         let (key, val) = match p % 4 {
-            0 => (
-                format!("s{p}"),
-                PropertyValue::String(format!("TXN{:012}", i)),
-            ),
+            0 => (format!("s{p}"), PropertyValue::String(format!("TXN{:012}", i))),
             1 => (format!("f{p}"), PropertyValue::Float(i as f64 * 1.37)),
             2 => (format!("i{p}"), PropertyValue::Integer(i as i64)),
-            _ => (
-                format!("c{p}"),
-                PropertyValue::String(format!("C{:03}", i % 900)),
-            ),
+            _ => (format!("c{p}"), PropertyValue::String(format!("C{:03}", i % 900))),
         };
         v.push((key, val));
     }
@@ -96,11 +88,7 @@ fn main() {
 
     println!(
         "Property scaling -- {n} nodes, degree {degree}{}",
-        if sparse_only {
-            "  [edge props: row map only]"
-        } else {
-            ""
-        }
+        if sparse_only { "  [edge props: row map only]" } else { "" }
     );
     println!("{}", "-".repeat(72));
     println!(

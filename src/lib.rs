@@ -115,77 +115,93 @@
 #![allow(missing_docs)]
 #![warn(clippy::all)]
 
-pub mod allocator;
 pub mod auth;
-pub mod compat;
+pub mod allocator;
 pub mod graph;
-pub mod persistence;
-pub mod protocol;
 pub mod query;
+pub mod protocol;
+pub mod persistence;
 pub mod raft;
+pub mod compat;
 // Not beside `snapshot`: samyama-graph#1392 adds `pub mod migrate;` at that
 // anchor, and two insertions at one line conflict for no reason either change
 // is about.
-pub mod agent;
-pub mod algo;
-pub mod convert;
-pub mod embed;
-pub mod export;
-pub mod http;
-pub mod index;
-pub mod migrate;
-pub mod nlq;
 pub mod pii;
+pub mod schema_doc;
 pub mod provenance;
 pub mod rdf;
-pub mod schema_doc;
-pub mod sharding;
-pub mod snapshot;
 pub mod sparql;
 pub mod vector;
-pub use auth::{read_credentials, Credential, Role, Secret};
+pub mod algo;
+pub mod index;
+pub mod sharding;
+pub mod http;
+pub mod embed;
+pub mod export;
+pub mod nlq;
+pub mod agent;
+pub mod migrate;
+pub mod snapshot;
+pub mod convert;
+pub use auth::{Credential, Secret, Role, read_credentials};
 pub mod optimization;
 
 // Re-export main types for convenience
 pub use graph::{
-    Edge, EdgeId, EdgeType, GraphError, GraphResult, GraphStore, Label, Node, NodeId, PropertyMap,
-    PropertyValue,
+    Edge, EdgeId, EdgeType, GraphError, GraphResult, GraphStore, Label, Node, NodeId,
+    PropertyMap, PropertyValue,
 };
 
-pub use query::{parse_query, Query, QueryEngine, RecordBatch};
+pub use query::{
+    QueryEngine, parse_query, Query, RecordBatch,
+};
 
-pub use protocol::{RespServer, RespValue, ServerConfig};
+pub use protocol::{
+    RespServer, ServerConfig, RespValue,
+};
 
 pub use persistence::{
-    AutoEmbedConfig, LLMProvider, NLQConfig, PersistenceError, PersistenceManager,
-    PersistenceResult, PersistentStorage, ResourceQuotas, ResourceUsage, StorageError,
-    StorageResult, Tenant, TenantError, TenantManager, TenantResult, Wal, WalEntry, WalError,
-    WalResult,
+    PersistenceManager, PersistenceError, PersistenceResult,
+    PersistentStorage, StorageError, StorageResult,
+    Tenant, TenantManager, ResourceQuotas, ResourceUsage, TenantError, TenantResult,
+    Wal, WalEntry, WalError, WalResult,
+    AutoEmbedConfig, NLQConfig, LLMProvider,
 };
 
-pub use embed::{EmbedError, EmbedPipeline, EmbedResult, TextChunk};
+pub use embed::{
+    EmbedPipeline, EmbedError, EmbedResult, TextChunk,
+};
 
-pub use nlq::{NLQError, NLQPipeline, NLQResult};
+pub use nlq::{
+    NLQPipeline, NLQError, NLQResult,
+};
 
 pub use raft::{
-    ClusterConfig, ClusterManager, GraphStateMachine, NodeId as RaftNodeIdWithAddr, RaftError,
-    RaftNode, RaftNodeId, RaftResult, Request as RaftRequest, Response as RaftResponse,
+    RaftNode, RaftNodeId, RaftError, RaftResult,
+    GraphStateMachine, Request as RaftRequest, Response as RaftResponse,
+    ClusterConfig, ClusterManager, NodeId as RaftNodeIdWithAddr,
 };
 
 pub use rdf::{
-    BlankNode, GraphToRdfMapper, InferenceRule, Literal, MappingConfig, MappingError, NamedNode,
-    Namespace, NamespaceManager, Quad, QuadPattern, RdfFormat, RdfObject, RdfParser, RdfPredicate,
-    RdfSerializer, RdfStore, RdfStoreError, RdfStoreResult, RdfSubject, RdfTerm, RdfToGraphMapper,
-    RdfsReasoner, Triple, TriplePattern,
+    RdfStore, RdfStoreError, RdfStoreResult,
+    NamedNode, BlankNode, Literal, Triple, Quad,
+    RdfTerm, RdfSubject, RdfPredicate, RdfObject,
+    TriplePattern, QuadPattern,
+    GraphToRdfMapper, RdfToGraphMapper, MappingConfig, MappingError,
+    NamespaceManager, Namespace,
+    RdfFormat, RdfParser, RdfSerializer,
+    RdfsReasoner, InferenceRule,
 };
 
 pub use sparql::{
-    QuerySolution, ResultFormat, SparqlEngine, SparqlError, SparqlExecutor, SparqlParser,
-    SparqlResult, SparqlResults,
+    SparqlEngine, SparqlError, SparqlResult,
+    SparqlResults, ResultFormat, QuerySolution,
+    SparqlParser, SparqlExecutor,
 };
 
 pub use vector::{
-    DistanceMetric, IndexKey, VectorError, VectorIndex, VectorIndexManager, VectorResult,
+    VectorIndex, VectorIndexManager, IndexKey,
+    DistanceMetric, VectorError, VectorResult,
 };
 
 /// Version information

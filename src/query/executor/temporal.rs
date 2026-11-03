@@ -167,10 +167,7 @@ pub fn parse_timezone_spec(tz: &str) -> Result<TzSpec, ExecutionError> {
             [h, m, sec] => (*h, *m, *sec),
             _ => return Err(err(format!("bad timezone offset: {tz}"))),
         };
-        let p = |x: &str| {
-            x.parse::<i32>()
-                .map_err(|_| err(format!("bad timezone offset: {tz}")))
-        };
+        let p = |x: &str| x.parse::<i32>().map_err(|_| err(format!("bad timezone offset: {tz}")));
         return Ok(TzSpec::Offset(sign * (p(h)? * 3600 + p(m)? * 60 + p(sec)?)));
     }
     t.parse::<chrono_tz::Tz>()
@@ -187,11 +184,7 @@ pub fn parse_timezone_spec(tz: &str) -> Result<TzSpec, ExecutionError> {
 /// same instant as shifting the time forward past it (02:30 in a 02:00 -> 03:00
 /// gap is 03:30 at the later offset). Picking arbitrarily would make one hour a
 /// year silently wrong; refusing, as this did before #1571, made it an error.
-pub fn resolve_offset(
-    spec: &TzSpec,
-    local_days: i64,
-    local_nanos: i64,
-) -> Result<i32, ExecutionError> {
+pub fn resolve_offset(spec: &TzSpec, local_days: i64, local_nanos: i64) -> Result<i32, ExecutionError> {
     match spec {
         TzSpec::Offset(o) => Ok(*o),
         TzSpec::Named(tz) => {
@@ -278,26 +271,10 @@ fn split_offset(t: &str) -> Result<(&str, Option<i32>), ExecutionError> {
 
 /// Every map key the temporal constructors understand.
 const KNOWN_KEYS: &[&str] = &[
-    "epochMillis",
-    "epochSeconds",
-    "year",
-    "month",
-    "day",
-    "week",
-    "dayOfWeek",
-    "quarter",
-    "dayOfQuarter",
-    "ordinalDay",
-    "hour",
-    "minute",
-    "second",
-    "millisecond",
-    "microsecond",
-    "nanosecond",
-    "timezone",
-    "date",
-    "time",
-    "datetime",
+    "epochMillis", "epochSeconds",
+    "year", "month", "day", "week", "dayOfWeek", "quarter", "dayOfQuarter", "ordinalDay",
+    "hour", "minute", "second", "millisecond", "microsecond", "nanosecond",
+    "timezone", "date", "time", "datetime",
 ];
 
 /// Refuse a map that names nothing the constructor understands, and say which
@@ -321,11 +298,7 @@ pub fn reject_unknown_map(
     Err(err(format!(
         "this constructor understands none of the keys given ({}); \
          expected one of: {}",
-        if given.is_empty() {
-            "the map is empty".to_string()
-        } else {
-            given.join(", ")
-        },
+        if given.is_empty() { "the map is empty".to_string() } else { given.join(", ") },
         KNOWN_KEYS.join(", ")
     )))
 }
@@ -374,10 +347,7 @@ pub fn truncate(
             0,
         ),
         "day" => (date, 0),
-        "hour" => (
-            date,
-            tod.unwrap_or(0) / 3_600_000_000_000 * 3_600_000_000_000,
-        ),
+        "hour" => (date, tod.unwrap_or(0) / 3_600_000_000_000 * 3_600_000_000_000),
         "minute" => (date, tod.unwrap_or(0) / 60_000_000_000 * 60_000_000_000),
         "second" => (date, tod.unwrap_or(0) / NANOS_PER_SEC * NANOS_PER_SEC),
         "millisecond" => (date, tod.unwrap_or(0) / 1_000_000 * 1_000_000),
@@ -392,15 +362,9 @@ pub fn truncate(
         let mut y = new_date.year();
         let mut m = new_date.month();
         let mut d = new_date.day();
-        if let Some(v) = field(overrides, "year") {
-            y = v as i32;
-        }
-        if let Some(v) = field(overrides, "month") {
-            m = v as u32;
-        }
-        if let Some(v) = field(overrides, "day") {
-            d = v as u32;
-        }
+        if let Some(v) = field(overrides, "year") { y = v as i32; }
+        if let Some(v) = field(overrides, "month") { m = v as u32; }
+        if let Some(v) = field(overrides, "day") { d = v as u32; }
         if overrides.contains_key("dayOfWeek") {
             let want = field(overrides, "dayOfWeek").unwrap_or(1) as i64;
             let base = ymd(y, m, d)?;
@@ -446,10 +410,7 @@ pub fn truncate(
     let (offset, zone) = match overrides.get("timezone").and_then(|v| v.as_string()) {
         Some(tz) => {
             let spec = parse_timezone_spec(&tz)?;
-            (
-                Some(resolve_offset(&spec, new_days, new_tod)?),
-                zone_name(&spec),
-            )
+            (Some(resolve_offset(&spec, new_days, new_tod)?), zone_name(&spec))
         }
         None => (offset, zone),
     };
@@ -469,22 +430,14 @@ fn decompose(
     Ok(match v {
         PropertyValue::Date(d) => (Some(*d as i64), None, None, None),
         PropertyValue::LocalTime(n) => (None, Some(*n), None, None),
-        PropertyValue::Time {
-            nanos,
-            offset_seconds,
-        } => (None, Some(*nanos), Some(*offset_seconds), None),
+        PropertyValue::Time { nanos, offset_seconds } => (None, Some(*nanos), Some(*offset_seconds), None),
         PropertyValue::LocalDateTime { secs, nanos } => (
             Some(secs.div_euclid(86_400)),
             Some(secs.rem_euclid(86_400) * NANOS_PER_SEC + *nanos as i64),
             None,
             None,
         ),
-        PropertyValue::ZonedDateTime {
-            secs,
-            nanos,
-            offset_seconds,
-            zone,
-        } => {
+        PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
             let local = secs + *offset_seconds as i64;
             (
                 Some(local.div_euclid(86_400)),
@@ -528,6 +481,7 @@ fn build(
         other => return Err(err(format!("cannot truncate to {other}"))),
     })
 }
+
 
 /// Split a trailing `[Area/City]` zone suffix off an ISO string.
 ///
@@ -580,23 +534,9 @@ pub fn parse_iso_date(s: &str) -> Result<i32, ExecutionError> {
     let (year_str, tail) = if digits.len() >= 8 && !rest[digits.len()..].starts_with('-') {
         (&digits[..4], &rest[4..])
     } else {
-        (
-            &digits[..digits.len().min(if rest.len() > digits.len() {
-                digits.len()
-            } else {
-                4
-            })],
-            &rest[digits.len().min(if rest.len() > digits.len() {
-                digits.len()
-            } else {
-                4
-            })..],
-        )
+        (&digits[..digits.len().min(if rest.len() > digits.len() { digits.len() } else { 4 })], &rest[digits.len().min(if rest.len() > digits.len() { digits.len() } else { 4 })..])
     };
-    let year = sign
-        * year_str
-            .parse::<i64>()
-            .map_err(|_| err(format!("bad year in {s}")))?;
+    let year = sign * year_str.parse::<i64>().map_err(|_| err(format!("bad year in {s}")))?;
     let year = i32::try_from(year).map_err(|_| err(format!("year out of range in {s}")))?;
     let tail = tail.trim_start_matches('-');
 
@@ -609,14 +549,8 @@ pub fn parse_iso_date(s: &str) -> Result<i32, ExecutionError> {
         if !matches!(w.len(), 2 | 3) || !w.bytes().all(|b| b.is_ascii_digit()) {
             return Err(err(format!("bad week in {s}")));
         }
-        let week: u32 = w[..2]
-            .parse()
-            .map_err(|_| err(format!("bad week in {s}")))?;
-        let dow: u32 = if w.len() > 2 {
-            w[2..3].parse().unwrap_or(1)
-        } else {
-            1
-        };
+        let week: u32 = w[..2].parse().map_err(|_| err(format!("bad week in {s}")))?;
+        let dow: u32 = if w.len() > 2 { w[2..3].parse().unwrap_or(1) } else { 1 };
         NaiveDate::from_isoywd_opt(year, week, weekday_from_iso(dow))
     } else {
         let d = tail.replace('-', "");
@@ -658,8 +592,9 @@ pub fn parse_iso_time(s: &str) -> Result<i64, ExecutionError> {
     if !c.chars().all(|ch| ch.is_ascii_digit()) || c.is_empty() {
         return Err(err(format!("cannot parse time: {s}")));
     }
-    let take =
-        |a: usize, b: usize| -> i64 { c.get(a..b).and_then(|x| x.parse().ok()).unwrap_or(0) };
+    let take = |a: usize, b: usize| -> i64 {
+        c.get(a..b).and_then(|x| x.parse().ok()).unwrap_or(0)
+    };
     let (h, m, sec) = match c.len() {
         1 | 2 => (take(0, c.len()), 0, 0),
         3 | 4 => (take(0, 2), take(2, c.len()), 0),
@@ -673,10 +608,7 @@ pub fn parse_iso_time(s: &str) -> Result<i64, ExecutionError> {
     let nanos: i64 = if frac.is_empty() {
         0
     } else {
-        let mut f = frac
-            .chars()
-            .filter(|c| c.is_ascii_digit())
-            .collect::<String>();
+        let mut f = frac.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
         f.truncate(9);
         while f.len() < 9 {
             f.push('0');
@@ -685,6 +617,7 @@ pub fn parse_iso_time(s: &str) -> Result<i64, ExecutionError> {
     };
     Ok((h * 3600 + m * 60 + sec) * NANOS_PER_SEC + nanos)
 }
+
 
 /// Split a date-time string into its clock part and a written UTC offset.
 ///

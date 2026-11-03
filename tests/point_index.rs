@@ -18,32 +18,17 @@ fn store(indexed: bool) -> GraphStore {
     let mut id = 0i64;
     for i in 0..30 {
         for j in 0..30 {
-            run(
-                &mut s,
-                &format!(
-                    "CREATE (:Site {{id: {id}, loc: point({{x: {}, y: {}}})}})",
-                    i as f64 * 2.0,
-                    j as f64
-                ),
-            );
+            run(&mut s, &format!("CREATE (:Site {{id: {id}, loc: point({{x: {}, y: {}}})}})", i as f64 * 2.0, j as f64));
             id += 1;
         }
     }
     for k in 0..200 {
         let lat = 12.9 + (k % 20) as f64 * 0.01;
         let lon = 77.5 + (k / 20) as f64 * 0.01;
-        run(
-            &mut s,
-            &format!(
-                "CREATE (:City {{id: {k}, at: point({{latitude: {lat}, longitude: {lon}}})}})"
-            ),
-        );
+        run(&mut s, &format!("CREATE (:City {{id: {k}, at: point({{latitude: {lat}, longitude: {lon}}})}})"));
     }
     if indexed {
-        run(
-            &mut s,
-            "CREATE POINT INDEX site_loc FOR (n:Site) ON (n.loc)",
-        );
+        run(&mut s, "CREATE POINT INDEX site_loc FOR (n:Site) ON (n.loc)");
         run(&mut s, "CREATE POINT INDEX ON :City(at)");
     }
     s
@@ -56,9 +41,7 @@ fn run(s: &mut GraphStore, q: &str) {
 }
 
 fn ids(s: &GraphStore, q: &str) -> Vec<i64> {
-    let b = QueryExecutor::new(s)
-        .execute(&parse_query(q).unwrap())
-        .unwrap_or_else(|e| panic!("{q}: {e}"));
+    let b = QueryExecutor::new(s).execute(&parse_query(q).unwrap()).unwrap_or_else(|e| panic!("{q}: {e}"));
     let mut v: Vec<i64> = b
         .records
         .iter()
@@ -72,9 +55,7 @@ fn ids(s: &GraphStore, q: &str) -> Vec<i64> {
 }
 
 fn plan(s: &GraphStore, q: &str) -> String {
-    let b = QueryExecutor::new(s)
-        .execute(&parse_query(&format!("EXPLAIN {q}")).unwrap())
-        .unwrap();
+    let b = QueryExecutor::new(s).execute(&parse_query(&format!("EXPLAIN {q}")).unwrap()).unwrap();
     format!("{:?}", b.records[0])
 }
 
@@ -90,11 +71,7 @@ fn the_planner_uses_the_index_and_the_answer_is_the_scan_s() {
     let (scan, index) = (store(false), store(true));
     for q in QUERIES {
         assert!(!plan(&scan, q).contains("PointIndexScan"), "{q}");
-        assert!(
-            plan(&index, q).contains("PointIndexScan"),
-            "{q}: {}",
-            plan(&index, q)
-        );
+        assert!(plan(&index, q).contains("PointIndexScan"), "{q}: {}", plan(&index, q));
         let want = ids(&scan, q);
         assert!(!want.is_empty(), "{q}: the fixture matches nothing");
         assert_eq!(ids(&index, q), want, "{q}");
@@ -106,17 +83,11 @@ fn the_index_follows_writes() {
     let mut s = store(true);
     let q = "MATCH (n:Site) WHERE point.withinBBox(n.loc, point({x: 100, y: 100}), point({x: 101, y: 101})) RETURN n.id AS id";
     assert!(ids(&s, q).is_empty());
-    run(
-        &mut s,
-        "MATCH (n:Site {id: 7}) SET n.loc = point({x: 100.5, y: 100.5})",
-    );
+    run(&mut s, "MATCH (n:Site {id: 7}) SET n.loc = point({x: 100.5, y: 100.5})");
     assert_eq!(ids(&s, q), vec![7]);
     run(&mut s, "MATCH (n:Site {id: 7}) REMOVE n.loc");
     assert!(ids(&s, q).is_empty());
-    run(
-        &mut s,
-        "CREATE (:Site {id: 9001, loc: point({x: 100.2, y: 100.9})})",
-    );
+    run(&mut s, "CREATE (:Site {id: 9001, loc: point({x: 100.2, y: 100.9})})");
     assert_eq!(ids(&s, q), vec![9001]);
     run(&mut s, "MATCH (n:Site {id: 9001}) REMOVE n:Site");
     assert!(ids(&s, q).is_empty());
@@ -149,10 +120,7 @@ fn nearest_returns_the_k_closest_in_order() {
     assert_eq!(got.len(), 4);
     assert!(got.windows(2).all(|w| w[0] <= w[1]), "{got:?}");
     // The nearest grid point to (11.1, 7.2) is (12, 7), 0.92 away.
-    assert!(
-        (got[0] - ((0.9f64).powi(2) + (0.2f64).powi(2)).sqrt()).abs() < 1e-9,
-        "{got:?}"
-    );
+    assert!((got[0] - ((0.9f64).powi(2) + (0.2f64).powi(2)).sqrt()).abs() < 1e-9, "{got:?}");
 
     let geo = QueryExecutor::new(&s)
         .execute(
@@ -179,10 +147,7 @@ fn nearest_returns_the_k_closest_in_order() {
 fn drop_removes_it_and_the_catalog_carries_it() {
     let mut s = store(true);
     let defs = format!("{:?}", s.index_catalog().definitions);
-    assert!(
-        defs.contains("Point") && defs.contains("site_loc"),
-        "{defs}"
-    );
+    assert!(defs.contains("Point") && defs.contains("site_loc"), "{defs}");
     run(&mut s, "DROP POINT INDEX site_loc");
     assert!(!plan(&s, QUERIES[0]).contains("PointIndexScan"));
     assert!(!format!("{:?}", s.index_catalog().definitions).contains("site_loc"));
@@ -218,25 +183,12 @@ fn index_memory_reports_each_point_index() {
     // The index memory report covers every index kind (#1673); the point
     // index was added after it and has to appear there too.
     let s = store(true);
-    let points: Vec<_> = s
-        .index_memory()
-        .into_iter()
-        .filter(|m| m.kind == "point")
-        .collect();
+    let points: Vec<_> = s.index_memory().into_iter().filter(|m| m.kind == "point").collect();
     assert_eq!(points.len(), 2, "{points:?}");
-    let site = points
-        .iter()
-        .find(|m| m.name.as_deref() == Some("site_loc"))
-        .expect("site_loc");
-    assert_eq!(
-        (site.label.as_str(), site.property.as_str(), site.entries),
-        ("Site", "loc", 900)
-    );
+    let site = points.iter().find(|m| m.name.as_deref() == Some("site_loc")).expect("site_loc");
+    assert_eq!((site.label.as_str(), site.property.as_str(), site.entries), ("Site", "loc", 900));
     assert!(site.bytes > 0);
-    let city = points
-        .iter()
-        .find(|m| m.label == "City")
-        .expect("City index");
+    let city = points.iter().find(|m| m.label == "City").expect("City index");
     assert_eq!((city.property.as_str(), city.entries), ("at", 200));
 }
 
@@ -275,11 +227,7 @@ fn rows_just_inside_a_geographic_radius_are_found_through_the_index() {
     assert!(r * 0.9995 / METRES_PER_DEGREE > r / 111_320.0);
     run(&mut stores[1], "CREATE POINT INDEX ON :City(at)");
     let q = format!("MATCH (n:City) WHERE point.distance(n.at, point({{latitude: 0, longitude: 0}})) < {r} RETURN n.id AS id");
-    assert!(
-        plan(&stores[1], &q).contains("PointIndexScan"),
-        "{}",
-        plan(&stores[1], &q)
-    );
+    assert!(plan(&stores[1], &q).contains("PointIndexScan"), "{}", plan(&stores[1], &q));
     assert_eq!(ids(&stores[0], &q), expected);
     assert_eq!(ids(&stores[1], &q), expected);
     let q = format!("MATCH (n:City) WHERE point.distance(n.at, point({{latitude: 60, longitude: 25}})) < {r} RETURN n.id AS id");
@@ -288,17 +236,9 @@ fn rows_just_inside_a_geographic_radius_are_found_through_the_index() {
 
     // Across the antimeridian: rows on both sides of 180 are inside r.
     let mut s = [GraphStore::new(), GraphStore::new()];
-    for (k, lon) in [179.5f64, 179.9, -179.9, -179.5, 178.0, -178.0]
-        .into_iter()
-        .enumerate()
-    {
+    for (k, lon) in [179.5f64, 179.9, -179.9, -179.5, 178.0, -178.0].into_iter().enumerate() {
         for st in s.iter_mut() {
-            run(
-                st,
-                &format!(
-                    "CREATE (:City {{id: {k}, at: point({{latitude: 0, longitude: {lon}}})}})"
-                ),
-            );
+            run(st, &format!("CREATE (:City {{id: {k}, at: point({{latitude: 0, longitude: {lon}}})}})"));
         }
     }
     run(&mut s[1], "CREATE POINT INDEX ON :City(at)");
@@ -316,10 +256,7 @@ fn geographic_nearest_matches_a_sort_by_point_distance() {
     for k in 0..400i64 {
         let lon = 10.0 + ((k * 37) % 400) as f64 * 0.05 - 10.0;
         let lat = 79.0 + ((k * 91) % 400) as f64 * 0.005;
-        run(
-            &mut s,
-            &format!("CREATE (:Hut {{id: {k}, at: point({{latitude: {lat}, longitude: {lon}}})}})"),
-        );
+        run(&mut s, &format!("CREATE (:Hut {{id: {k}, at: point({{latitude: {lat}, longitude: {lon}}})}})"));
     }
     run(&mut s, "CREATE POINT INDEX ON :Hut(at)");
     let want = |k: usize| {

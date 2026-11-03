@@ -330,10 +330,7 @@ async fn vector_dimension_mismatches_are_vector_errors() {
     // index rather than answering `[]` as if nothing were similar (#1660).
     let err = c.vector_search("Nope", "emb", &[1.0], 3).await.unwrap_err();
     assert!(matches!(err, SamyamaError::VectorError(_)), "{err:?}");
-    assert!(
-        err.to_string().contains("no vector index on :Nope(emb)"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("no vector index on :Nope(emb)"), "{err}");
 }
 
 #[tokio::test]

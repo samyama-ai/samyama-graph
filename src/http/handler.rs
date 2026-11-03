@@ -462,11 +462,7 @@ pub async fn query_handler(
     if let Some(Extension(Subject(user))) = &subject {
         let is_write = state.engine.statement_is_write(&payload.query);
         if let Err(e) = user.authorize_statement(&payload.graph, is_write) {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response();
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": e }))).into_response();
         }
     }
 
@@ -647,13 +643,7 @@ fn accepts_ndjson(headers: &axum::http::HeaderMap) -> bool {
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
-        .any(|m| {
-            m.split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .eq_ignore_ascii_case(NDJSON)
-        })
+        .any(|m| m.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case(NDJSON))
 }
 
 /// What the query thread hands the response body.
@@ -726,11 +716,7 @@ async fn stream_query(
     if payload.tx.is_some() {
         return refuse("A statement inside a transaction");
     }
-    if state
-        .engine
-        .statement_is_write(&payload.query)
-        .unwrap_or(false)
-    {
+    if state.engine.statement_is_write(&payload.query).unwrap_or(false) {
         return refuse("A write");
     }
 
@@ -803,11 +789,7 @@ async fn stream_query(
 
         match outcome {
             Ok(done) => {
-                let mut buf = if started {
-                    Vec::new()
-                } else {
-                    header(&done.columns)
-                };
+                let mut buf = if started { Vec::new() } else { header(&done.columns) };
                 let _ = serde_json::to_writer(
                     &mut buf,
                     &json!({
@@ -827,7 +809,7 @@ async fn stream_query(
             Err(e) => {
                 let mut buf =
                     serde_json::to_vec(&json!({ "error": e.to_string(), "rows": sent_rows }))
-                        .unwrap_or_default();
+                    .unwrap_or_default();
                 buf.push(b'\n');
                 let _ = send(StreamMsg::Data(buf.into()));
             }
@@ -1066,13 +1048,7 @@ fn render_query_result(
             // late materialization.
 
             for record in &batch.records {
-                records.push(render_row(
-                    record,
-                    &batch.columns,
-                    full_props,
-                    &mut nodes,
-                    &mut edges,
-                ));
+                records.push(render_row(record, &batch.columns, full_props, &mut nodes, &mut edges));
             }
 
             // Sorted by numeric id, not `HashMap` order. Rust seeds its hasher
@@ -3042,7 +3018,8 @@ pub async fn restore_snapshot_handler(
         std::io::Cursor::new(&data),
         state.snapshot_key.as_deref(),
     ) {
-        if let Some(e) = state.quota_refuses(&default_graph(), header.node_count, header.edge_count)
+        if let Some(e) =
+            state.quota_refuses(&default_graph(), header.node_count, header.edge_count)
         {
             return (
                 axum::http::StatusCode::TOO_MANY_REQUESTS,
@@ -3075,21 +3052,17 @@ pub async fn restore_snapshot_handler(
     let imported = if crate::snapshot::encryption::looks_encrypted(&data) {
         match state.snapshot_key.as_deref() {
             None => Err("this snapshot is encrypted and the server has no --snapshot-key".into()),
-            Some(_) if !dedup_key_refs.is_empty() => {
-                Err("deduplication on an encrypted snapshot is not supported yet".into())
-            }
-            Some(k) => {
-                crate::snapshot::import_tenant_maybe_encrypted(&mut store_guard, cursor, Some(k))
-            }
+            Some(_) if !dedup_key_refs.is_empty() => Err(
+                "deduplication on an encrypted snapshot is not supported yet".into(),
+            ),
+            Some(k) => crate::snapshot::import_tenant_maybe_encrypted(
+                &mut store_guard,
+                cursor,
+                Some(k),
+            ),
         }
     } else {
-        crate::snapshot::import_tenant_with_merge_policy(
-            &mut store_guard,
-            cursor,
-            &dedup_key_refs,
-            params.dedup_allow_conflicts,
-            params.merge_edges,
-        )
+        crate::snapshot::import_tenant_with_merge_policy(&mut store_guard, cursor, &dedup_key_refs, params.dedup_allow_conflicts, params.merge_edges)
     };
     match imported {
         Ok(stats) => {
@@ -3534,7 +3507,7 @@ mod tests {
                 embed_pipeline: None,
                 embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
                 persistence: None,
-                snapshot_key: None,
+            snapshot_key: None,
                 transactions: Default::default(),
             };
             let app = Router::new()
@@ -4994,12 +4967,7 @@ mod tests {
 /// rather than an error on a query that is otherwise fine. The chosen dialect is
 /// echoed in the response so a caller can see which reading it got.
 fn requested_dialect(payload: &QueryRequest) -> crate::query::Dialect {
-    match payload
-        .dialect
-        .as_deref()
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
+    match payload.dialect.as_deref().map(str::to_ascii_lowercase).as_deref() {
         Some("gql") | Some("iso") | Some("iso-gql") => crate::query::Dialect::Gql,
         _ => crate::query::Dialect::Cypher,
     }

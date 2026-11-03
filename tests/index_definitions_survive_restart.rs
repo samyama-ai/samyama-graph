@@ -40,11 +40,7 @@ impl Server {
             .ok();
         let mut store = GraphStore::new();
         store.enable_write_log();
-        Server {
-            dir,
-            pm: Some(pm),
-            store,
-        }
+        Server { dir, pm: Some(pm), store }
     }
 
     fn pm(&self) -> &PersistenceManager {
@@ -133,11 +129,7 @@ fn seeded() -> Server {
 fn show_indexes_lists_all_three_after_a_restart() {
     let mut s = seeded();
     let before = s.index_kinds();
-    assert_eq!(
-        before.len(),
-        3,
-        "three indexes before the restart: {before:?}"
-    );
+    assert_eq!(before.len(), 3, "three indexes before the restart: {before:?}");
 
     s.restart();
 
@@ -148,10 +140,7 @@ fn show_indexes_lists_all_three_after_a_restart() {
     );
     let joined = after.join("\n");
     assert!(joined.contains("BTREE"), "no BTREE row: {joined}");
-    assert!(
-        joined.contains("FULLTEXT[ftidx]"),
-        "no FULLTEXT row: {joined}"
-    );
+    assert!(joined.contains("FULLTEXT[ftidx]"), "no FULLTEXT row: {joined}");
     assert!(joined.contains("VECTOR"), "no VECTOR row: {joined}");
 }
 
@@ -159,10 +148,7 @@ fn show_indexes_lists_all_three_after_a_restart() {
 fn the_rows_are_still_there_so_the_definitions_are_the_only_thing_at_stake() {
     let mut s = seeded();
     s.restart();
-    assert_eq!(
-        s.rows("MATCH (p:P) RETURN count(p)"),
-        vec!["Some(Property(Integer(3)))".to_string()]
-    );
+    assert_eq!(s.rows("MATCH (p:P) RETURN count(p)"), vec!["Some(Property(Integer(3)))".to_string()]);
 }
 
 #[test]
@@ -195,10 +181,7 @@ fn full_text_search_answers_by_name_after_a_restart() {
     let hits = s
         .try_rows("CALL db.index.fulltext.queryNodes('ftidx', 'quick') YIELD node RETURN node")
         .unwrap_or_else(|e| panic!("the index name did not survive the restart: {e}"));
-    assert_eq!(
-        hits, 2,
-        "both 'quick' documents must come back from the restored index"
-    );
+    assert_eq!(hits, 2, "both 'quick' documents must come back from the restored index");
 }
 
 #[test]
@@ -222,10 +205,7 @@ fn a_vector_search_returns_its_rows_after_a_restart() {
              YIELD node, score RETURN node",
         )
         .unwrap_or_else(|e| panic!("the vector index name did not survive the restart: {e}"));
-    assert_eq!(
-        by_name, 3,
-        "resolving by name found the index but not its contents"
-    );
+    assert_eq!(by_name, 3, "resolving by name found the index but not its contents");
 }
 
 #[test]
@@ -239,18 +219,9 @@ fn a_dropped_index_does_not_come_back() {
     s.restart();
 
     let after = s.index_kinds().join("\n");
-    assert!(
-        !after.contains("BTREE"),
-        "the dropped BTREE index came back: {after}"
-    );
-    assert!(
-        !after.contains("FULLTEXT"),
-        "the dropped full-text index came back: {after}"
-    );
-    assert!(
-        after.contains("VECTOR"),
-        "the index that was not dropped is gone: {after}"
-    );
+    assert!(!after.contains("BTREE"), "the dropped BTREE index came back: {after}");
+    assert!(!after.contains("FULLTEXT"), "the dropped full-text index came back: {after}");
+    assert!(after.contains("VECTOR"), "the index that was not dropped is gone: {after}");
 }
 
 #[test]

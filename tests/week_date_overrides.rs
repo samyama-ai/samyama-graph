@@ -49,19 +49,10 @@ fn check(rows: &[(String, &str)]) {
 #[test]
 fn a_week_override_uses_the_iso_week_year() {
     check(&[
-        (
-            "date({date: date('1816-12-30'), week: 2, dayOfWeek: 3})".into(),
-            "1817-01-08",
-        ),
-        (
-            "date({date: date('1816-12-31'), week: 2})".into(),
-            "1817-01-07",
-        ),
+        ("date({date: date('1816-12-30'), week: 2, dayOfWeek: 3})".into(), "1817-01-08"),
+        ("date({date: date('1816-12-31'), week: 2})".into(), "1817-01-07"),
         // An explicit year is read as the week year too.
-        (
-            "date({date: date('1816-12-31'), year: 1817, week: 2})".into(),
-            "1817-01-07",
-        ),
+        ("date({date: date('1816-12-31'), year: 1817, week: 2})".into(), "1817-01-07"),
     ]);
 }
 
@@ -70,27 +61,15 @@ fn a_week_override_uses_the_iso_week_year() {
 #[test]
 fn the_composite_constructors_apply_the_same_rule() {
     check(&[
-        (
-            "localdatetime({date: date('1816-12-31'), week: 2})".into(),
-            "1817-01-07T00:00",
-        ),
+        ("localdatetime({date: date('1816-12-31'), week: 2})".into(), "1817-01-07T00:00"),
         (
             "localdatetime({date: date('1816-12-30'), week: 2, dayOfWeek: 3})".into(),
             "1817-01-08T00:00",
         ),
-        (
-            "datetime({date: date('1816-12-31'), week: 2})".into(),
-            "1817-01-07T00:00Z",
-        ),
-        (
-            "datetime({date: date('1816-12-31'), year: 1817, week: 2})".into(),
-            "1817-01-07T00:00Z",
-        ),
+        ("datetime({date: date('1816-12-31'), week: 2})".into(), "1817-01-07T00:00Z"),
+        ("datetime({date: date('1816-12-31'), year: 1817, week: 2})".into(), "1817-01-07T00:00Z"),
         // And the `quarter` rule from #838, which the composite path never had.
-        (
-            "localdatetime({date: date('1984-11-11'), quarter: 3})".into(),
-            "1984-08-11T00:00",
-        ),
+        ("localdatetime({date: date('1984-11-11'), quarter: 3})".into(), "1984-08-11T00:00"),
     ]);
 }
 
@@ -102,14 +81,8 @@ fn the_composite_constructors_apply_the_same_rule() {
 #[test]
 fn mid_year_week_dates_are_unchanged() {
     check(&[
-        (
-            "date({date: date('1984-10-11'), week: 2})".into(),
-            "1984-01-12",
-        ),
-        (
-            "date({year: 1984, week: 10, dayOfWeek: 3})".into(),
-            "1984-03-07",
-        ),
+        ("date({date: date('1984-10-11'), week: 2})".into(), "1984-01-12"),
+        ("date({year: 1984, week: 10, dayOfWeek: 3})".into(), "1984-03-07"),
     ]);
 }
 
@@ -119,18 +92,9 @@ fn mid_year_week_dates_are_unchanged() {
 #[test]
 fn ordinary_overrides_are_undisturbed() {
     check(&[
-        (
-            "date({year: 1984, month: 10, day: 11})".into(),
-            "1984-10-11",
-        ),
-        (
-            "date({date: date('1984-10-11'), month: 3})".into(),
-            "1984-03-11",
-        ),
-        (
-            "localdatetime({date: date('1984-10-11'), month: 3})".into(),
-            "1984-03-11T00:00",
-        ),
+        ("date({year: 1984, month: 10, day: 11})".into(), "1984-10-11"),
+        ("date({date: date('1984-10-11'), month: 3})".into(), "1984-03-11"),
+        ("localdatetime({date: date('1984-10-11'), month: 3})".into(), "1984-03-11T00:00"),
         (
             "localdatetime({date: date('1984-10-11'), time: localtime('12:31')})".into(),
             "1984-10-11T12:31",

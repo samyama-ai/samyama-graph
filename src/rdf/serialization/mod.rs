@@ -6,21 +6,21 @@
 //! - RDF/XML
 //! - JSON-LD
 
-use super::{RdfStore, Triple};
+use super::{Triple, RdfStore};
+use thiserror::Error;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
-use thiserror::Error;
 
-pub mod jsonld;
+pub mod turtle;
 pub mod ntriples;
 pub mod rdfxml;
-pub mod turtle;
+pub mod jsonld;
 
-use jsonld::{JsonLdParserWrapper, JsonLdSerializerWrapper};
+use turtle::{TurtleParserWrapper, TurtleSerializerWrapper};
 use ntriples::{NTriplesParserWrapper, NTriplesSerializerWrapper};
 use rdfxml::{RdfXmlParserWrapper, RdfXmlSerializerWrapper};
-use turtle::{TurtleParserWrapper, TurtleSerializerWrapper};
+use jsonld::{JsonLdParserWrapper, JsonLdSerializerWrapper};
 
 /// RDF serialization format
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,9 +104,7 @@ impl RdfParser {
     pub fn parse_file(path: &Path, format: Option<RdfFormat>) -> ParseResult<Vec<Triple>> {
         let format = format
             .or_else(|| RdfFormat::from_extension(path))
-            .ok_or_else(|| {
-                ParseError::Parse("Could not determine format from extension".to_string())
-            })?;
+            .ok_or_else(|| ParseError::Parse("Could not determine format from extension".to_string()))?;
 
         let mut file = File::open(path)?;
         let mut content = String::new();
@@ -151,20 +149,18 @@ impl RdfSerializer {
     }
 }
 
-#[cfg(test)]
-#[path = "serialization_cov_tests.rs"]
-mod cov_tests;
+#[cfg(test)] #[path = "serialization_cov_tests.rs"] mod cov_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rdf::{Literal, NamedNode, RdfPredicate};
+    use crate::rdf::{NamedNode, RdfPredicate, Literal};
 
     fn create_test_triples() -> Vec<Triple> {
         let subject = NamedNode::new("http://example.org/alice").unwrap();
         let predicate = RdfPredicate::new("http://xmlns.com/foaf/0.1/name").unwrap();
         let object = Literal::new_simple_literal("Alice");
-
+        
         vec![Triple::new(subject.into(), predicate, object.into())]
     }
 
@@ -198,24 +194,12 @@ mod tests {
         let output = RdfSerializer::serialize(&triples, RdfFormat::JsonLd).unwrap();
         assert!(output.contains("@id"));
     }
-
+    
     #[test]
     fn test_format_detection() {
-        assert_eq!(
-            RdfFormat::from_extension(Path::new("test.ttl")),
-            Some(RdfFormat::Turtle)
-        );
-        assert_eq!(
-            RdfFormat::from_extension(Path::new("test.nt")),
-            Some(RdfFormat::NTriples)
-        );
-        assert_eq!(
-            RdfFormat::from_extension(Path::new("test.rdf")),
-            Some(RdfFormat::RdfXml)
-        );
-        assert_eq!(
-            RdfFormat::from_extension(Path::new("test.jsonld")),
-            Some(RdfFormat::JsonLd)
-        );
+        assert_eq!(RdfFormat::from_extension(Path::new("test.ttl")), Some(RdfFormat::Turtle));
+        assert_eq!(RdfFormat::from_extension(Path::new("test.nt")), Some(RdfFormat::NTriples));
+        assert_eq!(RdfFormat::from_extension(Path::new("test.rdf")), Some(RdfFormat::RdfXml));
+        assert_eq!(RdfFormat::from_extension(Path::new("test.jsonld")), Some(RdfFormat::JsonLd));
     }
 }

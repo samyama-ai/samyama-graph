@@ -419,10 +419,7 @@ mod tests {
         assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<graphml"));
         assert!(xml.contains("<graph id=\"G\" edgedefault=\"directed\">"));
         assert!(xml.ends_with("  </graph>\n</graphml>\n"));
-        assert_eq!(
-            (rep.nodes_written, rep.edges_written, rep.keys_declared),
-            (0, 0, 2)
-        );
+        assert_eq!((rep.nodes_written, rep.edges_written, rep.keys_declared), (0, 0, 2));
         assert!(rep.typed_losslessly());
     }
 
@@ -453,41 +450,17 @@ mod tests {
         let (xml, rep) = to_graphml(&g);
         assert_eq!((rep.nodes_written, rep.edges_written), (3, 3));
         assert_eq!(rep.keys_declared, 2 + 5 + 1);
-        assert!(
-            xml.contains("attr.name=\"rank\" attr.type=\"long\""),
-            "{xml}"
-        );
-        assert!(
-            xml.contains(&format!("<node id=\"n{}\">\n    </node>", bare.as_u64())),
-            "{xml}"
-        );
-        assert_eq!(
-            rep.attributes_widened_to_string,
-            vec!["edge.w".to_string(), "node.name".to_string()]
-        );
+        assert!(xml.contains("attr.name=\"rank\" attr.type=\"long\""), "{xml}");
+        assert!(xml.contains(&format!("<node id=\"n{}\">\n    </node>", bare.as_u64())), "{xml}");
+        assert_eq!(rep.attributes_widened_to_string, vec!["edge.w".to_string(), "node.name".to_string()]);
         assert_eq!(rep.labels_containing_a_space, vec!["Big Cat".to_string()]);
         assert!(!rep.typed_losslessly());
 
-        assert!(
-            xml.contains("attr.name=\"age\" attr.type=\"double\""),
-            "{xml}"
-        );
-        assert!(
-            xml.contains("attr.name=\"name\" attr.type=\"string\""),
-            "{xml}"
-        );
-        assert!(
-            xml.contains("attr.name=\"ok\" attr.type=\"boolean\""),
-            "{xml}"
-        );
-        assert!(
-            xml.contains("attr.name=\"w\" attr.type=\"string\""),
-            "{xml}"
-        );
-        assert!(
-            xml.contains("<data key=\"labels\">Big Cat Person</data>"),
-            "{xml}"
-        );
+        assert!(xml.contains("attr.name=\"age\" attr.type=\"double\""), "{xml}");
+        assert!(xml.contains("attr.name=\"name\" attr.type=\"string\""), "{xml}");
+        assert!(xml.contains("attr.name=\"ok\" attr.type=\"boolean\""), "{xml}");
+        assert!(xml.contains("attr.name=\"w\" attr.type=\"string\""), "{xml}");
+        assert!(xml.contains("<data key=\"labels\">Big Cat Person</data>"), "{xml}");
         assert!(xml.contains("A&amp;B"), "{xml}");
         assert!(xml.contains(&format!(
             "<edge id=\"e{}\" source=\"n{}\" target=\"n{}\">",
@@ -504,27 +477,11 @@ mod tests {
         let mut g = GraphStore::new();
         let n = g.create_node("N");
         let mut m = HashMap::new();
-        m.insert(
-            "k".to_string(),
-            PropertyValue::Array(vec![PropertyValue::Null, PropertyValue::Boolean(true)]),
-        );
-        g.set_node_property(
-            "default",
-            n,
-            "arr",
-            PropertyValue::Array(vec![
-                PropertyValue::Integer(1),
-                PropertyValue::Float(0.5),
-                PropertyValue::String("s".into()),
-            ]),
-        )
-        .unwrap();
-        g.set_node_property("default", n, "map", PropertyValue::Map(m))
-            .unwrap();
-        g.set_node_property("default", n, "vec", PropertyValue::Vector(vec![1.0]))
-            .unwrap();
-        g.set_node_property("default", n, "when", PropertyValue::Date(0))
-            .unwrap();
+        m.insert("k".to_string(), PropertyValue::Array(vec![PropertyValue::Null, PropertyValue::Boolean(true)]));
+        g.set_node_property("default", n, "arr", PropertyValue::Array(vec![PropertyValue::Integer(1), PropertyValue::Float(0.5), PropertyValue::String("s".into())])).unwrap();
+        g.set_node_property("default", n, "map", PropertyValue::Map(m)).unwrap();
+        g.set_node_property("default", n, "vec", PropertyValue::Vector(vec![1.0])).unwrap();
+        g.set_node_property("default", n, "when", PropertyValue::Date(0)).unwrap();
         g.set_node_property(
             "default",
             n,
@@ -539,14 +496,8 @@ mod tests {
         assert!(xml.contains("[1,0.5,&quot;s&quot;]"), "{xml}");
         assert!(xml.contains("{&quot;k&quot;:[null,true]}"), "{xml}");
         assert!(xml.contains("[1.0]"), "{xml}");
-        assert!(
-            xml.contains(&esc(&PropertyValue::Date(0).to_string())),
-            "{xml}"
-        );
-        assert!(
-            xml.contains(&esc(&format!("[\"{}\"]", PropertyValue::Date(0)))),
-            "{xml}"
-        );
+        assert!(xml.contains(&esc(&PropertyValue::Date(0).to_string())), "{xml}");
+        assert!(xml.contains(&esc(&format!("[\"{}\"]", PropertyValue::Date(0)))), "{xml}");
     }
 
     #[test]
@@ -567,14 +518,8 @@ mod tests {
         let b = g.create_node("N");
         g.set_node_property("default", b, "code", 5i64).unwrap();
         let (xml, rep) = to_graphml(&g);
-        assert!(
-            xml.contains("attr.name=\"code\" attr.type=\"string\""),
-            "{xml}"
-        );
-        assert_eq!(
-            rep.attributes_widened_to_string,
-            vec!["node.code".to_string()]
-        );
+        assert!(xml.contains("attr.name=\"code\" attr.type=\"string\""), "{xml}");
+        assert_eq!(rep.attributes_widened_to_string, vec!["node.code".to_string()]);
     }
 
     #[test]
@@ -585,13 +530,7 @@ mod tests {
         let b = g.create_node("N");
         g.set_node_property("default", b, "flag", 1i64).unwrap();
         let (xml, rep) = to_graphml(&g);
-        assert!(
-            xml.contains("attr.name=\"flag\" attr.type=\"string\""),
-            "{xml}"
-        );
-        assert_eq!(
-            rep.attributes_widened_to_string,
-            vec!["node.flag".to_string()]
-        );
+        assert!(xml.contains("attr.name=\"flag\" attr.type=\"string\""), "{xml}");
+        assert_eq!(rep.attributes_widened_to_string, vec!["node.flag".to_string()]);
     }
 }

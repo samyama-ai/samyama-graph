@@ -67,10 +67,7 @@ struct Args {
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let get = |flag: &str| -> Option<String> {
-        argv.iter()
-            .position(|a| a == flag)
-            .and_then(|i| argv.get(i + 1))
-            .cloned()
+        argv.iter().position(|a| a == flag).and_then(|i| argv.get(i + 1)).cloned()
     };
     let args = Args {
         format: get("--format").unwrap_or_else(|| {
@@ -91,12 +88,7 @@ fn main() {
         limit: get("--limit").and_then(|v| v.parse().ok()),
         exclude: {
             let mut set: HashSet<String> = get("--exclude")
-                .map(|v| {
-                    v.split(',')
-                        .map(|c| c.trim().to_string())
-                        .filter(|c| !c.is_empty())
-                        .collect()
-                })
+                .map(|v| v.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect())
                 .unwrap_or_default();
             if let Some(path) = get("--exclude-file") {
                 match std::fs::read_to_string(&path) {
@@ -245,10 +237,7 @@ fn main() {
             // Translate the internal node ids back into the identifiers the user supplied,
             // otherwise the diagnostic names nodes they have no way to look up.
             let code_of = |id: NodeId| -> String {
-                match store
-                    .node_columns
-                    .get_property(id.as_u64() as usize, "code")
-                {
+                match store.node_columns.get_property(id.as_u64() as usize, "code") {
                     PropertyValue::String(s) => s,
                     _ => format!("node:{}", id.as_u64()),
                 }
@@ -279,10 +268,7 @@ fn main() {
                     .filter_map(|c| c.first().map(|&i| code_of(i)))
                     .collect();
                 if !breakers.is_empty() {
-                    eprintln!(
-                        "[ontology] to load anyway: --exclude {}",
-                        breakers.join(",")
-                    );
+                    eprintln!("[ontology] to load anyway: --exclude {}", breakers.join(","));
                 }
             }
             std::process::exit(1);
@@ -331,9 +317,7 @@ struct Interner {
 
 impl Interner {
     fn new() -> Self {
-        Interner {
-            ids: HashMap::new(),
-        }
+        Interner { ids: HashMap::new() }
     }
 
     fn get(&mut self, store: &mut GraphStore, label: &str, code: &str) -> NodeId {
@@ -393,15 +377,7 @@ fn load_obo(store: &mut GraphStore, args: &Args) -> (usize, usize) {
     for line in reader.lines().map_while(Result::ok) {
         let line = line.trim().to_string();
         if line == "[Term]" {
-            flush(
-                &current,
-                &current_name,
-                obsolete,
-                &mut pending,
-                store,
-                &mut interner,
-                &mut edges,
-            );
+            flush(&current, &current_name, obsolete, &mut pending, store, &mut interner, &mut edges);
             current = None;
             current_name = None;
             obsolete = false;
@@ -410,15 +386,7 @@ fn load_obo(store: &mut GraphStore, args: &Args) -> (usize, usize) {
         }
         if line.starts_with('[') {
             // [Typedef] and friends: stop collecting until the next [Term]
-            flush(
-                &current,
-                &current_name,
-                obsolete,
-                &mut pending,
-                store,
-                &mut interner,
-                &mut edges,
-            );
+            flush(&current, &current_name, obsolete, &mut pending, store, &mut interner, &mut edges);
             current = None;
             in_term = false;
             continue;
@@ -447,15 +415,7 @@ fn load_obo(store: &mut GraphStore, args: &Args) -> (usize, usize) {
             break;
         }
     }
-    flush(
-        &current,
-        &current_name,
-        obsolete,
-        &mut pending,
-        store,
-        &mut interner,
-        &mut edges,
-    );
+    flush(&current, &current_name, obsolete, &mut pending, store, &mut interner, &mut edges);
     (interner.ids.len(), edges)
 }
 
@@ -508,10 +468,7 @@ fn load_geonames(store: &mut GraphStore, args: &Args) -> (usize, usize) {
         }
         let parent = interner.get(store, &args.label, cols[0].trim());
         let child = interner.get(store, &args.label, cols[1].trim());
-        if store
-            .create_edge(child, parent, args.edge_type.as_str())
-            .is_ok()
-        {
+        if store.create_edge(child, parent, args.edge_type.as_str()).is_ok() {
             edges += 1;
         }
         if args.limit.is_some_and(|l| edges >= l) {
@@ -588,9 +545,7 @@ fn load_mesh(store: &mut GraphStore, args: &Args) -> (usize, usize) {
     let mut interner = Interner::new();
     let mut edges = 0usize;
     for line in reader.lines().map_while(Result::ok) {
-        let Some((name, tree)) = line.split_once(';') else {
-            continue;
-        };
+        let Some((name, tree)) = line.split_once(';') else { continue };
         let (name, tree) = (name.trim(), tree.trim());
         if tree.is_empty() {
             continue;
@@ -630,15 +585,10 @@ fn load_edgelist(store: &mut GraphStore, args: &Args) -> (usize, usize) {
         if i == 0 && line.to_lowercase().starts_with("child") {
             continue;
         }
-        let Some((c, p)) = line.split_once(',') else {
-            continue;
-        };
+        let Some((c, p)) = line.split_once(',') else { continue };
         let child = interner.get(store, &args.label, c.trim());
         let parent = interner.get(store, &args.label, p.trim());
-        if store
-            .create_edge(child, parent, args.edge_type.as_str())
-            .is_ok()
-        {
+        if store.create_edge(child, parent, args.edge_type.as_str()).is_ok() {
             edges += 1;
         }
         if args.limit.is_some_and(|l| edges >= l) {
@@ -680,24 +630,18 @@ fn load_calendar(store: &mut GraphStore, args: &Args) -> (usize, usize) {
         for q in 1..=4i64 {
             let quarter = mk(store, "Quarter", format!("{y}-Q{q}"));
             nodes += 1;
-            store
-                .create_edge(quarter, year, args.edge_type.as_str())
-                .unwrap();
+            store.create_edge(quarter, year, args.edge_type.as_str()).unwrap();
             edges += 1;
             for mo in 0..3i64 {
                 let m = (q - 1) * 3 + mo + 1;
                 let month = mk(store, "Month", format!("{y}-{m:02}"));
                 nodes += 1;
-                store
-                    .create_edge(month, quarter, args.edge_type.as_str())
-                    .unwrap();
+                store.create_edge(month, quarter, args.edge_type.as_str()).unwrap();
                 edges += 1;
                 for d in 1..=days_in(y, m) {
                     let day = mk(store, "Day", format!("{y}-{m:02}-{d:02}"));
                     nodes += 1;
-                    store
-                        .create_edge(day, month, args.edge_type.as_str())
-                        .unwrap();
+                    store.create_edge(day, month, args.edge_type.as_str()).unwrap();
                     edges += 1;
                 }
             }

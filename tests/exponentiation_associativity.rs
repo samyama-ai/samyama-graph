@@ -44,10 +44,7 @@ fn exponentiation_groups_left() {
     ] {
         let got = num(expr);
         assert_eq!(got, left, "{expr} should group left");
-        assert_ne!(
-            got, right,
-            "{expr}: the two groupings agree, so this case proves nothing"
-        );
+        assert_ne!(got, right, "{expr}: the two groupings agree, so this case proves nothing");
     }
 }
 
@@ -57,19 +54,11 @@ fn exponentiation_groups_left() {
 fn precedence_over_multiplicative_and_additive_is_unchanged() {
     for (mult, right) in [("*", 512.0), ("/", 8.0), ("%", 0.0)] {
         assert_eq!(num(&format!("4 ^ 3 {mult} 2 ^ 3")), right, "{mult}");
-        assert_eq!(
-            num(&format!("(4 ^ 3) {mult} (2 ^ 3)")),
-            right,
-            "{mult} parenthesised"
-        );
+        assert_eq!(num(&format!("(4 ^ 3) {mult} (2 ^ 3)")), right, "{mult} parenthesised");
     }
     for (add, right) in [("+", 72.0), ("-", 56.0)] {
         assert_eq!(num(&format!("4 ^ 3 {add} 2 ^ 3")), right, "{add}");
-        assert_eq!(
-            num(&format!("(4 ^ 3) {add} (2 ^ 3)")),
-            right,
-            "{add} parenthesised"
-        );
+        assert_eq!(num(&format!("(4 ^ 3) {add} (2 ^ 3)")), right, "{add} parenthesised");
     }
 }
 

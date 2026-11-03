@@ -112,23 +112,13 @@ pub fn build(scale: &HierScale) -> HierDataset {
         let year = node(&mut store, "Year", format!("Y{}", 2019 + y), None);
         tag(&mut store, year, "y", (2019 + y) as i64);
         for q in 0..4 {
-            let quarter = node(
-                &mut store,
-                "Quarter",
-                format!("Y{}Q{}", 2019 + y, q + 1),
-                None,
-            );
+            let quarter = node(&mut store, "Quarter", format!("Y{}Q{}", 2019 + y, q + 1), None);
             tag(&mut store, quarter, "y", (2019 + y) as i64);
             store.create_edge(quarter, year, "IN_PERIOD").unwrap();
             edges += 1;
             for m in 0..3 {
                 let mi = q * 3 + m + 1;
-                let month = node(
-                    &mut store,
-                    "Month",
-                    format!("Y{}M{:02}", 2019 + y, mi),
-                    None,
-                );
+                let month = node(&mut store, "Month", format!("Y{}M{:02}", 2019 + y, mi), None);
                 tag(&mut store, month, "y", (2019 + y) as i64);
                 store.create_edge(month, quarter, "IN_PERIOD").unwrap();
                 edges += 1;
@@ -253,12 +243,7 @@ pub fn build(scale: &HierScale) -> HierDataset {
     let flat_techniques: Vec<NodeId> = techniques.iter().flatten().copied().collect();
     for e in 0..scale.events {
         seed += 1;
-        let ev = node(
-            &mut store,
-            "Event",
-            format!("E{e}"),
-            Some(measure_for(seed)),
-        );
+        let ev = node(&mut store, "Event", format!("E{e}"), Some(measure_for(seed)));
         store
             .create_edge(ev, days[(e * 7) % days.len()], "ON")
             .unwrap();

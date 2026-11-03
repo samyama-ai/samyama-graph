@@ -52,11 +52,7 @@ fn load_csv_feeds_a_merge() {
         )
         .expect("LOAD CSV ... MERGE runs");
     assert_eq!(names(&store, "B"), expected);
-    assert_eq!(
-        store.node_count(),
-        2,
-        "one node per distinct name, not per row"
-    );
+    assert_eq!(store.node_count(), 2, "one node per distinct name, not per row");
 
     // Idempotent: running it again creates nothing.
     engine
@@ -66,11 +62,7 @@ fn load_csv_feeds_a_merge() {
             T,
         )
         .expect("the second run");
-    assert_eq!(
-        store.node_count(),
-        2,
-        "a second load merges into the same nodes"
-    );
+    assert_eq!(store.node_count(), 2, "a second load merges into the same nodes");
 
     // Through an intervening WITH, which failed the same way.
     let mut store = GraphStore::new();
@@ -114,10 +106,7 @@ fn load_csv_feeds_a_merge() {
     engine
         .execute_mut("MERGE (:E {name: 'Zed'})", &mut store, T)
         .expect("a bare MERGE still takes its own path");
-    assert_eq!(
-        names(&store, "E"),
-        ["Zed".to_string()].into_iter().collect()
-    );
+    assert_eq!(names(&store, "E"), ["Zed".to_string()].into_iter().collect());
 
     set_import_root(None).unwrap();
 }

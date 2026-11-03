@@ -21,21 +21,12 @@ use std::path::{Path, PathBuf};
 /// Files allowed to construct an outbound HTTP client, each with the reason
 /// `docs/DATA-HANDLING.md` gives for it.
 const DOCUMENTED_EGRESS: &[(&str, &str)] = &[
-    (
-        "src/nlq/client.rs",
-        "NLQ: question + schema summary to the configured provider",
-    ),
-    (
-        "src/embed/client.rs",
-        "embeddings: property values to the configured provider",
-    ),
+    ("src/nlq/client.rs", "NLQ: question + schema summary to the configured provider"),
+    ("src/embed/client.rs", "embeddings: property values to the configured provider"),
     // The agent's web-search tool builds a client and never uses it. Listed
     // rather than excused: a stub that holds a client is one edit away from
     // being an egress path, and the statement says it makes no request.
-    (
-        "src/agent/tools.rs",
-        "web search: a stub that makes no request",
-    ),
+    ("src/agent/tools.rs", "web search: a stub that makes no request"),
 ];
 
 fn repo_root() -> PathBuf {
@@ -136,16 +127,8 @@ fn there_is_no_telemetry_sdk_anywhere_in_the_tree() {
     // into the user's own graph and sends nothing.
     let manifests = ["Cargo.toml", "crates/samyama-sdk/Cargo.toml"];
     const REPORTERS: &[&str] = &[
-        "sentry",
-        "posthog",
-        "segment",
-        "mixpanel",
-        "amplitude",
-        "datadog",
-        "bugsnag",
-        "rollbar",
-        "honeycomb-io",
-        "google-analytics",
+        "sentry", "posthog", "segment", "mixpanel", "amplitude", "datadog", "bugsnag",
+        "rollbar", "honeycomb-io", "google-analytics",
     ];
     for manifest in manifests {
         let path = repo_root().join(manifest);

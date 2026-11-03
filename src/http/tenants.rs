@@ -9,8 +9,6 @@
 //! A tenant created here is immediately visible to the RESP `GRAPH.LIST`
 //! command because the same `Arc<TenantManager>` backs both paths.
 
-use crate::embed::EmbedPipeline;
-use crate::persistence::{AutoEmbedConfig, ResourceQuotas, TenantError, TenantManager};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -18,6 +16,8 @@ use axum::{
     routing::{delete, get, patch, post},
     Json, Router,
 };
+use crate::embed::EmbedPipeline;
+use crate::persistence::{AutoEmbedConfig, ResourceQuotas, TenantError, TenantManager};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -76,10 +76,7 @@ pub async fn create_tenant(
     State(state): State<TenantState>,
     Json(body): Json<CreateTenantBody>,
 ) -> impl IntoResponse {
-    match state
-        .tenants
-        .create_tenant(body.id.clone(), body.name.clone(), body.quotas)
-    {
+    match state.tenants.create_tenant(body.id.clone(), body.name.clone(), body.quotas) {
         Ok(()) => match state.tenants.get_tenant(&body.id) {
             Ok(t) => (StatusCode::CREATED, Json(tenant_to_json(&t))).into_response(),
             Err(e) => (
@@ -140,9 +137,11 @@ pub async fn delete_tenant(
             Json(json!({ "error": format!("Tenant '{}' not found", id) })),
         )
             .into_response(),
-        Err(TenantError::PermissionDenied(msg)) => {
-            (StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response()
-        }
+        Err(TenantError::PermissionDenied(msg)) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": msg })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
@@ -254,10 +253,7 @@ pub fn router(
     tenants: Arc<TenantManager>,
     embed_cache: Arc<RwLock<HashMap<String, Arc<EmbedPipeline>>>>,
 ) -> Router {
-    let state = TenantState {
-        tenants,
-        embed_cache,
-    };
+    let state = TenantState { tenants, embed_cache };
     Router::new()
         .route("/api/tenants", post(create_tenant).get(list_tenants))
         .route(

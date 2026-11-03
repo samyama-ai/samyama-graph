@@ -35,14 +35,12 @@ fn incident() -> (GraphStore, Vec<NodeId>) {
     let mut ids = Vec::new();
     for name in ["api", "db", "cache", "auth", "ui"] {
         let n = s.create_node_with_labels([Label::new("Svc")]);
-        s.set_node_property("default", n, "name", PropertyValue::String(name.into()))
-            .unwrap();
+        s.set_node_property("default", n, "name", PropertyValue::String(name.into())).unwrap();
         ids.push(n);
     }
     for (a, b, t) in [(0usize, 1usize, 10i64), (1, 2, 5), (0, 3, 12), (3, 4, 20)] {
         let e = s.create_edge(ids[a], ids[b], "CALLS").unwrap();
-        s.set_edge_property(e, "at", PropertyValue::Integer(t))
-            .unwrap();
+        s.set_edge_property(e, "at", PropertyValue::Integer(t)).unwrap();
     }
     (s, ids)
 }
@@ -53,9 +51,8 @@ fn is_path(v: &Value) -> bool {
         // A list of node ids or of nodes. The engine returns paths as an array
         // of integers today; accepting either shape means this keeps measuring
         // the requirement if that representation changes.
-        Value::Property(PropertyValue::Array(a)) => {
-            a.len() >= 2 && a.iter().all(|x| matches!(x, PropertyValue::Integer(_)))
-        }
+        Value::Property(PropertyValue::Array(a)) => a.len() >= 2
+            && a.iter().all(|x| matches!(x, PropertyValue::Integer(_))),
         Value::List(a) => a.len() >= 2,
         _ => false,
     }
@@ -88,35 +85,19 @@ fn main() {
     // YIELD item and the row is reported as not shipped, which is louder than
     // a silently absent column.
     let cases: Vec<(&str, String)> = vec![
-        (
-            "temporalReachability",
-            format!(
-                "CALL algo.temporalReachability({a}, {cfg}) YIELD node, time, path, times \
-                  RETURN node, time, path, times"
-            ),
-        ),
-        (
-            "temporalShortestPath",
-            format!(
-                "CALL algo.temporalShortestPath({a}, {b}, {cfg}) \
-                  YIELD path, times, arrival RETURN path, times, arrival"
-            ),
-        ),
-        (
-            "propagationRanking",
-            format!(
-                "CALL algo.propagationRanking({a}, {cfg}) YIELD node, time, rank, path, times \
-                  RETURN node, time, rank, path, times"
-            ),
-        ),
-        (
-            "symptomExplanation",
-            format!(
-                "CALL algo.symptomExplanation([[{b}, 30], [{c}, 30]], {cfg}) \
+        ("temporalReachability",
+         format!("CALL algo.temporalReachability({a}, {cfg}) YIELD node, time, path, times \
+                  RETURN node, time, path, times")),
+        ("temporalShortestPath",
+         format!("CALL algo.temporalShortestPath({a}, {b}, {cfg}) \
+                  YIELD path, times, arrival RETURN path, times, arrival")),
+        ("propagationRanking",
+         format!("CALL algo.propagationRanking({a}, {cfg}) YIELD node, time, rank, path, times \
+                  RETURN node, time, rank, path, times")),
+        ("symptomExplanation",
+         format!("CALL algo.symptomExplanation([[{b}, 30], [{c}, 30]], {cfg}) \
                   YIELD node, explains, onset, path, times \
-                  RETURN node, explains, onset, path, times"
-            ),
-        ),
+                  RETURN node, explains, onset, path, times")),
     ];
 
     let mut rows = Vec::new();
@@ -128,10 +109,9 @@ fn main() {
                 Ok(batch) => {
                     let cols: Vec<String> = batch.columns.clone();
                     // The first column whose value is a sequence of nodes.
-                    let path_col = batch
-                        .records
-                        .first()
-                        .and_then(|r| cols.iter().find(|c| r.get(c).is_some_and(is_path)).cloned());
+                    let path_col = batch.records.first().and_then(|r| {
+                        cols.iter().find(|c| r.get(c).is_some_and(is_path)).cloned()
+                    });
                     (true, batch.records.len(), cols, path_col, None)
                 }
             },
@@ -147,10 +127,7 @@ fn main() {
     }
 
     let shipped = rows.iter().filter(|r| r["dispatches"] == true).count();
-    let with_paths = rows
-        .iter()
-        .filter(|r| !r["supporting_path_column"].is_null())
-        .count();
+    let with_paths = rows.iter().filter(|r| !r["supporting_path_column"].is_null()).count();
 
     let json = serde_json::json!({
         "primitives": cases.len(),
@@ -160,11 +137,7 @@ fn main() {
     });
     let args: Vec<String> = std::env::args().collect();
     let text = serde_json::to_string_pretty(&json).unwrap();
-    match args
-        .iter()
-        .position(|x| x == "--json")
-        .and_then(|i| args.get(i + 1))
-    {
+    match args.iter().position(|x| x == "--json").and_then(|i| args.get(i + 1)) {
         Some(p) => std::fs::write(p, &text).unwrap(),
         None => println!("{text}"),
     }

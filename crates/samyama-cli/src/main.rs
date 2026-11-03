@@ -5,7 +5,7 @@
 use crate::snapshot_keys::run_snapshot_keys;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use comfy_table::{ContentArrangement, Table};
+use comfy_table::{Table, ContentArrangement};
 use samyama_sdk::{RemoteClient, SamyamaClient};
 
 mod doctor;
@@ -15,12 +15,7 @@ mod snapshot_keys;
 #[command(name = "samyama", version, about = "Samyama Graph Database CLI")]
 struct Cli {
     /// Server HTTP URL
-    #[arg(
-        long,
-        default_value = "http://localhost:8080",
-        global = true,
-        env = "SAMYAMA_URL"
-    )]
+    #[arg(long, default_value = "http://localhost:8080", global = true, env = "SAMYAMA_URL")]
     url: String,
 
     /// Output format
@@ -132,16 +127,12 @@ async fn main() {
     let client = RemoteClient::new(&cli.url);
 
     let result = match cli.command {
-        Commands::Query {
-            cypher,
-            graph,
-            readonly,
-        } => run_query(&client, &graph, &cypher, readonly, &cli.format).await,
-        Commands::Nlq {
-            question,
-            execute,
-            graph,
-        } => run_nlq(&client, &graph, &question, execute, &cli.format).await,
+        Commands::Query { cypher, graph, readonly } => {
+            run_query(&client, &graph, &cypher, readonly, &cli.format).await
+        }
+        Commands::Nlq { question, execute, graph } => {
+            run_nlq(&client, &graph, &question, execute, &cli.format).await
+        }
         Commands::Status => run_status(&client, &cli.format).await,
         Commands::Ping => run_ping(&client, &cli.format).await,
         Commands::Shell { graph } => run_shell(&client, &graph, &cli.format).await,
@@ -166,11 +157,13 @@ async fn main() {
             Ok(())
         }
         Commands::Snapshot { command } => match command {
-            SnapshotCommands::Keys { files, label, json } => run_snapshot_keys(
-                &files,
-                label.as_deref(),
-                json || matches!(&cli.format, OutputFormat::Json),
-            ),
+            SnapshotCommands::Keys { files, label, json } => {
+                run_snapshot_keys(
+                    &files,
+                    label.as_deref(),
+                    json || matches!(&cli.format, OutputFormat::Json),
+                )
+            }
         },
     };
 
@@ -180,11 +173,8 @@ async fn main() {
         // script, because the failure is exactly when it is parsing output.
         if json_errors {
             let body = serde_json::json!({"error": e.to_string()});
-            eprintln!(
-                "{}",
-                serde_json::to_string_pretty(&body)
-                    .unwrap_or_else(|_| format!("{{\"error\": \"{e}\"}}"))
-            );
+            eprintln!("{}", serde_json::to_string_pretty(&body)
+                .unwrap_or_else(|_| format!("{{\"error\": \"{e}\"}}")));
         } else {
             eprintln!("Error: {}", e);
         }
@@ -306,10 +296,8 @@ async fn run_ping(
     // so `--format json` produced output no JSON parser could read. It was the
     // only subcommand that ignored the flag.
     match format {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({"ping": result}))?
-        ),
+        OutputFormat::Json => println!("{}",
+            serde_json::to_string_pretty(&serde_json::json!({"ping": result}))?),
         _ => println!("{}", result),
     }
     Ok(())
@@ -320,39 +308,11 @@ async fn run_ping(
 /// property keys from the connected graph — needs a round trip and is deliberately not
 /// here yet; this is the half that works offline and on an empty graph.
 const COMPLETIONS: &[&str] = &[
-    ":help",
-    ":status",
-    ":ping",
-    ":quit",
-    ":exit",
-    "MATCH",
-    "OPTIONAL MATCH",
-    "WHERE",
-    "RETURN",
-    "CREATE",
-    "MERGE",
-    "DELETE",
-    "DETACH DELETE",
-    "SET",
-    "REMOVE",
-    "WITH",
-    "UNWIND",
-    "ORDER BY",
-    "SKIP",
-    "LIMIT",
-    "UNION",
-    "CALL",
-    "YIELD",
-    "FOREACH",
-    "EXPLAIN",
-    "PROFILE",
-    "count(",
-    "collect(",
-    "avg(",
-    "sum(",
-    "min(",
-    "max(",
-    "DISTINCT",
+    ":help", ":status", ":ping", ":quit", ":exit",
+    "MATCH", "OPTIONAL MATCH", "WHERE", "RETURN", "CREATE", "MERGE", "DELETE",
+    "DETACH DELETE", "SET", "REMOVE", "WITH", "UNWIND", "ORDER BY", "SKIP", "LIMIT",
+    "UNION", "CALL", "YIELD", "FOREACH", "EXPLAIN", "PROFILE",
+    "count(", "collect(", "avg(", "sum(", "min(", "max(", "DISTINCT",
 ];
 
 /// Completion and hinting for the shell. `rustyline` wants one type that implements
@@ -371,17 +331,14 @@ impl rustyline::completion::Completer for ShellHelper {
     ) -> rustyline::Result<(usize, Vec<String>)> {
         // Complete the word under the cursor, not the whole line: `MATCH (n) RET<tab>`
         // should offer RETURN without discarding what precedes it.
-        let start = line[..pos]
-            .rfind(|c: char| c.is_whitespace() || c == '(')
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        let start = line[..pos].rfind(|c: char| c.is_whitespace() || c == '(')
+            .map(|i| i + 1).unwrap_or(0);
         let word = &line[start..pos];
         if word.is_empty() {
             return Ok((start, Vec::new()));
         }
         let upper = word.to_uppercase();
-        let hits = COMPLETIONS
-            .iter()
+        let hits = COMPLETIONS.iter()
             .filter(|c| c.to_uppercase().starts_with(&upper))
             .map(|c| c.to_string())
             .collect();
@@ -392,8 +349,7 @@ impl rustyline::completion::Completer for ShellHelper {
 /// Where history lives. `~/.samyama_history`, as #1058 asked; falls back to the
 /// working directory when there is no home, rather than losing history silently.
 fn history_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
+    dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".samyama_history")
 }
 
@@ -404,10 +360,7 @@ async fn run_shell(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Samyama Interactive Shell (graph: {})", graph);
     println!("Type Cypher queries, or :help for commands. :quit to exit.");
-    println!(
-        "History is kept in {}; Tab completes.\n",
-        history_path().display()
-    );
+    println!("History is kept in {}; Tab completes.\n", history_path().display());
 
     // The editor owns the terminal, so a non-tty (a pipe, a test, CI) has to keep
     // working: rustyline returns an error at construction there, and the loop falls
@@ -417,8 +370,7 @@ async fn run_shell(
         .max_history_size(10_000)?
         .completion_type(rustyline::CompletionType::List)
         .build();
-    let mut editor =
-        rustyline::Editor::<ShellHelper, rustyline::history::FileHistory>::with_config(config).ok();
+    let mut editor = rustyline::Editor::<ShellHelper, rustyline::history::FileHistory>::with_config(config).ok();
     if let Some(ed) = editor.as_mut() {
         ed.set_helper(Some(ShellHelper));
         let _ = ed.load_history(&history_path());
@@ -552,23 +504,22 @@ async fn run_doctor(
 
     let report = doctor::report(checks);
     match format {
-        OutputFormat::Json => match serde_json::to_string_pretty(&report) {
-            Ok(j) => println!("{j}"),
-            Err(e) => {
-                eprintln!("{{\"error\": \"could not serialise report: {e}\"}}");
-                return 1;
+        OutputFormat::Json => {
+            match serde_json::to_string_pretty(&report) {
+                Ok(j) => println!("{j}"),
+                Err(e) => {
+                    eprintln!("{{\"error\": \"could not serialise report: {e}\"}}");
+                    return 1;
+                }
             }
-        },
+        }
         _ => {
             for c in &report.checks {
                 println!("  {:<7} {:<18} {}", c.verdict.to_string(), c.name, c.detail);
             }
             println!(
                 "\n{} check(s): {} failed, {} warned, {} skipped",
-                report.checks.len(),
-                report.failed,
-                report.warned,
-                report.skipped
+                report.checks.len(), report.failed, report.warned, report.skipped
             );
         }
     }
@@ -597,10 +548,7 @@ mod cli_tests {
             clap_complete::generate(shell, &mut Cli::command(), bin, &mut out);
             let script = String::from_utf8(out).expect("completion script is not UTF-8");
             assert!(!script.is_empty(), "{shell} produced an empty script");
-            assert!(
-                script.contains(bin),
-                "{shell} script never mentions `{bin}`"
-            );
+            assert!(script.contains(bin), "{shell} script never mentions `{bin}`");
         }
     }
 
@@ -608,11 +556,7 @@ mod cli_tests {
     fn nlq_takes_a_question_and_defaults_to_translate_only() {
         let cli = Cli::try_parse_from(["samyama", "nlq", "Who knows Alice?"]).expect("parse");
         match cli.command {
-            Commands::Nlq {
-                question,
-                execute,
-                graph,
-            } => {
+            Commands::Nlq { question, execute, graph } => {
                 assert_eq!(question, "Who knows Alice?");
                 // Running generated Cypher is opt-in.
                 assert!(!execute);
@@ -625,23 +569,12 @@ mod cli_tests {
     #[test]
     fn nlq_accepts_execute_and_graph() {
         let cli = Cli::try_parse_from([
-            "samyama",
-            "--format",
-            "json",
-            "nlq",
-            "--execute",
-            "--graph",
-            "social",
-            "top people",
+            "samyama", "--format", "json", "nlq", "--execute", "--graph", "social", "top people",
         ])
         .expect("parse");
         assert!(matches!(cli.format, OutputFormat::Json));
         match cli.command {
-            Commands::Nlq {
-                question,
-                execute,
-                graph,
-            } => {
+            Commands::Nlq { question, execute, graph } => {
                 assert_eq!(question, "top people");
                 assert!(execute);
                 assert_eq!(graph, "social");
@@ -664,19 +597,8 @@ mod cli_tests {
             .get_subcommands()
             .map(|c| c.get_name().to_string())
             .collect();
-        for want in [
-            "query",
-            "nlq",
-            "status",
-            "ping",
-            "shell",
-            "doctor",
-            "completions",
-        ] {
-            assert!(
-                names.iter().any(|n| n == want),
-                "missing subcommand `{want}` in {names:?}"
-            );
+        for want in ["query", "nlq", "status", "ping", "shell", "doctor", "completions"] {
+            assert!(names.iter().any(|n| n == want), "missing subcommand `{want}` in {names:?}");
         }
     }
 }

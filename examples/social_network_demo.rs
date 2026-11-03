@@ -5,14 +5,15 @@
 //! community detection (WCC/SCC), BFS information diffusion, network
 //! statistics, and force-directed SVG visualization.
 
-use rand::Rng;
 use samyama_sdk::{
-    AlgorithmClient, EmbeddedClient, LLMProvider, Label, NLQConfig, NodeId, PageRankConfig,
-    PropertyValue, SamyamaClient,
+    EmbeddedClient, SamyamaClient, AlgorithmClient,
+    Label, PropertyValue, NodeId, PageRankConfig,
+    NLQConfig, LLMProvider,
 };
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+use rand::Rng;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -48,76 +49,32 @@ const COMMUNITY_SKILLS: [[&str; 4]; NUM_COMMUNITIES] = [
 ];
 
 const COMPANIES: [&str; 20] = [
-    "Google",
-    "Meta",
-    "Apple",
-    "Amazon",
-    "Microsoft",
-    "Netflix",
-    "Stripe",
-    "Airbnb",
-    "Uber",
-    "Databricks",
-    "Snowflake",
-    "Confluent",
-    "HashiCorp",
-    "Datadog",
-    "Figma",
-    "Vercel",
-    "Supabase",
-    "PlanetScale",
-    "Railway",
-    "Fly.io",
+    "Google", "Meta", "Apple", "Amazon", "Microsoft",
+    "Netflix", "Stripe", "Airbnb", "Uber", "Databricks",
+    "Snowflake", "Confluent", "HashiCorp", "Datadog", "Figma",
+    "Vercel", "Supabase", "PlanetScale", "Railway", "Fly.io",
 ];
 
 const FIRST_NAMES: [&str; 40] = [
-    "Alice", "Bob", "Carlos", "Diana", "Elena", "Frank", "Grace", "Hiro", "Isha", "Jake", "Kenji",
-    "Luna", "Miguel", "Nina", "Oscar", "Priya", "Qian", "Rafael", "Sara", "Tomasz", "Uma",
-    "Viktor", "Wendy", "Xavier", "Yuki", "Zara", "Aiden", "Bianca", "Chloe", "Derek", "Elias",
-    "Fatima", "Gavin", "Hannah", "Ivan", "Jasmine", "Kai", "Lena", "Mateo", "Nadia",
+    "Alice", "Bob", "Carlos", "Diana", "Elena",
+    "Frank", "Grace", "Hiro", "Isha", "Jake",
+    "Kenji", "Luna", "Miguel", "Nina", "Oscar",
+    "Priya", "Qian", "Rafael", "Sara", "Tomasz",
+    "Uma", "Viktor", "Wendy", "Xavier", "Yuki",
+    "Zara", "Aiden", "Bianca", "Chloe", "Derek",
+    "Elias", "Fatima", "Gavin", "Hannah", "Ivan",
+    "Jasmine", "Kai", "Lena", "Mateo", "Nadia",
 ];
 
 const LAST_NAMES: [&str; 40] = [
-    "Chen",
-    "Patel",
-    "Kim",
-    "Nguyen",
-    "Garcia",
-    "Muller",
-    "Tanaka",
-    "Singh",
-    "Okonkwo",
-    "Williams",
-    "Johansson",
-    "Rossi",
-    "Fernandez",
-    "Kowalski",
-    "Sato",
-    "Ali",
-    "Larsen",
-    "Dubois",
-    "Schmidt",
-    "Park",
-    "Jensen",
-    "Costa",
-    "Ito",
-    "Bakker",
-    "Novak",
-    "Shah",
-    "Rivera",
-    "Yamamoto",
-    "Andersen",
-    "Gupta",
-    "Mendez",
-    "Petrov",
-    "Suzuki",
-    "Eriksson",
-    "Torres",
-    "Nakamura",
-    "Lund",
-    "Ortiz",
-    "Hoffmann",
-    "Reyes",
+    "Chen", "Patel", "Kim", "Nguyen", "Garcia",
+    "Muller", "Tanaka", "Singh", "Okonkwo", "Williams",
+    "Johansson", "Rossi", "Fernandez", "Kowalski", "Sato",
+    "Ali", "Larsen", "Dubois", "Schmidt", "Park",
+    "Jensen", "Costa", "Ito", "Bakker", "Novak",
+    "Shah", "Rivera", "Yamamoto", "Andersen", "Gupta",
+    "Mendez", "Petrov", "Suzuki", "Eriksson", "Torres",
+    "Nakamura", "Lund", "Ortiz", "Hoffmann", "Reyes",
 ];
 
 const COMMUNITY_COLORS: [&str; NUM_COMMUNITIES] = [
@@ -266,9 +223,7 @@ async fn main() {
     println!("Step 2: Influencer Identification (PageRank)");
     println!("------------------------------------------------------------------------");
 
-    let scores = client
-        .page_rank(PageRankConfig::default(), None, None)
-        .await;
+    let scores = client.page_rank(PageRankConfig::default(), None, None).await;
 
     // Sort by PageRank score descending
     let mut ranked: Vec<(u64, f64)> = scores.iter().map(|(&id, &s)| (id, s)).collect();
@@ -276,15 +231,9 @@ async fn main() {
 
     println!();
     println!("  Top 10 Most Influential Professionals:");
-    println!(
-        "  +------+----------------------------+------------------+------------------+-----------+"
-    );
-    println!(
-        "  | Rank | Name                       | Company          | Community        | PageRank  |"
-    );
-    println!(
-        "  +------+----------------------------+------------------+------------------+-----------+"
-    );
+    println!("  +------+----------------------------+------------------+------------------+-----------+");
+    println!("  | Rank | Name                       | Company          | Community        | PageRank  |");
+    println!("  +------+----------------------------+------------------+------------------+-----------+");
 
     {
         let store = client.store_read().await;
@@ -308,17 +257,11 @@ async fn main() {
 
             println!(
                 "  | {:>4} | {:<26} | {:<16} | {:<16} | {:>9.4} |",
-                rank + 1,
-                name,
-                company,
-                community,
-                score
+                rank + 1, name, company, community, score
             );
         }
     }
-    println!(
-        "  +------+----------------------------+------------------+------------------+-----------+"
-    );
+    println!("  +------+----------------------------+------------------+------------------+-----------+");
     println!();
 
     // -----------------------------------------------------------------------
@@ -331,9 +274,7 @@ async fn main() {
     let wcc = client.weakly_connected_components(None, None).await;
     let num_wcc = wcc.components.len();
 
-    let mut comp_sizes: Vec<(usize, usize)> = wcc
-        .components
-        .iter()
+    let mut comp_sizes: Vec<(usize, usize)> = wcc.components.iter()
         .map(|(&comp_id, members)| (comp_id, members.len()))
         .collect();
     comp_sizes.sort_by(|a, b| b.1.cmp(&a.1));
@@ -350,7 +291,10 @@ async fn main() {
     for (idx, &(comp_id, size)) in comp_sizes.iter().take(10).enumerate() {
         let bar_len = (size as f64 / max_size as f64 * max_bar as f64) as usize;
         let bar: String = "#".repeat(bar_len);
-        println!("  | {:>10} | {:>6} | {:<41} |", idx + 1, size, bar);
+        println!(
+            "  | {:>10} | {:>6} | {:<41} |",
+            idx + 1, size, bar
+        );
         let _ = comp_id;
     }
     println!("  +------------+--------+-------------------------------------------+");
@@ -372,9 +316,7 @@ async fn main() {
     let scc = client.strongly_connected_components(None, None).await;
     let num_scc = scc.components.len();
 
-    let mut scc_sizes: Vec<(usize, usize)> = scc
-        .components
-        .iter()
+    let mut scc_sizes: Vec<(usize, usize)> = scc.components.iter()
         .map(|(&comp_id, members)| (comp_id, members.len()))
         .collect();
     scc_sizes.sort_by(|a, b| b.1.cmp(&a.1));
@@ -435,19 +377,13 @@ async fn main() {
         if candidate_id == top_influencer_id {
             continue;
         }
-        if let Some(path) = client
-            .bfs(top_influencer_id, candidate_id, None, None)
-            .await
-        {
+        if let Some(path) = client.bfs(top_influencer_id, candidate_id, None, None).await {
             bfs_result = Some(path);
             break;
         }
     }
 
-    println!(
-        "  Source:  {} (top influencer, PageRank {:.4})",
-        top_name, ranked[0].1
-    );
+    println!("  Source:  {} (top influencer, PageRank {:.4})", top_name, ranked[0].1);
     println!();
 
     match bfs_result {
@@ -464,10 +400,7 @@ async fn main() {
             println!("  | 2 hops   | Friends-of-friends (viral threshold)      |");
             println!("  | 3 hops   | Three degrees of separation               |");
             if hops > 3 {
-                println!(
-                    "  | {} hops   | Actual path to lowest-ranked node         |",
-                    hops
-                );
+                println!("  | {} hops   | Actual path to lowest-ranked node         |", hops);
             }
             println!("  +----------+-------------------------------------------+");
             println!();
@@ -560,13 +493,7 @@ async fn main() {
 
     // Diameter estimate via BFS
     let mut max_path_len: usize = 0;
-    let sample_nodes = [
-        0usize,
-        NUM_USERS / 4,
-        NUM_USERS / 2,
-        3 * NUM_USERS / 4,
-        NUM_USERS - 1,
-    ];
+    let sample_nodes = [0usize, NUM_USERS / 4, NUM_USERS / 2, 3 * NUM_USERS / 4, NUM_USERS - 1];
     for &src_idx in &sample_nodes {
         if src_idx >= view.node_count {
             continue;
@@ -601,10 +528,7 @@ async fn main() {
     println!("  | Average degree                | {:>17.2} |", avg_degree);
     println!("  | Max degree                    | {:>17} |", max_degree);
     println!("  | Min degree                    | {:>17} |", min_degree);
-    println!(
-        "  | Clustering coeff (approx)     | {:>17.4} |",
-        avg_clustering
-    );
+    println!("  | Clustering coeff (approx)     | {:>17.4} |", avg_clustering);
     println!("  | Diameter estimate             | {:>17} |", max_path_len);
     println!("  | WCC components                | {:>17} |", num_wcc);
     println!("  | SCC components                | {:>17} |", num_scc);
@@ -628,10 +552,7 @@ async fn main() {
         println!("  | {:>8} | {:>6} | {:<41} |", deg, count, bar);
     }
     if deg_buckets.len() > 15 {
-        println!(
-            "  |      ... |    ... | (truncated, {} total buckets)              |",
-            deg_buckets.len()
-        );
+        println!("  |      ... |    ... | (truncated, {} total buckets)              |", deg_buckets.len());
     }
     println!("  +----------+--------+-------------------------------------------+");
     println!();
@@ -663,10 +584,7 @@ async fn main() {
         })
         .collect();
 
-    println!(
-        "  Running 100 physics iterations on {} nodes...",
-        view.node_count
-    );
+    println!("  Running 100 physics iterations on {} nodes...", view.node_count);
 
     for iter in 0..100 {
         let mut forces: Vec<Vec2> = vec![Vec2 { x: 0.0, y: 0.0 }; view.node_count];
@@ -820,11 +738,7 @@ async fn main() {
     let mut file = File::create(svg_path).unwrap();
     file.write_all(svg.as_bytes()).unwrap();
 
-    println!(
-        "  Saved: {} ({:.1} KB)",
-        svg_path,
-        svg.len() as f64 / 1024.0
-    );
+    println!("  Saved: {} ({:.1} KB)", svg_path, svg.len() as f64 / 1024.0);
     println!();
 
     // -----------------------------------------------------------------------
@@ -845,9 +759,7 @@ async fn main() {
             model: String::new(),
             api_key: None,
             api_base_url: None,
-            system_prompt: Some(
-                "You are a Cypher query expert for a social network graph.".to_string(),
-            ),
+            system_prompt: Some("You are a Cypher query expert for a social network graph.".to_string()),
         };
 
         let schema_summary = "Node labels: User\n\
@@ -889,22 +801,12 @@ async fn main() {
     println!("  ANALYSIS COMPLETE");
     println!("========================================================================");
     println!();
-    println!(
-        "  Graph:          {} users, {} connections across {} communities",
-        NUM_USERS, edge_count, NUM_COMMUNITIES
-    );
-    println!(
-        "  Top Influencer: {} (PageRank {:.4})",
-        top_name, ranked[0].1
-    );
-    println!(
-        "  Connectivity:   {} WCC, {} SCC components",
-        num_wcc, num_scc
-    );
-    println!(
-        "  Network:        avg degree {:.1}, clustering coeff {:.4}",
-        avg_degree, avg_clustering
-    );
+    println!("  Graph:          {} users, {} connections across {} communities",
+        NUM_USERS, edge_count, NUM_COMMUNITIES);
+    println!("  Top Influencer: {} (PageRank {:.4})", top_name, ranked[0].1);
+    println!("  Connectivity:   {} WCC, {} SCC components", num_wcc, num_scc);
+    println!("  Network:        avg degree {:.1}, clustering coeff {:.4}",
+        avg_degree, avg_clustering);
     println!("  Visualization:  {}", svg_path);
     println!("  NLQ:            ClaudeCode pipeline (social network intelligence)");
     println!();

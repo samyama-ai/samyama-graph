@@ -1,8 +1,8 @@
 //! Cypher-driven optimization problem.
 
 use crate::graph::{GraphStore, PropertyValue};
-use crate::query::executor::record::Value;
 use crate::query::QueryEngine;
+use crate::query::executor::record::Value;
 use ndarray::Array1;
 use samyama_optimization::common::{MultiObjectiveProblem, Problem};
 use std::collections::HashMap;
@@ -62,13 +62,10 @@ impl CypherProblem {
         engine: Arc<QueryEngine>,
     ) -> Self {
         Self {
-            dim,
-            lower,
-            upper,
+            dim, lower, upper,
             objective_template: objective_template.into(),
             penalty_template: None,
-            graph,
-            engine,
+            graph, engine,
             quantize: 1e-10,
             custom_subs: None,
             cache: Mutex::new(HashMap::new()),
@@ -82,9 +79,7 @@ impl CypherProblem {
     }
 
     pub fn with_subs<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&Array1<f64>) -> Vec<(String, String)> + Send + Sync + 'static,
-    {
+    where F: Fn(&Array1<f64>) -> Vec<(String, String)> + Send + Sync + 'static {
         self.custom_subs = Some(Box::new(f));
         self
     }
@@ -143,12 +138,8 @@ fn scalar_from_batch(batch: &crate::query::executor::record::RecordBatch) -> Opt
 }
 
 impl Problem for CypherProblem {
-    fn dim(&self) -> usize {
-        self.dim
-    }
-    fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
-        (self.lower.clone(), self.upper.clone())
-    }
+    fn dim(&self) -> usize { self.dim }
+    fn bounds(&self) -> (Array1<f64>, Array1<f64>) { (self.lower.clone(), self.upper.clone()) }
 
     fn objective(&self, variables: &Array1<f64>) -> f64 {
         let key = hash_quantized(variables, self.quantize);
@@ -157,11 +148,7 @@ impl Problem for CypherProblem {
             return obj;
         }
         let t0 = std::time::Instant::now();
-        let query = substitute(
-            &self.objective_template,
-            variables,
-            self.custom_subs.as_ref(),
-        );
+        let query = substitute(&self.objective_template, variables, self.custom_subs.as_ref());
         let store = self.graph.read().unwrap();
         let val = match self.engine.execute(&query, &store) {
             Ok(batch) => scalar_from_batch(&batch).unwrap_or(f64::INFINITY),
@@ -185,9 +172,7 @@ impl Problem for CypherProblem {
     }
 
     fn penalty(&self, variables: &Array1<f64>) -> f64 {
-        let Some(tmpl) = &self.penalty_template else {
-            return 0.0;
-        };
+        let Some(tmpl) = &self.penalty_template else { return 0.0; };
         let key = hash_quantized(variables, self.quantize);
         if let Some(&(_, Some(pen))) = self.cache.lock().unwrap().get(&key) {
             self.stats.lock().unwrap().hits += 1;
@@ -238,33 +223,20 @@ impl CypherMOProblem {
         engine: Arc<QueryEngine>,
     ) -> Self {
         Self {
-            dim,
-            lower,
-            upper,
-            objective_templates,
-            graph,
-            engine,
+            dim, lower, upper, objective_templates, graph, engine,
             quantize: 1e-10,
             cache: Mutex::new(HashMap::new()),
             stats: Mutex::new(CypherProblemStats::default()),
         }
     }
 
-    pub fn stats(&self) -> CypherProblemStats {
-        self.stats.lock().unwrap().clone()
-    }
+    pub fn stats(&self) -> CypherProblemStats { self.stats.lock().unwrap().clone() }
 }
 
 impl MultiObjectiveProblem for CypherMOProblem {
-    fn dim(&self) -> usize {
-        self.dim
-    }
-    fn num_objectives(&self) -> usize {
-        self.objective_templates.len()
-    }
-    fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
-        (self.lower.clone(), self.upper.clone())
-    }
+    fn dim(&self) -> usize { self.dim }
+    fn num_objectives(&self) -> usize { self.objective_templates.len() }
+    fn bounds(&self) -> (Array1<f64>, Array1<f64>) { (self.lower.clone(), self.upper.clone()) }
 
     fn objectives(&self, variables: &Array1<f64>) -> Vec<f64> {
         let key = hash_quantized(variables, self.quantize);
@@ -307,13 +279,9 @@ mod tests {
     fn build_test_graph() -> (Arc<RwLock<GraphStore>>, Arc<QueryEngine>) {
         let mut g = GraphStore::new();
         let n1 = g.create_node(Label::new("Item"));
-        g.get_node_mut(n1)
-            .unwrap()
-            .set_property("weight", PropertyValue::Float(2.0));
+        g.get_node_mut(n1).unwrap().set_property("weight", PropertyValue::Float(2.0));
         let n2 = g.create_node(Label::new("Item"));
-        g.get_node_mut(n2)
-            .unwrap()
-            .set_property("weight", PropertyValue::Float(3.0));
+        g.get_node_mut(n2).unwrap().set_property("weight", PropertyValue::Float(3.0));
         (Arc::new(RwLock::new(g)), Arc::new(QueryEngine::new()))
     }
 
@@ -326,8 +294,7 @@ mod tests {
             Array1::from(vec![-10.0, -10.0]),
             Array1::from(vec![10.0, 10.0]),
             "RETURN $x0 * $x0 + $x1 * $x1 AS f",
-            g,
-            e,
+            g, e,
         );
         let v = problem.objective(&Array1::from(vec![3.0, 4.0]));
         assert!((v - 25.0).abs() < 1e-6, "got {}", v);
@@ -337,17 +304,11 @@ mod tests {
     fn memoization_serves_repeat_calls() {
         let (g, e) = build_test_graph();
         let problem = CypherProblem::new(
-            1,
-            Array1::from(vec![0.0]),
-            Array1::from(vec![10.0]),
-            "RETURN $x0 AS f",
-            g,
-            e,
+            1, Array1::from(vec![0.0]), Array1::from(vec![10.0]),
+            "RETURN $x0 AS f", g, e,
         );
         let x = Array1::from(vec![1.5]);
-        for _ in 0..5 {
-            problem.objective(&x);
-        }
+        for _ in 0..5 { problem.objective(&x); }
         let s = problem.stats();
         assert_eq!(s.misses, 1, "first call misses");
         assert_eq!(s.hits, 4, "next 4 hit cache");
@@ -358,12 +319,9 @@ mod tests {
         let (g, e) = build_test_graph();
         // Sum item weights weighted by decision var components
         let problem = CypherProblem::new(
-            1,
-            Array1::from(vec![0.0]),
-            Array1::from(vec![10.0]),
+            1, Array1::from(vec![0.0]), Array1::from(vec![10.0]),
             "MATCH (i:Item) RETURN sum(i.weight) * $x0 AS f",
-            g,
-            e,
+            g, e,
         );
         let v = problem.objective(&Array1::from(vec![2.0]));
         // sum(weight) = 5.0; 5.0 * 2.0 = 10.0
@@ -372,14 +330,7 @@ mod tests {
 
     fn one_dim(template: &str) -> CypherProblem {
         let (g, e) = build_test_graph();
-        CypherProblem::new(
-            1,
-            Array1::from(vec![0.0]),
-            Array1::from(vec![10.0]),
-            template,
-            g,
-            e,
-        )
+        CypherProblem::new(1, Array1::from(vec![0.0]), Array1::from(vec![10.0]), template, g, e)
     }
 
     #[test]
@@ -402,13 +353,8 @@ mod tests {
 
     #[test]
     fn substitute_applies_custom_subs_first() {
-        let f: CustomSubsFn =
-            Box::new(|x: &Array1<f64>| vec![("$picked".to_string(), format!("[{}]", x[0] as i64))]);
-        let out = substitute(
-            "RETURN size($picked) + $x0",
-            &Array1::from(vec![3.0]),
-            Some(&f),
-        );
+        let f: CustomSubsFn = Box::new(|x: &Array1<f64>| vec![("$picked".to_string(), format!("[{}]", x[0] as i64))]);
+        let out = substitute("RETURN size($picked) + $x0", &Array1::from(vec![3.0]), Some(&f));
         assert_eq!(out, format!("RETURN size([3]) + {:.17}", 3.0));
     }
 
@@ -423,18 +369,9 @@ mod tests {
 
     #[test]
     fn integer_and_boolean_results_are_numeric() {
-        assert_eq!(
-            one_dim("RETURN 7 AS f").objective(&Array1::from(vec![0.0])),
-            7.0
-        );
-        assert_eq!(
-            one_dim("RETURN true AS f").objective(&Array1::from(vec![0.0])),
-            1.0
-        );
-        assert_eq!(
-            one_dim("RETURN false AS f").objective(&Array1::from(vec![0.0])),
-            0.0
-        );
+        assert_eq!(one_dim("RETURN 7 AS f").objective(&Array1::from(vec![0.0])), 7.0);
+        assert_eq!(one_dim("RETURN true AS f").objective(&Array1::from(vec![0.0])), 1.0);
+        assert_eq!(one_dim("RETURN false AS f").objective(&Array1::from(vec![0.0])), 0.0);
     }
 
     #[test]
@@ -459,9 +396,7 @@ mod tests {
         use crate::query::executor::record::RecordBatch;
         assert_eq!(scalar_from_batch(&RecordBatch::new(vec!["f".into()])), None);
         let mut no_cols = RecordBatch::new(vec![]);
-        no_cols
-            .records
-            .push(crate::query::executor::record::Record::new());
+        no_cols.records.push(crate::query::executor::record::Record::new());
         assert_eq!(scalar_from_batch(&no_cols), None);
     }
 
@@ -526,10 +461,7 @@ mod tests {
 
     #[test]
     fn multi_objective_evaluates_each_template_and_memoizes() {
-        let p = mo(&[
-            "RETURN $x0 AS a",
-            "MATCH (i:Item) RETURN sum(i.weight) AS b",
-        ]);
+        let p = mo(&["RETURN $x0 AS a", "MATCH (i:Item) RETURN sum(i.weight) AS b"]);
         assert_eq!(p.num_objectives(), 2);
         assert_eq!(MultiObjectiveProblem::dim(&p), 1);
         let (lo, hi) = MultiObjectiveProblem::bounds(&p);

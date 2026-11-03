@@ -86,10 +86,7 @@ fn the_wals_own_default_is_off_too() {
     with_fsync(Some("1"), || {
         let dir = tempfile::tempdir().expect("tempdir");
         let wal = samyama::persistence::wal::Wal::new(dir.path()).expect("wal");
-        assert!(
-            wal.sync_mode(),
-            "SAMYAMA_FSYNC=1 must reach the WAL as well"
-        );
+        assert!(wal.sync_mode(), "SAMYAMA_FSYNC=1 must reach the WAL as well");
     });
 }
 

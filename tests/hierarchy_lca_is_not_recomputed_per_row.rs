@@ -120,11 +120,7 @@ fn the_invariant_call_gives_the_same_answer_it_always_did() {
          WHERE id(c) IN hierarchy_lca(a, b) RETURN max(c.level) AS lvl",
         "lvl",
     );
-    assert_eq!(
-        got,
-        vec![0],
-        "across the fork the LCA is `root`, at level 0"
-    );
+    assert_eq!(got, vec![0], "across the fork the LCA is `root`, at level 0");
 }
 
 #[test]
@@ -194,8 +190,5 @@ fn the_index_still_agrees_with_the_traversal() {
          RETURN max(c.level) AS lvl",
         "lvl",
     );
-    assert_eq!(
-        by_function, by_traversal,
-        "the index and the traversal disagree"
-    );
+    assert_eq!(by_function, by_traversal, "the index and the traversal disagree");
 }

@@ -101,13 +101,7 @@ fn totals_and_remainders_are_not_the_same_accessor() {
     );
     check(
         "duration({years: 2, months: 5})",
-        &[
-            ("years", 2),
-            ("months", 29),
-            ("monthsOfYear", 5),
-            ("quarters", 9),
-            ("quartersOfYear", 1),
-        ],
+        &[("years", 2), ("months", 29), ("monthsOfYear", 5), ("quarters", 9), ("quartersOfYear", 1)],
     );
 }
 
@@ -120,19 +114,11 @@ fn totals_and_remainders_are_not_the_same_accessor() {
 #[test]
 fn a_negative_duration_floors_its_second_and_keeps_nanos_non_negative() {
     let dur = "duration.between(localdatetime('2018-01-02T10:00:00.1'), localdatetime('2018-01-01T10:00:00.2'))";
-    check(
-        dur,
-        &[
-            ("days", 0),
-            ("seconds", -86400),
-            ("nanosecondsOfSecond", 100000000),
-        ],
-    );
+    check(dur, &[("days", 0), ("seconds", -86400), ("nanosecondsOfSecond", 100000000)]);
 
     // Exactly-divisible negatives have no remainder to borrow and must not
     // gain a spurious one.
-    let exact =
-        "duration.between(localdatetime('2018-01-02T10:00'), localdatetime('2018-01-01T12:00'))";
+    let exact = "duration.between(localdatetime('2018-01-02T10:00'), localdatetime('2018-01-01T12:00'))";
     check(exact, &[("seconds", -79200), ("nanosecondsOfSecond", 0)]);
 }
 
@@ -142,22 +128,10 @@ fn a_negative_duration_floors_its_second_and_keeps_nanos_non_negative() {
 fn absent_parts_read_as_zero_not_null() {
     check(
         "duration({days: 3})",
-        &[
-            ("days", 3),
-            ("weeks", 0),
-            ("months", 0),
-            ("seconds", 0),
-            ("nanosecondsOfSecond", 0),
-        ],
+        &[("days", 3), ("weeks", 0), ("months", 0), ("seconds", 0), ("nanosecondsOfSecond", 0)],
     );
     check(
         "duration({seconds: 3})",
-        &[
-            ("days", 0),
-            ("months", 0),
-            ("seconds", 3),
-            ("hours", 0),
-            ("minutes", 0),
-        ],
+        &[("days", 0), ("months", 0), ("seconds", 3), ("hours", 0), ("minutes", 0)],
     );
 }

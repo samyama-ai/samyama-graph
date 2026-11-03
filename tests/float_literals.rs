@@ -21,9 +21,7 @@ fn value(expr: &str) -> Result<PropertyValue, String> {
     let store = GraphStore::new();
     let cypher = format!("RETURN {expr} AS r");
     let q = parse_query(&cypher).map_err(|e| format!("parse: {e:?}"))?;
-    let batch = QueryExecutor::new(&store)
-        .execute(&q)
-        .map_err(|e| format!("exec: {e:?}"))?;
+    let batch = QueryExecutor::new(&store).execute(&q).map_err(|e| format!("exec: {e:?}"))?;
     match batch.records.first().and_then(|r| r.get("r")) {
         Some(Value::Property(p)) => Ok(p.clone()),
         other => Err(format!("got {other:?}")),
@@ -33,7 +31,7 @@ fn value(expr: &str) -> Result<PropertyValue, String> {
 /// An over-large literal is refused before it runs.
 #[test]
 fn an_overflowing_literal_is_refused() {
-    for expr in ["1.34E999", "-1.34E999", "1e400", "9".repeat(400).as_str()] {
+    for expr in ["1.34E999", "-1.34E999", "1e400", "9" .repeat(400).as_str()] {
         assert!(value(expr).is_err(), "accepted `{expr}`");
     }
 }
@@ -43,10 +41,7 @@ fn an_overflowing_literal_is_refused() {
 #[test]
 fn a_computed_infinity_is_still_allowed() {
     assert_eq!(value("1.0 / 0.0"), Ok(PropertyValue::Float(f64::INFINITY)));
-    assert_eq!(
-        value("-1.0 / 0.0"),
-        Ok(PropertyValue::Float(f64::NEG_INFINITY))
-    );
+    assert_eq!(value("-1.0 / 0.0"), Ok(PropertyValue::Float(f64::NEG_INFINITY)));
 }
 
 /// Literals that fit are unaffected — a fix that rejected large-but-finite

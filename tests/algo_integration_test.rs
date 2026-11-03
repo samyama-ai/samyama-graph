@@ -1,4 +1,4 @@
-use samyama::graph::{EdgeType, GraphStore, PropertyValue};
+use samyama::graph::{GraphStore, PropertyValue, EdgeType};
 use samyama::query::executor::QueryExecutor;
 use samyama::query::parser::parse_query;
 
@@ -17,9 +17,9 @@ fn test_max_flow_mst_integration() {
     // 2->3 (1)
     // 2->4 (10)
     // 3->4 (10)
-
+    
     let et = EdgeType::new("LINK");
-
+    
     let e1 = store.create_edge(n1, n2, et.clone()).unwrap();
     store.set_edge_property_sparse(e1, "capacity", PropertyValue::Float(10.0));
 
@@ -36,60 +36,44 @@ fn test_max_flow_mst_integration() {
     store.set_edge_property_sparse(e5, "capacity", PropertyValue::Float(10.0));
 
     // 1. Test Max Flow
-    let query_str = format!(
-        "CALL algo.maxFlow({}, {}, 'capacity') YIELD max_flow",
-        n1.as_u64(),
-        n4.as_u64()
-    );
+    let query_str = format!("CALL algo.maxFlow({}, {}, 'capacity') YIELD max_flow", n1.as_u64(), n4.as_u64());
     let query = parse_query(&query_str).expect("Parse failed");
     let executor = QueryExecutor::new(&store);
     let result = executor.execute(&query).expect("Execute failed");
-
+    
     assert_eq!(result.records.len(), 1);
-    let max_flow = result.records[0]
-        .get("max_flow")
-        .unwrap()
-        .as_property()
-        .unwrap()
-        .as_float()
-        .unwrap();
-    assert_eq!(max_flow, 20.0); // 10 top, 10 bottom. Middle edge 2->3 adds nothing?
-                                // Path 1->2->4 (10)
-                                // Path 1->3->4 (10)
-                                // Total 20.
-
+    let max_flow = result.records[0].get("max_flow").unwrap().as_property().unwrap().as_float().unwrap();
+    assert_eq!(max_flow, 20.0); // 10 top, 10 bottom. Middle edge 2->3 adds nothing? 
+    // Path 1->2->4 (10)
+    // Path 1->3->4 (10)
+    // Total 20.
+    
     // 2. Test MST (using 'capacity' as weight for simplicity)
     // MST should pick edges with minimum weight.
     // Weights: 10, 10, 1, 10, 10.
     // Sorted: 1 (2->3), then 10s.
     // MST edges: 2-3 (1), 1-2 (10), 3-4 (10) -> Total 21.
     // Or 1-3 (10) instead of 1-2.
-
+    
     let query_str = "CALL algo.mst('capacity') YIELD source, target, weight, total_weight";
     let query = parse_query(query_str).expect("Parse failed");
     let result = executor.execute(&query).expect("Execute failed");
-
-    // 1 summary record + 3 edge records = 4 records?
+    
+    // 1 summary record + 3 edge records = 4 records? 
     // Implementation pushed summary then edges.
-
+    
     let mut total_weight = 0.0;
     let mut edge_count = 0;
-
+    
     for rec in result.records {
         if rec.has("total_weight") {
-            total_weight = rec
-                .get("total_weight")
-                .unwrap()
-                .as_property()
-                .unwrap()
-                .as_float()
-                .unwrap();
+            total_weight = rec.get("total_weight").unwrap().as_property().unwrap().as_float().unwrap();
         }
         if rec.has("source") {
             edge_count += 1;
         }
     }
-
+    
     assert_eq!(total_weight, 21.0);
     assert_eq!(edge_count, 3);
 }
@@ -122,33 +106,16 @@ fn max_flow_refuses_a_node_to_itself_and_an_absent_node() {
             let query = parse_query(&q).expect("Parse failed");
             QueryExecutor::new(&store).execute(&query).map(|_| ())
         };
-        let same = run(format!(
-            "CALL algo.maxFlow({}, {}) YIELD max_flow",
-            a.as_u64(),
-            a.as_u64()
-        ));
-        let absent = run(format!(
-            "CALL algo.maxFlow({}, 999999) YIELD max_flow",
-            a.as_u64()
-        ));
-        let real = run(format!(
-            "CALL algo.maxFlow({}, {}) YIELD max_flow",
-            a.as_u64(),
-            b.as_u64()
-        ));
+        let same = run(format!("CALL algo.maxFlow({}, {}) YIELD max_flow", a.as_u64(), a.as_u64()));
+        let absent = run(format!("CALL algo.maxFlow({}, 999999) YIELD max_flow", a.as_u64()));
+        let real = run(format!("CALL algo.maxFlow({}, {}) YIELD max_flow", a.as_u64(), b.as_u64()));
         let _ = tx.send((same.is_err(), absent.is_err(), real.is_ok()));
     });
 
     match rx.recv_timeout(Duration::from_secs(30)) {
         Ok((same, absent, real)) => {
-            assert!(
-                same,
-                "maxFlow(n, n) must be refused, not answered with a number"
-            );
-            assert!(
-                absent,
-                "maxFlow with a node that is not in the graph must be refused"
-            );
+            assert!(same, "maxFlow(n, n) must be refused, not answered with a number");
+            assert!(absent, "maxFlow with a node that is not in the graph must be refused");
             assert!(real, "a flow between two real nodes still answers");
         }
         Err(_) => panic!("CALL algo.maxFlow(n, n) did not return within 30s"),

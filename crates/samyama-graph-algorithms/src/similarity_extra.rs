@@ -79,9 +79,7 @@ pub fn node_similarity(view: &GraphView, k: usize, cutoff: f64) -> Vec<(usize, u
             })
             .collect();
         scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.0.cmp(&b.0))
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
         });
         scored.truncate(k);
         out.extend(scored.into_iter().map(|(v, s)| (u, v, s)));
@@ -148,9 +146,7 @@ pub fn constraint(view: &GraphView, u: usize) -> Option<f64> {
     let mut total = 0.0;
     for &j in &ordered {
         // (p_uj + sum_q p_uq * p_qj)^2, q over u's other neighbours
-        let indirect: f64 = ordered
-            .iter()
-            .filter(|&&q| q != j && q != u)
+        let indirect: f64 = ordered.iter().filter(|&&q| q != j && q != u)
             .map(|&q| p(u, q) * p(q, j))
             .sum();
         let c = p(u, j) + indirect;
@@ -255,10 +251,7 @@ mod tests {
         // both have degree 3.
         let clique = view(4, &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]);
         let star = view(4, &[(0, 1), (0, 2), (0, 3)]);
-        let (c, s) = (
-            constraint(&clique, 0).unwrap(),
-            constraint(&star, 0).unwrap(),
-        );
+        let (c, s) = (constraint(&clique, 0).unwrap(), constraint(&star, 0).unwrap());
         assert!(c > s, "clique {c} should be more constrained than star {s}");
     }
 

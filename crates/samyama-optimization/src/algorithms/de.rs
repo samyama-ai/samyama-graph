@@ -14,7 +14,7 @@ pub struct DESolver {
 impl DESolver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
-            seed: None,
+            seed: None, 
             config,
             f: 0.5,
             cr: 0.9,
@@ -50,10 +50,7 @@ impl DESolver {
                 break;
             }
             if iter % 10 == 0 {
-                println!(
-                    "DE Solver: Iteration {}/{}",
-                    iter, self.config.max_iterations
-                );
+                println!("DE Solver: Iteration {}/{}", iter, self.config.max_iterations);
             }
             let best_idx = self.find_best(&population);
             history.push(population[best_idx].fitness);
@@ -67,7 +64,7 @@ impl DESolver {
                 .enumerate()
                 .map(|(i, mut target)| {
                     let mut local_rng = crate::common::rng::child_rng(self.seed, iter, i);
-
+                    
                     // Pick a, b, c distinct from i
                     let mut idxs = [0; 3];
                     for k in 0..3 {
@@ -79,7 +76,7 @@ impl DESolver {
                             }
                         }
                     }
-
+                    
                     let a = &old_pop[idxs[0]];
                     let b = &old_pop[idxs[1]];
                     let c = &old_pop[idxs[2]];

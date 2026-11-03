@@ -9,10 +9,7 @@
 use samyama::snapshot::publish_gate::{gate, scan_text, Provenance};
 
 fn texts(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-    pairs
-        .iter()
-        .map(|(a, b)| (a.to_string(), b.to_string()))
-        .collect()
+    pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
 }
 
 #[test]
@@ -41,19 +38,12 @@ fn an_observed_catalog_needs_an_explicit_flag() {
 /// inside one, so the flag does not silence the scan.
 #[test]
 fn the_observed_flag_does_not_silence_the_pii_scan() {
-    let t = texts(&[(
-        "q1",
-        "Which orders used card 4111 1111 1111 1111 last week?",
-    )]);
+    let t = texts(&[("q1", "Which orders used card 4111 1111 1111 1111 last week?")]);
     let v = gate(Provenance::Observed, &t, true);
     assert!(!v.publishable, "the flag suppressed a PII finding");
     assert_eq!(v.findings.len(), 1);
     assert_eq!(v.findings[0].kind, "card-number");
-    assert!(
-        v.reasons.iter().any(|r| r.contains("does not cover this")),
-        "{:?}",
-        v.reasons
-    );
+    assert!(v.reasons.iter().any(|r| r.contains("does not cover this")), "{:?}", v.reasons);
 }
 
 /// A parameter sample is a data excerpt: it exists so the build-time execution
@@ -69,11 +59,7 @@ fn a_parameter_sample_is_scanned_like_any_other_text() {
     assert!(!v.publishable);
     assert_eq!(v.findings[0].kind, "email");
     // The excerpt locates the value without reproducing it.
-    assert!(
-        !v.findings[0].excerpt.contains("priya.sharma"),
-        "{:?}",
-        v.findings[0]
-    );
+    assert!(!v.findings[0].excerpt.contains("priya.sharma"), "{:?}", v.findings[0]);
     assert!(v.findings[0].excerpt.contains('*'));
 }
 
@@ -88,8 +74,7 @@ fn each_pattern_is_found() {
         let f = scan_text("t", text);
         assert!(
             f.iter().any(|x| x.kind == kind),
-            "{kind} not found in {text:?}, got {:?}",
-            f.iter().map(|x| x.kind).collect::<Vec<_>>()
+            "{kind} not found in {text:?}, got {:?}", f.iter().map(|x| x.kind).collect::<Vec<_>>()
         );
     }
 }
@@ -137,12 +122,6 @@ fn realistic_graph_text_does_not_trip_the_scan() {
 /// what separates them; without it every long identifier matches.
 #[test]
 fn a_long_number_that_fails_luhn_is_not_a_card() {
-    assert!(
-        scan_text("t", "4111111111111112").is_empty(),
-        "Luhn is not being checked"
-    );
-    assert!(
-        !scan_text("t", "4111111111111111").is_empty(),
-        "a valid card was missed"
-    );
+    assert!(scan_text("t", "4111111111111112").is_empty(), "Luhn is not being checked");
+    assert!(!scan_text("t", "4111111111111111").is_empty(), "a valid card was missed");
 }

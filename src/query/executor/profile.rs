@@ -43,7 +43,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::graph::GraphStore;
-use crate::query::executor::operator::{OperatorBox, OperatorDescription, PhysicalOperator};
+use crate::query::executor::operator::{
+    OperatorBox, OperatorDescription, PhysicalOperator,
+};
 use crate::query::executor::{ExecutionResult, Record, RecordBatch};
 
 /// Counters written by one instrumented operator.
@@ -125,9 +127,7 @@ impl ProfiledOperator {
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         self.counters.calls.fetch_add(1, Ordering::Relaxed);
         if produced > 0 {
-            self.counters
-                .rows
-                .fetch_add(produced as u64, Ordering::Relaxed);
+            self.counters.rows.fetch_add(produced as u64, Ordering::Relaxed);
         }
         out
     }
@@ -141,22 +141,14 @@ impl PhysicalOperator for ProfiledOperator {
         self.record(started, produced, result)
     }
 
-    fn next_mut(
-        &mut self,
-        store: &mut GraphStore,
-        tenant_id: &str,
-    ) -> ExecutionResult<Option<Record>> {
+    fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         let started = Instant::now();
         let result = self.inner.next_mut(store, tenant_id);
         let produced = usize::from(matches!(result, Ok(Some(_))));
         self.record(started, produced, result)
     }
 
-    fn next_batch(
-        &mut self,
-        store: &GraphStore,
-        batch_size: usize,
-    ) -> ExecutionResult<Option<RecordBatch>> {
+    fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         let started = Instant::now();
         let result = self.inner.next_batch(store, batch_size);
         let produced = match &result {
@@ -447,11 +439,7 @@ pub fn report(nodes: &[ProfileNode], wall: Duration, uninstrumented: Option<Dura
             "Uninstrumented execution of the same plan: {:.2}ms — instrumentation costs {:.1}x.\n\
              Use the proportions above; take absolute latency from the benchmark, not from here.\n",
             plain.as_secs_f64() * 1000.0,
-            if plain.is_zero() {
-                0.0
-            } else {
-                wall.as_secs_f64() / plain.as_secs_f64()
-            },
+            if plain.is_zero() { 0.0 } else { wall.as_secs_f64() / plain.as_secs_f64() },
         ));
     }
     out
@@ -487,10 +475,7 @@ mod tests {
 
         // The real details string from operator.rs's TrieJoin arm.
         let details = "c ∈ N_out(b)[:KNOWS] ∩ N_in(a)[:KNOWS]";
-        assert!(
-            details.len() > details.chars().count(),
-            "the fixture must be multi-byte"
-        );
+        assert!(details.len() > details.chars().count(), "the fixture must be multi-byte");
 
         // Depth 2 is the case that panicked; 0 and 1 happened to land on a
         // boundary, which is why this survived every shallower plan.
@@ -562,9 +547,7 @@ mod tests {
             let mut r = Record::new();
             r.bind(
                 "n".to_string(),
-                crate::query::executor::Value::Property(crate::graph::PropertyValue::Integer(
-                    i as i64,
-                )),
+                crate::query::executor::Value::Property(crate::graph::PropertyValue::Integer(i as i64)),
             );
             records.push(r);
         }
@@ -614,10 +597,7 @@ mod tests {
         drain(&mut plan, &store);
         assert_eq!(nodes[0].rows(), 4, "the limit passed 4 rows up");
         assert_eq!(nodes[1].rows(), 4, "the input produced 4");
-        assert!(
-            nodes[0].calls() >= 5,
-            "one pull per row plus the terminating one"
-        );
+        assert!(nodes[0].calls() >= 5, "one pull per row plus the terminating one");
     }
 
     #[test]
@@ -658,19 +638,10 @@ mod tests {
         let wall = started.elapsed();
 
         let text = report(&nodes, wall, None);
-        assert!(
-            text.contains("Hottest operators by exclusive time"),
-            "{text}"
-        );
+        assert!(text.contains("Hottest operators by exclusive time"), "{text}");
         assert!(text.contains("attributed to operators"), "{text}");
-        assert!(
-            text.contains("Limit"),
-            "the tree must name real operators: {text}"
-        );
-        assert!(
-            text.contains("FixedRows"),
-            "children must appear too: {text}"
-        );
+        assert!(text.contains("Limit"), "the tree must name real operators: {text}");
+        assert!(text.contains("FixedRows"), "children must appear too: {text}");
     }
 
     #[test]

@@ -42,11 +42,7 @@ fn griewank_at_origin() {
 fn schwefel_at_optimum() {
     let x = Array1::from_elem(30, 420.9687);
     // Schwefel optimum is approximate; tolerance reflects the constant truncation.
-    assert!(
-        approx(schwefel(&x), 0.0, 1e-2),
-        "schwefel = {}",
-        schwefel(&x)
-    );
+    assert!(approx(schwefel(&x), 0.0, 1e-2), "schwefel = {}", schwefel(&x));
 }
 
 #[test]
@@ -69,11 +65,7 @@ fn dixon_price_at_known_optimum() {
         let p = (2.0_f64.powi(i as i32 + 1) - 2.0) / 2.0_f64.powi(i as i32 + 1);
         2.0_f64.powf(-p)
     }));
-    assert!(
-        dixon_price(&x).abs() < 1e-10,
-        "dixon_price = {}",
-        dixon_price(&x)
-    );
+    assert!(dixon_price(&x).abs() < 1e-10, "dixon_price = {}", dixon_price(&x));
 }
 
 #[test]
@@ -82,12 +74,7 @@ fn styblinski_tang_at_optimum() {
     let x = Array1::from_elem(dim, -2.903534);
     let expected = -39.16599 * dim as f64;
     let got = styblinski_tang(&x);
-    assert!(
-        (got - expected).abs() < 1e-2,
-        "got {} expected {}",
-        got,
-        expected
-    );
+    assert!((got - expected).abs() < 1e-2, "got {} expected {}", got, expected);
 }
 
 // ───────────────────────────── the eighteen added for OPT-02's pairwise test
@@ -133,11 +120,7 @@ fn sum_squares_at_origin() {
 
 #[test]
 fn sum_of_different_powers_at_origin() {
-    assert!(approx(
-        sum_of_different_powers(&Array1::zeros(30)),
-        0.0,
-        1e-12
-    ));
+    assert!(approx(sum_of_different_powers(&Array1::zeros(30)), 0.0, 1e-12));
 }
 
 #[test]
@@ -200,11 +183,7 @@ fn bent_cigar_and_discus_are_conditioned_opposite_ways() {
 
 #[test]
 fn high_conditioned_elliptic_spans_six_orders_of_magnitude() {
-    assert!(approx(
-        high_conditioned_elliptic(&Array1::zeros(30)),
-        0.0,
-        1e-12
-    ));
+    assert!(approx(high_conditioned_elliptic(&Array1::zeros(30)), 0.0, 1e-12));
     let mut first = Array1::zeros(30);
     first[0] = 1.0;
     let mut last = Array1::zeros(30);
@@ -287,10 +266,6 @@ fn every_suite_entry_evaluates_at_its_declared_bounds() {
             );
         }
         let at_opt = spec.global_minimum;
-        assert!(
-            at_opt.is_finite(),
-            "{}: global_minimum is not finite",
-            spec.name
-        );
+        assert!(at_opt.is_finite(), "{}: global_minimum is not finite", spec.name);
     }
 }

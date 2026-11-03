@@ -145,19 +145,11 @@ fn fingerprint(store: &GraphStore) -> BTreeMap<String, String> {
     out.insert("edge_digest".into(), format!("{edge_sum:016x}"));
     out.insert(
         "labels".into(),
-        labels
-            .iter()
-            .map(|(k, v)| format!("{k}:{v}"))
-            .collect::<Vec<_>>()
-            .join(","),
+        labels.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(","),
     );
     out.insert(
         "edge_types".into(),
-        types
-            .iter()
-            .map(|(k, v)| format!("{k}:{v}"))
-            .collect::<Vec<_>>()
-            .join(","),
+        types.iter().map(|(k, v)| format!("{k}:{v}")).collect::<Vec<_>>().join(","),
     );
     out
 }
@@ -186,10 +178,7 @@ fn fixture() -> GraphStore {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let flag = |n: &str| -> Option<String> {
-        args.iter()
-            .position(|a| a == n)
-            .and_then(|i| args.get(i + 1))
-            .cloned()
+        args.iter().position(|a| a == n).and_then(|i| args.get(i + 1)).cloned()
     };
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
@@ -204,10 +193,7 @@ fn main() {
         let mut doc = fp.clone();
         doc.insert("arch".into(), arch.to_string());
         doc.insert("os".into(), os.to_string());
-        doc.insert(
-            "engine_version".into(),
-            env!("CARGO_PKG_VERSION").to_string(),
-        );
+        doc.insert("engine_version".into(), env!("CARGO_PKG_VERSION").to_string());
         doc.insert("snapshot_bytes".into(), bytes.to_string());
         doc.insert("exported_nodes".into(), format!("{:?}", stats));
 
@@ -232,14 +218,7 @@ fn main() {
         let got = fingerprint(&g);
 
         let mut bad = Vec::new();
-        for key in [
-            "nodes",
-            "edges",
-            "node_digest",
-            "edge_digest",
-            "labels",
-            "edge_types",
-        ] {
+        for key in ["nodes", "edges", "node_digest", "edge_digest", "labels", "edge_types"] {
             let want = expected.get(key).map(String::as_str).unwrap_or("(absent)");
             let have = got.get(key).map(String::as_str).unwrap_or("(absent)");
             let mark = if want == have { "ok  " } else { "FAIL" };
@@ -253,10 +232,7 @@ fn main() {
             "\nwritten on {}-{} (engine {}), read on {arch}-{os} (engine {})",
             expected.get("arch").map(String::as_str).unwrap_or("?"),
             expected.get("os").map(String::as_str).unwrap_or("?"),
-            expected
-                .get("engine_version")
-                .map(String::as_str)
-                .unwrap_or("?"),
+            expected.get("engine_version").map(String::as_str).unwrap_or("?"),
             env!("CARGO_PKG_VERSION"),
         );
         let same_arch = expected.get("arch").map(String::as_str) == Some(arch);

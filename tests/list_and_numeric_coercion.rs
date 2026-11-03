@@ -56,84 +56,44 @@ fn indexing_a_float_list_returns_the_element() {
     assert_eq!(one("RETURN [1.0, 2.0][0] AS r"), PropertyValue::Float(1.0));
     assert_eq!(one("RETURN [1.0, 2.0][1] AS r"), PropertyValue::Float(2.0));
     assert_eq!(one("RETURN [1.0, 2.0][-1] AS r"), PropertyValue::Float(2.0));
-    assert_eq!(
-        one("RETURN [1.0, 2.0][9] AS r"),
-        PropertyValue::Null,
-        "out of range is null"
-    );
+    assert_eq!(one("RETURN [1.0, 2.0][9] AS r"), PropertyValue::Null, "out of range is null");
 }
 
 #[test]
 fn a_comprehension_over_a_float_list_filters_rather_than_emptying() {
-    assert_eq!(
-        floats("RETURN [x IN [1.0, 2.0, 3.0] WHERE x > 1.5] AS r"),
-        vec![2.0, 3.0]
-    );
-    assert_eq!(
-        floats("RETURN [x IN [1.0, 2.0] | x * 2] AS r"),
-        vec![2.0, 4.0]
-    );
+    assert_eq!(floats("RETURN [x IN [1.0, 2.0, 3.0] WHERE x > 1.5] AS r"), vec![2.0, 3.0]);
+    assert_eq!(floats("RETURN [x IN [1.0, 2.0] | x * 2] AS r"), vec![2.0, 4.0]);
 }
 
 #[test]
 fn reduce_over_a_float_list_accumulates_rather_than_returning_the_seed() {
-    assert_eq!(
-        one("RETURN reduce(s = 0.0, x IN [1.0, 2.0] | s + x) AS r"),
-        PropertyValue::Float(3.0)
-    );
+    assert_eq!(one("RETURN reduce(s = 0.0, x IN [1.0, 2.0] | s + x) AS r"), PropertyValue::Float(3.0));
 }
 
 // ------------------------------------------------------- the loud ones
 
 #[test]
 fn the_list_functions_accept_a_float_list() {
-    assert_eq!(
-        one("RETURN size([1.0, 2.0]) AS r"),
-        PropertyValue::Integer(2)
-    );
-    assert_eq!(
-        one("RETURN head([1.0, 2.0]) AS r"),
-        PropertyValue::Float(1.0)
-    );
-    assert_eq!(
-        one("RETURN last([1.0, 2.0]) AS r"),
-        PropertyValue::Float(2.0)
-    );
+    assert_eq!(one("RETURN size([1.0, 2.0]) AS r"), PropertyValue::Integer(2));
+    assert_eq!(one("RETURN head([1.0, 2.0]) AS r"), PropertyValue::Float(1.0));
+    assert_eq!(one("RETURN last([1.0, 2.0]) AS r"), PropertyValue::Float(2.0));
     assert_eq!(floats("RETURN reverse([1.0, 2.0]) AS r"), vec![2.0, 1.0]);
 }
 
 #[test]
 fn predicate_functions_accept_a_float_list() {
-    assert_eq!(
-        one("RETURN all(x IN [1.0, 2.0] WHERE x > 0) AS r"),
-        PropertyValue::Boolean(true)
-    );
-    assert_eq!(
-        one("RETURN any(x IN [1.0, 2.0] WHERE x > 1.5) AS r"),
-        PropertyValue::Boolean(true)
-    );
-    assert_eq!(
-        one("RETURN none(x IN [1.0, 2.0] WHERE x > 9) AS r"),
-        PropertyValue::Boolean(true)
-    );
+    assert_eq!(one("RETURN all(x IN [1.0, 2.0] WHERE x > 0) AS r"), PropertyValue::Boolean(true));
+    assert_eq!(one("RETURN any(x IN [1.0, 2.0] WHERE x > 1.5) AS r"), PropertyValue::Boolean(true));
+    assert_eq!(one("RETURN none(x IN [1.0, 2.0] WHERE x > 9) AS r"), PropertyValue::Boolean(true));
 }
 
 // ------------------------------------------------------- IN coercion
 
 #[test]
 fn in_matches_a_float_against_an_integer_list() {
-    assert_eq!(
-        one("RETURN 7.0 IN [7, 99] AS r"),
-        PropertyValue::Boolean(true)
-    );
-    assert_eq!(
-        one("RETURN 7 IN [7.0, 99.0] AS r"),
-        PropertyValue::Boolean(true)
-    );
-    assert_eq!(
-        one("RETURN 7.5 IN [7, 99] AS r"),
-        PropertyValue::Boolean(false)
-    );
+    assert_eq!(one("RETURN 7.0 IN [7, 99] AS r"), PropertyValue::Boolean(true));
+    assert_eq!(one("RETURN 7 IN [7.0, 99.0] AS r"), PropertyValue::Boolean(true));
+    assert_eq!(one("RETURN 7.5 IN [7, 99] AS r"), PropertyValue::Boolean(false));
 }
 
 #[test]
@@ -141,12 +101,7 @@ fn in_agrees_with_equality() {
     // The inconsistency that made this a surprise: `=` coerced and `IN` did not.
     let mut store = GraphStore::new();
     let id = store.create_node("P");
-    let _ = store.set_node_property(
-        "default",
-        id,
-        "score".to_string(),
-        PropertyValue::Float(7.0),
-    );
+    let _ = store.set_node_property("default", id, "score".to_string(), PropertyValue::Float(7.0));
 
     let count = |cypher: &str| -> i64 {
         let query = parse_query(cypher).unwrap();
@@ -156,10 +111,7 @@ fn in_agrees_with_equality() {
             other => panic!("{other:?}"),
         }
     };
-    assert_eq!(
-        count("MATCH (p:P) WHERE p.score = 7 RETURN count(p) AS r"),
-        1
-    );
+    assert_eq!(count("MATCH (p:P) WHERE p.score = 7 RETURN count(p) AS r"), 1);
     assert_eq!(
         count("MATCH (p:P) WHERE p.score IN [7, 99] RETURN count(p) AS r"),
         1,
@@ -170,18 +122,9 @@ fn in_agrees_with_equality() {
 #[test]
 fn in_still_works_on_ordinary_lists() {
     assert_eq!(one("RETURN 1 IN [1, 2] AS r"), PropertyValue::Boolean(true));
-    assert_eq!(
-        one("RETURN 3 IN [1, 2] AS r"),
-        PropertyValue::Boolean(false)
-    );
-    assert_eq!(
-        one("RETURN \"a\" IN [\"a\", \"b\"] AS r"),
-        PropertyValue::Boolean(true)
-    );
-    assert_eq!(
-        one("RETURN \"a\" IN [1, 2] AS r"),
-        PropertyValue::Boolean(false)
-    );
+    assert_eq!(one("RETURN 3 IN [1, 2] AS r"), PropertyValue::Boolean(false));
+    assert_eq!(one("RETURN \"a\" IN [\"a\", \"b\"] AS r"), PropertyValue::Boolean(true));
+    assert_eq!(one("RETURN \"a\" IN [1, 2] AS r"), PropertyValue::Boolean(false));
 }
 
 // ------------------------------------------------------- #606
@@ -196,20 +139,10 @@ fn to_integer_yields_null_rather_than_failing() {
 
 #[test]
 fn to_integer_still_converts_what_it_can() {
-    assert_eq!(
-        one("RETURN toInteger(\"42\") AS r"),
-        PropertyValue::Integer(42)
-    );
-    assert_eq!(
-        one("RETURN toInteger(3.9) AS r"),
-        PropertyValue::Integer(3),
-        "truncates"
-    );
+    assert_eq!(one("RETURN toInteger(\"42\") AS r"), PropertyValue::Integer(42));
+    assert_eq!(one("RETURN toInteger(3.9) AS r"), PropertyValue::Integer(3), "truncates");
     assert_eq!(one("RETURN toInteger(7) AS r"), PropertyValue::Integer(7));
-    assert_eq!(
-        one("RETURN toFloat(\"1.5\") AS r"),
-        PropertyValue::Float(1.5)
-    );
+    assert_eq!(one("RETURN toFloat(\"1.5\") AS r"), PropertyValue::Float(1.5));
     assert_eq!(one("RETURN toFloat(3) AS r"), PropertyValue::Float(3.0));
 }
 
@@ -232,10 +165,7 @@ fn the_filtering_idiom_to_integer_exists_for_now_works() {
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(
-        one("RETURN toInteger(\"nope\") IS NULL AS r"),
-        PropertyValue::Boolean(true)
-    );
+    assert_eq!(one("RETURN toInteger(\"nope\") IS NULL AS r"), PropertyValue::Boolean(true));
 }
 
 // ------------------------------------------------------- unchanged
@@ -263,9 +193,7 @@ fn a_vector_property_is_still_a_vector() {
         PropertyValue::Vector(vec![0.1, 0.2, 0.3]),
     );
     assert!(matches!(
-        store
-            .node_columns
-            .get_property(id.as_u64() as usize, "embedding"),
+        store.node_columns.get_property(id.as_u64() as usize, "embedding"),
         PropertyValue::Vector(_)
     ));
     // And it reads as a list too, which is the point of the change.

@@ -51,17 +51,10 @@ fn guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// A persistence manager whose default tenant has the given ceilings.
-fn manager(
-    max_nodes: Option<usize>,
-    max_edges: Option<usize>,
-) -> (PersistenceManager, tempfile::TempDir) {
+fn manager(max_nodes: Option<usize>, max_edges: Option<usize>) -> (PersistenceManager, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let pm = PersistenceManager::new(dir.path()).expect("persistence");
-    let quotas = ResourceQuotas {
-        max_nodes,
-        max_edges,
-        ..ResourceQuotas::unlimited()
-    };
+    let quotas = ResourceQuotas { max_nodes, max_edges, ..ResourceQuotas::unlimited() };
     pm.tenants().update_quotas(T, quotas).expect("quotas");
     (pm, dir)
 }
@@ -80,15 +73,9 @@ fn run(
 ) -> (Option<String>, Option<String>) {
     store.enable_write_log();
     store.set_write_admission(pm.write_admission(T));
-    let stmt_err = engine
-        .execute_mut(cypher, store, T)
-        .err()
-        .map(|e| e.to_string());
+    let stmt_err = engine.execute_mut(cypher, store, T).err().map(|e| e.to_string());
     let muts = store.take_write_log();
-    let persist_err = pm
-        .apply_mutations(T, store, &muts)
-        .err()
-        .map(|e| e.to_string());
+    let persist_err = pm.apply_mutations(T, store, &muts).err().map(|e| e.to_string());
     if let Some(e) = &persist_err {
         health::mark_degraded(e.clone());
     }
@@ -158,12 +145,7 @@ fn the_count_does_not_exceed_the_limit_it_refused_at() {
     // that fails is undone whole (#1593), so it leaves none of its four rather
     // than the two that fitted.
     for _ in 0..4 {
-        let _ = run(
-            &pm,
-            &engine,
-            &mut store,
-            "UNWIND range(1,4) AS i CREATE (:Q {id:i})",
-        );
+        let _ = run(&pm, &engine, &mut store, "UNWIND range(1,4) AS i CREATE (:Q {id:i})");
     }
 
     assert_eq!(
@@ -198,16 +180,8 @@ fn a_breach_does_not_stop_writes_that_have_nothing_to_do_with_it() {
     // refused with "an earlier write did not reach disk". It is still refused --
     // the quota is on nodes, not on labels -- but it is refused as a quota, and
     // a write that creates no node is unaffected.
-    let (stmt, persist) = run(
-        &pm,
-        &engine,
-        &mut store,
-        "MATCH (n:Q {id:0}) SET n.seen = true",
-    );
-    assert_eq!(
-        stmt, None,
-        "a SET creates no node and must not be refused: {stmt:?}"
-    );
+    let (stmt, persist) = run(&pm, &engine, &mut store, "MATCH (n:Q {id:0}) SET n.seen = true");
+    assert_eq!(stmt, None, "a SET creates no node and must not be refused: {stmt:?}");
     assert_eq!(persist, None);
     assert!(
         !health::is_degraded(),
@@ -225,20 +199,12 @@ fn an_edge_quota_is_enforced_before_the_edge_exists() {
 
     run(&pm, &engine, &mut store, "CREATE (:P {id:1}), (:P {id:2})");
     for _ in 0..2 {
-        let (stmt, persist) = run(
-            &pm,
-            &engine,
-            &mut store,
-            "MATCH (a:P {id:1}), (b:P {id:2}) CREATE (a)-[:R]->(b)",
-        );
+        let (stmt, persist) =
+            run(&pm, &engine, &mut store, "MATCH (a:P {id:1}), (b:P {id:2}) CREATE (a)-[:R]->(b)");
         assert_eq!((stmt, persist), (None, None));
     }
-    let (stmt, persist) = run(
-        &pm,
-        &engine,
-        &mut store,
-        "MATCH (a:P {id:1}), (b:P {id:2}) CREATE (a)-[:R]->(b)",
-    );
+    let (stmt, persist) =
+        run(&pm, &engine, &mut store, "MATCH (a:P {id:1}), (b:P {id:2}) CREATE (a)-[:R]->(b)");
     let stmt = stmt.expect("the edge past the ceiling must fail");
     assert!(stmt.contains("edges (2/2)"), "got: {stmt}");
     assert!(
@@ -266,16 +232,8 @@ fn a_batch_that_crosses_the_ceiling_is_refused_whole() {
     let engine = QueryEngine::new();
     let mut store = GraphStore::new();
 
-    let (stmt, persist) = run(
-        &pm,
-        &engine,
-        &mut store,
-        "UNWIND range(1,100) AS i CREATE (:Q {id:i})",
-    );
-    assert!(
-        stmt.is_some(),
-        "a batch of 100 against a ceiling of 6 must fail"
-    );
+    let (stmt, persist) = run(&pm, &engine, &mut store, "UNWIND range(1,100) AS i CREATE (:Q {id:i})");
+    assert!(stmt.is_some(), "a batch of 100 against a ceiling of 6 must fail");
     assert_eq!(persist, None, "and must not fail at persist time");
     assert_eq!(store.node_count(), 0, "the rows before the ceiling stayed");
     assert_eq!(
@@ -284,12 +242,7 @@ fn a_batch_that_crosses_the_ceiling_is_refused_whole() {
         "and memory and disk agree on none of them"
     );
     // The quota is still all there: a batch that fits is admitted in full.
-    let (stmt, _) = run(
-        &pm,
-        &engine,
-        &mut store,
-        "UNWIND range(1,6) AS i CREATE (:Q {id:i})",
-    );
+    let (stmt, _) = run(&pm, &engine, &mut store, "UNWIND range(1,6) AS i CREATE (:Q {id:i})");
     assert_eq!(stmt, None);
     assert_eq!(store.node_count(), 6);
     assert!(!health::is_degraded());
@@ -313,9 +266,7 @@ fn a_store_with_no_admission_set_is_unchanged() {
 fn unlimited_quotas_produce_no_admission_at_all() {
     let dir = tempfile::tempdir().unwrap();
     let pm = PersistenceManager::new(dir.path()).unwrap();
-    pm.tenants()
-        .update_quotas(T, ResourceQuotas::unlimited())
-        .unwrap();
+    pm.tenants().update_quotas(T, ResourceQuotas::unlimited()).unwrap();
     assert_eq!(
         pm.write_admission(T),
         None,

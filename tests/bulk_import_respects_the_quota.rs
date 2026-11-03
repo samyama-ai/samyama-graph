@@ -52,9 +52,7 @@ fn store_admitting(max_nodes: Option<u64>, max_edges: Option<u64>, used: (u64, u
 fn bulk_admission_refuses_a_batch_that_would_cross_the_node_ceiling() {
     let s = store_admitting(Some(1000), None, (900, 0));
     assert!(s.admits_bulk(50, 0).is_ok(), "950 of 1000 fits");
-    let e = s
-        .admits_bulk(200, 0)
-        .expect_err("1100 of 1000 must not fit");
+    let e = s.admits_bulk(200, 0).expect_err("1100 of 1000 must not fit");
     assert!(
         e.to_string().contains("1100/1000"),
         "the refusal must say how far over it is, got: {e}"
@@ -64,10 +62,7 @@ fn bulk_admission_refuses_a_batch_that_would_cross_the_node_ceiling() {
 #[test]
 fn bulk_admission_refuses_a_batch_that_would_cross_the_edge_ceiling() {
     let s = store_admitting(None, Some(10), (0, 9));
-    assert!(
-        s.admits_bulk(1_000_000, 1).is_ok(),
-        "10 of 10 fits, nodes uncapped"
-    );
+    assert!(s.admits_bulk(1_000_000, 1).is_ok(), "10 of 10 fits, nodes uncapped");
     assert!(s.admits_bulk(0, 5).is_err(), "14 of 10 must not fit");
 }
 
@@ -111,9 +106,7 @@ fn parquet_bytes(rows: usize) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
     let batch = RecordBatch::try_new(
         schema.clone(),
-        vec![Arc::new(Int64Array::from(
-            (0..rows as i64).collect::<Vec<_>>(),
-        ))],
+        vec![Arc::new(Int64Array::from((0..rows as i64).collect::<Vec<_>>()))],
     )
     .expect("batch");
     let mut out: Vec<u8> = Vec::new();
@@ -247,7 +240,10 @@ fn multipart(bytes: &[u8]) -> (String, Vec<u8>) {
     );
     body.extend_from_slice(bytes);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    (format!("multipart/form-data; boundary={boundary}"), body)
+    (
+        format!("multipart/form-data; boundary={boundary}"),
+        body,
+    )
 }
 
 /// A router serving only `/api/snapshot/import`, over a store whose tenant has
@@ -268,10 +264,7 @@ fn import_app(
     pm.tenants()
         .update_quotas(
             T,
-            ResourceQuotas {
-                max_nodes,
-                ..ResourceQuotas::unlimited()
-            },
+            ResourceQuotas { max_nodes, ..ResourceQuotas::unlimited() },
         )
         .expect("quotas");
 
@@ -332,10 +325,7 @@ async fn a_snapshot_over_the_node_quota_is_refused_and_the_graph_stays_empty() {
         axum::http::StatusCode::TOO_MANY_REQUESTS,
         "100 nodes against a ceiling of 10: {body}"
     );
-    assert!(
-        body.contains("quota exceeded"),
-        "the refusal must say why: {body}"
-    );
+    assert!(body.contains("quota exceeded"), "the refusal must say why: {body}");
     assert_eq!(
         store.read().await.node_count(),
         0,

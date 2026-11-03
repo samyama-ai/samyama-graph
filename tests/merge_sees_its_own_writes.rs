@@ -229,18 +229,10 @@ fn the_fulltext_index_is_maintained_on_a_store_that_has_a_subscriber() {
     let (mut store, _rx) = GraphStore::with_async_indexing();
     let engine = QueryEngine::new();
     engine
-        .execute_mut(
-            "CREATE FULLTEXT INDEX docs FOR (d:Doc) ON (d.body)",
-            &mut store,
-            T,
-        )
+        .execute_mut("CREATE FULLTEXT INDEX docs FOR (d:Doc) ON (d.body)", &mut store, T)
         .unwrap();
     engine
-        .execute_mut(
-            "CREATE (:Doc {body: 'quick brown fox jumps'})",
-            &mut store,
-            T,
-        )
+        .execute_mut("CREATE (:Doc {body: 'quick brown fox jumps'})", &mut store, T)
         .unwrap();
     let hits = engine
         .execute(
@@ -253,10 +245,7 @@ fn the_fulltext_index_is_maintained_on_a_store_that_has_a_subscriber() {
         .and_then(|v| v.as_property())
         .and_then(|p| p.as_integer())
         .expect("count(node) is an integer");
-    assert_eq!(
-        n, 1,
-        "the full-text index did not see a document that was written"
-    );
+    assert_eq!(n, 1, "the full-text index did not see a document that was written");
 }
 
 /// The vector index stays on the channel, and this is what says it still arrives.
@@ -270,27 +259,18 @@ fn the_fulltext_index_is_maintained_on_a_store_that_has_a_subscriber() {
 /// test fails.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_vector_written_through_the_channel_reaches_the_index() {
-    use samyama::graph::PropertyValue;
     use std::sync::Arc;
+    use samyama::graph::PropertyValue;
 
     let (mut store, rx) = GraphStore::with_async_indexing();
     let vector_index = Arc::clone(&store.vector_index);
     let property_index = Arc::clone(&store.property_index);
     let tenants = Arc::new(samyama::persistence::TenantManager::new());
     vector_index
-        .create_index(
-            "Doc",
-            "embedding",
-            4,
-            samyama::vector::DistanceMetric::Cosine,
-        )
+        .create_index("Doc", "embedding", 4, samyama::vector::DistanceMetric::Cosine)
         .expect("create vector index");
     {
-        let (vi, pi, tm) = (
-            Arc::clone(&vector_index),
-            property_index,
-            Arc::clone(&tenants),
-        );
+        let (vi, pi, tm) = (Arc::clone(&vector_index), property_index, Arc::clone(&tenants));
         tokio::spawn(async move { GraphStore::start_background_indexer(rx, vi, pi, tm).await });
     }
 

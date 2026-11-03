@@ -40,10 +40,7 @@ fn read(rel: &str) -> String {
 }
 
 fn parse(v: &str) -> Option<Version> {
-    let parts: Vec<u64> = v
-        .split('.')
-        .map(|p| p.parse().ok())
-        .collect::<Option<_>>()?;
+    let parts: Vec<u64> = v.split('.').map(|p| p.parse().ok()).collect::<Option<_>>()?;
     match parts[..] {
         [a, b, c] => Some((a, b, c)),
         _ => None,
@@ -65,8 +62,7 @@ fn removal_rejects_patch_and_minor_releases_even_in_a_later_major() {
     for removed in [(1, 14, 0), (2, 0, 1), (2, 1, 0), (3, 2, 1)] {
         assert!(
             !is_later_major_release(since, removed),
-            "{} is not a later major release",
-            show(removed)
+            "{} is not a later major release", show(removed)
         );
     }
     for removed in [(2, 0, 0), (3, 0, 0)] {
@@ -90,21 +86,16 @@ fn entries() -> Vec<serde_json::Value> {
 }
 
 fn field<'a>(e: &'a serde_json::Value, key: &str) -> &'a str {
-    e[key]
-        .as_str()
-        .unwrap_or_else(|| panic!("entry {e} has no string `{key}`"))
+    e[key].as_str().unwrap_or_else(|| panic!("entry {e} has no string `{key}`"))
 }
 
 fn optional_version(e: &serde_json::Value, key: &str) -> Option<Version> {
     match &e[key] {
         serde_json::Value::Null => None,
-        serde_json::Value::String(s) => Some(
-            parse(s).unwrap_or_else(|| panic!("{}: `{key}` {s:?} is not X.Y.Z", field(e, "id"))),
-        ),
-        other => panic!(
-            "{}: `{key}` must be a version string or null, got {other}",
-            field(e, "id")
-        ),
+        serde_json::Value::String(s) => {
+            Some(parse(s).unwrap_or_else(|| panic!("{}: `{key}` {s:?} is not X.Y.Z", field(e, "id"))))
+        }
+        other => panic!("{}: `{key}` must be a version string or null, got {other}", field(e, "id")),
     }
 }
 
@@ -137,9 +128,7 @@ fn openapi_operations() -> OpenApi {
         let path = path.as_str().unwrap().to_string();
         for (method, op) in item.as_mapping().unwrap() {
             let method = method.as_str().unwrap().to_string();
-            if !["get", "put", "post", "delete", "patch", "head", "options"]
-                .contains(&method.as_str())
-            {
+            if !["get", "put", "post", "delete", "patch", "head", "options"].contains(&method.as_str()) {
                 continue;
             }
             if op["deprecated"].as_bool() == Some(true) {
@@ -154,14 +143,8 @@ fn openapi_operations() -> OpenApi {
 fn http_operation(e: &serde_json::Value) -> Operation {
     let op = &e["http"];
     (
-        op["method"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{}: http.method", field(e, "id")))
-            .to_lowercase(),
-        op["path"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{}: http.path", field(e, "id")))
-            .to_string(),
+        op["method"].as_str().unwrap_or_else(|| panic!("{}: http.method", field(e, "id"))).to_lowercase(),
+        op["path"].as_str().unwrap_or_else(|| panic!("{}: http.path", field(e, "id"))).to_string(),
     )
 }
 
@@ -169,18 +152,9 @@ fn http_operation(e: &serde_json::Value) -> Operation {
 /// moved, every assertion below would pass over nothing.
 #[test]
 fn the_registry_the_release_notes_and_the_openapi_document_are_all_readable() {
-    assert!(
-        !entries().is_empty(),
-        "no deprecations listed; the checks below would be vacuous"
-    );
-    assert!(
-        released().len() >= 3,
-        "fewer than three releases found in docs/release-notes"
-    );
-    assert!(
-        !openapi_operations().all.is_empty(),
-        "openapi.yaml lists no operations"
-    );
+    assert!(!entries().is_empty(), "no deprecations listed; the checks below would be vacuous");
+    assert!(released().len() >= 3, "fewer than three releases found in docs/release-notes");
+    assert!(!openapi_operations().all.is_empty(), "openapi.yaml lists no operations");
     assert!(
         parse(field(&registry(), "policy_applies_from")).is_some(),
         "`policy_applies_from` is not X.Y.Z"
@@ -193,21 +167,12 @@ fn every_entry_is_well_formed_and_not_from_the_future() {
     let mut ids = BTreeSet::new();
     for e in entries() {
         let id = field(&e, "id");
-        assert!(
-            ids.insert(id.to_string()),
-            "two entries share the id {id:?}"
-        );
+        assert!(ids.insert(id.to_string()), "two entries share the id {id:?}");
         for key in ["surface", "what", "replacement"] {
             assert!(!field(&e, key).trim().is_empty(), "{id}: empty `{key}`");
         }
-        let since = optional_version(&e, "deprecated_in")
-            .unwrap_or_else(|| panic!("{id}: no `deprecated_in`"));
-        assert!(
-            since <= now,
-            "{id}: deprecated_in {} is later than the version of record {}",
-            show(since),
-            show(now)
-        );
+        let since = optional_version(&e, "deprecated_in").unwrap_or_else(|| panic!("{id}: no `deprecated_in`"));
+        assert!(since <= now, "{id}: deprecated_in {} is later than the version of record {}", show(since), show(now));
         if field(&e, "surface") == "http" {
             http_operation(&e);
         }
@@ -221,14 +186,8 @@ fn a_removal_waits_for_a_major_and_two_minors_of_notice() {
     for e in entries() {
         let id = field(&e, "id");
         let since = optional_version(&e, "deprecated_in").unwrap();
-        let Some(removed) = optional_version(&e, "removed_in") else {
-            continue;
-        };
-        assert!(
-            removed <= now,
-            "{id}: removed_in {} is later than the version of record",
-            show(removed)
-        );
+        let Some(removed) = optional_version(&e, "removed_in") else { continue };
+        assert!(removed <= now, "{id}: removed_in {} is later than the version of record", show(removed));
         assert!(
             is_later_major_release(since, removed),
             "{id}: removed in {}, deprecated in {} -- removal is a breaking change \
@@ -254,29 +213,17 @@ fn a_removal_waits_for_a_major_and_two_minors_of_notice() {
 
 #[test]
 fn deprecated_http_operations_and_the_registry_agree() {
-    let OpenApi {
-        all,
-        deprecated: marked,
-    } = openapi_operations();
+    let OpenApi { all, deprecated: marked } = openapi_operations();
     let mut listed = BTreeSet::new();
     for e in entries().iter().filter(|e| field(e, "surface") == "http") {
         let id = field(e, "id");
         let op = http_operation(e);
         if optional_version(e, "removed_in").is_some() {
-            assert!(
-                !all.contains(&op),
-                "{id}: recorded as removed, but {op:?} is still in openapi.yaml"
-            );
+            assert!(!all.contains(&op), "{id}: recorded as removed, but {op:?} is still in openapi.yaml");
             continue;
         }
-        assert!(
-            all.contains(&op),
-            "{id}: {op:?} is not in openapi.yaml, but no `removed_in` says it went"
-        );
-        assert!(
-            marked.contains(&op),
-            "{id}: {op:?} is deprecated but not marked `deprecated: true` in openapi.yaml"
-        );
+        assert!(all.contains(&op), "{id}: {op:?} is not in openapi.yaml, but no `removed_in` says it went");
+        assert!(marked.contains(&op), "{id}: {op:?} is deprecated but not marked `deprecated: true` in openapi.yaml");
         listed.insert(op);
     }
     let unlisted: Vec<_> = marked.difference(&listed).collect();

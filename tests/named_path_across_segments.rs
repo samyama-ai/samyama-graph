@@ -28,11 +28,7 @@ fn chain() -> GraphStore {
         .map(|l| {
             let n = store.create_node_with_labels([Label::new(*l)]);
             let _ = store.set_node_property(
-                "default",
-                n,
-                "name".to_string(),
-                PropertyValue::String((*l).into()),
-            );
+                "default", n, "name".to_string(), PropertyValue::String((*l).into()));
             n
         })
         .collect();
@@ -62,10 +58,7 @@ fn shapes(store: &GraphStore, cypher: &str) -> Vec<(usize, usize)> {
 fn two_variable_length_segments_give_one_whole_path() {
     let store = chain();
     assert_eq!(
-        shapes(
-            &store,
-            "MATCH p = (a {name: \"A\"})-[:KNOWS*0..1]->(b)-[:FRIEND*0..1]->(c) RETURN p"
-        ),
+        shapes(&store, "MATCH p = (a {name: \"A\"})-[:KNOWS*0..1]->(b)-[:FRIEND*0..1]->(c) RETURN p"),
         vec![(1, 0), (2, 1), (3, 2)]
     );
 }
@@ -74,10 +67,7 @@ fn two_variable_length_segments_give_one_whole_path() {
 fn a_single_variable_length_segment_is_unchanged() {
     let store = chain();
     assert_eq!(
-        shapes(
-            &store,
-            "MATCH p = (a {name: \"A\"})-[:KNOWS*0..1]->(b) RETURN p"
-        ),
+        shapes(&store, "MATCH p = (a {name: \"A\"})-[:KNOWS*0..1]->(b) RETURN p"),
         vec![(1, 0), (2, 1)]
     );
 }
@@ -117,10 +107,7 @@ fn length_agrees_with_the_path_it_reports() {
 fn a_fixed_length_pattern_still_spans_both_segments() {
     let store = chain();
     assert_eq!(
-        shapes(
-            &store,
-            "MATCH p = (a:A)-[:KNOWS]->(b)-[:FRIEND]->(c) RETURN p"
-        ),
+        shapes(&store, "MATCH p = (a:A)-[:KNOWS]->(b)-[:FRIEND]->(c) RETURN p"),
         vec![(3, 2)]
     );
 }
@@ -138,10 +125,7 @@ fn three_segments_accumulate_too() {
     };
     store.create_edge(c, d, "NEXT").unwrap();
     assert_eq!(
-        shapes(
-            &store,
-            "MATCH p = (a:A)-[:KNOWS*1..1]->(b)-[:FRIEND*1..1]->(c)-[:NEXT*1..1]->(d) RETURN p"
-        ),
+        shapes(&store, "MATCH p = (a:A)-[:KNOWS*1..1]->(b)-[:FRIEND*1..1]->(c)-[:NEXT*1..1]->(d) RETURN p"),
         vec![(4, 3)]
     );
 }

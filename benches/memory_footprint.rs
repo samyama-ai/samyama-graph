@@ -78,9 +78,7 @@ static GLOBAL: Counting = Counting;
 
 /// Live heap bytes: everything allocated minus everything freed.
 fn live_heap() -> usize {
-    ALLOCATED
-        .load(Ordering::Relaxed)
-        .saturating_sub(FREED.load(Ordering::Relaxed))
+    ALLOCATED.load(Ordering::Relaxed).saturating_sub(FREED.load(Ordering::Relaxed))
 }
 
 /// Number of allocation calls so far. Allocation *count* matters
@@ -179,18 +177,9 @@ fn time_return_n(store: &GraphStore) {
     use samyama::query::executor::{QueryExecutor, Value};
     use samyama::query::parser::parse_query;
     let cases = [
-        (
-            "RETURN n, 1,000 Person",
-            "MATCH (n:Person) RETURN n LIMIT 1000",
-        ),
-        (
-            "RETURN n, 10,000 Post",
-            "MATCH (n:Post) RETURN n LIMIT 10000",
-        ),
-        (
-            "RETURN n.firstName (control)",
-            "MATCH (n:Person) RETURN n.firstName LIMIT 1000",
-        ),
+        ("RETURN n, 1,000 Person", "MATCH (n:Person) RETURN n LIMIT 1000"),
+        ("RETURN n, 10,000 Post", "MATCH (n:Post) RETURN n LIMIT 10000"),
+        ("RETURN n.firstName (control)", "MATCH (n:Person) RETURN n.firstName LIMIT 1000"),
     ];
     let once = |query: &samyama::query::ast::Query| -> usize {
         let batch = QueryExecutor::new(store).execute(query).expect("query");
@@ -198,9 +187,7 @@ fn time_return_n(store: &GraphStore) {
         for record in &batch.records {
             match record.get("n") {
                 Some(Value::NodeRef(id)) => {
-                    props += store
-                        .node_materialized(*id)
-                        .map_or(0, |n| n.properties.len())
+                    props += store.node_materialized(*id).map_or(0, |n| n.properties.len())
                 }
                 Some(Value::Node(_, n)) => props += n.properties.len(),
                 _ => {}
@@ -225,13 +212,7 @@ fn time_return_n(store: &GraphStore) {
             })
             .collect();
         ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        println!(
-            "{:<30} {:>8.2} {:>8.2} {:>8}",
-            name,
-            (ms[24] + ms[25]) / 2.0,
-            ms[47],
-            rows
-        );
+        println!("{:<30} {:>8.2} {:>8.2} {:>8}", name, (ms[24] + ms[25]) / 2.0, ms[47], rows);
     }
 }
 
@@ -307,46 +288,22 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
     println!("{:<28} {:>16}", "load seconds", elapsed.as_secs());
     println!("{:<28} {:>16}", "live heap (bytes)", heap);
     println!("{:<28} {:>16}", "RSS delta (bytes)", rss_delta);
-    println!(
-        "{:<28} {:>16}",
-        "statistics (bytes)",
-        after_stats.saturating_sub(after_load)
-    );
-    println!(
-        "{:<28} {:>16}",
-        "returned by shrink_to_fit",
-        before_shrink.saturating_sub(after_shrink)
-    );
+    println!("{:<28} {:>16}", "statistics (bytes)", after_stats.saturating_sub(after_load));
+    println!("{:<28} {:>16}", "returned by shrink_to_fit", before_shrink.saturating_sub(after_shrink));
     if let (Some(a), Some(b), Some(c)) = (rss_before_shrink, rss_after_shrink, rss_after_trim) {
         println!("{:<28} {:>16}", "  RSS before shrink", a);
         println!("{:<28} {:>16}", "  RSS after shrink", b);
         println!("{:<28} {:>16}", "  RSS after malloc_trim", c);
-        println!(
-            "{:<28} {:>16}",
-            "  RSS actually returned",
-            a.saturating_sub(c)
-        );
+        println!("{:<28} {:>16}", "  RSS actually returned", a.saturating_sub(c));
     }
     if edges > 0 {
-        println!(
-            "{:<28} {:>16.1}",
-            "heap bytes/edge",
-            heap as f64 / edges as f64
-        );
+        println!("{:<28} {:>16.1}", "heap bytes/edge", heap as f64 / edges as f64);
         if rss_delta >= 0 {
-            println!(
-                "{:<28} {:>16.1}",
-                "RSS bytes/edge  <- PERF-10",
-                rss_delta as f64 / edges as f64
-            );
+            println!("{:<28} {:>16.1}", "RSS bytes/edge  <- PERF-10", rss_delta as f64 / edges as f64);
         }
     }
     if heap > 0 && rss_delta > 0 {
-        println!(
-            "{:<28} {:>16.2}",
-            "RSS / heap",
-            rss_delta as f64 / heap as f64
-        );
+        println!("{:<28} {:>16.2}", "RSS / heap", rss_delta as f64 / heap as f64);
     }
     // After the footprint is read, so the timing's allocations are not in it.
     if std::env::args().any(|a| a == "--return-n") {
@@ -391,18 +348,12 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
         const STRING_HANDLE: usize = std::mem::size_of::<String>();
         let key_cost = entries * STRING_HANDLE + key_bytes;
         let key_interned = entries * std::mem::size_of::<u32>()
-            + distinct_keys
-                .iter()
-                .map(|k| k.len() + STRING_HANDLE)
-                .sum::<usize>();
+            + distinct_keys.iter().map(|k| k.len() + STRING_HANDLE).sum::<usize>();
         let label_cost = label_count * STRING_HANDLE + label_bytes;
         let label_interned = label_count * std::mem::size_of::<u32>()
-            + distinct_labels
-                .iter()
-                .map(|l| l.len() + STRING_HANDLE)
-                .sum::<usize>();
-        let recoverable =
-            key_cost.saturating_sub(key_interned) + label_cost.saturating_sub(label_interned);
+            + distinct_labels.iter().map(|l| l.len() + STRING_HANDLE).sum::<usize>();
+        let recoverable = key_cost.saturating_sub(key_interned)
+            + label_cost.saturating_sub(label_interned);
 
         // The store's own decomposition, rather than a second walk here that could
         // drift from it. Capacity, not length: slack is resident.
@@ -419,22 +370,14 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
                 "{:<30} {:>16} {:>9.1}%",
                 name,
                 bytes,
-                if heap > 0 {
-                    100.0 * bytes as f64 / heap as f64
-                } else {
-                    0.0
-                }
+                if heap > 0 { 100.0 * bytes as f64 / heap as f64 } else { 0.0 }
             );
         }
         println!(
             "{:<30} {:>16} {:>9.1}%",
             "attributed",
             report.attributed(),
-            if heap > 0 {
-                100.0 * report.attributed() as f64 / heap as f64
-            } else {
-                0.0
-            }
+            if heap > 0 { 100.0 * report.attributed() as f64 / heap as f64 } else { 0.0 }
         );
         println!(
             "{:<30} {:>16}",
@@ -478,13 +421,12 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
                 let span = hi.saturating_sub(*lo) + 1;
                 let dense = span * elem + span.div_ceil(64) * 8;
                 let sparse = entries * (8 + elem + 1) * 8 / 7;
-                let bytes =
-                    if samyama::graph::storage::columnar::dense_is_smaller(span, *entries, *elem) {
-                        dense_cols += 1;
-                        dense
-                    } else {
-                        sparse
-                    };
+                let bytes = if samyama::graph::storage::columnar::dense_is_smaller(span, *entries, *elem) {
+                    dense_cols += 1;
+                    dense
+                } else {
+                    sparse
+                };
                 columnar += bytes + name.len() + STRING_HANDLE;
             }
             // Plus the string contents, which are heap either way and cancel out of
@@ -500,46 +442,26 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
                 let saved = row_based - columnar;
                 println!("{:<30} {:>16}", "would save", saved);
                 if heap > 0 {
-                    println!(
-                        "{:<30} {:>15.1}%",
-                        "  as a share of live heap",
-                        100.0 * saved as f64 / heap as f64
-                    );
+                    println!("{:<30} {:>15.1}%", "  as a share of live heap", 100.0 * saved as f64 / heap as f64);
                 }
                 if edges > 0 {
-                    println!(
-                        "{:<30} {:>16.1}",
-                        "  bytes/edge",
-                        saved as f64 / edges as f64
-                    );
+                    println!("{:<30} {:>16.1}", "  bytes/edge", saved as f64 / edges as f64);
                 }
             }
         }
 
         println!("\nrepetition (what interning would remove)");
         println!("{:<30} {:>16}", "property entries", entries);
-        println!(
-            "{:<30} {:>16}",
-            "distinct property keys",
-            distinct_keys.len()
-        );
+        println!("{:<30} {:>16}", "distinct property keys", distinct_keys.len());
         println!("{:<30} {:>16}", "labels held", label_count);
         println!("{:<30} {:>16}", "distinct labels", distinct_labels.len());
         println!("{:<30} {:>16}", "string property value bytes", value_bytes);
         println!("{:<30} {:>16}", "recoverable by interning", recoverable);
         if heap > 0 {
-            println!(
-                "{:<30} {:>15.1}%",
-                "  as a share of live heap",
-                100.0 * recoverable as f64 / heap as f64
-            );
+            println!("{:<30} {:>15.1}%", "  as a share of live heap", 100.0 * recoverable as f64 / heap as f64);
         }
         if edges > 0 {
-            println!(
-                "{:<30} {:>16.1}",
-                "  bytes/edge it would remove",
-                recoverable as f64 / edges as f64
-            );
+            println!("{:<30} {:>16.1}", "  bytes/edge it would remove", recoverable as f64 / edges as f64);
         }
     }
 
@@ -553,25 +475,14 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
     // together, so the phase split the synthetic path reports is not available here.
     println!("\nallocation sizes during load (calls, not live blocks)");
     println!("{:<16} {:>14} {:>12}", "size", "count", "share");
-    let total: usize = (0..BUCKETS)
-        .map(|i| hist_end[i].saturating_sub(hist_base[i]))
-        .sum();
+    let total: usize = (0..BUCKETS).map(|i| hist_end[i].saturating_sub(hist_base[i])).sum();
     for i in 0..BUCKETS {
         let n = hist_end[i].saturating_sub(hist_base[i]);
         if n == 0 {
             continue;
         }
-        let label = if i + 1 >= BUCKETS {
-            format!(">={}", 1usize << i)
-        } else {
-            format!("{}..{}", 1usize << i, (1usize << (i + 1)) - 1)
-        };
-        println!(
-            "{:<16} {:>14} {:>11.1}%",
-            label,
-            n,
-            100.0 * n as f64 / total.max(1) as f64
-        );
+        let label = if i + 1 >= BUCKETS { format!(">={}", 1usize << i) } else { format!("{}..{}", 1usize << i, (1usize << (i + 1)) - 1) };
+        println!("{:<16} {:>14} {:>11.1}%", label, n, 100.0 * n as f64 / total.max(1) as f64);
     }
 
     if let Some(path) = json_out {
@@ -582,10 +493,7 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|| "unknown".into());
-        let name = dir
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let name = dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let body = format!(
             "{{
   \"suite\": \"memory-footprint\",
@@ -624,13 +532,9 @@ fn measure_real_dataset(dir: &std::path::Path, json_out: Option<String>) -> () {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| -> Option<String> {
-        args.iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1).cloned())
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
     };
-    let scale: usize = arg("--scale")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(100_000);
+    let scale: usize = arg("--scale").and_then(|s| s.parse().ok()).unwrap_or(100_000);
     let avg_degree: usize = arg("--degree").and_then(|s| s.parse().ok()).unwrap_or(4);
     // Bulk mode uses the stub inserts plus compact_adjacency() -- the path that
     // only snapshot import takes today (#504). The stubs skip endpoint
@@ -660,11 +564,7 @@ fn main() {
 
     println!(
         "Memory footprint — {scale} nodes, target degree {avg_degree}{}",
-        if bulk {
-            "  [BULK: stub inserts + compact_adjacency]"
-        } else {
-            ""
-        }
+        if bulk { "  [BULK: stub inserts + compact_adjacency]" } else { "" }
     );
     println!("{}", "-".repeat(78));
 
@@ -718,13 +618,9 @@ fn main() {
         for d in 0..avg_degree {
             let tgt = node_ids[(i * 7 + d * 31 + 1) % scale];
             let ok = if bulk {
-                store
-                    .create_edge_stub(src, tgt, edge_types[(i + d) % edge_types.len()])
-                    .is_ok()
+                store.create_edge_stub(src, tgt, edge_types[(i + d) % edge_types.len()]).is_ok()
             } else {
-                store
-                    .create_edge(src, tgt, edge_types[(i + d) % edge_types.len()])
-                    .is_ok()
+                store.create_edge(src, tgt, edge_types[(i + d) % edge_types.len()]).is_ok()
             };
             if ok {
                 edges += 1;
@@ -755,33 +651,17 @@ fn main() {
     let final_rss = rss();
 
     let phases = [
-        Phase {
-            name: "node structs",
-            heap_delta: after_bare_nodes.saturating_sub(base_heap),
-        },
-        Phase {
-            name: "node properties",
-            heap_delta: after_props.saturating_sub(after_bare_nodes),
-        },
-        Phase {
-            name: "edges + adjacency",
-            heap_delta: after_edges.saturating_sub(after_props),
-        },
-        Phase {
-            name: "statistics",
-            heap_delta: after_stats.saturating_sub(after_edges),
-        },
+        Phase { name: "node structs", heap_delta: after_bare_nodes.saturating_sub(base_heap) },
+        Phase { name: "node properties", heap_delta: after_props.saturating_sub(after_bare_nodes) },
+        Phase { name: "edges + adjacency", heap_delta: after_edges.saturating_sub(after_props) },
+        Phase { name: "statistics", heap_delta: after_stats.saturating_sub(after_edges) },
     ];
 
     let total_heap = after_stats.saturating_sub(base_heap);
 
     println!("{:<24} {:>14} {:>12}", "phase", "bytes", "share");
     for p in &phases {
-        let share = if total_heap > 0 {
-            100.0 * p.heap_delta as f64 / total_heap as f64
-        } else {
-            0.0
-        };
+        let share = if total_heap > 0 { 100.0 * p.heap_delta as f64 / total_heap as f64 } else { 0.0 };
         println!("{:<24} {:>14} {:>11.1}%", p.name, p.heap_delta, share);
     }
     println!("{:<24} {:>14}", "total (live heap)", total_heap);
@@ -847,11 +727,7 @@ fn main() {
             lo,
             hi,
             n,
-            if edges > 0 {
-                n as f64 / edges as f64
-            } else {
-                0.0
-            }
+            if edges > 0 { n as f64 / edges as f64 } else { 0.0 }
         );
         shown_e = true;
     }
@@ -861,19 +737,11 @@ fn main() {
 
     println!();
     println!("nodes: {scale}    edges: {edges}");
-    println!(
-        "{:<28} {:>10.1}",
-        "bytes/node (heap)",
-        total_heap as f64 / scale as f64
-    );
+    println!("{:<28} {:>10.1}", "bytes/node (heap)", total_heap as f64 / scale as f64);
     println!(
         "{:<28} {:>10.1}",
         "bytes/edge (heap)",
-        if edges > 0 {
-            total_heap as f64 / edges as f64
-        } else {
-            0.0
-        }
+        if edges > 0 { total_heap as f64 / edges as f64 } else { 0.0 }
     );
 
     // Edge-attributable cost on its own: the number PERF-10 is written against.
@@ -881,11 +749,7 @@ fn main() {
     println!(
         "{:<28} {:>10.1}   <- edges+adjacency only",
         "bytes/edge (edge phase)",
-        if edges > 0 {
-            edge_only as f64 / edges as f64
-        } else {
-            0.0
-        }
+        if edges > 0 { edge_only as f64 / edges as f64 } else { 0.0 }
     );
 
     if let (Some(b), Some(f)) = (base_rss, final_rss) {
@@ -895,17 +759,9 @@ fn main() {
         println!(
             "{:<28} {:>10.1}",
             "bytes/edge (RSS)",
-            if edges > 0 {
-                rss_delta as f64 / edges as f64
-            } else {
-                0.0
-            }
+            if edges > 0 { rss_delta as f64 / edges as f64 } else { 0.0 }
         );
-        let ratio = if total_heap > 0 {
-            rss_delta as f64 / total_heap as f64
-        } else {
-            0.0
-        };
+        let ratio = if total_heap > 0 { rss_delta as f64 / total_heap as f64 } else { 0.0 };
         println!("{:<28} {:>10.2}x", "RSS / live heap", ratio);
         println!();
         println!("The gap between the two is allocator slack, fragmentation and the");

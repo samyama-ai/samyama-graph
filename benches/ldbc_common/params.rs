@@ -89,10 +89,7 @@ impl Provenance {
         ));
         s.push_str(&format!(
             "  neighbourhood 1/2/3 hops: {} / {} / {} persons; person2 at distance {}\n",
-            self.neighbourhood[0],
-            self.neighbourhood[1],
-            self.neighbourhood[2],
-            self.person2_distance
+            self.neighbourhood[0], self.neighbourhood[1], self.neighbourhood[2], self.person2_distance
         ));
         for n in &self.notes {
             s.push_str(&format!("  {}\n", n));
@@ -143,9 +140,7 @@ impl Derived {
             ),
             format!(
                 "Anchor person degree {} (median {}, max {}).",
-                self.provenance.person_degree,
-                self.provenance.median_degree,
-                self.provenance.max_degree
+                self.provenance.person_degree, self.provenance.median_degree, self.provenance.max_degree
             ),
             "Ids are per-datagen-run and not portable to another extract.",
             notes.join(",\n"),
@@ -177,8 +172,7 @@ impl Derived {
 /// by-name lookup cannot address them. Node files go through
 /// [`for_each_named_row`] instead.
 fn for_each_row<F: FnMut(&[&str])>(path: &Path, mut f: F) -> Result<(), String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
     for line in text.lines().skip(1) {
         if line.is_empty() {
             continue;
@@ -205,8 +199,7 @@ fn for_each_row<F: FnMut(&[&str])>(path: &Path, mut f: F) -> Result<(), String> 
 /// `creationDate` where an id belongs yields a perfectly good integer, and the
 /// derived parameters would then be nonsense that every query accepts.
 fn for_each_named_row<F: FnMut(&NamedRow)>(path: &Path, mut f: F) -> Result<(), String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap_or("").split('|').collect();
     for line in lines {
@@ -214,10 +207,7 @@ fn for_each_named_row<F: FnMut(&NamedRow)>(path: &Path, mut f: F) -> Result<(), 
             continue;
         }
         let fields: Vec<&str> = line.split('|').collect();
-        f(&NamedRow {
-            header: &header,
-            fields: &fields,
-        });
+        f(&NamedRow { header: &header, fields: &fields });
     }
     Ok(())
 }
@@ -232,10 +222,7 @@ impl NamedRow<'_> {
     /// is short. Never falls back to a position: a wrong column that parses is
     /// the failure this whole helper exists to prevent.
     fn get(&self, name: &str) -> Option<&str> {
-        let i = self
-            .header
-            .iter()
-            .position(|h| h.eq_ignore_ascii_case(name))?;
+        let i = self.header.iter().position(|h| h.eq_ignore_ascii_case(name))?;
         self.fields.get(i).copied()
     }
 
@@ -365,9 +352,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
     let mut person_first_name: HashMap<i64, String> = HashMap::new();
     for_each_named_row(&dynamic.join("person_0_0.csv"), |f| {
         let Some(id) = f.id("id") else { return };
-        let Some(name) = f.get("firstName").map(str::to_string) else {
-            return;
-        };
+        let Some(name) = f.get("firstName").map(str::to_string) else { return };
         if hop3.contains(&id) && id != person_id {
             *names_in_hop3.entry(name.clone()).or_insert(0) += 1;
         }
@@ -411,9 +396,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         .collect();
     hop2_post_dates.sort_unstable();
     if hop2_post_dates.is_empty() {
-        return Err(
-            "the anchor's 2-hop neighbourhood wrote no posts — try a higher percentile".into(),
-        );
+        return Err("the anchor's 2-hop neighbourhood wrote no posts — try a higher percentile".into());
     }
     // A window around the middle of the neighbourhood's activity, and an upper
     // bound above almost all of it. IC2/IC9 read `< maxDate`; IC3/IC4 read a
@@ -439,11 +422,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
     // post with no replies makes IS7 return nothing — which #450 correctly
     // fails the run over. "Authored by the anchor" is not by itself enough to
     // make an id usable; it has to be an id the query has an answer for.
-    let pick_own = |owner: &HashMap<i64, i64>,
-                    who: i64,
-                    fallback: &HashSet<i64>,
-                    require: &HashSet<i64>|
-     -> Option<i64> {
+    let pick_own = |owner: &HashMap<i64, i64>, who: i64, fallback: &HashSet<i64>, require: &HashSet<i64>| -> Option<i64> {
         let usable = |m: &i64| require.is_empty() || require.contains(m);
         let mut own: Vec<i64> = owner
             .iter()
@@ -484,9 +463,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         .ok_or("no replied-to posts by the anchor or its immediate friends")?;
     // The provenance line below states this as fact. State it only if it holds.
     if !posts_with_replies.contains(&post_id) {
-        return Err(
-            format!("chosen postId {post_id} has no replies -- IS7 would measure nothing").into(),
-        );
+        return Err(format!("chosen postId {post_id} has no replies -- IS7 would measure nothing").into());
     }
 
     let mut comment_creator: HashMap<i64, i64> = HashMap::new();
@@ -522,9 +499,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        let (Some(post), Some(tag)) = (parse_id(f[0]), parse_id(f[1])) else {
-            return;
-        };
+        let (Some(post), Some(tag)) = (parse_id(f[0]), parse_id(f[1])) else { return };
         if post_creator.get(&post).is_some_and(|c| hop2.contains(c)) {
             hop2_tag_ids.insert(tag);
             if let Some(name) = tag_name_of.get(&tag) {
@@ -554,9 +529,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if let Some(name) = f.get("name") {
             place_name.insert(id, name.to_string());
         }
-        if f.get("type")
-            .is_some_and(|t| t.eq_ignore_ascii_case("country"))
-        {
+        if f.get("type").is_some_and(|t| t.eq_ignore_ascii_case("country")) {
             is_country.insert(id);
         }
     })?;
@@ -565,18 +538,14 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        let (Some(post), Some(place)) = (parse_id(f[0]), parse_id(f[1])) else {
-            return;
-        };
+        let (Some(post), Some(place)) = (parse_id(f[0]), parse_id(f[1])) else { return };
         if !is_country.contains(&place) {
             return;
         }
         if !post_creator.get(&post).is_some_and(|c| hop2.contains(c)) {
             return;
         }
-        let Some(&d) = post_date.get(&post) else {
-            return;
-        };
+        let Some(&d) = post_date.get(&post) else { return };
         if d >= start_date && d < end_date {
             if let Some(name) = place_name.get(&place) {
                 *country_counts.entry(name.clone()).or_insert(0) += 1;
@@ -589,11 +558,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
     // country if the neighbourhood only ever posted from one, which IC3 still
     // answers (the predicate is a disjunction).
     let (country_y, cy_hits) = sample_by_frequency(
-        &country_counts
-            .iter()
-            .filter(|(k, _)| **k != country_x)
-            .map(|(k, v)| (k.clone(), *v))
-            .collect(),
+        &country_counts.iter().filter(|(k, _)| **k != country_x).map(|(k, v)| (k.clone(), *v)).collect(),
         percentile,
     )
     .unwrap_or((country_x.clone(), cx_hits));
@@ -617,9 +582,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 2 {
             return;
         }
-        let (Some(tag), Some(class)) = (parse_id(f[0]), parse_id(f[1])) else {
-            return;
-        };
+        let (Some(tag), Some(class)) = (parse_id(f[0]), parse_id(f[1])) else { return };
         if hop2_tag_ids.contains(&tag) {
             if let Some(name) = tagclass_name.get(&class) {
                 *class_counts.entry(name.clone()).or_insert(0) += 1;
@@ -630,10 +593,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         .ok_or("no tag classes reachable from the anchor's neighbourhood")?;
     notes.push(format!(
         "tagClassName {:?} — p{} of {} classes on the neighbourhood's tags, {} tags in it",
-        tag_class_name,
-        percentile,
-        class_counts.len(),
-        class_hits
+        tag_class_name, percentile, class_counts.len(), class_hits
     ));
 
     // ---- organisationName: IC11 asks for friends-of-friends who worked
@@ -654,9 +614,7 @@ pub fn derive(data_dir: &Path, percentile: u8) -> Result<Derived, String> {
         if f.len() < 3 {
             return;
         }
-        let (Some(p), Some(o)) = (parse_id(f[0]), parse_id(f[1])) else {
-            return;
-        };
+        let (Some(p), Some(o)) = (parse_id(f[0]), parse_id(f[1])) else { return };
         let Some(from) = parse_id(f[2]) else { return };
         if from < 2012 && hop2.contains(&p) {
             if let Some(name) = org_name.get(&o) {
@@ -756,8 +714,7 @@ mod tests {
         // and the derived parameters are then nonsense that every query
         // accepts and every timer times. So there is no positional fallback.
         assert_eq!(
-            one_named_row("creationDate|firstName", "1266161530447|Mahinda", |r| r
-                .id("id")),
+            one_named_row("creationDate|firstName", "1266161530447|Mahinda", |r| r.id("id")),
             vec![None]
         );
     }
@@ -818,14 +775,8 @@ mod tests {
             ("typical".to_string(), 5),
             ("everywhere".to_string(), 900),
         ]);
-        assert_eq!(
-            sample_by_frequency(&counts, 50),
-            Some(("typical".into(), 5))
-        );
-        assert_eq!(
-            sample_by_frequency(&counts, 100),
-            Some(("everywhere".into(), 900))
-        );
+        assert_eq!(sample_by_frequency(&counts, 50), Some(("typical".into(), 5)));
+        assert_eq!(sample_by_frequency(&counts, 100), Some(("everywhere".into(), 900)));
         assert_eq!(sample_by_frequency(&counts, 0), Some(("rare".into(), 1)));
     }
 
@@ -876,10 +827,7 @@ mod tests {
             notes: vec!["tagName \"X\" — 12 posts carry it".into()],
         };
         let text = p.format();
-        assert!(
-            text.contains("p50"),
-            "the percentile must be visible: {text}"
-        );
+        assert!(text.contains("p50"), "the percentile must be visible: {text}");
         assert!(text.contains("median 14"), "{text}");
         assert!(text.contains("max 1455"), "the outlier not chosen: {text}");
         assert!(text.contains("tagName"), "{text}");

@@ -109,8 +109,9 @@ pub fn gpu_cdlp(
     // Try CUDA first
     #[cfg(feature = "cuda")]
     if let Some(cuda_ctx) = crate::runtime::GpuRuntime::get().and_then(|rt| rt.cuda()) {
-        let (merged_offsets, merged_targets) =
-            incident_multiset(node_count, out_offsets, out_targets, in_offsets, in_sources);
+        let (merged_offsets, merged_targets) = incident_multiset(
+            node_count, out_offsets, out_targets, in_offsets, in_sources,
+        );
         match crate::cuda::cdlp::cuda_cdlp(
             cuda_ctx,
             &merged_offsets,

@@ -6,10 +6,10 @@
 //! 3. Cypher 1-hop query via QueryEngine (full pipeline)
 //! 4. Cypher 2-hop query via QueryEngine (full pipeline)
 
-use rand::Rng;
 use samyama::{GraphStore, Label, PropertyValue, QueryEngine};
-use std::collections::HashSet;
 use std::time::Instant;
+use std::collections::HashSet;
+use rand::Rng;
 
 #[path = "common/bench_setup.rs"]
 mod bench_setup;
@@ -25,10 +25,7 @@ fn main() {
     println!("║   Late Materialization Micro-Benchmark                          ║");
     println!("╚══════════════════════════════════════════════════════════════════╝");
     println!();
-    println!(
-        "  Nodes: {}  |  Edges/node: {}  |  Queries: {}",
-        NUM_NODES, EDGES_PER_NODE, NUM_QUERIES
-    );
+    println!("  Nodes: {}  |  Edges/node: {}  |  Queries: {}", NUM_NODES, EDGES_PER_NODE, NUM_QUERIES);
     println!();
 
     // Build graph
@@ -39,15 +36,9 @@ fn main() {
     let build_start = Instant::now();
     for i in 0..NUM_NODES {
         let id = store.create_node("Entity");
-        store
-            .set_node_property("default", id, "id", i as i64)
-            .unwrap();
-        store
-            .set_node_property("default", id, "name", format!("node_{}", i))
-            .unwrap();
-        store
-            .set_node_property("default", id, "score", (i as f64) * 0.1)
-            .unwrap();
+        store.set_node_property("default", id, "id", i as i64).unwrap();
+        store.set_node_property("default", id, "name", format!("node_{}", i)).unwrap();
+        store.set_node_property("default", id, "score", (i as f64) * 0.1).unwrap();
     }
     for i in 0..NUM_NODES {
         let source = samyama::graph::NodeId::new((i + 1) as u64);
@@ -60,11 +51,7 @@ fn main() {
         }
     }
     println!(" done in {:?}", build_start.elapsed());
-    println!(
-        "  Total nodes: {}  edges: {}",
-        store.node_count(),
-        store.edge_count()
-    );
+    println!("  Total nodes: {}  edges: {}", store.node_count(), store.edge_count());
     println!();
 
     // ── Benchmark 1: Raw 3-hop via get_outgoing_edges (clones Edge objects) ──
@@ -97,12 +84,8 @@ fn main() {
         let duration = start.elapsed();
         let avg = duration / NUM_QUERIES as u32;
         let qps = NUM_QUERIES as f64 / duration.as_secs_f64();
-        println!(
-            "    Avg: {:>10.2?}  |  QPS: {:>8.0}  |  Avg reached: {:.0}",
-            avg,
-            qps,
-            total_reached as f64 / NUM_QUERIES as f64
-        );
+        println!("    Avg: {:>10.2?}  |  QPS: {:>8.0}  |  Avg reached: {:.0}",
+            avg, qps, total_reached as f64 / NUM_QUERIES as f64);
     }
     println!();
 
@@ -136,12 +119,8 @@ fn main() {
         let duration = start.elapsed();
         let avg = duration / NUM_QUERIES as u32;
         let qps = NUM_QUERIES as f64 / duration.as_secs_f64();
-        println!(
-            "    Avg: {:>10.2?}  |  QPS: {:>8.0}  |  Avg reached: {:.0}",
-            avg,
-            qps,
-            total_reached as f64 / NUM_QUERIES as f64
-        );
+        println!("    Avg: {:>10.2?}  |  QPS: {:>8.0}  |  Avg reached: {:.0}",
+            avg, qps, total_reached as f64 / NUM_QUERIES as f64);
     }
     println!();
 
@@ -155,10 +134,7 @@ fn main() {
         let mut success = 0;
         for _ in 0..NUM_QUERIES {
             let id = rng.gen_range(0..NUM_NODES);
-            let q = format!(
-                "MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = {} RETURN b.id",
-                id
-            );
+            let q = format!("MATCH (a:Entity)-[:LINKS_TO]->(b:Entity) WHERE a.id = {} RETURN b.id", id);
             if engine.execute(&q, &store).is_ok() {
                 success += 1;
             }
@@ -166,10 +142,8 @@ fn main() {
         let duration = start.elapsed();
         let avg = duration / NUM_QUERIES as u32;
         let qps = NUM_QUERIES as f64 / duration.as_secs_f64();
-        println!(
-            "    Avg: {:>10.2?}  |  QPS: {:>8.0}  |  Success: {}/{}",
-            avg, qps, success, NUM_QUERIES
-        );
+        println!("    Avg: {:>10.2?}  |  QPS: {:>8.0}  |  Success: {}/{}",
+            avg, qps, success, NUM_QUERIES);
     }
     println!();
 
@@ -191,10 +165,8 @@ fn main() {
         let duration = start.elapsed();
         let avg = duration / NUM_QUERIES as u32;
         let qps = NUM_QUERIES as f64 / duration.as_secs_f64();
-        println!(
-            "    Avg: {:>10.2?}  |  QPS: {:>8.0}  |  Success: {}/{}",
-            avg, qps, success, NUM_QUERIES
-        );
+        println!("    Avg: {:>10.2?}  |  QPS: {:>8.0}  |  Success: {}/{}",
+            avg, qps, success, NUM_QUERIES);
     }
     println!();
 

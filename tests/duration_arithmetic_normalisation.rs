@@ -37,10 +37,8 @@ fn text(cypher: &str) -> String {
 
 #[test]
 fn adding_a_duration_to_itself_carries_the_nanoseconds() {
-    assert_eq!(
-        text(&format!("RETURN toString({D} + {D}) AS a")),
-        "P25Y10M58DT67H56M27.000000006S"
-    );
+    assert_eq!(text(&format!("RETURN toString({D} + {D}) AS a")),
+               "P25Y10M58DT67H56M27.000000006S");
 }
 
 #[test]
@@ -54,14 +52,10 @@ fn a_negative_sub_second_duration_keeps_its_sign_in_the_nanoseconds() {
     // seconds. A normaliser using floor division gives `{seconds: -1,
     // nanos: 999999999}` -- the same instant, printed as `PT-1.999999999S`.
     // A correct value that renders wrong.
-    assert_eq!(
-        text("RETURN toString(duration({nanoseconds: -1}) + duration({seconds: 0})) AS a"),
-        "PT-0.000000001S"
-    );
-    assert_eq!(
-        text("RETURN toString(duration({seconds: 1}) - duration({nanoseconds: 1})) AS a"),
-        "PT0.999999999S"
-    );
+    assert_eq!(text("RETURN toString(duration({nanoseconds: -1}) + duration({seconds: 0})) AS a"),
+               "PT-0.000000001S");
+    assert_eq!(text("RETURN toString(duration({seconds: 1}) - duration({nanoseconds: 1})) AS a"),
+               "PT0.999999999S");
 }
 
 #[test]
@@ -69,22 +63,13 @@ fn months_and_days_are_not_merged_into_each_other() {
     // Cypher keeps the three groups separate on purpose: a month is not 30
     // days, and a day is not always 86,400 seconds across a DST boundary.
     // Normalising them would change answers rather than tidy them.
-    assert_eq!(
-        text("RETURN toString(duration({months: 1}) + duration({days: 1})) AS a"),
-        "P1M1D"
-    );
+    assert_eq!(text("RETURN toString(duration({months: 1}) + duration({days: 1})) AS a"), "P1M1D");
 }
 
 #[test]
 fn a_date_moves_by_the_whole_days_inside_the_seconds() {
-    assert_eq!(
-        text(&format!("RETURN toString(date('1984-10-11') + {D}) AS a")),
-        "1997-10-11"
-    );
-    assert_eq!(
-        text(&format!("RETURN toString(date('1984-10-11') - {D}) AS a")),
-        "1971-10-12"
-    );
+    assert_eq!(text(&format!("RETURN toString(date('1984-10-11') + {D}) AS a")), "1997-10-11");
+    assert_eq!(text(&format!("RETURN toString(date('1984-10-11') - {D}) AS a")), "1971-10-12");
 }
 
 #[test]
@@ -100,16 +85,7 @@ fn a_sub_day_remainder_is_still_dropped_by_a_date() {
 
 #[test]
 fn an_ordinary_date_plus_days_is_unaffected() {
-    assert_eq!(
-        text("RETURN toString(date('1984-10-11') + duration({days: 1})) AS a"),
-        "1984-10-12"
-    );
-    assert_eq!(
-        text("RETURN toString(date('1984-10-11') + duration({hours: 23})) AS a"),
-        "1984-10-11"
-    );
-    assert_eq!(
-        text("RETURN toString(date('1984-10-11') + duration({hours: 25})) AS a"),
-        "1984-10-12"
-    );
+    assert_eq!(text("RETURN toString(date('1984-10-11') + duration({days: 1})) AS a"), "1984-10-12");
+    assert_eq!(text("RETURN toString(date('1984-10-11') + duration({hours: 23})) AS a"), "1984-10-11");
+    assert_eq!(text("RETURN toString(date('1984-10-11') + duration({hours: 25})) AS a"), "1984-10-12");
 }

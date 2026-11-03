@@ -22,17 +22,11 @@ fn graph(seed: u64, n: usize, edges: usize, directed_only: bool) -> GraphStore {
     let mut ids = Vec::new();
     for i in 0..n {
         let node = s.create_node_with_labels([Label::new("N")]);
-        s.set_node_property("default", node, "id", PropertyValue::Integer(i as i64))
-            .unwrap();
+        s.set_node_property("default", node, "id", PropertyValue::Integer(i as i64)).unwrap();
         ids.push(node);
     }
     let mut x = seed | 1;
-    let mut next = || {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        x
-    };
+    let mut next = || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x };
     for _ in 0..edges {
         let a = (next() as usize) % n;
         let b = (next() as usize) % n;
@@ -49,18 +43,11 @@ fn graph(seed: u64, n: usize, edges: usize, directed_only: bool) -> GraphStore {
 fn len_of(store: &GraphStore, cypher: &str) -> Option<i64> {
     let parsed = parse_query(cypher).ok()?;
     let batch = QueryExecutor::new(store).execute(&parsed).ok()?;
-    batch
-        .records
-        .iter()
-        .filter_map(|r| match r.get("l") {
-            Some(v) => format!("{v:?}")
-                .split("Integer(")
-                .nth(1)
-                .and_then(|t| t.split(')').next())
-                .and_then(|t| t.parse::<i64>().ok()),
-            None => None,
-        })
-        .min()
+    batch.records.iter().filter_map(|r| match r.get("l") {
+        Some(v) => format!("{v:?}").split("Integer(").nth(1)
+            .and_then(|t| t.split(')').next()).and_then(|t| t.parse::<i64>().ok()),
+        None => None,
+    }).min()
 }
 
 fn main() {
@@ -75,22 +62,17 @@ fn main() {
                 for arrow in ["-[:R*]->", "-[:R*]-"] {
                     let one = format!(
                         "MATCH p = allShortestPaths((x:N {{id: {a}}}){arrow}(y:N {{id: {b}}})) \
-                         RETURN length(p) AS l"
-                    );
+                         RETURN length(p) AS l");
                     let two = format!(
                         "MATCH p = shortestPath((x:N {{id: {a}}}){arrow}(y:N {{id: {b}}})) \
-                         RETURN length(p) AS l"
-                    );
+                         RETURN length(p) AS l");
                     let (r_all, r_one) = (len_of(&s, &one), len_of(&s, &two));
                     checked += 1;
-                    if r_all.is_some() {
-                        reachable += 1;
-                    }
+                    if r_all.is_some() { reachable += 1; }
                     if r_all != r_one {
                         disagreed.push(format!(
                             "seed={seed} n={n} e={e} directed={directed} {a}->{b} {arrow}: \
-                             allShortestPaths={r_all:?} shortestPath={r_one:?}"
-                        ));
+                             allShortestPaths={r_all:?} shortestPath={r_one:?}"));
                     }
                 }
             }
@@ -103,10 +85,7 @@ fn main() {
     for d in disagreed.iter().take(10) {
         println!("  {d}");
     }
-    assert!(
-        reachable > checked / 10,
-        "fixture too sparse: only {reachable} reachable pairs"
-    );
+    assert!(reachable > checked / 10, "fixture too sparse: only {reachable} reachable pairs");
     assert!(disagreed.is_empty(), "{} disagreements", disagreed.len());
     println!("\nOK: bidirectional shortestPath agrees with the one-sided reference on every case");
 }

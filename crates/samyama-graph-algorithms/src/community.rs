@@ -74,11 +74,8 @@ pub fn weakly_connected_components(view: &GraphView) -> WccResult {
     for i in 0..n {
         let root = uf.find(i);
         let node_id = view.index_to_node[i];
-
-        components
-            .entry(root)
-            .or_insert_with(Vec::new)
-            .push(node_id);
+        
+        components.entry(root).or_insert_with(Vec::new).push(node_id);
         node_component.insert(node_id, root);
     }
 
@@ -172,14 +169,9 @@ pub fn strongly_connected_components(view: &GraphView) -> SccResult {
 
                     let node_id = view.index_to_node[node_idx];
                     node_component.insert(node_id, scc_count);
-                    components
-                        .entry(scc_count)
-                        .or_insert_with(Vec::new)
-                        .push(node_id);
+                    components.entry(scc_count).or_insert_with(Vec::new).push(node_id);
 
-                    if node_idx == u {
-                        break;
-                    }
+                    if node_idx == u { break; }
                 }
                 scc_count += 1;
             }
@@ -212,9 +204,7 @@ mod tests {
         let node_count = 4;
         let index_to_node = vec![1, 2, 3, 4];
         let mut node_to_index = HashMap::new();
-        for (i, &id) in index_to_node.iter().enumerate() {
-            node_to_index.insert(id, i);
-        }
+        for (i, &id) in index_to_node.iter().enumerate() { node_to_index.insert(id, i); }
 
         let mut outgoing = vec![vec![]; 4];
         outgoing[0].push(1); // 1->2
@@ -232,12 +222,12 @@ mod tests {
 
         let result = strongly_connected_components(&view);
         assert_eq!(result.components.len(), 2);
-
+        
         let c1 = result.node_component[&1];
         let c2 = result.node_component[&2];
         let c3 = result.node_component[&3];
         let c4 = result.node_component[&4];
-
+        
         assert_eq!(c1, c2);
         assert_eq!(c2, c3);
         assert_ne!(c1, c4);
@@ -279,18 +269,7 @@ mod tests {
             *id_counter += 1;
             for &v in view.successors(u) {
                 if ids[v] == -1 {
-                    dfs(
-                        v,
-                        id_counter,
-                        scc_count,
-                        ids,
-                        low,
-                        on_stack,
-                        stack,
-                        view,
-                        node_component,
-                        components,
-                    );
+                    dfs(v, id_counter, scc_count, ids, low, on_stack, stack, view, node_component, components);
                     low[u] = low[u].min(low[v]);
                 } else if on_stack[v] {
                     low[u] = low[u].min(ids[v] as usize);
@@ -303,9 +282,7 @@ mod tests {
                     let node_id = view.index_to_node[node_idx];
                     node_component.insert(node_id, *scc_count);
                     components.entry(*scc_count).or_default().push(node_id);
-                    if node_idx == u {
-                        break;
-                    }
+                    if node_idx == u { break; }
                 }
                 *scc_count += 1;
             }
@@ -313,35 +290,17 @@ mod tests {
 
         for i in 0..n {
             if ids[i] == -1 {
-                dfs(
-                    i,
-                    &mut id_counter,
-                    &mut scc_count,
-                    &mut ids,
-                    &mut low,
-                    &mut on_stack,
-                    &mut stack,
-                    view,
-                    &mut node_component,
-                    &mut components,
-                );
+                dfs(i, &mut id_counter, &mut scc_count, &mut ids, &mut low, &mut on_stack, &mut stack, view, &mut node_component, &mut components);
             }
         }
-        SccResult {
-            components,
-            node_component,
-        }
+        SccResult { components, node_component }
     }
 
     /// A view over `n` nodes (ids `100 + index`, so ids and indexes differ)
     /// with the given directed edges.
     fn view_of(n: usize, edges: &[(usize, usize)]) -> GraphView {
         let index_to_node: Vec<NodeId> = (0..n as u64).map(|i| 100 + i).collect();
-        let node_to_index = index_to_node
-            .iter()
-            .enumerate()
-            .map(|(i, &id)| (id, i))
-            .collect();
+        let node_to_index = index_to_node.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         let mut outgoing = vec![Vec::new(); n];
         let mut incoming = vec![Vec::new(); n];
         for &(a, b) in edges {
@@ -366,18 +325,9 @@ mod tests {
         // nested cycles, a node reached from two components.
         assert_same(&view_of(0, &[]), "empty");
         assert_same(&view_of(1, &[(0, 0)]), "self-loop");
-        assert_same(
-            &view_of(6, &[(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 5), (5, 3)]),
-            "two cycles",
-        );
-        assert_same(
-            &view_of(5, &[(0, 1), (1, 2), (2, 1), (2, 3), (3, 0), (1, 4)]),
-            "nested",
-        );
-        assert_same(
-            &view_of(5, &[(0, 1), (1, 0), (2, 3), (3, 2), (0, 4), (2, 4)]),
-            "shared sink",
-        );
+        assert_same(&view_of(6, &[(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 5), (5, 3)]), "two cycles");
+        assert_same(&view_of(5, &[(0, 1), (1, 2), (2, 1), (2, 3), (3, 0), (1, 4)]), "nested");
+        assert_same(&view_of(5, &[(0, 1), (1, 0), (2, 3), (3, 2), (0, 4), (2, 4)]), "shared sink");
 
         // And many pseudo-random graphs, sparse to dense, with parallel edges
         // and self-loops left in.
@@ -394,10 +344,7 @@ mod tests {
             let edges: Vec<_> = (0..m)
                 .map(|_| ((next() % n as u64) as usize, (next() % n as u64) as usize))
                 .collect();
-            assert_same(
-                &view_of(n, &edges),
-                &format!("random case {case} (n={n}, m={m})"),
-            );
+            assert_same(&view_of(n, &edges), &format!("random case {case} (n={n}, m={m})"));
         }
     }
 

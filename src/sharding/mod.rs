@@ -2,8 +2,8 @@
 //!
 //! Implements Tenant-Level Sharding (Phase 10).
 
-pub mod proxy;
 pub mod router;
+pub mod proxy;
 
+pub use router::{Router, RouteResult};
 pub use proxy::Proxy;
-pub use router::{RouteResult, Router};

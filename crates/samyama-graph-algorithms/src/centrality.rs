@@ -275,11 +275,7 @@ pub fn ranked(view: &GraphView, scores: &Scores) -> Vec<(NodeId, f64)> {
         .enumerate()
         .map(|(i, &s)| (view.index_to_node[i], s))
         .collect();
-    out.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.0.cmp(&b.0))
-    });
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
     out
 }
 

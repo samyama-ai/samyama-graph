@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use samyama_sdk::{EmbeddedClient, Label, NodeId, PropertyValue};
+use samyama_sdk::{EmbeddedClient, NodeId, PropertyValue, Label};
 
 #[path = "common/hgnc_ensembl_common.rs"]
 mod hgnc_ensembl_common;
@@ -106,7 +106,8 @@ async fn main() -> Result<(), Error> {
             "  Ensembl gene bridge:    {} ENSG IDs",
             format_num(ensembl_map.len())
         );
-        let (transcripts, edges) = load_ensembl_gff3(&mut graph, gff_path, &ensembl_map, max_rows)?;
+        let (transcripts, edges) =
+            load_ensembl_gff3(&mut graph, gff_path, &ensembl_map, max_rows)?;
         result.transcript_nodes = transcripts;
         result.has_transcript_edges = edges;
     }
@@ -116,18 +117,9 @@ async fn main() -> Result<(), Error> {
     eprintln!("========================================");
     eprintln!("HGNC load complete.");
     eprintln!("  Gene nodes:           {}", format_num(result.gene_nodes));
-    eprintln!(
-        "  SAME_AS edges:        {}",
-        format_num(result.same_as_edges)
-    );
-    eprintln!(
-        "  Transcript nodes:     {}",
-        format_num(result.transcript_nodes)
-    );
-    eprintln!(
-        "  HAS_TRANSCRIPT edges: {}",
-        format_num(result.has_transcript_edges)
-    );
+    eprintln!("  SAME_AS edges:        {}", format_num(result.same_as_edges));
+    eprintln!("  Transcript nodes:     {}", format_num(result.transcript_nodes));
+    eprintln!("  HAS_TRANSCRIPT edges: {}", format_num(result.has_transcript_edges));
     eprintln!("  Time:                 {}", format_duration(total_elapsed));
     eprintln!("========================================");
 

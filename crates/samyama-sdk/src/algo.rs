@@ -8,10 +8,11 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 use samyama::algo::{
-    bfs, bfs_all_shortest_paths, build_view, cdlp, count_triangles, dijkstra, edmonds_karp,
-    local_clustering_coefficient, page_rank, pca, prim_mst, strongly_connected_components,
-    weakly_connected_components, CdlpConfig, CdlpResult, FlowResult, LccResult, MSTResult,
-    PageRankConfig, PathResult, PcaConfig, PcaResult, PcaSolver, SccResult, WccResult,
+    build_view, page_rank, weakly_connected_components, strongly_connected_components,
+    bfs, dijkstra, bfs_all_shortest_paths, edmonds_karp, prim_mst, count_triangles,
+    cdlp, local_clustering_coefficient, pca,
+    PageRankConfig, PathResult, WccResult, SccResult, FlowResult, MSTResult,
+    CdlpConfig, CdlpResult, LccResult, PcaConfig, PcaResult, PcaSolver,
 };
 use samyama_graph_algorithms::pathfinding::NegativeWeight;
 use samyama_graph_algorithms::GraphView;
@@ -97,7 +98,11 @@ pub trait AlgorithmClient {
     ) -> MSTResult;
 
     /// Count triangles in the graph.
-    async fn count_triangles(&self, label: Option<&str>, edge_type: Option<&str>) -> usize;
+    async fn count_triangles(
+        &self,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+    ) -> usize;
 
     /// Find all shortest paths between source and target (BFS).
     async fn bfs_all_shortest_paths(
@@ -127,7 +132,12 @@ pub trait AlgorithmClient {
     ///
     /// Extracts the specified numeric properties from nodes matching `label`,
     /// builds a feature matrix, and runs PCA with the given config.
-    async fn pca(&self, label: Option<&str>, properties: &[&str], config: PcaConfig) -> PcaResult;
+    async fn pca(
+        &self,
+        label: Option<&str>,
+        properties: &[&str],
+        config: PcaConfig,
+    ) -> PcaResult;
 }
 
 #[async_trait]
@@ -221,7 +231,11 @@ impl AlgorithmClient for EmbeddedClient {
         prim_mst(&view)
     }
 
-    async fn count_triangles(&self, label: Option<&str>, edge_type: Option<&str>) -> usize {
+    async fn count_triangles(
+        &self,
+        label: Option<&str>,
+        edge_type: Option<&str>,
+    ) -> usize {
         let store = self.store.read().await;
         let view = build_view(&store, label, edge_type, None);
         count_triangles(&view)
@@ -260,7 +274,12 @@ impl AlgorithmClient for EmbeddedClient {
         local_clustering_coefficient(&view)
     }
 
-    async fn pca(&self, label: Option<&str>, properties: &[&str], config: PcaConfig) -> PcaResult {
+    async fn pca(
+        &self,
+        label: Option<&str>,
+        properties: &[&str],
+        config: PcaConfig,
+    ) -> PcaResult {
         let store = self.store.read().await;
         use samyama::graph::{Label, PropertyValue};
 
@@ -317,18 +336,9 @@ mod tests {
         let client = EmbeddedClient::new();
 
         // Create a small graph: A -> B -> C, A -> C
-        client
-            .query("default", r#"CREATE (a:Person {name: "Alice"})"#)
-            .await
-            .unwrap();
-        client
-            .query("default", r#"CREATE (b:Person {name: "Bob"})"#)
-            .await
-            .unwrap();
-        client
-            .query("default", r#"CREATE (c:Person {name: "Carol"})"#)
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (a:Person {name: "Alice"})"#).await.unwrap();
+        client.query("default", r#"CREATE (b:Person {name: "Bob"})"#).await.unwrap();
+        client.query("default", r#"CREATE (c:Person {name: "Carol"})"#).await.unwrap();
         client.query("default",
             r#"MATCH (a:Person {name: "Alice"}), (b:Person {name: "Bob"}) CREATE (a)-[:KNOWS]->(b)"#
         ).await.unwrap();
@@ -339,15 +349,10 @@ mod tests {
             r#"MATCH (a:Person {name: "Alice"}), (c:Person {name: "Carol"}) CREATE (a)-[:KNOWS]->(c)"#
         ).await.unwrap();
 
-        let scores = client
-            .page_rank(PageRankConfig::default(), Some("Person"), Some("KNOWS"))
-            .await;
+        let scores = client.page_rank(PageRankConfig::default(), Some("Person"), Some("KNOWS")).await;
         assert_eq!(scores.len(), 3);
         // Carol should have highest PageRank (most incoming links)
-        let max_node = scores
-            .iter()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap();
+        let max_node = scores.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
         // At least verify we got results
         assert!(*max_node.1 > 0.0);
     }
@@ -357,24 +362,10 @@ mod tests {
         let client = EmbeddedClient::new();
 
         // Two disconnected components
-        client
-            .query(
-                "default",
-                r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
-            )
-            .await
-            .unwrap();
-        client
-            .query(
-                "default",
-                r#"CREATE (c:Person {name: "Carol"})-[:KNOWS]->(d:Person {name: "Dave"})"#,
-            )
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#).await.unwrap();
+        client.query("default", r#"CREATE (c:Person {name: "Carol"})-[:KNOWS]->(d:Person {name: "Dave"})"#).await.unwrap();
 
-        let wcc = client
-            .weakly_connected_components(Some("Person"), Some("KNOWS"))
-            .await;
+        let wcc = client.weakly_connected_components(Some("Person"), Some("KNOWS")).await;
         assert_eq!(wcc.components.len(), 2);
     }
 
@@ -382,20 +373,10 @@ mod tests {
     async fn test_bfs() {
         let client = EmbeddedClient::new();
 
-        client
-            .query(
-                "default",
-                r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#,
-            )
-            .await
-            .unwrap();
-        client
-            .query(
-                "default",
-                r#"MATCH (b:Person {name: "Bob"}) CREATE (b)-[:KNOWS]->(c:Person {name: "Carol"})"#,
-            )
-            .await
-            .unwrap();
+        client.query("default", r#"CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})"#).await.unwrap();
+        client.query("default",
+            r#"MATCH (b:Person {name: "Bob"}) CREATE (b)-[:KNOWS]->(c:Person {name: "Carol"})"#
+        ).await.unwrap();
 
         // Get node IDs
         let store = client.store().read().await;
@@ -403,9 +384,7 @@ mod tests {
         drop(store);
 
         if all_nodes.len() >= 3 {
-            let result = client
-                .bfs(all_nodes[0], all_nodes[2], Some("Person"), Some("KNOWS"))
-                .await;
+            let result = client.bfs(all_nodes[0], all_nodes[2], Some("Person"), Some("KNOWS")).await;
             assert!(result.is_some());
             let path = result.unwrap();
             assert!(path.path.len() >= 2);

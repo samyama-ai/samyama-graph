@@ -23,21 +23,11 @@ use samyama::query::parser::parse_query;
 fn fixture(hubs: usize, tags_per_post: usize, people: usize) -> GraphStore {
     let mut store = GraphStore::new();
     let x = store.create_node("Tag");
-    let _ = store.set_node_property(
-        "default",
-        x,
-        "name".to_string(),
-        PropertyValue::String("x".into()),
-    );
+    let _ = store.set_node_property("default", x, "name".to_string(), PropertyValue::String("x".into()));
     let mut posts = Vec::new();
     for i in 0..hubs {
         let p = store.create_node("Post");
-        let _ = store.set_node_property(
-            "default",
-            p,
-            "id".to_string(),
-            PropertyValue::Integer(i as i64),
-        );
+        let _ = store.set_node_property("default", p, "id".to_string(), PropertyValue::Integer(i as i64));
         store.create_edge(p, x, "HAS_TAG").unwrap();
         for j in 0..tags_per_post {
             let t = store.create_node("Tag");
@@ -53,12 +43,7 @@ fn fixture(hubs: usize, tags_per_post: usize, people: usize) -> GraphStore {
     }
     for i in 0..people {
         let person = store.create_node("Person");
-        let _ = store.set_node_property(
-            "default",
-            person,
-            "id".to_string(),
-            PropertyValue::Integer(i as i64),
-        );
+        let _ = store.set_node_property("default", person, "id".to_string(), PropertyValue::Integer(i as i64));
         for p in &posts {
             store.create_edge(person, *p, "LIKES").unwrap();
         }
@@ -102,11 +87,7 @@ fn a_path_written_towards_the_bound_variable_is_walked_from_it() {
     // written, and reversing it would reverse what `p2` holds.
     let named = "MATCH (p:Post)-[:HAS_TAG]->(t:Tag {name: 'x'}) \
                  MATCH p2=(liker:Person)-[:LIKES]->(p) RETURN count(p2) AS n";
-    assert!(
-        plan(&store, named).contains("HashJoin"),
-        "{}",
-        plan(&store, named)
-    );
+    assert!(plan(&store, named).contains("HashJoin"), "{}", plan(&store, named));
     assert_eq!(count(&store, named), 15);
 }
 

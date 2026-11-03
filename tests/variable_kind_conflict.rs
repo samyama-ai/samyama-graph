@@ -52,9 +52,7 @@ fn a_path_variable_conflicts_with_a_node_and_with_a_relationship() {
 /// a pattern refers back to something it already bound.
 #[test]
 fn reusing_a_variable_as_the_same_kind_is_fine() {
-    assert!(accepted(
-        "MATCH (a)-[:R]->(b) MATCH (a)-[:S]->(c) RETURN a, b, c"
-    ));
+    assert!(accepted("MATCH (a)-[:R]->(b) MATCH (a)-[:S]->(c) RETURN a, b, c"));
     assert!(accepted("MATCH (a)-[r]->(b) RETURN a, r, b"));
     assert!(accepted("MATCH (a), (b) RETURN a, b"));
 }
@@ -115,17 +113,13 @@ fn a_create_on_a_name_carried_through_with_is_still_rejected() {
 #[test]
 fn a_name_carried_through_with_keeps_its_kind() {
     assert!(rejected("MATCH (a)-[r]->(b) WITH r MATCH (r) RETURN r"));
-    assert!(rejected(
-        "MATCH (a)-[r]->(b) WITH r AS q MATCH (q) RETURN q"
-    ));
+    assert!(rejected("MATCH (a)-[r]->(b) WITH r AS q MATCH (q) RETURN q"));
     // The other direction: a *node* carried forward may not become a
     // relationship. I first wrote this as an `accepted` case in the
     // dropped-name test above and it failed -- correctly. `a` is projected by
     // the WITH, so it is still a node on the far side, and the rule is right
     // to refuse. The test was wrong, not the code.
-    assert!(rejected(
-        "MATCH (a)-[r]->(b) WITH a MATCH ()-[a]-() RETURN a"
-    ));
+    assert!(rejected("MATCH (a)-[r]->(b) WITH a MATCH ()-[a]-() RETURN a"));
 }
 
 /// Anonymous positions bind nothing and cannot conflict.

@@ -28,10 +28,7 @@ use crate::query::ast::{Clause, Dialect, PathPattern, PathRestrictor, Query};
 /// `Dialect::Cypher` is a no-op by construction: the parser already fills in the
 /// openCypher defaults, so nothing is rewritten and no existing caller changes
 /// behaviour.
-pub fn apply(
-    query: &mut Query,
-    dialect: Dialect,
-) -> Result<(), crate::query::validate::ValidationError> {
+pub fn apply(query: &mut Query, dialect: Dialect) -> Result<(), crate::query::validate::ValidationError> {
     if dialect == Dialect::Cypher {
         return Ok(());
     }
@@ -107,18 +104,9 @@ mod tests {
     #[test]
     fn gql_leaves_an_explicit_restrictor_alone() {
         for (text, want) in [
-            (
-                "MATCH TRAIL (a)-[:E*1..3]->(b) RETURN a",
-                PathRestrictor::Trail,
-            ),
-            (
-                "MATCH ACYCLIC (a)-[:E*1..3]->(b) RETURN a",
-                PathRestrictor::Acyclic,
-            ),
-            (
-                "MATCH SIMPLE (a)-[:E*1..3]->(b) RETURN a",
-                PathRestrictor::Simple,
-            ),
+            ("MATCH TRAIL (a)-[:E*1..3]->(b) RETURN a", PathRestrictor::Trail),
+            ("MATCH ACYCLIC (a)-[:E*1..3]->(b) RETURN a", PathRestrictor::Acyclic),
+            ("MATCH SIMPLE (a)-[:E*1..3]->(b) RETURN a", PathRestrictor::Simple),
         ] {
             let mut q = parsed(text);
             apply(&mut q, Dialect::Gql).unwrap();

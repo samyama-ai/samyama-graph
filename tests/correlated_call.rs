@@ -16,9 +16,7 @@ fn graph() -> GraphStore {
     let mut s = GraphStore::new();
     let q = "CREATE (a:P {n: 'a', v: 1}), (b:P {n: 'b', v: 2}), (c:P {n: 'c', v: 3}), (d:P {n: 'd', v: 4}), \
              (a)-[:K {w: 1}]->(b), (b)-[:K {w: 2}]->(c), (a)-[:L]->(c), (d)-[:K {w: 3}]->(d)";
-    MutQueryExecutor::new(&mut s, "default".into())
-        .execute(&parse_query(q).unwrap())
-        .unwrap();
+    MutQueryExecutor::new(&mut s, "default".into()).execute(&parse_query(q).unwrap()).unwrap();
     s
 }
 
@@ -35,19 +33,11 @@ fn cell(v: Option<&Value>) -> String {
 fn check(q: &str, expected: &[&str]) {
     let s = graph();
     let p = parse_query(q).unwrap_or_else(|e| panic!("`{q}`: {e}"));
-    let out = QueryExecutor::new(&s)
-        .execute(&p)
-        .unwrap_or_else(|e| panic!("`{q}`: {e}"));
+    let out = QueryExecutor::new(&s).execute(&p).unwrap_or_else(|e| panic!("`{q}`: {e}"));
     let mut got: Vec<String> = out
         .records
         .iter()
-        .map(|r| {
-            out.columns
-                .iter()
-                .map(|c| cell(r.get(c)))
-                .collect::<Vec<_>>()
-                .join("|")
-        })
+        .map(|r| out.columns.iter().map(|c| cell(r.get(c))).collect::<Vec<_>>().join("|"))
         .collect();
     got.sort();
     assert_eq!(got, expected, "{q}");

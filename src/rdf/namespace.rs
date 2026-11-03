@@ -130,10 +130,7 @@ mod tests {
             mgr.get_iri("rdfs").unwrap(),
             "http://www.w3.org/2000/01/rdf-schema#"
         );
-        assert_eq!(
-            mgr.get_iri("xsd").unwrap(),
-            "http://www.w3.org/2001/XMLSchema#"
-        );
+        assert_eq!(mgr.get_iri("xsd").unwrap(), "http://www.w3.org/2001/XMLSchema#");
     }
 
     #[test]
@@ -178,18 +175,12 @@ mod tests {
             Err(e @ PrefixError::InvalidIri(_)) => assert_eq!(e.to_string(), "Invalid IRI: plain"),
             other => panic!("{other:?}"),
         }
-        assert_eq!(
-            mgr.get_iri("zz").unwrap_err().to_string(),
-            "Unknown prefix: zz"
-        );
+        assert_eq!(mgr.get_iri("zz").unwrap_err().to_string(), "Unknown prefix: zz");
     }
 
     #[test]
     fn compact_returns_none_for_unregistered_namespace() {
-        assert_eq!(
-            NamespaceManager::new().compact("http://example.org/x"),
-            None
-        );
+        assert_eq!(NamespaceManager::new().compact("http://example.org/x"), None);
     }
 
     #[test]

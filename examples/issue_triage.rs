@@ -36,19 +36,14 @@ fn run(setup: &[&str], q: &str) -> Result<(Vec<String>, usize), String> {
             .execute(&p)
             .map_err(|e| format!("exec: {e:?}"))?
     } else {
-        QueryExecutor::new(&s)
-            .execute(&p)
-            .map_err(|e| format!("exec: {e:?}"))?
+        QueryExecutor::new(&s).execute(&p).map_err(|e| format!("exec: {e:?}"))?
     };
     let rows: Vec<String> = batch
         .records
         .iter()
         .map(|r| {
-            let mut kv: Vec<String> = batch
-                .columns
-                .iter()
-                .map(|c| format!("{}={:?}", c, r.get(c)))
-                .collect();
+            let mut kv: Vec<String> =
+                batch.columns.iter().map(|c| format!("{}={:?}", c, r.get(c))).collect();
             if kv.is_empty() {
                 kv.push(format!("{r:?}"));
             }
@@ -168,45 +163,17 @@ fn main() {
                 let shown = if rows.is_empty() {
                     format!("(0 rows, {nodes} nodes)")
                 } else {
-                    format!(
-                        "{} [{} rows, {} nodes]",
-                        rows.first().cloned().unwrap_or_default(),
-                        rows.len(),
-                        nodes
-                    )
+                    format!("{} [{} rows, {} nodes]",
+                        rows.first().cloned().unwrap_or_default(), rows.len(), nodes)
                 };
-                println!(
-                    "{:<7}{:<52}{}",
-                    format!("#{}", c.issue),
-                    c.what,
-                    &shown[..shown.len().min(52)]
-                );
+                println!("{:<7}{:<52}{}", format!("#{}", c.issue), c.what, &shown[..shown.len().min(52)]);
                 println!("       expected: {}", c.expect);
-                println!(
-                    "       -> {}\n",
-                    if ok {
-                        "FIXED — candidate to close"
-                    } else {
-                        "still reproduces"
-                    }
-                );
-                if ok {
-                    fixed.push(c.issue)
-                } else {
-                    still_open.push(c.issue)
-                }
+                println!("       -> {}\n", if ok { "FIXED — candidate to close" } else { "still reproduces" });
+                if ok { fixed.push(c.issue) } else { still_open.push(c.issue) }
             }
             Err(e) => {
-                println!(
-                    "{:<7}{:<52}{}",
-                    format!("#{}", c.issue),
-                    c.what,
-                    &e[..e.len().min(52)]
-                );
-                println!(
-                    "       expected: {}\n       -> still reproduces (errored)\n",
-                    c.expect
-                );
+                println!("{:<7}{:<52}{}", format!("#{}", c.issue), c.what, &e[..e.len().min(52)]);
+                println!("       expected: {}\n       -> still reproduces (errored)\n", c.expect);
                 still_open.push(c.issue);
             }
         }

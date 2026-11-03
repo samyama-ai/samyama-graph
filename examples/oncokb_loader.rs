@@ -86,16 +86,15 @@ async fn main() -> Result<(), Error> {
     let result = {
         let mut graph = client.store_write().await;
         let hgnc_index = build_hgnc_symbol_index(&graph);
-        eprintln!("  HGNC :Gene bridge: {} symbols", fmt_num(hgnc_index.len()));
+        eprintln!(
+            "  HGNC :Gene bridge: {} symbols",
+            fmt_num(hgnc_index.len())
+        );
 
         let mut total = load_curated_genes_json(
             &mut graph,
             &genes_path,
-            if hgnc_index.is_empty() {
-                None
-            } else {
-                Some(&hgnc_index)
-            },
+            if hgnc_index.is_empty() { None } else { Some(&hgnc_index) },
         )?;
         eprintln!(
             "  Curated genes: {} :OncoKBGene nodes, {} SAME_AS edges",
@@ -105,7 +104,8 @@ async fn main() -> Result<(), Error> {
 
         if let Some(ref vp) = variants_path {
             let oncokb_index = build_oncokb_gene_index(&graph);
-            let var_res = load_actionable_variants_json(&mut graph, vp, &oncokb_index)?;
+            let var_res =
+                load_actionable_variants_json(&mut graph, vp, &oncokb_index)?;
             total.variant_nodes = var_res.variant_nodes;
             total.drug_nodes = var_res.drug_nodes;
             total.curated_edges = var_res.curated_edges;
@@ -124,34 +124,13 @@ async fn main() -> Result<(), Error> {
     eprintln!();
     eprintln!("========================================");
     eprintln!("OncoKB load complete.");
-    eprintln!(
-        "  :OncoKBGene nodes:                 {}",
-        fmt_num(result.gene_nodes)
-    );
-    eprintln!(
-        "  :Variant (OncoKB) nodes:           {}",
-        fmt_num(result.variant_nodes)
-    );
-    eprintln!(
-        "  :Drug nodes:                       {}",
-        fmt_num(result.drug_nodes)
-    );
-    eprintln!(
-        "  SAME_AS (OncoKBGene -> HGNC) edges:{}",
-        fmt_num(result.same_as_edges)
-    );
-    eprintln!(
-        "  CURATED_AS_ONCOGENIC edges:        {}",
-        fmt_num(result.curated_edges)
-    );
-    eprintln!(
-        "  HAS_THERAPEUTIC_IMPLICATION edges: {}",
-        fmt_num(result.therapeutic_edges)
-    );
-    eprintln!(
-        "  Time:                              {:.1}s",
-        total.elapsed().as_secs_f64()
-    );
+    eprintln!("  :OncoKBGene nodes:                 {}", fmt_num(result.gene_nodes));
+    eprintln!("  :Variant (OncoKB) nodes:           {}", fmt_num(result.variant_nodes));
+    eprintln!("  :Drug nodes:                       {}", fmt_num(result.drug_nodes));
+    eprintln!("  SAME_AS (OncoKBGene -> HGNC) edges:{}", fmt_num(result.same_as_edges));
+    eprintln!("  CURATED_AS_ONCOGENIC edges:        {}", fmt_num(result.curated_edges));
+    eprintln!("  HAS_THERAPEUTIC_IMPLICATION edges: {}", fmt_num(result.therapeutic_edges));
+    eprintln!("  Time:                              {:.1}s", total.elapsed().as_secs_f64());
     eprintln!("========================================");
 
     if let Some(ref snap) = snapshot_path {

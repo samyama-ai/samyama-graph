@@ -51,21 +51,13 @@ pub fn property_to_json(pv: &PropertyValue) -> serde_json::Value {
         PropertyValue::LocalTime(nanos) => {
             serde_json::json!({"__type": "LocalTime", "nanos": nanos})
         }
-        PropertyValue::Time {
-            nanos,
-            offset_seconds,
-        } => {
+        PropertyValue::Time { nanos, offset_seconds } => {
             serde_json::json!({"__type": "Time", "nanos": nanos, "offset": offset_seconds})
         }
         PropertyValue::LocalDateTime { secs, nanos } => {
             serde_json::json!({"__type": "LocalDateTime", "secs": secs, "nanos": nanos})
         }
-        PropertyValue::ZonedDateTime {
-            secs,
-            nanos,
-            offset_seconds,
-            zone,
-        } => {
+        PropertyValue::ZonedDateTime { secs, nanos, offset_seconds, zone } => {
             serde_json::json!({
                 "__type": "ZonedDateTime",
                 "secs": secs, "nanos": nanos,
@@ -159,11 +151,7 @@ pub fn json_to_property(val: &serde_json::Value) -> PropertyValue {
                         if let Some(n) = obj.get("nanos").and_then(|v| v.as_i64()) {
                             return PropertyValue::Time {
                                 nanos: n,
-                                offset_seconds: obj
-                                    .get("offset")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(0)
-                                    as i32,
+                                offset_seconds: obj.get("offset").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
                             };
                         }
                     }
@@ -171,8 +159,7 @@ pub fn json_to_property(val: &serde_json::Value) -> PropertyValue {
                         if let Some(sec) = obj.get("secs").and_then(|v| v.as_i64()) {
                             return PropertyValue::LocalDateTime {
                                 secs: sec,
-                                nanos: obj.get("nanos").and_then(|v| v.as_u64()).unwrap_or(0)
-                                    as u32,
+                                nanos: obj.get("nanos").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                             };
                         }
                     }
@@ -180,17 +167,9 @@ pub fn json_to_property(val: &serde_json::Value) -> PropertyValue {
                         if let Some(sec) = obj.get("secs").and_then(|v| v.as_i64()) {
                             return PropertyValue::ZonedDateTime {
                                 secs: sec,
-                                nanos: obj.get("nanos").and_then(|v| v.as_u64()).unwrap_or(0)
-                                    as u32,
-                                offset_seconds: obj
-                                    .get("offset")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(0)
-                                    as i32,
-                                zone: obj
-                                    .get("zone")
-                                    .and_then(|v| v.as_str())
-                                    .map(|z| z.to_string()),
+                                nanos: obj.get("nanos").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                                offset_seconds: obj.get("offset").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                                zone: obj.get("zone").and_then(|v| v.as_str()).map(|z| z.to_string()),
                             };
                         }
                     }
@@ -215,10 +194,20 @@ pub fn json_to_property(val: &serde_json::Value) -> PropertyValue {
                         }
                     }
                     "Duration" => {
-                        let months = obj.get("months").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let days = obj.get("days").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let seconds = obj.get("seconds").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let nanos = obj.get("nanos").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                        let months = obj
+                            .get("months")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let days =
+                            obj.get("days").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let seconds = obj
+                            .get("seconds")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let nanos = obj
+                            .get("nanos")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0) as i32;
                         return PropertyValue::Duration {
                             months,
                             days,
@@ -258,14 +247,8 @@ mod tests {
             PropertyValue::DateTime(1_437_514_832_142),
             PropertyValue::Date(19_723),
             PropertyValue::LocalTime(45_296_000_000_123),
-            PropertyValue::Time {
-                nanos: 45_296_000_000_000,
-                offset_seconds: 19_800,
-            },
-            PropertyValue::LocalDateTime {
-                secs: 1_700_000_000,
-                nanos: 7,
-            },
+            PropertyValue::Time { nanos: 45_296_000_000_000, offset_seconds: 19_800 },
+            PropertyValue::LocalDateTime { secs: 1_700_000_000, nanos: 7 },
             PropertyValue::ZonedDateTime {
                 secs: 1_700_000_000,
                 nanos: 9,
@@ -282,12 +265,7 @@ mod tests {
                 .collect(),
             ),
             PropertyValue::Vector(vec![0.25, -1.5, 3.0]),
-            PropertyValue::Duration {
-                months: 14,
-                days: 3,
-                seconds: 3_600,
-                nanos: 5,
-            },
+            PropertyValue::Duration { months: 14, days: 3, seconds: 3_600, nanos: 5 },
         ];
         for v in &values {
             match v {
@@ -347,9 +325,6 @@ mod tests {
                 other => panic!("{f}: {text} read back as {other:?}"),
             }
         }
-        assert_eq!(
-            property_to_json(&PropertyValue::Float(2.5)),
-            serde_json::json!(2.5)
-        );
+        assert_eq!(property_to_json(&PropertyValue::Float(2.5)), serde_json::json!(2.5));
     }
 }

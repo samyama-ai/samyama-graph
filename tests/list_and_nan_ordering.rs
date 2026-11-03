@@ -84,16 +84,8 @@ fn nan_orders_as_false_against_a_number() {
 #[test]
 fn nan_against_another_type_is_still_null() {
     for other in ["'a'", "true", "[1]", "null"] {
-        assert_eq!(
-            truth(&format!("0.0 / 0.0 < {other}")),
-            None,
-            "0.0/0.0 < {other}"
-        );
-        assert_eq!(
-            truth(&format!("0.0 / 0.0 >= {other}")),
-            None,
-            "0.0/0.0 >= {other}"
-        );
+        assert_eq!(truth(&format!("0.0 / 0.0 < {other}")), None, "0.0/0.0 < {other}");
+        assert_eq!(truth(&format!("0.0 / 0.0 >= {other}")), None, "0.0/0.0 >= {other}");
     }
 }
 

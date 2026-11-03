@@ -33,10 +33,7 @@ fn it_copies_every_binding() {
 #[test]
 fn zero_extra_is_a_plain_clone() {
     let original = sample();
-    assert_eq!(
-        original.clone_with_capacity(0).bindings(),
-        original.clone().bindings()
-    );
+    assert_eq!(original.clone_with_capacity(0).bindings(), original.clone().bindings());
 }
 
 #[test]
@@ -67,10 +64,7 @@ fn rebinding_an_existing_name_still_replaces_rather_than_appends() {
     let mut copy = sample().clone_with_capacity(4);
     copy.bind("person", Value::NodeRef(NodeId::from(99u64)));
     assert_eq!(copy.bindings().len(), 3, "rebinding must not append");
-    assert_eq!(
-        copy.get("person"),
-        Some(&Value::NodeRef(NodeId::from(99u64)))
-    );
+    assert_eq!(copy.get("person"), Some(&Value::NodeRef(NodeId::from(99u64))));
 }
 
 #[test]
@@ -98,11 +92,7 @@ fn an_expand_returns_the_same_rows_as_before() {
 
     let count = |cypher: &str| -> usize {
         let query = parse_query(cypher).expect("query should parse");
-        QueryExecutor::new(&store)
-            .execute(&query)
-            .expect("query should run")
-            .records
-            .len()
+        QueryExecutor::new(&store).execute(&query).expect("query should run").records.len()
     };
 
     // No edge variable, no path variable.
@@ -110,25 +100,16 @@ fn an_expand_returns_the_same_rows_as_before() {
     // An edge variable.
     assert_eq!(count("MATCH (h:Hub)<-[e:IN]-(n:N) RETURN n.v, e.w"), 200);
     // A path variable.
-    assert_eq!(
-        count("MATCH p = (h:Hub)<-[:IN]-(n:N) RETURN length(p)"),
-        200
-    );
+    assert_eq!(count("MATCH p = (h:Hub)<-[:IN]-(n:N) RETURN length(p)"), 200);
     // Both.
-    assert_eq!(
-        count("MATCH p = (h:Hub)<-[e:IN]-(n:N) RETURN length(p), e.w"),
-        200
-    );
+    assert_eq!(count("MATCH p = (h:Hub)<-[e:IN]-(n:N) RETURN length(p), e.w"), 200);
 
     // And the values, not just the count — a mis-sized reservation that
     // silently dropped a binding would keep the row count right.
     let query = parse_query("MATCH (h:Hub)<-[e:IN]-(n:N) WHERE n.v = 5 RETURN e.w AS w").unwrap();
     let batch = QueryExecutor::new(&store).execute(&query).unwrap();
     assert_eq!(batch.records.len(), 1);
-    assert_eq!(
-        batch.records[0].get("w"),
-        Some(&Value::Property(PropertyValue::Integer(10)))
-    );
+    assert_eq!(batch.records[0].get("w"), Some(&Value::Property(PropertyValue::Integer(10))));
 }
 
 #[test]

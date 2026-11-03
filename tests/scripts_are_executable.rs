@@ -87,18 +87,11 @@ fn every_case_study_has_a_runnable_entry_point() {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&run).unwrap().permissions().mode();
             if mode & 0o111 == 0 {
-                missing.push(format!(
-                    "{}: run.sh is not executable ({:o})",
-                    dir.display(),
-                    mode
-                ));
+                missing.push(format!("{}: run.sh is not executable ({:o})", dir.display(), mode));
             }
         }
     }
 
-    assert!(
-        checked > 0,
-        "no case studies found — has the layout changed?"
-    );
+    assert!(checked > 0, "no case studies found — has the layout changed?");
     assert!(missing.is_empty(), "{}", missing.join("\n"));
 }

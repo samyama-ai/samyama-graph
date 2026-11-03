@@ -47,9 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            eprintln!(
-                "--data-dir <path> is required (this example needs input; see the header comment)"
-            );
+            eprintln!("--data-dir <path> is required (this example needs input; see the header comment)");
             std::process::exit(2)
         });
 
@@ -64,31 +62,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the outer scan, so pinned-vs-unpinned is measurable without a timeout.
     const S3: &str = "MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a) \
 WHERE a.id < 400 AND a.id < b.id AND b.id < c.id RETURN count(a) AS x";
-    for (label, cypher) in [
-        ("BI-17 stage1 (a-b)", S1),
-        ("BI-17 stage2 (a-b-c)", S2),
-        ("BI-17 bounded (full)", S3),
-    ] {
+    for (label, cypher) in [("BI-17 stage1 (a-b)", S1), ("BI-17 stage2 (a-b-c)", S2), ("BI-17 bounded (full)", S3)] {
         let t = std::time::Instant::now();
         let q = parse_query(cypher)?;
         match QueryExecutor::new(&graph).execute(&q) {
             Ok(out) => {
                 let v = out.records.first().and_then(|r| r.get("x")).cloned();
-                println!(
-                    "@@ {label:<24} {:>8.1}s  rows={v:?}",
-                    t.elapsed().as_secs_f64()
-                );
+                println!("@@ {label:<24} {:>8.1}s  rows={v:?}", t.elapsed().as_secs_f64());
             }
             Err(e) => println!("@@ {label:<24} failed: {e}"),
         }
     }
 
-    for (label, cypher) in [
-        ("BI-11", BI11),
-        ("BI-17", BI17),
-        ("outer only", OUTER_ONLY),
-        ("inner only", INNER_ONLY),
-    ] {
+    for (label, cypher) in [("BI-11", BI11), ("BI-17", BI17), ("outer only", OUTER_ONLY), ("inner only", INNER_ONLY)] {
         println!("\n================ {label} ================");
         println!("{cypher}\n");
         let q = parse_query(&format!("EXPLAIN {cypher}"))?;

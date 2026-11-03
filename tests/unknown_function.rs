@@ -21,8 +21,8 @@
 //! so a namespaced name is always allowed and this catches the un-namespaced
 //! typo — the one that costs a debugging session.
 
-use samyama::graph::GraphStore;
 use samyama::query::executor::operator::{is_known_function, KNOWN_FUNCTIONS};
+use samyama::graph::GraphStore;
 use samyama::query::parser::parse_query;
 use samyama::query::QueryEngine;
 
@@ -43,10 +43,7 @@ fn an_unknown_function_is_refused() {
 
 #[test]
 fn the_message_names_the_function() {
-    let err = format!(
-        "{:?}",
-        parse_query("MATCH (a) RETURN lenght(a.name)").unwrap_err()
-    );
+    let err = format!("{:?}", parse_query("MATCH (a) RETURN lenght(a.name)").unwrap_err());
     assert!(err.contains("lenght"), "{err}");
 }
 
@@ -107,15 +104,7 @@ fn an_algorithm_name_called_as_a_function_is_refused_at_compile_time() {
     // These are procedures, reached as `CALL algo.<name>(...)`. As scalar
     // calls they used to pass validation and fail with "Runtime error: Unknown
     // function" -- or, with no row to evaluate, not fail at all (#1456).
-    for name in [
-        "pagerank",
-        "wcc",
-        "pca",
-        "louvain",
-        "shortestPath",
-        "degree",
-        "jaccard",
-    ] {
+    for name in ["pagerank", "wcc", "pca", "louvain", "shortestPath", "degree", "jaccard"] {
         let err = parse_query(&format!("RETURN {name}() AS r"))
             .expect_err(&format!("{name}() is not a scalar function"));
         let text = format!("{err:?}");
@@ -127,9 +116,7 @@ fn an_algorithm_name_called_as_a_function_is_refused_at_compile_time() {
         let mut store = GraphStore::new();
         let q = format!("MATCH (n) RETURN {name}(n) AS r");
         assert!(
-            QueryEngine::new()
-                .execute_mut(&q, &mut store, "default")
-                .is_err(),
+            QueryEngine::new().execute_mut(&q, &mut store, "default").is_err(),
             "{q} succeeded over an empty graph"
         );
     }

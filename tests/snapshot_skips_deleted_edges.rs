@@ -60,12 +60,7 @@ fn the_store_does_not_count_a_relationship_deleted_after_compaction() {
 #[test]
 fn a_relationship_deleted_after_compaction_stays_deleted() {
     let restored = round_trip(&compacted_then_deleted());
-    assert_eq!(
-        restored.edge_count(),
-        2,
-        "the deleted relationship came back: {:?}",
-        types(&restored)
-    );
+    assert_eq!(restored.edge_count(), 2, "the deleted relationship came back: {:?}", types(&restored));
     assert_eq!(types(&restored), vec!["R".to_string(), "S".to_string()]);
 }
 

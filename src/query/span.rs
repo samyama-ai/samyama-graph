@@ -90,8 +90,7 @@ pub fn offending_token(message: &str) -> Option<&str> {
         // at it with full confidence.
         if !t.is_empty()
             && (t.contains('.') || t.contains('_'))
-            && t.chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+            && t.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
             && t.chars().next().is_some_and(|c| c.is_alphabetic())
         {
             candidates.push((i + 2, t));
@@ -119,18 +118,15 @@ pub fn locate(query: &str, needle: &str) -> Option<Span> {
     while let Some(rel) = query[from..].find(needle) {
         let start = from + rel;
         let end = start + needle.len();
-        let before_ok = start == 0 || !query[..start].chars().next_back().is_some_and(is_ident);
-        let after_ok = end == query.len() || !query[end..].chars().next().is_some_and(is_ident);
+        let before_ok = start == 0
+            || !query[..start].chars().next_back().is_some_and(is_ident);
+        let after_ok = end == query.len()
+            || !query[end..].chars().next().is_some_and(is_ident);
         if before_ok && after_ok {
             let line = query[..start].matches('\n').count() + 1;
             let line_start = query[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
             let column = query[line_start..start].chars().count() + 1;
-            return Some(Span {
-                line,
-                column,
-                offset: start,
-                len: needle.len(),
-            });
+            return Some(Span { line, column, offset: start, len: needle.len() });
         }
         from = end;
     }
@@ -151,7 +147,11 @@ pub fn render(query: &str, span: Span) -> String {
     let gutter = span.line.to_string().len();
     let pad = " ".repeat(gutter);
     let caret_pad = " ".repeat(span.column.saturating_sub(1));
-    let carets = "^".repeat(query[span.offset..].chars().take(span.len).count().max(1));
+    let carets = "^".repeat(query[span.offset..]
+        .chars()
+        .take(span.len)
+        .count()
+        .max(1));
     format!(
         " --> {}:{}\n{pad} |\n{} | {line_text}\n{pad} | {caret_pad}{carets}",
         span.line, span.column, span.line
@@ -267,11 +267,7 @@ mod tests {
         // Not given a position it cannot justify. This is why the measurement
         // this moves is not 100%: some errors genuinely name no token, and the
         // fix for those is a better message, not a guessed span.
-        assert!(annotate(
-            "Type error: Add requires numeric or string",
-            "RETURN 1 + {a: 1}"
-        )
-        .is_none());
+        assert!(annotate("Type error: Add requires numeric or string", "RETURN 1 + {a: 1}").is_none());
     }
 
     #[test]

@@ -10,8 +10,8 @@
 //! 5. Concurrent read simulation
 
 use samyama::graph::{GraphStore, Label, PropertyValue};
-use std::hint::black_box;
 use std::time::Instant;
+use std::hint::black_box;
 
 #[path = "common/bench_setup.rs"]
 mod bench_setup;
@@ -53,10 +53,7 @@ fn benchmark_arena_allocation() {
     println!("  Nodes created:    {:>12}", format_number(ARENA_NODES));
     println!("  Duration:         {:>12.2?}", duration);
     println!("  Throughput:       {:>12.0} nodes/sec", rate);
-    println!(
-        "  Per-node latency: {:>12.0} ns",
-        duration.as_nanos() as f64 / ARENA_NODES as f64
-    );
+    println!("  Per-node latency: {:>12.0} ns", duration.as_nanos() as f64 / ARENA_NODES as f64);
 
     // Measure with properties
     let mut store2 = GraphStore::new();
@@ -76,10 +73,7 @@ fn benchmark_arena_allocation() {
     println!();
     println!("  With 4 properties (100K nodes):");
     println!("  Duration:         {:>12.2?}", dur2);
-    println!(
-        "  Throughput:       {:>12.0} nodes/sec",
-        100_000.0 / dur2.as_secs_f64()
-    );
+    println!("  Throughput:       {:>12.0} nodes/sec", 100_000.0 / dur2.as_secs_f64());
     println!();
 }
 
@@ -112,14 +106,8 @@ fn benchmark_mvcc_access() {
     println!("  Read operations:  {:>12}", format_number(MVCC_READS));
     println!("  Target version:   {:>12}", 50);
     println!("  Duration:         {:>12.2?}", duration);
-    println!(
-        "  Throughput:       {:>12.0} reads/sec",
-        MVCC_READS as f64 / duration.as_secs_f64()
-    );
-    println!(
-        "  Per-read latency: {:>12.0} ns",
-        duration.as_nanos() as f64 / MVCC_READS as f64
-    );
+    println!("  Throughput:       {:>12.0} reads/sec", MVCC_READS as f64 / duration.as_secs_f64());
+    println!("  Per-read latency: {:>12.0} ns", duration.as_nanos() as f64 / MVCC_READS as f64);
     println!();
 
     // Benchmark: Read at latest version
@@ -131,10 +119,7 @@ fn benchmark_mvcc_access() {
 
     println!("  Latest version reads:");
     println!("  Duration:         {:>12.2?}", dur2);
-    println!(
-        "  Throughput:       {:>12.0} reads/sec",
-        MVCC_READS as f64 / dur2.as_secs_f64()
-    );
+    println!("  Throughput:       {:>12.0} reads/sec", MVCC_READS as f64 / dur2.as_secs_f64());
     println!();
 }
 
@@ -172,14 +157,8 @@ fn benchmark_time_travel_queries() {
     let versions_to_test = [1u64, 5, 10, 15, 20];
     let reads_per_version = 100_000;
 
-    println!(
-        "  {:>8} {:>14} {:>14} {:>12}",
-        "Version", "Duration", "Throughput", "Latency"
-    );
-    println!(
-        "  {:>8} {:>14} {:>14} {:>12}",
-        "-------", "---------", "----------", "-------"
-    );
+    println!("  {:>8} {:>14} {:>14} {:>12}", "Version", "Duration", "Throughput", "Latency");
+    println!("  {:>8} {:>14} {:>14} {:>12}", "-------", "---------", "----------", "-------");
 
     for &version in &versions_to_test {
         let start = Instant::now();
@@ -191,10 +170,8 @@ fn benchmark_time_travel_queries() {
         let throughput = reads_per_version as f64 / duration.as_secs_f64();
         let latency_ns = duration.as_nanos() as f64 / reads_per_version as f64;
 
-        println!(
-            "  {:>8} {:>12.2?} {:>12.0}/s {:>10.0} ns",
-            version, duration, throughput, latency_ns
-        );
+        println!("  {:>8} {:>12.2?} {:>12.0}/s {:>10.0} ns",
+            version, duration, throughput, latency_ns);
     }
     println!();
 }
@@ -241,13 +218,9 @@ fn benchmark_version_overhead() {
     }
     let versioned_duration = start2.elapsed();
 
-    let overhead_pct =
-        ((versioned_duration.as_secs_f64() / baseline_duration.as_secs_f64()) - 1.0) * 100.0;
+    let overhead_pct = ((versioned_duration.as_secs_f64() / baseline_duration.as_secs_f64()) - 1.0) * 100.0;
 
-    println!(
-        "  Entities:         {:>12}",
-        format_number(PROPERTY_UPDATE_COUNT)
-    );
+    println!("  Entities:         {:>12}", format_number(PROPERTY_UPDATE_COUNT));
     println!("  Version bumps:    {:>12}", 10);
     println!("  Updates/version:  {:>12}", format_number(1000));
     println!();
@@ -265,18 +238,8 @@ fn benchmark_label_scan_performance() {
     let mut store = GraphStore::new();
 
     // Create nodes with different labels
-    let labels = [
-        "Server",
-        "User",
-        "Transaction",
-        "Document",
-        "Event",
-        "Alert",
-        "Metric",
-        "Config",
-        "Session",
-        "Request",
-    ];
+    let labels = ["Server", "User", "Transaction", "Document", "Event",
+                  "Alert", "Metric", "Config", "Session", "Request"];
 
     for i in 0..100_000 {
         let label = labels[i % labels.len()];
@@ -292,14 +255,8 @@ fn benchmark_label_scan_performance() {
 
     let scan_iterations = 1000;
 
-    println!(
-        "  {:>15} {:>10} {:>14} {:>12}",
-        "Label", "Count", "Duration", "Latency"
-    );
-    println!(
-        "  {:>15} {:>10} {:>14} {:>12}",
-        "-----", "-----", "--------", "-------"
-    );
+    println!("  {:>15} {:>10} {:>14} {:>12}", "Label", "Count", "Duration", "Latency");
+    println!("  {:>15} {:>10} {:>14} {:>12}", "-----", "-----", "--------", "-------");
 
     for &label in &labels[..5] {
         let start = Instant::now();
@@ -311,13 +268,8 @@ fn benchmark_label_scan_performance() {
         let count = store.get_nodes_by_label(&Label::new(label)).len();
         let latency = duration.as_nanos() as f64 / scan_iterations as f64;
 
-        println!(
-            "  {:>15} {:>10} {:>12.2?} {:>10.0} ns",
-            label,
-            format_number(count),
-            duration,
-            latency
-        );
+        println!("  {:>15} {:>10} {:>12.2?} {:>10.0} ns",
+            label, format_number(count), duration, latency);
     }
     println!();
 }
@@ -355,10 +307,7 @@ fn main() {
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║   Benchmark Summary                                        ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
-    println!(
-        "║  Total duration: {:>10.2?}                              ║",
-        total_duration
-    );
+    println!("║  Total duration: {:>10.2?}                              ║", total_duration);
     println!("║                                                            ║");
     println!("║  Key Metrics:                                              ║");
     println!("║  - Arena allocation: Sub-microsecond per node              ║");

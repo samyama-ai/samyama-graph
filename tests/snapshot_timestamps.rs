@@ -78,8 +78,7 @@ fn a_snapshot_without_the_fields_still_imports() {
         s
     };
     assert!(
-        raw.lines()
-            .any(|l| l.contains("\"t\":\"n\"") && l.contains("created_at")),
+        raw.lines().any(|l| l.contains("\"t\":\"n\"") && l.contains("created_at")),
         "the fixture snapshot must carry the field on its node lines"
     );
 
@@ -97,7 +96,10 @@ fn a_snapshot_without_the_fields_still_imports() {
                 let pat = format!(",\"{key}\":");
                 while let Some(p) = l.find(&pat) {
                     let tail = &l[p + 1..];
-                    let end = tail.find([',', '}']).map(|c| p + 1 + c).unwrap_or(l.len());
+                    let end = tail
+                        .find([',', '}'])
+                        .map(|c| p + 1 + c)
+                        .unwrap_or(l.len());
                     l.replace_range(p..end, "");
                 }
             }

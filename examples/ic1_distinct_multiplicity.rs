@@ -56,19 +56,9 @@ fn main() {
     let mut ids = Vec::new();
     for i in 0..n {
         let p = s.create_node_with_labels([Label::new("Person")]);
-        s.set_node_property("default", p, "id", PropertyValue::Integer(i))
-            .unwrap();
-        s.set_node_property(
-            "default",
-            p,
-            "firstName",
-            PropertyValue::String(if i % 97 == 7 {
-                "Rare".into()
-            } else {
-                format!("Common{}", i % 17)
-            }),
-        )
-        .unwrap();
+        s.set_node_property("default", p, "id", PropertyValue::Integer(i)).unwrap();
+        s.set_node_property("default", p, "firstName", PropertyValue::String(
+            if i % 97 == 7 { "Rare".into() } else { format!("Common{}", i % 17) })).unwrap();
         ids.push(p);
     }
     for i in 0..ids.len() {
@@ -76,19 +66,11 @@ fn main() {
             let _ = s.create_edge(ids[i], ids[(i * 7 + d * 977) % ids.len()], "KNOWS");
         }
     }
-    for stmt in [
-        "CREATE INDEX ON :Person(id)",
-        "CREATE INDEX ON :Person(firstName)",
-    ] {
+    for stmt in ["CREATE INDEX ON :Person(id)", "CREATE INDEX ON :Person(firstName)"] {
         let q = parse_query(stmt).unwrap();
-        MutQueryExecutor::new(&mut s, "default".to_string())
-            .execute(&q)
-            .unwrap();
+        MutQueryExecutor::new(&mut s, "default".to_string()).execute(&q).unwrap();
     }
-    println!(
-        "{n} Person, {} KNOWS (degree {degree})\n",
-        n as usize * degree
-    );
+    println!("{n} Person, {} KNOWS (degree {degree})\n", n as usize * degree);
 
     let bare = "MATCH (p:Person {id: 0})-[:KNOWS*1..3]-(f:Person {firstName: \"Rare\"}) \
                 WHERE f.id <> 0 RETURN f.id AS id";
@@ -97,54 +79,34 @@ fn main() {
 
     let (bare_rows, bare_t) = median(&s, bare, 5);
     let (dist_rows, dist_t) = median(&s, distinct, 5);
-    println!(
-        "{:<38} {:>9} rows  {:>10.2?}",
-        "RETURN (enumerates trails)", bare_rows, bare_t
-    );
-    println!(
-        "{:<38} {:>9} rows  {:>10.2?}",
-        "RETURN DISTINCT (BFS, as IC1)", dist_rows, dist_t
-    );
+    println!("{:<38} {:>9} rows  {:>10.2?}", "RETURN (enumerates trails)", bare_rows, bare_t);
+    println!("{:<38} {:>9} rows  {:>10.2?}", "RETURN DISTINCT (BFS, as IC1)", dist_rows, dist_t);
 
     // The set of answers must be identical; only multiplicity differs. If the
     // two walks disagree on *which* nodes are reachable that is a wrong answer,
     // and it matters more than any timing here.
     let (p, q) = (parse_query(bare).unwrap(), parse_query(distinct).unwrap());
-    let mut a: Vec<String> = QueryExecutor::new(&s)
-        .execute(&p)
-        .unwrap()
-        .records
-        .iter()
-        .filter_map(|r| r.get("id").map(|v| format!("{v:?}")))
-        .collect();
+    let mut a: Vec<String> = QueryExecutor::new(&s).execute(&p).unwrap().records.iter()
+        .filter_map(|r| r.get("id").map(|v| format!("{v:?}"))).collect();
     a.sort();
     a.dedup();
-    let mut b: Vec<String> = QueryExecutor::new(&s)
-        .execute(&q)
-        .unwrap()
-        .records
-        .iter()
-        .filter_map(|r| r.get("id").map(|v| format!("{v:?}")))
-        .collect();
+    let mut b: Vec<String> = QueryExecutor::new(&s).execute(&q).unwrap().records.iter()
+        .filter_map(|r| r.get("id").map(|v| format!("{v:?}"))).collect();
     b.sort();
     assert_eq!(a, b, "the two walks disagree on which nodes are reachable");
     println!("\nboth walks agree on all {} distinct answers", b.len());
 
-    assert!(
-        dist_rows < bare_rows,
+    assert!(dist_rows < bare_rows,
         "DISTINCT returned {dist_rows} rows and the bare form {bare_rows}: the \
-         pattern is not fanning out, so this probe cannot test what it claims"
-    );
+         pattern is not fanning out, so this probe cannot test what it claims");
 
     // The point of the example. A generous bound: the measured gap is ~30x, and
     // asserting 3x fails loudly if the BFS path stops being taken while leaving
     // room for a slower machine.
     let speedup = bare_t.as_secs_f64() / dist_t.as_secs_f64();
     println!("DISTINCT is {speedup:.1}x faster — it takes the BFS walk, not trail enumeration");
-    assert!(
-        speedup > 3.0,
+    assert!(speedup > 3.0,
         "DISTINCT was only {speedup:.1}x faster than the enumerating form; \
          `multiplicity_is_observable` has probably stopped recognising this shape, \
-         and IC1 is enumerating trails again (#710, #1054)"
-    );
+         and IC1 is enumerating trails again (#710, #1054)");
 }

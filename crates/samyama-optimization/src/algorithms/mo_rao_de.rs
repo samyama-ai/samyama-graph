@@ -97,7 +97,8 @@ impl MORaoDESolver {
                     let j_rand = rng.gen_range(0..dim);
                     for j in 0..dim {
                         let mutant = population[a].variables[j]
-                            + self.f * (population[b].variables[j] - population[c].variables[j]);
+                            + self.f
+                                * (population[b].variables[j] - population[c].variables[j]);
                         let pick = rng.gen::<f64>() < self.cr || j == j_rand;
                         new_vars[j] = if pick {
                             mutant.clamp(lower[j], upper[j])

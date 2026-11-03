@@ -225,17 +225,12 @@ impl GraphStateMachine {
                 properties,
                 version,
             } => {
-                match self.persistence.persist_update_node_properties_versioned(
-                    &tenant,
-                    node_id,
-                    &properties,
-                    version,
-                ) {
+                match self
+                    .persistence
+                    .persist_update_node_properties_versioned(&tenant, node_id, &properties, version)
+                {
                     Ok(_) => {
-                        info!(
-                            "Node {} properties updated for tenant {} (v{})",
-                            node_id, tenant, version
-                        );
+                        info!("Node {} properties updated for tenant {} (v{})", node_id, tenant, version);
                         Response::Ok
                     }
                     Err(e) => Response::Error {
@@ -250,17 +245,12 @@ impl GraphStateMachine {
                 properties,
                 version,
             } => {
-                match self.persistence.persist_update_edge_properties(
-                    &tenant,
-                    edge_id,
-                    &properties,
-                    version,
-                ) {
+                match self
+                    .persistence
+                    .persist_update_edge_properties(&tenant, edge_id, &properties, version)
+                {
                     Ok(_) => {
-                        info!(
-                            "Edge {} properties updated for tenant {} (v{})",
-                            edge_id, tenant, version
-                        );
+                        info!("Edge {} properties updated for tenant {} (v{})", edge_id, tenant, version);
                         Response::Ok
                     }
                     Err(e) => Response::Error {
@@ -292,10 +282,7 @@ impl GraphStateMachine {
     pub async fn create_snapshot(&self) -> Vec<u8> {
         // For now, return empty snapshot
         // In production, this would serialize the entire graph state
-        info!(
-            "Creating snapshot at log index {}",
-            self.get_last_applied().await
-        );
+        info!("Creating snapshot at log index {}", self.get_last_applied().await);
         vec![]
     }
 
@@ -354,32 +341,25 @@ mod tests {
             node_id: 1,
             labels: vec!["Person".to_string()],
             properties: PropertyMap::new(),
-        })
-        .await;
+        }).await;
         sm.apply(Request::CreateNode {
             tenant: "default".to_string(),
             node_id: 2,
             labels: vec!["Person".to_string()],
             properties: PropertyMap::new(),
-        })
-        .await;
+        }).await;
 
         // Create edge
-        let response = sm
-            .apply(Request::CreateEdge {
-                tenant: "default".to_string(),
-                edge_id: 1,
-                source: 1,
-                target: 2,
-                edge_type: "KNOWS".to_string(),
-                properties: PropertyMap::new(),
-            })
-            .await;
+        let response = sm.apply(Request::CreateEdge {
+            tenant: "default".to_string(),
+            edge_id: 1,
+            source: 1,
+            target: 2,
+            edge_type: "KNOWS".to_string(),
+            properties: PropertyMap::new(),
+        }).await;
         // Result depends on implementation — at minimum it shouldn't crash
-        assert!(
-            !matches!(response, Response::Error { .. })
-                || matches!(response, Response::Error { .. })
-        );
+        assert!(!matches!(response, Response::Error { .. }) || matches!(response, Response::Error { .. }));
     }
 
     #[tokio::test]
@@ -393,15 +373,12 @@ mod tests {
             node_id: 1,
             labels: vec!["Person".to_string()],
             properties: PropertyMap::new(),
-        })
-        .await;
+        }).await;
 
-        let response = sm
-            .apply(Request::DeleteNode {
-                tenant: "default".to_string(),
-                node_id: 1,
-            })
-            .await;
+        let response = sm.apply(Request::DeleteNode {
+            tenant: "default".to_string(),
+            node_id: 1,
+        }).await;
         // Should succeed or return OK
         assert!(matches!(response, Response::Ok) || matches!(response, Response::Error { .. }));
     }
@@ -417,19 +394,13 @@ mod tests {
             node_id: 1,
             labels: vec!["Person".to_string()],
             properties: PropertyMap::new(),
-        })
-        .await;
+        }).await;
 
-        let response = sm
-            .apply(Request::ExecuteQuery {
-                tenant: "default".to_string(),
-                query: "MATCH (n:Person) RETURN n".to_string(),
-            })
-            .await;
-        assert!(
-            matches!(response, Response::QueryResult { .. })
-                || matches!(response, Response::Error { .. })
-        );
+        let response = sm.apply(Request::ExecuteQuery {
+            tenant: "default".to_string(),
+            query: "MATCH (n:Person) RETURN n".to_string(),
+        }).await;
+        assert!(matches!(response, Response::QueryResult { .. }) || matches!(response, Response::Error { .. }));
     }
 
     #[tokio::test]
@@ -464,11 +435,7 @@ mod tests {
         let request = Request::CreateNode {
             tenant: "default".to_string(),
             node_id: 10,
-            labels: vec![
-                "Person".to_string(),
-                "Employee".to_string(),
-                "Manager".to_string(),
-            ],
+            labels: vec!["Person".to_string(), "Employee".to_string(), "Manager".to_string()],
             properties: PropertyMap::new(),
         };
 
@@ -500,10 +467,7 @@ mod tests {
         let sm = GraphStateMachine::new(persistence);
 
         let mut props = PropertyMap::new();
-        props.insert(
-            "name".to_string(),
-            crate::graph::PropertyValue::String("Alice".to_string()),
-        );
+        props.insert("name".to_string(), crate::graph::PropertyValue::String("Alice".to_string()));
         props.insert("age".to_string(), crate::graph::PropertyValue::Integer(30));
 
         let request = Request::CreateNode {
@@ -524,10 +488,7 @@ mod tests {
         let sm = GraphStateMachine::new(persistence);
 
         let mut props = PropertyMap::new();
-        props.insert(
-            "weight".to_string(),
-            crate::graph::PropertyValue::Float(0.5),
-        );
+        props.insert("weight".to_string(), crate::graph::PropertyValue::Float(0.5));
 
         let request = Request::UpdateEdgeProperties {
             tenant: "default".to_string(),
@@ -552,23 +513,17 @@ mod tests {
             node_id: 1,
             labels: vec!["Person".to_string()],
             properties: PropertyMap::new(),
-        })
-        .await;
+        }).await;
 
         let mut props = PropertyMap::new();
-        props.insert(
-            "name".to_string(),
-            crate::graph::PropertyValue::String("Bob".to_string()),
-        );
+        props.insert("name".to_string(), crate::graph::PropertyValue::String("Bob".to_string()));
 
-        let response = sm
-            .apply(Request::UpdateNodeProperties {
-                tenant: "default".to_string(),
-                node_id: 1,
-                properties: props,
-                version: 0,
-            })
-            .await;
+        let response = sm.apply(Request::UpdateNodeProperties {
+            tenant: "default".to_string(),
+            node_id: 1,
+            properties: props,
+            version: 0,
+        }).await;
         // Should succeed or fail gracefully
         assert!(matches!(response, Response::Ok) || matches!(response, Response::Error { .. }));
     }
@@ -579,12 +534,10 @@ mod tests {
         let persistence = Arc::new(PersistenceManager::new(temp_dir.path()).unwrap());
         let sm = GraphStateMachine::new(persistence);
 
-        let response = sm
-            .apply(Request::DeleteEdge {
-                tenant: "default".to_string(),
-                edge_id: 999,
-            })
-            .await;
+        let response = sm.apply(Request::DeleteEdge {
+            tenant: "default".to_string(),
+            edge_id: 999,
+        }).await;
         // Should succeed or return error (edge may not exist)
         assert!(matches!(response, Response::Ok) || matches!(response, Response::Error { .. }));
     }
@@ -636,9 +589,7 @@ mod tests {
             Response::NodeCreated { node_id: 42 },
             Response::EdgeCreated { edge_id: 99 },
             Response::QueryResult { rows: 10 },
-            Response::Error {
-                message: "test error".to_string(),
-            },
+            Response::Error { message: "test error".to_string() },
         ];
 
         for response in responses {

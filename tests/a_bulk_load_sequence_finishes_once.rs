@@ -62,33 +62,26 @@ use samyama::snapshot::{export_tenant, import_tenant};
 
 /// Three snapshots with disjoint labels, each small.
 fn snapshots() -> Vec<Vec<u8>> {
-    [
-        ("Alpha", "A_REL", 40usize),
-        ("Beta", "B_REL", 25),
-        ("Gamma", "C_REL", 10),
-    ]
-    .iter()
-    .map(|&(label, edge_type, n)| {
-        let mut src = GraphStore::new();
-        let ids: Vec<_> = (0..n)
-            .map(|i| {
-                let id = src.create_node(label);
-                src.set_node_property("default", id, "k", PropertyValue::Integer(i as i64))
-                    .unwrap();
-                id
-            })
-            .collect();
-        for i in 0..n {
-            src.create_edge(ids[i], ids[(i + 1) % n], edge_type)
-                .unwrap();
-            src.create_edge(ids[i], ids[(i + 7) % n], edge_type)
-                .unwrap();
-        }
-        let mut buf = Vec::new();
-        export_tenant(&src, &mut buf).expect("export");
-        buf
-    })
-    .collect()
+    [("Alpha", "A_REL", 40usize), ("Beta", "B_REL", 25), ("Gamma", "C_REL", 10)]
+        .iter()
+        .map(|&(label, edge_type, n)| {
+            let mut src = GraphStore::new();
+            let ids: Vec<_> = (0..n)
+                .map(|i| {
+                    let id = src.create_node(label);
+                    src.set_node_property("default", id, "k", PropertyValue::Integer(i as i64)).unwrap();
+                    id
+                })
+                .collect();
+            for i in 0..n {
+                src.create_edge(ids[i], ids[(i + 1) % n], edge_type).unwrap();
+                src.create_edge(ids[i], ids[(i + 7) % n], edge_type).unwrap();
+            }
+            let mut buf = Vec::new();
+            export_tenant(&src, &mut buf).expect("export");
+            buf
+        })
+        .collect()
 }
 
 fn imported_eagerly(snaps: &[Vec<u8>]) -> GraphStore {
@@ -167,16 +160,8 @@ fn a_deferred_sequence_yields_an_identical_graph() {
     assert_eq!(eager.node_count(), deferred.node_count(), "node count");
     assert_eq!(eager.edge_count(), deferred.edge_count(), "edge count");
 
-    let mut a: Vec<String> = eager
-        .all_labels()
-        .iter()
-        .map(|l| l.as_str().to_string())
-        .collect();
-    let mut b: Vec<String> = deferred
-        .all_labels()
-        .iter()
-        .map(|l| l.as_str().to_string())
-        .collect();
+    let mut a: Vec<String> = eager.all_labels().iter().map(|l| l.as_str().to_string()).collect();
+    let mut b: Vec<String> = deferred.all_labels().iter().map(|l| l.as_str().to_string()).collect();
     a.sort();
     b.sort();
     assert_eq!(a, b, "label sets");
@@ -191,11 +176,7 @@ fn a_deferred_sequence_yields_an_identical_graph() {
     // Absolute, not just equal: `get_edges_by_type` returned an empty vector
     // for a short index before this change, and 0 == 0 would have passed.
     for (t, expected) in [("A_REL", 80usize), ("B_REL", 50), ("C_REL", 20)] {
-        assert_eq!(
-            eager.get_edges_by_type(&EdgeType::new(t)).len(),
-            expected,
-            "eager {t}"
-        );
+        assert_eq!(eager.get_edges_by_type(&EdgeType::new(t)).len(), expected, "eager {t}");
         assert_eq!(
             deferred.get_edges_by_type(&EdgeType::new(t)).len(),
             expected,
@@ -214,11 +195,7 @@ fn a_deferred_sequence_yields_an_identical_graph() {
         "MATCH (a:Gamma {k: 3})-[:C_REL]->(b) RETURN count(b) AS c",
         "MATCH (a:Alpha)-[:A_REL]->(b) WHERE b.k > 20 RETURN count(b) AS c",
     ] {
-        assert_eq!(
-            count(&eager, cypher),
-            count(&deferred, cypher),
-            "`{cypher}`"
-        );
+        assert_eq!(count(&eager, cypher), count(&deferred, cypher), "`{cypher}`");
     }
 
     // Per-node degree, which is the read `degrees_are_exact_for` guards.
@@ -251,29 +228,12 @@ fn a_query_between_deferred_imports_reads_the_truth() {
     // still holds whatever the first import's stubs left. Every one of these
     // must already be right.
     assert_eq!(g.bulk_load_finish_count(), 0, "nothing finished yet");
-    assert_eq!(
-        count(&g, "MATCH (n) RETURN count(n) AS c"),
-        65,
-        "nodes after two imports"
-    );
-    assert_eq!(
-        count(&g, "MATCH ()-[r]->() RETURN count(r) AS c"),
-        130,
-        "edges"
-    );
-    assert_eq!(
-        count(&g, "MATCH (a:Alpha)-[:A_REL]->(b) RETURN count(b) AS c"),
-        80
-    );
-    assert_eq!(
-        count(&g, "MATCH (a:Beta)-[:B_REL]->(b) RETURN count(b) AS c"),
-        50
-    );
-    assert_eq!(
-        count(&g, "MATCH (a:Alpha)-[:B_REL]->(b) RETURN count(b) AS c"),
-        0,
-        "a type that does not join these labels"
-    );
+    assert_eq!(count(&g, "MATCH (n) RETURN count(n) AS c"), 65, "nodes after two imports");
+    assert_eq!(count(&g, "MATCH ()-[r]->() RETURN count(r) AS c"), 130, "edges");
+    assert_eq!(count(&g, "MATCH (a:Alpha)-[:A_REL]->(b) RETURN count(b) AS c"), 80);
+    assert_eq!(count(&g, "MATCH (a:Beta)-[:B_REL]->(b) RETURN count(b) AS c"), 50);
+    assert_eq!(count(&g, "MATCH (a:Alpha)-[:B_REL]->(b) RETURN count(b) AS c"), 0,
+        "a type that does not join these labels");
     assert_eq!(
         g.get_edges_by_type(&EdgeType::new("A_REL")).len(),
         80,
@@ -289,11 +249,7 @@ fn a_query_between_deferred_imports_reads_the_truth() {
     assert_eq!(count(&g, "MATCH ()-[r]->() RETURN count(r) AS c"), 130);
 
     import_tenant(&mut g, &snaps[2][..]).expect("import 3");
-    assert_eq!(
-        g.bulk_load_finish_count(),
-        1,
-        "still deferred after the force"
-    );
+    assert_eq!(g.bulk_load_finish_count(), 1, "still deferred after the force");
     g.end_deferred_bulk_load();
     assert_eq!(g.bulk_load_finish_count(), 2);
 
@@ -324,11 +280,7 @@ fn a_deferred_sequence_never_defers_the_vector_index() {
     g.begin_deferred_bulk_load();
     import_tenant(&mut g, &buf[..]).expect("import");
     // Mid-sequence, before any end_deferred_bulk_load.
-    assert_eq!(
-        g.bulk_load_finish_count(),
-        0,
-        "the deferred three have not run"
-    );
+    assert_eq!(g.bulk_load_finish_count(), 0, "the deferred three have not run");
     assert_eq!(
         g.rebuild_vector_index_full(),
         1,
@@ -357,11 +309,7 @@ fn deferral_nests_and_a_plain_import_still_finishes_eagerly() {
     g.begin_deferred_bulk_load();
     import_tenant(&mut g, &snaps[1][..]).expect("import");
     g.end_deferred_bulk_load();
-    assert_eq!(
-        g.bulk_load_finish_count(),
-        1,
-        "the inner end does not finish"
-    );
+    assert_eq!(g.bulk_load_finish_count(), 1, "the inner end does not finish");
     g.end_deferred_bulk_load();
     assert_eq!(g.bulk_load_finish_count(), 2, "the outer end does");
 

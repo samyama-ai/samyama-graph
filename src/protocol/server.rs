@@ -4,16 +4,16 @@
 
 use crate::graph::GraphStore;
 use crate::persistence::PersistenceManager;
+use crate::protocol::resp::{RespValue, RespError};
 use crate::protocol::command::CommandHandler;
-use crate::protocol::resp::{RespError, RespValue};
+use crate::sharding::{Router, Proxy, RouteResult};
 use crate::raft::ClusterManager;
-use crate::sharding::{Proxy, RouteResult, Router};
 use bytes::BytesMut;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{info, error, debug, warn};
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -210,7 +210,7 @@ async fn respond(
         .and_then(|v| v.as_string().ok().flatten())
         .map(|s| s.to_uppercase());
     let limit = GraphStore::session_transaction_timeout();
-
+    
     // REL-08 (#1328): with credentials configured, a connection may send only
     // AUTH and PING until it has authenticated. INFO is not on the list: it
     // describes the server to whoever asks.
@@ -226,9 +226,7 @@ async fn respond(
             if let Some(creds) = credentials {
                 let args = value.as_array().unwrap_or(&[]);
                 if args.len() != 3 {
-                    return RespValue::Error(
-                        "ERR wrong number of arguments for 'auth' command".to_string(),
-                    );
+                    return RespValue::Error("ERR wrong number of arguments for 'auth' command".to_string());
                 }
                 let username = args[1].as_string().unwrap_or(None).unwrap_or_default();
                 let password = args[2].as_string().unwrap_or(None).unwrap_or_default();
@@ -240,9 +238,7 @@ async fn respond(
                     return RespValue::Error("ERR invalid username-password pair".to_string());
                 }
             } else {
-                return RespValue::Error(
-                    "ERR Client sent AUTH, but no password is set".to_string(),
-                );
+                return RespValue::Error("ERR Client sent AUTH, but no password is set".to_string());
             }
         }
 
@@ -253,10 +249,7 @@ async fn respond(
             let mut guard = Arc::clone(store).write_owned().await;
             let reply = handler.begin_transaction_on(&mut guard);
             if !matches!(reply, RespValue::Error(_)) {
-                txn.open = Some(OpenTxn {
-                    guard,
-                    deadline: tokio::time::Instant::now() + limit,
-                });
+                txn.open = Some(OpenTxn { guard, deadline: tokio::time::Instant::now() + limit });
                 txn.timed_out = false;
             }
             reply
@@ -269,24 +262,17 @@ async fn respond(
             let mut open = txn.open.take().expect("matched Some");
             handler.rollback_transaction_on(&mut open.guard)
         }
-        (Some("GRAPH.COMMIT") | Some("GRAPH.ROLLBACK"), None) => {
-            RespValue::Error(if txn.timed_out {
-                format!(
-                    "ERR the transaction was open longer than {}s and was rolled back",
-                    limit.as_secs()
-                )
-            } else {
-                "ERR no transaction is open on this connection".to_string()
-            })
-        }
+        (Some("GRAPH.COMMIT") | Some("GRAPH.ROLLBACK"), None) => RespValue::Error(if txn.timed_out {
+            format!(
+                "ERR the transaction was open longer than {}s and was rolled back",
+                limit.as_secs()
+            )
+        } else {
+            "ERR no transaction is open on this connection".to_string()
+        }),
         (Some("GRAPH.QUERY"), Some(open)) => {
             let args = value.as_array().unwrap_or(&[]);
-            handler.query_in_transaction(
-                args,
-                &mut open.guard,
-                false,
-                txn.authenticated_as.as_ref(),
-            )
+            handler.query_in_transaction(args, &mut open.guard, false, txn.authenticated_as.as_ref())
         }
         (Some("GRAPH.RO_QUERY"), Some(open)) => {
             let args = value.as_array().unwrap_or(&[]);
@@ -295,9 +281,7 @@ async fn respond(
         // These never touch the store, so they cannot wait on the lock this
         // connection itself holds.
         (Some("PING") | Some("ECHO") | Some("INFO"), Some(_)) => {
-            handler
-                .handle_command(value, store, txn.authenticated_as.as_ref())
-                .await
+            handler.handle_command(value, store, txn.authenticated_as.as_ref()).await
         }
         // Anything else would take the store's lock, which this connection
         // already holds, and wait on itself for good.
@@ -306,11 +290,7 @@ async fn respond(
              GRAPH.ROLLBACK, PING, ECHO and INFO are accepted"
                 .to_string(),
         ),
-        (_, None) => {
-            handler
-                .handle_command(value, store, txn.authenticated_as.as_ref())
-                .await
-        }
+        (_, None) => handler.handle_command(value, store, txn.authenticated_as.as_ref()).await,
     }
 }
 
@@ -355,17 +335,8 @@ async fn handle_connection(
     credentials: Option<Arc<Vec<crate::auth::Credential>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = ConnTxn::default();
-    let result = serve_connection(
-        &mut socket,
-        &store,
-        &handler,
-        router,
-        proxy,
-        cluster,
-        &mut txn,
-        credentials,
-    )
-    .await;
+    let result =
+        serve_connection(&mut socket, &store, &handler, router, proxy, cluster, &mut txn, credentials).await;
     // However the connection ends -- a clean close, a protocol error, a failed
     // write -- a transaction still open is rolled back, or its partial writes
     // would stay and the lock it held would be gone with no one to finish it.
@@ -429,47 +400,31 @@ async fn serve_connection(
                     let mut forwarded = false;
 
                     // Attempt routing if configured
-                    if let (Some(router), Some(proxy), Some(cluster)) = (&router, &proxy, &cluster)
-                    {
+                    if let (Some(router), Some(proxy), Some(cluster)) = (&router, &proxy, &cluster) {
                         if let Ok(args) = value.as_array() {
                             if args.len() >= 2 {
                                 if let Ok(Some(cmd)) = args[0].as_string() {
                                     if cmd.to_uppercase().starts_with("GRAPH.") {
                                         if let Ok(Some(key)) = args[1].as_string() {
-                                            if let Some(RouteResult::Remote(node_id)) =
-                                                router.route(&key)
-                                            {
+                                            if let Some(RouteResult::Remote(node_id)) = router.route(&key) {
                                                 // Resolve address from ClusterConfig
                                                 let config = cluster.get_config().await;
-                                                if let Some(node_config) =
-                                                    config.nodes.iter().find(|n| n.id == node_id)
-                                                {
+                                                if let Some(node_config) = config.nodes.iter().find(|n| n.id == node_id) {
                                                     debug!("Routing command for tenant '{}' to node {} ({})", key, node_id, node_config.address);
-
+                                                    
                                                     // Re-encode command
                                                     let mut cmd_bytes = Vec::new();
                                                     value.encode(&mut cmd_bytes)?;
 
                                                     // Forward
-                                                    match proxy
-                                                        .forward(&node_config.address, &cmd_bytes)
-                                                        .await
-                                                    {
+                                                    match proxy.forward(&node_config.address, &cmd_bytes).await {
                                                         Ok(response_bytes) => {
-                                                            socket
-                                                                .write_all(&response_bytes)
-                                                                .await?;
+                                                            socket.write_all(&response_bytes).await?;
                                                             forwarded = true;
                                                         }
                                                         Err(e) => {
-                                                            error!(
-                                                                "Failed to forward request: {}",
-                                                                e
-                                                            );
-                                                            let err = RespValue::Error(format!(
-                                                                "ERR routing failed: {}",
-                                                                e
-                                                            ));
+                                                            error!("Failed to forward request: {}", e);
+                                                            let err = RespValue::Error(format!("ERR routing failed: {}", e));
                                                             let mut buf = Vec::new();
                                                             err.encode(&mut buf)?;
                                                             socket.write_all(&buf).await?;
@@ -487,14 +442,7 @@ async fn serve_connection(
 
                     if !forwarded {
                         // Process command locally
-                        let response = respond(
-                            handler,
-                            &value,
-                            store,
-                            txn,
-                            credentials.as_deref().map(|v| v.as_slice()),
-                        )
-                        .await;
+                        let response = respond(handler, &value, store, txn, credentials.as_deref().map(|v| v.as_slice())).await;
 
                         // Encode and send response
                         let mut response_buf = Vec::new();
@@ -529,12 +477,7 @@ mod tests {
     use super::*;
 
     fn cmd(parts: &[&str]) -> RespValue {
-        RespValue::Array(
-            parts
-                .iter()
-                .map(|p| RespValue::BulkString(Some(p.as_bytes().to_vec())))
-                .collect(),
-        )
+        RespValue::Array(parts.iter().map(|p| RespValue::BulkString(Some(p.as_bytes().to_vec()))).collect())
     }
 
     fn is_error(v: &RespValue) -> bool {
@@ -566,14 +509,9 @@ mod tests {
             cmd(&["GRAPH.BEGIN"]),
         ] {
             let r = respond(&handler, &q, &store, &mut txn, Some(&c)).await;
-            assert!(
-                matches!(&r, RespValue::Error(e) if e.starts_with("NOAUTH")),
-                "{q:?} answered {r:?}"
-            );
+            assert!(matches!(&r, RespValue::Error(e) if e.starts_with("NOAUTH")), "{q:?} answered {r:?}");
         }
-        assert!(!is_error(
-            &respond(&handler, &cmd(&["PING"]), &store, &mut txn, Some(&c)).await
-        ));
+        assert!(!is_error(&respond(&handler, &cmd(&["PING"]), &store, &mut txn, Some(&c)).await));
     }
 
     /// #1328: the file stores sha256(token). Presenting that digest must not
@@ -584,37 +522,13 @@ mod tests {
         let handler = CommandHandler::new(None);
         let c = creds(&[&format!("svc:{TEST_DIGEST}")]);
         let mut txn = ConnTxn::default();
-        let r = respond(
-            &handler,
-            &cmd(&["AUTH", "svc", TEST_DIGEST]),
-            &store,
-            &mut txn,
-            Some(&c),
-        )
-        .await;
+        let r = respond(&handler, &cmd(&["AUTH", "svc", TEST_DIGEST]), &store, &mut txn, Some(&c)).await;
         assert!(is_error(&r), "the stored digest was accepted as a password");
         assert!(txn.authenticated_as.is_none());
-        let r = respond(
-            &handler,
-            &cmd(&["AUTH", "svc", "test"]),
-            &store,
-            &mut txn,
-            Some(&c),
-        )
-        .await;
+        let r = respond(&handler, &cmd(&["AUTH", "svc", "test"]), &store, &mut txn, Some(&c)).await;
         assert!(!is_error(&r), "{r:?}");
-        let r = respond(
-            &handler,
-            &cmd(&["GRAPH.QUERY", "default", "CREATE (:T)"]),
-            &store,
-            &mut txn,
-            Some(&c),
-        )
-        .await;
-        assert!(
-            !is_error(&r),
-            "a role-less (admin) credential could not write: {r:?}"
-        );
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T)"]), &store, &mut txn, Some(&c)).await;
+        assert!(!is_error(&r), "a role-less (admin) credential could not write: {r:?}");
     }
 
     /// #1328: a Read credential runs reads, and is refused a write on every
@@ -629,83 +543,31 @@ mod tests {
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let handler = CommandHandler::new(Some(Arc::clone(&pm)));
         let mut setup = ConnTxn::default();
-        let r = respond(
-            &handler,
-            &cmd(&["GRAPH.QUERY", "default", "CREATE (:Keep)"]),
-            &store,
-            &mut setup,
-            None,
-        )
-        .await;
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:Keep)"]), &store, &mut setup, None).await;
         assert!(!is_error(&r), "{r:?}");
-        let keep = store
-            .read()
-            .await
-            .get_nodes_by_label(&crate::graph::Label::new("Keep"))[0]
-            .id;
-        assert!(
-            pm.storage()
-                .get_node("default", keep.as_u64())
-                .unwrap()
-                .is_some(),
-            "setup did not persist"
-        );
+        let keep = store.read().await.get_nodes_by_label(&crate::graph::Label::new("Keep"))[0].id;
+        assert!(pm.storage().get_node("default", keep.as_u64()).unwrap().is_some(), "setup did not persist");
 
         let c = creds(&[&format!("ro:{TEST_DIGEST}:roles=read")]);
         let mut txn = ConnTxn::default();
-        assert!(!is_error(
-            &respond(
-                &handler,
-                &cmd(&["AUTH", "ro", "test"]),
-                &store,
-                &mut txn,
-                Some(&c)
-            )
-            .await
-        ));
+        assert!(!is_error(&respond(&handler, &cmd(&["AUTH", "ro", "test"]), &store, &mut txn, Some(&c)).await));
 
         let read = cmd(&["GRAPH.QUERY", "default", "MATCH (n) RETURN count(n)"]);
-        assert!(!is_error(
-            &respond(&handler, &read, &store, &mut txn, Some(&c)).await
-        ));
+        assert!(!is_error(&respond(&handler, &read, &store, &mut txn, Some(&c)).await));
         for w in [
             cmd(&["GRAPH.QUERY", "default", "CREATE (:T)"]),
             cmd(&["GRAPH.DELETE", "default"]),
         ] {
             let r = respond(&handler, &w, &store, &mut txn, Some(&c)).await;
-            assert!(
-                matches!(&r, RespValue::Error(e) if e.contains("Write")),
-                "{w:?} answered {r:?}"
-            );
+            assert!(matches!(&r, RespValue::Error(e) if e.contains("Write")), "{w:?} answered {r:?}");
         }
         respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, Some(&c)).await;
-        let r = respond(
-            &handler,
-            &cmd(&["GRAPH.QUERY", "default", "CREATE (:T)"]),
-            &store,
-            &mut txn,
-            Some(&c),
-        )
-        .await;
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T)"]), &store, &mut txn, Some(&c)).await;
         assert!(is_error(&r), "a write ran inside a transaction: {r:?}");
-        respond(
-            &handler,
-            &cmd(&["GRAPH.ROLLBACK"]),
-            &store,
-            &mut txn,
-            Some(&c),
-        )
-        .await;
-        assert_eq!(
-            store.read().await.node_count(),
-            1,
-            "the store changed under a read-only credential"
-        );
+        respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, Some(&c)).await;
+        assert_eq!(store.read().await.node_count(), 1, "the store changed under a read-only credential");
         assert!(
-            pm.storage()
-                .get_node("default", keep.as_u64())
-                .unwrap()
-                .is_some(),
+            pm.storage().get_node("default", keep.as_u64()).unwrap().is_some(),
             "a refused GRAPH.DELETE still dropped the graph on disk"
         );
     }
@@ -716,44 +578,16 @@ mod tests {
         let handler = CommandHandler::new(None);
         let mut txn = ConnTxn::default();
 
-        assert!(!is_error(
-            &respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await
-        ));
-        let r = respond(
-            &handler,
-            &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]),
-            &store,
-            &mut txn,
-            None,
-        )
-        .await;
+        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await));
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]), &store, &mut txn, None).await;
         assert!(!is_error(&r), "{r:?}");
-        assert!(!is_error(
-            &respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await
-        ));
-        assert_eq!(
-            store.read().await.node_count(),
-            0,
-            "a rolled-back CREATE survived"
-        );
+        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await));
+        assert_eq!(store.read().await.node_count(), 0, "a rolled-back CREATE survived");
 
         respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await;
-        respond(
-            &handler,
-            &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]),
-            &store,
-            &mut txn,
-            None,
-        )
-        .await;
-        assert!(!is_error(
-            &respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn, None).await
-        ));
-        assert_eq!(
-            store.read().await.node_count(),
-            1,
-            "a committed CREATE was lost"
-        );
+        respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]), &store, &mut txn, None).await;
+        assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn, None).await));
+        assert_eq!(store.read().await.node_count(), 1, "a committed CREATE was lost");
     }
 
     #[tokio::test]
@@ -762,10 +596,7 @@ mod tests {
         let handler = CommandHandler::new(None);
         let mut txn = ConnTxn::default();
         respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await;
-        assert!(
-            store.try_read().is_err(),
-            "another reader got in during a transaction"
-        );
+        assert!(store.try_read().is_err(), "another reader got in during a transaction");
         respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await;
         assert!(store.try_read().is_ok(), "the lock was not released");
     }
@@ -795,26 +626,13 @@ mod tests {
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let handler = CommandHandler::new(None);
         let mut txn = ConnTxn::default();
-        assert!(is_error(
-            &respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn, None).await
-        ));
+        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn, None).await));
         respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await;
-        assert!(is_error(
-            &respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await
-        ));
-        let r = respond(
-            &handler,
-            &cmd(&["GRAPH.RO_QUERY", "default", "CREATE (:T)"]),
-            &store,
-            &mut txn,
-            None,
-        )
-        .await;
+        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await));
+        let r = respond(&handler, &cmd(&["GRAPH.RO_QUERY", "default", "CREATE (:T)"]), &store, &mut txn, None).await;
         assert!(is_error(&r), "RO_QUERY ran a write inside a transaction");
         respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await;
-        assert!(is_error(
-            &respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await
-        ));
+        assert!(is_error(&respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await));
     }
 
     /// #1594: `max_connections` was configured, defaulted to 100, and nothing
@@ -933,20 +751,10 @@ mod tests {
         client.write_all(&create).await.unwrap();
         let _ = client.read(&mut reply).await.unwrap();
         drop(client);
-        tokio::time::timeout(std::time::Duration::from_secs(10), server)
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), server).await.unwrap().unwrap();
         let guard = store.read().await;
-        assert_eq!(
-            guard.node_count(),
-            0,
-            "a transaction left open by a closed connection kept its write"
-        );
-        assert!(
-            guard.session_transaction_version().is_none(),
-            "the store still has a transaction open"
-        );
+        assert_eq!(guard.node_count(), 0, "a transaction left open by a closed connection kept its write");
+        assert!(guard.session_transaction_version().is_none(), "the store still has a transaction open");
     }
 
     /// #1311 item 5: the transaction deadline had never been tripped.
@@ -1052,20 +860,9 @@ mod tests {
         let handler = CommandHandler::new(Some(Arc::clone(&pm)));
         let mut txn = ConnTxn::default();
 
-        let r = respond(
-            &handler,
-            &cmd(&["GRAPH.QUERY", "default", "CREATE (:P {x: 1})"]),
-            &store,
-            &mut txn,
-            None,
-        )
-        .await;
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:P {x: 1})"]), &store, &mut txn, None).await;
         assert!(!is_error(&r), "{r:?}");
-        let p = store
-            .read()
-            .await
-            .get_nodes_by_label(&crate::graph::Label::new("P"))[0]
-            .id;
+        let p = store.read().await.get_nodes_by_label(&crate::graph::Label::new("P"))[0].id;
         // The failure is injected, not provoked with a `max_nodes: Some(1)`
         // quota as it was. A quota is checked before the row is created now, so
         // it refuses the statement rather than the commit and this test would be
@@ -1073,60 +870,21 @@ mod tests {
         // (#1483). `fail_next_apply_for_test` fires once, so the commit's apply
         // fails and the repair that follows it succeeds.
         respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await;
-        let r = respond(
-            &handler,
-            &cmd(&[
-                "GRAPH.QUERY",
-                "default",
-                "MATCH (p:P) SET p.x = 2 CREATE (:T)",
-            ]),
-            &store,
-            &mut txn,
-            None,
-        )
-        .await;
+        let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "MATCH (p:P) SET p.x = 2 CREATE (:T)"]), &store, &mut txn, None).await;
         assert!(!is_error(&r), "{r:?}");
         pm.fail_next_apply_for_test();
         let r = respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn, None).await;
-        assert!(
-            is_error(&r),
-            "a COMMIT that was not persisted reported success: {r:?}"
-        );
+        assert!(is_error(&r), "a COMMIT that was not persisted reported success: {r:?}");
 
         let guard = store.read().await;
-        assert!(
-            guard.session_transaction_version().is_none(),
-            "the transaction is still open"
-        );
-        assert_eq!(
-            guard.node_count(),
-            1,
-            "the refused CREATE is still in memory"
-        );
-        assert_eq!(
-            guard.node_property(p, "x"),
-            Some(crate::graph::PropertyValue::Integer(1)),
-            "the refused SET is still in memory"
-        );
+        assert!(guard.session_transaction_version().is_none(), "the transaction is still open");
+        assert_eq!(guard.node_count(), 1, "the refused CREATE is still in memory");
+        assert_eq!(guard.node_property(p, "x"), Some(crate::graph::PropertyValue::Integer(1)), "the refused SET is still in memory");
         drop(guard);
 
-        let on_disk = pm
-            .storage()
-            .get_node("default", p.as_u64())
-            .unwrap()
-            .expect("P left the disk");
-        assert_eq!(
-            on_disk.properties.get("x"),
-            Some(&crate::graph::PropertyValue::Integer(1)),
-            "the refused SET reached the disk"
-        );
-        assert!(
-            pm.storage()
-                .get_node("default", p.as_u64() + 1)
-                .unwrap()
-                .is_none(),
-            "the refused CREATE reached the disk"
-        );
+        let on_disk = pm.storage().get_node("default", p.as_u64()).unwrap().expect("P left the disk");
+        assert_eq!(on_disk.properties.get("x"), Some(&crate::graph::PropertyValue::Integer(1)), "the refused SET reached the disk");
+        assert!(pm.storage().get_node("default", p.as_u64() + 1).unwrap().is_none(), "the refused CREATE reached the disk");
     }
 
     #[test]
@@ -1151,7 +909,7 @@ mod tests {
         // This is a basic test structure
         // Real integration tests would require a running server
         let store = Arc::new(RwLock::new(GraphStore::new()));
-        let handler = Arc::new(CommandHandler::new(None)); // No persistence for tests
+        let handler = Arc::new(CommandHandler::new(None));  // No persistence for tests
 
         // Would need to set up mock socket for full test
         drop(store);
@@ -1263,8 +1021,10 @@ mod tests {
         let server = RespServer::new(config, store);
 
         // Starting on already-bound port should fail
-        let result =
-            tokio::time::timeout(std::time::Duration::from_millis(100), server.start()).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            server.start(),
+        ).await;
 
         // Either times out (somehow bound) or errors
         assert!(result.is_err() || result.unwrap().is_err());
@@ -1310,7 +1070,7 @@ mod tests {
 
         let client_task = tokio::spawn(async move {
             let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::io::{AsyncWriteExt, AsyncReadExt};
             // Send RESP-formatted PING: *1\r\n$4\r\nPING\r\n
             stream.write_all(b"*1\r\n$4\r\nPING\r\n").await.unwrap();
             let mut buf = vec![0u8; 256];
@@ -1318,11 +1078,7 @@ mod tests {
             assert!(n > 0);
             // The response should be a simple string "+PONG\r\n"
             let response = String::from_utf8_lossy(&buf[..n]);
-            assert!(
-                response.contains("PONG"),
-                "Expected PONG in response, got: {}",
-                response
-            );
+            assert!(response.contains("PONG"), "Expected PONG in response, got: {}", response);
             drop(stream);
         });
 
@@ -1343,7 +1099,7 @@ mod tests {
 
         let client_task = tokio::spawn(async move {
             let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::io::{AsyncWriteExt, AsyncReadExt};
             // Send invalid RESP data: bad array length
             stream.write_all(b"*abc\r\n").await.unwrap();
             let mut buf = vec![0u8; 256];
@@ -1392,8 +1148,9 @@ mod tests {
     #[test]
     fn test_server_with_persistence() {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let persistence =
-            Arc::new(crate::persistence::PersistenceManager::new(temp_dir.path()).unwrap());
+        let persistence = Arc::new(
+            crate::persistence::PersistenceManager::new(temp_dir.path()).unwrap()
+        );
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let config = ServerConfig::default();
 
@@ -1407,8 +1164,9 @@ mod tests {
     #[test]
     fn test_server_with_persistence_stores_config() {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let persistence =
-            Arc::new(crate::persistence::PersistenceManager::new(temp_dir.path()).unwrap());
+        let persistence = Arc::new(
+            crate::persistence::PersistenceManager::new(temp_dir.path()).unwrap()
+        );
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let config = ServerConfig {
             address: "0.0.0.0".to_string(),
@@ -1432,12 +1190,11 @@ mod tests {
 
         let client_task = tokio::spawn(async move {
             let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::io::{AsyncWriteExt, AsyncReadExt};
             // Use inline command format which is simpler
-            stream
-                .write_all(b"GRAPH.QUERY default \"MATCH (n) RETURN n\"\r\n")
-                .await
-                .unwrap();
+            stream.write_all(
+                b"GRAPH.QUERY default \"MATCH (n) RETURN n\"\r\n"
+            ).await.unwrap();
             let mut buf = vec![0u8; 4096];
             let n = stream.read(&mut buf).await.unwrap();
             assert!(n > 0, "Expected response from GRAPH.QUERY");
@@ -1465,30 +1222,21 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let (socket, _peer) = listener.accept().await.unwrap();
             // handle_connection returns Ok on clean disconnect (n=0)
-            let _result =
-                handle_connection(socket, server_store, server_handler, None, None, None, None)
-                    .await;
+            let _result = handle_connection(socket, server_store, server_handler, None, None, None, None).await;
         });
 
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
         // Send two PING commands back-to-back
-        stream
-            .write_all(b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n")
-            .await
-            .unwrap();
+        stream.write_all(b"*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n").await.unwrap();
 
         let mut buf = vec![0u8; 1024];
         let n = stream.read(&mut buf).await.unwrap();
         let response = String::from_utf8_lossy(&buf[..n]);
         // Should contain at least one PONG response
         let pong_count = response.matches("PONG").count();
-        assert!(
-            pong_count >= 1,
-            "Expected at least one PONG, got: {}",
-            response
-        );
+        assert!(pong_count >= 1, "Expected at least one PONG, got: {}", response);
 
         drop(stream);
         let _ = server_task.await;
@@ -1572,12 +1320,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let pm = Arc::new(PersistenceManager::new(dir.path()).unwrap());
             let store = Arc::new(RwLock::new(GraphStore::new()));
-            let server = RespServer::new_with_tenants(
-                config(0),
-                store,
-                Some(Arc::clone(&pm)),
-                Arc::clone(&tm),
-            );
+            let server =
+                RespServer::new_with_tenants(config(0), store, Some(Arc::clone(&pm)), Arc::clone(&tm));
             assert!(server.persistence.is_some());
             assert!(
                 Arc::ptr_eq(&server.tenant_manager(), &tm),

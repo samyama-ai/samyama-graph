@@ -56,19 +56,9 @@ async fn pca_over_column_only_nodes_matches_pca_over_rows() {
     );
     assert_eq!(a.explained_variance.len(), b.explained_variance.len());
     for (x, y) in a.explained_variance.iter().zip(&b.explained_variance) {
-        assert!(
-            (x - y).abs() < 1e-9,
-            "explained variance differs: {:?} vs {:?}",
-            a.explained_variance,
-            b.explained_variance
-        );
+        assert!((x - y).abs() < 1e-9, "explained variance differs: {:?} vs {:?}", a.explained_variance, b.explained_variance);
     }
     for (x, y) in a.mean.iter().zip(&b.mean) {
-        assert!(
-            (x - y).abs() < 1e-9,
-            "feature means differ: {:?} vs {:?}",
-            a.mean,
-            b.mean
-        );
+        assert!((x - y).abs() < 1e-9, "feature means differ: {:?} vs {:?}", a.mean, b.mean);
     }
 }

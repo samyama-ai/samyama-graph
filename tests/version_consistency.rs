@@ -26,9 +26,8 @@ fn root() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let path: PathBuf = root().join(rel);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!("{rel} is named in the release checklist but could not be read: {e}")
-    })
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{rel} is named in the release checklist but could not be read: {e}"))
 }
 
 /// Every `X.Y.Z` in `text`, as a list.
@@ -47,11 +46,7 @@ fn semvers(text: &str) -> Vec<String> {
             continue;
         }
         let parts: Vec<&str> = t.split('.').collect();
-        if parts.len() == 3
-            && parts
-                .iter()
-                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-        {
+        if parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) {
             out.push(t.to_string());
         }
     }
@@ -90,11 +85,7 @@ fn yaml_version_values(text: &str) -> Vec<String> {
                 out.extend(semvers(l));
                 continue;
             }
-            if l.is_empty()
-                || l.starts_with("examples:")
-                || l.starts_with("type:")
-                || l.starts_with("description:")
-            {
+            if l.is_empty() || l.starts_with("examples:") || l.starts_with("type:") || l.starts_with("description:") {
                 continue;
             }
             in_version_examples = false;
@@ -139,8 +130,8 @@ fn every_cargo_manifest_carries_the_version_of_record() {
         "crates/samyama-graph-algorithms/Cargo.toml",
         "sdk/python/Cargo.toml",
     ] {
-        let found =
-            cargo_package_version(rel).unwrap_or_else(|| panic!("{rel}: no [package] version"));
+        let found = cargo_package_version(rel)
+            .unwrap_or_else(|| panic!("{rel}: no [package] version"));
         assert!(
             found == VERSION || found == "workspace",
             "{rel} declares {found}, the version of record is {VERSION}"
@@ -188,10 +179,7 @@ fn every_internal_dependency_pin_names_the_version_of_record() {
         }
     }
     // Ten pins exist today; a scan that finds none is not a check.
-    assert!(
-        checked >= 5,
-        "found only {checked} pinned path dependencies — the scan is vacuous"
-    );
+    assert!(checked >= 5, "found only {checked} pinned path dependencies — the scan is vacuous");
 }
 
 #[test]
@@ -213,10 +201,7 @@ fn the_python_wheel_reports_the_version_of_record() {
 
 #[test]
 fn the_typescript_package_and_its_lockfile_agree_with_the_version_of_record() {
-    for rel in [
-        "sdk/typescript/package.json",
-        "sdk/typescript/package-lock.json",
-    ] {
+    for rel in ["sdk/typescript/package.json", "sdk/typescript/package-lock.json"] {
         let text = read(rel);
         // Only the top-level "version" keys — a lockfile's dependency
         // versions are not ours to hold in sync.
@@ -228,10 +213,7 @@ fn the_typescript_package_and_its_lockfile_agree_with_the_version_of_record() {
             .collect();
         assert!(!ours.is_empty(), "{rel}: no top-level version key found");
         for v in ours {
-            assert_eq!(
-                v, VERSION,
-                "{rel} declares {v}, the version of record is {VERSION}"
-            );
+            assert_eq!(v, VERSION, "{rel} declares {v}, the version of record is {VERSION}");
         }
     }
 }
@@ -242,10 +224,7 @@ fn the_openapi_document_advertises_the_version_of_record() {
     // status example claiming 0.7.0 is a published claim about the server.
     let text = read(OPENAPI);
     let values = yaml_version_values(&text);
-    assert!(
-        !values.is_empty(),
-        "no version fields found in {OPENAPI} — the scan is vacuous"
-    );
+    assert!(!values.is_empty(), "no version fields found in {OPENAPI} — the scan is vacuous");
     let stale: Vec<String> = values.into_iter().filter(|v| v != VERSION).collect();
     assert!(
         stale.is_empty(),
@@ -289,23 +268,11 @@ fn the_readme_version_badge_is_the_version_of_record() {
         .map(|(i, _)| &text[i + marker.len()..])
         // shields.io writes a literal `-` as `--`, so `1.9.0-rc1` appears as
         // `1.9.0--rc1`; the value ends at the first *single* dash.
-        .map(|rest| {
-            rest.replace("--", "\u{0}")
-                .split('-')
-                .next()
-                .unwrap_or("")
-                .replace('\u{0}', "-")
-        })
+        .map(|rest| rest.replace("--", "\u{0}").split('-').next().unwrap_or("").replace('\u{0}', "-"))
         .collect();
-    assert!(
-        !badges.is_empty(),
-        "README.md has no version badge — the scan is vacuous"
-    );
+    assert!(!badges.is_empty(), "README.md has no version badge — the scan is vacuous");
     for b in badges {
-        assert_eq!(
-            b, VERSION,
-            "README.md's version badge reads {b}; the version of record is {VERSION}"
-        );
+        assert_eq!(b, VERSION, "README.md's version badge reads {b}; the version of record is {VERSION}");
     }
 }
 
@@ -347,10 +314,7 @@ fn the_semver_scanner_finds_what_it_claims_to() {
     assert!(semvers("no version here").is_empty());
     assert!(semvers("1.7").is_empty(), "two components is not a semver");
     // The bug this function was rewritten for.
-    assert!(
-        semvers("bound to 127.0.0.1:6379").is_empty(),
-        "a dotted quad is not a version"
-    );
+    assert!(semvers("bound to 127.0.0.1:6379").is_empty(), "a dotted quad is not a version");
     assert!(semvers("10.0.0.255").is_empty());
 
     // And the OpenAPI reader must ignore the spec version while finding ours.

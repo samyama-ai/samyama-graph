@@ -170,8 +170,8 @@ impl MOBMWRSolver {
                 let mut new_vars = elite.clone();
                 for j in 0..dim {
                     let sigma = self.local_step * (upper[j] - lower[j]);
-                    new_vars[j] =
-                        (new_vars[j] + sigma * normal.sample(&mut rng)).clamp(lower[j], upper[j]);
+                    new_vars[j] = (new_vars[j] + sigma * normal.sample(&mut rng))
+                        .clamp(lower[j], upper[j]);
                 }
                 let fit = crate::common::evaluate_objectives(problem, &new_vars);
                 let viol: f64 = problem.penalties(&new_vars).iter().sum();

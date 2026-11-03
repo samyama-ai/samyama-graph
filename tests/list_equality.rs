@@ -49,11 +49,8 @@ fn two_empty_lists_group_as_one() {
     // one relationship, whose `tail` is also `[]`. Two paths, one group.
     // Before the fix this answered 2.
     assert_eq!(
-        rows(
-            &store,
-            "MATCH p = (:Root)-[*0..1]->(x) \
-                      WITH tail(relationships(p)) AS rs, count(*) AS c RETURN rs, c"
-        ),
+        rows(&store, "MATCH p = (:Root)-[*0..1]->(x) \
+                      WITH tail(relationships(p)) AS rs, count(*) AS c RETURN rs, c"),
         1
     );
 }
@@ -64,11 +61,8 @@ fn equal_lists_of_relationships_group_as_one() {
     // Four paths of length 0..3; their tails are [], [], [r2] and [r2, r3] —
     // three distinct groups.
     assert_eq!(
-        rows(
-            &store,
-            "MATCH p = (:Root)-[*0..3]->(x) \
-                      WITH tail(relationships(p)) AS rs, count(*) AS c RETURN rs, c"
-        ),
+        rows(&store, "MATCH p = (:Root)-[*0..3]->(x) \
+                      WITH tail(relationships(p)) AS rs, count(*) AS c RETURN rs, c"),
         3
     );
 }
@@ -77,11 +71,8 @@ fn equal_lists_of_relationships_group_as_one() {
 fn distinct_removes_a_duplicate_list() {
     let store = chain();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH p = (:Root)-[*0..1]->(x) \
-                      RETURN DISTINCT tail(relationships(p)) AS rs"
-        ),
+        rows(&store, "MATCH p = (:Root)-[*0..1]->(x) \
+                      RETURN DISTINCT tail(relationships(p)) AS rs"),
         1
     );
 }
@@ -90,10 +81,7 @@ fn distinct_removes_a_duplicate_list() {
 fn distinct_keeps_lists_that_differ() {
     let store = chain();
     assert_eq!(
-        rows(
-            &store,
-            "UNWIND [[1, 2], [1, 2], [2, 1], []] AS l RETURN DISTINCT l"
-        ),
+        rows(&store, "UNWIND [[1, 2], [1, 2], [2, 1], []] AS l RETURN DISTINCT l"),
         3
     );
 }
@@ -102,10 +90,7 @@ fn distinct_keeps_lists_that_differ() {
 fn distinct_deduplicates_maps() {
     let store = chain();
     assert_eq!(
-        rows(
-            &store,
-            "UNWIND [{a: 1}, {a: 1}, {a: 2}] AS m RETURN DISTINCT m"
-        ),
+        rows(&store, "UNWIND [{a: 1}, {a: 1}, {a: 2}] AS m RETURN DISTINCT m"),
         2
     );
 }
@@ -114,10 +99,7 @@ fn distinct_deduplicates_maps() {
 fn a_map_is_not_equal_to_a_map_with_an_extra_key() {
     let store = chain();
     assert_eq!(
-        rows(
-            &store,
-            "UNWIND [{a: 1}, {a: 1, b: 2}] AS m RETURN DISTINCT m"
-        ),
+        rows(&store, "UNWIND [{a: 1}, {a: 1, b: 2}] AS m RETURN DISTINCT m"),
         2
     );
 }
@@ -135,10 +117,7 @@ fn a_stored_list_and_a_built_list_are_the_same_list() {
         PropertyValue::Array(vec![PropertyValue::Integer(1), PropertyValue::Integer(2)]),
     );
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (n:N) UNWIND [n.xs, [1, 2]] AS l RETURN DISTINCT l"
-        ),
+        rows(&store, "MATCH (n:N) UNWIND [n.xs, [1, 2]] AS l RETURN DISTINCT l"),
         1
     );
 }

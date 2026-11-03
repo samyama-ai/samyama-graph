@@ -39,10 +39,7 @@ fn groups_right(lhs: &str, op: &str, rhs: &str, list: &str) {
     let bare = truth(&format!("{lhs} {op} {rhs} IN {list}"));
     let right = truth(&format!("{lhs} {op} ({rhs} IN {list})"));
     let left = truth(&format!("({lhs} {op} {rhs}) IN {list}"));
-    assert_eq!(
-        bare, right,
-        "{lhs} {op} {rhs} IN {list} did not group as `{lhs} {op} ({rhs} IN {list})`"
-    );
+    assert_eq!(bare, right, "{lhs} {op} {rhs} IN {list} did not group as `{lhs} {op} ({rhs} IN {list})`");
     assert_ne!(
         right, left,
         "{lhs} {op} {rhs} IN {list}: both groupings agree, so this case cannot detect the bug"
@@ -78,9 +75,7 @@ fn the_tck_enumeration() {
     let batch = QueryExecutor::new(&store).execute(&q).expect("runs");
     assert_eq!(
         batch.records.first().and_then(|r| r.get("result")),
-        Some(&Value::Property(samyama::graph::PropertyValue::Boolean(
-            true
-        )))
+        Some(&Value::Property(samyama::graph::PropertyValue::Boolean(true)))
     );
 }
 

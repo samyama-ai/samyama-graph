@@ -120,10 +120,7 @@ async fn main() -> Result<(), Error> {
                 Ok(r) => {
                     let elapsed = qt.elapsed();
                     if r.columns.is_empty() {
-                        eprintln!(
-                            "    (empty result, {:.0}ms)",
-                            elapsed.as_secs_f64() * 1000.0
-                        );
+                        eprintln!("    (empty result, {:.0}ms)", elapsed.as_secs_f64() * 1000.0);
                         continue;
                     }
                     eprintln!("    columns: {}", r.columns.join(" | "));
@@ -136,11 +133,7 @@ async fn main() -> Result<(), Error> {
                     if n > show {
                         eprintln!("    ... ({} more rows)", n - show);
                     }
-                    eprintln!(
-                        "    [{} rows in {:.0}ms]",
-                        n,
-                        elapsed.as_secs_f64() * 1000.0
-                    );
+                    eprintln!("    [{} rows in {:.0}ms]", n, elapsed.as_secs_f64() * 1000.0);
                 }
                 Err(e) => {
                     eprintln!("    ERROR: {}", e);

@@ -51,9 +51,12 @@ async fn get_json(app: Router, path: &str) -> (StatusCode, Value) {
 
 fn resp_graph_list(handler: &CommandHandler, store: &Arc<RwLock<GraphStore>>) -> Vec<String> {
     let rt = tokio::runtime::Handle::current();
-    let cmd = RespValue::Array(vec![RespValue::BulkString(Some(b"GRAPH.LIST".to_vec()))]);
-    let result =
-        tokio::task::block_in_place(|| rt.block_on(handler.handle_command(&cmd, store, None)));
+    let cmd = RespValue::Array(vec![
+        RespValue::BulkString(Some(b"GRAPH.LIST".to_vec())),
+    ]);
+    let result = tokio::task::block_in_place(|| {
+        rt.block_on(handler.handle_command(&cmd, store, None))
+    });
     match result {
         RespValue::Array(items) => items
             .into_iter()
@@ -73,10 +76,7 @@ async fn tenant_created_via_http_visible_to_resp() {
     let handler = CommandHandler::new_with_tenants(None, Arc::clone(&tm));
 
     // Precondition: only "default" exists.
-    assert_eq!(
-        resp_graph_list(&handler, &store),
-        vec!["default".to_string()]
-    );
+    assert_eq!(resp_graph_list(&handler, &store), vec!["default".to_string()]);
 
     // Create via HTTP.
     let (status, _body) = post_json(

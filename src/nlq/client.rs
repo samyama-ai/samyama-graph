@@ -1,9 +1,9 @@
 //! NLQ Client for LLM interactions
 
+use crate::persistence::tenant::{NLQConfig, LLMProvider};
 use crate::nlq::{NLQError, NLQResult};
-use crate::persistence::tenant::{LLMProvider, NLQConfig};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use reqwest::Client;
 use std::time::{Duration, Instant};
 
 /// Tokens a model reports for one call (COST-07, #1790).
@@ -83,20 +83,17 @@ impl NLQClient {
             .build()
             .map_err(|e| NLQError::ConfigError(e.to_string()))?;
 
-        let api_base_url = config
-            .api_base_url
-            .clone()
-            .unwrap_or_else(|| match config.provider {
+        let api_base_url = config.api_base_url.clone().unwrap_or_else(|| {
+            match config.provider {
                 LLMProvider::OpenAI => "https://api.openai.com/v1".to_string(),
                 LLMProvider::Ollama => "http://localhost:11434".to_string(),
-                LLMProvider::Gemini => {
-                    "https://generativelanguage.googleapis.com/v1beta".to_string()
-                }
+                LLMProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta".to_string(),
                 LLMProvider::AzureOpenAI => String::new(),
                 LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
                 LLMProvider::ClaudeCode => String::new(),
                 LLMProvider::Mock => String::new(),
-            });
+            }
+        });
 
         Ok(Self {
             client,
@@ -190,33 +187,17 @@ impl NLQClient {
             content: String,
         }
 
-        let api_key = self
-            .config
-            .api_key
-            .as_ref()
-            .ok_or_else(|| NLQError::ConfigError("OpenAI requires API key".to_string()))?;
-        let system_prompt = self
-            .config
-            .system_prompt
-            .clone()
-            .unwrap_or_else(|| "You are a Cypher expert.".to_string());
+        let api_key = self.config.api_key.as_ref().ok_or_else(|| NLQError::ConfigError("OpenAI requires API key".to_string()))?;
+        let system_prompt = self.config.system_prompt.clone().unwrap_or_else(|| "You are a Cypher expert.".to_string());
 
         let url = format!("{}/chat/completions", self.api_base_url);
-        let resp = self
-            .client
-            .post(&url)
+        let resp = self.client.post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&Request {
                 model: &self.config.model,
                 messages: vec![
-                    Message {
-                        role: "system".to_string(),
-                        content: system_prompt,
-                    },
-                    Message {
-                        role: "user".to_string(),
-                        content: prompt.to_string(),
-                    },
+                    Message { role: "system".to_string(), content: system_prompt },
+                    Message { role: "user".to_string(), content: prompt.to_string() },
                 ],
                 temperature: 0.0,
             })
@@ -225,16 +206,10 @@ impl NLQClient {
             .map_err(|e| NLQError::NetworkError(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(NLQError::ApiError(format!(
-                "OpenAI error: {}",
-                resp.status()
-            )));
+            return Err(NLQError::ApiError(format!("OpenAI error: {}", resp.status())));
         }
 
-        let result: Response = resp
-            .json()
-            .await
-            .map_err(|e| NLQError::SerializationError(e.to_string()))?;
+        let result: Response = resp.json().await.map_err(|e| NLQError::SerializationError(e.to_string()))?;
         let usage = result.usage.map_or_else(TokenUsage::default, |u| {
             TokenUsage::from_counts(u.prompt_tokens, u.completion_tokens, u.total_tokens)
         });
@@ -264,16 +239,10 @@ impl NLQClient {
             eval_count: Option<u64>,
         }
 
-        let system_prompt = self
-            .config
-            .system_prompt
-            .clone()
-            .unwrap_or_else(|| "You are a Cypher expert.".to_string());
-
+        let system_prompt = self.config.system_prompt.clone().unwrap_or_else(|| "You are a Cypher expert.".to_string());
+        
         let url = format!("{}/api/generate", self.api_base_url);
-        let resp = self
-            .client
-            .post(&url)
+        let resp = self.client.post(&url)
             .json(&Request {
                 model: &self.config.model,
                 prompt: prompt.to_string(),
@@ -285,16 +254,10 @@ impl NLQClient {
             .map_err(|e| NLQError::NetworkError(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(NLQError::ApiError(format!(
-                "Ollama error: {}",
-                resp.status()
-            )));
+            return Err(NLQError::ApiError(format!("Ollama error: {}", resp.status())));
         }
 
-        let result: Response = resp
-            .json()
-            .await
-            .map_err(|e| NLQError::SerializationError(e.to_string()))?;
+        let result: Response = resp.json().await.map_err(|e| NLQError::SerializationError(e.to_string()))?;
         let usage = TokenUsage::from_counts(result.prompt_eval_count, result.eval_count, None);
         Ok((result.response, usage))
     }
@@ -312,10 +275,7 @@ impl NLQClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(NLQError::ApiError(format!(
-                "Claude Code CLI failed: {}",
-                stderr
-            )));
+            return Err(NLQError::ApiError(format!("Claude Code CLI failed: {}", stderr)));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -365,35 +325,24 @@ impl NLQClient {
             content: Content,
         }
 
-        let api_key = self
-            .config
-            .api_key
-            .as_ref()
-            .ok_or_else(|| NLQError::ConfigError("Gemini requires API key".to_string()))?;
-        let system_prompt = self
-            .config
-            .system_prompt
-            .clone()
-            .unwrap_or_else(|| "You are a Cypher expert.".to_string());
-
+        let api_key = self.config.api_key.as_ref().ok_or_else(|| NLQError::ConfigError("Gemini requires API key".to_string()))?;
+        let system_prompt = self.config.system_prompt.clone().unwrap_or_else(|| "You are a Cypher expert.".to_string());
+        
         // Combine system prompt and user prompt because Gemini v1beta doesn't strictly have 'system' role in all endpoints
         // or effectively treats user/model turns.
         // A simple approach is prepending the system instruction.
         let full_prompt = format!("{}\n\nQuestion: {}", system_prompt, prompt);
 
-        let url = format!(
-            "{}/models/{}:generateContent?key={}",
-            self.api_base_url, self.config.model, api_key
-        );
-
-        let resp = self
-            .client
-            .post(&url)
+        let url = format!("{}/models/{}:generateContent?key={}", self.api_base_url, self.config.model, api_key);
+        
+        let resp = self.client.post(&url)
             .json(&Request {
-                contents: vec![Content {
-                    role: Some("user".to_string()),
-                    parts: vec![Part { text: full_prompt }],
-                }],
+                contents: vec![
+                    Content {
+                        role: Some("user".to_string()),
+                        parts: vec![Part { text: full_prompt }],
+                    }
+                ],
                 generation_config: GenerationConfig { temperature: 0.0 },
             })
             .send()
@@ -405,10 +354,7 @@ impl NLQClient {
             return Err(NLQError::ApiError(format!("Gemini error: {}", text)));
         }
 
-        let result: Response = resp
-            .json()
-            .await
-            .map_err(|e| NLQError::SerializationError(e.to_string()))?;
+        let result: Response = resp.json().await.map_err(|e| NLQError::SerializationError(e.to_string()))?;
         let usage = result.usage_metadata.map_or_else(TokenUsage::default, |u| {
             TokenUsage::from_counts(
                 u.prompt_token_count,
@@ -429,9 +375,7 @@ impl NLQClient {
     }
 }
 
-#[cfg(test)]
-#[path = "client_cov_tests.rs"]
-mod cov_tests;
+#[cfg(test)] #[path = "client_cov_tests.rs"] mod cov_tests;
 
 #[cfg(test)]
 mod tests {
@@ -633,10 +577,7 @@ mod tests {
             system_prompt: None,
         };
         let client_gemini = NLQClient::new(&config_gemini).unwrap();
-        assert_eq!(
-            client_gemini.api_base_url,
-            "https://generativelanguage.googleapis.com/v1beta"
-        );
+        assert_eq!(client_gemini.api_base_url, "https://generativelanguage.googleapis.com/v1beta");
 
         // ClaudeCode default (empty)
         let config_cc = NLQConfig {
@@ -689,9 +630,7 @@ mod tests {
             model: "mock".to_string(),
             api_key: None,
             api_base_url: None,
-            system_prompt: Some(
-                "You are a graph database expert specialized in medical data.".to_string(),
-            ),
+            system_prompt: Some("You are a graph database expert specialized in medical data.".to_string()),
         };
         let client = NLQClient::new(&config);
         assert!(client.is_ok());

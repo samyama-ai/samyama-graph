@@ -70,9 +70,7 @@ fn grouping_by_a_projected_variable_is_fine() {
 #[test]
 fn grouping_by_a_projected_property_is_fine() {
     assert!(accepted("MATCH (n) RETURN n.age, n.age + count(*)"));
-    assert!(accepted(
-        "MATCH (n) WITH n.age AS a, count(*) AS c RETURN a, c"
-    ));
+    assert!(accepted("MATCH (n) WITH n.age AS a, count(*) AS c RETURN a, c"));
 }
 
 #[test]
@@ -80,9 +78,7 @@ fn a_projection_that_does_not_aggregate_is_untouched() {
     // The rule must not fire at all without an aggregate, or every ordinary
     // projection becomes a candidate for rejection.
     assert!(accepted("MATCH (me)--(you) RETURN me.age + you.age"));
-    assert!(accepted(
-        "MATCH (me)--(you) WITH me.age + you.age AS s RETURN s"
-    ));
+    assert!(accepted("MATCH (me)--(you) WITH me.age + you.age AS s RETURN s"));
 }
 
 #[test]
@@ -95,9 +91,7 @@ fn variables_inside_the_aggregate_need_no_grouping() {
 
 #[test]
 fn multiple_aggregates_over_one_key_are_fine() {
-    assert!(accepted(
-        "MATCH (n) RETURN n.age, count(*), sum(n.score), max(n.score)"
-    ));
+    assert!(accepted("MATCH (n) RETURN n.age, count(*), sum(n.score), max(n.score)"));
 }
 
 #[test]

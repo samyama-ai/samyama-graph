@@ -54,27 +54,15 @@ fn a_zoned_source_is_converted() {
     check(&[
         (format!("time({ZONED_DT})"), "12:00+01:00"),
         (format!("time({{time: {ZONED_DT}}})"), "12:00+01:00"),
-        (
-            format!("time({{time: {ZONED_DT}, second: 42}})"),
-            "12:00:42+01:00",
-        ),
-        (
-            format!("time({{time: {ZONED_DT}, timezone: '+05:00'}})"),
-            "16:00+05:00",
-        ),
+        (format!("time({{time: {ZONED_DT}, second: 42}})"), "12:00:42+01:00"),
+        (format!("time({{time: {ZONED_DT}, timezone: '+05:00'}})"), "16:00+05:00"),
         (
             format!("time({{time: {ZONED_DT}, second: 42, timezone: '+05:00'}})"),
             "16:00:42+05:00",
         ),
         (format!("time({ZONED_TIME})"), "12:31:14.645876+01:00"),
-        (
-            format!("time({{time: {ZONED_TIME}}})"),
-            "12:31:14.645876+01:00",
-        ),
-        (
-            format!("time({{time: {ZONED_TIME}, second: 42}})"),
-            "12:31:42.645876+01:00",
-        ),
+        (format!("time({{time: {ZONED_TIME}}})"), "12:31:14.645876+01:00"),
+        (format!("time({{time: {ZONED_TIME}, second: 42}})"), "12:31:42.645876+01:00"),
         (
             format!("time({{time: {ZONED_TIME}, timezone: '+05:00'}})"),
             "16:31:14.645876+05:00",
@@ -94,18 +82,12 @@ fn a_local_source_is_only_labelled() {
     let local_dt =
         "localdatetime({year: 1984, month: 3, day: 7, hour: 12, minute: 31, second: 14, millisecond: 645})";
     check(&[
-        (
-            format!("time({{time: {local_t}, timezone: '+05:00'}})"),
-            "12:31:14.645876123+05:00",
-        ),
+        (format!("time({{time: {local_t}, timezone: '+05:00'}})"), "12:31:14.645876123+05:00"),
         (
             format!("time({{time: {local_t}, second: 42, timezone: '+05:00'}})"),
             "12:31:42.645876123+05:00",
         ),
-        (
-            format!("time({{time: {local_dt}, timezone: '+05:00'}})"),
-            "12:31:14.645+05:00",
-        ),
+        (format!("time({{time: {local_dt}, timezone: '+05:00'}})"), "12:31:14.645+05:00"),
         (
             format!("time({{time: {local_dt}, second: 42, timezone: '+05:00'}})"),
             "12:31:42.645+05:00",
@@ -138,8 +120,7 @@ fn a_quarter_override_keeps_the_day_within_the_quarter() {
         ),
         // An explicit dayOfQuarter still wins.
         (
-            "date({date: date({year: 1984, month: 11, day: 11}), quarter: 3, dayOfQuarter: 1})"
-                .into(),
+            "date({date: date({year: 1984, month: 11, day: 11}), quarter: 3, dayOfQuarter: 1})".into(),
             "1984-07-01",
         ),
     ]);

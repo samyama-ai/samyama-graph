@@ -22,11 +22,9 @@ fn graph(n: i64) -> GraphStore {
 fn plan_unchecked(store: &GraphStore, cypher: &str) -> String {
     let query = parse_query(&format!("EXPLAIN {cypher}")).expect("parse");
     match QueryExecutor::new(store).execute(&query).unwrap().records[0].get("plan") {
-        Some(Value::Property(PropertyValue::String(t))) => t
-            .lines()
-            .take_while(|l| !l.starts_with("---"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Some(Value::Property(PropertyValue::String(t))) => {
+            t.lines().take_while(|l| !l.starts_with("---")).collect::<Vec<_>>().join("\n")
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -67,10 +65,7 @@ fn an_id_equality_anchors_the_scan() {
     let store = graph(1000);
     let text = plan(&store, "MATCH (n:N) WHERE id(n) = 5 RETURN n.v AS v");
     assert!(text.contains("NodeById"), "{text}");
-    assert!(
-        !text.contains("NodeScan"),
-        "the label scan should be gone:\n{text}"
-    );
+    assert!(!text.contains("NodeScan"), "the label scan should be gone:\n{text}");
 }
 
 #[test]
@@ -83,15 +78,9 @@ fn it_works_without_a_label_too() {
 #[test]
 fn the_answer_is_unchanged() {
     let store = graph(1000);
-    assert_eq!(
-        values(&store, "MATCH (n:N) WHERE id(n) = 5 RETURN n.v AS v").len(),
-        1
-    );
+    assert_eq!(values(&store, "MATCH (n:N) WHERE id(n) = 5 RETURN n.v AS v").len(), 1);
     // Ids start at 1, and `v` counts from 0, so id 5 holds v = 4.
-    assert_eq!(
-        values(&store, "MATCH (n:N) WHERE id(n) = 5 RETURN n.v AS v"),
-        vec![4]
-    );
+    assert_eq!(values(&store, "MATCH (n:N) WHERE id(n) = 5 RETURN n.v AS v"), vec![4]);
 }
 
 #[test]
@@ -101,27 +90,15 @@ fn a_label_that_does_not_match_returns_nothing() {
     // whatever node holds that id.
     let mut store = graph(10);
     let other = store.create_node("Other");
-    let _ = store.set_node_property(
-        "default",
-        other,
-        "v".to_string(),
-        PropertyValue::Integer(99),
-    );
+    let _ = store.set_node_property("default", other, "v".to_string(), PropertyValue::Integer(99));
 
     let other_id = other.as_u64() as i64;
     assert_eq!(
-        values(
-            &store,
-            &format!("MATCH (n:Other) WHERE id(n) = {other_id} RETURN n.v AS v")
-        ),
+        values(&store, &format!("MATCH (n:Other) WHERE id(n) = {other_id} RETURN n.v AS v")),
         vec![99]
     );
     assert!(
-        values(
-            &store,
-            &format!("MATCH (n:N) WHERE id(n) = {other_id} RETURN n.v AS v")
-        )
-        .is_empty(),
+        values(&store, &format!("MATCH (n:N) WHERE id(n) = {other_id} RETURN n.v AS v")).is_empty(),
         "an :N pattern must not match an :Other node by id"
     );
 }
@@ -145,24 +122,15 @@ fn the_literal_may_be_on_either_side() {
     let store = graph(100);
     let text = plan(&store, "MATCH (n:N) WHERE 5 = id(n) RETURN n.v AS v");
     assert!(text.contains("NodeById"), "{text}");
-    assert_eq!(
-        values(&store, "MATCH (n:N) WHERE 5 = id(n) RETURN n.v AS v"),
-        vec![4]
-    );
+    assert_eq!(values(&store, "MATCH (n:N) WHERE 5 = id(n) RETURN n.v AS v"), vec![4]);
 }
 
 #[test]
 fn an_id_list_anchors_on_every_element() {
     let store = graph(1000);
-    let text = plan(
-        &store,
-        "MATCH (n:N) WHERE id(n) IN [3, 5, 7] RETURN n.v AS v",
-    );
+    let text = plan(&store, "MATCH (n:N) WHERE id(n) IN [3, 5, 7] RETURN n.v AS v");
     assert!(text.contains("NodeById"), "{text}");
-    let mut got = values(
-        &store,
-        "MATCH (n:N) WHERE id(n) IN [3, 5, 7] RETURN n.v AS v",
-    );
+    let mut got = values(&store, "MATCH (n:N) WHERE id(n) IN [3, 5, 7] RETURN n.v AS v");
     got.sort();
     assert_eq!(got, vec![2, 4, 6]);
 }
@@ -254,12 +222,7 @@ fn indexed_chain(n: i64) -> (GraphStore, Vec<NodeId>) {
     let ids: Vec<NodeId> = (0..n)
         .map(|i| {
             let id = store.create_node("N");
-            let _ = store.set_node_property(
-                "default",
-                id,
-                "seq".to_string(),
-                PropertyValue::Integer(i),
-            );
+            let _ = store.set_node_property("default", id, "seq".to_string(), PropertyValue::Integer(i));
             id
         })
         .collect();
@@ -340,10 +303,7 @@ fn an_unanchored_endpoint_still_works() {
     )
     .unwrap();
     let batch = QueryExecutor::new(&store).execute(&query).unwrap();
-    assert!(
-        !batch.records.is_empty(),
-        "an unpinned target must still be searched"
-    );
+    assert!(!batch.records.is_empty(), "an unpinned target must still be searched");
 }
 
 #[test]
@@ -385,11 +345,7 @@ fn both_endpoints_of_a_path_can_be_pinned_by_id() {
     let batch = QueryExecutor::new(&store).execute(&query).unwrap();
     assert_eq!(batch.records.len(), 1, "the chain connects them");
     assert_eq!(
-        QueryExecutor::new(&store)
-            .execute(&parse_query(by_property).unwrap())
-            .unwrap()
-            .records
-            .len(),
+        QueryExecutor::new(&store).execute(&parse_query(by_property).unwrap()).unwrap().records.len(),
         1,
         "and the inline form finds the same path"
     );

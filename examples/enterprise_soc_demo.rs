@@ -19,8 +19,10 @@
 static GLOBAL: samyama::allocator::Shipped = samyama::allocator::SHIPPED;
 
 use samyama_sdk::{
-    AgentConfig, AlgorithmClient, DistanceMetric, EdgeType, EmbeddedClient, LLMProvider, Label,
-    NLQConfig, NodeId, PageRankConfig, SamyamaClient, VectorClient,
+    EmbeddedClient, SamyamaClient, AlgorithmClient, VectorClient,
+    EdgeType, Label, NodeId, PageRankConfig,
+    NLQConfig, LLMProvider, AgentConfig,
+    DistanceMetric,
 };
 use std::collections::HashMap;
 use std::time::Instant;
@@ -72,14 +74,11 @@ async fn main() {
         model: "threat-analyst-v1".to_string(),
         api_key: None,
         api_base_url: None,
-        system_prompt: Some(
-            "You are a Tier 3 SOC analyst investigating APT campaigns.".to_string(),
-        ),
+        system_prompt: Some("You are a Tier 3 SOC analyst investigating APT campaigns.".to_string()),
         tools: vec![],
-        policies: HashMap::from([(
-            "Alert".to_string(),
-            "Correlate with MITRE ATT&CK and recommend containment.".to_string(),
-        )]),
+        policies: HashMap::from([
+            ("Alert".to_string(), "Correlate with MITRE ATT&CK and recommend containment.".to_string()),
+        ]),
     };
 
     let nlq_config = NLQConfig {
@@ -88,21 +87,11 @@ async fn main() {
         model: String::new(),
         api_key: None,
         api_base_url: None,
-        system_prompt: Some(
-            "You are a Cypher query expert for a cybersecurity knowledge graph.".to_string(),
-        ),
+        system_prompt: Some("You are a Cypher query expert for a cybersecurity knowledge graph.".to_string()),
     };
 
     // Create vector index for threat signature matching (128-dim)
-    client
-        .create_vector_index(
-            "ThreatIntel",
-            "signature_embedding",
-            128,
-            DistanceMetric::Cosine,
-        )
-        .await
-        .unwrap();
+    client.create_vector_index("ThreatIntel", "signature_embedding", 128, DistanceMetric::Cosine).await.unwrap();
 
     // ======================================================================
     // STEP 1: Build Enterprise Network Topology
@@ -123,409 +112,59 @@ async fn main() {
 
     let servers: Vec<ServerDef> = vec![
         // DMZ (10.1.x.x) - 12 servers
-        ServerDef {
-            name: "dmz-web-01",
-            ip: "10.1.1.10",
-            zone: "DMZ",
-            os: "Ubuntu 22.04",
-            role: "Web Server",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "dmz-web-02",
-            ip: "10.1.1.11",
-            zone: "DMZ",
-            os: "Ubuntu 22.04",
-            role: "Web Server",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "dmz-web-03",
-            ip: "10.1.1.12",
-            zone: "DMZ",
-            os: "Ubuntu 22.04",
-            role: "Web Server",
-            criticality: "Medium",
-        },
-        ServerDef {
-            name: "dmz-proxy-01",
-            ip: "10.1.2.10",
-            zone: "DMZ",
-            os: "CentOS 8",
-            role: "Reverse Proxy",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "dmz-proxy-02",
-            ip: "10.1.2.11",
-            zone: "DMZ",
-            os: "CentOS 8",
-            role: "Reverse Proxy",
-            criticality: "Medium",
-        },
-        ServerDef {
-            name: "dmz-mail-01",
-            ip: "10.1.3.10",
-            zone: "DMZ",
-            os: "Ubuntu 22.04",
-            role: "Mail Gateway",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "dmz-dns-01",
-            ip: "10.1.4.10",
-            zone: "DMZ",
-            os: "Ubuntu 20.04",
-            role: "External DNS",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "dmz-vpn-01",
-            ip: "10.1.5.10",
-            zone: "DMZ",
-            os: "FortiOS 7.4",
-            role: "VPN Gateway",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "dmz-waf-01",
-            ip: "10.1.6.10",
-            zone: "DMZ",
-            os: "F5 BIG-IP",
-            role: "WAF",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "dmz-ids-01",
-            ip: "10.1.7.10",
-            zone: "DMZ",
-            os: "SecurityOnion",
-            role: "IDS/IPS",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "dmz-lb-01",
-            ip: "10.1.8.10",
-            zone: "DMZ",
-            os: "HAProxy 2.8",
-            role: "Load Balancer",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "dmz-honeypot-01",
-            ip: "10.1.9.10",
-            zone: "DMZ",
-            os: "Ubuntu 22.04",
-            role: "Honeypot",
-            criticality: "Low",
-        },
+        ServerDef { name: "dmz-web-01",      ip: "10.1.1.10",   zone: "DMZ",      os: "Ubuntu 22.04",   role: "Web Server",          criticality: "High" },
+        ServerDef { name: "dmz-web-02",      ip: "10.1.1.11",   zone: "DMZ",      os: "Ubuntu 22.04",   role: "Web Server",          criticality: "High" },
+        ServerDef { name: "dmz-web-03",      ip: "10.1.1.12",   zone: "DMZ",      os: "Ubuntu 22.04",   role: "Web Server",          criticality: "Medium" },
+        ServerDef { name: "dmz-proxy-01",    ip: "10.1.2.10",   zone: "DMZ",      os: "CentOS 8",       role: "Reverse Proxy",       criticality: "High" },
+        ServerDef { name: "dmz-proxy-02",    ip: "10.1.2.11",   zone: "DMZ",      os: "CentOS 8",       role: "Reverse Proxy",       criticality: "Medium" },
+        ServerDef { name: "dmz-mail-01",     ip: "10.1.3.10",   zone: "DMZ",      os: "Ubuntu 22.04",   role: "Mail Gateway",        criticality: "High" },
+        ServerDef { name: "dmz-dns-01",      ip: "10.1.4.10",   zone: "DMZ",      os: "Ubuntu 20.04",   role: "External DNS",        criticality: "High" },
+        ServerDef { name: "dmz-vpn-01",      ip: "10.1.5.10",   zone: "DMZ",      os: "FortiOS 7.4",    role: "VPN Gateway",         criticality: "Critical" },
+        ServerDef { name: "dmz-waf-01",      ip: "10.1.6.10",   zone: "DMZ",      os: "F5 BIG-IP",      role: "WAF",                 criticality: "Critical" },
+        ServerDef { name: "dmz-ids-01",      ip: "10.1.7.10",   zone: "DMZ",      os: "SecurityOnion",  role: "IDS/IPS",             criticality: "Critical" },
+        ServerDef { name: "dmz-lb-01",       ip: "10.1.8.10",   zone: "DMZ",      os: "HAProxy 2.8",    role: "Load Balancer",       criticality: "High" },
+        ServerDef { name: "dmz-honeypot-01", ip: "10.1.9.10",   zone: "DMZ",      os: "Ubuntu 22.04",   role: "Honeypot",            criticality: "Low" },
         // Internal (172.16.x.x) - 18 servers
-        ServerDef {
-            name: "int-dc-01",
-            ip: "172.16.1.10",
-            zone: "Internal",
-            os: "Windows Server 2022",
-            role: "Domain Controller",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "int-dc-02",
-            ip: "172.16.1.11",
-            zone: "Internal",
-            os: "Windows Server 2022",
-            role: "Domain Controller",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "int-db-01",
-            ip: "172.16.2.10",
-            zone: "Internal",
-            os: "RHEL 9",
-            role: "Database (PostgreSQL)",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "int-db-02",
-            ip: "172.16.2.11",
-            zone: "Internal",
-            os: "RHEL 9",
-            role: "Database (Oracle)",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "int-db-03",
-            ip: "172.16.2.12",
-            zone: "Internal",
-            os: "Ubuntu 22.04",
-            role: "Database (MongoDB)",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "int-app-01",
-            ip: "172.16.3.10",
-            zone: "Internal",
-            os: "RHEL 9",
-            role: "Application Server",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "int-app-02",
-            ip: "172.16.3.11",
-            zone: "Internal",
-            os: "RHEL 9",
-            role: "Application Server",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "int-app-03",
-            ip: "172.16.3.12",
-            zone: "Internal",
-            os: "RHEL 9",
-            role: "Application Server",
-            criticality: "Medium",
-        },
-        ServerDef {
-            name: "int-file-01",
-            ip: "172.16.4.10",
-            zone: "Internal",
-            os: "Windows Server 2022",
-            role: "File Server",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "int-file-02",
-            ip: "172.16.4.11",
-            zone: "Internal",
-            os: "Windows Server 2022",
-            role: "File Server",
-            criticality: "Medium",
-        },
-        ServerDef {
-            name: "int-ci-01",
-            ip: "172.16.5.10",
-            zone: "Internal",
-            os: "Ubuntu 22.04",
-            role: "CI/CD (Jenkins)",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "int-git-01",
-            ip: "172.16.5.11",
-            zone: "Internal",
-            os: "Ubuntu 22.04",
-            role: "Git Server",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "int-ldap-01",
-            ip: "172.16.6.10",
-            zone: "Internal",
-            os: "Ubuntu 22.04",
-            role: "LDAP Server",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "int-siem-01",
-            ip: "172.16.7.10",
-            zone: "Internal",
-            os: "RHEL 9",
-            role: "SIEM (Splunk)",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "int-ntp-01",
-            ip: "172.16.8.10",
-            zone: "Internal",
-            os: "Ubuntu 20.04",
-            role: "NTP Server",
-            criticality: "Medium",
-        },
-        ServerDef {
-            name: "int-backup-01",
-            ip: "172.16.9.10",
-            zone: "Internal",
-            os: "RHEL 9",
-            role: "Backup Server",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "int-print-01",
-            ip: "172.16.10.10",
-            zone: "Internal",
-            os: "Windows Server 2019",
-            role: "Print Server",
-            criticality: "Low",
-        },
-        ServerDef {
-            name: "int-dhcp-01",
-            ip: "172.16.11.10",
-            zone: "Internal",
-            os: "Windows Server 2022",
-            role: "DHCP Server",
-            criticality: "Medium",
-        },
+        ServerDef { name: "int-dc-01",       ip: "172.16.1.10", zone: "Internal", os: "Windows Server 2022", role: "Domain Controller",  criticality: "Critical" },
+        ServerDef { name: "int-dc-02",       ip: "172.16.1.11", zone: "Internal", os: "Windows Server 2022", role: "Domain Controller",  criticality: "Critical" },
+        ServerDef { name: "int-db-01",       ip: "172.16.2.10", zone: "Internal", os: "RHEL 9",         role: "Database (PostgreSQL)", criticality: "Critical" },
+        ServerDef { name: "int-db-02",       ip: "172.16.2.11", zone: "Internal", os: "RHEL 9",         role: "Database (Oracle)",   criticality: "Critical" },
+        ServerDef { name: "int-db-03",       ip: "172.16.2.12", zone: "Internal", os: "Ubuntu 22.04",   role: "Database (MongoDB)",  criticality: "High" },
+        ServerDef { name: "int-app-01",      ip: "172.16.3.10", zone: "Internal", os: "RHEL 9",         role: "Application Server",  criticality: "High" },
+        ServerDef { name: "int-app-02",      ip: "172.16.3.11", zone: "Internal", os: "RHEL 9",         role: "Application Server",  criticality: "High" },
+        ServerDef { name: "int-app-03",      ip: "172.16.3.12", zone: "Internal", os: "RHEL 9",         role: "Application Server",  criticality: "Medium" },
+        ServerDef { name: "int-file-01",     ip: "172.16.4.10", zone: "Internal", os: "Windows Server 2022", role: "File Server",        criticality: "High" },
+        ServerDef { name: "int-file-02",     ip: "172.16.4.11", zone: "Internal", os: "Windows Server 2022", role: "File Server",        criticality: "Medium" },
+        ServerDef { name: "int-ci-01",       ip: "172.16.5.10", zone: "Internal", os: "Ubuntu 22.04",   role: "CI/CD (Jenkins)",     criticality: "High" },
+        ServerDef { name: "int-git-01",      ip: "172.16.5.11", zone: "Internal", os: "Ubuntu 22.04",   role: "Git Server",          criticality: "High" },
+        ServerDef { name: "int-ldap-01",     ip: "172.16.6.10", zone: "Internal", os: "Ubuntu 22.04",   role: "LDAP Server",         criticality: "High" },
+        ServerDef { name: "int-siem-01",     ip: "172.16.7.10", zone: "Internal", os: "RHEL 9",         role: "SIEM (Splunk)",       criticality: "Critical" },
+        ServerDef { name: "int-ntp-01",      ip: "172.16.8.10", zone: "Internal", os: "Ubuntu 20.04",   role: "NTP Server",          criticality: "Medium" },
+        ServerDef { name: "int-backup-01",   ip: "172.16.9.10", zone: "Internal", os: "RHEL 9",         role: "Backup Server",       criticality: "High" },
+        ServerDef { name: "int-print-01",    ip: "172.16.10.10",zone: "Internal", os: "Windows Server 2019", role: "Print Server",       criticality: "Low" },
+        ServerDef { name: "int-dhcp-01",     ip: "172.16.11.10",zone: "Internal", os: "Windows Server 2022", role: "DHCP Server",        criticality: "Medium" },
         // Cloud (10.100.x.x) - 10 servers
-        ServerDef {
-            name: "cld-k8s-master",
-            ip: "10.100.1.10",
-            zone: "Cloud",
-            os: "Ubuntu 22.04",
-            role: "K8s Control Plane",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "cld-k8s-node-01",
-            ip: "10.100.1.20",
-            zone: "Cloud",
-            os: "Ubuntu 22.04",
-            role: "K8s Worker Node",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "cld-k8s-node-02",
-            ip: "10.100.1.21",
-            zone: "Cloud",
-            os: "Ubuntu 22.04",
-            role: "K8s Worker Node",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "cld-k8s-node-03",
-            ip: "10.100.1.22",
-            zone: "Cloud",
-            os: "Ubuntu 22.04",
-            role: "K8s Worker Node",
-            criticality: "Medium",
-        },
-        ServerDef {
-            name: "cld-registry",
-            ip: "10.100.2.10",
-            zone: "Cloud",
-            os: "Ubuntu 22.04",
-            role: "Container Registry",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "cld-api-gw",
-            ip: "10.100.3.10",
-            zone: "Cloud",
-            os: "Amazon Linux 2",
-            role: "API Gateway",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "cld-lambda-mgr",
-            ip: "10.100.4.10",
-            zone: "Cloud",
-            os: "Amazon Linux 2",
-            role: "Serverless Manager",
-            criticality: "Medium",
-        },
-        ServerDef {
-            name: "cld-s3-proxy",
-            ip: "10.100.5.10",
-            zone: "Cloud",
-            os: "Amazon Linux 2",
-            role: "Storage Proxy",
-            criticality: "Medium",
-        },
-        ServerDef {
-            name: "cld-rds-01",
-            ip: "10.100.6.10",
-            zone: "Cloud",
-            os: "Amazon Linux 2",
-            role: "Cloud Database (RDS)",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "cld-elk-01",
-            ip: "10.100.7.10",
-            zone: "Cloud",
-            os: "Ubuntu 22.04",
-            role: "ELK Stack",
-            criticality: "High",
-        },
+        ServerDef { name: "cld-k8s-master",  ip: "10.100.1.10", zone: "Cloud",    os: "Ubuntu 22.04",   role: "K8s Control Plane",   criticality: "Critical" },
+        ServerDef { name: "cld-k8s-node-01", ip: "10.100.1.20", zone: "Cloud",    os: "Ubuntu 22.04",   role: "K8s Worker Node",     criticality: "High" },
+        ServerDef { name: "cld-k8s-node-02", ip: "10.100.1.21", zone: "Cloud",    os: "Ubuntu 22.04",   role: "K8s Worker Node",     criticality: "High" },
+        ServerDef { name: "cld-k8s-node-03", ip: "10.100.1.22", zone: "Cloud",    os: "Ubuntu 22.04",   role: "K8s Worker Node",     criticality: "Medium" },
+        ServerDef { name: "cld-registry",    ip: "10.100.2.10", zone: "Cloud",    os: "Ubuntu 22.04",   role: "Container Registry",  criticality: "High" },
+        ServerDef { name: "cld-api-gw",      ip: "10.100.3.10", zone: "Cloud",    os: "Amazon Linux 2", role: "API Gateway",         criticality: "High" },
+        ServerDef { name: "cld-lambda-mgr",  ip: "10.100.4.10", zone: "Cloud",    os: "Amazon Linux 2", role: "Serverless Manager",  criticality: "Medium" },
+        ServerDef { name: "cld-s3-proxy",    ip: "10.100.5.10", zone: "Cloud",    os: "Amazon Linux 2", role: "Storage Proxy",       criticality: "Medium" },
+        ServerDef { name: "cld-rds-01",      ip: "10.100.6.10", zone: "Cloud",    os: "Amazon Linux 2", role: "Cloud Database (RDS)",criticality: "Critical" },
+        ServerDef { name: "cld-elk-01",      ip: "10.100.7.10", zone: "Cloud",    os: "Ubuntu 22.04",   role: "ELK Stack",           criticality: "High" },
         // OT Network (192.168.x.x) - 10 servers
-        ServerDef {
-            name: "ot-scada-01",
-            ip: "192.168.1.10",
-            zone: "OT",
-            os: "Windows 10 LTSC",
-            role: "SCADA Controller",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "ot-scada-02",
-            ip: "192.168.1.11",
-            zone: "OT",
-            os: "Windows 10 LTSC",
-            role: "SCADA Controller",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "ot-plc-gw-01",
-            ip: "192.168.2.10",
-            zone: "OT",
-            os: "RTOS",
-            role: "PLC Gateway",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "ot-hmi-01",
-            ip: "192.168.3.10",
-            zone: "OT",
-            os: "Windows 10 LTSC",
-            role: "HMI Server",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "ot-historian-01",
-            ip: "192.168.4.10",
-            zone: "OT",
-            os: "Windows Server 2019",
-            role: "Data Historian",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "ot-eng-ws-01",
-            ip: "192.168.5.10",
-            zone: "OT",
-            os: "Windows 10",
-            role: "Engineering WS",
-            criticality: "High",
-        },
-        ServerDef {
-            name: "ot-eng-ws-02",
-            ip: "192.168.5.11",
-            zone: "OT",
-            os: "Windows 10",
-            role: "Engineering WS",
-            criticality: "Medium",
-        },
-        ServerDef {
-            name: "ot-fw-01",
-            ip: "192.168.0.1",
-            zone: "OT",
-            os: "FortiOS 7.2",
-            role: "OT Firewall",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "ot-diode-01",
-            ip: "192.168.0.5",
-            zone: "OT",
-            os: "Waterfall",
-            role: "Data Diode",
-            criticality: "Critical",
-        },
-        ServerDef {
-            name: "ot-antivirus-01",
-            ip: "192.168.6.10",
-            zone: "OT",
-            os: "Windows Server 2019",
-            role: "AV Management",
-            criticality: "Medium",
-        },
+        ServerDef { name: "ot-scada-01",     ip: "192.168.1.10",zone: "OT",       os: "Windows 10 LTSC",role: "SCADA Controller",    criticality: "Critical" },
+        ServerDef { name: "ot-scada-02",     ip: "192.168.1.11",zone: "OT",       os: "Windows 10 LTSC",role: "SCADA Controller",    criticality: "Critical" },
+        ServerDef { name: "ot-plc-gw-01",    ip: "192.168.2.10",zone: "OT",       os: "RTOS",           role: "PLC Gateway",         criticality: "Critical" },
+        ServerDef { name: "ot-hmi-01",       ip: "192.168.3.10",zone: "OT",       os: "Windows 10 LTSC",role: "HMI Server",          criticality: "High" },
+        ServerDef { name: "ot-historian-01", ip: "192.168.4.10",zone: "OT",       os: "Windows Server 2019", role: "Data Historian",     criticality: "High" },
+        ServerDef { name: "ot-eng-ws-01",    ip: "192.168.5.10",zone: "OT",       os: "Windows 10",     role: "Engineering WS",      criticality: "High" },
+        ServerDef { name: "ot-eng-ws-02",    ip: "192.168.5.11",zone: "OT",       os: "Windows 10",     role: "Engineering WS",      criticality: "Medium" },
+        ServerDef { name: "ot-fw-01",        ip: "192.168.0.1", zone: "OT",       os: "FortiOS 7.2",    role: "OT Firewall",         criticality: "Critical" },
+        ServerDef { name: "ot-diode-01",     ip: "192.168.0.5", zone: "OT",       os: "Waterfall",      role: "Data Diode",          criticality: "Critical" },
+        ServerDef { name: "ot-antivirus-01", ip: "192.168.6.10",zone: "OT",       os: "Windows Server 2019", role: "AV Management",      criticality: "Medium" },
     ];
 
     let mut server_ids: HashMap<String, NodeId> = HashMap::new();
@@ -562,50 +201,50 @@ async fn main() {
 
     // DMZ -> Internal gateway connections
     let fw_pairs: Vec<(&str, &str, &str)> = vec![
-        ("dmz-proxy-01", "int-app-01", "ROUTES_TO"),
-        ("dmz-proxy-01", "int-app-02", "ROUTES_TO"),
-        ("dmz-proxy-02", "int-app-03", "ROUTES_TO"),
-        ("dmz-mail-01", "int-ldap-01", "AUTHENTICATES_VIA"),
-        ("dmz-vpn-01", "int-dc-01", "AUTHENTICATES_VIA"),
-        ("dmz-waf-01", "dmz-web-01", "PROTECTS"),
-        ("dmz-waf-01", "dmz-web-02", "PROTECTS"),
-        ("dmz-waf-01", "dmz-web-03", "PROTECTS"),
-        ("dmz-lb-01", "dmz-web-01", "BALANCES_TO"),
-        ("dmz-lb-01", "dmz-web-02", "BALANCES_TO"),
-        ("dmz-lb-01", "dmz-web-03", "BALANCES_TO"),
-        ("dmz-ids-01", "int-siem-01", "REPORTS_TO"),
+        ("dmz-proxy-01",  "int-app-01",    "ROUTES_TO"),
+        ("dmz-proxy-01",  "int-app-02",    "ROUTES_TO"),
+        ("dmz-proxy-02",  "int-app-03",    "ROUTES_TO"),
+        ("dmz-mail-01",   "int-ldap-01",   "AUTHENTICATES_VIA"),
+        ("dmz-vpn-01",    "int-dc-01",     "AUTHENTICATES_VIA"),
+        ("dmz-waf-01",    "dmz-web-01",    "PROTECTS"),
+        ("dmz-waf-01",    "dmz-web-02",    "PROTECTS"),
+        ("dmz-waf-01",    "dmz-web-03",    "PROTECTS"),
+        ("dmz-lb-01",     "dmz-web-01",    "BALANCES_TO"),
+        ("dmz-lb-01",     "dmz-web-02",    "BALANCES_TO"),
+        ("dmz-lb-01",     "dmz-web-03",    "BALANCES_TO"),
+        ("dmz-ids-01",    "int-siem-01",   "REPORTS_TO"),
         // Internal connectivity
-        ("int-app-01", "int-db-01", "CONNECTS_TO"),
-        ("int-app-01", "int-db-03", "CONNECTS_TO"),
-        ("int-app-02", "int-db-01", "CONNECTS_TO"),
-        ("int-app-02", "int-db-02", "CONNECTS_TO"),
-        ("int-app-03", "int-db-02", "CONNECTS_TO"),
-        ("int-dc-01", "int-dc-02", "REPLICATES_TO"),
-        ("int-dc-01", "int-ldap-01", "SYNCS_WITH"),
-        ("int-ci-01", "int-git-01", "PULLS_FROM"),
-        ("int-ci-01", "cld-registry", "PUSHES_TO"),
-        ("int-file-01", "int-backup-01", "BACKS_UP_TO"),
-        ("int-file-02", "int-backup-01", "BACKS_UP_TO"),
+        ("int-app-01",    "int-db-01",     "CONNECTS_TO"),
+        ("int-app-01",    "int-db-03",     "CONNECTS_TO"),
+        ("int-app-02",    "int-db-01",     "CONNECTS_TO"),
+        ("int-app-02",    "int-db-02",     "CONNECTS_TO"),
+        ("int-app-03",    "int-db-02",     "CONNECTS_TO"),
+        ("int-dc-01",     "int-dc-02",     "REPLICATES_TO"),
+        ("int-dc-01",     "int-ldap-01",   "SYNCS_WITH"),
+        ("int-ci-01",     "int-git-01",    "PULLS_FROM"),
+        ("int-ci-01",     "cld-registry",  "PUSHES_TO"),
+        ("int-file-01",   "int-backup-01", "BACKS_UP_TO"),
+        ("int-file-02",   "int-backup-01", "BACKS_UP_TO"),
         // Cloud connectivity
-        ("cld-api-gw", "cld-k8s-node-01", "ROUTES_TO"),
-        ("cld-api-gw", "cld-k8s-node-02", "ROUTES_TO"),
-        ("cld-k8s-master", "cld-k8s-node-01", "MANAGES"),
-        ("cld-k8s-master", "cld-k8s-node-02", "MANAGES"),
-        ("cld-k8s-master", "cld-k8s-node-03", "MANAGES"),
-        ("cld-k8s-node-01", "cld-rds-01", "CONNECTS_TO"),
-        ("cld-k8s-node-02", "cld-rds-01", "CONNECTS_TO"),
-        ("cld-elk-01", "int-siem-01", "FEEDS_TO"),
+        ("cld-api-gw",    "cld-k8s-node-01", "ROUTES_TO"),
+        ("cld-api-gw",    "cld-k8s-node-02", "ROUTES_TO"),
+        ("cld-k8s-master","cld-k8s-node-01", "MANAGES"),
+        ("cld-k8s-master","cld-k8s-node-02", "MANAGES"),
+        ("cld-k8s-master","cld-k8s-node-03", "MANAGES"),
+        ("cld-k8s-node-01","cld-rds-01",     "CONNECTS_TO"),
+        ("cld-k8s-node-02","cld-rds-01",     "CONNECTS_TO"),
+        ("cld-elk-01",    "int-siem-01",     "FEEDS_TO"),
         // OT connectivity
-        ("ot-fw-01", "ot-scada-01", "PROTECTS"),
-        ("ot-fw-01", "ot-scada-02", "PROTECTS"),
-        ("ot-scada-01", "ot-plc-gw-01", "CONTROLS"),
-        ("ot-scada-02", "ot-plc-gw-01", "CONTROLS"),
-        ("ot-hmi-01", "ot-scada-01", "DISPLAYS"),
-        ("ot-historian-01", "ot-scada-01", "COLLECTS_FROM"),
-        ("ot-historian-01", "ot-scada-02", "COLLECTS_FROM"),
-        ("ot-diode-01", "int-siem-01", "ONE_WAY_TO"),
-        ("ot-eng-ws-01", "ot-scada-01", "PROGRAMS"),
-        ("ot-eng-ws-02", "ot-scada-02", "PROGRAMS"),
+        ("ot-fw-01",      "ot-scada-01",   "PROTECTS"),
+        ("ot-fw-01",      "ot-scada-02",   "PROTECTS"),
+        ("ot-scada-01",   "ot-plc-gw-01",  "CONTROLS"),
+        ("ot-scada-02",   "ot-plc-gw-01",  "CONTROLS"),
+        ("ot-hmi-01",     "ot-scada-01",   "DISPLAYS"),
+        ("ot-historian-01","ot-scada-01",   "COLLECTS_FROM"),
+        ("ot-historian-01","ot-scada-02",   "COLLECTS_FROM"),
+        ("ot-diode-01",   "int-siem-01",   "ONE_WAY_TO"),
+        ("ot-eng-ws-01",  "ot-scada-01",   "PROGRAMS"),
+        ("ot-eng-ws-02",  "ot-scada-02",   "PROGRAMS"),
     ];
 
     let mut edge_count = 0;
@@ -633,262 +272,38 @@ async fn main() {
     }
 
     let users: Vec<UserDef> = vec![
-        UserDef {
-            name: "Sarah Chen",
-            username: "schen",
-            department: "IT Security",
-            title: "CISO",
-            access_level: "Executive",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "James Wilson",
-            username: "jwilson",
-            department: "IT Security",
-            title: "SOC Manager",
-            access_level: "Admin",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Priya Sharma",
-            username: "psharma",
-            department: "IT Security",
-            title: "Threat Analyst",
-            access_level: "Admin",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Mike Rodriguez",
-            username: "mrodriguez",
-            department: "IT Operations",
-            title: "Sysadmin Lead",
-            access_level: "Admin",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Emily Park",
-            username: "epark",
-            department: "IT Operations",
-            title: "Network Engineer",
-            access_level: "Admin",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "David Kim",
-            username: "dkim",
-            department: "IT Operations",
-            title: "Cloud Architect",
-            access_level: "Admin",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Lisa Zhang",
-            username: "lzhang",
-            department: "Engineering",
-            title: "VP Engineering",
-            access_level: "Privileged",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Tom Anderson",
-            username: "tanderson",
-            department: "Engineering",
-            title: "Senior Developer",
-            access_level: "Developer",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Anika Patel",
-            username: "apatel",
-            department: "Engineering",
-            title: "DevOps Engineer",
-            access_level: "Developer",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Carlos Mendez",
-            username: "cmendez",
-            department: "Engineering",
-            title: "Backend Developer",
-            access_level: "Developer",
-            mfa_enabled: false,
-        },
-        UserDef {
-            name: "Rachel Green",
-            username: "rgreen",
-            department: "Engineering",
-            title: "Frontend Developer",
-            access_level: "Developer",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Hassan Ali",
-            username: "hali",
-            department: "Engineering",
-            title: "QA Engineer",
-            access_level: "Developer",
-            mfa_enabled: false,
-        },
-        UserDef {
-            name: "Jennifer Lee",
-            username: "jlee",
-            department: "Finance",
-            title: "CFO",
-            access_level: "Executive",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Robert Brown",
-            username: "rbrown",
-            department: "Finance",
-            title: "Financial Analyst",
-            access_level: "Standard",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Maria Garcia",
-            username: "mgarcia",
-            department: "Finance",
-            title: "Controller",
-            access_level: "Privileged",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Kevin O'Brien",
-            username: "kobrien",
-            department: "HR",
-            title: "HR Director",
-            access_level: "Privileged",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Sophia Rossi",
-            username: "srossi",
-            department: "HR",
-            title: "Recruiter",
-            access_level: "Standard",
-            mfa_enabled: false,
-        },
-        UserDef {
-            name: "Alex Thompson",
-            username: "athompson",
-            department: "Legal",
-            title: "General Counsel",
-            access_level: "Executive",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Diana Novak",
-            username: "dnovak",
-            department: "Marketing",
-            title: "Marketing Director",
-            access_level: "Standard",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Frank Miller",
-            username: "fmiller",
-            department: "Sales",
-            title: "VP Sales",
-            access_level: "Standard",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Grace Liu",
-            username: "gliu",
-            department: "Sales",
-            title: "Account Executive",
-            access_level: "Standard",
-            mfa_enabled: false,
-        },
-        UserDef {
-            name: "Ivan Petrov",
-            username: "ipetrov",
-            department: "IT Operations",
-            title: "Database Administrator",
-            access_level: "Admin",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Julia Santos",
-            username: "jsantos",
-            department: "IT Operations",
-            title: "Help Desk Technician",
-            access_level: "Standard",
-            mfa_enabled: false,
-        },
-        UserDef {
-            name: "Nathan Cooper",
-            username: "ncooper",
-            department: "Facilities",
-            title: "OT Engineer",
-            access_level: "OT_Admin",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Olivia Wright",
-            username: "owright",
-            department: "Facilities",
-            title: "OT Technician",
-            access_level: "OT_Operator",
-            mfa_enabled: false,
-        },
-        UserDef {
-            name: "Paul Wagner",
-            username: "pwagner",
-            department: "Research",
-            title: "Data Scientist",
-            access_level: "Developer",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Quinn Murphy",
-            username: "qmurphy",
-            department: "Research",
-            title: "ML Engineer",
-            access_level: "Developer",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Rita Yamamoto",
-            username: "ryamamoto",
-            department: "Compliance",
-            title: "Compliance Officer",
-            access_level: "Privileged",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Steve Jackson",
-            username: "sjackson",
-            department: "Executive",
-            title: "CEO",
-            access_level: "Executive",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Tanya Volkov",
-            username: "tvolkov",
-            department: "IT Security",
-            title: "Incident Responder",
-            access_level: "Admin",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Umar Farouk",
-            username: "ufarouk",
-            department: "Engineering",
-            title: "Site Reliability Engineer",
-            access_level: "Admin",
-            mfa_enabled: true,
-        },
-        UserDef {
-            name: "Wendy Chu",
-            username: "wchu",
-            department: "IT Security",
-            title: "Vulnerability Analyst",
-            access_level: "Admin",
-            mfa_enabled: true,
-        },
+        UserDef { name: "Sarah Chen",        username: "schen",       department: "IT Security",     title: "CISO",                      access_level: "Executive",  mfa_enabled: true },
+        UserDef { name: "James Wilson",      username: "jwilson",     department: "IT Security",     title: "SOC Manager",               access_level: "Admin",      mfa_enabled: true },
+        UserDef { name: "Priya Sharma",      username: "psharma",     department: "IT Security",     title: "Threat Analyst",            access_level: "Admin",      mfa_enabled: true },
+        UserDef { name: "Mike Rodriguez",    username: "mrodriguez",  department: "IT Operations",   title: "Sysadmin Lead",             access_level: "Admin",      mfa_enabled: true },
+        UserDef { name: "Emily Park",        username: "epark",       department: "IT Operations",   title: "Network Engineer",          access_level: "Admin",      mfa_enabled: true },
+        UserDef { name: "David Kim",         username: "dkim",        department: "IT Operations",   title: "Cloud Architect",           access_level: "Admin",      mfa_enabled: true },
+        UserDef { name: "Lisa Zhang",        username: "lzhang",      department: "Engineering",     title: "VP Engineering",            access_level: "Privileged", mfa_enabled: true },
+        UserDef { name: "Tom Anderson",      username: "tanderson",   department: "Engineering",     title: "Senior Developer",          access_level: "Developer",  mfa_enabled: true },
+        UserDef { name: "Anika Patel",       username: "apatel",      department: "Engineering",     title: "DevOps Engineer",           access_level: "Developer",  mfa_enabled: true },
+        UserDef { name: "Carlos Mendez",     username: "cmendez",     department: "Engineering",     title: "Backend Developer",         access_level: "Developer",  mfa_enabled: false },
+        UserDef { name: "Rachel Green",      username: "rgreen",      department: "Engineering",     title: "Frontend Developer",        access_level: "Developer",  mfa_enabled: true },
+        UserDef { name: "Hassan Ali",        username: "hali",        department: "Engineering",     title: "QA Engineer",               access_level: "Developer",  mfa_enabled: false },
+        UserDef { name: "Jennifer Lee",      username: "jlee",        department: "Finance",         title: "CFO",                       access_level: "Executive",  mfa_enabled: true },
+        UserDef { name: "Robert Brown",      username: "rbrown",      department: "Finance",         title: "Financial Analyst",         access_level: "Standard",   mfa_enabled: true },
+        UserDef { name: "Maria Garcia",      username: "mgarcia",     department: "Finance",         title: "Controller",                access_level: "Privileged", mfa_enabled: true },
+        UserDef { name: "Kevin O'Brien",     username: "kobrien",     department: "HR",              title: "HR Director",               access_level: "Privileged", mfa_enabled: true },
+        UserDef { name: "Sophia Rossi",      username: "srossi",      department: "HR",              title: "Recruiter",                 access_level: "Standard",   mfa_enabled: false },
+        UserDef { name: "Alex Thompson",     username: "athompson",   department: "Legal",           title: "General Counsel",           access_level: "Executive",  mfa_enabled: true },
+        UserDef { name: "Diana Novak",       username: "dnovak",      department: "Marketing",       title: "Marketing Director",        access_level: "Standard",   mfa_enabled: true },
+        UserDef { name: "Frank Miller",      username: "fmiller",     department: "Sales",           title: "VP Sales",                  access_level: "Standard",   mfa_enabled: true },
+        UserDef { name: "Grace Liu",         username: "gliu",        department: "Sales",           title: "Account Executive",         access_level: "Standard",   mfa_enabled: false },
+        UserDef { name: "Ivan Petrov",       username: "ipetrov",     department: "IT Operations",   title: "Database Administrator",    access_level: "Admin",      mfa_enabled: true },
+        UserDef { name: "Julia Santos",      username: "jsantos",     department: "IT Operations",   title: "Help Desk Technician",      access_level: "Standard",   mfa_enabled: false },
+        UserDef { name: "Nathan Cooper",     username: "ncooper",     department: "Facilities",      title: "OT Engineer",               access_level: "OT_Admin",   mfa_enabled: true },
+        UserDef { name: "Olivia Wright",     username: "owright",     department: "Facilities",      title: "OT Technician",             access_level: "OT_Operator",mfa_enabled: false },
+        UserDef { name: "Paul Wagner",       username: "pwagner",     department: "Research",        title: "Data Scientist",            access_level: "Developer",  mfa_enabled: true },
+        UserDef { name: "Quinn Murphy",      username: "qmurphy",     department: "Research",        title: "ML Engineer",               access_level: "Developer",  mfa_enabled: true },
+        UserDef { name: "Rita Yamamoto",     username: "ryamamoto",   department: "Compliance",      title: "Compliance Officer",        access_level: "Privileged", mfa_enabled: true },
+        UserDef { name: "Steve Jackson",     username: "sjackson",    department: "Executive",       title: "CEO",                       access_level: "Executive",  mfa_enabled: true },
+        UserDef { name: "Tanya Volkov",      username: "tvolkov",     department: "IT Security",     title: "Incident Responder",        access_level: "Admin",      mfa_enabled: true },
+        UserDef { name: "Umar Farouk",       username: "ufarouk",    department: "Engineering",     title: "Site Reliability Engineer",  access_level: "Admin",      mfa_enabled: true },
+        UserDef { name: "Wendy Chu",         username: "wchu",        department: "IT Security",     title: "Vulnerability Analyst",     access_level: "Admin",      mfa_enabled: true },
     ];
 
     let mut user_ids: HashMap<String, NodeId> = HashMap::new();
@@ -911,41 +326,20 @@ async fn main() {
 
     // User -> Server access relationships
     let access_map: Vec<(&str, &str)> = vec![
-        ("schen", "int-siem-01"),
-        ("schen", "int-dc-01"),
-        ("jwilson", "int-siem-01"),
-        ("jwilson", "dmz-ids-01"),
-        ("psharma", "int-siem-01"),
-        ("psharma", "dmz-ids-01"),
-        ("mrodriguez", "int-dc-01"),
-        ("mrodriguez", "int-dc-02"),
-        ("mrodriguez", "int-file-01"),
-        ("epark", "dmz-proxy-01"),
-        ("epark", "dmz-lb-01"),
-        ("epark", "dmz-waf-01"),
-        ("dkim", "cld-k8s-master"),
-        ("dkim", "cld-api-gw"),
-        ("dkim", "cld-rds-01"),
-        ("tanderson", "int-ci-01"),
-        ("tanderson", "int-git-01"),
-        ("apatel", "int-ci-01"),
-        ("apatel", "cld-registry"),
-        ("apatel", "cld-k8s-master"),
-        ("cmendez", "int-git-01"),
-        ("cmendez", "int-app-01"),
-        ("ipetrov", "int-db-01"),
-        ("ipetrov", "int-db-02"),
-        ("ipetrov", "int-db-03"),
-        ("ncooper", "ot-scada-01"),
-        ("ncooper", "ot-scada-02"),
-        ("ncooper", "ot-eng-ws-01"),
-        ("owright", "ot-hmi-01"),
-        ("owright", "ot-eng-ws-02"),
-        ("ufarouk", "cld-k8s-master"),
-        ("ufarouk", "cld-elk-01"),
-        ("ufarouk", "int-siem-01"),
-        ("wchu", "dmz-honeypot-01"),
-        ("wchu", "int-siem-01"),
+        ("schen",    "int-siem-01"),   ("schen",    "int-dc-01"),
+        ("jwilson",  "int-siem-01"),   ("jwilson",  "dmz-ids-01"),
+        ("psharma",  "int-siem-01"),   ("psharma",  "dmz-ids-01"),
+        ("mrodriguez","int-dc-01"),    ("mrodriguez","int-dc-02"),     ("mrodriguez","int-file-01"),
+        ("epark",    "dmz-proxy-01"),  ("epark",    "dmz-lb-01"),     ("epark",    "dmz-waf-01"),
+        ("dkim",     "cld-k8s-master"),("dkim",     "cld-api-gw"),    ("dkim",     "cld-rds-01"),
+        ("tanderson","int-ci-01"),     ("tanderson","int-git-01"),
+        ("apatel",   "int-ci-01"),     ("apatel",   "cld-registry"),  ("apatel",   "cld-k8s-master"),
+        ("cmendez",  "int-git-01"),    ("cmendez",  "int-app-01"),
+        ("ipetrov",  "int-db-01"),     ("ipetrov",  "int-db-02"),     ("ipetrov",  "int-db-03"),
+        ("ncooper",  "ot-scada-01"),   ("ncooper",  "ot-scada-02"),   ("ncooper",  "ot-eng-ws-01"),
+        ("owright",  "ot-hmi-01"),     ("owright",  "ot-eng-ws-02"),
+        ("ufarouk",  "cld-k8s-master"),("ufarouk",  "cld-elk-01"),    ("ufarouk",  "int-siem-01"),
+        ("wchu",     "dmz-honeypot-01"),("wchu",    "int-siem-01"),
     ];
 
     let mut access_edge_count = 0;
@@ -953,9 +347,7 @@ async fn main() {
         let mut store = client.store_write().await;
         for (user, server) in &access_map {
             if let (Some(&uid), Some(&sid)) = (user_ids.get(*user), server_ids.get(*server)) {
-                store
-                    .create_edge(uid, sid, EdgeType::new("HAS_ACCESS"))
-                    .unwrap();
+                store.create_edge(uid, sid, EdgeType::new("HAS_ACCESS")).unwrap();
                 access_edge_count += 1;
             }
         }
@@ -967,9 +359,7 @@ async fn main() {
     println!("    │ Department       │   Count  │");
     println!("    ├──────────────────┼──────────┤");
     let mut dept_counts: HashMap<&str, usize> = HashMap::new();
-    for u in &users {
-        *dept_counts.entry(u.department).or_insert(0) += 1;
-    }
+    for u in &users { *dept_counts.entry(u.department).or_insert(0) += 1; }
     let mut dept_sorted: Vec<_> = dept_counts.iter().collect();
     dept_sorted.sort_by(|a, b| b.1.cmp(a.1));
     for (dept, count) in &dept_sorted {
@@ -991,160 +381,28 @@ async fn main() {
     }
 
     let cves: Vec<CveDef> = vec![
-        CveDef {
-            id: "CVE-2021-44228",
-            description: "Log4Shell RCE in Apache Log4j",
-            cvss: 10.0,
-            family: "Log4Shell",
-            affected: "Java Applications",
-        },
-        CveDef {
-            id: "CVE-2021-45046",
-            description: "Log4j incomplete fix for CVE-2021-44228",
-            cvss: 9.0,
-            family: "Log4Shell",
-            affected: "Java Applications",
-        },
-        CveDef {
-            id: "CVE-2023-23397",
-            description: "Microsoft Outlook EoP via NTLM relay",
-            cvss: 9.8,
-            family: "Outlook",
-            affected: "Microsoft Outlook",
-        },
-        CveDef {
-            id: "CVE-2024-3400",
-            description: "PAN-OS GlobalProtect RCE pre-auth",
-            cvss: 10.0,
-            family: "PAN-OS",
-            affected: "Palo Alto Networks",
-        },
-        CveDef {
-            id: "CVE-2023-34362",
-            description: "MOVEit Transfer SQL injection",
-            cvss: 9.8,
-            family: "Cl0p",
-            affected: "MOVEit Transfer",
-        },
-        CveDef {
-            id: "CVE-2023-27997",
-            description: "FortiOS SSL-VPN heap overflow",
-            cvss: 9.8,
-            family: "FortiGate",
-            affected: "FortiOS",
-        },
-        CveDef {
-            id: "CVE-2024-21887",
-            description: "Ivanti Connect Secure command injection",
-            cvss: 9.1,
-            family: "Ivanti",
-            affected: "Ivanti VPN",
-        },
-        CveDef {
-            id: "CVE-2023-46805",
-            description: "Ivanti Connect Secure auth bypass",
-            cvss: 8.2,
-            family: "Ivanti",
-            affected: "Ivanti VPN",
-        },
-        CveDef {
-            id: "CVE-2021-34527",
-            description: "PrintNightmare Windows Print Spooler RCE",
-            cvss: 8.8,
-            family: "PrintNightmare",
-            affected: "Windows Print Spooler",
-        },
-        CveDef {
-            id: "CVE-2021-27065",
-            description: "Microsoft Exchange ProxyLogon RCE",
-            cvss: 9.8,
-            family: "ProxyLogon",
-            affected: "Exchange Server",
-        },
-        CveDef {
-            id: "CVE-2021-26855",
-            description: "Exchange Server SSRF via ProxyLogon",
-            cvss: 9.8,
-            family: "ProxyLogon",
-            affected: "Exchange Server",
-        },
-        CveDef {
-            id: "CVE-2022-30190",
-            description: "Follina MSDT code execution via Office",
-            cvss: 7.8,
-            family: "Follina",
-            affected: "Microsoft Office",
-        },
-        CveDef {
-            id: "CVE-2023-36884",
-            description: "Office HTML RCE via Storm-0978",
-            cvss: 8.8,
-            family: "Storm-0978",
-            affected: "Microsoft Office",
-        },
-        CveDef {
-            id: "CVE-2024-1709",
-            description: "ScreenConnect auth bypass",
-            cvss: 10.0,
-            family: "ScreenConnect",
-            affected: "ConnectWise",
-        },
-        CveDef {
-            id: "CVE-2024-1708",
-            description: "ScreenConnect path traversal RCE",
-            cvss: 8.4,
-            family: "ScreenConnect",
-            affected: "ConnectWise",
-        },
-        CveDef {
-            id: "CVE-2023-44487",
-            description: "HTTP/2 Rapid Reset DDoS attack",
-            cvss: 7.5,
-            family: "HTTP2",
-            affected: "HTTP/2 Servers",
-        },
-        CveDef {
-            id: "CVE-2022-41040",
-            description: "Exchange ProxyNotShell SSRF",
-            cvss: 8.8,
-            family: "ProxyNotShell",
-            affected: "Exchange Server",
-        },
-        CveDef {
-            id: "CVE-2023-20198",
-            description: "Cisco IOS XE Web UI privilege escalation",
-            cvss: 10.0,
-            family: "Cisco",
-            affected: "Cisco IOS XE",
-        },
-        CveDef {
-            id: "CVE-2024-47575",
-            description: "FortiManager missing authentication RCE",
-            cvss: 9.8,
-            family: "FortiManager",
-            affected: "FortiManager",
-        },
-        CveDef {
-            id: "CVE-2023-4966",
-            description: "Citrix Bleed session hijack",
-            cvss: 9.4,
-            family: "CitrixBleed",
-            affected: "Citrix NetScaler",
-        },
-        CveDef {
-            id: "CVE-2024-0012",
-            description: "PAN-OS management interface auth bypass",
-            cvss: 9.8,
-            family: "PAN-OS",
-            affected: "Palo Alto Networks",
-        },
-        CveDef {
-            id: "CVE-2021-40444",
-            description: "MSHTML RCE via ActiveX in Office docs",
-            cvss: 8.8,
-            family: "MSHTML",
-            affected: "Microsoft Office",
-        },
+        CveDef { id: "CVE-2021-44228", description: "Log4Shell RCE in Apache Log4j",                  cvss: 10.0, family: "Log4Shell",     affected: "Java Applications" },
+        CveDef { id: "CVE-2021-45046", description: "Log4j incomplete fix for CVE-2021-44228",         cvss: 9.0,  family: "Log4Shell",     affected: "Java Applications" },
+        CveDef { id: "CVE-2023-23397", description: "Microsoft Outlook EoP via NTLM relay",            cvss: 9.8,  family: "Outlook",       affected: "Microsoft Outlook" },
+        CveDef { id: "CVE-2024-3400",  description: "PAN-OS GlobalProtect RCE pre-auth",               cvss: 10.0, family: "PAN-OS",        affected: "Palo Alto Networks" },
+        CveDef { id: "CVE-2023-34362", description: "MOVEit Transfer SQL injection",                   cvss: 9.8,  family: "Cl0p",          affected: "MOVEit Transfer" },
+        CveDef { id: "CVE-2023-27997", description: "FortiOS SSL-VPN heap overflow",                   cvss: 9.8,  family: "FortiGate",     affected: "FortiOS" },
+        CveDef { id: "CVE-2024-21887", description: "Ivanti Connect Secure command injection",          cvss: 9.1,  family: "Ivanti",        affected: "Ivanti VPN" },
+        CveDef { id: "CVE-2023-46805", description: "Ivanti Connect Secure auth bypass",                cvss: 8.2,  family: "Ivanti",        affected: "Ivanti VPN" },
+        CveDef { id: "CVE-2021-34527", description: "PrintNightmare Windows Print Spooler RCE",         cvss: 8.8,  family: "PrintNightmare",affected: "Windows Print Spooler" },
+        CveDef { id: "CVE-2021-27065", description: "Microsoft Exchange ProxyLogon RCE",                cvss: 9.8,  family: "ProxyLogon",    affected: "Exchange Server" },
+        CveDef { id: "CVE-2021-26855", description: "Exchange Server SSRF via ProxyLogon",              cvss: 9.8,  family: "ProxyLogon",    affected: "Exchange Server" },
+        CveDef { id: "CVE-2022-30190", description: "Follina MSDT code execution via Office",           cvss: 7.8,  family: "Follina",       affected: "Microsoft Office" },
+        CveDef { id: "CVE-2023-36884", description: "Office HTML RCE via Storm-0978",                   cvss: 8.8,  family: "Storm-0978",    affected: "Microsoft Office" },
+        CveDef { id: "CVE-2024-1709",  description: "ScreenConnect auth bypass",                        cvss: 10.0, family: "ScreenConnect",  affected: "ConnectWise" },
+        CveDef { id: "CVE-2024-1708",  description: "ScreenConnect path traversal RCE",                 cvss: 8.4,  family: "ScreenConnect",  affected: "ConnectWise" },
+        CveDef { id: "CVE-2023-44487", description: "HTTP/2 Rapid Reset DDoS attack",                   cvss: 7.5,  family: "HTTP2",         affected: "HTTP/2 Servers" },
+        CveDef { id: "CVE-2022-41040", description: "Exchange ProxyNotShell SSRF",                      cvss: 8.8,  family: "ProxyNotShell", affected: "Exchange Server" },
+        CveDef { id: "CVE-2023-20198", description: "Cisco IOS XE Web UI privilege escalation",          cvss: 10.0, family: "Cisco",         affected: "Cisco IOS XE" },
+        CveDef { id: "CVE-2024-47575", description: "FortiManager missing authentication RCE",           cvss: 9.8,  family: "FortiManager",  affected: "FortiManager" },
+        CveDef { id: "CVE-2023-4966",  description: "Citrix Bleed session hijack",                      cvss: 9.4,  family: "CitrixBleed",   affected: "Citrix NetScaler" },
+        CveDef { id: "CVE-2024-0012",  description: "PAN-OS management interface auth bypass",           cvss: 9.8,  family: "PAN-OS",        affected: "Palo Alto Networks" },
+        CveDef { id: "CVE-2021-40444", description: "MSHTML RCE via ActiveX in Office docs",             cvss: 8.8,  family: "MSHTML",        affected: "Microsoft Office" },
     ];
 
     let mut cve_ids: HashMap<String, NodeId> = HashMap::new();
@@ -1179,15 +437,9 @@ async fn main() {
         } else {
             format!("{:<41}", cve.description)
         };
-        println!(
-            "    │ {:<16} │ {:>5.1}  │ {} │",
-            cve.id, cve.cvss, desc_trunc
-        );
+        println!("    │ {:<16} │ {:>5.1}  │ {} │", cve.id, cve.cvss, desc_trunc);
     }
-    println!(
-        "    │ ... ({} more)     │        │                                           │",
-        cves.len() - 10
-    );
+    println!("    │ ... ({} more)     │        │                                           │", cves.len() - 10);
     println!("    └──────────────────┴────────┴───────────────────────────────────────────┘");
 
     // -- MITRE ATT&CK Techniques -------
@@ -1200,91 +452,23 @@ async fn main() {
     }
 
     let techniques: Vec<MitreDef> = vec![
-        MitreDef {
-            technique_id: "T1566",
-            name: "Phishing",
-            tactic: "Initial Access",
-        },
-        MitreDef {
-            technique_id: "T1566.001",
-            name: "Spearphishing Attachment",
-            tactic: "Initial Access",
-        },
-        MitreDef {
-            technique_id: "T1566.002",
-            name: "Spearphishing Link",
-            tactic: "Initial Access",
-        },
-        MitreDef {
-            technique_id: "T1059",
-            name: "Command and Scripting Interpreter",
-            tactic: "Execution",
-        },
-        MitreDef {
-            technique_id: "T1059.001",
-            name: "PowerShell",
-            tactic: "Execution",
-        },
-        MitreDef {
-            technique_id: "T1053",
-            name: "Scheduled Task/Job",
-            tactic: "Persistence",
-        },
-        MitreDef {
-            technique_id: "T1547",
-            name: "Boot or Logon Autostart",
-            tactic: "Persistence",
-        },
-        MitreDef {
-            technique_id: "T1078",
-            name: "Valid Accounts",
-            tactic: "Defense Evasion",
-        },
-        MitreDef {
-            technique_id: "T1003",
-            name: "OS Credential Dumping",
-            tactic: "Credential Access",
-        },
-        MitreDef {
-            technique_id: "T1003.001",
-            name: "LSASS Memory",
-            tactic: "Credential Access",
-        },
-        MitreDef {
-            technique_id: "T1021",
-            name: "Remote Services",
-            tactic: "Lateral Movement",
-        },
-        MitreDef {
-            technique_id: "T1021.001",
-            name: "Remote Desktop Protocol",
-            tactic: "Lateral Movement",
-        },
-        MitreDef {
-            technique_id: "T1021.002",
-            name: "SMB/Windows Admin Shares",
-            tactic: "Lateral Movement",
-        },
-        MitreDef {
-            technique_id: "T1071",
-            name: "Application Layer Protocol",
-            tactic: "Command and Control",
-        },
-        MitreDef {
-            technique_id: "T1486",
-            name: "Data Encrypted for Impact",
-            tactic: "Impact",
-        },
-        MitreDef {
-            technique_id: "T1048",
-            name: "Exfiltration Over Alternative Protocol",
-            tactic: "Exfiltration",
-        },
-        MitreDef {
-            technique_id: "T1570",
-            name: "Lateral Tool Transfer",
-            tactic: "Lateral Movement",
-        },
+        MitreDef { technique_id: "T1566",     name: "Phishing",                         tactic: "Initial Access" },
+        MitreDef { technique_id: "T1566.001", name: "Spearphishing Attachment",          tactic: "Initial Access" },
+        MitreDef { technique_id: "T1566.002", name: "Spearphishing Link",                tactic: "Initial Access" },
+        MitreDef { technique_id: "T1059",     name: "Command and Scripting Interpreter", tactic: "Execution" },
+        MitreDef { technique_id: "T1059.001", name: "PowerShell",                        tactic: "Execution" },
+        MitreDef { technique_id: "T1053",     name: "Scheduled Task/Job",                tactic: "Persistence" },
+        MitreDef { technique_id: "T1547",     name: "Boot or Logon Autostart",           tactic: "Persistence" },
+        MitreDef { technique_id: "T1078",     name: "Valid Accounts",                    tactic: "Defense Evasion" },
+        MitreDef { technique_id: "T1003",     name: "OS Credential Dumping",             tactic: "Credential Access" },
+        MitreDef { technique_id: "T1003.001", name: "LSASS Memory",                      tactic: "Credential Access" },
+        MitreDef { technique_id: "T1021",     name: "Remote Services",                   tactic: "Lateral Movement" },
+        MitreDef { technique_id: "T1021.001", name: "Remote Desktop Protocol",            tactic: "Lateral Movement" },
+        MitreDef { technique_id: "T1021.002", name: "SMB/Windows Admin Shares",           tactic: "Lateral Movement" },
+        MitreDef { technique_id: "T1071",     name: "Application Layer Protocol",         tactic: "Command and Control" },
+        MitreDef { technique_id: "T1486",     name: "Data Encrypted for Impact",          tactic: "Impact" },
+        MitreDef { technique_id: "T1048",     name: "Exfiltration Over Alternative Protocol", tactic: "Exfiltration" },
+        MitreDef { technique_id: "T1570",     name: "Lateral Tool Transfer",              tactic: "Lateral Movement" },
     ];
 
     let mut technique_ids: HashMap<String, NodeId> = HashMap::new();
@@ -1306,7 +490,7 @@ async fn main() {
     let cve_technique_links: Vec<(&str, &str)> = vec![
         ("CVE-2021-44228", "T1059"),
         ("CVE-2023-23397", "T1566"),
-        ("CVE-2024-3400", "T1059"),
+        ("CVE-2024-3400",  "T1059"),
         ("CVE-2023-34362", "T1059"),
         ("CVE-2023-27997", "T1021"),
         ("CVE-2024-21887", "T1059"),
@@ -1314,7 +498,7 @@ async fn main() {
         ("CVE-2021-27065", "T1059"),
         ("CVE-2022-30190", "T1566.001"),
         ("CVE-2023-36884", "T1566.001"),
-        ("CVE-2024-1709", "T1078"),
+        ("CVE-2024-1709",  "T1078"),
         ("CVE-2023-20198", "T1078"),
         ("CVE-2021-40444", "T1566.002"),
     ];
@@ -1323,9 +507,7 @@ async fn main() {
         let mut store = client.store_write().await;
         for (cve, tech) in &cve_technique_links {
             if let (Some(&cid), Some(&tid)) = (cve_ids.get(*cve), technique_ids.get(*tech)) {
-                store
-                    .create_edge(cid, tid, EdgeType::new("USES_TECHNIQUE"))
-                    .unwrap();
+                store.create_edge(cid, tid, EdgeType::new("USES_TECHNIQUE")).unwrap();
             }
         }
     }
@@ -1335,19 +517,17 @@ async fn main() {
 
     // -- TARGETED: High-CVSS CVEs targeting DMZ servers --
     let targeted_links: Vec<(&str, &str)> = vec![
-        ("CVE-2021-44228", "dmz-web-01"),  // Log4Shell → Web Server
-        ("CVE-2021-44228", "dmz-web-02"),  // Log4Shell → Web Server
-        ("CVE-2021-27065", "dmz-mail-01"), // ProxyLogon → Mail Gateway
-        ("CVE-2023-27997", "dmz-vpn-01"),  // FortiOS → VPN Gateway
+        ("CVE-2021-44228", "dmz-web-01"),    // Log4Shell → Web Server
+        ("CVE-2021-44228", "dmz-web-02"),    // Log4Shell → Web Server
+        ("CVE-2021-27065", "dmz-mail-01"),   // ProxyLogon → Mail Gateway
+        ("CVE-2023-27997", "dmz-vpn-01"),    // FortiOS → VPN Gateway
     ];
 
     {
         let mut store = client.store_write().await;
         for (cve, server) in &targeted_links {
             if let (Some(&cid), Some(&sid)) = (cve_ids.get(*cve), server_ids.get(*server)) {
-                store
-                    .create_edge(cid, sid, EdgeType::new("TARGETED"))
-                    .unwrap();
+                store.create_edge(cid, sid, EdgeType::new("TARGETED")).unwrap();
             }
         }
     }
@@ -1357,36 +537,12 @@ async fn main() {
     subsection("Known Malware Families");
 
     let malware_families: Vec<(&str, &str, &str)> = vec![
-        (
-            "Emotet",
-            "Trojan/Loader",
-            "Banking trojan turned malware distribution platform",
-        ),
-        (
-            "Cobalt Strike",
-            "C2 Framework",
-            "Commercial red team tool commonly abused by APT groups",
-        ),
-        (
-            "BlackCat/ALPHV",
-            "Ransomware",
-            "Rust-based ransomware-as-a-service operation",
-        ),
-        (
-            "LockBit",
-            "Ransomware",
-            "Prolific ransomware gang with data leak site",
-        ),
-        (
-            "QakBot",
-            "Trojan/Loader",
-            "Banking trojan that delivers ransomware payloads",
-        ),
-        (
-            "Raspberry Robin",
-            "Worm",
-            "USB worm that spreads via removable drives",
-        ),
+        ("Emotet",        "Trojan/Loader",   "Banking trojan turned malware distribution platform"),
+        ("Cobalt Strike",  "C2 Framework",    "Commercial red team tool commonly abused by APT groups"),
+        ("BlackCat/ALPHV", "Ransomware",      "Rust-based ransomware-as-a-service operation"),
+        ("LockBit",        "Ransomware",      "Prolific ransomware gang with data leak site"),
+        ("QakBot",         "Trojan/Loader",   "Banking trojan that delivers ransomware payloads"),
+        ("Raspberry Robin","Worm",            "USB worm that spreads via removable drives"),
     ];
 
     let mut malware_ids: HashMap<String, NodeId> = HashMap::new();
@@ -1406,25 +562,23 @@ async fn main() {
 
     // Link malware to techniques
     let malware_technique_links: Vec<(&str, &str)> = vec![
-        ("Emotet", "T1566.001"),
-        ("Emotet", "T1059.001"),
-        ("Cobalt Strike", "T1071"),
-        ("Cobalt Strike", "T1021.002"),
-        ("Cobalt Strike", "T1003.001"),
+        ("Emotet",         "T1566.001"),
+        ("Emotet",         "T1059.001"),
+        ("Cobalt Strike",  "T1071"),
+        ("Cobalt Strike",  "T1021.002"),
+        ("Cobalt Strike",  "T1003.001"),
         ("BlackCat/ALPHV", "T1486"),
-        ("LockBit", "T1486"),
-        ("LockBit", "T1048"),
-        ("QakBot", "T1566.001"),
-        ("Raspberry Robin", "T1570"),
+        ("LockBit",        "T1486"),
+        ("LockBit",        "T1048"),
+        ("QakBot",         "T1566.001"),
+        ("Raspberry Robin","T1570"),
     ];
 
     {
         let mut store = client.store_write().await;
         for (mal, tech) in &malware_technique_links {
             if let (Some(&mid), Some(&tid)) = (malware_ids.get(*mal), technique_ids.get(*tech)) {
-                store
-                    .create_edge(mid, tid, EdgeType::new("USES_TECHNIQUE"))
-                    .unwrap();
+                store.create_edge(mid, tid, EdgeType::new("USES_TECHNIQUE")).unwrap();
             }
         }
     }
@@ -1462,62 +616,14 @@ async fn main() {
     }
 
     let attack_chain: Vec<AttackStep> = vec![
-        AttackStep {
-            step: 1,
-            source_name: "cmendez",
-            target_name: "int-git-01",
-            technique: "T1566.001",
-            description: "Spearphishing email with malicious attachment (Emotet dropper)",
-        },
-        AttackStep {
-            step: 2,
-            source_name: "int-git-01",
-            target_name: "int-ci-01",
-            technique: "T1021",
-            description: "Lateral movement to CI server via stolen SSH keys",
-        },
-        AttackStep {
-            step: 3,
-            source_name: "int-ci-01",
-            target_name: "cld-registry",
-            technique: "T1570",
-            description: "Poisoned container image pushed to registry",
-        },
-        AttackStep {
-            step: 4,
-            source_name: "int-ci-01",
-            target_name: "int-app-01",
-            technique: "T1059.001",
-            description: "PowerShell backdoor deployed to application server",
-        },
-        AttackStep {
-            step: 5,
-            source_name: "int-app-01",
-            target_name: "int-db-01",
-            technique: "T1048",
-            description: "Database credentials exfiltrated via DNS tunneling",
-        },
-        AttackStep {
-            step: 6,
-            source_name: "int-app-01",
-            target_name: "int-dc-01",
-            technique: "T1003.001",
-            description: "LSASS memory dump on domain controller (Cobalt Strike)",
-        },
-        AttackStep {
-            step: 7,
-            source_name: "int-dc-01",
-            target_name: "int-file-01",
-            technique: "T1021.002",
-            description: "SMB lateral movement to file server using DA credentials",
-        },
-        AttackStep {
-            step: 8,
-            source_name: "int-dc-01",
-            target_name: "ot-fw-01",
-            technique: "T1078",
-            description: "Attempting OT network breach using stolen admin creds",
-        },
+        AttackStep { step: 1, source_name: "cmendez",      target_name: "int-git-01",     technique: "T1566.001", description: "Spearphishing email with malicious attachment (Emotet dropper)" },
+        AttackStep { step: 2, source_name: "int-git-01",   target_name: "int-ci-01",      technique: "T1021",     description: "Lateral movement to CI server via stolen SSH keys" },
+        AttackStep { step: 3, source_name: "int-ci-01",    target_name: "cld-registry",   technique: "T1570",     description: "Poisoned container image pushed to registry" },
+        AttackStep { step: 4, source_name: "int-ci-01",    target_name: "int-app-01",     technique: "T1059.001", description: "PowerShell backdoor deployed to application server" },
+        AttackStep { step: 5, source_name: "int-app-01",   target_name: "int-db-01",      technique: "T1048",     description: "Database credentials exfiltrated via DNS tunneling" },
+        AttackStep { step: 6, source_name: "int-app-01",   target_name: "int-dc-01",      technique: "T1003.001", description: "LSASS memory dump on domain controller (Cobalt Strike)" },
+        AttackStep { step: 7, source_name: "int-dc-01",    target_name: "int-file-01",    technique: "T1021.002", description: "SMB lateral movement to file server using DA credentials" },
+        AttackStep { step: 8, source_name: "int-dc-01",    target_name: "ot-fw-01",       technique: "T1078",     description: "Attempting OT network breach using stolen admin creds" },
     ];
 
     // Create attack event nodes and edges
@@ -1536,29 +642,20 @@ async fn main() {
             let _ = store.add_label_to_node(tenant_id, event_id, "Alert");
 
             // Link event to source
-            let source_id = user_ids
-                .get(a.source_name)
+            let source_id = user_ids.get(a.source_name)
                 .or_else(|| server_ids.get(a.source_name));
             let target_id = server_ids.get(a.target_name);
 
             if let (Some(&sid), Some(&tid)) = (source_id, target_id) {
-                store
-                    .create_edge(event_id, sid, EdgeType::new("ORIGINATED_FROM"))
-                    .unwrap();
-                store
-                    .create_edge(event_id, tid, EdgeType::new("TARGETED"))
-                    .unwrap();
+                store.create_edge(event_id, sid, EdgeType::new("ORIGINATED_FROM")).unwrap();
+                store.create_edge(event_id, tid, EdgeType::new("TARGETED")).unwrap();
                 // Direct lateral movement edge for path analysis
-                store
-                    .create_edge(sid, tid, EdgeType::new("LATERAL_MOVEMENT"))
-                    .unwrap();
+                store.create_edge(sid, tid, EdgeType::new("LATERAL_MOVEMENT")).unwrap();
             }
 
             // Link event to MITRE technique
             if let Some(&tech_nid) = technique_ids.get(a.technique) {
-                store
-                    .create_edge(event_id, tech_nid, EdgeType::new("USES_TECHNIQUE"))
-                    .unwrap();
+                store.create_edge(event_id, tech_nid, EdgeType::new("USES_TECHNIQUE")).unwrap();
             }
 
             attack_event_ids.push(event_id);
@@ -1566,13 +663,7 @@ async fn main() {
 
         // Chain attack events sequentially
         for i in 0..attack_event_ids.len() - 1 {
-            store
-                .create_edge(
-                    attack_event_ids[i],
-                    attack_event_ids[i + 1],
-                    EdgeType::new("LEADS_TO"),
-                )
-                .unwrap();
+            store.create_edge(attack_event_ids[i], attack_event_ids[i + 1], EdgeType::new("LEADS_TO")).unwrap();
         }
     }
 
@@ -1586,10 +677,7 @@ async fn main() {
         } else {
             format!("{:<36}", a.description)
         };
-        println!(
-            "    │  {:>2}  │ {:<10} │ {:<16} │ {} │",
-            a.step, a.technique, a.target_name, desc_trunc
-        );
+        println!("    │  {:>2}  │ {:<10} │ {:<16} │ {} │", a.step, a.technique, a.target_name, desc_trunc);
     }
     println!("    └──────┴────────────┴──────────────────┴──────────────────────────────────────┘");
 
@@ -1620,33 +708,18 @@ async fn main() {
     {
         let store = client.store_read().await;
         let edges = store.get_outgoing_edges(*compromised_user);
-        let accessed_servers: Vec<_> = edges
-            .iter()
-            .filter(|e| {
-                e.edge_type.as_str() == "HAS_ACCESS" || e.edge_type.as_str() == "LATERAL_MOVEMENT"
-            })
+        let accessed_servers: Vec<_> = edges.iter()
+            .filter(|e| e.edge_type.as_str() == "HAS_ACCESS" || e.edge_type.as_str() == "LATERAL_MOVEMENT")
             .collect();
 
         println!("    Initial compromise: cmendez (Carlos Mendez - no MFA)");
-        println!(
-            "    Directly accessible from compromised user: {} servers",
-            accessed_servers.len()
-        );
+        println!("    Directly accessible from compromised user: {} servers", accessed_servers.len());
 
         for edge in &accessed_servers {
             if let Some(target_node) = store.get_node(edge.target) {
-                let sname = target_node
-                    .get_property("name")
-                    .unwrap()
-                    .as_string()
-                    .unwrap();
+                let sname = target_node.get_property("name").unwrap().as_string().unwrap();
                 let sip = target_node.get_property("ip").unwrap().as_string().unwrap();
-                println!(
-                    "      -> {} ({}) via {}",
-                    sname,
-                    sip,
-                    edge.edge_type.as_str()
-                );
+                println!("      -> {} ({}) via {}", sname, sip, edge.edge_type.as_str());
             }
         }
     }
@@ -1664,10 +737,7 @@ async fn main() {
         .map(|j| ((5 * 7 + j * 13) % 100) as f32 / 100.0) // close to CVE index 5
         .collect();
 
-    let search_results = client
-        .vector_search("ThreatIntel", "signature_embedding", &query_vec, 5)
-        .await
-        .unwrap();
+    let search_results = client.vector_search("ThreatIntel", "signature_embedding", &query_vec, 5).await.unwrap();
 
     println!("    Top 5 matching threat signatures:");
     println!("    ┌────┬──────────────────┬─────────┬───────────────────────────────────────┐");
@@ -1677,26 +747,14 @@ async fn main() {
         let store = client.store_read().await;
         for (rank, (nid, score)) in search_results.iter().enumerate() {
             if let Some(node) = store.get_node(*nid) {
-                let cve = node
-                    .get_property("cve_id")
-                    .map(|v| v.as_string().unwrap_or("?"))
-                    .unwrap_or("?");
-                let desc = node
-                    .get_property("description")
-                    .map(|v| v.as_string().unwrap_or("?"))
-                    .unwrap_or("?");
+                let cve = node.get_property("cve_id").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
+                let desc = node.get_property("description").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
                 let desc_trunc = if desc.len() > 37 {
                     format!("{}...", &desc[..34])
                 } else {
                     format!("{:<37}", desc)
                 };
-                println!(
-                    "    │ {:>2} │ {:<16} │ {:>6.4}  │ {} │",
-                    rank + 1,
-                    cve,
-                    score,
-                    desc_trunc
-                );
+                println!("    │ {:>2} │ {:<16} │ {:>6.4}  │ {} │", rank + 1, cve, score, desc_trunc);
             }
         }
     }
@@ -1711,13 +769,10 @@ async fn main() {
     subsection("5a. Critical Asset Identification (PageRank)");
     println!("    Running PageRank across all servers to identify most-connected assets...");
 
-    let pr_scores = client
-        .page_rank(PageRankConfig::default(), Some("Server"), None)
-        .await;
+    let pr_scores = client.page_rank(PageRankConfig::default(), Some("Server"), None).await;
 
     // Sort by score descending, map back to server names
-    let mut scored_servers: Vec<(NodeId, f64)> = pr_scores
-        .iter()
+    let mut scored_servers: Vec<(NodeId, f64)> = pr_scores.iter()
         .map(|(&node_id_u64, &score)| (NodeId::new(node_id_u64), score))
         .collect();
     scored_servers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
@@ -1731,26 +786,10 @@ async fn main() {
         let store = client.store_read().await;
         for (rank, (nid, score)) in scored_servers.iter().take(10).enumerate() {
             if let Some(node) = store.get_node(*nid) {
-                let sname = node
-                    .get_property("name")
-                    .map(|v| v.as_string().unwrap_or("?"))
-                    .unwrap_or("?");
-                let sip = node
-                    .get_property("ip")
-                    .map(|v| v.as_string().unwrap_or("?"))
-                    .unwrap_or("?");
-                let szone = node
-                    .get_property("zone")
-                    .map(|v| v.as_string().unwrap_or("?"))
-                    .unwrap_or("?");
-                println!(
-                    "    │ {:>2} │ {:<18} │ {:<12} │ {:<12} │ {:>8.4}  │",
-                    rank + 1,
-                    sname,
-                    sip,
-                    szone,
-                    score
-                );
+                let sname = node.get_property("name").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
+                let sip = node.get_property("ip").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
+                let szone = node.get_property("zone").map(|v| v.as_string().unwrap_or("?")).unwrap_or("?");
+                println!("    │ {:>2} │ {:<18} │ {:<12} │ {:<12} │ {:>8.4}  │", rank + 1, sname, sip, szone, score);
             }
         }
     }
@@ -1765,15 +804,7 @@ async fn main() {
 
     println!("    Finding shortest path from cmendez (entry) to ot-scada-01 (target)...");
 
-    match client
-        .dijkstra(
-            entry_point.as_u64(),
-            target_asset.as_u64(),
-            None,
-            None,
-            None,
-        )
-        .await
+    match client.dijkstra(entry_point.as_u64(), target_asset.as_u64(), None, None, None).await
         .expect("this demo builds no negative weights")
     {
         Some(path_result) => {
@@ -1783,16 +814,11 @@ async fn main() {
             for (i, node_id_u64) in path_result.path.iter().enumerate() {
                 let nid = NodeId::new(*node_id_u64);
                 if let Some(node) = store.get_node(nid) {
-                    let name = node
-                        .get_property("name")
+                    let name = node.get_property("name")
                         .or_else(|| node.get_property("username"))
                         .map(|v| v.as_string().unwrap_or("?"))
                         .unwrap_or("?");
-                    let arrow = if i < path_result.path.len() - 1 {
-                        " -->"
-                    } else {
-                        "    "
-                    };
+                    let arrow = if i < path_result.path.len() - 1 { " -->" } else { "    " };
                     println!("      [{}] {}{}", i, name, arrow);
                 }
             }
@@ -1804,15 +830,7 @@ async fn main() {
             // Try alternative path: entry -> int-git-01 -> int-ci-01 -> int-app-01 -> int-dc-01
             let intermediate = *server_ids.get("int-dc-01").unwrap();
             println!("    Trying path to int-dc-01 (Domain Controller) instead...");
-            match client
-                .dijkstra(
-                    entry_point.as_u64(),
-                    intermediate.as_u64(),
-                    None,
-                    None,
-                    None,
-                )
-                .await
+            match client.dijkstra(entry_point.as_u64(), intermediate.as_u64(), None, None, None).await
                 .expect("this demo builds no negative weights")
             {
                 Some(path_result) => {
@@ -1822,16 +840,11 @@ async fn main() {
                     for (i, node_id_u64) in path_result.path.iter().enumerate() {
                         let nid = NodeId::new(*node_id_u64);
                         if let Some(node) = store.get_node(nid) {
-                            let name = node
-                                .get_property("name")
+                            let name = node.get_property("name")
                                 .or_else(|| node.get_property("username"))
                                 .map(|v| v.as_string().unwrap_or("?"))
                                 .unwrap_or("?");
-                            let arrow = if i < path_result.path.len() - 1 {
-                                " -->"
-                            } else {
-                                "    "
-                            };
+                            let arrow = if i < path_result.path.len() - 1 { " -->" } else { "    " };
                             println!("      [{}] {}{}", i, name, arrow);
                         }
                     }
@@ -1848,9 +861,7 @@ async fn main() {
 
     println!("    Running Weakly Connected Components to verify network zones...");
 
-    let wcc_result = client
-        .weakly_connected_components(Some("Server"), None)
-        .await;
+    let wcc_result = client.weakly_connected_components(Some("Server"), None).await;
 
     let num_components = wcc_result.components.len();
     println!("    Connected components found: {}", num_components);
@@ -1866,37 +877,24 @@ async fn main() {
     {
         let store = client.store_read().await;
         for (idx, (_, members)) in components_sorted.iter().enumerate().take(8) {
-            let sample: Vec<String> = members
-                .iter()
-                .take(4)
-                .map(|&nid_u64| {
-                    let nid = NodeId::new(nid_u64);
-                    store
-                        .get_node(nid)
-                        .and_then(|n| n.get_property("name"))
-                        .and_then(|v| v.as_string().map(|s| s.to_string()))
-                        .unwrap_or_else(|| format!("node-{}", nid_u64))
-                })
-                .collect();
+            let sample: Vec<String> = members.iter().take(4).map(|&nid_u64| {
+                let nid = NodeId::new(nid_u64);
+                store.get_node(nid)
+                    .and_then(|n| n.get_property("name"))
+                    .and_then(|v| v.as_string().map(|s| s.to_string()))
+                    .unwrap_or_else(|| format!("node-{}", nid_u64))
+            }).collect();
             let sample_str = sample.join(", ");
             let sample_display = if sample_str.len() > 48 {
                 format!("{}...", &sample_str[..45])
             } else {
                 format!("{:<48}", sample_str)
             };
-            println!(
-                "    │ Segment {:>2}  │ {:>8} │ {} │",
-                idx + 1,
-                members.len(),
-                sample_display
-            );
+            println!("    │ Segment {:>2}  │ {:>8} │ {} │", idx + 1, members.len(), sample_display);
         }
     }
     if components_sorted.len() > 8 {
-        println!(
-            "    │ ... {} more │          │                                                │",
-            components_sorted.len() - 8
-        );
+        println!("    │ ... {} more │          │                                                │", components_sorted.len() - 8);
     }
     println!("    └─────────────┴──────────┴────────────────────────────────────────────────┘");
 
@@ -1907,32 +905,14 @@ async fn main() {
 
     // Query 1: Find all servers in the DMZ
     let queries: Vec<(&str, &str)> = vec![
-        (
-            "MATCH (s:DMZ) RETURN s LIMIT 5",
-            "DMZ Zone Servers (sample)",
-        ),
-        (
-            "MATCH (s:Internal) RETURN s LIMIT 5",
-            "Internal Zone Servers (sample)",
-        ),
-        (
-            "MATCH (s:Cloud) RETURN s LIMIT 5",
-            "Cloud Zone Servers (sample)",
-        ),
-        ("MATCH (s:OT) RETURN s LIMIT 5", "OT Zone Servers (sample)"),
-        (
-            "MATCH (u:User) RETURN u LIMIT 5",
-            "Enterprise Users (sample)",
-        ),
-        (
-            "MATCH (t:ThreatIntel) RETURN t LIMIT 5",
-            "Threat Intelligence (sample)",
-        ),
-        (
-            "MATCH (m:Malware) RETURN m LIMIT 5",
-            "Malware Families (sample)",
-        ),
-        ("MATCH (a:Alert) RETURN a LIMIT 5", "Attack Events (sample)"),
+        ("MATCH (s:DMZ) RETURN s LIMIT 5",         "DMZ Zone Servers (sample)"),
+        ("MATCH (s:Internal) RETURN s LIMIT 5",    "Internal Zone Servers (sample)"),
+        ("MATCH (s:Cloud) RETURN s LIMIT 5",       "Cloud Zone Servers (sample)"),
+        ("MATCH (s:OT) RETURN s LIMIT 5",          "OT Zone Servers (sample)"),
+        ("MATCH (u:User) RETURN u LIMIT 5",        "Enterprise Users (sample)"),
+        ("MATCH (t:ThreatIntel) RETURN t LIMIT 5", "Threat Intelligence (sample)"),
+        ("MATCH (m:Malware) RETURN m LIMIT 5",     "Malware Families (sample)"),
+        ("MATCH (a:Alert) RETURN a LIMIT 5",       "Attack Events (sample)"),
     ];
 
     for (cypher, label) in &queries {
@@ -1940,12 +920,7 @@ async fn main() {
         match client.query_readonly("default", cypher).await {
             Ok(batch) => {
                 let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-                println!(
-                    "    [OK] {} => {} results ({:.2}ms)",
-                    label,
-                    batch.len(),
-                    elapsed
-                );
+                println!("    [OK] {} => {} results ({:.2}ms)", label, batch.len(), elapsed);
             }
             Err(e) => {
                 println!("    [ERR] {} => {}", label, e);
@@ -2009,8 +984,7 @@ async fn main() {
             match runtime.process_trigger(enrichment_prompt, tenant_id).await {
                 Ok(response) => {
                     println!("    Claude generated enrichment:");
-                    let stmts: Vec<String> = response
-                        .lines()
+                    let stmts: Vec<String> = response.lines()
                         .map(|l| l.trim().to_string())
                         .filter(|l| {
                             let u = l.to_uppercase();
@@ -2018,10 +992,7 @@ async fn main() {
                         })
                         .collect();
                     for stmt in &stmts {
-                        println!(
-                            "      | {}",
-                            if stmt.len() > 78 { &stmt[..78] } else { stmt }
-                        );
+                        println!("      | {}", if stmt.len() > 78 { &stmt[..78] } else { stmt });
                     }
                     println!("    Parsed {} Cypher statements", stmts.len());
                 }
@@ -2038,24 +1009,13 @@ async fn main() {
     // ======================================================================
     section(8, "Investigation Summary");
 
-    let (
-        total_nodes,
-        server_count,
-        user_count,
-        threat_count,
-        mitre_count,
-        malware_count,
-        alert_count,
-        total_edges,
-    ) = {
+    let (total_nodes, server_count, user_count, threat_count, mitre_count, malware_count, alert_count, total_edges) = {
         let store = client.store_read().await;
         let total_nodes = store.all_nodes().len();
         let server_count = store.get_nodes_by_label(&Label::new("Server")).len();
         let user_count = store.get_nodes_by_label(&Label::new("User")).len();
         let threat_count = store.get_nodes_by_label(&Label::new("ThreatIntel")).len();
-        let mitre_count = store
-            .get_nodes_by_label(&Label::new("MitreTechnique"))
-            .len();
+        let mitre_count = store.get_nodes_by_label(&Label::new("MitreTechnique")).len();
         let malware_count = store.get_nodes_by_label(&Label::new("Malware")).len();
         let alert_count = store.get_nodes_by_label(&Label::new("Alert")).len();
 
@@ -2064,16 +1024,7 @@ async fn main() {
         for node in store.all_nodes() {
             total_edges += store.get_outgoing_edges(node.id).len();
         }
-        (
-            total_nodes,
-            server_count,
-            user_count,
-            threat_count,
-            mitre_count,
-            malware_count,
-            alert_count,
-            total_edges,
-        )
+        (total_nodes, server_count, user_count, threat_count, mitre_count, malware_count, alert_count, total_edges)
     };
 
     let elapsed = overall_start.elapsed();
@@ -2082,33 +1033,15 @@ async fn main() {
     println!("    ┌────────────────────────────────┬───────────┐");
     println!("    │ Entity Type                    │     Count │");
     println!("    ├────────────────────────────────┼───────────┤");
-    println!(
-        "    │ Servers                        │ {:>9} │",
-        server_count
-    );
+    println!("    │ Servers                        │ {:>9} │", server_count);
     println!("    │ Users                          │ {:>9} │", user_count);
-    println!(
-        "    │ Threat Intel (CVEs)            │ {:>9} │",
-        threat_count
-    );
+    println!("    │ Threat Intel (CVEs)            │ {:>9} │", threat_count);
     println!("    │ MITRE ATT&CK Techniques       │ {:>9} │", mitre_count);
-    println!(
-        "    │ Malware Families               │ {:>9} │",
-        malware_count
-    );
-    println!(
-        "    │ Attack Events                  │ {:>9} │",
-        alert_count
-    );
+    println!("    │ Malware Families               │ {:>9} │", malware_count);
+    println!("    │ Attack Events                  │ {:>9} │", alert_count);
     println!("    ├────────────────────────────────┼───────────┤");
-    println!(
-        "    │ Total Nodes                    │ {:>9} │",
-        total_nodes
-    );
-    println!(
-        "    │ Total Edges                    │ {:>9} │",
-        total_edges
-    );
+    println!("    │ Total Nodes                    │ {:>9} │", total_nodes);
+    println!("    │ Total Edges                    │ {:>9} │", total_edges);
     println!("    └────────────────────────────────┴───────────┘");
     println!();
     println!("    Capabilities Demonstrated:");

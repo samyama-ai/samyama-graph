@@ -37,11 +37,7 @@ fn ints(store: &GraphStore, cypher: &str, name: &str) -> Vec<i64> {
 fn a_leading_unwind_is_visible_to_a_following_with() {
     let store = GraphStore::new();
     assert_eq!(
-        ints(
-            &store,
-            "UNWIND [1, 2, 3] AS x WITH x WHERE x > 1 RETURN x AS a",
-            "a"
-        ),
+        ints(&store, "UNWIND [1, 2, 3] AS x WITH x WHERE x > 1 RETURN x AS a", "a"),
         vec![2, 3]
     );
 }
@@ -50,11 +46,7 @@ fn a_leading_unwind_is_visible_to_a_following_with() {
 fn the_with_may_rename_it() {
     let store = GraphStore::new();
     assert_eq!(
-        ints(
-            &store,
-            "UNWIND [1, 2, 3] AS x WITH x AS y WHERE y > 1 RETURN y AS a",
-            "a"
-        ),
+        ints(&store, "UNWIND [1, 2, 3] AS x WITH x AS y WHERE y > 1 RETURN y AS a", "a"),
         vec![2, 3]
     );
 }
@@ -63,11 +55,7 @@ fn the_with_may_rename_it() {
 fn the_with_may_project_an_expression_of_it() {
     let store = GraphStore::new();
     assert_eq!(
-        ints(
-            &store,
-            "UNWIND [1, 2, 3] AS x WITH x * 10 AS y WHERE y > 15 RETURN y AS a",
-            "a"
-        ),
+        ints(&store, "UNWIND [1, 2, 3] AS x WITH x * 10 AS y WHERE y > 15 RETURN y AS a", "a"),
         vec![20, 30]
     );
 }
@@ -106,19 +94,11 @@ fn every_row_survives_when_the_where_keeps_them_all() {
 fn a_with_can_aggregate_over_the_unwound_rows() {
     let store = GraphStore::new();
     assert_eq!(
-        ints(
-            &store,
-            "UNWIND [1, 2, 3, 4] AS x WITH sum(x) AS s RETURN s AS a",
-            "a"
-        ),
+        ints(&store, "UNWIND [1, 2, 3, 4] AS x WITH sum(x) AS s RETURN s AS a", "a"),
         vec![10]
     );
     assert_eq!(
-        ints(
-            &store,
-            "UNWIND [1, 2, 3, 4] AS x WITH count(x) AS c RETURN c AS a",
-            "a"
-        ),
+        ints(&store, "UNWIND [1, 2, 3, 4] AS x WITH count(x) AS c RETURN c AS a", "a"),
         vec![4]
     );
 }
@@ -178,27 +158,17 @@ fn a_trailing_unwind_still_belongs_to_its_stage() {
             PropertyValue::Integer(9),
         ]),
     );
-    let got = ints(
-        &store,
-        "MATCH (n:N) WITH n.tags AS t UNWIND t AS x RETURN x AS a",
-        "a",
-    );
+    let got = ints(&store, "MATCH (n:N) WITH n.tags AS t UNWIND t AS x RETURN x AS a", "a");
     assert_eq!(got, vec![7, 8, 9]);
 }
 
 #[test]
 fn a_leading_unwind_with_no_with_is_unchanged() {
     let store = GraphStore::new();
-    assert_eq!(
-        ints(&store, "UNWIND [5, 6] AS x RETURN x AS a", "a"),
-        vec![5, 6]
-    );
+    assert_eq!(ints(&store, "UNWIND [5, 6] AS x RETURN x AS a", "a"), vec![5, 6]);
     // Aggregation over a bare leading UNWIND — the case the SingleRowOperator
     // seed was introduced for.
-    assert_eq!(
-        ints(&store, "UNWIND [5, 6, 7] AS x RETURN count(x) AS a", "a"),
-        vec![3]
-    );
+    assert_eq!(ints(&store, "UNWIND [5, 6, 7] AS x RETURN count(x) AS a", "a"), vec![3]);
 }
 
 #[test]

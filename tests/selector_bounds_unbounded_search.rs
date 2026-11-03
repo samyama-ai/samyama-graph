@@ -33,11 +33,7 @@ fn cyclic() -> GraphStore {
     let mut store = GraphStore::new();
     for n in ["a", "b", "c"] {
         engine
-            .execute_mut(
-                &format!("CREATE (:N {{eid: \"{n}\", name: \"{n}\"}})"),
-                &mut store,
-                T,
-            )
+            .execute_mut(&format!("CREATE (:N {{eid: \"{n}\", name: \"{n}\"}})"), &mut store, T)
             .unwrap();
     }
     for (from, to) in [("a", "b"), ("a", "b"), ("b", "c"), ("c", "a")] {
@@ -99,9 +95,7 @@ fn a_single_path_selector_does_not_yet_bound_an_unbounded_walk() {
 fn the_start_node_is_a_reachable_endpoint_and_must_not_be_lost() {
     let s = cyclic();
     let q = "MATCH ANY SHORTEST (x:N)-[:E*1..4]->(y:N) WHERE x.name = 'a' RETURN y.eid";
-    let b = QueryEngine::new()
-        .execute_with_dialect(q, &s, Dialect::Gql)
-        .unwrap();
+    let b = QueryEngine::new().execute_with_dialect(q, &s, Dialect::Gql).unwrap();
     let ends: Vec<String> = b
         .records
         .iter()
@@ -151,10 +145,7 @@ fn a_bounded_selector_query_is_unchanged() {
         assert_eq!(run(&s, q), Ok(3), "{q}");
     }
     assert_eq!(
-        run(
-            &s,
-            "MATCH ALL SHORTEST (x:N)-[:E*1..4]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid"
-        ),
+        run(&s, "MATCH ALL SHORTEST (x:N)-[:E*1..4]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid"),
         Ok(6),
         "the two parallel edges a->b double the shortest path to every node \
          downstream of b, not only to b: two to b, two to c, two back to a"

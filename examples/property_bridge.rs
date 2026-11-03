@@ -75,8 +75,9 @@ async fn build_index(
     label: &str,
     prop: &str,
 ) -> Result<HashMap<String, NodeId>, Error> {
-    let q =
-        format!("MATCH (n:{label}) WHERE n.{prop} IS NOT NULL RETURN n.{prop} AS k, id(n) AS v");
+    let q = format!(
+        "MATCH (n:{label}) WHERE n.{prop} IS NOT NULL RETURN n.{prop} AS k, id(n) AS v"
+    );
     let r = client.query("default", &q).await?;
     let mut out = HashMap::with_capacity(r.records.len());
     for row in &r.records {
@@ -178,10 +179,7 @@ async fn main() -> Result<(), Error> {
         for (key, src_id) in &source_pairs {
             match target_index.get(key) {
                 Some(&tgt_id) => {
-                    if graph
-                        .create_edge(*src_id, tgt_id, edge_type.as_str())
-                        .is_ok()
-                    {
+                    if graph.create_edge(*src_id, tgt_id, edge_type.as_str()).is_ok() {
                         created += 1;
                     }
                 }
@@ -269,21 +267,13 @@ mod tests {
     fn creates_edges_when_property_values_match() {
         let mut g = GraphStore::new();
         let p1 = g.create_node("Protein");
-        g.get_node_mut(p1)
-            .unwrap()
-            .set_property("uniprot_id", PropertyValue::String("P38398".into()));
+        g.get_node_mut(p1).unwrap().set_property("uniprot_id", PropertyValue::String("P38398".into()));
         let p2 = g.create_node("Protein");
-        g.get_node_mut(p2)
-            .unwrap()
-            .set_property("uniprot_id", PropertyValue::String("Q53GA5".into()));
+        g.get_node_mut(p2).unwrap().set_property("uniprot_id", PropertyValue::String("Q53GA5".into()));
         let ct1 = g.create_node("ChemblTarget");
-        g.get_node_mut(ct1)
-            .unwrap()
-            .set_property("uniprot_accession", PropertyValue::String("P38398".into()));
+        g.get_node_mut(ct1).unwrap().set_property("uniprot_accession", PropertyValue::String("P38398".into()));
         let ct2 = g.create_node("ChemblTarget");
-        g.get_node_mut(ct2)
-            .unwrap()
-            .set_property("uniprot_accession", PropertyValue::String("MISSING".into()));
+        g.get_node_mut(ct2).unwrap().set_property("uniprot_accession", PropertyValue::String("MISSING".into()));
 
         let (created, missing) = run_bridge_in_memory(
             &mut g,
@@ -301,9 +291,7 @@ mod tests {
     fn skips_source_nodes_without_the_property() {
         let mut g = GraphStore::new();
         let p1 = g.create_node("Protein");
-        g.get_node_mut(p1)
-            .unwrap()
-            .set_property("uniprot_id", PropertyValue::String("P38398".into()));
+        g.get_node_mut(p1).unwrap().set_property("uniprot_id", PropertyValue::String("P38398".into()));
         // ChemblTarget without uniprot_accession property at all.
         g.create_node("ChemblTarget");
         let (created, missing) = run_bridge_in_memory(
@@ -325,17 +313,11 @@ mod tests {
         // bridge; multi-match would require explicit modeling).
         let mut g = GraphStore::new();
         let p1 = g.create_node("Protein");
-        g.get_node_mut(p1)
-            .unwrap()
-            .set_property("uniprot_id", PropertyValue::String("P38398".into()));
+        g.get_node_mut(p1).unwrap().set_property("uniprot_id", PropertyValue::String("P38398".into()));
         let p2 = g.create_node("Protein");
-        g.get_node_mut(p2)
-            .unwrap()
-            .set_property("uniprot_id", PropertyValue::String("P38398".into()));
+        g.get_node_mut(p2).unwrap().set_property("uniprot_id", PropertyValue::String("P38398".into()));
         let ct1 = g.create_node("ChemblTarget");
-        g.get_node_mut(ct1)
-            .unwrap()
-            .set_property("uniprot_accession", PropertyValue::String("P38398".into()));
+        g.get_node_mut(ct1).unwrap().set_property("uniprot_accession", PropertyValue::String("P38398".into()));
         let (created, missing) = run_bridge_in_memory(
             &mut g,
             "ChemblTarget",
@@ -352,13 +334,9 @@ mod tests {
     fn supports_arbitrary_edge_type() {
         let mut g = GraphStore::new();
         let gene = g.create_node("OncoKBGene");
-        g.get_node_mut(gene)
-            .unwrap()
-            .set_property("hugo_symbol", PropertyValue::String("BRAF".into()));
+        g.get_node_mut(gene).unwrap().set_property("hugo_symbol", PropertyValue::String("BRAF".into()));
         let hgnc = g.create_node("Gene");
-        g.get_node_mut(hgnc)
-            .unwrap()
-            .set_property("symbol", PropertyValue::String("BRAF".into()));
+        g.get_node_mut(hgnc).unwrap().set_property("symbol", PropertyValue::String("BRAF".into()));
         let (created, _) = run_bridge_in_memory(
             &mut g,
             "OncoKBGene",

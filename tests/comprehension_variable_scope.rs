@@ -33,12 +33,8 @@ use samyama::query::parser::parse_query;
 fn graph() -> GraphStore {
     let mut store = GraphStore::new();
     let a = store.create_node("A");
-    let _ = store.set_node_property(
-        "default",
-        a,
-        "name".to_string(),
-        PropertyValue::String("c".into()),
-    );
+    let _ = store.set_node_property("default", a, "name".to_string(),
+                                    PropertyValue::String("c".into()));
     let _ = store.set_node_property("default", a, "n".to_string(), PropertyValue::Integer(2));
     for label in ["B", "C"] {
         let t = store.create_node_with_labels([Label::new(label)]);
@@ -61,10 +57,7 @@ fn rows(store: &GraphStore, cypher: &str) -> usize {
 fn a_list_comprehension_in_a_where_sees_the_expanded_variable() {
     let store = graph();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (n)-->(b) WHERE n.name IN [x IN labels(b) | toLower(x)] RETURN b"
-        ),
+        rows(&store, "MATCH (n)-->(b) WHERE n.name IN [x IN labels(b) | toLower(x)] RETURN b"),
         1
     );
 }
@@ -75,17 +68,11 @@ fn a_quantifier_in_a_where_sees_it_too() {
     // that fell into the same catch-all.
     let store = graph();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (n)-->(b) WHERE any(x IN labels(b) WHERE x = 'B') RETURN b"
-        ),
+        rows(&store, "MATCH (n)-->(b) WHERE any(x IN labels(b) WHERE x = 'B') RETURN b"),
         1
     );
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (n)-->(b) WHERE none(x IN labels(b) WHERE x = 'B') RETURN b"
-        ),
+        rows(&store, "MATCH (n)-->(b) WHERE none(x IN labels(b) WHERE x = 'B') RETURN b"),
         1
     );
 }
@@ -94,10 +81,7 @@ fn a_quantifier_in_a_where_sees_it_too() {
 fn a_case_expression_in_a_where_sees_it_too() {
     let store = graph();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (n)-->(b) WHERE (CASE WHEN b:B THEN 1 ELSE 0 END) = 1 RETURN b"
-        ),
+        rows(&store, "MATCH (n)-->(b) WHERE (CASE WHEN b:B THEN 1 ELSE 0 END) = 1 RETURN b"),
         1
     );
 }
@@ -115,10 +99,7 @@ fn a_list_literal_in_a_where_sees_it_too() {
 fn reduce_in_a_where_sees_it_too() {
     let store = graph();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (n)-->(b) WHERE reduce(acc = 0, x IN labels(b) | acc + 1) = 1 RETURN b"
-        ),
+        rows(&store, "MATCH (n)-->(b) WHERE reduce(acc = 0, x IN labels(b) | acc + 1) = 1 RETURN b"),
         2
     );
 }
@@ -130,17 +111,11 @@ fn the_comprehensions_own_variable_is_not_an_outer_dependency() {
     // referencing nothing else must still run.
     let store = graph();
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (n) WHERE any(x IN [1, 2] WHERE x = 1) RETURN n"
-        ),
+        rows(&store, "MATCH (n) WHERE any(x IN [1, 2] WHERE x = 1) RETURN n"),
         3
     );
     assert_eq!(
-        rows(
-            &store,
-            "MATCH (n) WHERE size([x IN [1, 2, 3] | x * 2]) = 3 RETURN n"
-        ),
+        rows(&store, "MATCH (n) WHERE size([x IN [1, 2, 3] | x * 2]) = 3 RETURN n"),
         3
     );
 }
@@ -151,12 +126,6 @@ fn an_ordinary_pushed_predicate_still_filters() {
     // variable is still pushed down, and still narrows.
     let store = graph();
     assert_eq!(rows(&store, "MATCH (n) WHERE n.name = 'c' RETURN n"), 1);
-    assert_eq!(
-        rows(&store, "MATCH (n)-->(b) WHERE n.name = 'c' RETURN b"),
-        2
-    );
-    assert_eq!(
-        rows(&store, "MATCH (n)-->(b) WHERE n.name = 'zzz' RETURN b"),
-        0
-    );
+    assert_eq!(rows(&store, "MATCH (n)-->(b) WHERE n.name = 'c' RETURN b"), 2);
+    assert_eq!(rows(&store, "MATCH (n)-->(b) WHERE n.name = 'zzz' RETURN b"), 0);
 }

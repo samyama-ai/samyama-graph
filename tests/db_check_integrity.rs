@@ -64,19 +64,12 @@ fn a_dangling_edge_cannot_be_created_through_a_public_api() {
 
     let engine = QueryEngine::new();
     let mut store = GraphStore::new();
-    engine
-        .execute_mut("CREATE (a:N {eid: \"a\"})", &mut store, T)
-        .unwrap();
+    engine.execute_mut("CREATE (a:N {eid: \"a\"})", &mut store, T).unwrap();
     let a = store.get_nodes_by_label(&"N".into())[0].id;
 
     let missing = NodeId::new(9_999);
     assert!(store.get_node(missing).is_none());
-    let edge = Edge::new(
-        EdgeId::new(500),
-        a,
-        missing,
-        samyama::graph::EdgeType::new("E"),
-    );
+    let edge = Edge::new(EdgeId::new(500), a, missing, samyama::graph::EdgeType::new("E"));
     assert!(
         store.insert_recovered_edge(edge).is_err(),
         "recovery must refuse an edge whose endpoint does not exist; accepting it \
@@ -110,7 +103,9 @@ fn detach_delete_and_reload_stays_sound_across_rounds() {
         let (a, b) = fixtures[round % fixtures.len()];
         engine
             .execute_mut(
-                &format!("CREATE (x:N {{eid: \"{a}\"}}), (y:N {{eid: \"{b}\"}})"),
+                &format!(
+                    "CREATE (x:N {{eid: \"{a}\"}}), (y:N {{eid: \"{b}\"}})"
+                ),
                 &mut store,
                 T,
             )
@@ -128,15 +123,10 @@ fn detach_delete_and_reload_stays_sound_across_rounds() {
         let found = violations(&store);
         assert!(found.is_empty(), "round {round} after load: {found:?}");
 
-        engine
-            .execute_mut("MATCH (n) DETACH DELETE n", &mut store, T)
-            .unwrap();
+        engine.execute_mut("MATCH (n) DETACH DELETE n", &mut store, T).unwrap();
 
         let found = violations(&store);
-        assert!(
-            found.is_empty(),
-            "round {round} after DETACH DELETE: {found:?}"
-        );
+        assert!(found.is_empty(), "round {round} after DETACH DELETE: {found:?}");
         assert_eq!(
             store.edge_count(),
             0,

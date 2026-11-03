@@ -51,9 +51,7 @@ fn line_graph() -> GraphStore {
 
 fn names(store: &GraphStore, cypher: &str) -> Vec<String> {
     let query = parse_query(cypher).expect("query should parse");
-    let batch = QueryExecutor::new(store)
-        .execute(&query)
-        .expect("query should run");
+    let batch = QueryExecutor::new(store).execute(&query).expect("query should run");
     batch
         .records
         .iter()
@@ -98,10 +96,7 @@ fn a_type_the_graph_has_never_seen_matches_nothing() {
         &store,
         "MATCH (a:N)-[:NO_SUCH_TYPE*1..3]->(f:N) WHERE a.name = \"A\" RETURN f.name AS n",
     );
-    assert!(
-        out.is_empty(),
-        "an unknown edge type matched something: {out:?}"
-    );
+    assert!(out.is_empty(), "an unknown edge type matched something: {out:?}");
 }
 
 #[test]
@@ -133,11 +128,7 @@ fn an_undirected_pattern_reads_both_adjacencies() {
         "MATCH (c:N)-[:LINK*1..1]-(f:N) WHERE c.name = \"C\" RETURN f.name AS n",
     );
     out.sort();
-    assert_eq!(
-        out,
-        vec!["B", "D"],
-        "C links forward to D and backward from B"
-    );
+    assert_eq!(out, vec!["B", "D"], "C links forward to D and backward from B");
 }
 
 #[test]
@@ -238,9 +229,7 @@ fn a_named_path_still_reconstructs() {
          RETURN length(p) AS n",
     )
     .expect("query should parse");
-    let batch = QueryExecutor::new(&store)
-        .execute(&query)
-        .expect("query should run");
+    let batch = QueryExecutor::new(&store).execute(&query).expect("query should run");
     assert_eq!(batch.records.len(), 1);
     match batch.records[0].get("n") {
         Some(Value::Property(PropertyValue::Integer(len))) => {
@@ -295,9 +284,7 @@ fn a_large_traversal_reaches_the_same_set_as_a_hand_computed_bfs() {
 
     let query = parse_query("MATCH (a:N)-[:E*1..3]->(f:N) WHERE id(a) = 1 RETURN id(f) AS n")
         .expect("query should parse");
-    let batch = QueryExecutor::new(&store)
-        .execute(&query)
-        .expect("query should run");
+    let batch = QueryExecutor::new(&store).execute(&query).expect("query should run");
 
     // Compare the reachable **set**, not the row count. A node reachable by
     // more than one path yields more than one row — two paths to the same node
@@ -322,8 +309,7 @@ fn a_large_traversal_reaches_the_same_set_as_a_hand_computed_bfs() {
     expected.sort();
     actual.sort();
     assert_eq!(
-        actual,
-        expected,
+        actual, expected,
         "engine reached {} distinct nodes, hand BFS reached {}",
         actual.len(),
         expected.len()
@@ -359,9 +345,7 @@ fn a_directed_variable_length_segment_survives_anchor_reversal() {
     // One Tag, many People — so the cheapest anchor is the tag end and the
     // planner is forced to traverse the KNOWS segment backwards.
     let tag = mk(&mut store, "Tag", "T");
-    let people: Vec<_> = (0..200)
-        .map(|i| mk(&mut store, "Person", &format!("p{i}")))
-        .collect();
+    let people: Vec<_> = (0..200).map(|i| mk(&mut store, "Person", &format!("p{i}"))).collect();
 
     // Reachable: p0 -KNOWS-> p1 -WROTE-> post0 -HAS_TAG-> T
     let post0 = mk(&mut store, "Post", "post0");
@@ -391,9 +375,5 @@ fn a_directed_variable_length_segment_survives_anchor_reversal() {
         .collect();
     got.sort();
     got.dedup();
-    assert_eq!(
-        got,
-        vec!["post0".to_string()],
-        "the decoy has no inbound KNOWS path"
-    );
+    assert_eq!(got, vec!["post0".to_string()], "the decoy has no inbound KNOWS path");
 }

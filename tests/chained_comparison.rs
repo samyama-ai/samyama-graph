@@ -54,31 +54,16 @@ fn nums(store: &GraphStore, cypher: &str) -> Vec<i64> {
 #[test]
 fn a_numeric_range_selects_the_middle() {
     let store = three_nodes();
-    assert_eq!(
-        nums(&store, "MATCH (n) WHERE 1 < n.num < 3 RETURN n.num AS v"),
-        vec![2]
-    );
-    assert_eq!(
-        nums(&store, "MATCH (n) WHERE 1 <= n.num < 3 RETURN n.num AS v"),
-        vec![1, 2]
-    );
-    assert_eq!(
-        nums(&store, "MATCH (n) WHERE 1 < n.num <= 3 RETURN n.num AS v"),
-        vec![2, 3]
-    );
-    assert_eq!(
-        nums(&store, "MATCH (n) WHERE 1 <= n.num <= 3 RETURN n.num AS v"),
-        vec![1, 2, 3]
-    );
+    assert_eq!(nums(&store, "MATCH (n) WHERE 1 < n.num < 3 RETURN n.num AS v"), vec![2]);
+    assert_eq!(nums(&store, "MATCH (n) WHERE 1 <= n.num < 3 RETURN n.num AS v"), vec![1, 2]);
+    assert_eq!(nums(&store, "MATCH (n) WHERE 1 < n.num <= 3 RETURN n.num AS v"), vec![2, 3]);
+    assert_eq!(nums(&store, "MATCH (n) WHERE 1 <= n.num <= 3 RETURN n.num AS v"), vec![1, 2, 3]);
 }
 
 #[test]
 fn an_empty_range_selects_nothing_rather_than_erroring() {
     let store = three_nodes();
-    assert_eq!(
-        nums(&store, "MATCH (n) WHERE 10 < n.num <= 3 RETURN n.num AS v"),
-        Vec::<i64>::new()
-    );
+    assert_eq!(nums(&store, "MATCH (n) WHERE 10 < n.num <= 3 RETURN n.num AS v"), Vec::<i64>::new());
 }
 
 #[test]
@@ -86,9 +71,7 @@ fn a_chain_of_strings_works_the_same_way() {
     let store = three_nodes();
     let q = parse_query("MATCH (n) WHERE '1' < n.name < '3' RETURN n.num AS v")
         .expect("query should parse");
-    let got = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect("query should run");
+    let got = QueryExecutor::new(&store).execute(&q).expect("query should run");
     assert_eq!(got.records.len(), 1);
 }
 
@@ -99,35 +82,23 @@ fn a_parenthesised_comparison_is_not_a_chain() {
     // tell it apart from a chain.
     let store = GraphStore::new();
     let q = parse_query("RETURN (1 < 2) = true AS v").expect("query should parse");
-    let got = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect("query should run");
+    let got = QueryExecutor::new(&store).execute(&q).expect("query should run");
     assert_eq!(
         got.records[0].get("v"),
-        Some(&Value::Property(samyama::graph::PropertyValue::Boolean(
-            true
-        )))
+        Some(&Value::Property(samyama::graph::PropertyValue::Boolean(true)))
     );
 }
 
 #[test]
 fn ordinary_expressions_are_untouched() {
     let store = three_nodes();
+    assert_eq!(nums(&store, "MATCH (n) WHERE 1 < n.num RETURN n.num AS v"), vec![2, 3]);
     assert_eq!(
-        nums(&store, "MATCH (n) WHERE 1 < n.num RETURN n.num AS v"),
-        vec![2, 3]
-    );
-    assert_eq!(
-        nums(
-            &store,
-            "MATCH (n) WHERE n.num > 1 AND n.num < 3 RETURN n.num AS v"
-        ),
+        nums(&store, "MATCH (n) WHERE n.num > 1 AND n.num < 3 RETURN n.num AS v"),
         vec![2]
     );
     let q = parse_query("RETURN 1 + 2 * 3 AS v").expect("query should parse");
-    let got = QueryExecutor::new(&GraphStore::new())
-        .execute(&q)
-        .expect("should run");
+    let got = QueryExecutor::new(&GraphStore::new()).execute(&q).expect("should run");
     assert_eq!(
         got.records[0].get("v"),
         Some(&Value::Property(samyama::graph::PropertyValue::Integer(7))),

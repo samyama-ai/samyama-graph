@@ -22,10 +22,7 @@ pub struct SAPHRSolver {
 impl SAPHRSolver {
     pub fn new(config: SolverConfig) -> Self {
         Self {
-            seed: None,
-            config,
-            epsilon: 0.2,
-        }
+            seed: None, config, epsilon: 0.2 }
     }
 
     /// Fix the seed so this solver's run can be re-derived (#455).
@@ -72,7 +69,10 @@ impl SAPHRSolver {
 
             // Sample variant by softmax over success counts (probability table).
             let total: f64 = success.iter().sum();
-            let probs = [success[0] / total, (success[0] + success[1]) / total];
+            let probs = [
+                success[0] / total,
+                (success[0] + success[1]) / total,
+            ];
 
             // Updates per individual + count successes per variant.
             let updates: Vec<(Individual, usize, bool)> = population
@@ -147,7 +147,10 @@ impl SAPHRSolver {
                 })
                 .collect();
 
-            population = updates.iter().map(|(ind, _, _)| ind.clone()).collect();
+            population = updates
+                .iter()
+                .map(|(ind, _, _)| ind.clone())
+                .collect();
             for (_, c, ok) in &updates {
                 if *ok {
                     success[*c] += 1.0;

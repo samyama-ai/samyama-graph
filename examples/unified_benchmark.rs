@@ -79,11 +79,7 @@ fn load_oracle(path: &std::path::Path) -> HashMap<String, Oracle> {
     match fs::read_to_string(path) {
         Ok(s) => match serde_yaml::from_str::<OracleFile>(&s) {
             Ok(f) => {
-                eprintln!(
-                    "Loaded oracle with {} entries from {:?}",
-                    f.queries.len(),
-                    path
-                );
+                eprintln!("Loaded oracle with {} entries from {:?}", f.queries.len(), path);
                 f.queries
             }
             Err(e) => {
@@ -100,36 +96,20 @@ fn load_oracle(path: &std::path::Path) -> HashMap<String, Oracle> {
 fn classify(rows: usize, oracle: Option<&Oracle>) -> (&'static str, bool) {
     match oracle.map(|o| o.status).unwrap_or(OracleStatus::NonEmpty) {
         OracleStatus::NonEmpty => {
-            if rows > 0 {
-                ("pass", true)
-            } else {
-                ("empty", false)
-            }
+            if rows > 0 { ("pass", true) } else { ("empty", false) }
         }
         OracleStatus::DataDependent => {
-            if rows > 0 {
-                ("pass", true)
-            } else {
-                ("pass_data_gap", true)
-            }
+            if rows > 0 { ("pass", true) } else { ("pass_data_gap", true) }
         }
         OracleStatus::Aggregation => ("pass", true), // any result (including 0 row) is fine
         OracleStatus::Exact => {
             let want = oracle.and_then(|o| o.rows).unwrap_or(0);
-            if rows == want {
-                ("pass", true)
-            } else {
-                ("fail_count", false)
-            }
+            if rows == want { ("pass", true) } else { ("fail_count", false) }
         }
         OracleStatus::Range => {
             let lo = oracle.and_then(|o| o.min).unwrap_or(1);
             let hi = oracle.and_then(|o| o.max).unwrap_or(usize::MAX);
-            if rows >= lo && rows <= hi {
-                ("pass", true)
-            } else {
-                ("fail_count", false)
-            }
+            if rows >= lo && rows <= hi { ("pass", true) } else { ("fail_count", false) }
         }
     }
 }
@@ -171,16 +151,10 @@ impl LoadReport {
         let mut line = format!("  {filename}: {} queries", self.loaded);
         let mut skips = Vec::new();
         if self.skipped_no_cypher > 0 {
-            skips.push(format!(
-                "{} rows skipped: no MATCH/RETURN",
-                self.skipped_no_cypher
-            ));
+            skips.push(format!("{} rows skipped: no MATCH/RETURN", self.skipped_no_cypher));
         }
         if self.skipped_short > 0 {
-            skips.push(format!(
-                "{} rows skipped: fewer fields than the header",
-                self.skipped_short
-            ));
+            skips.push(format!("{} rows skipped: fewer fields than the header", self.skipped_short));
         }
         if !skips.is_empty() {
             line.push_str(&format!(" ({})", skips.join(", ")));
@@ -235,18 +209,13 @@ fn column_index(header: &[String], names: &[&str], fallback: usize) -> usize {
         .unwrap_or(fallback)
 }
 
-fn parse_csv_queries(
-    path: &std::path::Path,
-) -> (Vec<(String, String, String, String)>, LoadReport) {
+fn parse_csv_queries(path: &std::path::Path) -> (Vec<(String, String, String, String)>, LoadReport) {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
             return (
                 vec![],
-                LoadReport {
-                    unreadable: Some(e.to_string()),
-                    ..Default::default()
-                },
+                LoadReport { unreadable: Some(e.to_string()), ..Default::default() },
             )
         }
     };
@@ -256,10 +225,7 @@ fn parse_csv_queries(
         None => {
             return (
                 vec![],
-                LoadReport {
-                    unreadable: Some("empty file".into()),
-                    ..Default::default()
-                },
+                LoadReport { unreadable: Some("empty file".into()), ..Default::default() },
             )
         }
     };
@@ -273,10 +239,7 @@ fn parse_csv_queries(
         &["cypher", "query", "query_text", "statement"],
         header.len().saturating_sub(1),
     );
-    let widest = [id_col, name_col, cat_col, cypher_col]
-        .into_iter()
-        .max()
-        .unwrap_or(0);
+    let widest = [id_col, name_col, cat_col, cypher_col].into_iter().max().unwrap_or(0);
 
     let mut queries = Vec::new();
     let mut report = LoadReport::default();
@@ -309,10 +272,7 @@ fn parse_csv_queries(
 /// The list used to be hardcoded, so a query file that was present but unnamed
 /// was skipped without a word (#683).
 fn query_files(dir: &std::path::Path) -> Result<Vec<PathBuf>, String> {
-    if dir
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("csv"))
-    {
+    if dir.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv")) {
         return Ok(vec![dir.to_path_buf()]);
     }
     let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -421,24 +381,12 @@ async fn main() -> Result<(), Error> {
         .cloned();
     let dedup_keys: Vec<&str> = dedup_keys_str
         .as_deref()
-        .map(|s| {
-            s.split(',')
-                .map(|k| k.trim())
-                .filter(|k| !k.is_empty())
-                .collect()
-        })
+        .map(|s| s.split(',').map(|k| k.trim()).filter(|k| !k.is_empty()).collect())
         .unwrap_or_default();
-    let merge_edges = match args
-        .iter()
-        .find_map(|a| a.strip_prefix("--merge-edges="))
-        .or_else(|| {
-            args.iter()
-                .position(|a| a == "--merge-edges")
-                .and_then(|i| args.get(i + 1))
-                .map(String::as_str)
-        })
-        .unwrap_or("unpropertied")
-    {
+    let merge_edges = match args.iter().find_map(|a| a.strip_prefix("--merge-edges="))
+        .or_else(|| args.iter().position(|a| a == "--merge-edges")
+            .and_then(|i| args.get(i + 1)).map(String::as_str))
+        .unwrap_or("unpropertied") {
         "never" => samyama::snapshot::MergeEdges::Never,
         "unpropertied" => samyama::snapshot::MergeEdges::Unpropertied,
         "always" => samyama::snapshot::MergeEdges::Always,
@@ -466,11 +414,7 @@ async fn main() -> Result<(), Error> {
     };
     let oracle_path = get_arg(&args, "--oracle").unwrap_or_else(|| {
         let first = &query_paths[0];
-        if first.is_dir() {
-            first.join("expected_rows.yaml")
-        } else {
-            PathBuf::from("expected_rows.yaml")
-        }
+        if first.is_dir() { first.join("expected_rows.yaml") } else { PathBuf::from("expected_rows.yaml") }
     });
     let oracle = load_oracle(&oracle_path);
 
@@ -526,24 +470,10 @@ async fn main() -> Result<(), Error> {
         let stats = if dedup_keys.is_empty() {
             client.import_snapshot("default", p).await?
         } else {
-            client
-                .import_snapshot_merge_policy(
-                    "default",
-                    p,
-                    &dedup_keys,
-                    args.iter().any(|a| a == "--dedup-allow-conflicts"),
-                    merge_edges,
-                )
-                .await?
+            client.import_snapshot_merge_policy("default", p, &dedup_keys, args.iter().any(|a| a == "--dedup-allow-conflicts"), merge_edges).await?
         };
-        eprintln!(
-            "{} edges deduplicated, {} parallel edges kept",
-            stats.edges_deduplicated, stats.parallel_edges_kept
-        );
-        eprintln!(
-            "{} candidate merges refused for conflicting identifiers",
-            stats.merges_refused_conflicting
-        );
+        eprintln!("{} edges deduplicated, {} parallel edges kept", stats.edges_deduplicated, stats.parallel_edges_kept);
+        eprintln!("{} candidate merges refused for conflicting identifiers", stats.merges_refused_conflicting);
         eprintln!(
             "{} nodes, {} edges, {} MERGED in {:.1}s",
             stats.node_count,
@@ -558,7 +488,10 @@ async fn main() -> Result<(), Error> {
     // Journal/MeSHTerm) and OMOP (Person/Visit/ConditionOccurrence/DrugExposure/
     // Measurement/ProcedureOccurrence) share NO label with any other snapshot, so
     // they can never merge — running them through dedup is pure cost.
-    for (name, path) in &[("PubMed", &pubmed_snap), ("OMOP", &omop_snap)] {
+    for (name, path) in &[
+        ("PubMed", &pubmed_snap),
+        ("OMOP", &omop_snap),
+    ] {
         if let Some(ref p) = path {
             eprint!("Importing {} snapshot... ", name);
             let t0 = Instant::now();
@@ -822,10 +755,7 @@ async fn main() -> Result<(), Error> {
         eprintln!("Exporting combined snapshot to {} ...", cs.display());
         let t0 = Instant::now();
         client.export_snapshot("default", cs).await?;
-        eprintln!(
-            "Combined snapshot exported in {:.1}s",
-            t0.elapsed().as_secs_f64()
-        );
+        eprintln!("Combined snapshot exported in {:.1}s", t0.elapsed().as_secs_f64());
     }
     if skip_queries {
         eprintln!("--skip-queries set; skipping query phase.");
@@ -854,11 +784,7 @@ async fn main() -> Result<(), Error> {
     }
     let mut skipped_rows = 0usize;
     for path in &files {
-        let filename = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let (queries, report) = parse_csv_queries(path);
         eprintln!("{}", report.describe(&filename));
         skipped_rows += report.skipped_no_cypher + report.skipped_short;
@@ -909,7 +835,10 @@ async fn main() -> Result<(), Error> {
                     "fail_count" => "FAIL#",
                     _ => "EMPTY",
                 };
-                eprintln!("  {} {}: {} rows in {:.1}ms [{}]", tag, id, rows, ms, name);
+                eprintln!(
+                    "  {} {}: {} rows in {:.1}ms [{}]",
+                    tag, id, rows, ms, name
+                );
                 match status {
                     "pass" => pass += 1,
                     "pass_data_gap" => pass_data_gap += 1,
@@ -1010,9 +939,7 @@ mod tests {
         assert_eq!((report.loaded, report.skipped_no_cypher), (1, 1));
         assert_eq!(queries.len(), 1);
         assert!(
-            report
-                .describe("q.csv")
-                .contains("1 rows skipped: no MATCH/RETURN"),
+            report.describe("q.csv").contains("1 rows skipped: no MATCH/RETURN"),
             "{}",
             report.describe("q.csv")
         );
@@ -1036,11 +963,7 @@ mod tests {
     fn an_unreadable_file_says_so() {
         let report = parse_csv_queries(std::path::Path::new("/nonexistent/q.csv")).1;
         assert!(report.unreadable.is_some());
-        assert!(
-            report.describe("q.csv").contains("not read"),
-            "{}",
-            report.describe("q.csv")
-        );
+        assert!(report.describe("q.csv").contains("not read"), "{}", report.describe("q.csv"));
     }
 
     /// Every `.csv` in the directory is considered — the list is not hardcoded.
@@ -1051,10 +974,8 @@ mod tests {
             fs::write(dir.path().join(n), "id,name,category,cypher\n").unwrap();
         }
         let files = query_files(dir.path()).unwrap();
-        let names: Vec<String> = files
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
-            .collect();
+        let names: Vec<String> =
+            files.iter().map(|p| p.file_name().unwrap().to_string_lossy().to_string()).collect();
         assert_eq!(names, vec!["a-queries.csv", "b-queries.csv"]);
     }
 
@@ -1072,35 +993,22 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(
-            arg_values(&args, "--queries").unwrap(),
-            vec!["a", "b/x.csv"]
-        );
+        assert_eq!(arg_values(&args, "--queries").unwrap(), vec!["a", "b/x.csv"]);
         assert!(arg_values(&args, "--absent").unwrap().is_empty());
 
-        let short: Vec<String> = ["prog", "--queries", "a", "--queries"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let short: Vec<String> =
+            ["prog", "--queries", "a", "--queries"].iter().map(|s| s.to_string()).collect();
         assert!(arg_values(&short, "--queries").is_err());
     }
 
     /// A value-taking flag passed last used to panic with `index out of bounds`.
     #[test]
     fn a_flag_without_a_value_is_an_error_not_a_panic() {
-        let args: Vec<String> = ["prog", "--study-refs"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            arg_value(&args, "--study-refs"),
-            Err("--study-refs needs a value".into())
-        );
+        let args: Vec<String> = ["prog", "--study-refs"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(arg_value(&args, "--study-refs"), Err("--study-refs needs a value".into()));
 
-        let args: Vec<String> = ["prog", "--study-refs", "--queries", "d"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> =
+            ["prog", "--study-refs", "--queries", "d"].iter().map(|s| s.to_string()).collect();
         assert!(arg_value(&args, "--study-refs").is_err());
         assert_eq!(arg_value(&args, "--queries").unwrap().unwrap(), "d");
         assert_eq!(arg_value(&args, "--absent").unwrap(), None);
@@ -1151,16 +1059,11 @@ mod tests {
     /// The same NAME=PATH twice imports twice. No argument-level dedup.
     #[test]
     fn the_same_extra_snap_twice_is_two_imports() {
-        let args: Vec<String> = [
-            "prog",
-            "--extra-snap",
-            "GO=/d/go.sgsnap",
-            "--extra-snap",
-            "GO=/d/go.sgsnap",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let args: Vec<String> =
+            ["prog", "--extra-snap", "GO=/d/go.sgsnap", "--extra-snap", "GO=/d/go.sgsnap"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
         assert_eq!(parse_extra_snaps(&args).unwrap().len(), 2);
     }
 
@@ -1173,63 +1076,45 @@ mod tests {
             .collect();
         assert_eq!(
             parse_extra_snaps(&args).unwrap(),
-            vec![(
-                "Mental Health".to_string(),
-                PathBuf::from("/d/a=b/mh.sgsnap")
-            )]
+            vec![("Mental Health".to_string(), PathBuf::from("/d/a=b/mh.sgsnap"))]
         );
     }
 
     /// A value with no `=` is an error, not a path with an empty label.
     #[test]
     fn an_extra_snap_without_an_equals_is_rejected() {
-        let args: Vec<String> = ["prog", "--extra-snap", "/d/umls.sgsnap"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> =
+            ["prog", "--extra-snap", "/d/umls.sgsnap"].iter().map(|s| s.to_string()).collect();
         assert!(parse_extra_snaps(&args).is_err());
     }
 
     /// An unnamed snapshot would log as `Importing  snapshot...` — reject it.
     #[test]
     fn an_extra_snap_with_an_empty_name_is_rejected() {
-        let args: Vec<String> = ["prog", "--extra-snap", "=/d/umls.sgsnap"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> =
+            ["prog", "--extra-snap", "=/d/umls.sgsnap"].iter().map(|s| s.to_string()).collect();
         assert!(parse_extra_snaps(&args).is_err());
     }
 
     /// A named nothing is an error too.
     #[test]
     fn an_extra_snap_with_an_empty_path_is_rejected() {
-        let args: Vec<String> = ["prog", "--extra-snap", "UMLS="]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> =
+            ["prog", "--extra-snap", "UMLS="].iter().map(|s| s.to_string()).collect();
         assert!(parse_extra_snaps(&args).is_err());
     }
 
     /// No `--extra-snap` is not an error: the list is simply empty.
     #[test]
     fn no_extra_snap_flag_yields_an_empty_list() {
-        let args: Vec<String> = ["prog", "--queries", "/q"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = ["prog", "--queries", "/q"].iter().map(|s| s.to_string()).collect();
         assert!(parse_extra_snaps(&args).unwrap().is_empty());
     }
 
     /// `--extra-snap` with no value follows the existing `arg_values` error path.
     #[test]
     fn an_extra_snap_without_a_value_is_an_error_not_a_panic() {
-        let args: Vec<String> = ["prog", "--extra-snap"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            parse_extra_snaps(&args),
-            Err("--extra-snap needs a value".into())
-        );
+        let args: Vec<String> = ["prog", "--extra-snap"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(parse_extra_snaps(&args), Err("--extra-snap needs a value".into()));
     }
 }

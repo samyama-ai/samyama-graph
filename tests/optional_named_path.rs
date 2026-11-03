@@ -42,10 +42,7 @@ fn one_value(store: &GraphStore, cypher: &str) -> Value {
 fn an_unmatched_optional_named_path_is_null() {
     let store = graph();
     assert_eq!(
-        one_value(
-            &store,
-            "MATCH (a:A) OPTIONAL MATCH p = (a)-[:X]->(b) RETURN p"
-        ),
+        one_value(&store, "MATCH (a:A) OPTIONAL MATCH p = (a)-[:X]->(b) RETURN p"),
         Value::Null,
         "the row survives and p is null"
     );
@@ -54,10 +51,7 @@ fn an_unmatched_optional_named_path_is_null() {
 #[test]
 fn a_matched_optional_named_path_is_still_the_path() {
     let store = graph();
-    match one_value(
-        &store,
-        "MATCH (a:A) OPTIONAL MATCH p = (a)-[:REL]->(b) RETURN p",
-    ) {
+    match one_value(&store, "MATCH (a:A) OPTIONAL MATCH p = (a)-[:REL]->(b) RETURN p") {
         Value::Path { nodes, edges } => assert_eq!((nodes.len(), edges.len()), (2, 1)),
         other => panic!("expected a path, got {other:?}"),
     }
@@ -70,9 +64,7 @@ fn the_other_optional_variables_are_unaffected() {
     let store = graph();
     let q = parse_query("MATCH (a:A) OPTIONAL MATCH p = (a)-[:X]->(b) RETURN p, b")
         .expect("query should parse");
-    let out = QueryExecutor::new(&store)
-        .execute(&q)
-        .expect("query should run");
+    let out = QueryExecutor::new(&store).execute(&q).expect("query should run");
     assert_eq!(out.records.len(), 1);
     assert_eq!(out.records[0].get("p"), Some(&Value::Null));
     assert_eq!(out.records[0].get("b"), Some(&Value::Null));
