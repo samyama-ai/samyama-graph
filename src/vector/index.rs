@@ -453,15 +453,20 @@ impl VectorIndex {
     }
 
     /// Everything this index holds resident: both vector copies, the HNSW
-    /// graph, and the exact-match table (#1498). What `SHOW INDEXES`, the
-    /// memory endpoint and the metrics report for a vector index.
+    /// graph, the exact-match table (#1498), and the map from each node to its
+    /// current entry (#1968). What `SHOW INDEXES`, the memory endpoint and the
+    /// metrics report for a vector index.
     pub fn resident_bytes(&self) -> usize {
         use std::mem::size_of;
         let exact: usize = self.exact.capacity() * (size_of::<u64>() + size_of::<Vec<usize>>() + 1)
             + self.exact.values().map(|v| v.capacity() * size_of::<usize>()).sum::<usize>();
+        // One entry per live vector, which at low dimensions is a large share
+        // of the index: at 8 f32 dimensions the vector is 32 bytes and this
+        // entry 17.
+        let current = self.current.capacity() * (size_of::<u64>() + size_of::<usize>() + 1);
         let records = self.stored_f32.capacity() * size_of::<StoredVector>()
             + self.stored_f16.capacity() * size_of::<(u64, Vec<f16>)>();
-        self.vector_bytes() + self.graph_bytes() + exact + records
+        self.vector_bytes() + self.graph_bytes() + exact + current + records
     }
 
     /// Add a vector to the index
