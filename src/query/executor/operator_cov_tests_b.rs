@@ -6712,7 +6712,7 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
     (path, args)
 }
 
-/// The columns of the first row `name` returns when called as `catalogue_call` says.
+/// Every column `name` returns across all its rows, when called as `catalogue_call` says.
 fn catalogue_columns(entry: &super::super::algorithm_catalog::AlgorithmEntry, name: &str) -> Vec<String> {
     let (mut store, args) = catalogue_call(&AlgorithmOperator::canonical_name(entry.name));
     let rows = if entry.writes {
@@ -6721,28 +6721,39 @@ fn catalogue_columns(entry: &super::super::algorithm_catalog::AlgorithmEntry, na
         run_algo(&store, name, args)
     }
     .unwrap_or_else(|e| panic!("{name}: {e}"));
-    let first = rows.first().unwrap_or_else(|| panic!("{name} returned no rows"));
-    let mut cols = first.bound_variables();
+    assert!(!rows.is_empty(), "{name} returned no rows");
+    // Every row, not the first: mst leads with a summary row and then
+    // yields one row per tree edge, with different columns.
+    let mut cols: Vec<String> = rows.iter().flat_map(|r| r.bound_variables()).collect();
     cols.sort();
+    cols.dedup();
     cols
 }
 
 #[test]
 fn every_catalogued_algorithm_yields_its_listed_columns() {
     use super::super::algorithm_catalog::ALGORITHM_CATALOG;
+    // Collected rather than asserted one at a time, so a run names every
+    // algorithm whose listing is wrong instead of stopping at the first.
+    let mut wrong = Vec::new();
     for entry in ALGORITHM_CATALOG {
         let mut listed: Vec<String> = entry.yields.iter().map(|c| c.to_string()).collect();
         listed.sort();
         for name in std::iter::once(entry.name).chain(entry.aliases.iter().copied()) {
             let got = catalogue_columns(entry, name);
-            if entry.name == "algo.or.solve" {
-                // The union of two shapes; the multi-objective one is checked below.
-                assert!(got.iter().all(|c| listed.contains(c)), "{name}: {got:?} not within {listed:?}");
+            // `or.solve` lists the union of two shapes; the multi-objective
+            // one is checked below.
+            let ok = if entry.name == "algo.or.solve" {
+                got.iter().all(|c| listed.contains(c))
             } else {
-                assert_eq!(got, listed, "{name}");
+                got == listed
+            };
+            if !ok {
+                wrong.push(format!("{name}: yields {got:?}, listed {listed:?}"));
             }
         }
     }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     // `or.solve`'s multi-objective shape is the rest of its listed columns.
     let mut store = solve_store();
     let rows = run_algo_mut(

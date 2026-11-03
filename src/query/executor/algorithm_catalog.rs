@@ -36,8 +36,9 @@ pub struct AlgorithmEntry {
     /// Other names that dispatch to the same implementation.
     pub aliases: &'static [&'static str],
     pub category: AlgorithmCategory,
-    /// Columns of each returned row. `algo.or.solve` lists the union of its
-    /// single- and multi-objective shapes (see its entry).
+    /// Every column its rows carry. Where rows differ in shape -- `algo.mst`'s
+    /// summary and edge rows, `algo.or.solve`'s single- and multi-objective
+    /// results -- this is the union (see those entries).
     pub yields: &'static [&'static str],
     /// Writes to the graph, so it needs write access to call.
     pub writes: bool,
@@ -99,7 +100,9 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     read("algo.transitiveClosure", &[], Path, &["source", "target"]),
     read("algo.randomWalk", &[], Path, &["node", "step"]),
     read("algo.maxFlow", &[], Path, &["max_flow"]),
-    read("algo.mst", &[], Path, &["total_weight", "components"]),
+    // A summary row (`total_weight`, `components`), then one row per tree
+    // edge (`source`, `target`, `weight`).
+    read("algo.mst", &[], Path, &["total_weight", "components", "source", "target", "weight"]),
     // Link prediction: a score over a *pair*, so these yield `node1, node2,
     // score` rather than a column beside the nodes.
     read("algo.commonNeighbors", &["algo.commonNeighbours"], LinkPrediction, &["node1", "node2", "score"]),
