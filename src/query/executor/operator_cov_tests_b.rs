@@ -301,7 +301,10 @@ fn create_vector_index_operator_builds_l2_index_once_until_reset() {
     assert!(op.next_mut(&mut store, TENANT).unwrap().is_some());
     assert!(op.next_mut(&mut store, TENANT).unwrap().is_none());
     let shown = read(&store, "SHOW INDEXES");
-    assert_eq!(strings(&shown, "type"), vec!["VECTOR"]);
+    assert_eq!(
+        strings(&shown, "type"),
+        vec!["VECTOR[m=16, ef_construction=200, ef=auto]"]
+    );
     op.reset();
     // Declaring it again replaces the index rather than adding a second one.
     assert!(op.next_mut(&mut store, TENANT).unwrap().is_some());
@@ -1975,12 +1978,9 @@ fn similarity_and_structural_holes() {
     assert!(rows.iter().any(|r| rec_node(r, "node") == ids[0]
         && rec_node(r, "other") == ids[2]
         && rec_float(r, "similarity") == 1.0));
-    assert!(algo_err(
-        &mut store,
-        "algo.nodeSimilarity",
-        vec![lmap(&[("topK", pint(1))])]
-    )
-    .contains("unknown config key `topK`"));
+    // `topK` in the map is the documented spelling and limits each node to one pair.
+    let top1 = algo_rows(&mut store, "algo.nodeSimilarity", vec![lmap(&[("topK", pint(1))])]);
+    assert_eq!(top1.len(), algo_rows(&mut store, "algo.nodeSimilarity", vec![li(1)]).len());
 
     for name in ["algo.overlap", "algo.cosine"] {
         let rows = algo_rows(&mut store, name, vec![]);
@@ -2241,6 +2241,31 @@ fn or_solve_every_single_objective_solver_dispatches() {
         )
         .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(prop_str(&rows[0], "algorithm"), name);
+    }
+}
+
+#[test]
+fn or_solve_multi_objective_without_cost_properties_is_refused() {
+    // #2060: an empty objective vector panicked inside the solver.
+    for name in AlgorithmOperator::MULTI_OBJECTIVE_SOLVERS {
+        let mut store = solve_store();
+        let e = match run_algo_mut(
+            &mut store,
+            "algo.or.solve",
+            vec![lmap(&[
+                ("algorithm", pstr(name)),
+                ("label", pstr("Item")),
+                ("property", pstr("qty")),
+                ("populationSize", pint(6)),
+                ("maxIterations", pint(2)),
+            ])],
+        ) {
+            Ok(rows) => panic!("{name} ran with no cost properties: {} rows", rows.len()),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains("needs `costProperties`"), "{name}: {e}");
+        let written = read(&store, "MATCH (n:Item) WHERE n.qty IS NOT NULL RETURN count(n) AS c");
+        assert_eq!(int(&written, 0, "c"), 0, "{name}: refused, so nothing is written");
     }
 }
 
@@ -6659,4 +6684,46 @@ fn reset_forgets_that_a_projection_was_used() {
     op.projection_used.set(true);
     op.reset();
     assert!(op.check_projection_used().is_err(), "a re-run must take its view again");
+}
+
+/// A filter the algorithm reads is one its config map accepts, and one it
+/// accepts is one it reads.
+///
+/// The allow-lists from #1316 refused `{label}`, `{edgeType}` and
+/// nodeSimilarity's documented `{topK}`, which these algorithms read, and let
+/// wcc take `{label}`, `{startTime}` and `{timeProperty}`, which it ignored --
+/// `algo.wcc({label: 'Nope'})` returned every node.
+#[test]
+fn config_map_filters_are_read_and_accepted() {
+    let (store, ids) = path4();
+    let outcome = |name: &str, args: Vec<Expression>| -> Result<usize, String> {
+        run_algo(&store, name, args).map(|rows| rows.len()).map_err(|e| e.to_string())
+    };
+    let source = |rest: Vec<Expression>| [vec![li(ids[0])], rest].concat();
+    for name in [
+        "algo.wcc", "algo.katz", "algo.hits", "algo.articleRank", "algo.eccentricity",
+        "algo.nodeSimilarity", "algo.randomWalk",
+    ] {
+        let walk = name == "algo.randomWalk";
+        let call = |filter: Expression| if walk { source(vec![filter]) } else { vec![filter] };
+        // randomWalk's first argument is its source, so the map is its only
+        // way to take a label; the others read either spelling the same.
+        for label in ["V", "Nope"].into_iter().filter(|_| !walk) {
+            let by_map = outcome(name, call(lmap(&[("label", pstr(label))])));
+            let positional = outcome(name, call(Expression::Literal(pstr(label))));
+            assert_eq!(by_map, positional, "{name} with label {label}");
+        }
+        let unfiltered = outcome(name, if walk { source(vec![]) } else { vec![] });
+        assert_ne!(
+            outcome(name, call(lmap(&[("label", pstr("Nope"))]))),
+            unfiltered,
+            "{name}: a label matching no node must change the answer"
+        );
+        let typed = outcome(name, call(lmap(&[("edgeType", pstr("E"))])));
+        assert!(!typed.clone().is_err_and(|e| e.contains("unknown config key")), "{name}: {typed:?}");
+    }
+    for key in ["startTime", "timeProperty"] {
+        let e = outcome("algo.wcc", vec![lmap(&[(key, pint(1))])]).unwrap_err();
+        assert!(e.contains(&format!("unknown config key `{key}`")), "{e}");
+    }
 }

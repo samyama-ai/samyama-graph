@@ -123,6 +123,30 @@ fn check_deadline() -> ExecutionResult<()> {
     })
 }
 
+/// Stops a long algorithm at the query deadline (ALGO-12, #1693).
+///
+/// An algorithm runs inside one call, so without this the deadline was only
+/// looked at once that call returned: `algo.pageRank` on a large graph ran
+/// every iteration however long they took, and the query reported
+/// `Query timed out` only afterwards, if at all. Checked between iterations, on
+/// the executor's thread, which is where the deadline is set.
+struct DeadlineProgress;
+
+impl crate::algo::Progress for DeadlineProgress {
+    fn step(&self, _done: usize, _total: usize) -> bool {
+        check_deadline().is_ok()
+    }
+}
+
+/// The error for an algorithm the deadline stopped: still `Query timed out`,
+/// the deadline's message everywhere else, and how far it got.
+fn algorithm_timed_out(call: &str, stopped: crate::algo::Stopped) -> ExecutionError {
+    ExecutionError::RuntimeError(format!(
+        "Query timed out: {call} stopped after {} of {} iterations",
+        stopped.done, stopped.total
+    ))
+}
+
 /// Extract node ID from a Value for identity comparison
 fn node_id_of(v: &Value) -> Option<NodeId> {
     match v {
@@ -14395,6 +14419,12 @@ pub struct VectorSearchOperator {
     node_var: String,
     /// Variable name for similarity scores (optional)
     score_var: Option<String>,
+    /// The part of a following WHERE that names only the node, applied
+    /// inside the search so it decides which nodes count towards k (#1969).
+    filter: Option<Expression>,
+    /// This query's search width, from `{ef: ...}` (#1971). `None` is the
+    /// index's default.
+    ef: Option<usize>,
     /// Search results
     results: Vec<(NodeId, f32)>,
     /// Current index in results
@@ -14417,9 +14447,23 @@ impl VectorSearchOperator {
             k,
             node_var,
             score_var,
+            filter: None,
+            ef: None,
             results: Vec::new(),
             current: 0,
         }
+    }
+
+    /// Search only among the nodes `filter` passes (#1969).
+    pub fn with_filter(mut self, filter: Option<Expression>) -> Self {
+        self.filter = filter;
+        self
+    }
+
+    /// Search with this width rather than the index's default (#1971).
+    pub fn with_ef(mut self, ef: Option<usize>) -> Self {
+        self.ef = ef;
+        self
     }
 
     fn initialize(&mut self, store: &GraphStore) -> ExecutionResult<()> {
@@ -14427,13 +14471,41 @@ impl VectorSearchOperator {
             return Ok(());
         }
 
-        self.results = store.vector_search(
-            &self.label,
-            &self.property_key,
-            &self.query_vector,
-            self.k,
-        ).map_err(|e| ExecutionError::GraphError(e.to_string()))?;
-
+        let Some(filter) = &self.filter else {
+            self.results = store
+                .vector_search_where(
+                    &self.label,
+                    &self.property_key,
+                    &self.query_vector,
+                    self.k,
+                    self.ef,
+                    |_| true,
+                )
+                .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+            return Ok(());
+        };
+        // The search asks about one node at a time and takes a yes or no, so
+        // the first error is kept and raised after it: a predicate that fails
+        // must fail the query, as it would above the search, not read as
+        // "no match".
+        let error = std::cell::RefCell::new(None);
+        let results = store
+            .vector_search_where(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, |id| {
+                if error.borrow().is_some() {
+                    return false;
+                }
+                let mut record = Record::new();
+                record.bind(self.node_var.clone(), Value::NodeRef(id));
+                eval_predicate_standalone(filter, &record, store).unwrap_or_else(|e| {
+                    *error.borrow_mut() = Some(e);
+                    false
+                })
+            })
+            .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+        if let Some(e) = error.into_inner() {
+            return Err(e);
+        }
+        self.results = results;
         Ok(())
     }
 }
@@ -14464,9 +14536,16 @@ impl PhysicalOperator for VectorSearchOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
+        let mut details = format!("{}.{}, k={}", self.label, self.property_key, self.k);
+        if let Some(ef) = self.ef {
+            details.push_str(&format!(", ef={ef}"));
+        }
+        if let Some(f) = &self.filter {
+            details.push_str(&format!(", filter: {}", format_expression(f)));
+        }
         OperatorDescription {
             name: "VectorSearch".to_string(),
-            details: format!("{}.{}, k={}", self.label, self.property_key, self.k),
+            details,
             children: Vec::new(),
         }
     }
@@ -15393,6 +15472,8 @@ pub struct CreateVectorIndexOperator {
     /// dropped would build a full-precision index for a caller who asked for
     /// half of one and report success.
     quantization: crate::vector::index::Quantization,
+    /// `m`, `ef_construction` and the default `ef` (#1971).
+    params: crate::vector::HnswParams,
     /// The name the DDL gave this index, kept so Neo4j's form of
     /// `db.index.vector.queryNodes(indexName, k, vector)` can resolve it (#1041).
     name: Option<String>,
@@ -15407,6 +15488,7 @@ impl CreateVectorIndexOperator {
             dimensions,
             similarity,
             quantization: crate::vector::index::Quantization::None,
+            params: crate::vector::HnswParams::default(),
             name: None,
             executed: false,
         }
@@ -15419,6 +15501,11 @@ impl CreateVectorIndexOperator {
 
     pub fn with_quantization(mut self, q: crate::vector::index::Quantization) -> Self {
         self.quantization = q;
+        self
+    }
+
+    pub fn with_params(mut self, params: crate::vector::HnswParams) -> Self {
+        self.params = params;
         self
     }
 }
@@ -15442,9 +15529,9 @@ impl PhysicalOperator for CreateVectorIndexOperator {
             _ => return Err(ExecutionError::RuntimeError(format!("Unsupported similarity metric: {}", self.similarity))),
         };
 
-        store.create_vector_index_named(self.name.as_deref(), self.label.as_str(),
-                                        &self.property_key, self.dimensions, metric,
-                                        self.quantization)
+        store.create_vector_index_with_params(self.name.as_deref(), self.label.as_str(),
+                                              &self.property_key, self.dimensions, metric,
+                                              self.quantization, self.params)
             .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
         // Backfill nodes that already carry the embedding. Registering the index without
@@ -15476,8 +15563,8 @@ impl PhysicalOperator for CreateVectorIndexOperator {
         OperatorDescription {
             name: "CreateVectorIndex".to_string(),
             details: format!(
-                "{} dims={} {} quantization={:?}",
-                named, self.dimensions, self.similarity, self.quantization
+                "{} dims={} {} quantization={:?} {}",
+                named, self.dimensions, self.similarity, self.quantization, self.params
             ),
             children: Vec::new(),
         }
@@ -15935,7 +16022,16 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .vector_index
                     .list_indices()
                     .into_iter()
-                    .map(|k| (k.label, k.property_key, "VECTOR".to_string())),
+                    .map(|k| {
+                        // With its HNSW parameters (#1971), in the bracket the
+                        // other kinds use for their name.
+                        let params = store
+                            .vector_index
+                            .get_index(&k.label, &k.property_key)
+                            .map(|i| i.read().unwrap().params())
+                            .unwrap_or_default();
+                        (k.label, k.property_key, format!("VECTOR[{params}]"))
+                    }),
             );
             // Full-text indexes too, or the only way to learn that one exists
             // is to search it and read the error naming the ones that do. The
@@ -17810,7 +17906,12 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         weight_property: Option<&str>,
     ) -> ExecutionResult<AlgoView> {
         let Some(projection) = self.requested_projection(store)? else {
-            return Ok(AlgoView::Built(crate::algo::build_view(store, label, edge_type, weight_property)));
+            let view = crate::algo::build_view_with(store, label, edge_type, weight_property, &DeadlineProgress)
+                .map_err(|stopped| ExecutionError::RuntimeError(format!(
+                    "Query timed out: {} stopped building its graph view after {} of {} nodes",
+                    self.name, stopped.done, stopped.total
+                )))?;
+            return Ok(AlgoView::Built(view));
         };
         let given: Vec<&str> = [("a label", label), ("a relationship type", edge_type), ("a weight", weight_property)]
             .into_iter()
@@ -18118,10 +18219,15 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
         // Build view and run
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
-        let scores = crate::algo::page_rank(&view, config);
+        let scores = crate::algo::page_rank_with(&view, config, &DeadlineProgress)
+            .map_err(|stopped| algorithm_timed_out("algo.pageRank", stopped))?;
 
-        // Convert to records
-        for (algo_id, score) in scores {
+        // Convert to records. One per node, with a copy of the node, so on a
+        // large graph this is not free either: checked like the iterations.
+        for (i, (algo_id, score)) in scores.into_iter().enumerate() {
+            if i % 4096 == 0 {
+                check_deadline()?;
+            }
             let node_id = NodeId::new(algo_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(node_id) {
@@ -18196,8 +18302,13 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     }
 
     fn execute_wcc(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label", "startTime", "timeProperty"])?;
-        // Arguments: (label?, edge_type?)
+        // `startTime` and `timeProperty` were allowed here and read by nothing,
+        // so `{label: ...}` and `{startTime: ...}` both ran on the whole graph
+        // and reported success -- the silent drop `reject_unknown_config_keys`
+        // exists to refuse. The filters are read from the map as well as
+        // positionally, as the centrality procedures read them.
+        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label"])?;
+        // Arguments: (label?, edge_type?) or ({label, edgeType})
         let mut label = None;
         let mut edge_type = None;
 
@@ -18209,6 +18320,16 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         if self.args.len() > 1 {
             if let Expression::Literal(PropertyValue::String(s)) = &self.args[1] {
                 edge_type = Some(s.clone());
+            }
+        }
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::String(v)) = m.get("label") {
+                    label = Some(v.clone());
+                }
+                if let Some(PropertyValue::String(v)) = m.get("edgeType") {
+                    edge_type = Some(v.clone());
+                }
             }
         }
 
@@ -18773,7 +18894,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// smaller number indistinguishable from a real one, and a caller sizing a
     /// traversal budget from it would under-provision.
     fn execute_metric(&mut self, store: &GraphStore, which: Metric) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, &self.name, &["undirected"])?;
+        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "undirected"])?;
         let view = self.structural_view(store)?;
         // Undirected by default, as every one of these is a statement about
         // graph shape rather than about flow.
@@ -19058,7 +19179,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// reproduce is not a result: someone who sees something surprising in a
     /// walk has to be able to get the same walk back.
     fn execute_random_walk(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "randomWalk", &["seed", "steps"])?;
+        Self::reject_unknown_config_keys(&self.args, "randomWalk", &["edgeType", "label", "seed", "steps"])?;
         let (mut steps, mut seed) = (10usize, 42u64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19086,7 +19207,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.articleRank()` -- PageRank that discounts prolific linkers.
     fn execute_article_rank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "articleRank", &["dampingFactor", "iterations"])?;
+        Self::reject_unknown_config_keys(&self.args, "articleRank", &["dampingFactor", "edgeType", "iterations", "label"])?;
         let (mut damping, mut iters) = (0.85f64, 20usize);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19107,7 +19228,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.katz({alpha, beta, iterations, tolerance})`.
     fn execute_katz(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "katz", &["alpha", "beta", "iterations", "tolerance"])?;
+        Self::reject_unknown_config_keys(&self.args, "katz", &["alpha", "beta", "edgeType", "iterations", "label", "tolerance"])?;
         let (mut alpha, mut beta, mut iters, mut tol) = (0.1f64, 1.0f64, 1000usize, 1e-6f64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19144,7 +19265,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// procedures would run the same fixed point twice and invite a caller to
     /// compare hubs from one run with authorities from another.
     fn execute_hits(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "hits", &["iterations", "tolerance"])?;
+        Self::reject_unknown_config_keys(&self.args, "hits", &["edgeType", "iterations", "label", "tolerance"])?;
         let (mut iters, mut tol) = (500usize, 1e-8f64);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19504,7 +19625,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
     /// `algo.nodeSimilarity({topK, cutoff})`.
     fn execute_node_similarity(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "nodeSimilarity", &["cutoff"])?;
+        Self::reject_unknown_config_keys(&self.args, "nodeSimilarity", &["cutoff", "edgeType", "label", "topK"])?;
         let k = self.usize_arg("topK", 10);
         let mut cutoff = 0.0f64;
         for arg in &self.args {
@@ -20265,6 +20386,17 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                  a multi-objective result has no scalar gap"
                     .to_string(),
             ));
+        }
+        // A multi-objective solver minimises one objective per cost property.
+        // With none it was handed an empty objective vector and panicked on
+        // the first index (#2060) -- the zero-property case #1499 did not
+        // reach, since it fixed the one-property case.
+        if is_multi_objective && cost_props.is_empty() {
+            return Err(ExecutionError::bad_argument(format!(
+                "or.solve: `{algorithm}` is multi-objective and needs `costProperties`, \
+                 the node properties to minimise (for example \
+                 {{costProperties: ['cost', 'risk']}})"
+            )));
         }
 
         let pop_size = cfg_i("populationSize", "population_size").unwrap_or(50) as usize;

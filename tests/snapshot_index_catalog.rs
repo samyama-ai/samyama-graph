@@ -25,7 +25,7 @@ use samyama::graph::GraphStore;
 use samyama::index::catalog::IndexDefinition;
 use samyama::query::QueryEngine;
 use samyama::vector::index::Quantization;
-use samyama::vector::DistanceMetric;
+use samyama::vector::{DistanceMetric, HnswParams};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -226,6 +226,86 @@ fn an_identical_definition_on_the_target_is_not_a_conflict() {
     let stats = samyama::snapshot::import_tenant(&mut dst, &export(&src)[..]).expect("import");
     assert_eq!(stats.index_conflicts, 0);
     assert_eq!(dst.index_catalog(), src.index_catalog());
+}
+
+// ---- HNSW parameters against defaults (#1971) ------------------------------
+//
+// Default parameters write no `VectorParams` record, so comparing records
+// alone saw no conflict when only one side was tuned, and the import rebuilt
+// the target's index with the snapshot's parameters.
+
+/// `source()`'s vector index with every HNSW parameter away from its default.
+fn tuned() -> GraphStore {
+    let mut s = GraphStore::new();
+    run(
+        &mut s,
+        "CREATE (:P {id: 1, email: 'a@x', body: 'quick brown fox', emb: [0.1, 0.2, 0.3, 0.4]})",
+    );
+    run(
+        &mut s,
+        "CREATE VECTOR INDEX vidx FOR (v:P) ON (v.emb) \
+         OPTIONS {dimensions: 4, similarity: 'l2', quantization: 'fp16', \
+         m: 32, ef_construction: 400, ef: 120}",
+    );
+    s
+}
+
+fn params(store: &GraphStore) -> HnswParams {
+    store
+        .vector_index
+        .get_index("P", "emb")
+        .expect("the vector index")
+        .read()
+        .unwrap()
+        .params()
+}
+
+#[test]
+fn a_default_index_does_not_reset_a_tuned_one_on_the_target() {
+    let mut dst = tuned();
+    let before = (dst.index_catalog(), params(&dst));
+    assert_ne!(before.1, HnswParams::default());
+
+    let stats = samyama::snapshot::import_tenant(&mut dst, &export(&source())[..]).expect("import");
+    assert_eq!(stats.index_conflicts, 1);
+    assert_eq!(
+        params(&dst),
+        before.1,
+        "the target's tuned parameters were reset"
+    );
+    assert_eq!(vector_def(&dst), vector_def(&tuned()));
+    assert!(dst
+        .index_catalog()
+        .definitions
+        .iter()
+        .any(|d| matches!(d, IndexDefinition::VectorParams { m: 32, .. })));
+}
+
+#[test]
+fn a_tuned_index_does_not_retune_a_default_one_on_the_target() {
+    let mut dst = source();
+    let stats = samyama::snapshot::import_tenant(&mut dst, &export(&tuned())[..]).expect("import");
+    assert_eq!(stats.index_conflicts, 1);
+    assert_eq!(
+        params(&dst),
+        HnswParams::default(),
+        "the target's index was retuned"
+    );
+    assert!(
+        !dst.index_catalog()
+            .definitions
+            .iter()
+            .any(|d| matches!(d, IndexDefinition::VectorParams { .. })),
+        "the snapshot's parameters were recorded for the target's index"
+    );
+}
+
+#[test]
+fn the_same_tuned_parameters_are_not_a_conflict() {
+    let mut dst = tuned();
+    let stats = samyama::snapshot::import_tenant(&mut dst, &export(&tuned())[..]).expect("import");
+    assert_eq!(stats.index_conflicts, 0);
+    assert_eq!(dst.index_catalog(), tuned().index_catalog());
 }
 
 // ---- the HTTP path, which is where rediscovery used to run -----------------
