@@ -396,6 +396,21 @@ impl QueryEngine {
         Ok(query)
     }
 
+    /// `cached_parse` for a statement about to run: one that does not parse is
+    /// a failed query and is counted as one (#2080).
+    ///
+    /// The parse ran before the timer and before `log_if_slow`, so a syntax
+    /// error left `samyama_queries_total` and `samyama_queries_failed_total`
+    /// where they were -- a client sending nothing but broken statements showed
+    /// a clean failure rate. `statement_is_write` keeps the uncounted form: it
+    /// classifies, and the run that follows it is the one that counts.
+    fn parse_to_run(&self, query_str: &str) -> Result<Arc<Query>, Box<dyn std::error::Error>> {
+        let started = std::time::Instant::now();
+        self.cached_parse(query_str).inspect_err(|_| {
+            self.log_if_slow(query_str, started.elapsed(), 0, false);
+        })
+    }
+
     /// Whether this statement can change the graph, answered by the parser.
     ///
     /// The servers each matched strings against the query text to decide which
@@ -490,12 +505,15 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        let mut query = self.cached_parse(query_str)?;
+        let parse_started = std::time::Instant::now();
+        let mut query = self.parse_to_run(query_str)?;
         // Only a non-Cypher dialect rewrites the AST, so only that pays for a
         // private copy; the shared one is never modified.
         if dialect != crate::query::ast::Dialect::Cypher {
             let mut own = (*query).clone();
             crate::query::dialect::apply(&mut own, dialect).map_err(|e| {
+                // Refused before it ran, like a parse error, and counted as one.
+                self.log_if_slow(query_str, parse_started.elapsed(), 0, false);
                 with_span(
                     Box::new(crate::query::ParseError::Coded {
                         code: e.code(),
@@ -573,7 +591,7 @@ impl QueryEngine {
         sink: &mut dyn FnMut(&[String], Vec<executor::Record>) -> Result<(), String>,
         time_limit: Option<std::time::Duration>,
     ) -> Result<StreamedResult, Box<dyn std::error::Error>> {
-        let query = self.cached_parse(query_str)?;
+        let query = self.parse_to_run(query_str)?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
@@ -658,7 +676,8 @@ impl QueryEngine {
         params: &BoundParams,
         time_limit: Option<std::time::Duration>,
     ) -> Result<(RecordBatch, bool), Box<dyn std::error::Error>> {
-        let query = self.cached_parse(query_str)?;
+        let started = std::time::Instant::now();
+        let query = self.parse_to_run(query_str)?;
         let mut effective = query.params.clone();
         effective.extend(params.clone());
         let key = ResultKey {
@@ -672,6 +691,10 @@ impl QueryEngine {
             let mut cache = self.result_cache.lock().unwrap();
             if let Some(hit) = cache.get(&key) {
                 self.result_stats.record_hit();
+                // A hit is a query answered, and it returned before anything
+                // was counted: `/metrics` showed fewer queries than were served
+                // and a latency histogram of misses only (#2080).
+                self.log_if_slow(query_str, started.elapsed(), hit.records.len(), true);
                 return Ok((hit.clone(), true));
             }
         }
@@ -812,7 +835,7 @@ impl QueryEngine {
         params: &BoundParams,
         time_limit: Option<std::time::Duration>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        let query = self.cached_parse(query_str)?;
+        let query = self.parse_to_run(query_str)?;
         let deadline = self.deadline(time_limit);
 
         // Both sides of this: the span on the error (#1358) and the timing
