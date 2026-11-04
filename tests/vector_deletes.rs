@@ -63,7 +63,7 @@ fn deleted_nodes_do_not_crowd_out_the_survivors() {
     let got = ids(
         &s,
         "CALL db.index.vector.queryNodes('L2T','v',[1.0,0.0],3) YIELD node, score \
-         RETURN node.id AS id ORDER BY score, id",
+         RETURN node.id AS id ORDER BY score DESC, id",
     );
     assert_eq!(got, vec![1001, 1002, 1003]);
 }

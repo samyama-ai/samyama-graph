@@ -225,6 +225,9 @@ async fn the_recommended_replacements_run() {
     s.ok("CREATE VECTOR INDEX person_emb FOR (p:Person) ON (p.embedding) OPTIONS {dimensions: 3, similarity: 'cosine'}").await;
     let knn = s.ok("CALL db.index.vector.queryNodes('Person', 'embedding', [0.1, 0.2, 0.3], 1) YIELD node, score RETURN node.name").await;
     assert_eq!(text(&rows(&rows(&knn)[1])[0]), "Alice");
+    // `vec.euclideanDistance` / `vec.cosineDistance` (#1980).
+    s.ok("RETURN vector.distance([0.1, 0.2], [0.3, 0.4], 'EUCLIDEAN') AS e, vector.distance([0.1, 0.2], [0.3, 0.4], 'COSINE') AS c").await;
+    s.ok("CALL db.index.vector.queryNodes('Person', 'embedding', [0.1, 0.2, 0.3], 1) YIELD node, distance RETURN distance").await;
 
     // Paths, degrees, types, joins.
     s.ok("MATCH p = shortestPath((a:Person {name: 'Alice'})-[:KNOWS*]->(b:Person {name: 'Bob'})) RETURN length(p)").await;

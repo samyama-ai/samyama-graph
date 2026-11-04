@@ -208,6 +208,13 @@ impl VectorIndexManager {
         self.model_ids.read().unwrap().get(&key).cloned()
     }
 
+    /// The metric the index on `label.property_key` was declared with, which
+    /// decides how its distances become scores (#1980).
+    pub fn metric(&self, label: &str, property_key: &str) -> Option<DistanceMetric> {
+        self.get_index(label, property_key)
+            .map(|index| index.read().unwrap().metric())
+    }
+
     /// Get an index
     pub fn get_index(&self, label: &str, property_key: &str) -> Option<Arc<RwLock<VectorIndex>>> {
         let key = IndexKey {
