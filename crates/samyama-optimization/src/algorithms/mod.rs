@@ -30,6 +30,7 @@ pub mod saphr;
 pub mod lshade;
 pub mod spea2;
 pub mod moead;
+pub mod cmaes;
 pub(crate) mod variation;
 
 pub use jaya::JayaSolver;
@@ -64,3 +65,4 @@ pub use saphr::SAPHRSolver;
 pub use lshade::LSHADESolver;
 pub use spea2::SPEA2Solver;
 pub use moead::MOEADSolver;
+pub use cmaes::CMAESSolver;

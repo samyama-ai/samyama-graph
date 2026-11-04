@@ -75,7 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, CMAESSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
 
 /// A store error on a write path, classified for the caller (#1483).
@@ -17716,7 +17716,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "MOTLBO",
         "Jaya", "QOJaya", "SAMPJaya", "EHRJaya",
         "BMR", "BWR", "BMWR", "MOBMWR",
-        "PSO", "DE", "LSHADE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
+        "PSO", "DE", "LSHADE", "CMAES", "GA", "SA", "ABC", "GSA", "HS", "FPA",
         "Firefly", "Cuckoo", "GWO", "Bat",
         "NSGA2", "MORaoDE", "SPEA2", "MOEAD", "SAPHR",
     ];
@@ -20399,6 +20399,8 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 // Success-history adaptive DE with linear population
                 // reduction (OPT-13, #1803).
                 "LSHADE" => LSHADESolver::new(solver_config).solve(&problem),
+                // Covariance matrix adaptation ES (OPT-13, #1803).
+                "CMAES" => CMAESSolver::new(solver_config).solve(&problem),
                 // Jaya by name, and by omitting `algorithm` -- the default is
                 // applied where the name is read, not here.
                 "Jaya" => JayaSolver::new(solver_config).solve(&problem),

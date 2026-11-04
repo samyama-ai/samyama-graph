@@ -19,7 +19,7 @@ use ndarray::Array1;
 use samyama_optimization::algorithms::{
     BMRSolver, BMWRSolver, BWRSolver, DESolver, EHRJayaSolver, GASolver, GOTLBOSolver, ITLBOSolver,
     JayaSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, NSGA2Solver, SPEA2Solver, MOEADSolver, PSOSolver, QOJayaSolver,
-    QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver, LSHADESolver,
+    QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver, LSHADESolver, CMAESSolver,
 };
 use samyama_optimization::benchmarks::{DTLZ, DTLZ_FRONT_SAMPLES_PER_AXIS, ZDT, ZDT_FRONT_SAMPLES};
 use samyama_optimization::budget::{Budget, Budgeted, StopReason};
@@ -375,6 +375,20 @@ fn algorithm_catalog() -> Vec<AlgorithmInfo> {
                 title: "Improving the search performance of SHADE using linear population size reduction",
                 url: "https://doi.org/10.1109/CEC.2014.6900380",
                 year: 2014,
+            }],
+            params: default_params(),
+            multi_objective: false,
+        },
+        AlgorithmInfo {
+            id: "cmaes",
+            name: "CMA-ES",
+            family: "evolution-strategy",
+            variant: None,
+            equation_tex: r"x_k \sim m + \sigma\,\mathcal{N}(0, C)",
+            paper_refs: vec![PaperRef {
+                title: "Completely Derandomized Self-Adaptation in Evolution Strategies",
+                url: "https://doi.org/10.1162/106365601750190398",
+                year: 2001,
             }],
             params: default_params(),
             multi_objective: false,
@@ -1251,6 +1265,7 @@ fn run_solver_within(
             "pso" => seeded!(PSOSolver::new(cfg), seed).solve(problem),
             "de" => seeded!(DESolver::new(cfg), seed).solve(problem),
             "lshade" => seeded!(LSHADESolver::new(cfg), seed).solve(problem),
+            "cmaes" => seeded!(CMAESSolver::new(cfg), seed).solve(problem),
             "ga" => seeded!(GASolver::new(cfg), seed).solve(problem),
             other => {
                 return Err(format!(

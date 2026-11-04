@@ -41,6 +41,7 @@ We support 15+ algorithms across various families:
 - **PSO**: Particle Swarm Optimization.
 - **DE**: Differential Evolution.
 - **L-SHADE**: Differential Evolution that adapts its own F and CR from a success history and shrinks its population linearly (Tanabe & Fukunaga, CEC 2014). Not parallel: one generation runs sequentially.
+- **CMA-ES**: Covariance Matrix Adaptation Evolution Strategy (Hansen & Ostermeier, 2001): samples from a multivariate normal and learns its covariance and step size from successful steps, so badly scaled and rotated problems become round to the search. `O(n^3)` per generation: meant for tens to a few hundred variables.
 - **Firefly**: Firefly Algorithm (Light intensity based attraction).
 - **Cuckoo**: Cuckoo Search (Levy flights and nest abandonment).
 - **Bat**: Bat Algorithm (Echolocation).

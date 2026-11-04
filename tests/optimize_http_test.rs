@@ -53,7 +53,7 @@ async fn algorithms_endpoint_lists_rao_family_and_baselines() {
         "jaya", "rao1", "rao2", "rao3", "tlbo", "bmr", "bwr", "bmwr",
         "samp_jaya", "qo_rao", "ehrjaya", "saphr",
         "mo_bmr", "mo_bwr", "mo_bmwr", "mo_rao_de", "spea2", "moead",
-        "pso", "de", "lshade", "ga", "nsga2",
+        "pso", "de", "lshade", "cmaes", "ga", "nsga2",
     ] {
         assert!(names.iter().any(|n| n == required), "missing algorithm: {required}");
     }

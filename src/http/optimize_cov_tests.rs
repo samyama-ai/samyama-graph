@@ -119,10 +119,10 @@ async fn the_algorithm_catalogue_lists_every_solver_once() {
     let (status, json) = get_json(app(), "/optimize/algorithms").await;
     assert_eq!(status, StatusCode::OK);
     let algos = json.as_array().unwrap();
-    assert_eq!(algos.len(), 26);
+    assert_eq!(algos.len(), 27);
     let ids: std::collections::HashSet<&str> =
         algos.iter().map(|a| a["id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 26, "duplicate ids");
+    assert_eq!(ids.len(), 27, "duplicate ids");
     let nsga2 = algos.iter().find(|a| a["id"] == "nsga2").unwrap();
     assert_eq!(nsga2["multi_objective"], true);
     assert_eq!(nsga2["family"], "multi-objective");
@@ -401,6 +401,7 @@ fn every_single_objective_solver_runs_on_every_single_objective_benchmark() {
         "pso",
         "de",
         "lshade",
+        "cmaes",
         "ga",
     ];
     for algo in algos {
@@ -901,7 +902,7 @@ async fn error_and_cancel_events_carry_no_time() {
 async fn every_algorithm_reports_a_measured_time_over_http() {
     let (_, algos) = get_json(app(), "/optimize/algorithms").await;
     let algos = algos.as_array().unwrap();
-    assert_eq!(algos.len(), 26);
+    assert_eq!(algos.len(), 27);
     for a in algos {
         let id = a["id"].as_str().unwrap();
         let bench = if a["multi_objective"].as_bool().unwrap() {

@@ -99,6 +99,7 @@ fn single_solvers() -> Vec<(&'static str, Single)> {
         ("pso", |c, p| PSOSolver::new(c).with_seed(SEED).solve(p)),
         ("de", |c, p| DESolver::new(c).with_seed(SEED).solve(p)),
         ("lshade", |c, p| LSHADESolver::new(c).with_seed(SEED).solve(p)),
+        ("cmaes", |c, p| CMAESSolver::new(c).with_seed(SEED).solve(p)),
         ("gotlbo", |c, p| {
             GOTLBOSolver::new(c).with_seed(SEED).solve(p)
         }),
@@ -228,7 +229,7 @@ fn assert_stops_as_fewer_iterations_would(
 #[test]
 fn every_single_objective_solver_stops_at_its_evaluation_budget() {
     let solvers = single_solvers();
-    assert_eq!(solvers.len(), 26);
+    assert_eq!(solvers.len(), 27);
     for (name, solve) in solvers {
         assert_stops_as_fewer_iterations_would(name, |n, b| run_single(solve, n, b));
     }
