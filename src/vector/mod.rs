@@ -45,6 +45,7 @@
 //! ```
 //! This enables hybrid queries combining graph traversal with semantic similarity.
 
+pub mod distance;
 pub mod index;
 pub mod manager;
 
