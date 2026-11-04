@@ -2618,7 +2618,25 @@ fn quota_overrides_from_args(
     let edges = quota_arg("--max-edges")?;
     let memory = quota_arg("--max-memory-bytes")?;
     let storage = quota_arg("--max-storage-bytes")?;
-    if nodes.is_none() && edges.is_none() && memory.is_none() && storage.is_none() {
+    // The one quota that had no flag, so the default tenant's query time limit
+    // could not be changed without code (#2046). Zero is refused rather than
+    // taken literally: a limit of 0 ms times out every statement, which is
+    // never what an operator typing it meant. `unlimited` is the way to say
+    // "no limit".
+    let query_time = quota_arg("--max-query-time-ms")?;
+    if query_time == Some(Some(0)) {
+        return Err(
+            "error: --max-query-time-ms 0 would time out every query; \
+             use `unlimited` for no limit"
+                .to_string(),
+        );
+    }
+    if nodes.is_none()
+        && edges.is_none()
+        && memory.is_none()
+        && storage.is_none()
+        && query_time.is_none()
+    {
         return Ok(None);
     }
     let mut q = samyama::persistence::tenant::ResourceQuotas::default();
@@ -2626,6 +2644,7 @@ fn quota_overrides_from_args(
     if let Some(v) = edges { q.max_edges = v; }
     if let Some(v) = memory { q.max_memory_bytes = v; }
     if let Some(v) = storage { q.max_storage_bytes = v; }
+    if let Some(v) = query_time { q.max_query_time_ms = v.map(|ms| ms as u64); }
     Ok(Some(q))
 }
 

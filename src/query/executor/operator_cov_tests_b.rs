@@ -301,7 +301,10 @@ fn create_vector_index_operator_builds_l2_index_once_until_reset() {
     assert!(op.next_mut(&mut store, TENANT).unwrap().is_some());
     assert!(op.next_mut(&mut store, TENANT).unwrap().is_none());
     let shown = read(&store, "SHOW INDEXES");
-    assert_eq!(strings(&shown, "type"), vec!["VECTOR"]);
+    assert_eq!(
+        strings(&shown, "type"),
+        vec!["VECTOR[m=16, ef_construction=200, ef=auto]"]
+    );
     op.reset();
     // Declaring it again replaces the index rather than adding a second one.
     assert!(op.next_mut(&mut store, TENANT).unwrap().is_some());
