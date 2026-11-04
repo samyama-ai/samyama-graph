@@ -60,8 +60,8 @@ fn store() -> GraphStore {
     let by_id: HashMap<i64, NodeId> = s
         .get_nodes_by_label(&Label::new("Doc"))
         .iter()
-        .map(|n| match n.get_property("id") {
-            Some(PropertyValue::Integer(i)) => (*i, n.id),
+        .map(|n| match s.node_property(n.id, "id") {
+            Some(PropertyValue::Integer(i)) => (i, n.id),
             other => panic!("{other:?}"),
         })
         .collect();
