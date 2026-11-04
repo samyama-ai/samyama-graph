@@ -147,6 +147,7 @@ fn multi_solvers() -> Vec<(&'static str, Multi)> {
             MORaoDESolver::new(c).with_seed(SEED).solve(p)
         }),
         ("spea2", |c, p| SPEA2Solver::new(c).with_seed(SEED).solve(p)),
+        ("moead", |c, p| MOEADSolver::new(c).with_seed(SEED).solve(p)),
     ]
 }
 
@@ -236,7 +237,7 @@ fn every_single_objective_solver_stops_at_its_evaluation_budget() {
 #[test]
 fn every_multi_objective_solver_stops_at_its_evaluation_budget() {
     let solvers = multi_solvers();
-    assert_eq!(solvers.len(), 5);
+    assert_eq!(solvers.len(), 6);
     for (name, solve) in solvers {
         assert_stops_as_fewer_iterations_would(name, |n, b| run_multi(solve, n, b));
     }
