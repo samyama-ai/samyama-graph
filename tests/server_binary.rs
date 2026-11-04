@@ -761,6 +761,17 @@ fn a_quota_flag_without_a_number_is_refused() {
     run(&["--ephemeral", "--max-memory-bytes", "lots"], &[])
         .assert_code(2)
         .err_has("--max-memory-bytes expects a number or `unlimited`, got \"lots\"");
+    run(&["--ephemeral", "--max-query-time-ms", "soon"], &[])
+        .assert_code(2)
+        .err_has("--max-query-time-ms expects a number or `unlimited`, got \"soon\"");
+}
+
+#[test]
+fn a_query_time_limit_of_zero_is_refused_in_favour_of_unlimited() {
+    // Zero would time out every statement the server ran (#2046).
+    run(&["--ephemeral", "--max-query-time-ms", "0"], &[])
+        .assert_code(2)
+        .err_has("use `unlimited` for no limit");
 }
 
 #[test]
