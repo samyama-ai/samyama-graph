@@ -22,6 +22,7 @@ pub mod pca;
 pub mod centrality;
 pub mod centrality_extra;
 pub mod link_prediction;
+pub mod negative_sampling;
 pub mod community_detect;
 pub mod metrics;
 pub mod pathfinding_extra;
@@ -48,6 +49,7 @@ pub use centrality::{
     eigenvector_centrality, harmonic_centrality, ranked, Scores,
 };
 pub use link_prediction::{predict_links, score_one, LinkScore, PairScore};
+pub use negative_sampling::{negative_samples, NegativeStrategy};
 pub use similarity_extra::{
     constraint, cosine_similarity, effective_size, node_similarity, overlap_coefficient,
     reciprocity,
