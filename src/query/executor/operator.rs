@@ -6229,6 +6229,24 @@ pub trait PhysicalOperator: Send {
     /// Reset the operator to start from the beginning
     fn reset(&mut self);
 
+    /// Bytes this operator holds in rows it has buffered, or `None` for one
+    /// that streams a row at a time (#2078).
+    ///
+    /// Read by PROFILE when the operator first produces and when it finishes.
+    /// An estimate from a walk of the rows, so it has to stay cheap enough to
+    /// call twice per operator per query.
+    fn memory_bytes(&self) -> Option<usize> {
+        None
+    }
+
+    /// Ask the operator to remember the most it buffers, for `memory_bytes`.
+    ///
+    /// Called by PROFILE when it wraps the plan, and only then: walking a
+    /// buffer to size it is work an unprofiled query should not pay for. An
+    /// operator that hands its whole buffer out in one batch is empty again by
+    /// the time anyone outside could look, so it has to note the size itself.
+    fn track_memory(&mut self) {}
+
     /// The predicate this operator filters on, if it is a filter.
     ///
     /// Exists so the planner can tell whether a filter it is about to add is
@@ -11543,6 +11561,8 @@ pub struct AggregateOperator {
     agg_names: Vec<std::sync::Arc<str>>,
     results: std::vec::IntoIter<Record>,
     executed: bool,
+    /// Most bytes buffered, once PROFILE asks for it (#2078).
+    peak_bytes: Option<usize>,
 }
 
 impl AggregateOperator {
@@ -11554,6 +11574,7 @@ impl AggregateOperator {
         let group_names = group_by.iter().map(|(_, a)| std::sync::Arc::from(a.as_str())).collect();
         let agg_names = aggregates.iter().map(|a| std::sync::Arc::from(a.alias.as_str())).collect();
         Self {
+            peak_bytes: None,
             input,
             group_by,
             aggregates,
@@ -11638,6 +11659,15 @@ impl AggregateOperator {
 }
 
 impl PhysicalOperator for AggregateOperator {
+    /// One row per group, built before the first is returned.
+    fn memory_bytes(&self) -> Option<usize> {
+        self.peak_bytes
+    }
+
+    fn track_memory(&mut self) {
+        self.peak_bytes.get_or_insert(0);
+    }
+
     /// One row with no grouping key. With one, the square root of the input:
     /// the usual guess for a group count the statistics do not record.
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
@@ -11654,6 +11684,7 @@ impl PhysicalOperator for AggregateOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.results.as_slice().iter()))); }
         }
         Ok(self.results.next())
     }
@@ -11682,6 +11713,7 @@ impl PhysicalOperator for AggregateOperator {
             }
             self.input = Box::new(MaterializedOperator::new(rows));
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.results.as_slice().iter()))); }
         }
         Ok(self.results.next())
     }
@@ -11709,6 +11741,7 @@ impl PhysicalOperator for AggregateOperator {
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.results.as_slice().iter()))); }
         }
 
         let mut batch = Vec::with_capacity(batch_size);
@@ -13312,11 +13345,14 @@ pub struct SortOperator {
     /// `records[..sorted_upto]` are in final order. The rest are in input
     /// order until `sort_tail` runs, which happens only if a read gets there.
     sorted_upto: usize,
+    /// Most bytes buffered, once PROFILE asks for it (#2078).
+    peak_bytes: Option<usize>,
 }
 
 impl SortOperator {
     pub fn new(input: OperatorBox, sort_items: Vec<(Expression, bool)>) -> Self {
         Self {
+            peak_bytes: None,
             input,
             sort_items,
             records: Vec::new(),
@@ -13729,6 +13765,15 @@ impl SortOperator {
 }
 
 impl PhysicalOperator for SortOperator {
+    /// Every input row, held to be ordered.
+    fn memory_bytes(&self) -> Option<usize> {
+        self.peak_bytes
+    }
+
+    fn track_memory(&mut self) {
+        self.peak_bytes.get_or_insert(0);
+    }
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -13764,6 +13809,7 @@ impl PhysicalOperator for SortOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.records.iter()))); }
         }
         if self.current >= self.sorted_upto && self.sorted_upto < self.records.len() {
             self.sort_tail(store)?;
@@ -13798,6 +13844,7 @@ impl PhysicalOperator for SortOperator {
             }
             self.input = Box::new(MaterializedOperator::new(rows));
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.records.iter()))); }
         }
         if self.current >= self.sorted_upto && self.sorted_upto < self.records.len() {
             self.sort_tail(store)?;
@@ -13818,6 +13865,7 @@ impl PhysicalOperator for SortOperator {
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.records.iter()))); }
         }
 
         if self.current >= self.records.len() {
@@ -14782,6 +14830,8 @@ pub struct JoinOperator {
     /// clause pipeline joins in — therefore got the read executor's refusal
     /// from inside a statement that was correctly routed as a write (#1479).
     right_drained_mut: bool,
+    /// Most bytes buffered, once PROFILE asks for it (#2078).
+    peak_bytes: Option<usize>,
 }
 
 impl JoinOperator {
@@ -14793,6 +14843,7 @@ impl JoinOperator {
 
     pub fn new(left: OperatorBox, right: OperatorBox, join_vars: Vec<String>) -> Self {
         Self {
+            peak_bytes: None,
             left,
             right,
             join_vars,
@@ -14857,6 +14908,15 @@ impl JoinOperator {
 }
 
 impl PhysicalOperator for JoinOperator {
+    /// The hashed left side and the buffered right side.
+    fn memory_bytes(&self) -> Option<usize> {
+        self.peak_bytes
+    }
+
+    fn track_memory(&mut self) {
+        self.peak_bytes.get_or_insert(0);
+    }
+
     /// An equi-join on node variables: each row of the smaller side meets about
     /// one row of the larger.
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
@@ -14872,6 +14932,7 @@ impl PhysicalOperator for JoinOperator {
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.materialize(store)?;
+        if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.left_records.values().flatten()) + records_bytes(self.right_records.iter()))); }
 
         while self.current_right_index < self.right_records.len() {
             let right_record = &self.right_records[self.current_right_index];
@@ -14901,6 +14962,7 @@ impl PhysicalOperator for JoinOperator {
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         self.materialize(store)?;
+        if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.left_records.values().flatten()) + records_bytes(self.right_records.iter()))); }
         let mut results = Vec::with_capacity(batch_size);
 
         while results.len() < batch_size && self.current_right_index < self.right_records.len() {
@@ -17599,6 +17661,13 @@ impl PhysicalOperator for MaterializedOperator {
             children: Vec::new(),
         }
     }
+}
+
+/// Estimated heap bytes of buffered rows, for `PhysicalOperator::memory_bytes`.
+pub(crate) fn records_bytes<'a>(records: impl Iterator<Item = &'a Record>) -> usize {
+    records
+        .map(|r| std::mem::size_of::<Record>() + r.values().map(Value::approx_heap_bytes).sum::<usize>())
+        .sum()
 }
 
 /// Algorithm operator: CALL algo.pageRank(...)
