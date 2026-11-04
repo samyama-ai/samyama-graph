@@ -489,13 +489,18 @@ fn literal(v: &[f32]) -> String {
 
 /// `:Emb` nodes with `id` = position in `data`, `cat = id % 10` and `v`,
 /// under an index named `emb` declared with `metric`.
+/// The index is created with the same search width as [`search`] uses, a
+/// quarter of the corpus. Left at the default (`max(2k, 64)`), a rebuilt
+/// graph answered L2 at recall 0.71 on one CI run (#2069). The width is an
+/// index option, so it also travels through a snapshot.
 fn store(metric: DistanceMetric, data: &[Vec<f32>]) -> GraphStore {
     let mut s = GraphStore::new();
+    let ef = (data.len() / 4).max(64);
     write(
         &mut s,
         &format!(
             "CREATE VECTOR INDEX emb FOR (n:Emb) ON (n.v) \
-             OPTIONS {{dimensions: {DIM}, similarity: '{}'}}",
+             OPTIONS {{dimensions: {DIM}, similarity: '{}', ef: {ef}}}",
             similarity(metric)
         ),
     );
