@@ -1252,6 +1252,32 @@ pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse 
     }))
 }
 
+/// `?limit=N` on `GET /api/slowlog`.
+#[derive(Debug, Deserialize)]
+pub struct SlowlogParams {
+    limit: Option<usize>,
+}
+
+/// `GET /api/slowlog` — the most recent queries past `SLOW_QUERY_MS`, newest
+/// first (#2079). `limit` defaults to, and is capped at, the ring's size.
+///
+/// `samyama_slow_queries_total` said slow queries happened; this says which,
+/// without access to the server's stderr.
+pub async fn slowlog_handler(Query(params): Query<SlowlogParams>) -> impl IntoResponse {
+    use crate::query::slowlog;
+    let limit = params.limit.unwrap_or(slowlog::max_len()).min(slowlog::max_len());
+    Json(json!({
+        "len": slowlog::len(),
+        "max_len": slowlog::max_len(),
+        "entries": slowlog::recent(limit),
+    }))
+}
+
+/// `DELETE /api/slowlog` — empty the ring; reports how many entries it held.
+pub async fn slowlog_reset_handler() -> impl IntoResponse {
+    Json(json!({ "cleared": crate::query::slowlog::reset() }))
+}
+
 /// Handler for graph schema introspection
 /// How many nodes of a label `/api/schema` reads to work out which properties
 /// it has. A property graph lets two nodes of a label carry different keys, so
