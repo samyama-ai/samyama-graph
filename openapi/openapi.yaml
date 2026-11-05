@@ -674,6 +674,7 @@ paths:
                 storage:
                   nodes: 2000
                   edges: 11000
+                  persistence_degraded: false
 
   /api/tenants:
     get:
@@ -1638,6 +1639,9 @@ components:
             edges:
               type: integer
               description: Number of edges in the graph
+            persistence_degraded:
+              type: boolean
+              description: True after a write failed to reach disk. The server then refuses writes until restarted, and `status` is `degraded`.
 
     SchemaResponse:
       type: object
