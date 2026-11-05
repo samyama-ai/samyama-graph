@@ -88,6 +88,44 @@ pub enum DistanceMetric {
     InnerProduct,
 }
 
+impl DistanceMetric {
+    /// The distance between two vectors, as an index declared with this
+    /// metric reports it: `1 - cos` for cosine, the Euclidean distance for
+    /// L2, `1 - a.b` for inner product. Computed by the index's own kernel,
+    /// so it is the number a search would report for the same pair. The
+    /// caller checks that the lengths agree.
+    pub fn distance(self, a: &[f32], b: &[f32]) -> f32 {
+        let kernel = MetricDistance(self);
+        kernel.reported(kernel.eval(a, b))
+    }
+
+    /// The Neo4j 5 similarity score for a distance this metric reports
+    /// (#1980). Higher is better, and it falls as the distance grows, so
+    /// nearest-first is also highest-score-first:
+    ///
+    /// | metric | distance `d` | score |
+    /// |---|---|---|
+    /// | cosine | `1 - cos` | `(1 + cos) / 2` = `1 - d/2`, in [0, 1] |
+    /// | L2 | Euclidean `d` | `1 / (1 + d²)`, in (0, 1] |
+    /// | inner product | `1 - a.b` | `(1 + a.b) / 2` = `1 - d/2` |
+    ///
+    /// Cosine and L2 are Neo4j's `vector.similarity.cosine` and
+    /// `vector.similarity.euclidean`. Neo4j 5 has no inner-product index; the
+    /// mapping is Lucene's `DOT_PRODUCT` score, which equals the cosine score
+    /// for unit vectors and is in [0, 1] only for them. For vectors that are
+    /// not normalized it can leave [0, 1], but it still orders correctly.
+    ///
+    /// In f64, so that two near neighbours whose distances differ in f32
+    /// still have scores that differ.
+    pub fn score(self, distance: f32) -> f64 {
+        let d = distance as f64;
+        match self {
+            DistanceMetric::Cosine | DistanceMetric::InnerProduct => 1.0 - d / 2.0,
+            DistanceMetric::L2 => 1.0 / (1.0 + d * d),
+        }
+    }
+}
+
 /// A point in the vector space, associated with a NodeId
 #[derive(Clone, Debug)]
 pub struct VectorPoint {
@@ -765,6 +803,17 @@ impl VectorIndex {
             None => (fetch * 2).max(64),
         }
         .min(total);
+        // Tombstones increase both the result over-fetch and the search width.
+        // Once the estimated layer-0 neighbour work (ef * 2m) reaches the
+        // live population, scanning the live vectors is a better bounded
+        // choice than walking a wider, deletion-polluted random graph. It
+        // also avoids a full-length but low-recall result from that graph.
+        // Clean indexes retain their ANN path and configured search width.
+        if self.superseded > 0
+            && ef_search.saturating_mul(self.params.m).saturating_mul(2) >= n
+        {
+            return Ok(self.report(self.brute_force_search(query, k.min(n))));
+        }
         // hnsw_rs 0.2.1 can panic deep in search_layer (hnsw.rs:938,
         // `return_points.peek().unwrap()`) on certain graphs. A panic here would
         // unwind across the await point and take the whole server down, so a single
@@ -1099,6 +1148,36 @@ mod tests {
         let inner = InnerProductDistance;
         // Dot product = 0
         assert!((inner.eval(&v1, &v2) - 1.0).abs() < 1e-6); // 1.0 - 0.0
+    }
+
+    /// The Neo4j score of each metric (#1980): best is highest, and a larger
+    /// distance always scores lower.
+    #[test]
+    fn scores_follow_neo4j_and_fall_as_distance_grows() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // Cosine: identical 1, orthogonal 0.5, opposite 0.
+        assert!(close(DistanceMetric::Cosine.score(0.0), 1.0));
+        assert!(close(DistanceMetric::Cosine.score(1.0), 0.5));
+        assert!(close(DistanceMetric::Cosine.score(2.0), 0.0));
+        // L2: 1 / (1 + d²).
+        assert!(close(DistanceMetric::L2.score(0.0), 1.0));
+        assert!(close(DistanceMetric::L2.score(2.0), 0.2));
+        // Inner product: (1 + dot) / 2, with distance 1 - dot.
+        assert!(close(DistanceMetric::InnerProduct.score(0.0), 1.0));
+        assert!(close(DistanceMetric::InnerProduct.score(1.0), 0.5));
+        for metric in [DistanceMetric::Cosine, DistanceMetric::L2, DistanceMetric::InnerProduct] {
+            let mut last = f64::INFINITY;
+            for i in 0..200 {
+                let s = metric.score(i as f32 * 0.01);
+                assert!(s < last, "{metric:?}: score did not fall at d={}", i as f32 * 0.01);
+                last = s;
+            }
+        }
+        // The distance is the one the index reports.
+        let (a, b) = ([1.0f32, 0.0], [0.0f32, 1.0]);
+        assert!((DistanceMetric::Cosine.distance(&a, &b) - 1.0).abs() < 1e-6);
+        assert!((DistanceMetric::L2.distance(&a, &b) - 2f32.sqrt()).abs() < 1e-6);
+        assert!((DistanceMetric::InnerProduct.distance(&a, &b) - 1.0).abs() < 1e-6);
     }
 
     /// `n` distinct unit-ish vectors of dimension 8, deterministic.
