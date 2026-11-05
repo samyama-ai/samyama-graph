@@ -17,6 +17,22 @@
 //! successful check by anything reading the output.
 
 use std::fmt;
+use std::time::Duration;
+
+/// Under this, RocksDB and a loaded server run out of descriptors.
+const MIN_OPEN_FILES: u64 = 4096;
+/// Attributed memory past this share of the host's RAM leaves no room to load.
+const MEMORY_WARN_PERCENT: u64 = 80;
+/// `RETURN 1` touches no data, so this much is the host or the build, not the
+/// query: a debug binary, swapping, or a noisy neighbour.
+const SLOW_PROBE: Duration = Duration::from_millis(25);
+/// Statements in the self-check. `doctor` runs against servers in use.
+pub const PROBES: usize = 20;
+/// Names of the checks that need a server, for when none answered.
+const SERVER_ONLY: [&str; 4] = ["persistence", "server memory", "metrics", "latency"];
+
+/// What a `GET` came back with: the status code and body, or why there is none.
+pub type Fetched = Result<(u16, String), String>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -162,7 +178,173 @@ pub fn local_checks(url: &str, data_dir: &std::path::Path) -> Vec<Check> {
         check_url(url),
         check_memory(),
         check_data_dir(data_dir),
+        check_open_files(open_file_limit().as_deref()),
+        check_nlq(|v| std::env::var(v).ok()),
     ]
+}
+
+/// This shell's descriptor limit. The server inherits what the shell that
+/// started it had, so this is the server's own only when that is this machine.
+fn open_file_limit() -> Option<String> {
+    let out = std::process::Command::new("sh").args(["-c", "ulimit -n"]).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn check_open_files(limit: Option<&str>) -> Check {
+    match limit {
+        None => Check::new("open files", Verdict::Skipped, "could not run `ulimit -n`"),
+        Some("unlimited") => Check::new("open files", Verdict::Pass, "unlimited"),
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(n) if n < MIN_OPEN_FILES => Check::new("open files", Verdict::Warn,
+                format!("limit is {n}, under {MIN_OPEN_FILES}; raise it with `ulimit -n` before \
+                         starting the server")),
+            Ok(n) => Check::new("open files", Verdict::Pass, format!("limit is {n}")),
+            Err(_) => Check::new("open files", Verdict::Skipped,
+                format!("`ulimit -n` said '{raw}'")),
+        },
+    }
+}
+
+/// The same validation the server does at start-up, on this shell's variables.
+/// The server's own environment cannot be read from here.
+fn check_nlq(get: impl Fn(&str) -> Option<String>) -> Check {
+    if get("NLQ_PROVIDER").is_none_or(|p| p.trim().is_empty()) {
+        return Check::new("nlq config", Verdict::Skipped, "NLQ_PROVIDER is not set in this shell");
+    }
+    match samyama::nlq::config_from(get) {
+        Ok(c) => Check::new("nlq config", Verdict::Pass,
+            format!("provider {:?} is configured in this shell", c.provider)),
+        Err(e) => Check::new("nlq config", Verdict::Warn, e),
+    }
+}
+
+/// The body of an answer worth reading, or the check that says why it is not.
+fn answered<'a>(name: &'static str, fetched: &'a Fetched) -> Result<&'a str, Check> {
+    match fetched {
+        Ok((200..=299, body)) => Ok(body),
+        // The endpoint is there and wants a credential this client lacks: an
+        // absence of information, not a finding about the server.
+        Ok((code @ (401 | 403), _)) => {
+            Err(Check::new(name, Verdict::Skipped, format!("server answered {code}")))
+        }
+        Ok((code, _)) => Err(Check::new(name, Verdict::Warn, format!("server answered {code}"))),
+        Err(e) => Err(Check::new(name, Verdict::Warn, format!("no answer: {e}"))),
+    }
+}
+
+/// `fetched` is `GET /api/status`. A failed persist is a `Fail`, not a warning:
+/// the server is refusing every write and has writes that a restart will lose.
+pub fn check_persistence(fetched: &Fetched) -> Check {
+    const NAME: &str = "persistence";
+    let body = match answered(NAME, fetched) {
+        Ok(b) => b,
+        Err(c) => return c,
+    };
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let degraded = v["storage"]["persistence_degraded"].as_bool();
+    if degraded == Some(true) || v["status"] == "degraded" {
+        return Check::new(NAME, Verdict::Fail,
+            "degraded: a write did not reach disk and writes are being refused; \
+             see the server log");
+    }
+    match degraded {
+        Some(_) => Check::new(NAME, Verdict::Pass, "no write has failed to reach disk"),
+        None => Check::new(NAME, Verdict::Skipped, "this server does not report persistence health"),
+    }
+}
+
+/// RAM of this machine in MiB, if the server at `url` is on it. For a server
+/// elsewhere this machine's RAM says nothing.
+pub fn local_ram_mib(url: &str) -> Option<u64> {
+    let u = url::Url::parse(url).ok()?;
+    let local = match u.host()? {
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    };
+    local.then(meminfo).flatten().map(|(total, _)| total)
+}
+
+/// `fetched` is `GET /api/memory`, whose figures are floors, so a warning here
+/// is if anything late.
+pub fn check_server_memory(fetched: &Fetched, ram_mib: Option<u64>) -> Check {
+    const NAME: &str = "server memory";
+    let body = match answered(NAME, fetched) {
+        Ok(b) => b,
+        Err(c) => return c,
+    };
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let Some(graph) = v["graph"]["attributed_bytes"].as_u64() else {
+        return Check::new(NAME, Verdict::Warn, "/api/memory has no graph.attributed_bytes");
+    };
+    let mib = (graph + v["index_memory_bytes"].as_u64().unwrap_or(0)) / (1024 * 1024);
+    match ram_mib {
+        Some(ram) if mib * 100 >= ram * MEMORY_WARN_PERCENT => Check::new(NAME, Verdict::Warn,
+            format!("at least {mib} MiB of {ram} MiB host RAM is graph and indexes")),
+        Some(ram) => Check::new(NAME, Verdict::Pass, format!("at least {mib} MiB of {ram} MiB host RAM")),
+        None => Check::new(NAME, Verdict::Pass, format!("at least {mib} MiB; host RAM not known here")),
+    }
+}
+
+/// `fetched` is `GET /metrics`.
+pub fn check_metrics(fetched: &Fetched) -> Check {
+    const NAME: &str = "metrics";
+    match answered(NAME, fetched) {
+        Ok(body) if body.contains("samyama_") => Check::new(NAME, Verdict::Pass,
+            format!("{} metric lines", body.lines().filter(|l| !l.starts_with('#')).count())),
+        Ok(_) => Check::new(NAME, Verdict::Warn, "/metrics answered with no samyama_ metric"),
+        Err(c) => c,
+    }
+}
+
+/// Round trips of `RETURN 1`, or the error that stopped them.
+pub fn check_latency(samples: Result<Vec<Duration>, String>) -> Check {
+    const NAME: &str = "latency";
+    let mut s = match samples {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => return Check::new(NAME, Verdict::Skipped, "no probes ran"),
+        Err(e) => return Check::new(NAME, Verdict::Warn, format!("`RETURN 1` failed: {e}")),
+    };
+    s.sort();
+    let p50 = s[(s.len() - 1) / 2];
+    let p95 = s[(s.len() * 95).div_ceil(100) - 1];
+    let seen = format!("RETURN 1 x{}: p50 {p50:.1?}, p95 {p95:.1?}", s.len());
+    if p95 > SLOW_PROBE {
+        Check::new(NAME, Verdict::Warn, format!("{seen}, over {SLOW_PROBE:?}; network, a debug \
+            build, swapping or a busy host"))
+    } else {
+        Check::new(NAME, Verdict::Pass, seen)
+    }
+}
+
+/// For when no server answered: not observed is not the same as fine.
+pub fn server_only_skipped() -> Vec<Check> {
+    SERVER_ONLY
+        .iter()
+        .map(|n| Check::new(n, Verdict::Skipped, "no server answered"))
+        .collect()
+}
+
+/// The RESP port is not in the HTTP URL, so it is checked only when named. If
+/// it is named and nothing listens, the check fails: that is the question asked.
+pub fn check_resp_port(url: &str, port: Option<u16>) -> Check {
+    use std::net::ToSocketAddrs;
+    const NAME: &str = "resp port";
+    let Some(port) = port else {
+        return Check::new(NAME, Verdict::Skipped, "pass --resp-port to check it");
+    };
+    let host = url::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_string));
+    let Some(host) = host else {
+        return Check::new(NAME, Verdict::Skipped, "the server url has no host");
+    };
+    let addr = (host.trim_matches(['[', ']']), port).to_socket_addrs().ok().and_then(|mut a| a.next());
+    let Some(addr) = addr else {
+        return Check::new(NAME, Verdict::Fail, format!("cannot resolve {host}"));
+    };
+    match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+        Ok(_) => Check::new(NAME, Verdict::Pass, format!("{addr} accepts connections")),
+        Err(e) => Check::new(NAME, Verdict::Fail, format!("{addr}: {e}")),
+    }
 }
 
 /// The server half. `status` is the version string the server reported, or the
@@ -338,6 +520,106 @@ mod tests {
         } else {
             assert_eq!(c.verdict, Verdict::Skipped);
         }
+    }
+
+    fn got(code: u16, body: &str) -> Fetched {
+        Ok((code, body.to_string()))
+    }
+
+    #[test]
+    fn persistence_is_judged_from_what_the_server_reports() {
+        let v = |s: &str| check_persistence(&got(200, s)).verdict;
+        assert_eq!(v(r#"{"status":"healthy","storage":{"persistence_degraded":false}}"#), Verdict::Pass);
+        assert_eq!(v(r#"{"status":"degraded","storage":{"persistence_degraded":true}}"#), Verdict::Fail);
+        assert_eq!(v(r#"{"status":"degraded","storage":{}}"#), Verdict::Fail);
+        // An older server does not say. That is not the same as saying it is fine.
+        assert_eq!(v(r#"{"status":"healthy","storage":{}}"#), Verdict::Skipped);
+        assert_eq!(report(vec![check_persistence(&got(200, r#"{"status":"degraded"}"#))]).exit_code(), 1);
+    }
+
+    #[test]
+    fn an_endpoint_that_wants_a_credential_is_skipped_and_a_broken_one_warns() {
+        assert_eq!(check_metrics(&got(401, "")).verdict, Verdict::Skipped);
+        assert_eq!(check_metrics(&got(403, "")).verdict, Verdict::Skipped);
+        assert_eq!(check_metrics(&got(500, "")).verdict, Verdict::Warn);
+        assert_eq!(check_metrics(&Err("refused".into())).verdict, Verdict::Warn);
+        assert_eq!(check_metrics(&got(200, "<html>")).verdict, Verdict::Warn);
+        let c = check_metrics(&got(200, "# HELP x\nsamyama_nodes 3\n"));
+        assert_eq!((c.verdict, c.detail.as_str()), (Verdict::Pass, "1 metric lines"));
+    }
+
+    #[test]
+    fn server_memory_warns_near_the_hosts_ram() {
+        let body = format!(r#"{{"graph":{{"attributed_bytes":{}}},"index_memory_bytes":{}}}"#,
+            700u64 << 20, 100u64 << 20);
+        assert_eq!(check_server_memory(&got(200, &body), Some(1000)).verdict, Verdict::Warn);
+        assert_eq!(check_server_memory(&got(200, &body), Some(1001)).verdict, Verdict::Pass);
+        let c = check_server_memory(&got(200, &body), None);
+        assert_eq!(c.verdict, Verdict::Pass);
+        assert!(c.detail.contains("at least 800 MiB"), "{}", c.detail);
+        assert_eq!(check_server_memory(&got(200, "{}"), None).verdict, Verdict::Warn);
+    }
+
+    #[test]
+    fn only_a_server_on_this_machine_is_compared_with_its_ram() {
+        assert_eq!(local_ram_mib("http://db.example.test:8080"), None);
+        assert_eq!(local_ram_mib("http://10.0.0.1:8080"), None);
+        assert_eq!(local_ram_mib("not a url"), None);
+        assert_eq!(local_ram_mib("http://localhost:8080"), meminfo().map(|m| m.0));
+    }
+
+    #[test]
+    fn latency_is_judged_on_p95_and_reports_both() {
+        let ms = |v: &[u64]| Ok(v.iter().map(|m| Duration::from_millis(*m)).collect());
+        // One outlier in twenty sits past p95 and must not warn; two reach it.
+        let mut one = vec![1u64; 19];
+        one.push(500);
+        let c = check_latency(ms(&one));
+        assert_eq!(c.verdict, Verdict::Pass, "{}", c.detail);
+        assert!(c.detail.contains("p50 1.0ms, p95 1.0ms"), "{}", c.detail);
+        let mut two = vec![1u64; 18];
+        two.extend([500, 500]);
+        assert_eq!(check_latency(ms(&two)).verdict, Verdict::Warn);
+        assert_eq!(check_latency(ms(&[])).verdict, Verdict::Skipped);
+        assert_eq!(check_latency(Err("400".into())).verdict, Verdict::Warn);
+    }
+
+    #[test]
+    fn a_low_descriptor_limit_warns() {
+        assert_eq!(check_open_files(Some("256")).verdict, Verdict::Warn);
+        assert_eq!(check_open_files(Some("4095")).verdict, Verdict::Warn);
+        assert_eq!(check_open_files(Some("4096")).verdict, Verdict::Pass);
+        assert_eq!(check_open_files(Some("unlimited")).verdict, Verdict::Pass);
+        assert_eq!(check_open_files(Some("?")).verdict, Verdict::Skipped);
+        assert_eq!(check_open_files(None).verdict, Verdict::Skipped);
+    }
+
+    #[test]
+    fn nlq_is_checked_only_when_a_provider_is_set() {
+        assert_eq!(check_nlq(|_| None).verdict, Verdict::Skipped);
+        let env = |v: &str| (v == "NLQ_PROVIDER").then(|| "openai".to_string());
+        let c = check_nlq(env);
+        assert_eq!(c.verdict, Verdict::Warn);
+        assert!(c.detail.contains("API key"), "{}", c.detail);
+        let keyed = |v: &str| match v {
+            "NLQ_PROVIDER" => Some("openai".to_string()),
+            "OPENAI_API_KEY" => Some("not-a-real-key".to_string()),
+            _ => None,
+        };
+        let c = check_nlq(keyed);
+        assert_eq!(c.verdict, Verdict::Pass);
+        assert!(!c.detail.contains("not-a-real-key"), "{}", c.detail);
+    }
+
+    #[test]
+    fn the_resp_port_is_checked_when_named() {
+        let url = "http://127.0.0.1:8080";
+        assert_eq!(check_resp_port(url, None).verdict, Verdict::Skipped);
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        assert_eq!(check_resp_port(url, Some(port)).verdict, Verdict::Pass);
+        drop(l);
+        assert_eq!(check_resp_port(url, Some(port)).verdict, Verdict::Fail);
     }
 
     #[test]
