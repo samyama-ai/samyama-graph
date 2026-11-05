@@ -783,6 +783,15 @@ impl VectorIndex {
             None => (fetch * 2).max(64),
         }
         .min(total);
+        // Tombstones increase both the result over-fetch and the search width.
+        // Once the estimated neighbour-distance work (ef * m) reaches the
+        // live population, scanning the live vectors is a better bounded
+        // choice than walking a wider, deletion-polluted random graph. It
+        // also avoids a full-length but low-recall result from that graph.
+        // Clean indexes retain their ANN path and configured search width.
+        if self.superseded > 0 && ef_search.saturating_mul(self.params.m) >= n {
+            return Ok(self.report(self.brute_force_search(query, k.min(n))));
+        }
         // hnsw_rs 0.2.1 can panic deep in search_layer (hnsw.rs:938,
         // `return_points.peek().unwrap()`) on certain graphs. A panic here would
         // unwind across the await point and take the whole server down, so a single

@@ -162,6 +162,13 @@ fn recall_holds_after_deleting_a_share_of_the_index() {
                     "{share}% deleted: returned deleted node {id}"
                 );
             }
+            // At 10% deletion, over-fetching 300 tombstones costs more
+            // candidate work than scanning 2,700 live vectors. This path
+            // must now return the independent exact top-k, not just meet
+            // the approximate recall tolerance below.
+            if share == 10 {
+                assert_eq!(got, want, "deletion-heavy search must use its bounded exact path");
+            }
             hits += got.iter().filter(|id| want.contains(id)).count();
             total += want.len();
         }
