@@ -45,6 +45,7 @@
 //! re-inserted. This trades load-time speed for implementation simplicity.
 
 use crate::graph::NodeId;
+use crate::vector::distance;
 use half::f16;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -360,25 +361,24 @@ impl MetricDistance {
                     norm_a += a * a;
                     norm_b += b * b;
                 }
-                if norm_a <= 0.0 || norm_b <= 0.0 {
-                    return 1.0;
-                }
-                // The clamp and floor of `CosineDistance`, for its reason.
-                let sim = (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0);
-                (1.0 - sim).max(0.0)
+                cosine_rank(dot, norm_a, norm_b)
             }
             DistanceMetric::L2 => pairs.map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt(),
-            DistanceMetric::InnerProduct => {
-                let dot: f32 = pairs.map(|(a, b)| a * b).sum();
-                // Continuous at 0 (both sides give 1), positive, and larger
-                // for a smaller dot product: the order of `-dot`, without a
-                // negative value.
-                if dot >= 0.0 {
-                    1.0 / (1.0 + dot)
-                } else {
-                    1.0 - dot
-                }
+            DistanceMetric::InnerProduct => inner_product_rank(pairs.map(|(a, b)| a * b).sum()),
+        }
+    }
+
+    /// [`rank`](Self::rank) for f32 slices, with the SIMD kernels of
+    /// [`super::distance`] (#1976). Agrees with `rank` to rounding: the
+    /// kernels add in a different order.
+    fn rank_f32(self, va: &[f32], vb: &[f32]) -> f32 {
+        match self.0 {
+            DistanceMetric::Cosine => {
+                let (dot, norm_a, norm_b) = distance::cosine_parts(va, vb);
+                cosine_rank(dot, norm_a, norm_b)
             }
+            DistanceMetric::L2 => distance::l2_sq(va, vb).sqrt(),
+            DistanceMetric::InnerProduct => inner_product_rank(distance::dot(va, vb)),
         }
     }
 
@@ -397,7 +397,27 @@ impl MetricDistance {
 
 impl Distance<f32> for MetricDistance {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
-        self.rank(va.iter().copied().zip(vb.iter().copied()))
+        self.rank_f32(va, vb)
+    }
+}
+
+/// Cosine distance from its three sums, with the clamp and floor of
+/// `CosineDistance`, for its reason.
+fn cosine_rank(dot: f32, norm_a: f32, norm_b: f32) -> f32 {
+    if norm_a <= 0.0 || norm_b <= 0.0 {
+        return 1.0;
+    }
+    let sim = (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0);
+    (1.0 - sim).max(0.0)
+}
+
+/// Continuous at 0 (both sides give 1), positive, and larger for a smaller
+/// dot product: the order of `-dot`, without a negative value.
+fn inner_product_rank(dot: f32) -> f32 {
+    if dot >= 0.0 {
+        1.0 / (1.0 + dot)
+    } else {
+        1.0 - dot
     }
 }
 
