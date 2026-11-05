@@ -119,6 +119,12 @@ impl RespServer {
         }
     }
 
+    /// Record this server's writes in `log`, the one the HTTP server writes to.
+    pub fn with_audit_log(self, log: Arc<crate::http::server::AuditLog>) -> Self {
+        self.handler.set_audit_log(log);
+        self
+    }
+
     /// Access the shared tenant registry (for wiring HTTP routes).
     pub fn tenant_manager(&self) -> Arc<crate::persistence::TenantManager> {
         self.handler.tenant_manager()
@@ -194,9 +200,29 @@ struct ConnTxn {
     authenticated_as: Option<crate::auth::Credential>,
 }
 
-/// Answer one command, routing the transaction commands and anything run
-/// inside an open transaction to the lock the connection holds.
+/// Answer one command and put it in the audit log if it can change state
+/// (#2081). Every path to a reply goes through here, so a write refused for
+/// want of a credential is recorded as well as one that ran.
 async fn respond(
+    handler: &CommandHandler,
+    value: &RespValue,
+    store: &Arc<RwLock<GraphStore>>,
+    txn: &mut ConnTxn,
+    credentials: Option<&[crate::auth::Credential]>,
+) -> RespValue {
+    let entry = handler.audit_entry_for(value);
+    let reply = respond_unaudited(handler, value, store, txn, credentials).await;
+    if let Some(entry) = entry {
+        // `unauthenticated` is a state, not a name, as in the HTTP entries.
+        let subject = txn.authenticated_as.as_ref().map_or("unauthenticated", |c| c.name.as_str());
+        handler.audit(&entry, subject, !matches!(reply, RespValue::Error(_)));
+    }
+    reply
+}
+
+/// Route the transaction commands and anything run inside an open transaction
+/// to the lock the connection holds.
+async fn respond_unaudited(
     handler: &CommandHandler,
     value: &RespValue,
     store: &Arc<RwLock<GraphStore>>,
@@ -278,9 +304,12 @@ async fn respond(
             let args = value.as_array().unwrap_or(&[]);
             handler.query_in_transaction(args, &mut open.guard, true, txn.authenticated_as.as_ref())
         }
+        // Reads the store through the lock this connection holds: asking for it
+        // again would wait out the transaction.
+        (Some("INFO"), Some(open)) => handler.info_on(Some(&open.guard)),
         // These never touch the store, so they cannot wait on the lock this
         // connection itself holds.
-        (Some("PING") | Some("ECHO") | Some("INFO"), Some(_)) => {
+        (Some("PING") | Some("ECHO"), Some(_)) => {
             handler.handle_command(value, store, txn.authenticated_as.as_ref()).await
         }
         // Anything else would take the store's lock, which this connection

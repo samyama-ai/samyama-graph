@@ -2152,7 +2152,7 @@ async fn start_server() {
             // asked to be audited, which is the state the flag exists to leave.
             Some(p) => match samyama::http::server::AuditLog::open(&p) {
                 Ok(l) => {
-                    println!("HTTP API: auditing state-changing requests to {p}");
+                    println!("HTTP and RESP: auditing state-changing requests to {p}");
                     Some(std::sync::Arc::new(l))
                 }
                 Err(e) => {
@@ -2577,6 +2577,9 @@ async fn start_server() {
     // token a formality (#1328).
     if !credentials.is_empty() {
         server = server.with_credentials(Arc::new(credentials));
+    }
+    if let Some(log) = audit_log {
+        server = server.with_audit_log(log);
     }
 
     println!("Server ready. Press Ctrl+C to stop.\n");
