@@ -4008,18 +4008,68 @@ impl QueryPlanner {
             // `Vector`. List literals stay lists now (#628), so requiring the
             // `Vector` variant here would reject every query vector written
             // with a decimal point -- which is all of them.
-            let query_vector = match vector_arg {
-                Expression::Literal(pv) => pv.to_vector().ok_or_else(|| {
-                    ExecutionError::PlanningError(
-                        "the query vector must be a list of numbers".to_string(),
-                    )
-                })?,
-                _ => return Err(ExecutionError::PlanningError("the query vector must be a vector literal".to_string())),
+            //
+            // The vector and `k` are values known before the search starts: a
+            // literal, a `$parameter` (bound to a literal before planning), or
+            // an expression over those, such as `toInteger($k)` (#2047). They
+            // are evaluated once here, against no row, as
+            // `db.index.point.nearest` evaluates its centre. An expression that
+            // needs a row -- a variable -- fails with the evaluator's own error
+            // rather than being read as no vector.
+            //
+            // A literal is read in place; a 768-float vector is not copied to
+            // be read.
+            let evaluated = |e: &Expression, what: &str| -> ExecutionResult<PropertyValue> {
+                let not_a_value = || {
+                    ExecutionError::PlanningError(format!(
+                        "db.index.vector.queryNodes: the {what} must be a value, not a node, \
+                         relationship or path"
+                    ))
+                };
+                match super::operator::eval_expression(e, &super::Record::new(), store) {
+                    Ok(super::Value::Property(pv)) => Ok(pv),
+                    Ok(super::Value::Null) => Ok(PropertyValue::Null),
+                    // `[$x, $y]` evaluates to a list of values, not a property.
+                    Ok(super::Value::List(items)) => items
+                        .into_iter()
+                        .map(|v| match v {
+                            super::Value::Property(pv) => Ok(pv),
+                            _ => Err(not_a_value()),
+                        })
+                        .collect::<ExecutionResult<Vec<_>>>()
+                        .map(PropertyValue::Array),
+                    Ok(_) => Err(not_a_value()),
+                    Err(e) => Err(ExecutionError::PlanningError(format!(
+                        "db.index.vector.queryNodes: the {what} must be a literal or a \
+                         $parameter: {e}"
+                    ))),
+                }
             };
 
-            let k = match k_arg {
-                Expression::Literal(PropertyValue::Integer(i)) => *i as usize,
-                _ => return Err(ExecutionError::PlanningError("k must be an integer literal".to_string())),
+            let query_vector = match vector_arg {
+                Expression::Literal(pv) => pv.to_vector(),
+                e => evaluated(e, "query vector")?.to_vector(),
+            }
+            .ok_or_else(|| {
+                ExecutionError::PlanningError(
+                    "the query vector must be a list of numbers".to_string(),
+                )
+            })?;
+
+            // Negative `k` is refused rather than cast: `-1 as usize` is
+            // `usize::MAX`, a search for every vector in the index. A literal
+            // made that hard to write by accident; a parameter does not.
+            let k_value = match k_arg {
+                Expression::Literal(pv) => pv.clone(),
+                e => evaluated(e, "k")?,
+            };
+            let k = match k_value {
+                PropertyValue::Integer(i) if i >= 0 => i as usize,
+                other => {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "k must be a non-negative integer, got {other:?}"
+                    )))
+                }
             };
 
             let mut node_var = "node".to_string();
