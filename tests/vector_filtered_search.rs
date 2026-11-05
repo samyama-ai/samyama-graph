@@ -147,6 +147,9 @@ fn aliases_both_call_forms_and_score_conjuncts() {
     );
     assert_eq!(got.len(), 5);
     assert!(got.iter().all(|id| id % 10 == 7));
+    let mut got = got;
+    got.sort();
+    assert_eq!(got, w, "score conjuncts must preserve the exact filtered top-k");
 }
 
 /// A filter that passes nothing returns nothing, and one that passes fewer
