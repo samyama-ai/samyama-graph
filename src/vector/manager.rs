@@ -208,6 +208,13 @@ impl VectorIndexManager {
         self.model_ids.read().unwrap().get(&key).cloned()
     }
 
+    /// The metric the index on `label.property_key` was declared with, which
+    /// decides how its distances become scores (#1980).
+    pub fn metric(&self, label: &str, property_key: &str) -> Option<DistanceMetric> {
+        self.get_index(label, property_key)
+            .map(|index| index.read().unwrap().metric())
+    }
+
     /// Get an index
     pub fn get_index(&self, label: &str, property_key: &str) -> Option<Arc<RwLock<VectorIndex>>> {
         let key = IndexKey {
@@ -821,6 +828,18 @@ fn widen(
     // refuse.
     let mut fetch = k.min(len);
     loop {
+        // Include the base-layer links examined per candidate, not just the
+        // number of returned candidates, when comparing with a filtered scan.
+        // This also avoids accepting k passing but low-recall ANN results on
+        // modest indexes where scanning was already competitive.
+        let params = index.params();
+        let candidates = fetch.saturating_add(index.superseded());
+        let width = ef.or(params.ef)
+            .unwrap_or_else(|| candidates.saturating_mul(2).max(64))
+            .max(candidates);
+        if k > 0 && len > 0 && width.saturating_mul(params.m).saturating_mul(2) >= len {
+            return index.search_exact_where(query, k, &keep);
+        }
         let mut seen = std::collections::HashSet::new();
         let kept: Vec<(NodeId, f32)> = index
             .search_ef(query, fetch, ef)?

@@ -63,7 +63,7 @@ fn an_l2_index_answers_with_l2_distance() {
     let got = ids(
         &s,
         "CALL db.index.vector.queryNodes('L2T','v',[1.0,0.0],5) YIELD node, score \
-         RETURN node.id AS id ORDER BY score, id",
+         RETURN node.id AS id ORDER BY score DESC, id",
     );
     assert_eq!(got, vec![1, 1001, 1002, 1003, 1004]);
 }
