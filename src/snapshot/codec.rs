@@ -29,6 +29,12 @@ pub fn property_to_json(pv: &PropertyValue) -> serde_json::Value {
     match pv {
         PropertyValue::String(s) => serde_json::Value::String(s.clone()),
         PropertyValue::Integer(i) => serde_json::json!(i),
+        // JSON has no infinity or NaN, and `json!` writes them as `null`, so
+        // the value was lost without a word. They are tagged instead, in
+        // XML Schema's spellings.
+        PropertyValue::Float(f) if !f.is_finite() => {
+            serde_json::json!({"__type": "Float", "value": non_finite_name(*f)})
+        }
         PropertyValue::Float(f) => serde_json::json!(f),
         PropertyValue::Boolean(b) => serde_json::json!(b),
         PropertyValue::Null => serde_json::Value::Null,
@@ -85,6 +91,17 @@ pub fn property_to_json(pv: &PropertyValue) -> serde_json::Value {
                 "nanos": nanos
             })
         }
+    }
+}
+
+/// `INF`, `-INF` or `NaN`, as XML Schema spells a non-finite double.
+fn non_finite_name(f: f64) -> &'static str {
+    if f.is_nan() {
+        "NaN"
+    } else if f > 0.0 {
+        "INF"
+    } else {
+        "-INF"
     }
 }
 
@@ -163,6 +180,17 @@ pub fn json_to_property(val: &serde_json::Value) -> PropertyValue {
                                 .filter_map(|v| v.as_f64().map(|f| f as f32))
                                 .collect();
                             return PropertyValue::Vector(floats);
+                        }
+                    }
+                    "Float" => {
+                        let value = match obj.get("value").and_then(|v| v.as_str()) {
+                            Some("INF") => Some(f64::INFINITY),
+                            Some("-INF") => Some(f64::NEG_INFINITY),
+                            Some("NaN") => Some(f64::NAN),
+                            _ => None,
+                        };
+                        if let Some(f) = value {
+                            return PropertyValue::Float(f);
                         }
                     }
                     "Duration" => {
@@ -280,5 +308,23 @@ mod tests {
             let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
             assert_eq!(json_to_property(&parsed), v, "via {text}");
         }
+    }
+
+    /// Infinities and NaN survive the codec. As plain JSON they were written
+    /// as `null` and read back as no value at all.
+    #[test]
+    fn non_finite_floats_round_trip() {
+        for f in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let json = property_to_json(&PropertyValue::Float(f));
+            let text = serde_json::to_string(&json).unwrap();
+            let back = json_to_property(&serde_json::from_str(&text).unwrap());
+            match back {
+                PropertyValue::Float(g) => {
+                    assert!(g == f || (f.is_nan() && g.is_nan()), "{f}: {text}")
+                }
+                other => panic!("{f}: {text} read back as {other:?}"),
+            }
+        }
+        assert_eq!(property_to_json(&PropertyValue::Float(2.5)), serde_json::json!(2.5));
     }
 }
