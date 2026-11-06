@@ -582,7 +582,9 @@ paths:
         of the structures rather than a reading of the allocator: allocator slack,
         hash-map load factor and the Arc-held vector and hierarchy indexes are not
         counted, so these are floors. `bytes_per_edge` is null on a graph with no
-        edges, because zero would be a claim and a false one.
+        edges, because zero would be a claim and a false one. `result_cache`
+        reports the query-result cache (`entries`, `bytes`, `budget_bytes`),
+        which sits outside the graph and is not part of `attributed_bytes`.
       responses:
         '200':
           description: Memory attribution

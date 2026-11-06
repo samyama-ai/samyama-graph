@@ -1841,6 +1841,28 @@ async fn memory_reports_bytes_per_edge_and_the_tenant_count() {
 }
 
 #[tokio::test]
+async fn the_result_cache_is_on_metrics_and_memory() {
+    // #2080: the result cache was on neither page.
+    let s = indexed_graph().await;
+    {
+        let store = s.store.read().await;
+        for _ in 0..2 {
+            s.engine.execute_cached("MATCH (n) RETURN count(n) AS c", &store).unwrap();
+        }
+    }
+    let t = get_uri(routes(s.clone()), "/metrics").await.text();
+    assert!(t.contains("samyama_result_cache_entries 1\n"), "{t}");
+    assert!(t.contains("samyama_result_cache_hits 1\n"), "{t}");
+    assert!(t.contains("samyama_result_cache_misses 1\n"), "{t}");
+    assert!(!t.contains("samyama_result_cache_bytes 0\n"), "{t}");
+
+    let j = get_uri(routes(s), "/api/memory").await.json();
+    assert_eq!(j["result_cache"]["entries"], 1);
+    assert!(j["result_cache"]["bytes"].as_u64().unwrap() > 0);
+    assert!(j["result_cache"]["budget_bytes"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
 async fn schema_types_properties_and_lists_indexes_and_constraints() {
     let s = indexed_graph().await;
     let j = get_uri(routes(s), "/api/schema").await.json();
