@@ -302,6 +302,10 @@ name = "vector_benchmark"
 harness = false
 
 [[bench]]
+name = "vector_distance"
+harness = false
+
+[[bench]]
 name = "graphalytics_benchmark"
 harness = false
 
