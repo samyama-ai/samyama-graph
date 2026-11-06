@@ -20460,7 +20460,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
             "max_iterations",
             "minTotal", "min", "min_total", "populationSize", "population_size",
-            "property", "upperBound",
+            "property", "seed", "upperBound",
         ])?;
         let algorithm = config_map.get("algorithm").and_then(|v| v.as_string()).unwrap_or("Jaya");
         if !Self::is_known_solver(algorithm) {
@@ -20545,6 +20545,26 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
         let pop_size = cfg_i("populationSize", "population_size").unwrap_or(50) as usize;
         let max_iter = cfg_i("maxIterations", "max_iterations").unwrap_or(100) as usize;
+        // The solvers take a seed (`with_seed`) and were given none, so the same
+        // call on the same data answered differently every time (#2061).
+        // Optional, so an unseeded call keeps drawing from entropy.
+        let seed = match config_map.get("seed") {
+            None => None,
+            Some(PropertyValue::Integer(n)) if *n >= 0 => Some(*n as u64),
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "or.solve: `seed` must be a non-negative integer, got {other:?}"
+                )))
+            }
+        };
+        macro_rules! solve_with_seed {
+            ($solver:expr, $problem:expr) => {
+                match seed {
+                    Some(s) => $solver.with_seed(s).solve($problem),
+                    None => $solver.solve($problem),
+                }
+            };
+        }
 
         // 1. Gather nodes and costs
         let label = Label::new(label_str);
@@ -20612,10 +20632,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         if is_multi_objective {
             let started = std::time::Instant::now();
             let res = match algorithm {
-                "MOTLBO" => MOTLBOSolver::new(solver_config).solve(&problem),
-                "MOBMWR" => MOBMWRSolver::new(solver_config, MOBMWRVariant::MOBMR).solve(&problem),
-                "MORaoDE" => MORaoDESolver::new(solver_config).solve(&problem),
-                _ => NSGA2Solver::new(solver_config).solve(&problem), // Default multi
+                "MOTLBO" => solve_with_seed!(MOTLBOSolver::new(solver_config), &problem),
+                "MOBMWR" => solve_with_seed!(MOBMWRSolver::new(solver_config, MOBMWRVariant::MOBMR), &problem),
+                "MORaoDE" => solve_with_seed!(MORaoDESolver::new(solver_config), &problem),
+                _ => solve_with_seed!(NSGA2Solver::new(solver_config), &problem), // Default multi
             };
             let total_time_ms = duration_ms(started.elapsed());
 
@@ -20666,39 +20686,39 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         } else {
             let started = std::time::Instant::now();
             let result = match algorithm {
-                "Rao1" => RaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
-                "Rao2" => RaoSolver::new(solver_config, RaoVariant::Rao2).solve(&problem),
-                "Rao3" => RaoSolver::new(solver_config, RaoVariant::Rao3).solve(&problem),
-                "TLBO" => TLBOSolver::new(solver_config).solve(&problem),
-                "Firefly" => FireflySolver::new(solver_config).solve(&problem),
-                "Cuckoo" => CuckooSolver::new(solver_config).solve(&problem),
-                "GWO" => GWOSolver::new(solver_config).solve(&problem),
-                "GA" => GASolver::new(solver_config).solve(&problem),
-                "SA" => SASolver::new(solver_config).solve(&problem),
-                "Bat" => BatSolver::new(solver_config).solve(&problem),
-                "ABC" => ABCSolver::new(solver_config).solve(&problem),
-                "GSA" => GSASolver::new(solver_config).solve(&problem),
-                "HS" => HSSolver::new(solver_config).solve(&problem),
-                "FPA" => FPASolver::new(solver_config).solve(&problem),
+                "Rao1" => solve_with_seed!(RaoSolver::new(solver_config, RaoVariant::Rao1), &problem),
+                "Rao2" => solve_with_seed!(RaoSolver::new(solver_config, RaoVariant::Rao2), &problem),
+                "Rao3" => solve_with_seed!(RaoSolver::new(solver_config, RaoVariant::Rao3), &problem),
+                "TLBO" => solve_with_seed!(TLBOSolver::new(solver_config), &problem),
+                "Firefly" => solve_with_seed!(FireflySolver::new(solver_config), &problem),
+                "Cuckoo" => solve_with_seed!(CuckooSolver::new(solver_config), &problem),
+                "GWO" => solve_with_seed!(GWOSolver::new(solver_config), &problem),
+                "GA" => solve_with_seed!(GASolver::new(solver_config), &problem),
+                "SA" => solve_with_seed!(SASolver::new(solver_config), &problem),
+                "Bat" => solve_with_seed!(BatSolver::new(solver_config), &problem),
+                "ABC" => solve_with_seed!(ABCSolver::new(solver_config), &problem),
+                "GSA" => solve_with_seed!(GSASolver::new(solver_config), &problem),
+                "HS" => solve_with_seed!(HSSolver::new(solver_config), &problem),
+                "FPA" => solve_with_seed!(FPASolver::new(solver_config), &problem),
                 // Shipped in the crate and previously unreachable (#1341).
-                "PSO" => PSOSolver::new(solver_config).solve(&problem),
-                "DE" => DESolver::new(solver_config).solve(&problem),
-                "BMR" => BMRSolver::new(solver_config).solve(&problem),
-                "BWR" => BWRSolver::new(solver_config).solve(&problem),
-                "BMWR" => BMWRSolver::new(solver_config).solve(&problem),
-                "QOJaya" => QOJayaSolver::new(solver_config).solve(&problem),
-                "SAMPJaya" => SAMPJayaSolver::new(solver_config).solve(&problem),
-                "EHRJaya" => EHRJayaSolver::new(solver_config).solve(&problem),
-                "ITLBO" => ITLBOSolver::new(solver_config).solve(&problem),
-                "GOTLBO" => GOTLBOSolver::new(solver_config).solve(&problem),
-                "QORao" => QORaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
-                "SAPHR" => SAPHRSolver::new(solver_config).solve(&problem),
+                "PSO" => solve_with_seed!(PSOSolver::new(solver_config), &problem),
+                "DE" => solve_with_seed!(DESolver::new(solver_config), &problem),
+                "BMR" => solve_with_seed!(BMRSolver::new(solver_config), &problem),
+                "BWR" => solve_with_seed!(BWRSolver::new(solver_config), &problem),
+                "BMWR" => solve_with_seed!(BMWRSolver::new(solver_config), &problem),
+                "QOJaya" => solve_with_seed!(QOJayaSolver::new(solver_config), &problem),
+                "SAMPJaya" => solve_with_seed!(SAMPJayaSolver::new(solver_config), &problem),
+                "EHRJaya" => solve_with_seed!(EHRJayaSolver::new(solver_config), &problem),
+                "ITLBO" => solve_with_seed!(ITLBOSolver::new(solver_config), &problem),
+                "GOTLBO" => solve_with_seed!(GOTLBOSolver::new(solver_config), &problem),
+                "QORao" => solve_with_seed!(QORaoSolver::new(solver_config, RaoVariant::Rao1), &problem),
+                "SAPHR" => solve_with_seed!(SAPHRSolver::new(solver_config), &problem),
                 // Success-history adaptive DE with linear population
                 // reduction (OPT-13, #1803).
-                "LSHADE" => LSHADESolver::new(solver_config).solve(&problem),
+                "LSHADE" => solve_with_seed!(LSHADESolver::new(solver_config), &problem),
                 // Jaya by name, and by omitting `algorithm` -- the default is
                 // applied where the name is read, not here.
-                "Jaya" => JayaSolver::new(solver_config).solve(&problem),
+                "Jaya" => solve_with_seed!(JayaSolver::new(solver_config), &problem),
                 // Not a catch-all. `SOLVERS` has already accepted this name, so
                 // arriving here means the list and the dispatch have drifted
                 // apart, and running Jaya instead is how that drift stayed
