@@ -294,9 +294,24 @@ numbers above is that the two can be checked against each other.
   Refused requests are recorded, with `subject: "unauthenticated"` — a 401 on a
   write route is exactly the entry the log exists for.
 
+  The RESP port writes to the same file. It knows the statement, so it records
+  writes only: `GRAPH.QUERY` and `GRAPH.RO_QUERY` when the statement writes or
+  does not parse, `GRAPH.DELETE`, `GRAPH.COMMIT` and `GRAPH.ROLLBACK`.
+
+  ```json
+  {"at":"2026-11-05T10:00:00+00:00","protocol":"resp","subject":"ops","command":"GRAPH.QUERY","tenant":"default","is_write":true,"query_hash":"9f86d0…","ok":true}
+  ```
+
+  `query_hash` is the SHA-256 of the statement, without its parameters. A write
+  inside a transaction is recorded when it runs, so one with no `GRAPH.COMMIT`
+  after it did not land. A transaction rolled back by its deadline or by a
+  closed connection writes no `GRAPH.ROLLBACK` entry.
+
   **The request body is never recorded.** It carries the query, and the query
   carries the data. What is recorded is who, what route, which method, what
-  status, and when. The bearer token never appears: the entry is built from the
+  status, and when. A hash of a statement is not the statement, but a short one
+  with a guessable literal can be confirmed by hashing the guess, so keep values
+  in parameters and treat the log as sensitive. The bearer token never appears: the entry is built from the
   credential that matched, not from the header that was presented.
 
   Off by default. A log written to a path nobody chose is how a disk fills up
