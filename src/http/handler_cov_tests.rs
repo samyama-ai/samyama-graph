@@ -1751,7 +1751,7 @@ async fn json_import_refusals_and_quota() {
 }
 
 #[tokio::test]
-async fn json_import_keeps_scalars_and_drops_structures() {
+async fn json_import_keeps_scalars_and_lists_and_drops_nulls() {
     let s = state();
     let r = post_json(
         routes(s.clone()),
@@ -1764,7 +1764,7 @@ async fn json_import_keeps_scalars_and_drops_structures() {
     let rows = run(&s, "MATCH (n:N) WHERE n.a = 1 RETURN keys(n) AS k").await;
     let mut keys: Vec<String> = serde_json::from_value(rows["records"][0][0].clone()).unwrap();
     keys.sort();
-    assert_eq!(keys, vec!["a", "b"]);
+    assert_eq!(keys, vec!["a", "b", "c"]);
 }
 
 #[tokio::test]
