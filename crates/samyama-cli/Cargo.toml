@@ -26,3 +26,12 @@ comfy-table = ">=7, <7.2"
 # `with-file-history` is the feature that persists history across sessions.
 rustyline = { version = "14", default-features = false, features = ["with-file-history", "derive"] }
 dirs = "5"
+# `load <kg>` (#1759): streams a release asset to disk and the file up to the
+# server, so a 745 MB snapshot is never held in memory by the client.
+reqwest = { version = "0.13.1", features = ["multipart", "stream"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+# Serves a real snapshot to `load` in the tests, the way the SDK's own
+# in-process tests serve the engine's router.
+axum = "0.7"
