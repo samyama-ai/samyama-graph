@@ -54,11 +54,21 @@ there are conditions on you, not on the engine.
 
 **Getting a graph.** *HuggingFace* means a versioned dataset under
 `huggingface.co/datasets/VaidhyaMegha/`. *Snapshot* means a `.sgsnap` file on a
-[samyama-graph release](https://github.com/samyama-ai/samyama-graph/releases), imported in
-one call:
+[samyama-graph release](https://github.com/samyama-ai/samyama-graph/releases). With a server
+running, one command downloads it, checks its SHA-256 and loads it:
 
 ```bash
-curl -X POST localhost:8080/api/tenants/default/snapshot/import -F "file=@cricket.sgsnap"
+samyama-cli load cricket        # samyama-cli load --list shows every snapshot KG
+```
+
+It loads into an empty server and stops, before downloading, if the server already holds
+data (`--force` adds anyway). A server started with no flags allows 1M nodes and 10M edges,
+which two of these exceed: start it with `--max-nodes unlimited --max-edges unlimited
+--max-memory-bytes unlimited` for clinical-trials (7.8M nodes, about 17 GB of memory while
+loading) and imdb (1.9M nodes). A file you already have is imported in one call:
+
+```bash
+curl -X POST localhost:8080/api/snapshot/import -F "file=@cricket.sgsnap"
 ```
 
 *Build it* means running the repository's own ETL against a local engine.
