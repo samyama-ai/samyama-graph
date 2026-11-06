@@ -133,15 +133,15 @@ fn an_unsupported_output_is_refused_before_the_input_is_read() {
     // the formats were checked first.
     let err = convert(
         &dir.path().join("missing.sgsnap"),
-        &dir.path().join("out.ttl"),
+        &dir.path().join("out.json"),
         &Options::default(),
     )
     .unwrap_err();
     assert!(
-        matches!(err, ConvertError::CannotWrite(Format::Turtle)),
+        matches!(err, ConvertError::CannotWrite(Format::Neo4jJson)),
         "{err}"
     );
-    assert!(!dir.path().join("out.ttl").exists());
+    assert!(!dir.path().join("out.json").exists());
 
     let err = convert(
         &dir.path().join("in.xyz"),

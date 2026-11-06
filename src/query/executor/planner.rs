@@ -4074,19 +4074,26 @@ impl QueryPlanner {
 
             let mut node_var = "node".to_string();
             let mut score_var = None;
+            // `score` is Neo4j's similarity, higher is better; `distance` is
+            // the raw distance, lower is better, which `score` was before
+            // #1980.
+            let mut distance_var = None;
 
             for item in &call_clause.yield_items {
                 if item.name == "node" {
                     node_var = item.alias.clone().unwrap_or_else(|| item.name.clone());
                 } else if item.name == "score" {
                     score_var = Some(item.alias.clone().unwrap_or_else(|| item.name.clone()));
+                } else if item.name == "distance" {
+                    distance_var = Some(item.alias.clone().unwrap_or_else(|| item.name.clone()));
                 }
             }
 
             Ok(Box::new(
                 VectorSearchOperator::new(label, property, query_vector, k, node_var, score_var)
                     .with_filter(vector_filter)
-                    .with_ef(ef),
+                    .with_ef(ef)
+                    .with_distance_var(distance_var),
             ))
         } else if call_clause.procedure_name == "db.checkIntegrity"
             || call_clause.procedure_name == "db.checkintegrity"
