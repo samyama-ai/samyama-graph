@@ -28,6 +28,9 @@ pub mod mo_bmwr_family;
 pub mod mo_rao_de;
 pub mod saphr;
 pub mod lshade;
+pub mod spea2;
+pub mod moead;
+pub(crate) mod variation;
 
 pub use jaya::JayaSolver;
 pub use rao::{RaoSolver, RaoVariant};
@@ -59,3 +62,5 @@ pub use mo_bmwr_family::{MOBMWRSolver, MOBMWRVariant};
 pub use mo_rao_de::MORaoDESolver;
 pub use saphr::SAPHRSolver;
 pub use lshade::LSHADESolver;
+pub use spea2::SPEA2Solver;
+pub use moead::MOEADSolver;

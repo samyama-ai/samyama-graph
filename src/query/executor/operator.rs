@@ -75,7 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
 
 /// A store error on a write path, classified for the caller (#1483).
@@ -17894,7 +17894,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         "BMR", "BWR", "BMWR", "MOBMWR",
         "PSO", "DE", "LSHADE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
         "Firefly", "Cuckoo", "GWO", "Bat",
-        "NSGA2", "MORaoDE", "SAPHR",
+        "NSGA2", "MORaoDE", "SPEA2", "MOEAD", "SAPHR",
     ];
 
     /// The subset of `SOLVERS` that optimise more than one objective.
@@ -17906,7 +17906,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// here rather than by remembering to edit an `||` chain — the omission
     /// that made `MOBMWR` and `MORaoDE` report a dispatch bug.
     const MULTI_OBJECTIVE_SOLVERS: &'static [&'static str] =
-        &["MOTLBO", "MOBMWR", "NSGA2", "MORaoDE"];
+        &["MOTLBO", "MOBMWR", "NSGA2", "MORaoDE", "SPEA2", "MOEAD"];
 
     /// Procedures that need `&mut GraphStore`, and the refusal the read path owes
     /// a caller who asks for one there.
@@ -20501,6 +20501,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 "MOTLBO" => MOTLBOSolver::new(solver_config).solve(&problem),
                 "MOBMWR" => MOBMWRSolver::new(solver_config, MOBMWRVariant::MOBMR).solve(&problem),
                 "MORaoDE" => MORaoDESolver::new(solver_config).solve(&problem),
+                // Strength Pareto EA 2 (OPT-13, #1803).
+                "SPEA2" => SPEA2Solver::new(solver_config).solve(&problem),
+                // Decomposition-based MOEA (OPT-13, #1803).
+                "MOEAD" => MOEADSolver::new(solver_config).solve(&problem),
                 _ => NSGA2Solver::new(solver_config).solve(&problem), // Default multi
             };
             let total_time_ms = duration_ms(started.elapsed());

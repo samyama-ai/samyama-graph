@@ -2271,7 +2271,7 @@ fn or_solve_multi_objective_without_cost_properties_is_refused() {
 
 #[test]
 fn or_solve_multi_objective_reports_a_front() {
-    for name in ["NSGA2", "MOTLBO", "MOBMWR", "MORaoDE"] {
+    for name in ["NSGA2", "MOTLBO", "MOBMWR", "MORaoDE", "SPEA2", "MOEAD"] {
         let mut store = solve_store();
         let rows = run_algo_mut(
             &mut store,
