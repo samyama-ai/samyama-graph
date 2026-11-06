@@ -301,6 +301,12 @@ harness = false
 name = "vector_benchmark"
 harness = false
 
+# Recall–QPS sweep against ann-benchmarks datasets (#1983). Its shared code
+# is in benches/ann_common and is tested by tests/ann_harness.rs.
+[[bench]]
+name = "ann_benchmark"
+harness = false
+
 [[bench]]
 name = "vector_distance"
 harness = false
