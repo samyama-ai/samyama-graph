@@ -3937,6 +3937,20 @@ impl QueryPlanner {
             )));
         }
 
+        // Similarity graphs from a vector index (#1979).
+        if let Some(procedure) = super::vector_ops::VectorProcedure::from_name(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::vector_ops::VectorSimilarityGraphOperator::new(
+                procedure,
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
+        }
+
         if call_clause.procedure_name == "db.index.vector.queryNodes" {
             // Two spellings of the same call, because the name is Neo4j's (#1041):
             //

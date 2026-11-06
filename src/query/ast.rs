@@ -1446,7 +1446,22 @@ impl Query {
         self.clauses.iter().any(|c| match c {
             Clause::Call(call) => AlgorithmOperator::call_writes(&call.procedure_name, &call.arguments),
             _ => false,
-        })
+        }) || self.calls_a_writing_vector_procedure()
+    }
+
+    /// `vector.knnGraph` / `vector.similarityJoin` with `write: true` (#1979),
+    /// which create relationships. Kept beside `AlgorithmOperator::call_writes`
+    /// rather than inside it: they are not algorithms and have their own
+    /// operator, `vector_ops`.
+    fn calls_a_writing_vector_procedure(&self) -> bool {
+        use crate::query::executor::vector_ops::call_writes;
+        self.call_clause
+            .as_ref()
+            .is_some_and(|c| call_writes(&c.procedure_name, &c.arguments))
+            || self.clauses.iter().any(|c| match c {
+                Clause::Call(call) => call_writes(&call.procedure_name, &call.arguments),
+                _ => false,
+            })
     }
 
     pub fn new() -> Self {
