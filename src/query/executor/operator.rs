@@ -18165,8 +18165,13 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// a `SET`. Any `writeProperty`, even an invalid one, counts: the refusal
     /// for an invalid one then comes from the write path, with its reason,
     /// instead of a read executor saying only that it cannot write.
+    ///
+    /// An embedding procedure with `write: false` streams (#1736), so it reads
+    /// -- unless it also names a `writeProperty`, which is then refused on the
+    /// write path for asking both.
     pub fn call_writes(name: &str, args: &[Expression]) -> bool {
-        Self::procedure_is_mutating(name) || Self::config_has_key(args, Self::WRITE_PROPERTY_KEY)
+        (Self::procedure_is_mutating(name) && !Self::embedding_streams(name, args))
+            || Self::config_has_key(args, Self::WRITE_PROPERTY_KEY)
     }
 
     /// Whether any literal config map among `args` holds `key`.
@@ -20032,26 +20037,172 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
-    /// `CALL algo.fastRP(label?, {embeddingDimension, iterationWeights, seed,
-    /// normalize, writeProperty, edgeType}) YIELD node, embedding` -- FastRP
-    /// graph embeddings (ML-06).
+    /// The config key that turns an embedding call into a stream (#1736):
+    /// `CALL algo.fastRP('Node', {write: false})` returns the rows and stores
+    /// nothing.
     ///
-    /// Requires write access, like `algo.or.solve`: ML-06 asks for the
-    /// embedding "stored as vector properties", not only streamed, so this
-    /// writes `writeProperty` (default `embedding`) on every node in scope
-    /// before returning it as a row. That is a deliberate difference from
-    /// every other algorithm here, which streams and leaves persistence to
-    /// the caller's own `SET` -- ALGO-06's generic `write`/`mutate` modes
-    /// remain unbuilt, but ML-06 specifically asks this algorithm to persist
-    /// its own result.
+    /// The embeddings write by default, unlike every other algorithm here,
+    /// because ML-06 asks for them "stored as vector properties" (see
+    /// `execute_fastrp`). Turning that default round would silently stop
+    /// existing callers' writes, so the stream is the opt-in instead.
+    pub const EMBEDDING_WRITE_KEY: &'static str = "write";
+
+    /// The procedures that write by default and stream on `write: false`.
+    pub const EMBEDDING_PROCEDURES: &'static [&'static str] = &["fastrp", "node2vec"];
+
+    /// Is this a `CALL` to an embedding procedure that asks not to write?
+    ///
+    /// Read from literal config maps, as `call_writes` reads `writeProperty`,
+    /// so the router and the operator see the same request. Only the literal
+    /// `false` counts; anything else is refused by `embedding_write_target`
+    /// on the write path, with its reason.
+    pub fn embedding_streams(name: &str, args: &[Expression]) -> bool {
+        Self::EMBEDDING_PROCEDURES.contains(&Self::canonical_name(name).as_str())
+            && args.iter().any(|arg| {
+                matches!(
+                    arg,
+                    Expression::Literal(PropertyValue::Map(m))
+                        if m.get(Self::EMBEDDING_WRITE_KEY) == Some(&PropertyValue::Boolean(false))
+                )
+            })
+    }
+
+    /// Where an embedding call stores its vectors: `Some(property)` to write
+    /// (`writeProperty`, default `embedding`), `None` to stream only.
+    ///
+    /// `write: false` with a `writeProperty` is refused rather than resolved
+    /// one way or the other: the call asks for two opposite things, and
+    /// either guess loses a write or makes one the caller did not ask for.
+    fn embedding_write_target(&self, call: &str) -> ExecutionResult<Option<String>> {
+        let mut write = true;
+        let mut property = None;
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                match m.get(Self::EMBEDDING_WRITE_KEY) {
+                    None => {}
+                    Some(PropertyValue::Boolean(b)) => write = *b,
+                    Some(other) => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "{call}: `{}` must be a boolean, got {other:?}",
+                            Self::EMBEDDING_WRITE_KEY
+                        )))
+                    }
+                }
+                match m.get(Self::WRITE_PROPERTY_KEY) {
+                    None => {}
+                    Some(PropertyValue::String(s)) if !s.trim().is_empty() => {
+                        property = Some(s.clone())
+                    }
+                    Some(other) => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "{call}: `{}` must be a non-empty property name, got {other:?}",
+                            Self::WRITE_PROPERTY_KEY
+                        )))
+                    }
+                }
+            }
+        }
+        match (write, property) {
+            (false, Some(p)) => Err(ExecutionError::bad_argument(format!(
+                "{call}: `{}: false` asks for no write and `{}: '{p}'` asks for one. \
+                 Drop one of them.",
+                Self::EMBEDDING_WRITE_KEY,
+                Self::WRITE_PROPERTY_KEY
+            ))),
+            (false, None) => Ok(None),
+            (true, p) => Ok(Some(p.unwrap_or_else(|| "embedding".to_string()))),
+        }
+    }
+
+    /// Store each embedding (when `target` names a property) and emit its row.
+    ///
+    /// Stored as `PropertyValue::Vector`, `f32` per dimension -- the type a
+    /// float list literal parses to and the one the vector index reads
+    /// directly -- rather than an `Array` of `Float` values, each of which is
+    /// a full `PropertyValue` (#1736). The narrowing to `f32` is deliberate
+    /// here and nowhere else: a list literal stays 64-bit (#628), but an
+    /// embedding is a vector, and 4 bytes a dimension instead of a whole
+    /// `PropertyValue` is what makes one per node affordable. The row carries the same `f32` values,
+    /// so what a stream returns is exactly what a write would have stored.
+    fn emit_embeddings(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+        call: &str,
+        target: Option<&str>,
+        embeddings: Vec<(NodeId, Vec<f64>)>,
+    ) -> ExecutionResult<()> {
+        for (id, embedding) in embeddings {
+            let vector: Vec<f32> = embedding.into_iter().map(|f| f as f32).collect();
+            if let Some(property) = target {
+                store
+                    .set_node_property(
+                        tenant_id,
+                        id,
+                        property.to_string(),
+                        PropertyValue::Vector(vector.clone()),
+                    )
+                    .map_err(|e| {
+                        ExecutionError::RuntimeError(format!(
+                            "{call}: failed to write `{property}`: {e}"
+                        ))
+                    })?;
+            }
+            self.push_embedding_row(store, id, vector);
+        }
+        Ok(())
+    }
+
+    /// The read path's half of `emit_embeddings`: rows only, nothing stored.
+    fn stream_embeddings(&mut self, store: &GraphStore, embeddings: Vec<(NodeId, Vec<f64>)>) {
+        for (id, embedding) in embeddings {
+            let vector: Vec<f32> = embedding.into_iter().map(|f| f as f32).collect();
+            self.push_embedding_row(store, id, vector);
+        }
+    }
+
+    fn push_embedding_row(&mut self, store: &GraphStore, id: NodeId, vector: Vec<f32>) {
+        if let Some(node) = store.get_node(id) {
+            let mut record = Record::new();
+            record.bind("node".to_string(), Value::Node(id, Box::new(node.clone())));
+            record.bind(
+                "embedding".to_string(),
+                Value::List(
+                    vector
+                        .into_iter()
+                        .map(|f| Value::Property(PropertyValue::Float(f as f64)))
+                        .collect(),
+                ),
+            );
+            self.results.push(record);
+        }
+    }
+
+    /// `CALL algo.fastRP(label?, {embeddingDimension, iterationWeights, seed,
+    /// normalize, writeProperty, write, edgeType}) YIELD node, embedding` --
+    /// FastRP graph embeddings (ML-06).
+    ///
+    /// Writes by default, unlike every other algorithm here: ML-06 asks for
+    /// the embedding "stored as vector properties", not only streamed, so this
+    /// stores `writeProperty` (default `embedding`) on every node in scope
+    /// before returning it as a row, and needs write access to do it, like
+    /// `algo.or.solve`. `write: false` streams instead, stores nothing, and
+    /// runs on the read path (#1736). Running it again overwrites the stored
+    /// vectors, which is how they are refreshed.
     fn execute_fastrp(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
+        let target = self.embedding_write_target("algo.fastRP")?;
+        let embeddings = self.fastrp_embeddings(store)?;
+        self.emit_embeddings(store, tenant_id, "algo.fastRP", target.as_deref(), embeddings)
+    }
+
+    /// FastRP's config and run, shared by the write and the read path.
+    fn fastrp_embeddings(&self, store: &GraphStore) -> ExecutionResult<Vec<(NodeId, Vec<f64>)>> {
         Self::reject_unknown_config_keys(&self.args, "fastRP", &[
             "label", "edgeType", "embeddingDimension", "iterationWeights", "seed",
-            "normalize", "writeProperty",
+            "normalize", "writeProperty", "write",
         ])?;
         let view = self.structural_view(store)?;
         let mut config = crate::algo::FastRpConfig::default();
-        let mut write_property = "embedding".to_string();
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
                 if let Some(v) = m.get("embeddingDimension") {
@@ -20082,36 +20233,20 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 }
                 if let Some(PropertyValue::Integer(v)) = m.get("seed") { config.seed = *v as u64; }
                 if let Some(PropertyValue::Boolean(b)) = m.get("normalize") { config.normalize = *b; }
-                if let Some(PropertyValue::String(s)) = m.get("writeProperty") { write_property = s.clone(); }
             }
         }
-
         let embeddings = crate::algo::fastrp(&view, &config);
-        for (idx, embedding) in embeddings.into_iter().enumerate() {
-            let id = NodeId::new(view.index_to_node[idx]);
-            let values: Vec<PropertyValue> = embedding.into_iter().map(PropertyValue::Float).collect();
-            store
-                .set_node_property(tenant_id, id, write_property.clone(), PropertyValue::Array(values.clone()))
-                .map_err(|e| ExecutionError::RuntimeError(format!(
-                    "algo.fastRP: failed to write `{write_property}`: {e}"
-                )))?;
-            if let Some(node) = store.get_node(id) {
-                let mut record = Record::new();
-                record.bind("node".to_string(), Value::Node(id, Box::new(node.clone())));
-                record.bind(
-                    "embedding".to_string(),
-                    Value::List(values.into_iter().map(Value::Property).collect()),
-                );
-                self.results.push(record);
-            }
-        }
-        Ok(())
+        Ok(embeddings
+            .into_iter()
+            .enumerate()
+            .map(|(idx, e)| (NodeId::new(view.index_to_node[idx]), e))
+            .collect())
     }
 
     /// `CALL algo.node2vec(label?, {embeddingDimension, walkLength,
     /// walksPerNode, returnFactor, inOutFactor, windowSize, seed,
-    /// writeProperty, edgeType}) YIELD node, embedding` -- node2vec graph
-    /// embeddings (ML-06).
+    /// writeProperty, write, edgeType}) YIELD node, embedding` -- node2vec
+    /// graph embeddings (ML-06).
     ///
     /// **This runs node2vec's real biased 2nd-order random walks
     /// (`returnFactor` = p, `inOutFactor` = q) but embeds them with a
@@ -20120,15 +20255,22 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// for what that means and why. Calling this "node2vec" is only honest
     /// with that caveat attached, so it is repeated at both call sites.
     ///
-    /// Requires write access for the same reason `algo.fastRP` does above.
+    /// Writes by default and streams on `write: false`, as `algo.fastRP` does
+    /// above.
     fn execute_node2vec(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
+        let target = self.embedding_write_target("algo.node2vec")?;
+        let embeddings = self.node2vec_embeddings(store)?;
+        self.emit_embeddings(store, tenant_id, "algo.node2vec", target.as_deref(), embeddings)
+    }
+
+    /// node2vec's config and run, shared by the write and the read path.
+    fn node2vec_embeddings(&self, store: &GraphStore) -> ExecutionResult<Vec<(NodeId, Vec<f64>)>> {
         Self::reject_unknown_config_keys(&self.args, "node2vec", &[
             "label", "edgeType", "embeddingDimension", "walkLength", "walksPerNode",
-            "returnFactor", "inOutFactor", "windowSize", "seed", "writeProperty",
+            "returnFactor", "inOutFactor", "windowSize", "seed", "writeProperty", "write",
         ])?;
         let view = self.structural_view(store)?;
         let mut config = crate::algo::Node2VecConfig::default();
-        let mut write_property = "embedding".to_string();
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
                 if let Some(v) = m.get("embeddingDimension") {
@@ -20182,30 +20324,15 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     config.window_size = *v as usize;
                 }
                 if let Some(PropertyValue::Integer(v)) = m.get("seed") { config.seed = *v as u64; }
-                if let Some(PropertyValue::String(s)) = m.get("writeProperty") { write_property = s.clone(); }
             }
         }
 
         let embeddings = crate::algo::node2vec(&view, &config);
-        for (idx, embedding) in embeddings.into_iter().enumerate() {
-            let id = NodeId::new(view.index_to_node[idx]);
-            let values: Vec<PropertyValue> = embedding.into_iter().map(PropertyValue::Float).collect();
-            store
-                .set_node_property(tenant_id, id, write_property.clone(), PropertyValue::Array(values.clone()))
-                .map_err(|e| ExecutionError::RuntimeError(format!(
-                    "algo.node2vec: failed to write `{write_property}`: {e}"
-                )))?;
-            if let Some(node) = store.get_node(id) {
-                let mut record = Record::new();
-                record.bind("node".to_string(), Value::Node(id, Box::new(node.clone())));
-                record.bind(
-                    "embedding".to_string(),
-                    Value::List(values.into_iter().map(Value::Property).collect()),
-                );
-                self.results.push(record);
-            }
-        }
-        Ok(())
+        Ok(embeddings
+            .into_iter()
+            .enumerate()
+            .map(|(idx, e)| (NodeId::new(view.index_to_node[idx]), e))
+            .collect())
     }
 
     /// CALL algo.pca(label, properties, nComponents?) YIELD node, projection
@@ -21165,7 +21292,9 @@ impl PhysicalOperator for AlgorithmOperator {
             // `Query::is_write()`; the message stays for a caller who builds a read
             // executor directly.
             if let Some(why) = Self::mutating_procedure_refusal(&self.name) {
-                return Err(ExecutionError::RuntimeError(why.to_string()));
+                if !Self::embedding_streams(&self.name, &self.args) {
+                    return Err(ExecutionError::RuntimeError(why.to_string()));
+                }
             }
             // Likewise a write-back call (ALGO-06), which `Query::is_write()`
             // routes to the write executor.
@@ -21248,9 +21377,30 @@ impl PhysicalOperator for AlgorithmOperator {
                 "effectivesize" => self.execute_structural_holes(store, true)?,
                 "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
                 "reciprocity" => self.execute_reciprocity(store)?,
-                // The three mutating procedures are refused from `MUTATING_PROCEDURES`
-                // before this match, so that the refusal and the routing decision read
-                // the same list (#1468).
+                // An embedding reaches here only with `write: false` (#1736):
+                // without it the refusal above has already fired. The write
+                // target is still read, so `write: false` together with a
+                // `writeProperty` is refused with its reason here too.
+                "fastrp" | "node2vec" => {
+                    let fastrp = Self::canonical_name(&self.name) == "fastrp";
+                    let call = if fastrp { "algo.fastRP" } else { "algo.node2vec" };
+                    if self.embedding_write_target(call)?.is_some() {
+                        return Err(ExecutionError::RuntimeError(format!(
+                            "{call} writes unless `{}: false`, and writing requires write \
+                             access (MutQueryExecutor)",
+                            Self::EMBEDDING_WRITE_KEY
+                        )));
+                    }
+                    let embeddings = if fastrp {
+                        self.fastrp_embeddings(store)?
+                    } else {
+                        self.node2vec_embeddings(store)?
+                    };
+                    self.stream_embeddings(store, embeddings);
+                }
+                // `or.solve`, the remaining mutating procedure, is refused from
+                // `MUTATING_PROCEDURES` before this match, so that the refusal and
+                // the routing decision read the same list (#1468).
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.check_projection_used()?;

@@ -317,10 +317,30 @@ Both write a vector as a node property (`writeProperty`, default `embedding`)
 rather than only streaming it -- ML-06 asks for the result "stored as vector
 properties". They write whether or not `writeProperty` is given, which the
 algorithms under "Write-back" above do only when asked; that is the
-deliberate exception, documented at the call site. Both require write access (`CALL ... YIELD node, embedding` through
-`MutQueryExecutor`) for that reason, and both are seeded and reproducible: no
-call to a clock or a process RNG, every random draw is a pure function of
-`(seed, node index, dimension index)` computed with SplitMix64.
+deliberate exception, documented at the call site. Both require write access
+(`CALL ... YIELD node, embedding` through `MutQueryExecutor`) for that reason,
+and both are seeded and reproducible: no call to a clock or a process RNG,
+every random draw is a pure function of `(seed, node index, dimension index)`
+computed with SplitMix64.
+
+| Config | Effect | Access |
+|---|---|---|
+| (none), or `write: true` | Stores `embedding` on every node in scope and yields it | Write |
+| `writeProperty: 'p'` | Stores `p` instead | Write |
+| `write: false` | Yields the rows and stores nothing (#1736) | Read |
+| `write: false, writeProperty: 'p'` | Refused: it asks for no write and for one | -- |
+
+The stored value is a `Vector` (`f32` per dimension), the type the vector index
+reads directly, so an index on the property finds a node by its own embedding
+with no conversion (`tests/graph_embeddings.rs`). The yielded
+`embedding` carries the same `f32` values widened back to floats, so a stream
+returns exactly what a write would have stored. A list literal stays 64-bit
+(#628); the narrowing applies to stored embeddings only.
+
+Running the call again overwrites the stored vectors, which is how they are
+refreshed. Nothing records which run, config or seed produced a stored vector:
+versioning (ML-06's "versioned") is not built. `mutate` mode is not built either,
+because a projection cannot hold a property yet (ALGO-05).
 
 **node2vec here runs the real biased 2nd-order random walks (`returnFactor` =
 p, `inOutFactor` = q) but embeds them with a random-projection of the walks'
