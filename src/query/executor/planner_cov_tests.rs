@@ -895,16 +895,26 @@ fn vector_query_nodes_argument_checks() {
         e.contains("the query vector must be a list of numbers"),
         "{e}"
     );
+    // A parameter is bound before planning (#2047); one that reaches the
+    // planner unbound was never supplied, and the error says how to supply it.
     let e = call_err(&s, "CALL db.index.vector.queryNodes('Doc', 'emb', $v, 2)");
     assert!(
-        e.contains("the query vector must be a vector literal"),
+        e.contains("the query vector must be a literal or a $parameter")
+            && e.contains("Unresolved parameter: `$v`"),
         "{e}"
     );
+    let e = call_err(&s, "CALL db.index.vector.queryNodes('Doc', 'emb', n.v, 2)");
+    assert!(e.contains("the query vector must be a literal or a $parameter"), "{e}");
     let e = call_err(
         &s,
         "CALL db.index.vector.queryNodes('Doc', 'emb', [1.0], 'k')",
     );
-    assert!(e.contains("k must be an integer literal"), "{e}");
+    assert!(e.contains("k must be a non-negative integer"), "{e}");
+    let e = call_err(&s, "CALL db.index.vector.queryNodes('Doc', 'emb', [1.0], -1)");
+    assert!(e.contains("k must be a non-negative integer"), "{e}");
+    // A constant expression is a value known before the search, like a literal.
+    let op = call(&s, "CALL db.index.vector.queryNodes('Doc', 'emb', [1.0, 0.0], 1 + 1) YIELD node").unwrap();
+    assert_eq!(op.describe().name, "VectorSearch");
 
     let op = call(&s, "CALL db.index.vector.queryNodes('Doc', 'emb', [1.0, 0.0], 2) YIELD node AS d, score AS sc, other").unwrap();
     assert_eq!(op.describe().name, "VectorSearch");
