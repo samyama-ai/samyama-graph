@@ -208,6 +208,13 @@ impl VectorIndexManager {
         self.model_ids.read().unwrap().get(&key).cloned()
     }
 
+    /// The metric the index on `label.property_key` was declared with, which
+    /// decides how its distances become scores (#1980).
+    pub fn metric(&self, label: &str, property_key: &str) -> Option<DistanceMetric> {
+        self.get_index(label, property_key)
+            .map(|index| index.read().unwrap().metric())
+    }
+
     /// Get an index
     pub fn get_index(&self, label: &str, property_key: &str) -> Option<Arc<RwLock<VectorIndex>>> {
         let key = IndexKey {
@@ -383,28 +390,54 @@ impl VectorIndexManager {
     /// Indices whose dimension differs from the query are skipped (a query vector
     /// can only be compared within its own embedding space).
     pub fn search_all(&self, query: &[f32], k: usize) -> VectorResult<Vec<(NodeId, f32)>> {
-        // Snapshot the key list first so we don't hold the map lock across the
-        // per-index searches (each of which takes the index's own lock).
-        let keys = self.list_indices();
+        self.search_each(query, k, |_, index| index.search(query, k))
+    }
+
+    /// Run `search` on every index whose dimension is the query's, in
+    /// parallel when there is more than one (#1976), and merge the hits to a
+    /// global top-`k`.
+    ///
+    /// The (key, index) pairs are snapshotted first, so the map lock is not
+    /// held across the searches; each search takes only its own index's read
+    /// lock. The merge runs after every search has finished, in the order
+    /// the indexes were listed, so it is the merge the sequential loop did.
+    fn search_each(
+        &self,
+        query: &[f32],
+        k: usize,
+        search: impl Fn(&IndexKey, &VectorIndex) -> VectorResult<Vec<(NodeId, f32)>> + Sync,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        use rayon::prelude::*;
+        let indexes: Vec<(IndexKey, Arc<RwLock<VectorIndex>>)> = self
+            .indices
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(key, lock)| (key.clone(), Arc::clone(lock)))
+            .collect();
+        let one = |(key, lock): &(IndexKey, Arc<RwLock<VectorIndex>>)| {
+            let index = lock.read().unwrap();
+            if index.dimensions() != query.len() {
+                return Ok(Vec::new());
+            }
+            search(key, &index)
+        };
+        let hits: Vec<Vec<(NodeId, f32)>> = if indexes.len() > 1 {
+            indexes.par_iter().map(one).collect::<VectorResult<_>>()?
+        } else {
+            indexes.iter().map(one).collect::<VectorResult<_>>()?
+        };
         // A node can be indexed under more than one (label, property); keep only
         // its best (smallest) distance so it isn't returned twice.
         let mut best: HashMap<NodeId, f32> = HashMap::new();
-        for key in keys {
-            if let Some(index_lock) = self.get_index(&key.label, &key.property_key) {
-                let index = index_lock.read().unwrap();
-                if index.dimensions() != query.len() {
-                    continue;
-                }
-                for (node_id, distance) in index.search(query, k)? {
-                    best.entry(node_id)
-                        .and_modify(|d| {
-                            if distance < *d {
-                                *d = distance;
-                            }
-                        })
-                        .or_insert(distance);
-                }
-            }
+        for (node_id, distance) in hits.into_iter().flatten() {
+            best.entry(node_id)
+                .and_modify(|d| {
+                    if distance < *d {
+                        *d = distance;
+                    }
+                })
+                .or_insert(distance);
         }
         let mut merged: Vec<(NodeId, f32)> = best.into_iter().collect();
         merged.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -450,35 +483,18 @@ impl VectorIndexManager {
 
     /// [`search_all`](Self::search_all), keeping only the `(label, node)` pairs
     /// `keep` accepts (#1605).
+    ///
+    /// The indexes are searched in parallel, so `keep` is called from
+    /// several threads at once (#1976).
     pub fn search_all_filtered(
         &self,
         query: &[f32],
         k: usize,
-        keep: impl Fn(&str, NodeId) -> bool,
+        keep: impl Fn(&str, NodeId) -> bool + Sync,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
-        let mut best: HashMap<NodeId, f32> = HashMap::new();
-        for key in self.list_indices() {
-            if let Some(index_lock) = self.get_index(&key.label, &key.property_key) {
-                let index = index_lock.read().unwrap();
-                if index.dimensions() != query.len() {
-                    continue;
-                }
-                let kept = widen(&index, query, k, None, &|id| keep(&key.label, id))?;
-                for (node_id, distance) in kept {
-                    best.entry(node_id)
-                        .and_modify(|d| {
-                            if distance < *d {
-                                *d = distance;
-                            }
-                        })
-                        .or_insert(distance);
-                }
-            }
-        }
-        let mut merged: Vec<(NodeId, f32)> = best.into_iter().collect();
-        merged.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        merged.truncate(k);
-        Ok(merged)
+        self.search_each(query, k, |key, index| {
+            widen(index, query, k, None, &|id| keep(&key.label, id))
+        })
     }
 
     /// Drop and rebuild a specific HNSW index from a caller-supplied vector list.
@@ -730,6 +746,50 @@ mod tests {
         assert!(hits[0].1 < 1e-6);
     }
 
+    /// The parallel search over several indexes (#1976) returns what
+    /// searching each index in turn and merging gives.
+    #[test]
+    fn search_all_over_many_indexes_equals_searching_each_in_turn() {
+        let mgr = VectorIndexManager::new();
+        let labels: Vec<String> = (0..8).map(|i| format!("L{i}")).collect();
+        for (li, label) in labels.iter().enumerate() {
+            mgr.create_index(label, "v", 16, DistanceMetric::L2).unwrap();
+            for j in 0..20u64 {
+                let v: Vec<f32> = (0..16)
+                    .map(|d| ((li as u64 * 31 + j * 7 + d) % 13) as f32 / 13.0)
+                    .collect();
+                // Ids overlap across labels, so the dedup is exercised.
+                mgr.add_vector(label, "v", NodeId::new(j + li as u64 * 10), &v)
+                    .unwrap();
+            }
+        }
+        let query: Vec<f32> = (0..16).map(|d| (d % 5) as f32 / 5.0).collect();
+        let k = 10;
+
+        let mut best: HashMap<NodeId, f32> = HashMap::new();
+        for label in &labels {
+            for (id, d) in mgr.search(label, "v", &query, k).unwrap() {
+                let e = best.entry(id).or_insert(d);
+                *e = e.min(d);
+            }
+        }
+        let mut expected: Vec<(NodeId, f32)> = best.into_iter().collect();
+        expected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        expected.truncate(k);
+
+        let got = mgr.search_all(&query, k).unwrap();
+        let dist = |v: &[(NodeId, f32)]| v.iter().map(|(_, d)| *d).collect::<Vec<_>>();
+        // Distances, not ids: ties may come back in either order.
+        assert_eq!(dist(&got), dist(&expected));
+
+        // The filtered form applies `keep` per index, from several threads.
+        let kept = mgr
+            .search_all_filtered(&query, k, |label, _| label == "L3")
+            .unwrap();
+        let only_l3 = mgr.search("L3", "v", &query, k).unwrap();
+        assert_eq!(dist(&kept), dist(&only_l3));
+    }
+
     #[test]
     fn rebuild_skips_mismatched_vectors_and_ignores_unknown_indexes() {
         let mgr = VectorIndexManager::new();
@@ -821,6 +881,18 @@ fn widen(
     // refuse.
     let mut fetch = k.min(len);
     loop {
+        // Include the base-layer links examined per candidate, not just the
+        // number of returned candidates, when comparing with a filtered scan.
+        // This also avoids accepting k passing but low-recall ANN results on
+        // modest indexes where scanning was already competitive.
+        let params = index.params();
+        let candidates = fetch.saturating_add(index.superseded());
+        let width = ef.or(params.ef)
+            .unwrap_or_else(|| candidates.saturating_mul(2).max(64))
+            .max(candidates);
+        if k > 0 && len > 0 && width.saturating_mul(params.m).saturating_mul(2) >= len {
+            return index.search_exact_where(query, k, &keep);
+        }
         let mut seen = std::collections::HashSet::new();
         let kept: Vec<(NodeId, f32)> = index
             .search_ef(query, fetch, ef)?

@@ -3090,6 +3090,8 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint",
     "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
     "tostringornull", "toupper", "touppercase", "trim", "type", "valuetype",
+    "vector.distance", "vector.similarity.cosine", "vector.similarity.euclidean",
+    "vector_distance",
 ];
 
 /// Is `name` a function this engine implements?
@@ -3279,6 +3281,10 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("haslabels", 2),
     ("point.distance", 2),
     ("point.withinbbox", 3),
+    ("vector.similarity.cosine", 2),
+    ("vector.similarity.euclidean", 2),
+    ("vector.distance", 3),
+    ("vector_distance", 3),
 ];
 
 /// How many arguments this function needs at minimum, if it is constrained.
@@ -4811,6 +4817,65 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let inside = p.x >= ll.x && p.x <= ur.x && p.y >= ll.y && p.y <= ur.y;
             Ok(Value::Property(PropertyValue::Boolean(inside)))
         }
+        // Neo4j 5's vector functions (#1980). The similarities are the
+        // `score` of `db.index.vector.queryNodes` for the same pair, from the
+        // same kernels: higher is better, in [0, 1].
+        "vector.similarity.cosine" => {
+            let (a, b) = vector_pair(&args[0], &args[1], "vector.similarity.cosine")?;
+            if is_zero_vector(&a) || is_zero_vector(&b) {
+                // A zero vector has no direction: not valid for cosine.
+                return Ok(Value::Null);
+            }
+            let metric = crate::vector::DistanceMetric::Cosine;
+            Ok(Value::Property(PropertyValue::Float(metric.score(metric.distance(&a, &b)))))
+        }
+        "vector.similarity.euclidean" => {
+            let (a, b) = vector_pair(&args[0], &args[1], "vector.similarity.euclidean")?;
+            let metric = crate::vector::DistanceMetric::L2;
+            Ok(Value::Property(PropertyValue::Float(metric.score(metric.distance(&a, &b)))))
+        }
+        // A distance, lower is better, by the metric named in the third
+        // argument -- Neo4j's `vector_distance`, under both spellings.
+        "vector.distance" | "vector_distance" => {
+            let (a, b) = vector_pair(&args[0], &args[1], name)?;
+            let metric = match &args[2] {
+                Value::Property(PropertyValue::String(m)) => m.to_ascii_uppercase(),
+                _ => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{name}()` takes the metric as a string, one of {}",
+                        VECTOR_DISTANCE_METRICS.join(", ")
+                    )))
+                }
+            };
+            use crate::vector::DistanceMetric as M;
+            let d = match metric.as_str() {
+                "EUCLIDEAN" => M::L2.distance(&a, &b) as f64,
+                // No index kernel reports these two; computed here, in f64.
+                "EUCLIDEAN_SQUARED" => a
+                    .iter()
+                    .zip(&b)
+                    .map(|(x, y)| (*x as f64 - *y as f64).powi(2))
+                    .sum(),
+                "MANHATTAN" => a.iter().zip(&b).map(|(x, y)| (*x as f64 - *y as f64).abs()).sum(),
+                "COSINE" => {
+                    if is_zero_vector(&a) || is_zero_vector(&b) {
+                        return Ok(Value::Null);
+                    }
+                    M::Cosine.distance(&a, &b) as f64
+                }
+                // The inner-product kernel reports `1 - a.b`; Neo4j's DOT
+                // distance is `-(a.b)`.
+                "DOT" => M::InnerProduct.distance(&a, &b) as f64 - 1.0,
+                "HAMMING" => a.iter().zip(&b).filter(|(x, y)| x != y).count() as f64,
+                other => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{name}()`: unknown metric '{other}'; expected one of {}",
+                        VECTOR_DISTANCE_METRICS.join(", ")
+                    )))
+                }
+            };
+            Ok(Value::Property(PropertyValue::Float(d)))
+        }
         // CY-22: Math constants & minor functions
         "e" => Ok(Value::Property(PropertyValue::Float(std::f64::consts::E))),
         "log10" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.log10()))) }
@@ -4926,6 +4991,50 @@ fn extract_string(val: &Value) -> ExecutionResult<String> {
         Value::Property(PropertyValue::String(s)) => Ok(s.clone()),
         _ => Err(ExecutionError::TypeError("Expected string argument".to_string())),
     }
+}
+
+/// The metrics `vector.distance` takes, as Neo4j names them.
+const VECTOR_DISTANCE_METRICS: &[&str] =
+    &["EUCLIDEAN", "EUCLIDEAN_SQUARED", "MANHATTAN", "COSINE", "DOT", "HAMMING"];
+
+/// A vector argument of the `vector.*` functions (#1980): a non-empty list
+/// of finite numbers.
+fn vector_arg(v: &Value, who: &str) -> ExecutionResult<Vec<f32>> {
+    let vector = match v {
+        Value::Property(pv) => pv.to_vector(),
+        Value::List(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Property(PropertyValue::Float(f)) => Some(*f as f32),
+                Value::Property(PropertyValue::Integer(i)) => Some(*i as f32),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    };
+    match vector {
+        Some(v) if !v.is_empty() && v.iter().all(|x| x.is_finite()) => Ok(v),
+        _ => Err(ExecutionError::TypeError(format!(
+            "`{who}()` takes vectors: non-empty lists of finite numbers"
+        ))),
+    }
+}
+
+/// Two vectors of the same dimension, as every `vector.*` function needs.
+fn vector_pair(a: &Value, b: &Value, who: &str) -> ExecutionResult<(Vec<f32>, Vec<f32>)> {
+    let (a, b) = (vector_arg(a, who)?, vector_arg(b, who)?);
+    if a.len() != b.len() {
+        return Err(ExecutionError::bad_argument(format!(
+            "`{who}()` takes two vectors of the same dimension; got {} and {}",
+            a.len(),
+            b.len()
+        )));
+    }
+    Ok((a, b))
+}
+
+fn is_zero_vector(v: &[f32]) -> bool {
+    v.iter().all(|x| *x == 0.0)
 }
 
 /// Helper: extract integer from Value
@@ -14417,8 +14526,14 @@ pub struct VectorSearchOperator {
     k: usize,
     /// Variable name for matched nodes
     node_var: String,
-    /// Variable name for similarity scores (optional)
+    /// Variable for `score`: Neo4j's similarity, higher is better (#1980).
     score_var: Option<String>,
+    /// Variable for `distance`: the raw distance the index ranks by, lower
+    /// is better. What `score` was before #1980.
+    distance_var: Option<String>,
+    /// The index's metric, read when the search runs; it decides how a
+    /// distance becomes a score.
+    metric: Option<crate::vector::DistanceMetric>,
     /// The part of a following WHERE that names only the node, applied
     /// inside the search so it decides which nodes count towards k (#1969).
     filter: Option<Expression>,
@@ -14447,6 +14562,8 @@ impl VectorSearchOperator {
             k,
             node_var,
             score_var,
+            distance_var: None,
+            metric: None,
             filter: None,
             ef: None,
             results: Vec::new(),
@@ -14466,10 +14583,19 @@ impl VectorSearchOperator {
         self
     }
 
+    /// Bind the raw distance to this variable (`YIELD distance`, #1980).
+    pub fn with_distance_var(mut self, distance_var: Option<String>) -> Self {
+        self.distance_var = distance_var;
+        self
+    }
+
     fn initialize(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         if !self.results.is_empty() || self.current > 0 {
             return Ok(());
         }
+        // A missing index is reported by the search itself (#1660), so a
+        // missing metric here only means there is nothing to score.
+        self.metric = store.vector_index.metric(&self.label, &self.property_key);
 
         let Some(filter) = &self.filter else {
             self.results = store
@@ -14518,14 +14644,32 @@ impl PhysicalOperator for VectorSearchOperator {
             return Ok(None);
         }
 
-        let (node_id, score) = &self.results[self.current];
+        let (node_id, distance) = self.results[self.current];
         self.current += 1;
 
         let mut record = Record::new();
-        record.bind(self.node_var.clone(), Value::NodeRef(*node_id));
+        record.bind(self.node_var.clone(), Value::NodeRef(node_id));
 
+        // `score` is Neo4j's: a similarity, higher is better. The rows are
+        // still nearest first, and the score falls as the distance grows, so
+        // that is also highest score first (#1980).
         if let Some(score_var) = &self.score_var {
-            record.bind(score_var.clone(), Value::Property(PropertyValue::Float(*score as f64)));
+            let metric = self.metric.ok_or_else(|| {
+                ExecutionError::GraphError(format!(
+                    "no vector index on :{}({})",
+                    self.label, self.property_key
+                ))
+            })?;
+            record.bind(
+                score_var.clone(),
+                Value::Property(PropertyValue::Float(metric.score(distance))),
+            );
+        }
+        if let Some(distance_var) = &self.distance_var {
+            record.bind(
+                distance_var.clone(),
+                Value::Property(PropertyValue::Float(distance as f64)),
+            );
         }
 
         Ok(Some(record))
@@ -20202,7 +20346,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
             "max_iterations",
             "minTotal", "min", "min_total", "populationSize", "population_size",
-            "property", "upperBound",
+            "property", "seed", "upperBound",
         ])?;
         let algorithm = config_map.get("algorithm").and_then(|v| v.as_string()).unwrap_or("Jaya");
         if !Self::is_known_solver(algorithm) {
@@ -20287,6 +20431,26 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
 
         let pop_size = cfg_i("populationSize", "population_size").unwrap_or(50) as usize;
         let max_iter = cfg_i("maxIterations", "max_iterations").unwrap_or(100) as usize;
+        // The solvers take a seed (`with_seed`) and were given none, so the same
+        // call on the same data answered differently every time (#2061).
+        // Optional, so an unseeded call keeps drawing from entropy.
+        let seed = match config_map.get("seed") {
+            None => None,
+            Some(PropertyValue::Integer(n)) if *n >= 0 => Some(*n as u64),
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "or.solve: `seed` must be a non-negative integer, got {other:?}"
+                )))
+            }
+        };
+        macro_rules! solve_with_seed {
+            ($solver:expr, $problem:expr) => {
+                match seed {
+                    Some(s) => $solver.with_seed(s).solve($problem),
+                    None => $solver.solve($problem),
+                }
+            };
+        }
 
         // 1. Gather nodes and costs
         let label = Label::new(label_str);
@@ -20354,10 +20518,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         if is_multi_objective {
             let started = std::time::Instant::now();
             let res = match algorithm {
-                "MOTLBO" => MOTLBOSolver::new(solver_config).solve(&problem),
-                "MOBMWR" => MOBMWRSolver::new(solver_config, MOBMWRVariant::MOBMR).solve(&problem),
-                "MORaoDE" => MORaoDESolver::new(solver_config).solve(&problem),
-                _ => NSGA2Solver::new(solver_config).solve(&problem), // Default multi
+                "MOTLBO" => solve_with_seed!(MOTLBOSolver::new(solver_config), &problem),
+                "MOBMWR" => solve_with_seed!(MOBMWRSolver::new(solver_config, MOBMWRVariant::MOBMR), &problem),
+                "MORaoDE" => solve_with_seed!(MORaoDESolver::new(solver_config), &problem),
+                _ => solve_with_seed!(NSGA2Solver::new(solver_config), &problem), // Default multi
             };
             let total_time_ms = duration_ms(started.elapsed());
 
@@ -20408,39 +20572,39 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         } else {
             let started = std::time::Instant::now();
             let result = match algorithm {
-                "Rao1" => RaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
-                "Rao2" => RaoSolver::new(solver_config, RaoVariant::Rao2).solve(&problem),
-                "Rao3" => RaoSolver::new(solver_config, RaoVariant::Rao3).solve(&problem),
-                "TLBO" => TLBOSolver::new(solver_config).solve(&problem),
-                "Firefly" => FireflySolver::new(solver_config).solve(&problem),
-                "Cuckoo" => CuckooSolver::new(solver_config).solve(&problem),
-                "GWO" => GWOSolver::new(solver_config).solve(&problem),
-                "GA" => GASolver::new(solver_config).solve(&problem),
-                "SA" => SASolver::new(solver_config).solve(&problem),
-                "Bat" => BatSolver::new(solver_config).solve(&problem),
-                "ABC" => ABCSolver::new(solver_config).solve(&problem),
-                "GSA" => GSASolver::new(solver_config).solve(&problem),
-                "HS" => HSSolver::new(solver_config).solve(&problem),
-                "FPA" => FPASolver::new(solver_config).solve(&problem),
+                "Rao1" => solve_with_seed!(RaoSolver::new(solver_config, RaoVariant::Rao1), &problem),
+                "Rao2" => solve_with_seed!(RaoSolver::new(solver_config, RaoVariant::Rao2), &problem),
+                "Rao3" => solve_with_seed!(RaoSolver::new(solver_config, RaoVariant::Rao3), &problem),
+                "TLBO" => solve_with_seed!(TLBOSolver::new(solver_config), &problem),
+                "Firefly" => solve_with_seed!(FireflySolver::new(solver_config), &problem),
+                "Cuckoo" => solve_with_seed!(CuckooSolver::new(solver_config), &problem),
+                "GWO" => solve_with_seed!(GWOSolver::new(solver_config), &problem),
+                "GA" => solve_with_seed!(GASolver::new(solver_config), &problem),
+                "SA" => solve_with_seed!(SASolver::new(solver_config), &problem),
+                "Bat" => solve_with_seed!(BatSolver::new(solver_config), &problem),
+                "ABC" => solve_with_seed!(ABCSolver::new(solver_config), &problem),
+                "GSA" => solve_with_seed!(GSASolver::new(solver_config), &problem),
+                "HS" => solve_with_seed!(HSSolver::new(solver_config), &problem),
+                "FPA" => solve_with_seed!(FPASolver::new(solver_config), &problem),
                 // Shipped in the crate and previously unreachable (#1341).
-                "PSO" => PSOSolver::new(solver_config).solve(&problem),
-                "DE" => DESolver::new(solver_config).solve(&problem),
-                "BMR" => BMRSolver::new(solver_config).solve(&problem),
-                "BWR" => BWRSolver::new(solver_config).solve(&problem),
-                "BMWR" => BMWRSolver::new(solver_config).solve(&problem),
-                "QOJaya" => QOJayaSolver::new(solver_config).solve(&problem),
-                "SAMPJaya" => SAMPJayaSolver::new(solver_config).solve(&problem),
-                "EHRJaya" => EHRJayaSolver::new(solver_config).solve(&problem),
-                "ITLBO" => ITLBOSolver::new(solver_config).solve(&problem),
-                "GOTLBO" => GOTLBOSolver::new(solver_config).solve(&problem),
-                "QORao" => QORaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
-                "SAPHR" => SAPHRSolver::new(solver_config).solve(&problem),
+                "PSO" => solve_with_seed!(PSOSolver::new(solver_config), &problem),
+                "DE" => solve_with_seed!(DESolver::new(solver_config), &problem),
+                "BMR" => solve_with_seed!(BMRSolver::new(solver_config), &problem),
+                "BWR" => solve_with_seed!(BWRSolver::new(solver_config), &problem),
+                "BMWR" => solve_with_seed!(BMWRSolver::new(solver_config), &problem),
+                "QOJaya" => solve_with_seed!(QOJayaSolver::new(solver_config), &problem),
+                "SAMPJaya" => solve_with_seed!(SAMPJayaSolver::new(solver_config), &problem),
+                "EHRJaya" => solve_with_seed!(EHRJayaSolver::new(solver_config), &problem),
+                "ITLBO" => solve_with_seed!(ITLBOSolver::new(solver_config), &problem),
+                "GOTLBO" => solve_with_seed!(GOTLBOSolver::new(solver_config), &problem),
+                "QORao" => solve_with_seed!(QORaoSolver::new(solver_config, RaoVariant::Rao1), &problem),
+                "SAPHR" => solve_with_seed!(SAPHRSolver::new(solver_config), &problem),
                 // Success-history adaptive DE with linear population
                 // reduction (OPT-13, #1803).
-                "LSHADE" => LSHADESolver::new(solver_config).solve(&problem),
+                "LSHADE" => solve_with_seed!(LSHADESolver::new(solver_config), &problem),
                 // Jaya by name, and by omitting `algorithm` -- the default is
                 // applied where the name is read, not here.
-                "Jaya" => JayaSolver::new(solver_config).solve(&problem),
+                "Jaya" => solve_with_seed!(JayaSolver::new(solver_config), &problem),
                 // Not a catch-all. `SOLVERS` has already accepted this name, so
                 // arriving here means the list and the dispatch have drifted
                 // apart, and running Jaya instead is how that drift stayed
