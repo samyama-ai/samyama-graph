@@ -144,12 +144,13 @@ fn mock_server(mode: StatusMode) -> String {
     format!("http://{addr}")
 }
 
-/// A URL on which nothing is listening.
-fn dead_url() -> String {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = l.local_addr().unwrap();
-    drop(l);
-    format!("http://{addr}")
+/// Reserve a TCP port without listening, so concurrent mocks cannot reuse it.
+/// Keep the socket alive until the CLI has finished observing connection refusal.
+fn dead_url() -> (tokio::net::TcpSocket, String) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    (socket, format!("http://{addr}"))
 }
 
 fn temp_home(tag: &str) -> PathBuf {
@@ -512,7 +513,7 @@ fn doctor_fails_on_a_server_that_is_not_persisting() {
 
 #[test]
 fn doctor_json_reports_an_unreachable_server_as_a_failure() {
-    let url = dead_url();
+    let (_reserved_port, url) = dead_url();
     let dir = temp_home("doctor_json");
     let missing = dir.join("not-yet");
     let o = run(&[
@@ -554,7 +555,8 @@ fn completions_print_a_script_for_the_installed_binary() {
 
 #[test]
 fn an_unreachable_server_is_a_connection_error() {
-    let o = run(&["--url", &dead_url(), "query", "MATCH (n) RETURN n"]);
+    let (_reserved_port, url) = dead_url();
+    let o = run(&["--url", &url, "query", "MATCH (n) RETURN n"]);
     assert_eq!(o.status.code(), Some(1));
     assert!(stderr(&o).starts_with("Error: "), "{}", stderr(&o));
 }

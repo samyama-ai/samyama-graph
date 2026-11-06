@@ -9,6 +9,7 @@ use comfy_table::{Table, ContentArrangement};
 use samyama_sdk::{RemoteClient, SamyamaClient};
 
 mod doctor;
+mod load;
 mod snapshot_keys;
 
 #[derive(Parser)]
@@ -92,6 +93,30 @@ enum Commands {
         /// Shell to generate for
         shell: Shell,
     },
+    /// Download a published knowledge graph and load it into the server (KG-03)
+    ///
+    /// `samyama-cli load cricket` fetches the KG's snapshot from the release it
+    /// is published on, checks its SHA-256, and imports it into the server at
+    /// `--url`. It loads into an empty server and stops before downloading if
+    /// the server already holds data (pass `--force` to add anyway). Run
+    /// `load --list` for the KGs published as snapshots.
+    Load {
+        /// Which KG, e.g. cricket (see --list)
+        #[arg(required_unless_present = "list", conflicts_with = "list")]
+        kg: Option<String>,
+
+        /// Print the KGs that can be loaded, then exit
+        #[arg(long)]
+        list: bool,
+
+        /// Add to a server that already holds data instead of refusing
+        #[arg(long)]
+        force: bool,
+
+        /// Where snapshots are fetched from, as `<base>/<release tag>/<file>`
+        #[arg(long, default_value = load::DEFAULT_SOURCE, env = "SAMYAMA_KG_SOURCE")]
+        source: String,
+    },
     /// Inspect snapshots without importing them into a graph store
     Snapshot {
         #[command(subcommand)]
@@ -158,6 +183,27 @@ async fn main() {
             let name = option_env!("CARGO_BIN_NAME").unwrap_or("samyama-cli");
             clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
             Ok(())
+        }
+        Commands::Load {
+            kg,
+            list,
+            force,
+            source,
+        } => {
+            let json = matches!(&cli.format, OutputFormat::Json);
+            if list {
+                load::run_list(json)
+            } else {
+                // `kg` is present whenever `--list` is not (clap enforces it).
+                load::run_load(
+                    kg.as_deref().unwrap_or_default(),
+                    &cli.url,
+                    &source,
+                    force,
+                    json,
+                )
+                .await
+            }
         }
         Commands::Snapshot { command } => match command {
             SnapshotCommands::Keys { files, label, json } => {
@@ -618,6 +664,35 @@ mod cli_tests {
     }
 
     #[test]
+    fn load_takes_a_kg_or_list_but_not_both() {
+        let cli = Cli::try_parse_from(["samyama", "load", "cricket"]).expect("parse");
+        match cli.command {
+            Commands::Load {
+                kg,
+                list,
+                force,
+                source,
+            } => {
+                assert_eq!(kg.as_deref(), Some("cricket"));
+                assert!(!list);
+                // Adding to a graph that holds data is opt-in.
+                assert!(!force);
+                assert_eq!(source, load::DEFAULT_SOURCE);
+            }
+            _ => panic!("parsed as a different subcommand"),
+        }
+        assert!(Cli::try_parse_from(["samyama", "load", "--list"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["samyama", "load"]).is_err(),
+            "no KG and no --list"
+        );
+        assert!(
+            Cli::try_parse_from(["samyama", "load", "cricket", "--list"]).is_err(),
+            "a KG and --list together"
+        );
+    }
+
+    #[test]
     fn every_subcommand_is_reachable_by_name() {
         // A subcommand that exists in the enum but is not registered would be
         // invisible; `doctor` and `completions` are the new ones and the two
@@ -626,7 +701,7 @@ mod cli_tests {
             .get_subcommands()
             .map(|c| c.get_name().to_string())
             .collect();
-        for want in ["query", "nlq", "status", "ping", "shell", "doctor", "completions"] {
+        for want in ["query", "nlq", "status", "ping", "shell", "doctor", "completions", "load"] {
             assert!(names.iter().any(|n| n == want), "missing subcommand `{want}` in {names:?}");
         }
     }
