@@ -99,11 +99,22 @@ class SamyamaClient:
     def query_stream(self, cypher: str, graph: str = "default") -> QueryStream:
         """Iterate a read query's rows as the server produces them, one dict per row."""
         ...
-    def nlq(self, question: str) -> str:
-        """Translate a question into read-only Cypher on the server; remote mode only.
+    def nlq(
+        self,
+        question: str,
+        provider: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+        api_base_url: str | None = None,
+    ) -> str:
+        """Translate a question into read-only Cypher, without running it.
 
-        Returns the query without running it. Raises `RuntimeError` when the
-        server has no provider configured or the generated query writes.
+        Embedded mode translates in-process; the four settings take the place
+        of `NLQ_PROVIDER`, `NLQ_MODEL`, the provider's key variable and
+        `NLQ_API_BASE_URL`. Remote mode asks the server, which chooses its own
+        provider: passing any setting there raises `ValueError`. Raises
+        `RuntimeError` when no provider is configured, a key is missing, or
+        the generated query writes.
         """
         ...
     def status(self) -> ServerStatus: ...

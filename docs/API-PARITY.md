@@ -15,7 +15,7 @@ Version: 1.0.0
 | **Vector index create / add / k-NN search**<!-- vector_search --> | Yes — `/api/vector-search`, `/api/vector/indexes` | No command | **Embedded-only** — `VectorClient` | **Embedded-only** — `.vector_search()` calls `require_embedded()` | No method | **Embedded-only, conditionally** — `find_similar_*` tools |
 | **Portable snapshot export / import (.sgsnap)**<!-- snapshot --> | Yes — `/api/snapshot/export`, `/api/snapshot/import` | No command | **Embedded-only** — `EmbeddedClient::export_snapshot`/`import_snapshot`(not on the `SamyamaClient` trait, so `RemoteClient` has neither) | No method exposed | No method | No tool |
 | **Bulk import (CSV / JSON / Parquet)**<!-- bulk_import --> | Yes — `/api/import/csv`, `/api/import/json`, `/api/import/parquet` | No command | No method exposed | No method exposed | **Partial** — `.importCsv()`, `.importJson()`; no `importParquet` | No tool |
-| **Natural-language-to-Cypher (NLQ)**<!-- nlq --> | Yes — `/api/nlq` | No command | **Embedded-only** — `EmbeddedClient::nlq_pipeline()` returns the `NLQPipeline`; not on the shared trait | No method exposed | No method | No — tools are generated from schema instead (see note) |
+| **Natural-language-to-Cypher (NLQ)**<!-- nlq --> | Yes — `/api/nlq` | Yes | Yes — `EmbeddedClient::nlq`/`nlq_with` in-process, `RemoteClient::nlq` over `/api/nlq`; not on the shared trait | Yes — `.nlq()`, embedded and remote | Yes | No — tools are generated from schema instead (see note) |
 | **Schema / index discovery**<!-- schema_introspection --> | Yes — `/api/schema` | Via Cypher only — `SHOW INDEXES`/`SHOW CONSTRAINTS` over `GRAPH.QUERY` | Via Cypher only — no dedicated method on the trait | Via Cypher only — no dedicated method | Yes — `.schema()` | Yes — `schema_info` tool |
 | **Multi-graph management (list / delete)**<!-- multi_graph --> | Yes — `/api/tenants`, `/api/tenants/{id}` | Yes — `GRAPH.LIST`, `GRAPH.DELETE` | Yes — `.list_graphs()`, `.delete_graph()` | Yes — `.list_graphs()`, `.delete_graph()` | Yes — `.listGraphs()`, `.deleteGraph()` | No — the server is bound to one graph at construction |
 
@@ -50,7 +50,7 @@ Legend: plain **Yes** = a first-class method/endpoint/tool exists. **Embedded-on
 | Vector index create / add / k-NN search | 1 | 3 | 2 |
 | Portable snapshot export / import (.sgsnap) | 1 | 1 | 4 |
 | Bulk import (CSV / JSON / Parquet) | 1 | 0 | 5 |
-| Natural-language-to-Cypher (NLQ) | 1 | 1 | 4 |
+| Natural-language-to-Cypher (NLQ) | 5 | 0 | 1 |
 | Schema / index discovery | 3 | 0 | 3 |
 | Multi-graph management (list / delete) | 5 | 0 | 1 |
 
