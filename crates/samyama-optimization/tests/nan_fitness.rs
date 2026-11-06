@@ -104,6 +104,7 @@ fn every_single_objective_solver_finishes_and_never_returns_a_nan_best() {
         "QORao1" => QORaoSolver::new(config(), RaoVariant::Rao1).with_seed(SEED),
         "SAPHR" => SAPHRSolver::new(config()).with_seed(SEED),
         "LSHADE" => LSHADESolver::new(config()).with_seed(SEED),
+        "CMAES" => CMAESSolver::new(config()).with_seed(SEED),
     ];
     let mut bad = Vec::new();
     for (name, run) in &solvers {
@@ -218,6 +219,14 @@ fn every_multi_objective_solver_finishes_with_no_nan_on_its_front() {
                     .with_seed(SEED)
                     .solve(&HalfNanMo)
             }),
+        ),
+        (
+            "SPEA2",
+            Box::new(|| SPEA2Solver::new(config()).with_seed(SEED).solve(&HalfNanMo)),
+        ),
+        (
+            "MOEAD",
+            Box::new(|| MOEADSolver::new(config()).with_seed(SEED).solve(&HalfNanMo)),
         ),
     ];
     let mut bad = Vec::new();

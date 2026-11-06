@@ -18,8 +18,8 @@ use futures::stream::Stream;
 use ndarray::Array1;
 use samyama_optimization::algorithms::{
     BMRSolver, BMWRSolver, BWRSolver, DESolver, EHRJayaSolver, GASolver, GOTLBOSolver, ITLBOSolver,
-    JayaSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, NSGA2Solver, PSOSolver, QOJayaSolver,
-    QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver, LSHADESolver,
+    JayaSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver, NSGA2Solver, SPEA2Solver, MOEADSolver, PSOSolver, QOJayaSolver,
+    QORaoSolver, RaoSolver, RaoVariant, SAMPJayaSolver, SAPHRSolver, TLBOSolver, LSHADESolver, CMAESSolver,
 };
 use samyama_optimization::benchmarks::{DTLZ, DTLZ_FRONT_SAMPLES_PER_AXIS, ZDT, ZDT_FRONT_SAMPLES};
 use samyama_optimization::budget::{Budget, Budgeted, StopReason};
@@ -318,6 +318,34 @@ fn algorithm_catalog() -> Vec<AlgorithmInfo> {
             multi_objective: true,
         },
         AlgorithmInfo {
+            id: "spea2",
+            name: "SPEA2",
+            family: "multi-objective",
+            variant: None,
+            equation_tex: r"F(i) = \sum_{j \succ i} |\{k : j \succ k\}| + \frac{1}{\sigma_i^k + 2}",
+            paper_refs: vec![PaperRef {
+                title: "SPEA2: Improving the Strength Pareto Evolutionary Algorithm",
+                url: "https://doi.org/10.3929/ethz-a-004284029",
+                year: 2001,
+            }],
+            params: default_params(),
+            multi_objective: true,
+        },
+        AlgorithmInfo {
+            id: "moead",
+            name: "MOEA/D",
+            family: "multi-objective",
+            variant: None,
+            equation_tex: r"g^{te}(x \mid \lambda, z^*) = \max_m \lambda_m \lvert f_m(x) - z^*_m \rvert",
+            paper_refs: vec![PaperRef {
+                title: "MOEA/D: A Multiobjective Evolutionary Algorithm Based on Decomposition",
+                url: "https://doi.org/10.1109/TEVC.2007.892759",
+                year: 2007,
+            }],
+            params: default_params(),
+            multi_objective: true,
+        },
+        AlgorithmInfo {
             id: "pso",
             name: "PSO",
             family: "swarm",
@@ -347,6 +375,20 @@ fn algorithm_catalog() -> Vec<AlgorithmInfo> {
                 title: "Improving the search performance of SHADE using linear population size reduction",
                 url: "https://doi.org/10.1109/CEC.2014.6900380",
                 year: 2014,
+            }],
+            params: default_params(),
+            multi_objective: false,
+        },
+        AlgorithmInfo {
+            id: "cmaes",
+            name: "CMA-ES",
+            family: "evolution-strategy",
+            variant: None,
+            equation_tex: r"x_k \sim m + \sigma\,\mathcal{N}(0, C)",
+            paper_refs: vec![PaperRef {
+                title: "Completely Derandomized Self-Adaptation in Evolution Strategies",
+                url: "https://doi.org/10.1162/106365601750190398",
+                year: 2001,
             }],
             params: default_params(),
             multi_objective: false,
@@ -1075,6 +1117,8 @@ fn solve_multi_objective<P: MultiObjectiveProblem>(
         "mo_bwr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(problem),
         "mo_bmwr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMWR), seed).solve(problem),
         "mo_rao_de" => seeded!(MORaoDESolver::new(cfg), seed).solve(problem),
+        "spea2" => seeded!(SPEA2Solver::new(cfg), seed).solve(problem),
+        "moead" => seeded!(MOEADSolver::new(cfg), seed).solve(problem),
         "nsga2" => seeded!(NSGA2Solver::new(cfg), seed).solve(problem),
         _ => return Err(format!("algorithm {} not multi-objective", algo_id)),
     };
@@ -1221,6 +1265,7 @@ fn run_solver_within(
             "pso" => seeded!(PSOSolver::new(cfg), seed).solve(problem),
             "de" => seeded!(DESolver::new(cfg), seed).solve(problem),
             "lshade" => seeded!(LSHADESolver::new(cfg), seed).solve(problem),
+            "cmaes" => seeded!(CMAESSolver::new(cfg), seed).solve(problem),
             "ga" => seeded!(GASolver::new(cfg), seed).solve(problem),
             other => {
                 return Err(format!(
