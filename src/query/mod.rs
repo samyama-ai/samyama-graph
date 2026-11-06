@@ -775,6 +775,14 @@ impl QueryEngine {
     /// When a statement started now must stop: the server's
     /// `SAMYAMA_QUERY_TIMEOUT` or the tenant's `max_query_time_ms`, whichever
     /// comes first (#1593). `None` when neither is set.
+    ///
+    /// The shorter, not the server's alone: a tenant limit is a quota, and a
+    /// quota the server's setting could lift would not be one. What made
+    /// `SAMYAMA_QUERY_TIMEOUT` unable to raise anything was the shipped tenant
+    /// default of 60 s, which every tenant carried whether or not anyone had
+    /// set it. That default is now no limit, so the server's timeout governs
+    /// until a tenant is given one, and the default tenant's can be set with
+    /// `--max-query-time-ms` (#2046).
     fn deadline(&self, time_limit: Option<std::time::Duration>) -> Option<std::time::Instant> {
         let server = (self.query_timeout_secs > 0)
             .then(|| std::time::Duration::from_secs(self.query_timeout_secs));
