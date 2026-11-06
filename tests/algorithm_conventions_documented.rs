@@ -6,9 +6,9 @@
 //! that ships without them documented is one a user cannot compare against
 //! anything, so shipping one fails here rather than at the next comparison.
 //!
-//! The list of algorithms is read from `is_algorithm`'s own match arms, which is
-//! the dispatcher's list rather than a second copy of it. A copy would go stale
-//! silently and this test would then pass by agreeing with itself.
+//! The list of algorithms is read from `ALGORITHM_CATALOG`, the list
+//! `is_algorithm` itself reads (#2013), rather than a second copy of it. A copy
+//! would go stale silently and this test would then pass by agreeing with itself.
 //!
 //! Text, not behaviour. That a row *says* self-loops are skipped is not evidence
 //! that they are; `CH-ALGO-PARITY` compares our answers against a reference and
@@ -26,6 +26,12 @@ const AXES: [&str; 6] = [
 /// the same shape the dispatcher compares on: no namespace, no separators, no case.
 fn canonical(name: &str) -> String {
     let bare = name.trim().trim_matches('`');
+    // The catalogue spells `algo.or.solve`; drop the namespace before the
+    // `or.` check below, or it reads as `solve`.
+    let bare = bare
+        .strip_prefix("algo.")
+        .or_else(|| bare.strip_prefix("samyama."))
+        .unwrap_or(bare);
     let bare = match bare.rsplit_once('.') {
         Some((prefix, tail)) if prefix != "or" => tail,
         _ => bare,
@@ -33,18 +39,20 @@ fn canonical(name: &str) -> String {
     bare.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
 }
 
-/// The names `is_algorithm` will dispatch, read from its match arms.
+/// The names `is_algorithm` will dispatch, and their aliases, read from the
+/// catalogue: every string literal in it that starts with `algo.` (the
+/// `yields` columns do not).
 fn dispatchable(src: &str) -> BTreeSet<String> {
-    let start = src.find("pub fn is_algorithm").expect("is_algorithm not found");
+    let start = src.find("pub const ALGORITHM_CATALOG").expect("ALGORITHM_CATALOG not found");
     let body = &src[start..];
-    let end = body.find("\n    }").expect("is_algorithm has no end");
+    let end = body.find("\n];").expect("ALGORITHM_CATALOG has no end");
     let mut out = BTreeSet::new();
     for chunk in body[..end].split('"').skip(1).step_by(2) {
-        if !chunk.is_empty() && chunk.chars().all(|c| c.is_ascii_lowercase() || c == '.' || c.is_ascii_digit()) {
+        if chunk.starts_with("algo.") {
             out.insert(chunk.to_string());
         }
     }
-    assert!(out.len() > 40, "read only {} names from is_algorithm", out.len());
+    assert!(out.len() > 40, "read only {} names from ALGORITHM_CATALOG", out.len());
     out
 }
 
@@ -148,7 +156,7 @@ fn documented(doc: &str) -> std::collections::BTreeMap<String, BTreeSet<String>>
 #[test]
 fn every_callable_algorithm_documents_its_conventions() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let src = std::fs::read_to_string(root.join("src/query/executor/operator.rs")).unwrap();
+    let src = std::fs::read_to_string(root.join("src/query/executor/algorithm_catalog.rs")).unwrap();
     let doc = std::fs::read_to_string(root.join(DOC))
         .unwrap_or_else(|e| panic!("{DOC} is missing ({e}); ALGO-03 asks for it"));
 
