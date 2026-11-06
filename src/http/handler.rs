@@ -1586,6 +1586,77 @@ fn json_scalar_value(val: &serde_json::Value) -> Option<PropertyValue> {
     }
 }
 
+/// A JSON value as an imported property (#2047).
+///
+/// `Ok(None)` for `null`, which leaves the property unset as it always has.
+/// A list of scalars is a list property -- an embedding among them, which the
+/// store hands to any vector index on that label and key. Anything else is an
+/// error naming what was wrong: this used to be `None` too, so an `embedding`
+/// list was dropped from every node and the import still answered `ok`.
+fn json_property_value(val: &serde_json::Value) -> Result<Option<PropertyValue>, String> {
+    match val {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                json_scalar_value(item).ok_or_else(|| {
+                    format!(
+                        "element {i} of the list is {}; a list property holds \
+                         strings, numbers or booleans",
+                        json_kind(item)
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|v| Some(PropertyValue::Array(v))),
+        serde_json::Value::Object(_) => Err(
+            "a map is not a property value; a property is a scalar or a list of scalars"
+                .to_string(),
+        ),
+        scalar => Ok(json_scalar_value(scalar)),
+    }
+}
+
+fn json_kind(val: &serde_json::Value) -> &'static str {
+    match val {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "a list",
+        serde_json::Value::Object(_) => "a map",
+    }
+}
+
+/// Why `value` cannot be imported as `label.key`, when a vector index covers
+/// that property and the value is not a vector of the index's dimensions.
+///
+/// The store indexes a vector without reporting a mismatch -- a wrong-length
+/// embedding is stored on the node and left out of the index -- so the import
+/// checks first, while it can still refuse the whole request.
+fn vector_import_mismatch(
+    store: &crate::graph::GraphStore,
+    label: &str,
+    key: &str,
+    value: &PropertyValue,
+) -> Option<String> {
+    let index = store.vector_index.get_index(label, key)?;
+    let dimensions = index.read().ok()?.dimensions();
+    match value.to_vector() {
+        Some(v) if v.len() == dimensions => None,
+        Some(v) => Some(format!(
+            "the vector index on :{label}({key}) has {dimensions} dimensions; \
+             this vector has {}",
+            v.len()
+        )),
+        None => Some(format!(
+            "the vector index on :{label}({key}) holds lists of {dimensions} numbers; \
+             this value is not one"
+        )),
+    }
+}
+
 /// The text an endpoint key is matched on.
 ///
 /// CSV node import stores `101` as an integer and an edge file carries it as
@@ -2823,25 +2894,42 @@ pub async fn import_json_handler(
                 .as_ref()
                 .and_then(endpoint_key_text)
         };
-        let rows: Vec<EdgeRow> = payload
+        // A property that cannot be imported refuses the request before
+        // anything is written, as it does for nodes below (#2047).
+        let rows: Result<Vec<EdgeRow>, String> = payload
             .edges
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(i, e)| {
                 let obj = e.as_object();
-                EdgeRow {
+                let mut props = Vec::new();
+                for (k, v) in obj.into_iter().flatten() {
+                    if k.as_str() == spec.source_key_col || k.as_str() == spec.target_key_col {
+                        continue;
+                    }
+                    if let Some(v) = json_property_value(v)
+                        .map_err(|e| format!("edge {i}, property `{k}`: {e}"))?
+                    {
+                        props.push((k.clone(), v));
+                    }
+                }
+                Ok(EdgeRow {
                     source: key(obj, &spec.source_key_col),
                     target: key(obj, &spec.target_key_col),
-                    props: obj
-                        .into_iter()
-                        .flatten()
-                        .filter(|(k, _)| {
-                            k.as_str() != spec.source_key_col && k.as_str() != spec.target_key_col
-                        })
-                        .filter_map(|(k, v)| json_scalar_value(v).map(|v| (k.clone(), v)))
-                        .collect(),
-                }
+                    props,
+                })
             })
             .collect();
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": e, "created": 0 })),
+                )
+                    .into_response()
+            }
+        };
         let outcome = state
             .mutate(&payload.graph, |store| {
                 import_edges(store, &spec, rows, strict)
@@ -2866,36 +2954,91 @@ pub async fn import_json_handler(
             .into_response();
     }
 
-    let mut count = 0usize;
-    state
+    // Every property is converted before any node is created, so a value that
+    // cannot be imported refuses the request with nothing written, rather than
+    // being left off the node it belonged to (#2047).
+    let mut rows: Vec<Vec<(String, PropertyValue)>> = Vec::with_capacity(payload.nodes.len());
+    for (i, node_json) in payload.nodes.iter().enumerate() {
+        let mut props = Vec::new();
+        for (k, v) in node_json.as_object().into_iter().flatten() {
+            match json_property_value(v) {
+                Ok(Some(v)) => props.push((k.clone(), v)),
+                Ok(None) => {}
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": format!("node {i}, property `{k}`: {e}"),
+                            "nodes_created": 0,
+                        })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        rows.push(props);
+    }
+
+    // What the store reports per property. A uniqueness violation is the
+    // case that reaches here; it used to be discarded with `let _`.
+    const REPORTED_ERRORS: usize = 20;
+    let outcome = state
         .mutate(&payload.graph, |store_guard| {
-            for node_json in &payload.nodes {
+            // Checked against the store under the write lock, before the
+            // first node, so an index created between the check and the
+            // write cannot slip a mismatch past it.
+            for (i, props) in rows.iter().enumerate() {
+                for (k, v) in props {
+                    if let Some(e) = vector_import_mismatch(store_guard, &payload.label, k, v) {
+                        return Err(format!("node {i}, property `{k}`: {e}"));
+                    }
+                }
+            }
+            let mut count = 0usize;
+            let mut failed = 0usize;
+            let mut errors: Vec<String> = Vec::new();
+            for (i, props) in rows.into_iter().enumerate() {
                 let node_id = store_guard.create_node(payload.label.as_str());
 
                 // Through `set_node_property`, not the `&mut Node` (#1505) —
                 // see the CSV handler above for why.
-                let props: Vec<(String, PropertyValue)> = node_json
-                    .as_object()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|(k, v)| json_scalar_value(v).map(|v| (k.to_string(), v)))
-                    .collect();
                 for (k, v) in props {
-                    let _ = store_guard.set_node_property(&payload.graph, node_id, k, v);
+                    if let Err(e) = store_guard.set_node_property(&payload.graph, node_id, k.clone(), v) {
+                        failed += 1;
+                        if errors.len() < REPORTED_ERRORS {
+                            errors.push(format!("node {i}, property `{k}`: {e}"));
+                        }
+                    }
                 }
                 count += 1;
             }
+            Ok((count, failed, errors))
         })
         .await;
 
-    Json(json!({
-        "status": "ok",
+    let (count, failed, errors) = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e, "nodes_created": 0 })),
+            )
+                .into_response()
+        }
+    };
+
+    let mut body = json!({
+        "status": if failed == 0 { "ok" } else { "partial" },
         "import_mode": "node",
         "nodes_created": count,
         "label": payload.label,
         "graph": payload.graph,
-    }))
-    .into_response()
+    });
+    if failed > 0 {
+        body["properties_not_written"] = json!(failed);
+        body["errors"] = json!(errors);
+    }
+    Json(body).into_response()
 }
 
 // ==================== Snapshot Handlers ====================
