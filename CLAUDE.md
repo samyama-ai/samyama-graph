@@ -25,6 +25,8 @@ cargo bench                                    # All benchmarks
 cargo bench --bench graph_benchmarks           # Criterion micro-benchmarks (15 benches)
 cargo bench --bench full_benchmark             # Full suite (ingestion, vector, traversal, algorithms)
 cargo bench --bench vector_benchmark           # HNSW vector search
+cargo bench --bench ann_benchmark -- --synthetic 100000x128  # recall@k vs QPS sweep over ef
+cargo bench --bench ann_benchmark -- --dataset data/ann/sift-128-euclidean  # after scripts/download_ann_datasets.py
 cargo bench --bench graphalytics_benchmark     # LDBC Graphalytics algorithms
 cargo bench --bench mvcc_benchmark             # MVCC & arena allocation
 cargo bench --bench late_materialization_bench  # Late materialization traversal
@@ -232,7 +234,7 @@ Benchmarks are the opposite — always `--release`, on a quiet host, with the
 calibration line compared before the timings (#529).
 
 - **Unit and integration tests** across the workspace; `scripts/coverage.sh` measures coverage for the current checkout.
-- **31 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
+- **33 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
 - **Integration tests**: Rust suites in `tests/` and Python scripts in `tests/integration/`
 - **20 demos on built-in data** in `examples/`
 - **17 dataset loaders and post-processing passes** in `examples/`

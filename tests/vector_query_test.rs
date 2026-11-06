@@ -24,7 +24,7 @@ fn test_vector_call_query() {
     // In Cypher, vector literal is [0.1, 0.2, ...] - but our parser might need it to be passed via parameters or we use a hack for now.
     // Let's see if we can parse a simple CALL.
     // Currently our parser supports list literal in value rule.
-    let query_str = "CALL db.index.vector.queryNodes('Person', 'embedding', [1.0, 0.1, 0.0], 1) YIELD node, score RETURN node.name, score";
+    let query_str = "CALL db.index.vector.queryNodes('Person', 'embedding', [1.0, 0.1, 0.0], 1) YIELD node, score, distance RETURN node.name, score, distance";
     
     let result = engine.execute(query_str, &store).unwrap();
     
@@ -32,9 +32,13 @@ fn test_vector_call_query() {
     let record = &result.records[0];
     
     assert_eq!(record.get("node.name").unwrap().as_property().unwrap().as_string(), Some("Alice"));
-    // score should be small
+    // `score` is Neo4j's similarity, near 1 for a near match; `distance` is
+    // the cosine distance, near 0 (#1980).
     let score = record.get("score").unwrap().as_property().unwrap().as_float().unwrap();
-    assert!(score < 0.1);
+    assert!(score > 0.9);
+    let distance = record.get("distance").unwrap().as_property().unwrap().as_float().unwrap();
+    assert!(distance < 0.1);
+    assert!((score - (1.0 - distance / 2.0)).abs() < 1e-9);
 }
 
 #[test]

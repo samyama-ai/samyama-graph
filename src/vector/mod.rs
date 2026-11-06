@@ -44,7 +44,10 @@
 //! RETURN node.name, score
 //! ```
 //! This enables hybrid queries combining graph traversal with semantic similarity.
+//! `score` is Neo4j's similarity, higher is better; `YIELD distance` gives the
+//! raw distance, lower is better (#1980). See `DistanceMetric::score`.
 
+pub mod distance;
 pub mod index;
 pub mod manager;
 
