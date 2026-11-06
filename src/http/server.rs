@@ -418,15 +418,43 @@ impl AuditLog {
     /// a full disk must not become a denial of service on the API, and the
     /// warning is what says the log has a hole.
     fn record(&self, subject: &str, method: &str, path: &str, status: u16) {
-        use std::io::Write;
         let line = format!(
-            "{{\"at\":\"{}\",\"subject\":{},\"method\":\"{}\",\"path\":{},\"status\":{}}}\n",
+            "{{\"at\":\"{}\",\"protocol\":\"http\",\"subject\":{},\"method\":\"{}\",\"path\":{},\"status\":{}}}\n",
             chrono::Utc::now().to_rfc3339(),
             serde_json::to_string(subject).unwrap_or_else(|_| "\"?\"".into()),
             method,
             serde_json::to_string(path).unwrap_or_else(|_| "\"?\"".into()),
             status,
         );
+        self.append(&line);
+    }
+
+    /// Record one RESP write (#2081). `query_hash` is the SHA-256 of the
+    /// statement: enough to tell two writes apart or to match one against a
+    /// known query, without the text, which carries the data.
+    pub(crate) fn record_resp(
+        &self,
+        subject: &str,
+        command: &str,
+        tenant: Option<&str>,
+        query_hash: Option<&str>,
+        ok: bool,
+    ) {
+        let entry = serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "protocol": "resp",
+            "subject": subject,
+            "command": command,
+            "tenant": tenant,
+            "is_write": true,
+            "query_hash": query_hash,
+            "ok": ok,
+        });
+        self.append(&format!("{entry}\n"));
+    }
+
+    fn append(&self, line: &str) {
+        use std::io::Write;
         let mut sink = match self.sink.lock() {
             Ok(s) => s,
             Err(e) => e.into_inner(),
