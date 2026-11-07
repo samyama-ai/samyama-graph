@@ -93,6 +93,7 @@ pub mod temporal;
 pub mod operator;
 pub mod budget;
 pub mod profile;
+mod plan_json;
 pub mod physical_planner;
 pub mod plan_enumerator;
 pub mod planner;
@@ -528,6 +529,11 @@ impl<'a> QueryExecutor<'a> {
         let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
 
         // Handle EXPLAIN - return plan description instead of executing
+        if query.explain && query.plan_json {
+            let diag = planner::PLAN_DIAGNOSTICS.with(|d| d.borrow_mut().take());
+            let doc = plan_json::explain(&mut plan.root, self.store, self.row_budget, diag);
+            return whole(plan_json::batch(doc, plan_hash), sink);
+        }
         if query.explain {
             let mut batch = Self::explain_plan_with_stats(&mut plan, Some(self.store), self.row_budget);
             batch.plan_hash = plan_hash;
@@ -566,6 +572,11 @@ impl<'a> QueryExecutor<'a> {
             use crate::graph::PropertyValue;
 
             let plan_text = plan.root.describe().format(0);
+            // Taken before the plan is instrumented and planned again: the
+            // re-plan below would overwrite the diagnostics, and instrumenting
+            // consumes the plan the hash describes.
+            let diag = planner::PLAN_DIAGNOSTICS.with(|d| d.borrow_mut().take());
+            let json_hash = query.plan_json.then(|| plan_json::plan_hash_of(&plan.root));
 
             let mut instrumented = plan;
             let nodes = profile::instrument_with_estimates(&mut instrumented.root, self.store);
@@ -577,6 +588,17 @@ impl<'a> QueryExecutor<'a> {
             let plain_start = std::time::Instant::now();
             let result = self.execute_plan(plain_plan)?;
             let plain_elapsed = plain_start.elapsed();
+
+            if let Some(json_hash) = json_hash {
+                let measured = plan_json::Measured {
+                    nodes: &nodes,
+                    instrumented: profiled_elapsed,
+                    plain: plain_elapsed,
+                    rows: result.records.len(),
+                };
+                let doc = plan_json::profile(json_hash, measured, self.row_budget, diag);
+                return whole(plan_json::batch(doc, plan_hash), sink);
+            }
 
             let stats = self.store.statistics();
             let profile_text = format!(
@@ -844,6 +866,12 @@ impl<'a> MutQueryExecutor<'a> {
         let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
 
         // Handle EXPLAIN - return plan description instead of executing
+        if query.explain && query.plan_json {
+            let store_ref: &GraphStore = self.store;
+            let diag = planner::PLAN_DIAGNOSTICS.with(|d| d.borrow_mut().take());
+            let doc = plan_json::explain(&mut plan.root, store_ref, self.row_budget, diag);
+            return Ok(plan_json::batch(doc, plan_hash));
+        }
         if query.explain {
             let store_ref: &GraphStore = self.store;
             let mut batch = QueryExecutor::explain_plan_with_stats(&mut plan, Some(store_ref), self.row_budget);

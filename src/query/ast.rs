@@ -146,6 +146,9 @@ pub struct Query {
     pub show_constraints: bool,
     /// PROFILE flag
     pub profile: bool,
+    /// `EXPLAIN (FORMAT JSON)` / `PROFILE (FORMAT JSON)`: return the plan as a
+    /// structured map rather than text (#2013).
+    pub plan_json: bool,
     /// Query parameters
     pub params: HashMap<String, PropertyValue>,
     /// FOREACH clause (optional)
@@ -1500,6 +1503,7 @@ impl Query {
             plan_options: PlanOptions::default(),
             show_constraints: false,
             profile: false,
+            plan_json: false,
             params: HashMap::new(),
             foreach_clause: None,
             unwind_clause: None,
