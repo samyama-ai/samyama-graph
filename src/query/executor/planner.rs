@@ -3937,6 +3937,20 @@ impl QueryPlanner {
             )));
         }
 
+        // Similarity graphs from a vector index (#1979).
+        if let Some(procedure) = super::vector_ops::VectorProcedure::from_name(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::vector_ops::VectorSimilarityGraphOperator::new(
+                procedure,
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
+        }
+
         if call_clause.procedure_name == "db.index.vector.queryNodes" {
             // Two spellings of the same call, because the name is Neo4j's (#1041):
             //
@@ -4917,9 +4931,17 @@ impl QueryPlanner {
                 // Before the remove, so the index it skips is still the scan's.
                 let other_end =
                     range_other_end(&start_var, &property, &op, &val, &remaining_predicates, idx);
-                remaining_predicates.remove(idx);
                 // The range conjunct stays in the WHERE filter (a range scan
-                // answers none), so the scan's bounds may be loose.
+                // answers none), so the scan's bounds may be loose -- and it
+                // stays *here*, in this subplan, rather than by grace of the
+                // re-application at the end of `plan_inner`. That net is
+                // skipped whenever the query has a `WITH`, and an
+                // optional-scoped conjunct is routed past it to a join that
+                // does not apply it, so both shapes returned the excluded
+                // bound: `p.id > 100 WITH p` answered 100 (#2107).
+                if op == BinaryOp::Eq {
+                    remaining_predicates.remove(idx);
+                }
                 let scan = IndexScanOperator::new(start_var.clone(), label, property, op, val)
                     .with_loose_bounds();
                 Box::new(match other_end {
@@ -5899,7 +5921,13 @@ impl QueryPlanner {
             find_index_predicate(&anchor_var, &anchor.labels, &candidates, store)
         {
             let other_end = range_other_end(&anchor_var, &property, &op, &val, &candidates, idx);
-            candidates.remove(idx);
+            // Kept for a range, for the reason at the start-anchored site: the
+            // loose bound is only sound while this conjunct is re-checked, and
+            // `WITH` and `OPTIONAL MATCH` both bypass the net that used to do
+            // it (#2107).
+            if op == BinaryOp::Eq {
+                candidates.remove(idx);
+            }
             let scan = IndexScanOperator::new(anchor_var.clone(), label, property, op, val)
                 .with_loose_bounds();
             Box::new(match other_end {
