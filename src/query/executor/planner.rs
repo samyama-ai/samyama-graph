@@ -1689,6 +1689,40 @@ impl QueryPlanner {
             });
         }
 
+        // STRUCTURE INDEX DDL (SGI, ADR-041 / #2036), mirroring the hierarchy
+        // index above: SHOW reads declarations, the other three write.
+        if query.show_structure_indexes {
+            return Ok(ExecutionPlan {
+                root: Box::new(super::structure_ops::ShowStructureIndexesOperator::new()),
+                output_columns: super::structure_ops::structure_info_columns(),
+                is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
+        if let Some(clause) = &query.create_structure_index_clause {
+            return Ok(ExecutionPlan {
+                root: Box::new(super::structure_ops::CreateStructureIndexOperator::new(clause.clone())),
+                output_columns: super::structure_ops::structure_info_columns(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
+        if let Some(name) = &query.drop_structure_index {
+            return Ok(ExecutionPlan {
+                root: Box::new(super::structure_ops::DropStructureIndexOperator::new(name.clone())),
+                output_columns: super::structure_ops::structure_drop_columns(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
+        if let Some(name) = &query.rebuild_structure_index {
+            return Ok(ExecutionPlan {
+                root: Box::new(super::structure_ops::RebuildStructureIndexOperator::new(name.clone())),
+                output_columns: super::structure_ops::structure_info_columns(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
         // Handle SHOW CONSTRAINTS
         if query.show_constraints {
             return Ok(ExecutionPlan {
@@ -11570,6 +11604,10 @@ mod tests {
             drop_hierarchy_index: None,
             rebuild_hierarchy_index: None,
             show_hierarchy_indexes: false,
+            create_structure_index_clause: None,
+            drop_structure_index: None,
+            rebuild_structure_index: None,
+            show_structure_indexes: false,
             graph_projection_ddl: None,
             show_indexes: false,
             show_constraints: false,
