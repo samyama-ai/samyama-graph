@@ -154,6 +154,9 @@ pub fn fsync_enabled() -> bool {
     )
 }
 
+/// One row as a RocksDB iterator yields it: the key and value, or the read error.
+type RowItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
+
 impl PersistentStorage {
     /// Open or create a new persistent storage
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
@@ -550,7 +553,7 @@ impl PersistentStorage {
                 id: NodeId::new(stored.id),
                 version: 1,
                 labels: stored.labels.into_iter()
-                    .map(|s| crate::graph::Label::new(s))
+                    .map(crate::graph::Label::new)
                     .collect(),
                 properties,
                 created_at: stored.created_at,
@@ -729,7 +732,7 @@ impl PersistentStorage {
         cf: &impl rocksdb::AsColumnFamilyRef,
         tenant: &str,
         kind: char,
-    ) -> impl Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>> + 'a {
+    ) -> impl Iterator<Item = RowItem> + 'a {
         let (from, to) = Self::row_range(tenant, kind);
         let mut opts = rocksdb::ReadOptions::default();
         opts.set_iterate_upper_bound(to);
@@ -878,7 +881,7 @@ mod tests {
             }],
         };
         storage.put_index_catalog("acme", &catalog).unwrap();
-        assert!(storage.get_index_catalog("acme").unwrap().len() > 0);
+        assert!(!storage.get_index_catalog("acme").unwrap().is_empty());
 
         storage.delete_graph("acme").unwrap();
         assert_eq!(
