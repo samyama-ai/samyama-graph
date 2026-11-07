@@ -327,6 +327,20 @@ jobs:
       - name: The Dockerfile's Rust is new enough for the lockfile
         run: python3 scripts/check_dockerfile_rust_pin.py
 
+      # The other way the container breaks without the Dockerfile being
+      # touched. v1.14.0 shipped with no image because #1833 moved `cli/` into
+      # `crates/samyama-cli` while the Dockerfile still said `COPY cli ./cli`
+      # (#2056 removed it). The pull request that broke it changed no
+      # Dockerfile line, so a gate keyed on Dockerfile changes would not have
+      # fired -- and nothing builds the image on a PR or in the nightly sweep,
+      # so the first build of a release is the release itself.
+      #
+      # This checks the Dockerfile's own COPY sources exist. It does not prove
+      # the image builds; only a build does that. It does catch the class that
+      # actually broke, in the PR that causes it, in under a second.
+      - name: The Dockerfile's COPY sources all exist
+        run: python3 scripts/check_dockerfile_copy_sources.py
+
       - name: Examples and benches compile
         # The sweep runs these; here we only prove they still build, which is
         # what actually breaks when a signature changes.
