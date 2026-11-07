@@ -38,7 +38,10 @@ fn rows(s: &GraphStore, q: &str) -> Vec<std::collections::HashMap<String, Value>
         .records
         .iter()
         .map(|r| {
-            ["name", "label", "manifold", "coordinates", "measure", "points"]
+            [
+                "name", "label", "manifold", "coordinates", "contact_radius",
+                "backbone", "group_by", "measure", "points",
+            ]
                 .iter()
                 .filter_map(|k| r.get(k).map(|v| (k.to_string(), v.clone())))
                 .collect()
@@ -103,6 +106,40 @@ fn a_structure_index_is_declared_and_then_listed() {
         .expect("SHOW lists the declared index");
     assert_eq!(text_of(&pdb["manifold"]), "euclidean3d");
     assert_eq!(text_of(&pdb["coordinates"]), "x, y, z");
+}
+
+#[test]
+fn show_reports_every_convention_the_ddl_accepts() {
+    // Asserting these through the registry is not enough, and that is how the
+    // gap got here: the first version of this suite read `sequence_prop` and
+    // `group_by_prop` off the declaration, so BACKBONE and GROUP BY could be
+    // declared and never reported. A convention a caller can set and cannot
+    // read back is the shape of #1494.
+    let mut s = protein();
+    write(
+        &mut s,
+        "CREATE STRUCTURE INDEX pdb ON :Residue(x, y, z) \
+         BACKBONE residue_seq GROUP BY chain_id CONTACT_RADIUS 8.0 MEASURE b_factor",
+    );
+    let listed = rows(&s, "SHOW STRUCTURE INDEXES");
+    let pdb = listed
+        .iter()
+        .find(|r| r.get("name").map(text_of).as_deref() == Some("pdb"))
+        .expect("SHOW lists the declared index");
+    assert_eq!(text_of(&pdb["backbone"]), "residue_seq");
+    assert_eq!(text_of(&pdb["group_by"]), "chain_id");
+    assert_eq!(text_of(&pdb["measure"]), "b_factor");
+
+    // A declaration that omits them reports Null, not a missing column: the row
+    // shape must not depend on what was declared.
+    write(&mut s, "CREATE STRUCTURE INDEX bare ON :Residue(x, y, z)");
+    let listed = rows(&s, "SHOW STRUCTURE INDEXES");
+    let bare = listed
+        .iter()
+        .find(|r| r.get("name").map(text_of).as_deref() == Some("bare"))
+        .expect("SHOW lists the bare index");
+    assert!(matches!(bare["backbone"], Value::Null), "{:?}", bare["backbone"]);
+    assert!(matches!(bare["group_by"], Value::Null), "{:?}", bare["group_by"]);
 }
 
 #[test]

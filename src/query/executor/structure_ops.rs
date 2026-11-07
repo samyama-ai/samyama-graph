@@ -120,6 +120,27 @@ fn convention_record(c: &StructuralConvention, points: Option<usize>) -> Record 
             .map(|r| Value::Property(PropertyValue::Float(r)))
             .unwrap_or(Value::Null),
     );
+    // The DDL accepts BACKBONE and GROUP BY, so they have to be readable: a
+    // convention that can be declared and not read back is the shape of #1494,
+    // where a PATCH that erased a config looked exactly like one that set it.
+    // Only Euclidean3d carries them today; the other manifolds report Null
+    // rather than omitting the column, so the row shape does not vary.
+    let (backbone, group_by) = match &c.manifold {
+        ManifoldSpec::Euclidean3d {
+            sequence_prop,
+            group_by_prop,
+            ..
+        } => (sequence_prop.clone(), group_by_prop.clone()),
+        _ => (None, None),
+    };
+    record.bind(
+        "backbone".to_string(),
+        backbone.as_deref().map(text).unwrap_or(Value::Null),
+    );
+    record.bind(
+        "group_by".to_string(),
+        group_by.as_deref().map(text).unwrap_or(Value::Null),
+    );
     record.bind(
         "measure".to_string(),
         c.measure_prop.as_deref().map(text).unwrap_or(Value::Null),
@@ -143,6 +164,8 @@ pub fn structure_info_columns() -> Vec<String> {
         "manifold",
         "coordinates",
         "contact_radius",
+        "backbone",
+        "group_by",
         "measure",
         "points",
     ]
