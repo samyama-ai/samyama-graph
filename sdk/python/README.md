@@ -75,6 +75,42 @@ Other methods on the client: `status()` (returns a `ServerStatus` with
 `status`, `version`, `nodes`, `edges`), `ping()`, `list_graphs()`,
 `delete_graph(graph="default")`.
 
+## Snapshots
+
+A `.sgsnap` file is a whole graph in one file. In embedded mode the client
+loads and saves one itself, so a notebook, an evaluation harness or an agent
+needs no server and no network:
+
+```python
+from samyama import SamyamaClient
+
+client = SamyamaClient.open_snapshot("pubmed.sgsnap")   # embedded, ready to query
+client.query_readonly("MATCH (a:Article) RETURN count(a) AS n")
+
+client.query('CREATE (:Note {text: "checked"})')
+report = client.export_snapshot("pubmed-annotated.sgsnap")
+print(report["nodes_exported"], report["bytes_written"], report["dropped"])
+```
+
+`import_snapshot(path)` adds a snapshot to a client's graph and returns a report
+with the keys of the server's import response (`nodes_imported`,
+`edges_imported`, `nodes_merged`, `merges_by_key`, `dedup_keys_unused`, ...)
+plus `duration_ms`. Pass `dedup_keys=["drugbank_id"]` to merge incoming nodes
+into existing ones that share a key value; `open_snapshot` takes the same
+argument. `export_snapshot` replaces any file at `path`, and its `dropped` list
+says what the format does not carry.
+
+**Vectors added with `add_vector` are not carried.** `add_vector` puts a vector
+in the vector index only, not on the node as a property, and a snapshot holds
+node properties and index *declarations*. After `open_snapshot` the index exists
+but is empty, and `vector_search` returns nothing; the export's `dropped` list
+does not report it yet. Re-add the vectors after opening.
+
+All three are embedded-only: a remote client raises `RuntimeError`, because a
+server imports and exports its own snapshots (`POST /api/snapshot/import` and
+`POST /api/snapshot/export`). A file that is missing
+or is not a snapshot raises `RuntimeError` and leaves the graph unchanged.
+
 ## asyncio
 
 `samyama_aio` wraps the same client, running each call on a worker thread so

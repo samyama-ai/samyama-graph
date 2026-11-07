@@ -122,6 +122,46 @@ class SamyamaClient:
     def delete_graph(self, graph: str = "default") -> None: ...
     def list_graphs(self) -> list[str]: ...
 
+    # Snapshots. Embedded only (#2092).
+    @staticmethod
+    def open_snapshot(
+        path: str,
+        dedup_keys: list[str] | None = None,
+        allow_conflicts: bool = False,
+    ) -> SamyamaClient:
+        """An embedded client holding the `.sgsnap` at `path`, ready to query.
+
+        `embedded()` then `import_snapshot(path)`. No server, no socket.
+        """
+        ...
+    def import_snapshot(
+        self,
+        path: str,
+        graph: str = "default",
+        dedup_keys: list[str] | None = None,
+        allow_conflicts: bool = False,
+    ) -> dict[str, Any]:
+        """Add the `.sgsnap` at `path` to this graph; returns the import report.
+
+        The report has the keys of the server's import response
+        (`nodes_imported`, `edges_imported`, `nodes_merged`, `merge_groups`,
+        `merges_by_key`, `dedup_keys_unused`, `labels`, `edge_types`,
+        `indexes_restored`, ...) plus `duration_ms`. With `dedup_keys`, an
+        incoming node sharing a key value with an existing one is merged into
+        it. `allow_conflicts` without `dedup_keys` raises `ValueError`, and so
+        does a `graph` other than `"default"`. A missing or invalid file raises
+        `RuntimeError` and leaves the graph as it was.
+        """
+        ...
+    def export_snapshot(self, path: str, graph: str = "default") -> dict[str, Any]:
+        """Write this graph to a `.sgsnap` at `path`, replacing any file there.
+
+        Returns `nodes_exported`, `edges_exported`, `bytes_written`, `labels`,
+        `edge_types`, `duration_ms`, and `dropped`: what the format does not
+        carry, as `{what, count, detail}` entries.
+        """
+        ...
+
     # Algorithms. Embedded only.
     def page_rank(
         self,

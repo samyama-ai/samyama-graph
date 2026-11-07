@@ -243,6 +243,108 @@ impl SamyamaClient {
             )),
         }
     }
+
+    /// The embedded client, for a snapshot method; a remote client is refused
+    /// with where to go instead (#2092).
+    fn embedded_for_snapshot(&self, method: &str) -> PyResult<&EmbeddedClient> {
+        match &*self.inner {
+            ClientInner::Embedded(c) => Ok(c),
+            ClientInner::Remote(_) => Err(PyRuntimeError::new_err(format!(
+                "{method} reads or writes a file in this process, so it is only available in \
+                 embedded mode (SamyamaClient.embedded() or SamyamaClient.open_snapshot(path)). \
+                 A server imports and exports snapshots itself: \
+                 POST /api/snapshot/import and POST /api/snapshot/export."
+            ))),
+        }
+    }
+
+    /// Import `path` into `client`, as `import_snapshot` does.
+    fn import_into(
+        py: Python<'_>,
+        client: &EmbeddedClient,
+        path: &str,
+        dedup_keys: Option<Vec<String>>,
+        allow_conflicts: bool,
+    ) -> PyResult<Py<PyAny>> {
+        if allow_conflicts && dedup_keys.is_none() {
+            // Conflicts are between nodes a dedup key merges; with no keys,
+            // nothing merges and the flag would be accepted and ignored.
+            return Err(PyValueError::new_err(
+                "allow_conflicts only applies with dedup_keys: without keys nothing is merged",
+            ));
+        }
+        let path = std::path::PathBuf::from(path);
+        let started = std::time::Instant::now();
+        // The SDK's error is not `Send`, so it is turned into text before it
+        // leaves the detached section.
+        let stats = py
+            .detach(|| {
+                let rt = get_runtime();
+                match &dedup_keys {
+                    None => rt.block_on(client.import_snapshot("default", &path)),
+                    Some(keys) => {
+                        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+                        rt.block_on(client.import_snapshot_dedup_options(
+                            "default", &path, &keys, allow_conflicts,
+                        ))
+                    }
+                }
+                .map_err(|e| e.to_string())
+            })
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!("import_snapshot({}): {e}", path.display()))
+            })?;
+        let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+        // The keys of the server's `POST /api/snapshot/import` response, so a
+        // caller reads one shape whichever way the snapshot came in.
+        let report = serde_json::json!({
+            "nodes_imported": stats.node_count,
+            "edges_imported": stats.edge_count,
+            "nodes_merged": stats.merged_count,
+            "merges_refused_conflicting": stats.merges_refused_conflicting,
+            "edges_deduplicated": stats.edges_deduplicated,
+            "parallel_edges_kept": stats.parallel_edges_kept,
+            "merge_groups": stats.merge_groups,
+            "largest_merge_group": stats.largest_merge_group,
+            "merges_by_key": stats.merges_by_key.iter()
+                .map(|(k, n)| serde_json::json!({"key": k, "merged": n}))
+                .collect::<Vec<_>>(),
+            "property_conflicts_by_key": stats.property_conflicts_by_key.iter()
+                .map(|(k, n)| serde_json::json!({"key": k, "conflicts": n}))
+                .collect::<Vec<_>>(),
+            "property_conflict_samples": stats.property_conflict_samples.iter()
+                .map(|c| serde_json::json!({"key": c.key, "kept": c.kept, "discarded": c.discarded}))
+                .collect::<Vec<_>>(),
+            "dedup_keys_unused": stats.dedup_keys_unused.iter()
+                .map(|u| serde_json::json!({"key": u.key, "incoming_nodes_with_key": u.incoming_nodes_with_key}))
+                .collect::<Vec<_>>(),
+            "labels": stats.labels,
+            "edge_types": stats.edge_types,
+            "indexes_restored": stats.indexes.map(|r| serde_json::json!({
+                "property": r.property,
+                "unique": r.unique,
+                "fulltext": r.fulltext,
+                "vector": r.vector,
+                "failed": r.failed,
+                "conflicts": stats.index_conflicts,
+            })),
+            "duration_ms": duration_ms,
+        });
+        json_to_py(py, &report)
+    }
+}
+
+/// This build serves one graph. The embedded client's snapshot methods have no
+/// graph of their own to select, so another name is refused rather than
+/// accepted and ignored -- the same rule `query` follows (#366).
+fn require_default_graph(method: &str, graph: &str) -> PyResult<()> {
+    if graph == "default" {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "{method}: this build serves a single graph, \"default\"; got graph=\"{graph}\""
+        )))
+    }
 }
 
 #[pymethods]
@@ -485,6 +587,100 @@ impl SamyamaClient {
             }
         });
         result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    // ========================================================================
+    // Snapshots (embedded mode only, #2092)
+    // ========================================================================
+
+    /// An embedded client holding the `.sgsnap` snapshot at `path`, ready to
+    /// query: `SamyamaClient.embedded()` followed by `import_snapshot(path)`.
+    ///
+    /// ```python
+    /// client = SamyamaClient.open_snapshot("pubmed.sgsnap")
+    /// client.query_readonly("MATCH (a:Article) RETURN count(a)")
+    /// ```
+    ///
+    /// No server and no network socket: the graph is in this process.
+    /// `dedup_keys` and `allow_conflicts` are as for `import_snapshot`.
+    #[staticmethod]
+    #[pyo3(signature = (path, dedup_keys=None, allow_conflicts=false))]
+    fn open_snapshot(
+        py: Python<'_>,
+        path: &str,
+        dedup_keys: Option<Vec<String>>,
+        allow_conflicts: bool,
+    ) -> PyResult<Self> {
+        let client = EmbeddedClient::new();
+        Self::import_into(py, &client, path, dedup_keys, allow_conflicts)?;
+        Ok(SamyamaClient {
+            inner: Arc::new(ClientInner::Embedded(client)),
+        })
+    }
+
+    /// Import the `.sgsnap` snapshot at `path` into this client's graph, and
+    /// return what happened as a dict.
+    ///
+    /// The snapshot is **added** to what the graph already holds. With
+    /// `dedup_keys` (node properties such as `["drugbank_id"]`), an incoming
+    /// node that shares a key value with a node already there is merged into
+    /// it instead of added; `allow_conflicts=True` lets a merge go ahead when
+    /// another of the keys differs.
+    ///
+    /// The dict has the keys of the server's `POST /api/snapshot/import`
+    /// response -- `nodes_imported`, `edges_imported`, `nodes_merged`,
+    /// `merge_groups`, `merges_by_key`, `dedup_keys_unused`, `labels`,
+    /// `edge_types`, `indexes_restored` and the rest -- plus `duration_ms`.
+    /// A file that is missing or is not a snapshot raises `RuntimeError`, and
+    /// leaves the graph as it was.
+    #[pyo3(signature = (path, graph="default", dedup_keys=None, allow_conflicts=false))]
+    fn import_snapshot(
+        &self,
+        py: Python<'_>,
+        path: &str,
+        graph: &str,
+        dedup_keys: Option<Vec<String>>,
+        allow_conflicts: bool,
+    ) -> PyResult<Py<PyAny>> {
+        require_default_graph("import_snapshot", graph)?;
+        let client = self.embedded_for_snapshot("import_snapshot")?;
+        Self::import_into(py, client, path, dedup_keys, allow_conflicts)
+    }
+
+    /// Write this client's graph to a `.sgsnap` snapshot at `path`, and return
+    /// what was written as a dict: `nodes_exported`, `edges_exported`,
+    /// `bytes_written`, `labels`, `edge_types`, `duration_ms`, and `dropped`
+    /// -- what the format does not carry, one `{what, count, detail}` per
+    /// kind, empty when nothing was lost. An existing file at `path` is
+    /// replaced.
+    #[pyo3(signature = (path, graph="default"))]
+    fn export_snapshot(&self, py: Python<'_>, path: &str, graph: &str) -> PyResult<Py<PyAny>> {
+        require_default_graph("export_snapshot", graph)?;
+        let client = self.embedded_for_snapshot("export_snapshot")?;
+        let path = std::path::PathBuf::from(path);
+        let started = std::time::Instant::now();
+        let stats = py
+            .detach(|| {
+                get_runtime()
+                    .block_on(client.export_snapshot("default", &path))
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!("export_snapshot({}): {e}", path.display()))
+            })?;
+        let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let report = serde_json::json!({
+            "nodes_exported": stats.node_count,
+            "edges_exported": stats.edge_count,
+            "bytes_written": stats.bytes_written,
+            "labels": stats.labels,
+            "edge_types": stats.edge_types,
+            "dropped": stats.dropped.iter()
+                .map(|d| serde_json::json!({"what": d.what, "count": d.count, "detail": d.detail}))
+                .collect::<Vec<_>>(),
+            "duration_ms": duration_ms,
+        });
+        json_to_py(py, &report)
     }
 
     // ========================================================================
