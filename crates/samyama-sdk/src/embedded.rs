@@ -14,6 +14,66 @@ use crate::client::SamyamaClient;
 use crate::error::{SamyamaError, SamyamaResult};
 use crate::models::{QueryResult, SdkNode, SdkEdge, ServerStatus, StorageStats};
 
+/// The NLQ settings for one [`EmbeddedClient::nlq_with`] call (#2092).
+///
+/// Each field that is set takes the place of an environment variable, and
+/// each one left `None` is read from the environment as before:
+///
+/// | field          | replaces                                        |
+/// |----------------|-------------------------------------------------|
+/// | `provider`     | `NLQ_PROVIDER`                                  |
+/// | `model`        | `NLQ_MODEL` (default `gpt-4o`)                  |
+/// | `api_key`      | the provider's own key variable, e.g. `OPENAI_API_KEY` or `GEMINI_API_KEY` |
+/// | `api_base_url` | `NLQ_API_BASE_URL`                              |
+///
+/// The result is checked by the same reader the server uses
+/// (`samyama::nlq::config_from`), so the two refuse the same things with the
+/// same messages: no provider, an unknown one, one that is not implemented,
+/// and one that needs a key it was not given.
+#[derive(Clone, Debug, Default)]
+pub struct NlqSettings {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub api_base_url: Option<String>,
+}
+
+impl NlqSettings {
+    /// The [`samyama::NLQConfig`] these settings and the process environment
+    /// describe.
+    pub fn resolve(&self) -> Result<samyama::NLQConfig, String> {
+        self.resolve_from(|var| std::env::var(var).ok())
+    }
+
+    /// As [`Self::resolve`], reading the environment through `env`.
+    pub(crate) fn resolve_from(
+        &self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<samyama::NLQConfig, String> {
+        let provider_name = self.provider.clone().or_else(|| env("NLQ_PROVIDER"));
+        let provider = samyama::LLMProvider::parse(provider_name.as_deref().unwrap_or_default())?;
+        let key_var = samyama::nlq::api_key_var(&provider);
+        // A key given for a provider that takes none would be dropped
+        // without a word, so it is refused: either the provider is not the
+        // one the caller meant, or the key is going nowhere.
+        if self.api_key.is_some() && key_var.is_none() {
+            return Err(format!(
+                "api_key was given, but the NLQ provider {provider:?} takes no API key"
+            ));
+        }
+        samyama::nlq::config_from(|var| {
+            let given = match var {
+                "NLQ_PROVIDER" => provider_name.clone(),
+                "NLQ_MODEL" => self.model.clone(),
+                "NLQ_API_BASE_URL" => self.api_base_url.clone(),
+                v if Some(v) == key_var => self.api_key.clone(),
+                _ => None,
+            };
+            given.or_else(|| env(var))
+        })
+    }
+}
+
 /// In-process client that wraps a GraphStore directly.
 ///
 /// No network overhead — queries execute in the same process.
@@ -65,6 +125,51 @@ impl EmbeddedClient {
         config: samyama::persistence::tenant::NLQConfig,
     ) -> Result<samyama::NLQPipeline, samyama::NLQError> {
         samyama::NLQPipeline::new(config)
+    }
+
+    /// Translate a natural-language question into Cypher, in-process (#2092).
+    ///
+    /// The embedded counterpart of [`crate::RemoteClient::nlq`], doing what
+    /// the server's `POST /api/nlq` does: the provider comes from the
+    /// `NLQ_*` environment variables, the model is shown this graph's schema
+    /// summary, and a generated query that writes is refused before it is
+    /// returned. It returns the query and does **not** run it. Pass it to
+    /// [`SamyamaClient::query_readonly`] for results.
+    ///
+    /// No server is involved, but the provider still is: `openai` and
+    /// `gemini` send the question and the schema summary to that service,
+    /// and `ollama` to the Ollama server. Only `mock` stays in the process.
+    /// Errors arrive as [`SamyamaError::QueryError`], as they do from a
+    /// server.
+    pub async fn nlq(&self, question: &str) -> SamyamaResult<String> {
+        self.nlq_with(question, &NlqSettings::default()).await
+    }
+
+    /// As [`Self::nlq`], with `settings` taking the place of the matching
+    /// `NLQ_*` environment variables for this call.
+    ///
+    /// # Example
+    /// ```
+    /// # use samyama_sdk::{EmbeddedClient, NlqSettings, SamyamaClient};
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() -> samyama_sdk::SamyamaResult<()> {
+    /// let client = EmbeddedClient::new();
+    /// let settings = NlqSettings { provider: Some("mock".into()), ..Default::default() };
+    /// let cypher = client.nlq_with("Show me some nodes", &settings).await?;
+    /// let result = client.query_readonly("default", &cypher).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn nlq_with(&self, question: &str, settings: &NlqSettings) -> SamyamaResult<String> {
+        let config = settings.resolve().map_err(SamyamaError::QueryError)?;
+        let pipeline = samyama::NLQPipeline::new(config)
+            .map_err(|e| SamyamaError::QueryError(e.to_string()))?;
+        // Take the summary and let go of the read lock before the model call,
+        // which can take seconds, as the server's handler does.
+        let schema = self.store.read().await.schema_summary();
+        pipeline
+            .translate(question, &schema)
+            .await
+            .map(|t| t.cypher)
+            .map_err(|e| SamyamaError::QueryError(e.to_string()))
     }
 
     /// Create an agent runtime for agentic enrichment workflows.
@@ -441,6 +546,7 @@ impl SamyamaClient for EmbeddedClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use samyama::LLMProvider;
 
     #[tokio::test]
     async fn test_embedded_ping() {
@@ -755,5 +861,99 @@ mod tests {
         // Should be able to clone the Arc
         let _cloned = Arc::clone(store_ref);
         assert!(Arc::strong_count(store_ref) >= 2);
+    }
+
+    // --- NlqSettings (#2092): read against a made-up environment ------------
+
+    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |var| pairs.iter().find(|(k, _)| *k == var).map(|(_, v)| v.to_string())
+    }
+
+    fn settings(provider: Option<&str>, api_key: Option<&str>) -> NlqSettings {
+        NlqSettings {
+            provider: provider.map(str::to_string),
+            api_key: api_key.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn nlq_settings_left_empty_read_the_environment() {
+        let env = env_of(&[
+            ("NLQ_PROVIDER", "openai"),
+            ("NLQ_MODEL", "gpt-env"),
+            ("OPENAI_API_KEY", "sk-env"),
+            ("NLQ_API_BASE_URL", "http://env.invalid/v1"),
+        ]);
+        let c = NlqSettings::default().resolve_from(env).unwrap();
+        assert_eq!(c.provider, LLMProvider::OpenAI);
+        assert_eq!(c.model, "gpt-env");
+        assert_eq!(c.api_key.as_deref(), Some("sk-env"));
+        assert_eq!(c.api_base_url.as_deref(), Some("http://env.invalid/v1"));
+        assert!(c.enabled);
+    }
+
+    #[test]
+    fn nlq_settings_that_are_set_win_over_the_environment() {
+        let env = env_of(&[
+            ("NLQ_PROVIDER", "ollama"),
+            ("NLQ_MODEL", "llama-env"),
+            ("OPENAI_API_KEY", "sk-env"),
+            ("NLQ_API_BASE_URL", "http://env.invalid"),
+        ]);
+        let given = NlqSettings {
+            provider: Some("openai".into()),
+            model: Some("gpt-given".into()),
+            api_key: Some("sk-given".into()),
+            api_base_url: Some("http://given.invalid/v1".into()),
+        };
+        let c = given.resolve_from(env).unwrap();
+        assert_eq!(c.provider, LLMProvider::OpenAI);
+        assert_eq!(c.model, "gpt-given");
+        assert_eq!(c.api_key.as_deref(), Some("sk-given"));
+        assert_eq!(c.api_base_url.as_deref(), Some("http://given.invalid/v1"));
+    }
+
+    #[test]
+    fn nlq_settings_default_the_model_as_the_server_does() {
+        let c = settings(Some("mock"), None).resolve_from(env_of(&[])).unwrap();
+        assert_eq!(c.model, "gpt-4o");
+        assert_eq!(c.api_key, None);
+        assert_eq!(c.api_base_url, None);
+    }
+
+    #[test]
+    fn nlq_settings_give_the_key_to_the_provider_it_was_given_for() {
+        // The OpenAI key in the environment must not reach Google (#438).
+        let env = env_of(&[("OPENAI_API_KEY", "sk-openai")]);
+        let c = settings(Some("gemini"), Some("g-key")).resolve_from(&env).unwrap();
+        assert_eq!(c.provider, LLMProvider::Gemini);
+        assert_eq!(c.api_key.as_deref(), Some("g-key"));
+        let e = settings(Some("gemini"), None).resolve_from(&env).unwrap_err();
+        assert!(e.contains("GEMINI_API_KEY"), "{e}");
+    }
+
+    #[test]
+    fn nlq_settings_refuse_what_the_server_refuses() {
+        let none = env_of(&[]);
+        let e = NlqSettings::default().resolve_from(&none).unwrap_err();
+        assert!(e.contains("NLQ_PROVIDER is not set"), "{e}");
+        let e = settings(Some("openai"), None).resolve_from(&none).unwrap_err();
+        assert!(e.contains("OPENAI_API_KEY"), "{e}");
+        let e = settings(Some("nope"), None).resolve_from(&none).unwrap_err();
+        assert!(e.contains("unknown NLQ_PROVIDER \"nope\""), "{e}");
+        let e = settings(Some("anthropic"), Some("k")).resolve_from(&none).unwrap_err();
+        assert!(e.contains("not implemented"), "{e}");
+    }
+
+    #[test]
+    fn nlq_settings_refuse_a_key_the_provider_would_drop() {
+        for provider in ["mock", "ollama", "claudecode"] {
+            let e = settings(Some(provider), Some("sk-x")).resolve_from(env_of(&[])).unwrap_err();
+            assert!(e.contains("takes no API key"), "{provider}: {e}");
+        }
+        // The same provider from the environment is refused the same way.
+        let env = env_of(&[("NLQ_PROVIDER", "mock")]);
+        assert!(settings(None, Some("sk-x")).resolve_from(env).is_err());
     }
 }
