@@ -1086,12 +1086,16 @@ fn render_query_result(
 pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
     let stats = state.engine.cache_stats();
+    // The one thing here that can stop being true of a running server: after a
+    // failed persist, every write is refused until a restart (#2082).
+    let degraded = crate::persistence::health::is_degraded();
     Json(json!({
-        "status": "healthy",
+        "status": if degraded { "degraded" } else { "healthy" },
         "version": crate::VERSION,
         "storage": {
             "nodes": store_guard.node_count(),
             "edges": store_guard.edge_count(),
+            "persistence_degraded": degraded,
         },
         "cache": {
             "hits": stats.hits(),

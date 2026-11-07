@@ -87,7 +87,7 @@ fn respond(mut stream: TcpStream, mode: StatusMode) {
         match mode {
             StatusMode::Healthy => (
                 200,
-                r#"{"status":"healthy","version":"0.0.1","storage":{"nodes":3,"edges":2}}"#
+                r#"{"status":"healthy","version":"0.0.1","storage":{"nodes":3,"edges":2,"persistence_degraded":false}}"#
                     .to_string(),
             ),
             StatusMode::Degraded => (
@@ -97,6 +97,10 @@ fn respond(mut stream: TcpStream, mode: StatusMode) {
             ),
             StatusMode::ServerError => (503, r#"{"error":"down"}"#.to_string()),
         }
+    } else if request_line.starts_with("GET /api/memory") {
+        (200, r#"{"graph":{"attributed_bytes":1048576},"index_memory_bytes":0}"#.to_string())
+    } else if request_line.starts_with("GET /metrics") {
+        (200, "samyama_nodes 3\n".to_string())
     } else if request_line.starts_with("POST /api/query") {
         query_body(json["query"].as_str().unwrap_or(""))
     } else if request_line.starts_with("POST /api/nlq") {
@@ -480,6 +484,34 @@ fn doctor_passes_against_a_healthy_server_and_prints_a_summary() {
 }
 
 #[test]
+fn doctor_reads_the_servers_health_endpoints() {
+    let url = mock_server(StatusMode::Healthy);
+    let dir = temp_home("doctor_deep");
+    let o = run(&["--url", &url, "--format", "json", "doctor", "--data-dir", dir.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).expect("JSON");
+    let checks = v["checks"].as_array().unwrap();
+    let find = |n: &str| checks.iter().find(|c| c["name"] == n).unwrap().clone();
+    assert_eq!(find("persistence")["verdict"], "pass");
+    assert_eq!(find("server memory")["verdict"], "pass");
+    assert_eq!(find("metrics")["verdict"], "pass");
+    assert!(find("latency")["detail"].as_str().unwrap().contains("RETURN 1 x20"));
+    assert_eq!(find("resp port")["verdict"], "skipped");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn doctor_fails_on_a_server_that_is_not_persisting() {
+    let url = mock_server(StatusMode::Degraded);
+    let dir = temp_home("doctor_degraded");
+    let o = run(&["--url", &url, "doctor", "--data-dir", dir.to_str().unwrap()]);
+    let out = stdout(&o);
+    assert_eq!(o.status.code(), Some(1), "{out}");
+    assert!(out.contains("writes are being refused"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn doctor_json_reports_an_unreachable_server_as_a_failure() {
     let (_reserved_port, url) = dead_url();
     let dir = temp_home("doctor_json");
@@ -500,6 +532,9 @@ fn doctor_json_reports_an_unreachable_server_as_a_failure() {
     let find = |n: &str| checks.iter().find(|c| c["name"] == n).unwrap().clone();
     assert_eq!(find("server reachable")["verdict"], "fail");
     assert_eq!(find("version match")["verdict"], "skipped");
+    for name in ["persistence", "server memory", "metrics", "latency"] {
+        assert_eq!(find(name)["verdict"], "skipped", "{name}");
+    }
     assert_eq!(find("data directory")["verdict"], "pass");
     assert!(find("data directory")["detail"]
         .as_str()
