@@ -154,8 +154,18 @@ class AsyncSamyamaClient:
         stream = await _to_thread(self._client.query_stream, cypher, graph)
         return AsyncQueryStream(stream)
 
-    async def nlq(self, question: str) -> str:
-        return await _to_thread(self._client.nlq, question)
+    async def nlq(
+        self,
+        question: str,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        api_base_url: Optional[str] = None,
+    ) -> str:
+        return await _to_thread(
+            self._client.nlq, question,
+            provider=provider, model=model, api_key=api_key, api_base_url=api_base_url,
+        )
 
     async def status(self) -> Any:
         return await _to_thread(self._client.status)
