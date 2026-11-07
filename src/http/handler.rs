@@ -1105,6 +1105,16 @@ pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse 
     }))
 }
 
+/// `GET /api/algorithms/catalog` — every algorithm `CALL algo.*` runs (#2013).
+///
+/// A client listed algorithms from its own hard-coded array, eight of the
+/// sixty-eight dispatched; this is the list `is_algorithm` itself reads, so
+/// it cannot name one that does not run or miss one that does.
+pub async fn algorithm_catalog_handler() -> impl IntoResponse {
+    let algorithms = crate::query::executor::algorithm_catalog::ALGORITHM_CATALOG;
+    Json(json!({ "count": algorithms.len(), "algorithms": algorithms }))
+}
+
 /// `GET /metrics` — Prometheus text exposition (REL-10).
 ///
 /// Hand-rolled rather than pulling in a metrics crate: what is exported here
