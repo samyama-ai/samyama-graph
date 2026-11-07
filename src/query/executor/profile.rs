@@ -63,6 +63,9 @@ pub struct NodeCounters {
     /// Times this operator was pulled from. A high call count against a low
     /// row count is an operator being asked and answering nothing.
     calls: AtomicU64,
+    /// The largest `PhysicalOperator::memory_bytes` read from the operator,
+    /// plus one so that 0 can mean "never reported" (#2078).
+    memory_plus_one: AtomicU64,
 }
 
 /// One node of the instrumented plan, in pre-order.
@@ -93,6 +96,13 @@ impl ProfileNode {
     /// Pull calls received.
     pub fn calls(&self) -> u64 {
         self.counters.calls.load(Ordering::Relaxed)
+    }
+
+    /// The most this operator held in buffered rows, in bytes, or `None` for
+    /// an operator that buffers nothing (#2078). An estimate from a walk of
+    /// the rows, like `/api/memory`, not an allocator reading.
+    pub fn memory_bytes(&self) -> Option<u64> {
+        self.counters.memory_plus_one.load(Ordering::Relaxed).checked_sub(1)
     }
 
     /// How far the estimate was from what happened: the larger of the two
@@ -126,8 +136,19 @@ impl ProfiledOperator {
             .nanos
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         self.counters.calls.fetch_add(1, Ordering::Relaxed);
+        // Memory is read when the first row leaves and when the operator says
+        // it is done. The operator recorded its own peak when it built its
+        // buffer (`track_memory`), so this is a field read, not a walk.
+        let first_output = produced > 0 && self.counters.rows.load(Ordering::Relaxed) == 0;
         if produced > 0 {
             self.counters.rows.fetch_add(produced as u64, Ordering::Relaxed);
+        }
+        if first_output || produced == 0 {
+            if let Some(bytes) = self.inner.memory_bytes() {
+                self.counters
+                    .memory_plus_one
+                    .fetch_max(bytes as u64 + 1, Ordering::Relaxed);
+            }
         }
         out
     }
@@ -216,6 +237,10 @@ impl PhysicalOperator for ProfiledOperator {
     fn estimate_rows(&self, store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         self.inner.estimate_rows(store, children)
     }
+
+    fn memory_bytes(&self) -> Option<usize> {
+        self.inner.memory_bytes()
+    }
 }
 
 /// A stand-in used only while a slot is being swapped. Never executed.
@@ -276,7 +301,8 @@ fn wrap(
     let estimated = store.and_then(|store| slot.estimate_rows(store, &children));
     nodes[index].estimated = estimated;
 
-    let inner = std::mem::replace(slot, Box::new(Vacated));
+    let mut inner = std::mem::replace(slot, Box::new(Vacated));
+    inner.track_memory();
     *slot = Box::new(ProfiledOperator { inner, counters });
     estimated
 }
@@ -308,26 +334,21 @@ fn self_times(nodes: &[ProfileNode]) -> Vec<Duration> {
 /// the table above is for people, and a column header is not attached to the
 /// number under it once the line is taken on its own. An operator with no
 /// estimate prints `estimated=-` rather than a number it does not have.
+///
+/// Printed for every plan, with the operator's details **in full**: this is the
+/// section a viewer parses, and it used to vanish whenever no operator had an
+/// estimate and to cut details at 24 characters, hiding which index or
+/// predicate an operator used (#2078). The table above keeps its truncation;
+/// it is for people.
 fn estimate_section(nodes: &[ProfileNode], selves: &[Duration]) -> String {
-    if nodes.iter().all(|n| n.estimated.is_none()) {
-        return String::new();
-    }
     let mut out = format!(
         "\nEstimated vs actual rows (q-error = larger / smaller; ! above {Q_ERROR_FLAG}):\n"
     );
     for (node, self_time) in nodes.iter().zip(selves) {
         let mut label = format!("{}{}", "  ".repeat(node.depth), node.name);
         if !node.details.is_empty() {
-            let detail: String = node.details.chars().take(24).collect();
-            label.push_str(&format!(" ({detail})"));
+            label.push_str(&format!(" ({})", node.details));
         }
-        // `String::truncate` is byte-indexed and panics when the cut is not on
-        // a char boundary. The details above are taken by CHARS, and the
-        // `{:<38}` below pads by chars, so the cut has to be by chars as well:
-        // #1614 gave TrieJoin a details string containing `∈` and `∩`, three
-        // bytes each, and PROFILE on a cyclic pattern nested two deep landed
-        // byte 38 inside `∩` and killed the process.
-        let label: String = label.chars().take(38).collect();
         let (estimated, q_error, flag) = match (node.estimated, node.q_error()) {
             (Some(e), Some(q)) => (
                 format!("{}", e.round() as u64),
@@ -337,9 +358,10 @@ fn estimate_section(nodes: &[ProfileNode], selves: &[Duration]) -> String {
             _ => ("-".to_string(), "-".to_string(), ""),
         };
         out.push_str(&format!(
-            "  {label:<38} estimated={estimated} actual={} q-error={q_error} time={:.3}ms{flag}\n",
+            "  {label:<38} estimated={estimated} actual={} q-error={q_error} time={:.3}ms memory={}{flag}\n",
             node.rows(),
             self_time.as_secs_f64() * 1000.0,
+            node.memory_bytes().map_or_else(|| "-".to_string(), |b| format!("{b}B")),
         ));
     }
     out
