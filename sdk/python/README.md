@@ -132,6 +132,37 @@ asyncio.run(main())
 `AsyncSamyamaClient.connect(url, **kwargs)` takes the same keyword arguments as
 `SamyamaClient.connect`.
 
+## Natural-language queries
+
+`nlq` turns a question into Cypher. It returns the query and does not run it;
+a generated query that writes is refused.
+
+```python
+client = SamyamaClient.embedded()
+# ... load a graph ...
+cypher = client.nlq("Who does Alice know?", provider="openai")  # key from OPENAI_API_KEY
+result = client.query_readonly(cypher)
+```
+
+In embedded mode the translation happens in this process: the model is shown
+this graph's schema, as the server would show it. The provider is read from
+the same environment variables the server reads, and the keyword arguments
+take their place for one call:
+
+| argument       | environment variable it replaces                     |
+|----------------|------------------------------------------------------|
+| `provider`     | `NLQ_PROVIDER` — `openai`, `gemini`, `ollama`, `claudecode` or `mock`; no default |
+| `model`        | `NLQ_MODEL` (default `gpt-4o`)                       |
+| `api_key`      | the provider's own: `OPENAI_API_KEY`, `GEMINI_API_KEY` |
+| `api_base_url` | `NLQ_API_BASE_URL`                                   |
+
+No server is involved, but the provider still is: `openai` and `gemini` send
+the question and the schema summary to that service. `mock` answers a fixed
+query without leaving the process, for tests.
+
+A remote client asks the server (`POST /api/nlq`), which chooses its own
+provider, so passing any of these arguments to it raises `ValueError`.
+
 ## More
 
 - [`docs/SDK-API-CLI-ARCHITECTURE.md`](https://github.com/samyama-ai/samyama-graph/blob/main/docs/SDK-API-CLI-ARCHITECTURE.md)

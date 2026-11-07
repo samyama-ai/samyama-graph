@@ -7,7 +7,7 @@ use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::types::PyDict;
 use samyama_sdk::{
-    ConnectionConfig, EmbeddedClient, RemoteClient, RowStream, SamyamaClient as SamyamaClientTrait,
+    ConnectionConfig, EmbeddedClient, NlqSettings, RemoteClient, RowStream, SamyamaClient as SamyamaClientTrait,
     QueryResult as SdkQueryResult,
     AlgorithmClient, PageRankConfig, PcaConfig,
     VectorClient, DistanceMetric, NodeId,
@@ -477,23 +477,58 @@ impl SamyamaClient {
         }
     }
 
-    /// Translate a natural-language question into Cypher (`POST /api/nlq`).
+    /// Translate a natural-language question into Cypher.
     ///
     /// Returns the generated query; it does not run it. Pass the result to
-    /// `query_readonly` for results. The server chooses the LLM provider
-    /// (`NLQ_PROVIDER`) and refuses any generated query that writes; that
-    /// refusal, like an unconfigured provider, raises `RuntimeError` with the
-    /// server's message. Remote mode only: translation happens on the server.
-    fn nlq(&self, py: Python<'_>, question: &str) -> PyResult<String> {
-        let client = match &*self.inner {
-            ClientInner::Remote(c) => c,
-            ClientInner::Embedded(_) => {
-                return Err(PyRuntimeError::new_err(
-                    "nlq is only available in remote mode. Use SamyamaClient.connect(url).",
-                ))
+    /// `query_readonly` for results. A generated query that writes is
+    /// refused, and that refusal, like an unconfigured provider, raises
+    /// `RuntimeError`.
+    ///
+    /// Embedded mode translates in-process (#2092): the model is shown this
+    /// graph's schema, and the provider comes from `NLQ_PROVIDER`,
+    /// `NLQ_MODEL`, the provider's own key variable (`OPENAI_API_KEY`,
+    /// `GEMINI_API_KEY`) and `NLQ_API_BASE_URL`. `provider`, `model`,
+    /// `api_key` and `api_base_url` take the place of those for this call.
+    ///
+    /// Remote mode asks the server (`POST /api/nlq`), which chooses its own
+    /// provider, so passing any of the four to a remote client raises
+    /// `ValueError` rather than being ignored.
+    #[pyo3(signature = (question, provider=None, model=None, api_key=None, api_base_url=None))]
+    fn nlq(
+        &self,
+        py: Python<'_>,
+        question: &str,
+        provider: Option<String>,
+        model: Option<String>,
+        api_key: Option<String>,
+        api_base_url: Option<String>,
+    ) -> PyResult<String> {
+        let settings = NlqSettings { provider, model, api_key, api_base_url };
+        let result = match &*self.inner {
+            ClientInner::Remote(c) => {
+                let given: Vec<&str> = [
+                    ("provider", settings.provider.is_some()),
+                    ("model", settings.model.is_some()),
+                    ("api_key", settings.api_key.is_some()),
+                    ("api_base_url", settings.api_base_url.is_some()),
+                ]
+                .into_iter()
+                .filter_map(|(name, set)| set.then_some(name))
+                .collect();
+                if !given.is_empty() {
+                    return Err(PyValueError::new_err(format!(
+                        "nlq settings only apply in embedded mode (got: {}). A server \
+                         chooses its own NLQ provider (NLQ_PROVIDER on the server, or the \
+                         tenant's nlq_config).",
+                        given.join(", ")
+                    )));
+                }
+                py.detach(|| get_runtime().block_on(c.nlq(question)))
+            }
+            ClientInner::Embedded(c) => {
+                py.detach(|| get_runtime().block_on(c.nlq_with(question, &settings)))
             }
         };
-        let result = py.detach(|| get_runtime().block_on(client.nlq(question)));
         result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
