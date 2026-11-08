@@ -90,6 +90,11 @@ jobs:
       # Editing this file runs them too, so a change to the job is tested by
       # the pull request that makes it.
       platforms: ${{ steps.filter.outputs.platforms }}
+      # Two more, for the workflows folded in here. Both were separate
+      # PR-triggered workflows, so a pull request started three workflows where
+      # one will do. Neither gates a merge -- see their files.
+      catalogs: ${{ steps.filter.outputs.catalogs }}
+      sortcost: ${{ steps.filter.outputs.sortcost }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,6 +118,8 @@ jobs:
             echo "conformance=true" >> "$GITHUB_OUTPUT"
             echo "docs=true" >> "$GITHUB_OUTPUT"
             echo "platforms=true" >> "$GITHUB_OUTPUT"
+            echo "catalogs=true" >> "$GITHUB_OUTPUT"
+            echo "sortcost=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -122,6 +129,8 @@ jobs:
             echo "conformance=true" >> "$GITHUB_OUTPUT"
             echo "docs=true" >> "$GITHUB_OUTPUT"
             echo "platforms=true" >> "$GITHUB_OUTPUT"
+            echo "catalogs=true" >> "$GITHUB_OUTPUT"
+            echo "sortcost=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -222,6 +231,38 @@ jobs:
             echo "not a pull request into main; the macOS and Windows legs will be skipped"
           fi
           echo "platforms=$PLATFORMS" >> "$GITHUB_OUTPUT"
+          # The KG catalogs, folded in from `kg-catalogs.yml`. These are the
+          # paths that file's own `paths:` filter named.
+          CATALOG_PATHS='(^case_studies/[^/]+/questions\.json$|^case_studies/[^/]+/[^/]+\.sgqueries$|^case_studies/[^/]+/case\.env$|^\.github/workflows/kg-catalogs\.yml$|^\.github/workflows/ci\.yml$)'
+
+          CATALOGS=false
+          for f in $CHANGED; do
+            if printf '%s' "$f" | grep -qE "$CATALOG_PATHS"; then
+              echo "requires the KG catalog check: $f"
+              CATALOGS=true
+              break
+            fi
+          done
+          if [ "$CATALOGS" = "false" ]; then
+            echo "no KG catalog touched; that check will be skipped"
+          fi
+          echo "catalogs=$CATALOGS" >> "$GITHUB_OUTPUT"
+
+          # The sort-cost measurement, folded in from `sort-measurement.yml`.
+          SORTCOST_PATHS='(^examples/sort_cost_decompose\.rs$|^\.github/workflows/sort-measurement\.yml$|^\.github/workflows/ci\.yml$)'
+
+          SORTCOST=false
+          for f in $CHANGED; do
+            if printf '%s' "$f" | grep -qE "$SORTCOST_PATHS"; then
+              echo "requires the sort-cost measurement: $f"
+              SORTCOST=true
+              break
+            fi
+          done
+          if [ "$SORTCOST" = "false" ]; then
+            echo "sort-cost probe untouched; that measurement will be skipped"
+          fi
+          echo "sortcost=$SORTCOST" >> "$GITHUB_OUTPUT"
 
   docs-gate:
     # CH-DOC-EXEC for a PR that changes documentation and no code (#1854).
@@ -1275,6 +1316,30 @@ jobs:
             fi
           done
           echo "every excluded workspace lockfile is current"
+
+  # Folded in from `kg-catalogs.yml` and `sort-measurement.yml`, which were the
+  # only other workflows a pull request triggered. Called rather than copied, so
+  # each still has one definition and keeps its own schedule and dispatch.
+  #
+  # Neither is in `ci-ok`'s needs, which preserves exactly today's behaviour:
+  # the catalog check downloads published snapshots over the network, and the
+  # sort probe is a measurement, not a test. Folding them in is about one
+  # workflow per pull request, not about making them gate.
+  kg-catalogs:
+    name: KG catalogs
+    needs: changes
+    if: needs.changes.outputs.catalogs == 'true'
+    uses: ./.github/workflows/kg-catalogs.yml
+    permissions:
+      contents: read
+
+  sort-measurement:
+    name: sort cost measurement
+    needs: changes
+    if: needs.changes.outputs.sortcost == 'true'
+    uses: ./.github/workflows/sort-measurement.yml
+    permissions:
+      contents: read
 
   ci-ok:
     name: ci-ok
