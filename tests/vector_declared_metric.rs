@@ -63,7 +63,7 @@ fn an_l2_index_answers_with_l2_distance() {
     let got = ids(
         &s,
         "CALL db.index.vector.queryNodes('L2T','v',[1.0,0.0],5) YIELD node, score \
-         RETURN node.id AS id ORDER BY score, id",
+         RETURN node.id AS id ORDER BY score DESC, id",
     );
     assert_eq!(got, vec![1, 1001, 1002, 1003, 1004]);
 }
@@ -117,10 +117,21 @@ fn exact(metric: DistanceMetric, a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// The search width the graph case below uses: a fifth of its corpus.
+const WIDE_EF: usize = 400;
+
 /// The index's top-k agrees with an exact scan under the same metric, and
 /// reports the distance the metric defines. Below 128 vectors the index scans
 /// exactly; above it the graph answers, so the check there is recall rather
 /// than equality.
+///
+/// The graph is searched wide. HNSW picks each node's layers at random, and
+/// at the default width of 64 recall on these 2,000 points ranged from 0.74
+/// to above 0.9 between runs, which failed CI on PRs that did not touch
+/// vectors. This test is about the metric: a wrong one fails the distance
+/// check and the exact-scan comparison at any width, and a width this large
+/// keeps the right one from depending on the draw. Recall at the default
+/// width is the HNSW tests' job.
 #[test]
 fn each_metric_ranks_and_scores_as_an_exact_scan_does() {
     for metric in [
@@ -144,7 +155,7 @@ fn each_metric_ranks_and_scores_as_an_exact_scan_does() {
                     .collect();
                 want.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
                 let want: Vec<u64> = want.iter().take(10).map(|p| p.0).collect();
-                let got = index.search(&q, 10).unwrap();
+                let got = index.search_ef(&q, 10, Some(WIDE_EF)).unwrap();
                 for (id, d) in &got {
                     let true_d = exact(metric, &q, &data[id.as_u64() as usize]);
                     assert!(

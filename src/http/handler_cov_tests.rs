@@ -86,6 +86,7 @@ fn routes(state: AppState) -> Router {
         .route("/api/memory", get(memory_handler))
         .route("/metrics", get(metrics_handler))
         .route("/api/schema", get(schema_handler))
+        .route("/api/algorithms/catalog", get(algorithm_catalog_handler))
         .route("/api/sample", post(sample_handler))
         .route("/api/snapshot/export", post(export_snapshot_handler))
         .route("/api/snapshot/import", post(restore_snapshot_handler))
@@ -1750,7 +1751,7 @@ async fn json_import_refusals_and_quota() {
 }
 
 #[tokio::test]
-async fn json_import_keeps_scalars_and_drops_structures() {
+async fn json_import_keeps_scalars_and_lists_and_drops_nulls() {
     let s = state();
     let r = post_json(
         routes(s.clone()),
@@ -1763,7 +1764,7 @@ async fn json_import_keeps_scalars_and_drops_structures() {
     let rows = run(&s, "MATCH (n:N) WHERE n.a = 1 RETURN keys(n) AS k").await;
     let mut keys: Vec<String> = serde_json::from_value(rows["records"][0][0].clone()).unwrap();
     keys.sort();
-    assert_eq!(keys, vec!["a", "b"]);
+    assert_eq!(keys, vec!["a", "b", "c"]);
 }
 
 #[tokio::test]
@@ -1838,6 +1839,32 @@ async fn memory_reports_bytes_per_edge_and_the_tenant_count() {
         "no edges, no ratio"
     );
     assert!(empty["tenants"].is_null());
+}
+
+#[tokio::test]
+async fn algorithm_catalog_lists_every_algorithm_the_engine_dispatches() {
+    let j = get_uri(routes(state()), "/api/algorithms/catalog").await.json();
+    let list = j["algorithms"].as_array().unwrap();
+    assert_eq!(j["count"], list.len());
+    assert_eq!(list.len(), crate::query::executor::algorithm_catalog::ALGORITHM_CATALOG.len());
+    // Every listed name and alias is one the engine accepts.
+    for entry in list {
+        let names = std::iter::once(&entry["name"]).chain(entry["aliases"].as_array().unwrap());
+        for name in names {
+            let name = name.as_str().unwrap();
+            assert!(
+                crate::query::executor::operator::AlgorithmOperator::is_algorithm(name),
+                "{name} is listed but does not dispatch"
+            );
+        }
+    }
+    let katz = list.iter().find(|e| e["name"] == "algo.katz").unwrap();
+    assert_eq!(katz["category"], "centrality");
+    assert_eq!(katz["aliases"], serde_json::json!(["algo.katzCentrality"]));
+    assert_eq!(katz["yields"], serde_json::json!(["node", "score"]));
+    assert_eq!(katz["writes"], false);
+    let fast_rp = list.iter().find(|e| e["name"] == "algo.fastRP").unwrap();
+    assert_eq!(fast_rp["writes"], true);
 }
 
 #[tokio::test]
@@ -2142,6 +2169,74 @@ async fn a_snapshot_past_the_quota_is_refused_whole() {
     assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(r.json()["nodes_imported"], 0);
     assert_eq!(s.store.read().await.node_count(), 0);
+}
+
+/// `data` with its header's declared counts replaced, the body untouched.
+fn declaring(data: &[u8], nodes: u64, edges: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    crate::snapshot::edit_header(data, &mut out, |h| {
+        h.insert("node_count".into(), json!(nodes));
+        h.insert("edge_count".into(), json!(edges));
+        Ok(())
+    })
+    .unwrap();
+    out
+}
+
+#[tokio::test]
+async fn a_header_that_understates_its_nodes_is_still_held_to_the_quota() {
+    // The header said zero, so the up-front check passed, and every node in
+    // the body was created regardless of the quota.
+    let src = state();
+    run(&src, "CREATE (:S), (:S), (:S)").await;
+    let data = declaring(&snapshot_bytes(&src).await, 0, 0);
+    let (s, _pm, _dir) = state_with_quota(2, 0);
+    let r = post_multipart(routes(s.clone()), "/api/snapshot/import", vec![file(data)]).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.text());
+    assert_eq!(r.json()["nodes_imported"], 0);
+    assert_eq!(s.store.read().await.node_count(), 0, "the import is rolled back whole");
+}
+
+#[tokio::test]
+async fn a_header_that_understates_its_edges_is_still_held_to_the_quota() {
+    let src = state();
+    run(&src, "CREATE (:S)-[:R]->(:S), (:S)-[:R]->(:S)").await;
+    let data = declaring(&snapshot_bytes(&src).await, 4, 0);
+    let (s, _pm, _dir) = state_with_quota(100, 1);
+    let r = post_multipart(routes(s.clone()), "/api/snapshot/import", vec![file(data)]).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.text());
+    let store = s.store.read().await;
+    assert_eq!((store.node_count(), store.edge_count()), (0, 0));
+}
+
+#[tokio::test]
+async fn an_understated_header_that_fits_still_imports() {
+    // The header is not trusted, but neither is it required to be right: a
+    // file from another tool that gets the counts wrong imports if its body
+    // fits.
+    let src = state();
+    run(&src, "CREATE (:S), (:S)").await;
+    let data = declaring(&snapshot_bytes(&src).await, 0, 0);
+    let (s, _pm, _dir) = state_with_quota(5, 0);
+    let r = post_multipart(routes(s.clone()), "/api/snapshot/import", vec![file(data)]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    assert_eq!(s.store.read().await.node_count(), 2);
+}
+
+#[tokio::test]
+async fn repeated_snapshot_imports_count_what_earlier_ones_added() {
+    // A snapshot import is not journalled, so the quota counter does not see
+    // its rows; each upload used to be checked against the count before any
+    // of them.
+    let src = state();
+    run(&src, "CREATE (:S), (:S)").await;
+    let data = snapshot_bytes(&src).await;
+    let (s, _pm, _dir) = state_with_quota(3, 0);
+    let r = post_multipart(routes(s.clone()), "/api/snapshot/import", vec![file(data.clone())]).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let r = post_multipart(routes(s.clone()), "/api/snapshot/import", vec![file(data)]).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.text());
+    assert_eq!(s.store.read().await.node_count(), 2);
 }
 
 #[tokio::test]
