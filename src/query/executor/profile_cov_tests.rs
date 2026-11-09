@@ -194,7 +194,11 @@ fn long_details_are_truncated_in_the_tree() {
     let nodes = instrument(&mut plan);
     assert_eq!(nodes[0].details.len(), 100);
     let text = report(&nodes, Duration::from_millis(1), None);
+    // The tree is for people and is cut; the per-operator section below it is
+    // what a viewer parses and keeps the details whole (#2078).
+    let (tree, section) = text.split_once("Estimated vs actual rows").expect("section printed");
     let expected = format!("Probe ({})", "a".repeat(24));
-    assert!(text.contains(&expected), "{text}");
-    assert!(!text.contains(&"a".repeat(25)), "{text}");
+    assert!(tree.contains(&expected), "{text}");
+    assert!(!tree.contains(&"a".repeat(25)), "{text}");
+    assert!(section.contains(&format!("Probe ({})", "a".repeat(100))), "{text}");
 }

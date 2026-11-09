@@ -86,6 +86,7 @@ fn routes(state: AppState) -> Router {
         .route("/api/memory", get(memory_handler))
         .route("/metrics", get(metrics_handler))
         .route("/api/schema", get(schema_handler))
+        .route("/api/algorithms/catalog", get(algorithm_catalog_handler))
         .route("/api/sample", post(sample_handler))
         .route("/api/snapshot/export", post(export_snapshot_handler))
         .route("/api/snapshot/import", post(restore_snapshot_handler))
@@ -1860,6 +1861,32 @@ async fn the_result_cache_is_on_metrics_and_memory() {
     assert_eq!(j["result_cache"]["entries"], 1);
     assert!(j["result_cache"]["bytes"].as_u64().unwrap() > 0);
     assert!(j["result_cache"]["budget_bytes"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn algorithm_catalog_lists_every_algorithm_the_engine_dispatches() {
+    let j = get_uri(routes(state()), "/api/algorithms/catalog").await.json();
+    let list = j["algorithms"].as_array().unwrap();
+    assert_eq!(j["count"], list.len());
+    assert_eq!(list.len(), crate::query::executor::algorithm_catalog::ALGORITHM_CATALOG.len());
+    // Every listed name and alias is one the engine accepts.
+    for entry in list {
+        let names = std::iter::once(&entry["name"]).chain(entry["aliases"].as_array().unwrap());
+        for name in names {
+            let name = name.as_str().unwrap();
+            assert!(
+                crate::query::executor::operator::AlgorithmOperator::is_algorithm(name),
+                "{name} is listed but does not dispatch"
+            );
+        }
+    }
+    let katz = list.iter().find(|e| e["name"] == "algo.katz").unwrap();
+    assert_eq!(katz["category"], "centrality");
+    assert_eq!(katz["aliases"], serde_json::json!(["algo.katzCentrality"]));
+    assert_eq!(katz["yields"], serde_json::json!(["node", "score"]));
+    assert_eq!(katz["writes"], false);
+    let fast_rp = list.iter().find(|e| e["name"] == "algo.fastRP").unwrap();
+    assert_eq!(fast_rp["writes"], true);
 }
 
 #[tokio::test]
