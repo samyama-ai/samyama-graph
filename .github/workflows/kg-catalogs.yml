@@ -24,32 +24,30 @@ on:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
-  # DO NOT make any check in this file a required status check while this
-  # `paths:` filter is here (#1854 item 3; #1860 for what it costs).
+  # Called by `ci.yml` on pull requests, which is where this workflow's own
+  # `pull_request:` trigger used to live. See the note below.
+  workflow_call:
+  # This workflow's own pull-request trigger now lives in `ci.yml`, which calls
+  # it (`workflow_call:` above) behind a `changes` output. Same reason
+  # `conformance.yml` was folded in: a workflow that `paths:` filters out does
+  # not report its checks as skipped -- it does not report them at all -- so a
+  # required context here could never be satisfied, and every pull request
+  # missing these paths would sit pending forever with no visible cause
+  # (#1854 item 3; #1860 for what it costs).
   #
-  # A workflow that `paths:` filters out does not report its checks as skipped
-  # -- it does not report them at all. A required context that never reports
-  # leaves every pull request missing these paths pending forever, unmergeable,
-  # with no visible cause. This is safe today only because nothing here is
-  # required.
+  # As a job condition in `ci.yml` the check always reports, so `ci-ok` can gate
+  # it the day anyone decides it should. It is deliberately NOT in `ci-ok`'s
+  # needs today: this job downloads published snapshots over the network, so a
+  # rotted release URL would block every `case_studies/` pull request. That is a
+  # policy call, not an oversight.
   #
-  # Converting to a job condition, the shape `ci.yml` uses, is NOT sufficient on
-  # its own. #1860 was a docs-only pull request under exactly that shape and was
-  # MERGEABLE yet permanently BLOCKED: when an `if:` skips a MATRIX job, GitHub
-  # never expands the matrix, so the check reports under its literal name
+  # One trap worth keeping written down: a job condition is not sufficient on
+  # its own for a MATRIX job. When an `if:` skips a matrix job, GitHub never
+  # expands the matrix, so the check reports under its literal name
   # (`test (${{ matrix.os }})`) and the required `test (ubuntu-latest)` never
-  # appears. A skipped job with a FIXED name does satisfy its requirement --
-  # `supply-chain (cargo-deny)` reports, skipped, under exactly the required
-  # name.
-  #
-  # So if this ever has to gate merges, route it through `ci.yml`'s single
-  # fixed-name aggregator (`ci-ok`, #1863) instead of requiring it directly.
-  pull_request:
-    paths:
-      - "case_studies/*/questions.json"
-      - "case_studies/*/*.sgqueries"
-      - "case_studies/*/case.env"
-      - ".github/workflows/kg-catalogs.yml"
+  # appears -- #1860 was MERGEABLE yet permanently BLOCKED that way. A skipped
+  # job with a FIXED name does satisfy its requirement. This job has a fixed
+  # name, so it is safe.
 
 permissions:
   contents: read

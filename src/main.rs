@@ -736,19 +736,12 @@ fn cmd_auth_token(argv: &[String]) -> i32 {
         return 2;
     }
 
-    // `getrandom` is already in the tree; reading /dev/urandom directly keeps
-    // this to the standard library and makes the source of the entropy the
-    // obvious thing rather than a crate feature.
+    // The OS random source, through `getrandom`. This read /dev/urandom by path,
+    // which does not exist on Windows, so `auth-token` failed there (#1696).
     let mut raw = [0u8; 32];
-    match std::fs::File::open("/dev/urandom").and_then(|mut f| {
-        use std::io::Read;
-        f.read_exact(&mut raw)
-    }) {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("cannot read /dev/urandom: {e}");
-            return 1;
-        }
+    if let Err(e) = samyama::snapshot::encryption::os_random(&mut raw) {
+        eprintln!("{e}");
+        return 1;
     }
     let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
     let digest: String =

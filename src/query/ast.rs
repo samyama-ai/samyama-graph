@@ -131,6 +131,14 @@ pub struct Query {
     pub rebuild_hierarchy_index: Option<String>,
     /// SHOW HIERARCHY INDEXES flag
     pub show_hierarchy_indexes: bool,
+    /// CREATE STRUCTURE INDEX clause (optional) — ADR-041, #2036
+    pub create_structure_index_clause: Option<CreateStructureIndexClause>,
+    /// DROP STRUCTURE INDEX name (optional)
+    pub drop_structure_index: Option<String>,
+    /// REBUILD STRUCTURE INDEX name (optional)
+    pub rebuild_structure_index: Option<String>,
+    /// SHOW STRUCTURE INDEXES flag
+    pub show_structure_indexes: bool,
     /// CREATE / REFRESH / DROP / SHOW GRAPH PROJECTION(S) (ALGO-05)
     pub graph_projection_ddl: Option<GraphProjectionDdl>,
     /// SHOW INDEXES flag
@@ -329,6 +337,39 @@ pub struct CreateHierarchyIndexClause {
     pub measure_label: Option<String>,
     /// Optional measure property.
     pub measure_property: Option<String>,
+    /// Requested roll-up monoids (`sum`, `count`, `min`, `max`).
+    pub aggregates: Vec<String>,
+}
+
+/// CREATE STRUCTURE INDEX clause (SGI, ADR-041 / #2036).
+///
+/// `CREATE STRUCTURE INDEX pdb ON :Residue(x, y, z) METRIC euclidean
+///  BACKBONE residue_seq GROUP BY chain_id CONTACT_RADIUS 8.0
+///  MEASURE b_factor AGGREGATE sum, min, max, count`
+///
+/// Where [`CreateHierarchyIndexClause`] names a covering *relationship*, this
+/// names the coordinate *properties* that place a node in a continuous
+/// manifold. Each field below maps to one field of
+/// `crate::index::structure::ManifoldSpec`, so a clause that parses always
+/// describes a convention the index can build.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateStructureIndexClause {
+    /// Index name.
+    pub name: String,
+    /// Node label the convention applies to.
+    pub label: String,
+    /// Coordinate properties: `(x, y, z)`, or `(lat, lon)` / `(lat, lon, elevation)`.
+    pub coords: Vec<String>,
+    /// Declared metric (`euclidean`, `geo`); inferred from the arity when absent.
+    pub metric: Option<String>,
+    /// `BACKBONE` — sequential ordering along a chain or polymer.
+    pub sequence_prop: Option<String>,
+    /// `GROUP BY` — separates one chain or fibre from another.
+    pub group_by_prop: Option<String>,
+    /// `CONTACT_RADIUS` — implicit proximity edges within this distance.
+    pub contact_radius: Option<f64>,
+    /// `MEASURE` — the numeric property spatial roll-ups aggregate.
+    pub measure_prop: Option<String>,
     /// Requested roll-up monoids (`sum`, `count`, `min`, `max`).
     pub aggregates: Vec<String>,
 }
@@ -1400,6 +1441,9 @@ impl Query {
             || self.create_hierarchy_index_clause.is_some()
             || self.drop_hierarchy_index.is_some()
             || self.rebuild_hierarchy_index.is_some()
+            || self.create_structure_index_clause.is_some()
+            || self.drop_structure_index.is_some()
+            || self.rebuild_structure_index.is_some()
             || self.graph_projection_ddl.as_ref().is_some_and(GraphProjectionDdl::is_write)
         {
             return true;
@@ -1446,7 +1490,22 @@ impl Query {
         self.clauses.iter().any(|c| match c {
             Clause::Call(call) => AlgorithmOperator::call_writes(&call.procedure_name, &call.arguments),
             _ => false,
-        })
+        }) || self.calls_a_writing_vector_procedure()
+    }
+
+    /// `vector.knnGraph` / `vector.similarityJoin` with `write: true` (#1979),
+    /// which create relationships. Kept beside `AlgorithmOperator::call_writes`
+    /// rather than inside it: they are not algorithms and have their own
+    /// operator, `vector_ops`.
+    fn calls_a_writing_vector_procedure(&self) -> bool {
+        use crate::query::executor::vector_ops::call_writes;
+        self.call_clause
+            .as_ref()
+            .is_some_and(|c| call_writes(&c.procedure_name, &c.arguments))
+            || self.clauses.iter().any(|c| match c {
+                Clause::Call(call) => call_writes(&call.procedure_name, &call.arguments),
+                _ => false,
+            })
     }
 
     pub fn new() -> Self {
@@ -1478,6 +1537,10 @@ impl Query {
             drop_hierarchy_index: None,
             rebuild_hierarchy_index: None,
             show_hierarchy_indexes: false,
+            create_structure_index_clause: None,
+            drop_structure_index: None,
+            rebuild_structure_index: None,
+            show_structure_indexes: false,
             graph_projection_ddl: None,
             show_indexes: false,
             analyze: false,
