@@ -508,7 +508,17 @@ async fn main() -> Result<(), Error> {
     // Every snapshot is in: compact once, rebuild the edge-type index once,
     // recompute the catalog once. Before the direct loaders and before any
     // query, so nothing downstream sees a deferred state.
+    //
+    // Timed, because this is the phase #1828's 5.9x speedup is about and the
+    // only one the 2026-10-04 runs could not separate: run 4 bounded dedup
+    // imports *plus* this finish together at 3.17x, so the 5.9x measured at
+    // 8M/16M has never been confirmed at 328M nodes. Every phase around it
+    // reports its own seconds; this one did not, so each run re-learnt
+    // nothing. One line, and the next run answers it.
+    eprint!("Finishing deferred bulk load... ");
+    let t0 = Instant::now();
     client.store_write().await.end_deferred_bulk_load();
+    eprintln!("{:.1}s", t0.elapsed().as_secs_f64());
 
     // ── Phase 2: Run direct loaders (HashMap properties, correct IDs) ──
     {

@@ -6,7 +6,7 @@
   "cores": 16,
   "load_average_1m": "0.94",
   "reps": 5,
-  "corpus": "benchmarks/hier/queries.json",
+  "corpus": "benches/hier/queries.json",
   "queries": 108,
   "agreed": 108
 }

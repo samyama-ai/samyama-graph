@@ -45,6 +45,7 @@
 //! re-inserted. This trades load-time speed for implementation simplicity.
 
 use crate::graph::NodeId;
+use crate::vector::distance;
 use half::f16;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -85,6 +86,44 @@ pub enum DistanceMetric {
     Cosine,
     /// Inner product
     InnerProduct,
+}
+
+impl DistanceMetric {
+    /// The distance between two vectors, as an index declared with this
+    /// metric reports it: `1 - cos` for cosine, the Euclidean distance for
+    /// L2, `1 - a.b` for inner product. Computed by the index's own kernel,
+    /// so it is the number a search would report for the same pair. The
+    /// caller checks that the lengths agree.
+    pub fn distance(self, a: &[f32], b: &[f32]) -> f32 {
+        let kernel = MetricDistance(self);
+        kernel.reported(kernel.eval(a, b))
+    }
+
+    /// The Neo4j 5 similarity score for a distance this metric reports
+    /// (#1980). Higher is better, and it falls as the distance grows, so
+    /// nearest-first is also highest-score-first:
+    ///
+    /// | metric | distance `d` | score |
+    /// |---|---|---|
+    /// | cosine | `1 - cos` | `(1 + cos) / 2` = `1 - d/2`, in [0, 1] |
+    /// | L2 | Euclidean `d` | `1 / (1 + d²)`, in (0, 1] |
+    /// | inner product | `1 - a.b` | `(1 + a.b) / 2` = `1 - d/2` |
+    ///
+    /// Cosine and L2 are Neo4j's `vector.similarity.cosine` and
+    /// `vector.similarity.euclidean`. Neo4j 5 has no inner-product index; the
+    /// mapping is Lucene's `DOT_PRODUCT` score, which equals the cosine score
+    /// for unit vectors and is in [0, 1] only for them. For vectors that are
+    /// not normalized it can leave [0, 1], but it still orders correctly.
+    ///
+    /// In f64, so that two near neighbours whose distances differ in f32
+    /// still have scores that differ.
+    pub fn score(self, distance: f32) -> f64 {
+        let d = distance as f64;
+        match self {
+            DistanceMetric::Cosine | DistanceMetric::InnerProduct => 1.0 - d / 2.0,
+            DistanceMetric::L2 => 1.0 / (1.0 + d * d),
+        }
+    }
 }
 
 /// A point in the vector space, associated with a NodeId
@@ -201,6 +240,90 @@ impl Quantization {
     }
 }
 
+/// The HNSW build and search parameters of one index (#1971).
+///
+/// Each is a point on the recall-latency curve, and which point is right
+/// depends on the corpus and the caller, so none is fixed here. `m` and
+/// `ef_construction` shape the graph and are set when it is built; `ef` is
+/// only the default search width, and a query can pass its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HnswParams {
+    /// Links per node on the upper layers; layer 0 keeps twice as many.
+    pub m: usize,
+    /// Candidates considered when linking a new node.
+    pub ef_construction: usize,
+    /// Default search width. `None` is `max(2 * k, 64)`, the width used
+    /// before this could be set.
+    pub ef: Option<usize>,
+}
+
+impl Default for HnswParams {
+    fn default() -> Self {
+        Self { m: 16, ef_construction: 200, ef: None }
+    }
+}
+
+impl HnswParams {
+    /// Accepted `m`. hnsw_rs refuses more than 256 links and reports the
+    /// count as a `u8`, so 256 itself would read back as 0.
+    pub const M_RANGE: std::ops::RangeInclusive<usize> = 2..=128;
+    /// Accepted `ef_construction`, and `ef`.
+    pub const EF_RANGE: std::ops::RangeInclusive<usize> = 1..=100_000;
+
+    /// Refuse a value outside the accepted ranges, naming the option.
+    pub fn validate(&self) -> Result<(), String> {
+        if !Self::M_RANGE.contains(&self.m) {
+            return Err(format!(
+                "`m` must be between {} and {}, got {}",
+                Self::M_RANGE.start(),
+                Self::M_RANGE.end(),
+                self.m
+            ));
+        }
+        if !Self::EF_RANGE.contains(&self.ef_construction) {
+            return Err(format!(
+                "`ef_construction` must be between {} and {}, got {}",
+                Self::EF_RANGE.start(),
+                Self::EF_RANGE.end(),
+                self.ef_construction
+            ));
+        }
+        if let Some(ef) = self.ef {
+            check_ef(ef)?;
+        }
+        Ok(())
+    }
+
+    /// Whether an index built with `self` has the graph `other` would build.
+    /// The search width is not part of the graph.
+    pub fn same_graph(&self, other: &Self) -> bool {
+        self.m == other.m && self.ef_construction == other.ef_construction
+    }
+}
+
+/// Refuse a search width outside [`HnswParams::EF_RANGE`].
+pub fn check_ef(ef: usize) -> Result<(), String> {
+    if HnswParams::EF_RANGE.contains(&ef) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`ef` must be between {} and {}, got {ef}",
+            HnswParams::EF_RANGE.start(),
+            HnswParams::EF_RANGE.end()
+        ))
+    }
+}
+
+impl std::fmt::Display for HnswParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "m={}, ef_construction={}, ef=", self.m, self.ef_construction)?;
+        match self.ef {
+            Some(ef) => write!(f, "{ef}"),
+            None => write!(f, "auto"),
+        }
+    }
+}
+
 /// Inner Product distance implementation for hnsw_rs
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InnerProductDistance;
@@ -238,25 +361,24 @@ impl MetricDistance {
                     norm_a += a * a;
                     norm_b += b * b;
                 }
-                if norm_a <= 0.0 || norm_b <= 0.0 {
-                    return 1.0;
-                }
-                // The clamp and floor of `CosineDistance`, for its reason.
-                let sim = (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0);
-                (1.0 - sim).max(0.0)
+                cosine_rank(dot, norm_a, norm_b)
             }
             DistanceMetric::L2 => pairs.map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt(),
-            DistanceMetric::InnerProduct => {
-                let dot: f32 = pairs.map(|(a, b)| a * b).sum();
-                // Continuous at 0 (both sides give 1), positive, and larger
-                // for a smaller dot product: the order of `-dot`, without a
-                // negative value.
-                if dot >= 0.0 {
-                    1.0 / (1.0 + dot)
-                } else {
-                    1.0 - dot
-                }
+            DistanceMetric::InnerProduct => inner_product_rank(pairs.map(|(a, b)| a * b).sum()),
+        }
+    }
+
+    /// [`rank`](Self::rank) for f32 slices, with the SIMD kernels of
+    /// [`super::distance`] (#1976). Agrees with `rank` to rounding: the
+    /// kernels add in a different order.
+    fn rank_f32(self, va: &[f32], vb: &[f32]) -> f32 {
+        match self.0 {
+            DistanceMetric::Cosine => {
+                let (dot, norm_a, norm_b) = distance::cosine_parts(va, vb);
+                cosine_rank(dot, norm_a, norm_b)
             }
+            DistanceMetric::L2 => distance::l2_sq(va, vb).sqrt(),
+            DistanceMetric::InnerProduct => inner_product_rank(distance::dot(va, vb)),
         }
     }
 
@@ -275,7 +397,27 @@ impl MetricDistance {
 
 impl Distance<f32> for MetricDistance {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
-        self.rank(va.iter().copied().zip(vb.iter().copied()))
+        self.rank_f32(va, vb)
+    }
+}
+
+/// Cosine distance from its three sums, with the clamp and floor of
+/// `CosineDistance`, for its reason.
+fn cosine_rank(dot: f32, norm_a: f32, norm_b: f32) -> f32 {
+    if norm_a <= 0.0 || norm_b <= 0.0 {
+        return 1.0;
+    }
+    let sim = (dot / (norm_a.sqrt() * norm_b.sqrt())).clamp(-1.0, 1.0);
+    (1.0 - sim).max(0.0)
+}
+
+/// Continuous at 0 (both sides give 1), positive, and larger for a smaller
+/// dot product: the order of `-dot`, without a negative value.
+fn inner_product_rank(dot: f32) -> f32 {
+    if dot >= 0.0 {
+        1.0 / (1.0 + dot)
+    } else {
+        1.0 - dot
     }
 }
 
@@ -312,6 +454,8 @@ pub struct VectorIndex {
     metric: DistanceMetric,
     /// How values are stored (NDS-09).
     quantization: Quantization,
+    /// Graph shape and default search width (#1971).
+    params: HnswParams,
     /// The actual HNSW index
     backend: Backend,
     /// All inserted vectors (for persistence — HNSW doesn't expose iteration),
@@ -351,6 +495,7 @@ impl std::fmt::Debug for VectorIndex {
             .field("dimensions", &self.dimensions)
             .field("metric", &self.metric)
             .field("quantization", &self.quantization)
+            .field("params", &self.params)
             .field("len", &self.len())
             .finish()
     }
@@ -368,32 +513,48 @@ impl VectorIndex {
         metric: DistanceMetric,
         quantization: Quantization,
     ) -> Self {
-        Self::build(dimensions, metric, quantization, 100_000)
+        Self::with_params(dimensions, metric, quantization, HnswParams::default())
     }
 
+    /// Create an index with the given HNSW parameters (#1971). The caller
+    /// validates them; see [`HnswParams::validate`].
+    pub fn with_params(
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+        params: HnswParams,
+    ) -> Self {
+        Self::build(dimensions, metric, quantization, params, 0)
+    }
+
+    /// `expected` sizes the graph's first allocation and nothing else: it is
+    /// not a capacity, and the graph grows past it. It was a fixed 100,000,
+    /// which reserved room for that many points in every index, the empty
+    /// ones included (#1971).
     fn build(
         dimensions: usize,
         metric: DistanceMetric,
         quantization: Quantization,
-        max_elements: usize,
+        params: HnswParams,
+        expected: usize,
     ) -> Self {
-        let m = 16;
-        let ef_construction = 200;
+        let HnswParams { m, ef_construction, .. } = params;
         // Built with the declared metric: before #1967 every index was
         // cosine, whatever `similarity` said.
         let distance = MetricDistance(metric);
         let backend = match quantization {
             Quantization::None => Backend::F32(Hnsw::new(
-                m, max_elements, 16, ef_construction, distance,
+                m, expected, 16, ef_construction, distance,
             )),
             Quantization::Fp16 => Backend::F16(Hnsw::new(
-                m, max_elements, 16, ef_construction, distance,
+                m, expected, 16, ef_construction, distance,
             )),
         };
         Self {
             dimensions,
             metric,
             quantization,
+            params,
             backend,
             stored_f32: Vec::new(),
             stored_f16: Vec::new(),
@@ -406,6 +567,22 @@ impl VectorIndex {
     /// How this index stores its values.
     pub fn quantization(&self) -> Quantization {
         self.quantization
+    }
+
+    /// The HNSW parameters this index was built with (#1971).
+    pub fn params(&self) -> HnswParams {
+        self.params
+    }
+
+    /// Change the parameters. A new `m` or `ef_construction` rebuilds the
+    /// graph from the current entries; a new default `ef` does not, since it
+    /// changes only how the graph is searched.
+    pub fn set_params(&mut self, params: HnswParams) {
+        if params.same_graph(&self.params) {
+            self.params = params;
+        } else {
+            self.rebuild_with(params);
+        }
     }
 
     /// Bytes held for the vectors themselves, across both copies the index
@@ -453,15 +630,20 @@ impl VectorIndex {
     }
 
     /// Everything this index holds resident: both vector copies, the HNSW
-    /// graph, and the exact-match table (#1498). What `SHOW INDEXES`, the
-    /// memory endpoint and the metrics report for a vector index.
+    /// graph, the exact-match table (#1498), and the map from each node to its
+    /// current entry (#1968). What `SHOW INDEXES`, the memory endpoint and the
+    /// metrics report for a vector index.
     pub fn resident_bytes(&self) -> usize {
         use std::mem::size_of;
         let exact: usize = self.exact.capacity() * (size_of::<u64>() + size_of::<Vec<usize>>() + 1)
             + self.exact.values().map(|v| v.capacity() * size_of::<usize>()).sum::<usize>();
+        // One entry per live vector, which at low dimensions is a large share
+        // of the index: at 8 f32 dimensions the vector is 32 bytes and this
+        // entry 17.
+        let current = self.current.capacity() * (size_of::<u64>() + size_of::<usize>() + 1);
         let records = self.stored_f32.capacity() * size_of::<StoredVector>()
             + self.stored_f16.capacity() * size_of::<(u64, Vec<f16>)>();
-        self.vector_bytes() + self.graph_bytes() + exact + records
+        self.vector_bytes() + self.graph_bytes() + exact + current + records
     }
 
     /// Add a vector to the index
@@ -557,9 +739,13 @@ impl VectorIndex {
 
     /// The same index, holding only the current entries.
     pub fn compact(&mut self) {
+        self.rebuild_with(self.params);
+    }
+
+    /// Rebuild from the current entries with `params`.
+    fn rebuild_with(&mut self, params: HnswParams) {
         let live: Vec<StoredVector> = self.iter_stored().collect();
-        let max_elements = (live.len() + 10_000).max(100_000);
-        let mut fresh = Self::build(self.dimensions, self.metric, self.quantization, max_elements);
+        let mut fresh = Self::build(self.dimensions, self.metric, self.quantization, params, live.len());
         for sv in &live {
             // Every entry here was accepted at this dimension already.
             let _ = fresh.add(NodeId::new(sv.node_id), &sv.vector);
@@ -569,6 +755,19 @@ impl VectorIndex {
 
     /// Search for nearest neighbors
     pub fn search(&self, query: &[f32], k: usize) -> VectorResult<Vec<(NodeId, f32)>> {
+        self.search_ef(query, k, None)
+    }
+
+    /// [`search`](Self::search) with a search width for this query only
+    /// (#1971). `None` uses the index's default `ef`, and failing that
+    /// `max(2 * k, 64)`. The width never goes below the number of results
+    /// asked for, nor above the size of the graph.
+    pub fn search_ef(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
         if query.len() != self.dimensions {
             return Err(VectorError::DimensionMismatch {
                 expected: self.dimensions,
@@ -599,7 +798,22 @@ impl VectorIndex {
         // (#1968). Ask for enough extra to cover them, and drop them after.
         let total = self.entries();
         let fetch = (k + self.superseded).min(total);
-        let ef_search = (fetch * 2).max(64).min(total);
+        let ef_search = match ef.or(self.params.ef) {
+            Some(ef) => ef.max(fetch),
+            None => (fetch * 2).max(64),
+        }
+        .min(total);
+        // Tombstones increase both the result over-fetch and the search width.
+        // Once the estimated layer-0 neighbour work (ef * 2m) reaches the
+        // live population, scanning the live vectors is a better bounded
+        // choice than walking a wider, deletion-polluted random graph. It
+        // also avoids a full-length but low-recall result from that graph.
+        // Clean indexes retain their ANN path and configured search width.
+        if self.superseded > 0
+            && ef_search.saturating_mul(self.params.m).saturating_mul(2) >= n
+        {
+            return Ok(self.report(self.brute_force_search(query, k.min(n))));
+        }
         // hnsw_rs 0.2.1 can panic deep in search_layer (hnsw.rs:938,
         // `return_points.peek().unwrap()`) on certain graphs. A panic here would
         // unwind across the await point and take the whole server down, so a single
@@ -728,6 +942,34 @@ impl VectorIndex {
     /// index's own metric, so it matches the graph; non-finite distances are
     /// skipped.
     fn brute_force_search(&self, query: &[f32], k: usize) -> Vec<(NodeId, f32)> {
+        self.brute_force_where(query, k, &|_| true)
+    }
+
+    /// The `k` nearest among the nodes `keep` passes, by exact scan, with the
+    /// distances a search reports (#1969). For a filter that passes few
+    /// nodes, where widening a graph search would walk mostly nodes it then
+    /// throws away. `keep` is asked only about the index's current entries.
+    pub fn search_exact_where(
+        &self,
+        query: &[f32],
+        k: usize,
+        keep: &dyn Fn(NodeId) -> bool,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        if query.len() != self.dimensions {
+            return Err(VectorError::DimensionMismatch {
+                expected: self.dimensions,
+                got: query.len(),
+            });
+        }
+        Ok(self.report(self.brute_force_where(query, k, keep)))
+    }
+
+    fn brute_force_where(
+        &self,
+        query: &[f32],
+        k: usize,
+        keep: &dyn Fn(NodeId) -> bool,
+    ) -> Vec<(NodeId, f32)> {
         let distance = MetricDistance(self.metric);
         // The query is quantized to match what is stored, so the exact search
         // answers the same question the graph does. Comparing a full-precision
@@ -738,7 +980,7 @@ impl VectorIndex {
                 .stored_f32
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| self.is_current(*i))
+                .filter(|(i, sv)| self.is_current(*i) && keep(NodeId::new(sv.node_id)))
                 .map(|(_, sv)| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
                 .collect(),
             Quantization::Fp16 => {
@@ -746,7 +988,7 @@ impl VectorIndex {
                 self.stored_f16
                     .iter()
                     .enumerate()
-                    .filter(|(i, _)| self.is_current(*i))
+                    .filter(|(i, (id, _))| self.is_current(*i) && keep(NodeId::new(*id)))
                     .map(|(_, (id, v))| (NodeId::new(*id), distance.eval(&q, v)))
                     .collect()
             }
@@ -813,16 +1055,32 @@ impl VectorIndex {
         metric: DistanceMetric,
         quantization: Quantization,
     ) -> VectorResult<Self> {
+        Self::load_with_params(path, dimensions, metric, quantization, HnswParams::default())
+    }
+
+    /// Load, building the graph with `params` (#1971).
+    pub fn load_with_params(
+        path: &std::path::Path,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+        params: HnswParams,
+    ) -> VectorResult<Self> {
         if !path.exists() {
-            return Ok(Self::with_quantization(dimensions, metric, quantization));
+            return Ok(Self::with_params(dimensions, metric, quantization, params));
         }
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let stored_vectors: Vec<StoredVector> = bincode::deserialize_from(reader)
             .map_err(|e| VectorError::IndexError(format!("deserialization error: {}", e)))?;
 
-        let max_elements = (stored_vectors.len() + 10_000).max(100_000);
-        let mut index = Self::build(dimensions, metric, quantization, max_elements);
+        let mut index = Self::build(
+            dimensions,
+            metric,
+            quantization,
+            params,
+            stored_vectors.len(),
+        );
         for sv in &stored_vectors {
             index.add(NodeId::new(sv.node_id), &sv.vector)?;
         }
@@ -890,6 +1148,36 @@ mod tests {
         let inner = InnerProductDistance;
         // Dot product = 0
         assert!((inner.eval(&v1, &v2) - 1.0).abs() < 1e-6); // 1.0 - 0.0
+    }
+
+    /// The Neo4j score of each metric (#1980): best is highest, and a larger
+    /// distance always scores lower.
+    #[test]
+    fn scores_follow_neo4j_and_fall_as_distance_grows() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // Cosine: identical 1, orthogonal 0.5, opposite 0.
+        assert!(close(DistanceMetric::Cosine.score(0.0), 1.0));
+        assert!(close(DistanceMetric::Cosine.score(1.0), 0.5));
+        assert!(close(DistanceMetric::Cosine.score(2.0), 0.0));
+        // L2: 1 / (1 + d²).
+        assert!(close(DistanceMetric::L2.score(0.0), 1.0));
+        assert!(close(DistanceMetric::L2.score(2.0), 0.2));
+        // Inner product: (1 + dot) / 2, with distance 1 - dot.
+        assert!(close(DistanceMetric::InnerProduct.score(0.0), 1.0));
+        assert!(close(DistanceMetric::InnerProduct.score(1.0), 0.5));
+        for metric in [DistanceMetric::Cosine, DistanceMetric::L2, DistanceMetric::InnerProduct] {
+            let mut last = f64::INFINITY;
+            for i in 0..200 {
+                let s = metric.score(i as f32 * 0.01);
+                assert!(s < last, "{metric:?}: score did not fall at d={}", i as f32 * 0.01);
+                last = s;
+            }
+        }
+        // The distance is the one the index reports.
+        let (a, b) = ([1.0f32, 0.0], [0.0f32, 1.0]);
+        assert!((DistanceMetric::Cosine.distance(&a, &b) - 1.0).abs() < 1e-6);
+        assert!((DistanceMetric::L2.distance(&a, &b) - 2f32.sqrt()).abs() < 1e-6);
+        assert!((DistanceMetric::InnerProduct.distance(&a, &b) - 1.0).abs() < 1e-6);
     }
 
     /// `n` distinct unit-ish vectors of dimension 8, deterministic.

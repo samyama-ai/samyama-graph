@@ -108,6 +108,12 @@ Said here rather than discovered later:
   ([#1364](https://github.com/samyama-ai/samyama-graph/issues/1364)). Neo4j is
   no stricter in principle and much more stable in practice, so a query that
   paged without `ORDER BY` and worked there needs one here.
+- **Vector scores mean what they mean in Neo4j** from 1.15.0: `score` from
+  `db.index.vector.queryNodes` is a similarity, higher is better, and
+  `vector.similarity.cosine` / `vector.similarity.euclidean` return the same
+  number. Before 1.15.0 `score` was a distance, lower is better
+  ([#1980](https://github.com/samyama-ai/samyama-graph/issues/1980)); a server
+  older than that returns the worst matches for `ORDER BY score DESC`.
 - **Leaving again is documented**, with its losses named, in
   [`LEAVING-SAMYAMA.md`](LEAVING-SAMYAMA.md). Read it before you arrive, not
   after: the measure of lock-in is what the exit costs, and we would rather you
@@ -117,7 +123,7 @@ Said here rather than discovered later:
 
 ## 5. Tell us what refused
 
-`benchmarks/compat/neo4j-idioms.cypher` is the corpus this engine is measured
+`tests/fixtures/compat/neo4j-idioms.cypher` is the corpus this engine is measured
 against, and it is written from Neo4j's documentation and from application code
 rather than from our feature list — one derived from our features would report
 100% of whatever we already do.
