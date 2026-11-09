@@ -77,12 +77,15 @@
 //! heterogeneous collections of operators.
 
 pub mod adjacency_agg_detector;
+pub mod algorithm_catalog;
 pub mod analyze_ops;
 pub mod cost_model;
 pub mod hierarchy_detector;
 pub mod hierarchy_ops;
 pub mod projection_ops;
+pub mod structure_ops;
 pub mod point_ops;
+pub mod vector_ops;
 pub mod semi_join_detector;
 pub mod leapfrog;
 pub mod logical_optimizer;
@@ -859,7 +862,11 @@ impl<'a> MutQueryExecutor<'a> {
         //
         // The plan is still driven to exhaustion — the rows are what is
         // discarded, not the work. Discarding earlier would skip the writes.
-        let mut batch = self.execute_plan_mut(plan)?;
+        let index_build = query.create_vector_index_clause.is_some()
+            || query.create_fulltext_index_clause.is_some()
+            || query.create_index_clause.is_some()
+            || query.create_hierarchy_index_clause.is_some();
+        let mut batch = self.execute_plan_mut(plan, index_build)?;
         batch.plan_hash = plan_hash;
         // Scoped to **data writes**, not to "any query without a RETURN".
         // Two neighbours produce rows with no RETURN and must keep doing so:
@@ -883,16 +890,41 @@ impl<'a> MutQueryExecutor<'a> {
         Ok(batch)
     }
 
-    fn execute_plan_mut(&mut self, mut plan: ExecutionPlan) -> ExecutionResult<RecordBatch> {
+    /// Drive a write plan to exhaustion.
+    ///
+    /// `index_build` is a statement that builds an index over the data already
+    /// in the store (`CREATE VECTOR INDEX`, `CREATE INDEX`, ...). Its deadline
+    /// is checked once, before the build starts, and not after it. The build
+    /// is one call with no point at which it can stop part way, so a check
+    /// afterwards could only fail a build that had already finished: the
+    /// statement reported `Query timed out after 1 rows` and `atomically`
+    /// threw the finished index away, minutes of HNSW construction that the
+    /// retry would then repeat and lose the same way (#2046).
+    fn execute_plan_mut(&mut self, mut plan: ExecutionPlan, index_build: bool) -> ExecutionResult<RecordBatch> {
         // A no-op at budget 0, so the ordinary path allocates nothing.
         budget::enforce(&mut plan.root, self.row_budget);
 
         let mut records = Vec::new();
         let batch_size = 1024;
 
+        // `>=` as below, so a limit of zero refuses the build without
+        // depending on the clock having ticked.
+        let deadline = if index_build {
+            if let Some(deadline) = self.deadline {
+                if std::time::Instant::now() >= deadline {
+                    return Err(ExecutionError::RuntimeError(
+                        "Query timed out before the index build started".to_string(),
+                    ));
+                }
+            }
+            None
+        } else {
+            self.deadline
+        };
+
         // The same two checks as the read path: the thread-local one inside
         // the materialising operators, and one per batch here.
-        operator::set_query_deadline(self.deadline);
+        operator::set_query_deadline(deadline);
         // Pull records from the root operator in batches
         // Use next_batch_mut to allow operators to modify the graph store
         let result = (|| {
@@ -900,7 +932,7 @@ impl<'a> MutQueryExecutor<'a> {
                 records.extend(batch.records);
                 // `>=`, so a limit of zero stops the statement after its
                 // first batch without depending on the clock having ticked.
-                if let Some(deadline) = self.deadline {
+                if let Some(deadline) = deadline {
                     if std::time::Instant::now() >= deadline {
                         return Err(ExecutionError::RuntimeError(format!(
                             "Query timed out after {} rows",

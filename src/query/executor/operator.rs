@@ -3090,6 +3090,8 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint",
     "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
     "tostringornull", "toupper", "touppercase", "trim", "type", "valuetype",
+    "vector.distance", "vector.similarity.cosine", "vector.similarity.euclidean",
+    "vector_distance",
 ];
 
 /// Is `name` a function this engine implements?
@@ -3279,6 +3281,10 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("haslabels", 2),
     ("point.distance", 2),
     ("point.withinbbox", 3),
+    ("vector.similarity.cosine", 2),
+    ("vector.similarity.euclidean", 2),
+    ("vector.distance", 3),
+    ("vector_distance", 3),
 ];
 
 /// How many arguments this function needs at minimum, if it is constrained.
@@ -4811,6 +4817,65 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let inside = p.x >= ll.x && p.x <= ur.x && p.y >= ll.y && p.y <= ur.y;
             Ok(Value::Property(PropertyValue::Boolean(inside)))
         }
+        // Neo4j 5's vector functions (#1980). The similarities are the
+        // `score` of `db.index.vector.queryNodes` for the same pair, from the
+        // same kernels: higher is better, in [0, 1].
+        "vector.similarity.cosine" => {
+            let (a, b) = vector_pair(&args[0], &args[1], "vector.similarity.cosine")?;
+            if is_zero_vector(&a) || is_zero_vector(&b) {
+                // A zero vector has no direction: not valid for cosine.
+                return Ok(Value::Null);
+            }
+            let metric = crate::vector::DistanceMetric::Cosine;
+            Ok(Value::Property(PropertyValue::Float(metric.score(metric.distance(&a, &b)))))
+        }
+        "vector.similarity.euclidean" => {
+            let (a, b) = vector_pair(&args[0], &args[1], "vector.similarity.euclidean")?;
+            let metric = crate::vector::DistanceMetric::L2;
+            Ok(Value::Property(PropertyValue::Float(metric.score(metric.distance(&a, &b)))))
+        }
+        // A distance, lower is better, by the metric named in the third
+        // argument -- Neo4j's `vector_distance`, under both spellings.
+        "vector.distance" | "vector_distance" => {
+            let (a, b) = vector_pair(&args[0], &args[1], name)?;
+            let metric = match &args[2] {
+                Value::Property(PropertyValue::String(m)) => m.to_ascii_uppercase(),
+                _ => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{name}()` takes the metric as a string, one of {}",
+                        VECTOR_DISTANCE_METRICS.join(", ")
+                    )))
+                }
+            };
+            use crate::vector::DistanceMetric as M;
+            let d = match metric.as_str() {
+                "EUCLIDEAN" => M::L2.distance(&a, &b) as f64,
+                // No index kernel reports these two; computed here, in f64.
+                "EUCLIDEAN_SQUARED" => a
+                    .iter()
+                    .zip(&b)
+                    .map(|(x, y)| (*x as f64 - *y as f64).powi(2))
+                    .sum(),
+                "MANHATTAN" => a.iter().zip(&b).map(|(x, y)| (*x as f64 - *y as f64).abs()).sum(),
+                "COSINE" => {
+                    if is_zero_vector(&a) || is_zero_vector(&b) {
+                        return Ok(Value::Null);
+                    }
+                    M::Cosine.distance(&a, &b) as f64
+                }
+                // The inner-product kernel reports `1 - a.b`; Neo4j's DOT
+                // distance is `-(a.b)`.
+                "DOT" => M::InnerProduct.distance(&a, &b) as f64 - 1.0,
+                "HAMMING" => a.iter().zip(&b).filter(|(x, y)| x != y).count() as f64,
+                other => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{name}()`: unknown metric '{other}'; expected one of {}",
+                        VECTOR_DISTANCE_METRICS.join(", ")
+                    )))
+                }
+            };
+            Ok(Value::Property(PropertyValue::Float(d)))
+        }
         // CY-22: Math constants & minor functions
         "e" => Ok(Value::Property(PropertyValue::Float(std::f64::consts::E))),
         "log10" => { let v = extract_float(&args[0])?; Ok(Value::Property(PropertyValue::Float(v.log10()))) }
@@ -4926,6 +4991,50 @@ fn extract_string(val: &Value) -> ExecutionResult<String> {
         Value::Property(PropertyValue::String(s)) => Ok(s.clone()),
         _ => Err(ExecutionError::TypeError("Expected string argument".to_string())),
     }
+}
+
+/// The metrics `vector.distance` takes, as Neo4j names them.
+const VECTOR_DISTANCE_METRICS: &[&str] =
+    &["EUCLIDEAN", "EUCLIDEAN_SQUARED", "MANHATTAN", "COSINE", "DOT", "HAMMING"];
+
+/// A vector argument of the `vector.*` functions (#1980): a non-empty list
+/// of finite numbers.
+fn vector_arg(v: &Value, who: &str) -> ExecutionResult<Vec<f32>> {
+    let vector = match v {
+        Value::Property(pv) => pv.to_vector(),
+        Value::List(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Property(PropertyValue::Float(f)) => Some(*f as f32),
+                Value::Property(PropertyValue::Integer(i)) => Some(*i as f32),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    };
+    match vector {
+        Some(v) if !v.is_empty() && v.iter().all(|x| x.is_finite()) => Ok(v),
+        _ => Err(ExecutionError::TypeError(format!(
+            "`{who}()` takes vectors: non-empty lists of finite numbers"
+        ))),
+    }
+}
+
+/// Two vectors of the same dimension, as every `vector.*` function needs.
+fn vector_pair(a: &Value, b: &Value, who: &str) -> ExecutionResult<(Vec<f32>, Vec<f32>)> {
+    let (a, b) = (vector_arg(a, who)?, vector_arg(b, who)?);
+    if a.len() != b.len() {
+        return Err(ExecutionError::bad_argument(format!(
+            "`{who}()` takes two vectors of the same dimension; got {} and {}",
+            a.len(),
+            b.len()
+        )));
+    }
+    Ok((a, b))
+}
+
+fn is_zero_vector(v: &[f32]) -> bool {
+    v.iter().all(|x| *x == 0.0)
 }
 
 /// Helper: extract integer from Value
@@ -6228,6 +6337,24 @@ pub trait PhysicalOperator: Send {
 
     /// Reset the operator to start from the beginning
     fn reset(&mut self);
+
+    /// Bytes this operator holds in rows it has buffered, or `None` for one
+    /// that streams a row at a time (#2078).
+    ///
+    /// Read by PROFILE when the operator first produces and when it finishes.
+    /// An estimate from a walk of the rows, so it has to stay cheap enough to
+    /// call twice per operator per query.
+    fn memory_bytes(&self) -> Option<usize> {
+        None
+    }
+
+    /// Ask the operator to remember the most it buffers, for `memory_bytes`.
+    ///
+    /// Called by PROFILE when it wraps the plan, and only then: walking a
+    /// buffer to size it is work an unprofiled query should not pay for. An
+    /// operator that hands its whole buffer out in one batch is empty again by
+    /// the time anyone outside could look, so it has to note the size itself.
+    fn track_memory(&mut self) {}
 
     /// The predicate this operator filters on, if it is a filter.
     ///
@@ -11543,6 +11670,8 @@ pub struct AggregateOperator {
     agg_names: Vec<std::sync::Arc<str>>,
     results: std::vec::IntoIter<Record>,
     executed: bool,
+    /// Most bytes buffered, once PROFILE asks for it (#2078).
+    peak_bytes: Option<usize>,
 }
 
 impl AggregateOperator {
@@ -11554,6 +11683,7 @@ impl AggregateOperator {
         let group_names = group_by.iter().map(|(_, a)| std::sync::Arc::from(a.as_str())).collect();
         let agg_names = aggregates.iter().map(|a| std::sync::Arc::from(a.alias.as_str())).collect();
         Self {
+            peak_bytes: None,
             input,
             group_by,
             aggregates,
@@ -11638,6 +11768,15 @@ impl AggregateOperator {
 }
 
 impl PhysicalOperator for AggregateOperator {
+    /// One row per group, built before the first is returned.
+    fn memory_bytes(&self) -> Option<usize> {
+        self.peak_bytes
+    }
+
+    fn track_memory(&mut self) {
+        self.peak_bytes.get_or_insert(0);
+    }
+
     /// One row with no grouping key. With one, the square root of the input:
     /// the usual guess for a group count the statistics do not record.
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
@@ -11654,6 +11793,7 @@ impl PhysicalOperator for AggregateOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.results.as_slice().iter()))); }
         }
         Ok(self.results.next())
     }
@@ -11682,6 +11822,7 @@ impl PhysicalOperator for AggregateOperator {
             }
             self.input = Box::new(MaterializedOperator::new(rows));
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.results.as_slice().iter()))); }
         }
         Ok(self.results.next())
     }
@@ -11709,6 +11850,7 @@ impl PhysicalOperator for AggregateOperator {
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.results.as_slice().iter()))); }
         }
 
         let mut batch = Vec::with_capacity(batch_size);
@@ -13312,11 +13454,14 @@ pub struct SortOperator {
     /// `records[..sorted_upto]` are in final order. The rest are in input
     /// order until `sort_tail` runs, which happens only if a read gets there.
     sorted_upto: usize,
+    /// Most bytes buffered, once PROFILE asks for it (#2078).
+    peak_bytes: Option<usize>,
 }
 
 impl SortOperator {
     pub fn new(input: OperatorBox, sort_items: Vec<(Expression, bool)>) -> Self {
         Self {
+            peak_bytes: None,
             input,
             sort_items,
             records: Vec::new(),
@@ -13729,6 +13874,15 @@ impl SortOperator {
 }
 
 impl PhysicalOperator for SortOperator {
+    /// Every input row, held to be ordered.
+    fn memory_bytes(&self) -> Option<usize> {
+        self.peak_bytes
+    }
+
+    fn track_memory(&mut self) {
+        self.peak_bytes.get_or_insert(0);
+    }
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -13764,6 +13918,7 @@ impl PhysicalOperator for SortOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.records.iter()))); }
         }
         if self.current >= self.sorted_upto && self.sorted_upto < self.records.len() {
             self.sort_tail(store)?;
@@ -13798,6 +13953,7 @@ impl PhysicalOperator for SortOperator {
             }
             self.input = Box::new(MaterializedOperator::new(rows));
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.records.iter()))); }
         }
         if self.current >= self.sorted_upto && self.sorted_upto < self.records.len() {
             self.sort_tail(store)?;
@@ -13818,6 +13974,7 @@ impl PhysicalOperator for SortOperator {
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         if !self.executed {
             self.execute_all(store)?;
+            if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.records.iter()))); }
         }
 
         if self.current >= self.records.len() {
@@ -14417,11 +14574,20 @@ pub struct VectorSearchOperator {
     k: usize,
     /// Variable name for matched nodes
     node_var: String,
-    /// Variable name for similarity scores (optional)
+    /// Variable for `score`: Neo4j's similarity, higher is better (#1980).
     score_var: Option<String>,
+    /// Variable for `distance`: the raw distance the index ranks by, lower
+    /// is better. What `score` was before #1980.
+    distance_var: Option<String>,
+    /// The index's metric, read when the search runs; it decides how a
+    /// distance becomes a score.
+    metric: Option<crate::vector::DistanceMetric>,
     /// The part of a following WHERE that names only the node, applied
     /// inside the search so it decides which nodes count towards k (#1969).
     filter: Option<Expression>,
+    /// This query's search width, from `{ef: ...}` (#1971). `None` is the
+    /// index's default.
+    ef: Option<usize>,
     /// Search results
     results: Vec<(NodeId, f32)>,
     /// Current index in results
@@ -14444,7 +14610,10 @@ impl VectorSearchOperator {
             k,
             node_var,
             score_var,
+            distance_var: None,
+            metric: None,
             filter: None,
+            ef: None,
             results: Vec::new(),
             current: 0,
         }
@@ -14456,14 +14625,36 @@ impl VectorSearchOperator {
         self
     }
 
+    /// Search with this width rather than the index's default (#1971).
+    pub fn with_ef(mut self, ef: Option<usize>) -> Self {
+        self.ef = ef;
+        self
+    }
+
+    /// Bind the raw distance to this variable (`YIELD distance`, #1980).
+    pub fn with_distance_var(mut self, distance_var: Option<String>) -> Self {
+        self.distance_var = distance_var;
+        self
+    }
+
     fn initialize(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         if !self.results.is_empty() || self.current > 0 {
             return Ok(());
         }
+        // A missing index is reported by the search itself (#1660), so a
+        // missing metric here only means there is nothing to score.
+        self.metric = store.vector_index.metric(&self.label, &self.property_key);
 
         let Some(filter) = &self.filter else {
             self.results = store
-                .vector_search(&self.label, &self.property_key, &self.query_vector, self.k)
+                .vector_search_where(
+                    &self.label,
+                    &self.property_key,
+                    &self.query_vector,
+                    self.k,
+                    self.ef,
+                    |_| true,
+                )
                 .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
             return Ok(());
         };
@@ -14473,7 +14664,7 @@ impl VectorSearchOperator {
         // "no match".
         let error = std::cell::RefCell::new(None);
         let results = store
-            .vector_search_where(&self.label, &self.property_key, &self.query_vector, self.k, |id| {
+            .vector_search_where(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, |id| {
                 if error.borrow().is_some() {
                     return false;
                 }
@@ -14501,14 +14692,32 @@ impl PhysicalOperator for VectorSearchOperator {
             return Ok(None);
         }
 
-        let (node_id, score) = &self.results[self.current];
+        let (node_id, distance) = self.results[self.current];
         self.current += 1;
 
         let mut record = Record::new();
-        record.bind(self.node_var.clone(), Value::NodeRef(*node_id));
+        record.bind(self.node_var.clone(), Value::NodeRef(node_id));
 
+        // `score` is Neo4j's: a similarity, higher is better. The rows are
+        // still nearest first, and the score falls as the distance grows, so
+        // that is also highest score first (#1980).
         if let Some(score_var) = &self.score_var {
-            record.bind(score_var.clone(), Value::Property(PropertyValue::Float(*score as f64)));
+            let metric = self.metric.ok_or_else(|| {
+                ExecutionError::GraphError(format!(
+                    "no vector index on :{}({})",
+                    self.label, self.property_key
+                ))
+            })?;
+            record.bind(
+                score_var.clone(),
+                Value::Property(PropertyValue::Float(metric.score(distance))),
+            );
+        }
+        if let Some(distance_var) = &self.distance_var {
+            record.bind(
+                distance_var.clone(),
+                Value::Property(PropertyValue::Float(distance as f64)),
+            );
         }
 
         Ok(Some(record))
@@ -14519,18 +14728,16 @@ impl PhysicalOperator for VectorSearchOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
+        let mut details = format!("{}.{}, k={}", self.label, self.property_key, self.k);
+        if let Some(ef) = self.ef {
+            details.push_str(&format!(", ef={ef}"));
+        }
+        if let Some(f) = &self.filter {
+            details.push_str(&format!(", filter: {}", format_expression(f)));
+        }
         OperatorDescription {
             name: "VectorSearch".to_string(),
-            details: match &self.filter {
-                Some(f) => format!(
-                    "{}.{}, k={}, filter: {}",
-                    self.label,
-                    self.property_key,
-                    self.k,
-                    format_expression(f)
-                ),
-                None => format!("{}.{}, k={}", self.label, self.property_key, self.k),
-            },
+            details,
             children: Vec::new(),
         }
     }
@@ -14767,6 +14974,8 @@ pub struct JoinOperator {
     /// clause pipeline joins in — therefore got the read executor's refusal
     /// from inside a statement that was correctly routed as a write (#1479).
     right_drained_mut: bool,
+    /// Most bytes buffered, once PROFILE asks for it (#2078).
+    peak_bytes: Option<usize>,
 }
 
 impl JoinOperator {
@@ -14778,6 +14987,7 @@ impl JoinOperator {
 
     pub fn new(left: OperatorBox, right: OperatorBox, join_vars: Vec<String>) -> Self {
         Self {
+            peak_bytes: None,
             left,
             right,
             join_vars,
@@ -14842,6 +15052,15 @@ impl JoinOperator {
 }
 
 impl PhysicalOperator for JoinOperator {
+    /// The hashed left side and the buffered right side.
+    fn memory_bytes(&self) -> Option<usize> {
+        self.peak_bytes
+    }
+
+    fn track_memory(&mut self) {
+        self.peak_bytes.get_or_insert(0);
+    }
+
     /// An equi-join on node variables: each row of the smaller side meets about
     /// one row of the larger.
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
@@ -14857,6 +15076,7 @@ impl PhysicalOperator for JoinOperator {
 
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.materialize(store)?;
+        if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.left_records.values().flatten()) + records_bytes(self.right_records.iter()))); }
 
         while self.current_right_index < self.right_records.len() {
             let right_record = &self.right_records[self.current_right_index];
@@ -14886,6 +15106,7 @@ impl PhysicalOperator for JoinOperator {
 
     fn next_batch(&mut self, store: &GraphStore, batch_size: usize) -> ExecutionResult<Option<RecordBatch>> {
         self.materialize(store)?;
+        if let Some(peak) = self.peak_bytes { self.peak_bytes = Some(peak.max(records_bytes(self.left_records.values().flatten()) + records_bytes(self.right_records.iter()))); }
         let mut results = Vec::with_capacity(batch_size);
 
         while results.len() < batch_size && self.current_right_index < self.right_records.len() {
@@ -15457,6 +15678,8 @@ pub struct CreateVectorIndexOperator {
     /// dropped would build a full-precision index for a caller who asked for
     /// half of one and report success.
     quantization: crate::vector::index::Quantization,
+    /// `m`, `ef_construction` and the default `ef` (#1971).
+    params: crate::vector::HnswParams,
     /// The name the DDL gave this index, kept so Neo4j's form of
     /// `db.index.vector.queryNodes(indexName, k, vector)` can resolve it (#1041).
     name: Option<String>,
@@ -15471,6 +15694,7 @@ impl CreateVectorIndexOperator {
             dimensions,
             similarity,
             quantization: crate::vector::index::Quantization::None,
+            params: crate::vector::HnswParams::default(),
             name: None,
             executed: false,
         }
@@ -15483,6 +15707,11 @@ impl CreateVectorIndexOperator {
 
     pub fn with_quantization(mut self, q: crate::vector::index::Quantization) -> Self {
         self.quantization = q;
+        self
+    }
+
+    pub fn with_params(mut self, params: crate::vector::HnswParams) -> Self {
+        self.params = params;
         self
     }
 }
@@ -15506,9 +15735,9 @@ impl PhysicalOperator for CreateVectorIndexOperator {
             _ => return Err(ExecutionError::RuntimeError(format!("Unsupported similarity metric: {}", self.similarity))),
         };
 
-        store.create_vector_index_named(self.name.as_deref(), self.label.as_str(),
-                                        &self.property_key, self.dimensions, metric,
-                                        self.quantization)
+        store.create_vector_index_with_params(self.name.as_deref(), self.label.as_str(),
+                                              &self.property_key, self.dimensions, metric,
+                                              self.quantization, self.params)
             .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
         // Backfill nodes that already carry the embedding. Registering the index without
@@ -15540,8 +15769,8 @@ impl PhysicalOperator for CreateVectorIndexOperator {
         OperatorDescription {
             name: "CreateVectorIndex".to_string(),
             details: format!(
-                "{} dims={} {} quantization={:?}",
-                named, self.dimensions, self.similarity, self.quantization
+                "{} dims={} {} quantization={:?} {}",
+                named, self.dimensions, self.similarity, self.quantization, self.params
             ),
             children: Vec::new(),
         }
@@ -15999,7 +16228,16 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .vector_index
                     .list_indices()
                     .into_iter()
-                    .map(|k| (k.label, k.property_key, "VECTOR".to_string())),
+                    .map(|k| {
+                        // With its HNSW parameters (#1971), in the bracket the
+                        // other kinds use for their name.
+                        let params = store
+                            .vector_index
+                            .get_index(&k.label, &k.property_key)
+                            .map(|i| i.read().unwrap().params())
+                            .unwrap_or_default();
+                        (k.label, k.property_key, format!("VECTOR[{params}]"))
+                    }),
             );
             // Full-text indexes too, or the only way to learn that one exists
             // is to search it and read the error naming the ones that do. The
@@ -17567,6 +17805,13 @@ impl PhysicalOperator for MaterializedOperator {
             children: Vec::new(),
         }
     }
+}
+
+/// Estimated heap bytes of buffered rows, for `PhysicalOperator::memory_bytes`.
+pub(crate) fn records_bytes<'a>(records: impl Iterator<Item = &'a Record>) -> usize {
+    records
+        .map(|r| std::mem::size_of::<Record>() + r.values().map(Value::approx_heap_bytes).sum::<usize>())
+        .sum()
 }
 
 /// Algorithm operator: CALL algo.pageRank(...)
@@ -20170,7 +20415,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
             "max_iterations",
             "minTotal", "min", "min_total", "populationSize", "population_size",
-            "property", "upperBound",
+            "property", "seed", "upperBound",
         ])?;
         let algorithm = config_map.get("algorithm").and_then(|v| v.as_string()).unwrap_or("Jaya");
         if !Self::is_known_solver(algorithm) {
@@ -20241,9 +20486,40 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                     .to_string(),
             ));
         }
+        // A multi-objective solver minimises one objective per cost property.
+        // With none it was handed an empty objective vector and panicked on
+        // the first index (#2060) -- the zero-property case #1499 did not
+        // reach, since it fixed the one-property case.
+        if is_multi_objective && cost_props.is_empty() {
+            return Err(ExecutionError::bad_argument(format!(
+                "or.solve: `{algorithm}` is multi-objective and needs `costProperties`, \
+                 the node properties to minimise (for example \
+                 {{costProperties: ['cost', 'risk']}})"
+            )));
+        }
 
         let pop_size = cfg_i("populationSize", "population_size").unwrap_or(50) as usize;
         let max_iter = cfg_i("maxIterations", "max_iterations").unwrap_or(100) as usize;
+        // The solvers take a seed (`with_seed`) and were given none, so the same
+        // call on the same data answered differently every time (#2061).
+        // Optional, so an unseeded call keeps drawing from entropy.
+        let seed = match config_map.get("seed") {
+            None => None,
+            Some(PropertyValue::Integer(n)) if *n >= 0 => Some(*n as u64),
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "or.solve: `seed` must be a non-negative integer, got {other:?}"
+                )))
+            }
+        };
+        macro_rules! solve_with_seed {
+            ($solver:expr, $problem:expr) => {
+                match seed {
+                    Some(s) => $solver.with_seed(s).solve($problem),
+                    None => $solver.solve($problem),
+                }
+            };
+        }
 
         // 1. Gather nodes and costs
         let label = Label::new(label_str);
@@ -20311,14 +20587,14 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         if is_multi_objective {
             let started = std::time::Instant::now();
             let res = match algorithm {
-                "MOTLBO" => MOTLBOSolver::new(solver_config).solve(&problem),
-                "MOBMWR" => MOBMWRSolver::new(solver_config, MOBMWRVariant::MOBMR).solve(&problem),
-                "MORaoDE" => MORaoDESolver::new(solver_config).solve(&problem),
+                "MOTLBO" => solve_with_seed!(MOTLBOSolver::new(solver_config), &problem),
+                "MOBMWR" => solve_with_seed!(MOBMWRSolver::new(solver_config, MOBMWRVariant::MOBMR), &problem),
+                "MORaoDE" => solve_with_seed!(MORaoDESolver::new(solver_config), &problem),
                 // Strength Pareto EA 2 (OPT-13, #1803).
-                "SPEA2" => SPEA2Solver::new(solver_config).solve(&problem),
+                "SPEA2" => solve_with_seed!(SPEA2Solver::new(solver_config), &problem),
                 // Decomposition-based MOEA (OPT-13, #1803).
-                "MOEAD" => MOEADSolver::new(solver_config).solve(&problem),
-                _ => NSGA2Solver::new(solver_config).solve(&problem), // Default multi
+                "MOEAD" => solve_with_seed!(MOEADSolver::new(solver_config), &problem),
+                _ => solve_with_seed!(NSGA2Solver::new(solver_config), &problem), // Default multi
             };
             let total_time_ms = duration_ms(started.elapsed());
 
@@ -20369,41 +20645,41 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         } else {
             let started = std::time::Instant::now();
             let result = match algorithm {
-                "Rao1" => RaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
-                "Rao2" => RaoSolver::new(solver_config, RaoVariant::Rao2).solve(&problem),
-                "Rao3" => RaoSolver::new(solver_config, RaoVariant::Rao3).solve(&problem),
-                "TLBO" => TLBOSolver::new(solver_config).solve(&problem),
-                "Firefly" => FireflySolver::new(solver_config).solve(&problem),
-                "Cuckoo" => CuckooSolver::new(solver_config).solve(&problem),
-                "GWO" => GWOSolver::new(solver_config).solve(&problem),
-                "GA" => GASolver::new(solver_config).solve(&problem),
-                "SA" => SASolver::new(solver_config).solve(&problem),
-                "Bat" => BatSolver::new(solver_config).solve(&problem),
-                "ABC" => ABCSolver::new(solver_config).solve(&problem),
-                "GSA" => GSASolver::new(solver_config).solve(&problem),
-                "HS" => HSSolver::new(solver_config).solve(&problem),
-                "FPA" => FPASolver::new(solver_config).solve(&problem),
+                "Rao1" => solve_with_seed!(RaoSolver::new(solver_config, RaoVariant::Rao1), &problem),
+                "Rao2" => solve_with_seed!(RaoSolver::new(solver_config, RaoVariant::Rao2), &problem),
+                "Rao3" => solve_with_seed!(RaoSolver::new(solver_config, RaoVariant::Rao3), &problem),
+                "TLBO" => solve_with_seed!(TLBOSolver::new(solver_config), &problem),
+                "Firefly" => solve_with_seed!(FireflySolver::new(solver_config), &problem),
+                "Cuckoo" => solve_with_seed!(CuckooSolver::new(solver_config), &problem),
+                "GWO" => solve_with_seed!(GWOSolver::new(solver_config), &problem),
+                "GA" => solve_with_seed!(GASolver::new(solver_config), &problem),
+                "SA" => solve_with_seed!(SASolver::new(solver_config), &problem),
+                "Bat" => solve_with_seed!(BatSolver::new(solver_config), &problem),
+                "ABC" => solve_with_seed!(ABCSolver::new(solver_config), &problem),
+                "GSA" => solve_with_seed!(GSASolver::new(solver_config), &problem),
+                "HS" => solve_with_seed!(HSSolver::new(solver_config), &problem),
+                "FPA" => solve_with_seed!(FPASolver::new(solver_config), &problem),
                 // Shipped in the crate and previously unreachable (#1341).
-                "PSO" => PSOSolver::new(solver_config).solve(&problem),
-                "DE" => DESolver::new(solver_config).solve(&problem),
-                "BMR" => BMRSolver::new(solver_config).solve(&problem),
-                "BWR" => BWRSolver::new(solver_config).solve(&problem),
-                "BMWR" => BMWRSolver::new(solver_config).solve(&problem),
-                "QOJaya" => QOJayaSolver::new(solver_config).solve(&problem),
-                "SAMPJaya" => SAMPJayaSolver::new(solver_config).solve(&problem),
-                "EHRJaya" => EHRJayaSolver::new(solver_config).solve(&problem),
-                "ITLBO" => ITLBOSolver::new(solver_config).solve(&problem),
-                "GOTLBO" => GOTLBOSolver::new(solver_config).solve(&problem),
-                "QORao" => QORaoSolver::new(solver_config, RaoVariant::Rao1).solve(&problem),
-                "SAPHR" => SAPHRSolver::new(solver_config).solve(&problem),
+                "PSO" => solve_with_seed!(PSOSolver::new(solver_config), &problem),
+                "DE" => solve_with_seed!(DESolver::new(solver_config), &problem),
+                "BMR" => solve_with_seed!(BMRSolver::new(solver_config), &problem),
+                "BWR" => solve_with_seed!(BWRSolver::new(solver_config), &problem),
+                "BMWR" => solve_with_seed!(BMWRSolver::new(solver_config), &problem),
+                "QOJaya" => solve_with_seed!(QOJayaSolver::new(solver_config), &problem),
+                "SAMPJaya" => solve_with_seed!(SAMPJayaSolver::new(solver_config), &problem),
+                "EHRJaya" => solve_with_seed!(EHRJayaSolver::new(solver_config), &problem),
+                "ITLBO" => solve_with_seed!(ITLBOSolver::new(solver_config), &problem),
+                "GOTLBO" => solve_with_seed!(GOTLBOSolver::new(solver_config), &problem),
+                "QORao" => solve_with_seed!(QORaoSolver::new(solver_config, RaoVariant::Rao1), &problem),
+                "SAPHR" => solve_with_seed!(SAPHRSolver::new(solver_config), &problem),
                 // Success-history adaptive DE with linear population
                 // reduction (OPT-13, #1803).
-                "LSHADE" => LSHADESolver::new(solver_config).solve(&problem),
+                "LSHADE" => solve_with_seed!(LSHADESolver::new(solver_config), &problem),
                 // Covariance matrix adaptation ES (OPT-13, #1803).
-                "CMAES" => CMAESSolver::new(solver_config).solve(&problem),
+                "CMAES" => solve_with_seed!(CMAESSolver::new(solver_config), &problem),
                 // Jaya by name, and by omitting `algorithm` -- the default is
                 // applied where the name is read, not here.
-                "Jaya" => JayaSolver::new(solver_config).solve(&problem),
+                "Jaya" => solve_with_seed!(JayaSolver::new(solver_config), &problem),
                 // Not a catch-all. `SOLVERS` has already accepted this name, so
                 // arriving here means the list and the dispatch have drifted
                 // apart, and running Jaya instead is how that drift stayed
@@ -20747,115 +21023,11 @@ impl AlgorithmOperator {
     }
 
     /// Is this a name the algorithm operator can run?
+    ///
+    /// Read from the catalogue `GET /api/algorithms/catalog` serves (#2013),
+    /// so a name is callable exactly when a client can discover it.
     pub fn is_algorithm(name: &str) -> bool {
-        matches!(
-            Self::canonical_name(name).as_str(),
-            "pagerank"
-                | "shortestpath"
-                | "wcc"
-                | "scc"
-                | "weightedpath"
-                | "maxflow"
-                | "mst"
-                | "trianglecount"
-                | "cdlp"
-                | "lcc"
-                // Principal component analysis over numeric node properties
-                // (#1022): in the algorithms crate and the SDK, and refused
-                // here as unknown.
-                | "pca"
-                | "or.solve"
-                // Graph embeddings (ML-06): node2vec's biased walks and
-                // FastRP's sparse-projection propagation, both writing a
-                // vector property rather than only streaming -- see
-                // `execute_fastrp`/`execute_node2vec` for what each does and
-                // does not do.
-                | "fastrp"
-                | "node2vec"
-                // The four causal/temporal primitives (ALGO-15). Reachability
-                // in a temporal graph is not transitive -- an edge that fired
-                // before you arrived is not traversable -- so none of these
-                // can be expressed with the static algorithms above.
-                | "temporalreachability"
-                | "temporalshortestpath"
-                | "propagationranking"
-                | "symptomexplanation"
-                // Centrality. Three different answers to "which nodes matter":
-                // degree is local, closeness finds the well-placed node, and
-                // betweenness finds the bottleneck -- often a low-degree node
-                // the other two miss, since the single bridge between two
-                // clusters has degree 2.
-                | "degree"
-                | "degreecentrality"
-                | "closeness"
-                | "closenesscentrality"
-                | "betweenness"
-                | "betweennesscentrality"
-                | "harmonic"
-                | "harmoniccentrality"
-                | "eigenvector"
-                | "eigenvectorcentrality"
-                | "kcore"
-                | "corenumber"
-                // Link prediction: a score over a *pair*, so these yield
-                // `node1, node2, score` rather than a column beside the nodes.
-                | "commonneighbors"
-                | "commonneighbours"
-                | "jaccard"
-                | "adamicadar"
-                // Structural: one DFS answers all four.
-                | "topologicalsort"
-                | "toposort"
-                | "cycledetection"
-                | "findcycle"
-                | "bridges"
-                | "articulationpoints"
-                // Whole-graph shape.
-                | "eccentricity"
-                | "diameter"
-                | "radius"
-                | "averageneighbordegree"
-                | "averageneighbourdegree"
-                | "degreeassortativity"
-                // Community detection. `labelpropagation` routes to cdlp:
-                // that *is* label propagation, LDBC's, and a second
-                // deterministic one collapses every connected graph to a
-                // single community.
-                | "louvain"
-                | "modularity"
-                | "labelpropagation"
-                // Path enumeration and a PageRank variant.
-                | "allshortestpaths"
-                | "astar"
-                | "yens"
-                | "randomwalk"
-                | "articlerank"
-                // Ranking beyond PageRank: influence that decays with
-                // distance, the hub/authority pair, a source-biased rank, and
-                // a seed set chosen to spread out rather than cluster.
-                | "katz" | "katzcentrality"
-                | "hits" | "hubsandauthorities"
-                | "personalizedpagerank" | "personalisedpagerank"
-                | "voterank"
-                // Paths: negative weights, all-pairs, DAG longest, closure.
-                | "bellmanford" | "allpairsshortestpath" | "allpairs"
-                | "wienerindex" | "daglongestpath" | "longestpath"
-                | "transitiveclosure"
-                // Structure and cohesion.
-                | "bipartite" | "bipartitesets"
-                | "maximalmatching" | "matching"
-                | "colouring" | "coloring" | "greedycolouring"
-                | "dominatingset" | "ktruss" | "truss"
-                | "transitivity" | "globalefficiency" | "squareclustering"
-                | "richclub" | "richclubcoefficient"
-                | "biconnectedcomponents" | "biconnected"
-                // Similarity and structural holes.
-                | "nodesimilarity"
-                | "overlap" | "overlapcoefficient"
-                | "cosine" | "cosinesimilarity"
-                | "effectivesize" | "constraint" | "burtconstraint"
-                | "reciprocity"
-        )
+        super::algorithm_catalog::find(name).is_some()
     }
 }
 

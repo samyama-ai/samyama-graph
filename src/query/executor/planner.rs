@@ -1558,6 +1558,18 @@ impl QueryPlanner {
         store: &GraphStore,
         seed: Option<(OperatorBox, HashSet<String>)>,
     ) -> ExecutionResult<ExecutionPlan> {
+        // `CALL db.index.vector.queryNodes(...) YIELD node MATCH (node)-->(m)`:
+        // the search's rows become the seed, so the MATCH expands from them
+        // (#2045). Done before the EXISTS bodies are taken out below, because
+        // the recursive call takes them out of the same query itself.
+        if seed.is_none() {
+            if let Some((call_op, yielded)) = self.vector_call_seed(query, store)? {
+                let mut rest = query.clone();
+                rest.call_clause = None;
+                return self.plan_inner_seeded(&rest, store, Some((call_op, yielded)));
+            }
+        }
+
         // A full `EXISTS { ... }` in the WHERE is planned as a semi-join, not
         // evaluated as a predicate (#1211). It is taken out before the WHERE is
         // pushed down anywhere, and applied after the MATCH (below).
@@ -1677,6 +1689,40 @@ impl QueryPlanner {
             });
         }
 
+        // STRUCTURE INDEX DDL (SGI, ADR-041 / #2036), mirroring the hierarchy
+        // index above: SHOW reads declarations, the other three write.
+        if query.show_structure_indexes {
+            return Ok(ExecutionPlan {
+                root: Box::new(super::structure_ops::ShowStructureIndexesOperator::new()),
+                output_columns: super::structure_ops::structure_info_columns(),
+                is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
+        if let Some(clause) = &query.create_structure_index_clause {
+            return Ok(ExecutionPlan {
+                root: Box::new(super::structure_ops::CreateStructureIndexOperator::new(clause.clone())),
+                output_columns: super::structure_ops::structure_info_columns(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
+        if let Some(name) = &query.drop_structure_index {
+            return Ok(ExecutionPlan {
+                root: Box::new(super::structure_ops::DropStructureIndexOperator::new(name.clone())),
+                output_columns: super::structure_ops::structure_drop_columns(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
+        if let Some(name) = &query.rebuild_structure_index {
+            return Ok(ExecutionPlan {
+                root: Box::new(super::structure_ops::RebuildStructureIndexOperator::new(name.clone())),
+                output_columns: super::structure_ops::structure_info_columns(),
+                is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
+            });
+        }
+
         // Handle SHOW CONSTRAINTS
         if query.show_constraints {
             return Ok(ExecutionPlan {
@@ -1748,7 +1794,8 @@ impl QueryPlanner {
                     clause.dimensions,
                     clause.similarity.clone(),
                 ).with_name(clause.index_name.clone())
-                 .with_quantization(clause.quantization)),
+                 .with_quantization(clause.quantization)
+                 .with_params(clause.params)),
                 output_columns: vec![],
                 is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
@@ -3924,6 +3971,20 @@ impl QueryPlanner {
             )));
         }
 
+        // Similarity graphs from a vector index (#1979).
+        if let Some(procedure) = super::vector_ops::VectorProcedure::from_name(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::vector_ops::VectorSimilarityGraphOperator::new(
+                procedure,
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
+        }
+
         if call_clause.procedure_name == "db.index.vector.queryNodes" {
             // Two spellings of the same call, because the name is Neo4j's (#1041):
             //
@@ -3934,17 +3995,32 @@ impl QueryPlanner {
             // documentation, which is most of them — writes the second. Taking a name with
             // an established meaning and giving it a different one is the defect; accepting
             // both is the fix that does not break the queries already written against ours.
+            //
+            // Either form takes a trailing options map, `{ef: 200}` (#1971). A fourth
+            // argument makes it Neo4j's form only when that argument is a map: without
+            // the check, `('Doc', 1, [1.0], 2)` -- our form with a bad property -- was
+            // read as Neo4j's with `2` for its options, and the error named the wrong
+            // mistake.
             let args = &call_clause.arguments;
-            let neo4j_form = args.len() == 3
-                && matches!(args.first(), Some(Expression::Literal(PropertyValue::String(_))))
-                && matches!(args.get(1), Some(Expression::Literal(PropertyValue::Integer(_))));
+            let options_map = |e: &Expression| {
+                matches!(e, Expression::MapExpr(_) | Expression::Literal(PropertyValue::Map(_)))
+            };
+            let neo4j_form = matches!(args.first(), Some(Expression::Literal(PropertyValue::String(_))))
+                && matches!(args.get(1), Some(Expression::Literal(PropertyValue::Integer(_))))
+                && (args.len() == 3 || (args.len() == 4 && options_map(&args[3])));
+            let positional = if neo4j_form { 3 } else { 4 };
 
-            if args.len() < 3 || (args.len() == 3 && !neo4j_form) {
+            if args.len() < positional || args.len() > positional + 1 {
                 return Err(ExecutionError::PlanningError(
                     "db.index.vector.queryNodes takes either (label, property, queryVector, k) \
-                     or Neo4j's (indexName, k, queryVector)".to_string()
+                     or Neo4j's (indexName, k, queryVector), and optionally an options map \
+                     such as {ef: 200}".to_string()
                 ));
             }
+            let ef = match args.get(positional) {
+                Some(options) => vector_query_ef(options)?,
+                None => None,
+            };
 
             let (label, property, vector_arg, k_arg) = if neo4j_form {
                 let name = match &args[0] {
@@ -3980,34 +4056,92 @@ impl QueryPlanner {
             // `Vector`. List literals stay lists now (#628), so requiring the
             // `Vector` variant here would reject every query vector written
             // with a decimal point -- which is all of them.
-            let query_vector = match vector_arg {
-                Expression::Literal(pv) => pv.to_vector().ok_or_else(|| {
-                    ExecutionError::PlanningError(
-                        "the query vector must be a list of numbers".to_string(),
-                    )
-                })?,
-                _ => return Err(ExecutionError::PlanningError("the query vector must be a vector literal".to_string())),
+            //
+            // The vector and `k` are values known before the search starts: a
+            // literal, a `$parameter` (bound to a literal before planning), or
+            // an expression over those, such as `toInteger($k)` (#2047). They
+            // are evaluated once here, against no row, as
+            // `db.index.point.nearest` evaluates its centre. An expression that
+            // needs a row -- a variable -- fails with the evaluator's own error
+            // rather than being read as no vector.
+            //
+            // A literal is read in place; a 768-float vector is not copied to
+            // be read.
+            let evaluated = |e: &Expression, what: &str| -> ExecutionResult<PropertyValue> {
+                let not_a_value = || {
+                    ExecutionError::PlanningError(format!(
+                        "db.index.vector.queryNodes: the {what} must be a value, not a node, \
+                         relationship or path"
+                    ))
+                };
+                match super::operator::eval_expression(e, &super::Record::new(), store) {
+                    Ok(super::Value::Property(pv)) => Ok(pv),
+                    Ok(super::Value::Null) => Ok(PropertyValue::Null),
+                    // `[$x, $y]` evaluates to a list of values, not a property.
+                    Ok(super::Value::List(items)) => items
+                        .into_iter()
+                        .map(|v| match v {
+                            super::Value::Property(pv) => Ok(pv),
+                            _ => Err(not_a_value()),
+                        })
+                        .collect::<ExecutionResult<Vec<_>>>()
+                        .map(PropertyValue::Array),
+                    Ok(_) => Err(not_a_value()),
+                    Err(e) => Err(ExecutionError::PlanningError(format!(
+                        "db.index.vector.queryNodes: the {what} must be a literal or a \
+                         $parameter: {e}"
+                    ))),
+                }
             };
 
-            let k = match k_arg {
-                Expression::Literal(PropertyValue::Integer(i)) => *i as usize,
-                _ => return Err(ExecutionError::PlanningError("k must be an integer literal".to_string())),
+            let query_vector = match vector_arg {
+                Expression::Literal(pv) => pv.to_vector(),
+                e => evaluated(e, "query vector")?.to_vector(),
+            }
+            .ok_or_else(|| {
+                ExecutionError::PlanningError(
+                    "the query vector must be a list of numbers".to_string(),
+                )
+            })?;
+
+            // Negative `k` is refused rather than cast: `-1 as usize` is
+            // `usize::MAX`, a search for every vector in the index. A literal
+            // made that hard to write by accident; a parameter does not.
+            let k_value = match k_arg {
+                Expression::Literal(pv) => pv.clone(),
+                e => evaluated(e, "k")?,
+            };
+            let k = match k_value {
+                PropertyValue::Integer(i) if i >= 0 => i as usize,
+                other => {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "k must be a non-negative integer, got {other:?}"
+                    )))
+                }
             };
 
             let mut node_var = "node".to_string();
             let mut score_var = None;
+            // `score` is Neo4j's similarity, higher is better; `distance` is
+            // the raw distance, lower is better, which `score` was before
+            // #1980.
+            let mut distance_var = None;
 
             for item in &call_clause.yield_items {
                 if item.name == "node" {
                     node_var = item.alias.clone().unwrap_or_else(|| item.name.clone());
                 } else if item.name == "score" {
                     score_var = Some(item.alias.clone().unwrap_or_else(|| item.name.clone()));
+                } else if item.name == "distance" {
+                    distance_var = Some(item.alias.clone().unwrap_or_else(|| item.name.clone()));
                 }
             }
 
             Ok(Box::new(
                 VectorSearchOperator::new(label, property, query_vector, k, node_var, score_var)
-                    .with_filter(vector_filter),
+                    .with_filter(vector_filter)
+                    .with_ef(ef)
+                    .with_distance_var(distance_var),
             ))
         } else if call_clause.procedure_name == "db.checkIntegrity"
             || call_clause.procedure_name == "db.checkintegrity"
@@ -4831,9 +4965,17 @@ impl QueryPlanner {
                 // Before the remove, so the index it skips is still the scan's.
                 let other_end =
                     range_other_end(&start_var, &property, &op, &val, &remaining_predicates, idx);
-                remaining_predicates.remove(idx);
                 // The range conjunct stays in the WHERE filter (a range scan
-                // answers none), so the scan's bounds may be loose.
+                // answers none), so the scan's bounds may be loose -- and it
+                // stays *here*, in this subplan, rather than by grace of the
+                // re-application at the end of `plan_inner`. That net is
+                // skipped whenever the query has a `WITH`, and an
+                // optional-scoped conjunct is routed past it to a join that
+                // does not apply it, so both shapes returned the excluded
+                // bound: `p.id > 100 WITH p` answered 100 (#2107).
+                if op == BinaryOp::Eq {
+                    remaining_predicates.remove(idx);
+                }
                 let scan = IndexScanOperator::new(start_var.clone(), label, property, op, val)
                     .with_loose_bounds();
                 Box::new(match other_end {
@@ -5813,7 +5955,13 @@ impl QueryPlanner {
             find_index_predicate(&anchor_var, &anchor.labels, &candidates, store)
         {
             let other_end = range_other_end(&anchor_var, &property, &op, &val, &candidates, idx);
-            candidates.remove(idx);
+            // Kept for a range, for the reason at the start-anchored site: the
+            // loose bound is only sound while this conjunct is re-checked, and
+            // `WITH` and `OPTIONAL MATCH` both bypass the net that used to do
+            // it (#2107).
+            if op == BinaryOp::Eq {
+                candidates.remove(idx);
+            }
             let scan = IndexScanOperator::new(anchor_var.clone(), label, property, op, val)
                 .with_loose_bounds();
             Box::new(match other_end {
@@ -8483,6 +8631,48 @@ fn is_volatile(expr: &Expression) -> bool {
     }
 }
 
+/// The `ef` of `db.index.vector.queryNodes`'s options map (#1971). Any other
+/// key is refused: an option the search ignored would answer at a width the
+/// caller did not ask for, and say nothing.
+fn vector_query_ef(options: &Expression) -> ExecutionResult<Option<usize>> {
+    let bad = |msg: String| ExecutionError::PlanningError(format!("db.index.vector.queryNodes: {msg}"));
+    let entries: Vec<(String, Option<i64>)> = match options {
+        Expression::MapExpr(entries) => entries
+            .iter()
+            .map(|(k, v)| {
+                let n = match v {
+                    Expression::Literal(PropertyValue::Integer(i)) => Some(*i),
+                    _ => None,
+                };
+                (k.clone(), n)
+            })
+            .collect(),
+        Expression::Literal(PropertyValue::Map(map)) => map
+            .iter()
+            .map(|(k, v)| {
+                let n = match v {
+                    PropertyValue::Integer(i) => Some(*i),
+                    _ => None,
+                };
+                (k.clone(), n)
+            })
+            .collect(),
+        _ => return Err(bad("the options must be a map literal, such as {ef: 200}".to_string())),
+    };
+    let mut ef = None;
+    for (key, value) in entries {
+        if key != "ef" {
+            return Err(bad(format!("unknown option `{key}`; the accepted option is `ef`")));
+        }
+        let value = value
+            .filter(|v| *v > 0)
+            .ok_or_else(|| bad("`ef` must be a positive integer literal".to_string()))?;
+        crate::vector::index::check_ef(value as usize).map_err(bad)?;
+        ef = Some(value as usize);
+    }
+    Ok(ef)
+}
+
 /// Flatten an AND-chain expression into a list of individual predicates.
 /// E.g., `a AND b AND c` → `[a, b, c]`
 fn flatten_and_predicates(expr: &Expression) -> Vec<Expression> {
@@ -8888,6 +9078,11 @@ impl QueryPlanner {
             }
         }
         let mut anon_seq = 0usize;
+        // Names for anonymous nodes in a MATCH expanded from bound rows. The
+        // reading prefix was planned by a separate call whose own count starts
+        // at zero, so this one starts well clear of it: a reused name would
+        // rebind a variable the prefix's rows already carry.
+        let mut pushdown_anon = 1usize << 20;
         // Set when a RETURN has already placed the sort below its projection.
         let mut order_by_applied = false;
 
@@ -8923,6 +9118,33 @@ impl QueryPlanner {
                     // is taken whole and sorted — it comes from a HashSet, and
                     // an unsorted key order varies between runs.
                     let clause_vars = Self::clause_variables(&mc.pattern);
+                    // A clause that starts from a bound variable expands from
+                    // the rows already in hand instead. `CALL
+                    // db.index.vector.queryNodes(...) YIELD node WITH node
+                    // MATCH (node)-[:CITES]->(m)` otherwise planned the MATCH
+                    // over the whole graph and joined it to the k search hits
+                    // (#2045). Its WHERE, if any, is the `Clause::Where` that
+                    // follows, so none is passed here.
+                    if !mc.optional && Self::can_pushdown_match(mc, &bound) {
+                        if let Some(pred) =
+                            self.bound_node_constraints(std::slice::from_ref(mc), &bound)
+                        {
+                            operator = Box::new(FilterOperator::new(operator, pred));
+                        }
+                        let (expanded, new_vars) = self.plan_pushed_down_match(
+                            mc,
+                            None,
+                            &clause_vars,
+                            &bound,
+                            operator,
+                            &mut pushdown_anon,
+                            store,
+                        )?;
+                        operator = expanded;
+                        bound.extend(new_vars);
+                        bound.extend(clause_vars);
+                        continue;
+                    }
                     let match_op = self.dispatch_plan_match(mc, None, store)?;
                     let mut shared: Vec<String> = bound.intersection(&clause_vars).cloned().collect();
                     shared.sort();
@@ -10089,6 +10311,119 @@ impl QueryPlanner {
             current_op = Box::new(FilterOperator::new(current_op, distinct.clone()));
         }
         Ok((current_op, new_vars))
+    }
+
+    /// The vector search a query's MATCH should be expanded from, with the
+    /// variables it yields (#2045).
+    ///
+    /// `CALL db.index.vector.queryNodes(...) YIELD node MATCH (node)-[:CITES]->(m)`
+    /// planned the MATCH first, while nothing was bound: a scan of every node,
+    /// expanded over the whole graph, and only then hash-joined to the k rows
+    /// the search returned. Planning the search first and handing its rows to
+    /// the MATCH as a seed lets the clause expand from `node` instead.
+    ///
+    /// A join on the yielded variables and an expand from them give the same
+    /// rows, so this changes the cost and not the answer. Only the plain shape
+    /// is taken -- a read with a RETURN, no WITH, UNWIND, subquery or write --
+    /// and only when the first MATCH can actually start from what the search
+    /// binds; everything else keeps the join it had.
+    ///
+    /// Labels and inline properties the MATCH puts on a yielded node are a
+    /// filter on the search's rows. The expand from a bound start does not
+    /// check them, and the join it replaces did.
+    fn vector_call_seed(
+        &self,
+        query: &Query,
+        store: &GraphStore,
+    ) -> ExecutionResult<Option<(OperatorBox, HashSet<String>)>> {
+        let Some(call) = &query.call_clause else {
+            return Ok(None);
+        };
+        if call.procedure_name != "db.index.vector.queryNodes"
+            || call.yield_items.is_empty()
+            || query.match_clauses.is_empty()
+            || query.return_clause.is_none()
+            || query.with_clause.is_some()
+            || query.with_split_index.is_some()
+            || !query.extra_with_stages.is_empty()
+            || query.call_subquery.is_some()
+            || query.correlated_call.is_some()
+            || query.unwind_clause.is_some()
+            || !query.extra_unwind_clauses.is_empty()
+            || !query.post_with_unwind_clauses.is_empty()
+            || query.load_csv_clause.is_some()
+            || query.load_parquet_clause.is_some()
+            || query.foreach_clause.is_some()
+            || query.create_clause.is_some()
+            || query.merge_clause.is_some()
+            || query.delete_clause.is_some()
+            || !query.set_clauses.is_empty()
+            || !query.remove_clauses.is_empty()
+        {
+            return Ok(None);
+        }
+        let yielded: HashSet<String> = call
+            .yield_items
+            .iter()
+            .map(|i| i.alias.clone().unwrap_or_else(|| i.name.clone()))
+            .collect();
+        if !Self::can_pushdown_match(&query.match_clauses[0], &yielded) {
+            return Ok(None);
+        }
+        let mut call_op = self.plan_call(call, store)?;
+        let required: Vec<MatchClause> =
+            query.match_clauses.iter().filter(|mc| !mc.optional).cloned().collect();
+        if let Some(pred) = self.bound_node_constraints(&required, &yielded) {
+            call_op = Box::new(FilterOperator::new(call_op, pred));
+        }
+        Ok(Some((call_op, yielded)))
+    }
+
+    /// The labels and inline properties `clauses` give a variable already in
+    /// `bound`, as one predicate over it, or `None` if they give none.
+    ///
+    /// The expand from a bound start reads neither: `MATCH (a:B)-->(x)` with
+    /// `a` bound walks from every `a`, `:B` or not. A planner that replaces a
+    /// join on `a` with that expand applies this to the input first.
+    fn bound_node_constraints(
+        &self,
+        clauses: &[MatchClause],
+        bound: &HashSet<String>,
+    ) -> Option<Expression> {
+        let mut conds: Vec<Expression> = Vec::new();
+        for mc in clauses {
+            for path in &mc.pattern.paths {
+                let nodes = std::iter::once(&path.start).chain(path.segments.iter().map(|s| &s.node));
+                for node in nodes {
+                    let Some(var) = node.variable.as_ref().filter(|v| bound.contains(*v)) else {
+                        continue;
+                    };
+                    if !node.labels.is_empty() {
+                        conds.push(Expression::Function {
+                            name: "hasLabels".to_string(),
+                            args: vec![
+                                Expression::Variable(var.clone()),
+                                Expression::Literal(PropertyValue::Array(
+                                    node.labels
+                                        .iter()
+                                        .map(|l| PropertyValue::String(l.as_str().to_string()))
+                                        .collect(),
+                                )),
+                            ],
+                            distinct: false,
+                        });
+                    }
+                    if let Some(props) = node.properties.as_ref().filter(|p| !p.is_empty()) {
+                        conds.push(self.build_property_filter(var, props));
+                    }
+                }
+            }
+        }
+        conds.into_iter().reduce(|left, right| Expression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::And,
+            right: Box::new(right),
+        })
     }
 
     /// Build the optional expand for a clause `optional_pushdown_vars` accepted.
@@ -11269,6 +11604,10 @@ mod tests {
             drop_hierarchy_index: None,
             rebuild_hierarchy_index: None,
             show_hierarchy_indexes: false,
+            create_structure_index_clause: None,
+            drop_structure_index: None,
+            rebuild_structure_index: None,
+            show_structure_indexes: false,
             graph_projection_ddl: None,
             show_indexes: false,
             show_constraints: false,

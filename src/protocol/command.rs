@@ -7,9 +7,22 @@ use crate::graph::GraphStore;
 use crate::persistence::{PersistenceManager, TenantManager};
 use crate::protocol::resp::RespValue;
 use crate::query::{QueryEngine, Value};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, warn};
+
+/// How long `INFO` waits for the store. A connection holding a transaction open
+/// keeps the writer's lock for up to the transaction timeout, and a monitoring
+/// poll must not hang behind it.
+const INFO_STORE_WAIT: Duration = Duration::from_millis(100);
+
+/// What a RESP command will put in the audit log once its reply is known.
+pub(crate) struct AuditEntry {
+    command: String,
+    tenant: Option<String>,
+    query_hash: Option<String>,
+}
 
 /// Command handler for processing GRAPH.* commands
 pub struct CommandHandler {
@@ -18,6 +31,9 @@ pub struct CommandHandler {
     persistence: Option<Arc<PersistenceManager>>,
     /// Shared tenant registry — HA-09 unifies HTTP + RESP views
     tenant_manager: Arc<TenantManager>,
+    /// The log `--audit-log` opened, shared with the HTTP server (#2081). Set
+    /// once, before the first connection.
+    audit: OnceLock<Arc<crate::http::server::AuditLog>>,
 }
 
 impl CommandHandler {
@@ -35,6 +51,7 @@ impl CommandHandler {
             query_engine: QueryEngine::new(),
             persistence,
             tenant_manager,
+            audit: OnceLock::new(),
         }
     }
 
@@ -49,7 +66,58 @@ impl CommandHandler {
             query_engine: QueryEngine::new(),
             persistence,
             tenant_manager,
+            audit: OnceLock::new(),
         }
+    }
+
+    /// Record this server's writes in `log`.
+    pub fn set_audit_log(&self, log: Arc<crate::http::server::AuditLog>) {
+        let _ = self.audit.set(log);
+    }
+
+    /// The audit entry `value` calls for, or `None` if it changes nothing.
+    ///
+    /// Asked before the command runs, so a refused write is recorded too: it is
+    /// the entry the log exists for. A statement that does not parse counts as a
+    /// write, for the reason HTTP records by method: a log that occasionally
+    /// over-records is worth more than one that occasionally misses a write.
+    pub(crate) fn audit_entry_for(&self, value: &RespValue) -> Option<AuditEntry> {
+        self.audit.get()?;
+        let args = value.as_array().ok()?;
+        let command = args.first()?.as_string().ok()??.to_uppercase();
+        let named_graph = || args.get(1).and_then(|v| v.as_string().ok().flatten());
+        let (tenant, query_hash) = match command.as_str() {
+            "GRAPH.QUERY" | "GRAPH.RO_QUERY" => {
+                let query = args.get(2)?.as_string().ok()??;
+                if matches!(self.query_engine.statement_is_write(&query), Ok(false)) {
+                    return None;
+                }
+                (named_graph(), Some(Self::query_hash(&query)))
+            }
+            "GRAPH.DELETE" => (named_graph(), None),
+            // These name no graph: the transaction is on the only one served.
+            "GRAPH.COMMIT" | "GRAPH.ROLLBACK" => (Some("default".to_string()), None),
+            _ => return None,
+        };
+        Some(AuditEntry { command, tenant, query_hash })
+    }
+
+    /// Write `entry`, now that the reply says how the command ended.
+    pub(crate) fn audit(&self, entry: &AuditEntry, subject: &str, ok: bool) {
+        if let Some(log) = self.audit.get() {
+            log.record_resp(
+                subject,
+                &entry.command,
+                entry.tenant.as_deref(),
+                entry.query_hash.as_deref(),
+                ok,
+            );
+        }
+    }
+
+    fn query_hash(query: &str) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(query.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// Access the shared tenant registry (for HTTP wiring in main).
@@ -98,7 +166,7 @@ impl CommandHandler {
             "GRAPH.LIST" => self.handle_graph_list(args, store, auth).await,
             "PING" => self.handle_ping(args),
             "ECHO" => self.handle_echo(args),
-            "INFO" => self.handle_info(args),
+            "INFO" => self.handle_info(store).await,
             _ => RespValue::Error(format!("ERR unknown command '{}'", cmd_name)),
         }
     }
@@ -604,17 +672,68 @@ impl CommandHandler {
     }
 
     /// Handle INFO command
-    fn handle_info(&self, _args: &[RespValue]) -> RespValue {
-        let info = format!(
+    async fn handle_info(&self, store: &Arc<RwLock<GraphStore>>) -> RespValue {
+        match tokio::time::timeout(INFO_STORE_WAIT, store.read()).await {
+            Ok(guard) => self.info_on(Some(&guard)),
+            Err(_) => self.info_on(None),
+        }
+    }
+
+    /// The INFO reply (#2081). `store` is `None` when the store could not be
+    /// read in time: the lines it answers are then left out and `store_busy:1`
+    /// says why, because a `used_memory:0` on a loaded graph is the fiction this
+    /// replaced.
+    ///
+    /// `used_memory` is the walk `/api/memory` reports, a floor and not a
+    /// reading of the allocator. `connected_clients` counts RESP connections.
+    /// The two cache counters are this port's own engine; the HTTP server has
+    /// another. The query counters are process-wide, as on `/metrics`.
+    pub fn info_on(&self, store: Option<&GraphStore>) -> RespValue {
+        let clients = self
+            .tenant_manager
+            .get_usage("default")
+            .map_or(0, |u| u.active_connections);
+        let mut info = format!(
             "# Server\r\n\
              samyama_version:{}\r\n\
              redis_mode:standalone\r\n\
              # Clients\r\n\
-             connected_clients:1\r\n\
-             # Memory\r\n\
-             used_memory:0\r\n",
+             connected_clients:{clients}\r\n",
             crate::VERSION
         );
+        let graphs = self.tenant_manager.list_tenants().len();
+        match store {
+            Some(s) => info.push_str(&format!(
+                "# Memory\r\n\
+                 used_memory:{}\r\n\
+                 # Graph\r\n\
+                 nodes_total:{}\r\n\
+                 edges_total:{}\r\n\
+                 graphs_total:{graphs}\r\n",
+                s.memory_report().attributed(),
+                s.node_count(),
+                s.edge_count(),
+            )),
+            None => info.push_str(&format!(
+                "# Graph\r\n\
+                 graphs_total:{graphs}\r\n\
+                 store_busy:1\r\n"
+            )),
+        }
+        let m = crate::query::metrics::snapshot();
+        info.push_str(&format!(
+            "# Stats\r\n\
+             total_queries_processed:{}\r\n\
+             total_queries_failed:{}\r\n\
+             slow_queries_total:{}\r\n\
+             ast_cache_hits:{}\r\n\
+             result_cache_hits:{}\r\n",
+            m.total,
+            m.failed,
+            m.slow,
+            self.query_engine.cache_stats().hits(),
+            self.query_engine.result_cache_stats().hits(),
+        ));
         RespValue::BulkString(Some(info.into_bytes()))
     }
 

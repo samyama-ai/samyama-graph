@@ -301,7 +301,10 @@ fn create_vector_index_operator_builds_l2_index_once_until_reset() {
     assert!(op.next_mut(&mut store, TENANT).unwrap().is_some());
     assert!(op.next_mut(&mut store, TENANT).unwrap().is_none());
     let shown = read(&store, "SHOW INDEXES");
-    assert_eq!(strings(&shown, "type"), vec!["VECTOR"]);
+    assert_eq!(
+        strings(&shown, "type"),
+        vec!["VECTOR[m=16, ef_construction=200, ef=auto]"]
+    );
     op.reset();
     // Declaring it again replaces the index rather than adding a second one.
     assert!(op.next_mut(&mut store, TENANT).unwrap().is_some());
@@ -2242,6 +2245,31 @@ fn or_solve_every_single_objective_solver_dispatches() {
 }
 
 #[test]
+fn or_solve_multi_objective_without_cost_properties_is_refused() {
+    // #2060: an empty objective vector panicked inside the solver.
+    for name in AlgorithmOperator::MULTI_OBJECTIVE_SOLVERS {
+        let mut store = solve_store();
+        let e = match run_algo_mut(
+            &mut store,
+            "algo.or.solve",
+            vec![lmap(&[
+                ("algorithm", pstr(name)),
+                ("label", pstr("Item")),
+                ("property", pstr("qty")),
+                ("populationSize", pint(6)),
+                ("maxIterations", pint(2)),
+            ])],
+        ) {
+            Ok(rows) => panic!("{name} ran with no cost properties: {} rows", rows.len()),
+            Err(e) => e.to_string(),
+        };
+        assert!(e.contains("needs `costProperties`"), "{name}: {e}");
+        let written = read(&store, "MATCH (n:Item) WHERE n.qty IS NOT NULL RETURN count(n) AS c");
+        assert_eq!(int(&written, 0, "c"), 0, "{name}: refused, so nothing is written");
+    }
+}
+
+#[test]
 fn or_solve_multi_objective_reports_a_front() {
     for name in ["NSGA2", "MOTLBO", "MOBMWR", "MORaoDE", "SPEA2", "MOEAD"] {
         let mut store = solve_store();
@@ -2282,6 +2310,51 @@ fn or_solve_multi_objective_reports_a_front() {
     )
     .unwrap();
     assert!(rows[0].get("front_size").is_some());
+}
+
+fn seeded_solve(name: &str, seed: PropertyValue) -> Result<String, String> {
+    let mut store = solve_store();
+    let mut cfg = vec![
+        ("algorithm", pstr(name)),
+        ("label", pstr("Item")),
+        ("property", pstr("qty")),
+        ("populationSize", pint(6)),
+        ("maxIterations", pint(3)),
+        ("seed", seed),
+    ];
+    if AlgorithmOperator::MULTI_OBJECTIVE_SOLVERS.contains(&name) {
+        cfg.push((
+            "costProperties",
+            PropertyValue::Array(vec![pstr("cost"), pstr("risk")]),
+        ));
+    }
+    run_algo_mut(&mut store, "algo.or.solve", vec![lmap(&cfg)]).map_err(|e| e.to_string())?;
+    let written = read(&store, "MATCH (n:Item) RETURN n.qty AS q ORDER BY id(n)");
+    Ok(format!("{:?}", written.records))
+}
+
+#[test]
+fn or_solve_same_seed_gives_the_same_result() {
+    // #2061: CALL passed no seed, so two identical calls wrote different values.
+    let mut names = vec![
+        "Jaya", "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "SAMPJaya",
+        "QOJaya", "EHRJaya", "BMR", "BWR", "BMWR", "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS",
+        "FPA", "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR", "LSHADE",
+    ];
+    names.extend_from_slice(AlgorithmOperator::MULTI_OBJECTIVE_SOLVERS);
+    for name in names {
+        let a = seeded_solve(name, pint(42)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let b = seeded_solve(name, pint(42)).unwrap();
+        assert_eq!(a, b, "{name}: same seed, different result");
+    }
+}
+
+#[test]
+fn or_solve_rejects_a_bad_seed() {
+    for seed in [pint(-1), pstr("abc"), PropertyValue::Float(1.5)] {
+        let e = seeded_solve("Jaya", seed).unwrap_err();
+        assert!(e.contains("`seed` must be a non-negative integer"), "{e}");
+    }
 }
 
 #[test]
@@ -6656,6 +6729,177 @@ fn reset_forgets_that_a_projection_was_used() {
     op.projection_used.set(true);
     op.reset();
     assert!(op.check_projection_used().is_err(), "a re-run must take its view again");
+}
+
+// ---------------------------------------------------------------------------
+// the algorithm catalogue (#2013)
+// ---------------------------------------------------------------------------
+
+/// A graph and arguments on which the catalogued algorithm returns rows.
+fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
+    let (path, ids) = path4();
+    let node = |i: usize| Expression::Literal(PropertyValue::Integer(ids[i]));
+    let lit = |v: PropertyValue| Expression::Literal(v);
+    let pairs = |second: i64| {
+        lit(PropertyValue::Array(
+            ids.iter()
+                .map(|&i| PropertyValue::Array(vec![pint(i), pint(second)]))
+                .collect(),
+        ))
+    };
+    let args = match canonical {
+        "shortestpath" | "maxflow" | "allshortestpaths" | "astar" | "yens"
+        | "temporalshortestpath" => vec![node(0), node(3)],
+        "weightedpath" => vec![node(0), node(3), lit(pstr("w"))],
+        "temporalreachability" | "propagationranking" | "bellmanford" | "randomwalk" => {
+            vec![node(0)]
+        }
+        "pca" => vec![
+            lit(pstr("V")),
+            lit(PropertyValue::Array(vec![pstr("x"), pstr("y")])),
+            lit(pint(1)),
+        ],
+        "symptomexplanation" => vec![pairs(40)],
+        "modularity" => vec![pairs(0)],
+        "fastrp" | "node2vec" => vec![lmap(&[("embeddingDimension", pint(4))])],
+        // A path has no cycle and pairs it cannot reach; a triangle has both.
+        "wienerindex" | "cycledetection" => return (triangle().0, vec![]),
+        // The smallest graph with a non-empty 3-truss.
+        "ktruss" => {
+            let k4 = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+            return (algo_graph(4, &k4, None).0, vec![]);
+        }
+        "or.solve" => {
+            return (
+                solve_store(),
+                vec![lmap(&[
+                    ("label", pstr("Item")),
+                    ("property", pstr("qty")),
+                    ("populationSize", pint(6)),
+                    ("maxIterations", pint(3)),
+                ])],
+            )
+        }
+        _ => vec![],
+    };
+    (path, args)
+}
+
+/// Every column `name` returns across all its rows, when called as `catalogue_call` says.
+fn catalogue_columns(entry: &super::super::algorithm_catalog::AlgorithmEntry, name: &str) -> Vec<String> {
+    let (mut store, args) = catalogue_call(&AlgorithmOperator::canonical_name(entry.name));
+    let rows = if entry.writes {
+        run_algo_mut(&mut store, name, args)
+    } else {
+        run_algo(&store, name, args)
+    }
+    .unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert!(!rows.is_empty(), "{name} returned no rows");
+    // Every row, not the first: mst leads with a summary row and then
+    // yields one row per tree edge, with different columns.
+    let mut cols: Vec<String> = rows.iter().flat_map(|r| r.bound_variables()).collect();
+    cols.sort();
+    cols.dedup();
+    cols
+}
+
+#[test]
+fn every_catalogued_algorithm_yields_its_listed_columns() {
+    use super::super::algorithm_catalog::ALGORITHM_CATALOG;
+    // Collected rather than asserted one at a time, so a run names every
+    // algorithm whose listing is wrong instead of stopping at the first.
+    let mut wrong = Vec::new();
+    for entry in ALGORITHM_CATALOG {
+        let mut listed: Vec<String> = entry.yields.iter().map(|c| c.to_string()).collect();
+        listed.sort();
+        for name in std::iter::once(entry.name).chain(entry.aliases.iter().copied()) {
+            let got = catalogue_columns(entry, name);
+            // `or.solve` lists the union of two shapes; the multi-objective
+            // one is checked below.
+            let ok = if entry.name == "algo.or.solve" {
+                got.iter().all(|c| listed.contains(c))
+            } else {
+                got == listed
+            };
+            if !ok {
+                wrong.push(format!("{name}: yields {got:?}, listed {listed:?}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    // `or.solve`'s multi-objective shape is the rest of its listed columns.
+    let mut store = solve_store();
+    let rows = run_algo_mut(
+        &mut store,
+        "algo.or.solve",
+        vec![lmap(&[
+            ("label", pstr("Item")),
+            ("property", pstr("qty")),
+            ("costProperties", PropertyValue::Array(vec![pstr("cost"), pstr("risk")])),
+            ("populationSize", pint(6)),
+            ("maxIterations", pint(2)),
+        ])],
+    )
+    .unwrap();
+    let multi = rows[0].bound_variables();
+    let single = catalogue_columns(super::super::algorithm_catalog::find("algo.or.solve").unwrap(), "algo.or.solve");
+    let listed = super::super::algorithm_catalog::find("algo.or.solve").unwrap().yields;
+    for c in listed {
+        assert!(multi.iter().any(|m| m == c) || single.iter().any(|s| s == c), "{c} is never yielded");
+    }
+}
+
+#[test]
+fn catalogue_names_are_unique_and_write_access_matches_the_operator() {
+    use super::super::algorithm_catalog::ALGORITHM_CATALOG;
+    let mut seen = std::collections::HashSet::new();
+    for entry in ALGORITHM_CATALOG {
+        for name in std::iter::once(entry.name).chain(entry.aliases.iter().copied()) {
+            assert!(seen.insert(AlgorithmOperator::canonical_name(name)), "{name} is listed twice");
+        }
+        assert_eq!(
+            entry.writes,
+            AlgorithmOperator::procedure_is_mutating(entry.name),
+            "{}",
+            entry.name
+        );
+    }
+    // The GDS spellings resolve through the same table, and the divergent ones do not.
+    assert!(super::super::algorithm_catalog::find("gds.pageRank.stream").is_some());
+    assert!(super::super::algorithm_catalog::find("gds.fastRP.stream").is_none());
+    assert!(super::super::algorithm_catalog::find("algo.nope").is_none());
+}
+
+/// Every name either dispatch `match` runs is in the catalogue.
+///
+/// The catalogue tests above only check what is listed; an algorithm added to
+/// dispatch and not listed would pass them and be refused by `is_algorithm`.
+/// The names are read from the match arms themselves, as
+/// `tests/algorithm_conventions_documented.rs` reads the catalogue, so this is
+/// not a third copy of the list.
+#[test]
+fn every_dispatched_algorithm_is_catalogued() {
+    let src = include_str!("operator.rs");
+    let opening = "match Self::canonical_name(&self.name).as_str() {";
+    let closing = "_ => return Err(Self::unknown_algorithm(&self.name)),";
+    let mut dispatched = Vec::new();
+    let mut rest = src;
+    while let Some(start) = rest.find(opening) {
+        let body = &rest[start + opening.len()..];
+        let end = body.find(closing).expect("a dispatch match without its fallback arm");
+        for line in body[..end].lines().map(str::trim).filter(|l| l.starts_with('"')) {
+            let arm = line.split("=>").next().unwrap();
+            dispatched.extend(arm.split('"').skip(1).step_by(2).map(str::to_string));
+        }
+        rest = &body[end..];
+    }
+    assert!(dispatched.len() > 60, "read only {} names from dispatch", dispatched.len());
+    for name in dispatched {
+        assert!(
+            super::super::algorithm_catalog::find(&name).is_some(),
+            "`{name}` dispatches but is not in ALGORITHM_CATALOG"
+        );
+    }
 }
 
 /// A filter the algorithm reads is one its config map accepts, and one it

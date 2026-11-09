@@ -9,10 +9,22 @@
 //!
 //! ## Key encoding
 //!
-//! Keys are tenant-prefixed (e.g., `tenant:node:123`, `tenant:edge:456`) so that even
-//! within a column family, data is logically partitioned. This encoding ensures tenants
-//! cannot accidentally read each other's data and enables efficient prefix scans for
-//! tenant-specific queries.
+//! Keys are tenant-prefixed -- `{tenant}:n:{id:016x}` and `{tenant}:e:{id:016x}` -- so
+//! that even within a column family, data is logically partitioned.
+//!
+//! The prefix alone does not establish that partition, and reading it as though it did
+//! is what #2108 was. Two things are needed on every tenant-scoped read and delete:
+//!
+//!   * an explicit upper bound on the iterator. `prefix_iterator_cf` confines an
+//!     iterator only when the column family has a prefix extractor configured, and
+//!     none is, so `prefix_same_as_start` is inert and the iterator runs to the end
+//!     of the column family.
+//!   * a check that the key has a row key's exact shape. A tenant id is not
+//!     validated anywhere, so a tenant may be named to sit inside another's range:
+//!     `acme:n` writes `acme:n:n:{id}`, which is inside `acme`'s `acme:n:` range.
+//!
+//! `row_range` and `owns_row` are the two halves, and every tenant-scoped operation
+//! here uses both.
 //!
 //! ## Serialization
 //!
@@ -141,6 +153,9 @@ pub fn fsync_enabled() -> bool {
         "1" | "true" | "yes" | "on"
     )
 }
+
+/// One row as a RocksDB iterator yields it: the key and value, or the read error.
+type RowItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 impl PersistentStorage {
     /// Open or create a new persistent storage
@@ -521,13 +536,16 @@ impl PersistentStorage {
         let cf = self.db.cf_handle("nodes")
             .ok_or_else(|| StorageError::ColumnFamily("nodes".to_string()))?;
 
-        let prefix = format!("{}:", tenant);
         let mut nodes = Vec::new();
 
-        let iter = self.db.prefix_iterator_cf(&cf, prefix.as_bytes());
-
-        for item in iter {
-            let (_key, value) = item?;
+        for item in self.row_iter(&cf, tenant, 'n') {
+            let (key, value) = item?;
+            // The iterator is bounded, so this only rejects a differently
+            // shaped key inside the range -- another tenant named like this
+            // one's prefix.
+            if !Self::owns_row(tenant, 'n', &key) {
+                continue;
+            }
             let stored: StoredNode = bincode::deserialize(&value)?;
             let properties: PropertyMap = bincode::deserialize(&stored.properties)?;
 
@@ -535,7 +553,7 @@ impl PersistentStorage {
                 id: NodeId::new(stored.id),
                 version: 1,
                 labels: stored.labels.into_iter()
-                    .map(|s| crate::graph::Label::new(s))
+                    .map(crate::graph::Label::new)
                     .collect(),
                 properties,
                 created_at: stored.created_at,
@@ -553,13 +571,13 @@ impl PersistentStorage {
         let cf = self.db.cf_handle("edges")
             .ok_or_else(|| StorageError::ColumnFamily("edges".to_string()))?;
 
-        let prefix = format!("{}:", tenant);
         let mut edges = Vec::new();
 
-        let iter = self.db.prefix_iterator_cf(&cf, prefix.as_bytes());
-
-        for item in iter {
-            let (_key, value) = item?;
+        for item in self.row_iter(&cf, tenant, 'e') {
+            let (key, value) = item?;
+            if !Self::owns_row(tenant, 'e', &key) {
+                continue;
+            }
             let stored: StoredEdge = bincode::deserialize(&value)?;
             let properties: PropertyMap = bincode::deserialize(&stored.properties)?;
 
@@ -587,12 +605,24 @@ impl PersistentStorage {
         let mut tenants = HashSet::new();
         let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
 
+        // `{tenant}:n:{id:016x}`. The tenant is read by removing the suffix the
+        // writer added, not by splitting on the first ':': a tenant id may
+        // contain one and nothing rejects that, so `a:b` was listed as `a` --
+        // and a caller that then scanned what the list named scanned the wrong
+        // range. Split on bytes, because the cut may land inside a multi-byte
+        // character of a tenant id and `str::split_at` would panic on it.
+        const SUFFIX: usize = ":n:".len() + 16;
         for item in iter {
             let (key, _) = item?;
-            if let Ok(key_str) = std::str::from_utf8(&key) {
-                if let Some(tenant) = key_str.split(':').next() {
-                    tenants.insert(tenant.to_string());
-                }
+            let Some(cut) = key.len().checked_sub(SUFFIX) else {
+                continue;
+            };
+            let (owner, tail) = key.split_at(cut);
+            if &tail[..3] != b":n:" || !tail[3..].iter().all(u8::is_ascii_hexdigit) {
+                continue;
+            }
+            if let Ok(tenant) = std::str::from_utf8(owner) {
+                tenants.insert(tenant.to_string());
             }
         }
 
@@ -606,25 +636,111 @@ impl PersistentStorage {
     /// rewinds the id counters, the writes that followed were persisted over ids
     /// that still belonged to the deleted graph.
     ///
-    /// A range delete rather than a scan and a loop: a drop should not cost one
-    /// round trip per row, and the keys are `{tenant}:n:{id:016x}`, so the tenant's
-    /// rows are one contiguous range. The upper bound is the prefix with its last
-    /// byte incremented, which is the first key that cannot belong to it.
+    /// Bounded iteration and a shape check per key, not a range delete.
+    ///
+    /// A range delete over `["{tenant}:{kind}:", "{tenant}:{kind};")` is one
+    /// round trip for the whole drop, and the comment here used to call that
+    /// upper bound "the first key that cannot belong to it". It is not: a tenant
+    /// id is never validated, so a tenant named `acme:n` writes
+    /// `acme:n:n:{id}`, which is inside `acme`'s range -- and dropping `acme`
+    /// deleted that tenant's rows with no way to tell afterwards. A range delete
+    /// cannot express "and of this exact shape", so the drop reads the keys and
+    /// deletes the ones this tenant owns.
+    ///
+    /// That costs a scan of the tenant's own range, which is the price of the
+    /// guarantee. It is not one round trip per row: the deletes go in batches of
+    /// `DELETE_BATCH`, bounded so dropping a large tenant does not hold the
+    /// whole key set in memory at once.
+    ///
+    /// The index catalog goes too. `put_index_catalog` writes `catalog:{tenant}`
+    /// into the `indices` column family, which this walked right past, so a
+    /// dropped graph's index declarations outlived it and came back on a tenant
+    /// later created under the same name -- the shape of #1110, in the column
+    /// family added after it.
     pub fn delete_graph(&self, tenant: &str) -> StorageResult<()> {
+        /// Keys per write. Large enough that the drop is not a round trip per
+        /// row, small enough to bound what is held while dropping a big tenant.
+        const DELETE_BATCH: usize = 4096;
+
         for (cf_name, kind) in [("nodes", 'n'), ("edges", 'e')] {
             let cf = self
                 .db
                 .cf_handle(cf_name)
                 .ok_or_else(|| StorageError::ColumnFamily(cf_name.to_string()))?;
-            let from = format!("{}:{}:", tenant, kind).into_bytes();
-            let mut to = from.clone();
-            // ':' + 1. The range is half-open, so this is the first key past the
-            // prefix and no key of the prefix can equal it.
-            *to.last_mut().expect("prefix is never empty") += 1;
-            self.db.delete_range_cf(&cf, from, to)?;
+            let mut batch = WriteBatch::default();
+            let mut staged = 0usize;
+            for item in self.row_iter(&cf, tenant, kind) {
+                let (key, _) = item?;
+                if !Self::owns_row(tenant, kind, &key) {
+                    continue;
+                }
+                batch.delete_cf(&cf, &key);
+                staged += 1;
+                if staged == DELETE_BATCH {
+                    self.db
+                        .write_opt(std::mem::take(&mut batch), &self.write_opts)?;
+                    staged = 0;
+                }
+            }
+            if staged > 0 {
+                self.db.write_opt(batch, &self.write_opts)?;
+            }
         }
-        debug!("Dropped every node and edge for tenant {}", tenant);
+
+        // Absent on every database written before #1477, so a missing column
+        // family is not an error here.
+        if let Some(cf) = self.db.cf_handle("indices") {
+            let key = format!("catalog:{}", tenant);
+            self.db.delete_cf_opt(&cf, key.as_bytes(), &self.write_opts)?;
+        }
+
+        debug!("Dropped every node, edge and index declaration for tenant {}", tenant);
         Ok(())
+    }
+
+    /// The half-open key range that can hold `tenant`'s rows in a `kind`
+    /// column family.
+    ///
+    /// The upper bound is the prefix with its last byte incremented. Every key
+    /// carrying the prefix is below it, so it bounds the iterator -- but it does
+    /// not by itself decide ownership: see `owns_row`.
+    fn row_range(tenant: &str, kind: char) -> (Vec<u8>, Vec<u8>) {
+        let from = format!("{}:{}:", tenant, kind).into_bytes();
+        let mut to = from.clone();
+        *to.last_mut().expect("the prefix always ends in ':'") += 1;
+        (from, to)
+    }
+
+    /// Whether `key` is one of `tenant`'s own rows.
+    ///
+    /// Inside the range *and* shaped like a row key: the prefix followed by
+    /// exactly the sixteen hex digits `node_key`/`edge_key` write. Being inside
+    /// the range is not sufficient, because a tenant id is never validated, so
+    /// a tenant can be named to put its own keys inside another's range --
+    /// `acme:n` writes `acme:n:n:{id}`, inside `acme`'s `acme:n:` range. The
+    /// length check is what separates them.
+    fn owns_row(tenant: &str, kind: char, key: &[u8]) -> bool {
+        let prefix = format!("{}:{}:", tenant, kind).into_bytes();
+        key.len() == prefix.len() + 16
+            && key.starts_with(&prefix)
+            && key[prefix.len()..].iter().all(u8::is_ascii_hexdigit)
+    }
+
+    /// A forward iterator over just `tenant`'s range in `cf`.
+    fn row_iter<'a>(
+        &'a self,
+        cf: &impl rocksdb::AsColumnFamilyRef,
+        tenant: &str,
+        kind: char,
+    ) -> impl Iterator<Item = RowItem> + 'a {
+        let (from, to) = Self::row_range(tenant, kind);
+        let mut opts = rocksdb::ReadOptions::default();
+        opts.set_iterate_upper_bound(to);
+        self.db.iterator_cf_opt(
+            cf,
+            opts,
+            rocksdb::IteratorMode::From(&from, rocksdb::Direction::Forward),
+        )
     }
 
     /// Create node key with tenant prefix
@@ -643,6 +759,137 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use crate::graph::Label;
+
+    /// A row for `tenant`, so a test can say who wrote what.
+    fn node_for(storage: &PersistentStorage, tenant: &str, id: u64) {
+        let mut node = Node::new(NodeId::new(id), Label::new("Row"));
+        node.set_property("owner", tenant);
+        storage.put_node(tenant, &node).unwrap();
+    }
+
+    fn owners(nodes: &[Node]) -> Vec<String> {
+        let mut out: Vec<String> = nodes
+            .iter()
+            .map(|n| n.get_property("owner").unwrap().as_string().unwrap().to_string())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// A tenant's scan must stop at that tenant's rows.
+    ///
+    /// The keys are `{tenant}:n:{id:016x}`, one contiguous range per tenant, but
+    /// `prefix_iterator_cf` only confines an iterator when the column family has
+    /// a prefix extractor configured. None is, so `prefix_same_as_start` is
+    /// inert: the iterator seeks to `{tenant}:` and then runs to the end of the
+    /// column family, and the scan loop discards the key, so nothing downstream
+    /// notices. Recovery for one tenant loaded every tenant sorting after it.
+    #[test]
+    fn a_tenant_scan_stops_at_its_own_rows() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = PersistentStorage::open(temp_dir.path()).unwrap();
+
+        // `b` sorts after `a:`, so it is what an unconfined iterator walks into.
+        node_for(&storage, "a", 1);
+        node_for(&storage, "b", 2);
+        node_for(&storage, "c", 3);
+
+        assert_eq!(owners(&storage.scan_nodes("a").unwrap()), vec!["a"]);
+        assert_eq!(owners(&storage.scan_nodes("b").unwrap()), vec!["b"]);
+        assert_eq!(owners(&storage.scan_nodes("c").unwrap()), vec!["c"]);
+    }
+
+    /// Nothing validates a tenant id, so one can be named to look like another
+    /// tenant's key prefix. `acme:n` writes `acme:n:n:{id}`, which lies inside
+    /// `acme`'s own `acme:n:` range -- so the two tenants must not read or
+    /// delete each other's rows.
+    #[test]
+    fn a_tenant_named_like_another_s_key_prefix_stays_separate() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = PersistentStorage::open(temp_dir.path()).unwrap();
+
+        node_for(&storage, "acme", 1);
+        node_for(&storage, "acme:n", 2);
+
+        assert_eq!(owners(&storage.scan_nodes("acme").unwrap()), vec!["acme"]);
+        assert_eq!(owners(&storage.scan_nodes("acme:n").unwrap()), vec!["acme:n"]);
+
+        // And dropping one must leave the other whole. A range delete over
+        // ["acme:n:", "acme:n;") covers every key `acme:n` owns.
+        storage.delete_graph("acme").unwrap();
+        assert!(storage.scan_nodes("acme").unwrap().is_empty(), "acme is gone");
+        assert_eq!(
+            owners(&storage.scan_nodes("acme:n").unwrap()),
+            vec!["acme:n"],
+            "dropping `acme` must not touch the tenant named `acme:n`"
+        );
+    }
+
+    /// Edges too: same key shape, same column family layout, separate code path.
+    #[test]
+    fn a_tenant_edge_scan_stops_at_its_own_rows() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = PersistentStorage::open(temp_dir.path()).unwrap();
+
+        for (tenant, id) in [("a", 1u64), ("b", 2), ("acme:e", 3)] {
+            let edge = Edge::new(EdgeId::new(id), NodeId::new(1), NodeId::new(2), "LINKS");
+            storage.put_edge(tenant, &edge).unwrap();
+        }
+
+        assert_eq!(storage.scan_edges("a").unwrap().len(), 1);
+        assert_eq!(storage.scan_edges("b").unwrap().len(), 1);
+        assert_eq!(storage.scan_edges("acme:e").unwrap().len(), 1);
+    }
+
+    /// The tenant of `a:b:n:{id}` is `a:b`, not `a`.
+    ///
+    /// Splitting on the first `:` reads the key as if a tenant id could not
+    /// contain one. Nothing enforces that, so a tenant with a `:` in its name
+    /// was listed under a prefix of itself -- and a caller recovering what the
+    /// list named then scanned the wrong range.
+    #[test]
+    fn listing_tenants_reads_the_whole_tenant_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = PersistentStorage::open(temp_dir.path()).unwrap();
+
+        node_for(&storage, "plain", 1);
+        node_for(&storage, "a:b", 2);
+
+        let mut listed = storage.list_persisted_tenants().unwrap();
+        listed.sort();
+        assert_eq!(listed, vec!["a:b".to_string(), "plain".to_string()]);
+    }
+
+    /// A drop must take the tenant's index declarations with it.
+    ///
+    /// `put_index_catalog` writes `catalog:{tenant}` into the `indices` column
+    /// family, and the drop walked only `nodes` and `edges`. So the catalog
+    /// outlived the graph, and a tenant later created under the same name came
+    /// back with index definitions for rows that no longer existed -- the shape
+    /// of #1110, in the column family that was added after it.
+    #[test]
+    fn dropping_a_graph_drops_its_index_catalog() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = PersistentStorage::open(temp_dir.path()).unwrap();
+
+        node_for(&storage, "acme", 1);
+        let catalog = crate::index::catalog::IndexCatalog {
+            definitions: vec![crate::index::catalog::IndexDefinition::Property {
+                label: "Person".to_string(),
+                property: "email".to_string(),
+            }],
+        };
+        storage.put_index_catalog("acme", &catalog).unwrap();
+        assert!(!storage.get_index_catalog("acme").unwrap().is_empty());
+
+        storage.delete_graph("acme").unwrap();
+        assert_eq!(
+            storage.get_index_catalog("acme").unwrap().len(),
+            0,
+            "the dropped graph's index declarations outlived it"
+        );
+    }
 
     #[test]
     fn test_storage_open() {

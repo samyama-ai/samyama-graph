@@ -17,7 +17,7 @@ cypher_option = { cypher_option_key ~ "=" ~ cypher_option_value }
 cypher_option_key = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 cypher_option_value = @{ (ASCII_ALPHANUMERIC | "_" | "-" | ".")+ }
 union_clause = { ^"UNION" ~ ^"ALL"? }
-statement = { analyze_stmt | show_graph_projections_stmt | create_graph_projection_stmt | refresh_graph_projection_stmt | drop_graph_projection_stmt | show_hierarchy_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_point_index_stmt | drop_point_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | load_parquet_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
+statement = { analyze_stmt | show_graph_projections_stmt | create_graph_projection_stmt | refresh_graph_projection_stmt | drop_graph_projection_stmt | show_hierarchy_indexes_stmt | show_structure_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_structure_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_point_index_stmt | drop_point_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_structure_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | rebuild_structure_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | load_parquet_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
 
 // A query as what Cypher actually is: an ordered sequence of clauses.
 //
@@ -74,6 +74,36 @@ create_hierarchy_index_stmt = { ^"CREATE" ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable ~
 drop_hierarchy_index_stmt = { ^"DROP" ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable }
 show_hierarchy_indexes_stmt = { ^"SHOW" ~ ^"HIERARCHY" ~ (^"INDEXES" | ^"INDEX") }
 rebuild_hierarchy_index_stmt = { ^"REBUILD" ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable }
+
+// CREATE STRUCTURE INDEX (SGI, ADR-041 / #2036). The hierarchy index above
+// orders a subsumption poset; this one orders points in a continuous manifold,
+// so where that takes a covering relationship this takes the coordinate
+// properties that place a node:
+//
+//   CREATE STRUCTURE INDEX pdb ON :Residue(x, y, z)
+//     METRIC euclidean
+//     BACKBONE residue_seq GROUP BY chain_id
+//     CONTACT_RADIUS 8.0
+//     MEASURE b_factor AGGREGATE sum, min, max, count
+//
+// Two coordinates mean a geographic pair (lat, lon); three mean 3D Euclidean,
+// or geographic with elevation when METRIC says so. Everything after the
+// coordinate list is optional, and each clause maps to one field of
+// `ManifoldSpec`, so the grammar cannot express a convention the index cannot
+// build.
+create_structure_index_stmt = { ^"CREATE" ~ ^"STRUCTURE" ~ ^"INDEX" ~ variable ~ ^"ON" ~ ":" ~ label ~ sgi_coords ~ sgi_metric? ~ sgi_backbone? ~ sgi_contact_radius? ~ sgi_measure? }
+sgi_coords = { "(" ~ property_key ~ ("," ~ property_key){1,2} ~ ")" }
+sgi_metric = { ^"METRIC" ~ sgi_metric_name }
+sgi_metric_name = @{ ^"euclidean" | ^"geospherical" | ^"geo" | ^"spherical" }
+sgi_backbone = { ^"BACKBONE" ~ property_key ~ sgi_group_by? }
+sgi_group_by = { ^"GROUP" ~ ^"BY" ~ property_key }
+sgi_contact_radius = { ^"CONTACT_RADIUS" ~ (float | integer) }
+sgi_measure = { ^"MEASURE" ~ property_key ~ sgi_aggregates? }
+sgi_aggregates = { ^"AGGREGATE" ~ sgi_aggregate ~ ("," ~ sgi_aggregate)* }
+sgi_aggregate = @{ ^"sum" | ^"count" | ^"min" | ^"max" }
+drop_structure_index_stmt = { ^"DROP" ~ ^"STRUCTURE" ~ ^"INDEX" ~ variable }
+show_structure_indexes_stmt = { ^"SHOW" ~ ^"STRUCTURE" ~ (^"INDEXES" | ^"INDEX") }
+rebuild_structure_index_stmt = { ^"REBUILD" ~ ^"STRUCTURE" ~ ^"INDEX" ~ variable }
 // Named graph projections (ALGO-05, #1681): a view of the graph kept under a
 // name for repeated analytics, `CALL algo.x({graph: 'name'})`.
 //   CREATE GRAPH PROJECTION social IF NOT EXISTS NODES :Person RELATIONSHIPS :KNOWS WEIGHT cost

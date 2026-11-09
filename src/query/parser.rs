@@ -638,6 +638,9 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             Rule::show_hierarchy_indexes_stmt => {
                 query.show_hierarchy_indexes = true;
             }
+            Rule::show_structure_indexes_stmt => {
+                query.show_structure_indexes = true;
+            }
             Rule::show_graph_projections_stmt => {
                 query.graph_projection_ddl = Some(GraphProjectionDdl::Show);
             }
@@ -667,6 +670,21 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             }
             Rule::rebuild_hierarchy_index_stmt => {
                 query.rebuild_hierarchy_index = inner
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::variable)
+                    .map(|p| unescape_name(p.as_str()));
+            }
+            Rule::create_structure_index_stmt => {
+                parse_create_structure_index_statement(inner, query)?;
+            }
+            Rule::drop_structure_index_stmt => {
+                query.drop_structure_index = inner
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::variable)
+                    .map(|p| unescape_name(p.as_str()));
+            }
+            Rule::rebuild_structure_index_stmt => {
+                query.rebuild_structure_index = inner
                     .into_inner()
                     .find(|p| p.as_rule() == Rule::variable)
                     .map(|p| unescape_name(p.as_str()));
@@ -1051,6 +1069,138 @@ fn parse_create_hierarchy_index_statement(
     Ok(())
 }
 
+fn parse_create_structure_index_statement(
+    pair: pest::iterators::Pair<Rule>,
+    query: &mut Query,
+) -> ParseResult<()> {
+    let mut name: Option<String> = None;
+    let mut label: Option<String> = None;
+    let mut coords: Vec<String> = Vec::new();
+    let mut metric: Option<String> = None;
+    let mut sequence_prop: Option<String> = None;
+    let mut group_by_prop: Option<String> = None;
+    let mut contact_radius: Option<f64> = None;
+    let mut measure_prop: Option<String> = None;
+    let mut aggregates: Vec<String> = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::variable => name = Some(unescape_name(inner.as_str())),
+            Rule::label => label = Some(unescape_name(inner.as_str())),
+            Rule::sgi_coords => {
+                for c in inner.into_inner() {
+                    if c.as_rule() == Rule::property_key {
+                        coords.push(unescape_name(c.as_str()));
+                    }
+                }
+            }
+            Rule::sgi_metric => {
+                metric = inner
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::sgi_metric_name)
+                    .map(|p| p.as_str().to_ascii_lowercase());
+            }
+            Rule::sgi_backbone => {
+                // `BACKBONE residue_seq GROUP BY chain_id`: the first property
+                // key is the sequence, the one inside `sgi_group_by` the group.
+                for part in inner.into_inner() {
+                    match part.as_rule() {
+                        Rule::property_key if sequence_prop.is_none() => {
+                            sequence_prop = Some(unescape_name(part.as_str()));
+                        }
+                        Rule::sgi_group_by => {
+                            group_by_prop = part
+                                .into_inner()
+                                .find(|p| p.as_rule() == Rule::property_key)
+                                .map(|p| unescape_name(p.as_str()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Rule::sgi_contact_radius => {
+                let raw = inner
+                    .into_inner()
+                    .find(|p| matches!(p.as_rule(), Rule::float | Rule::integer))
+                    .map(|p| p.as_str().to_string());
+                if let Some(text) = raw {
+                    let value: f64 = text.parse().map_err(|_| {
+                        ParseError::SemanticError(format!("CONTACT_RADIUS {text} is not a number"))
+                    })?;
+                    // A radius of zero yields no contacts and a negative one is
+                    // meaningless; refused here rather than producing an index
+                    // whose implicit edges are silently empty.
+                    if !(value.is_finite() && value > 0.0) {
+                        return Err(ParseError::SemanticError(format!(
+                            "CONTACT_RADIUS must be a finite positive distance, got {text}"
+                        )));
+                    }
+                    contact_radius = Some(value);
+                }
+            }
+            Rule::sgi_measure => {
+                for part in inner.into_inner() {
+                    match part.as_rule() {
+                        Rule::property_key if measure_prop.is_none() => {
+                            measure_prop = Some(unescape_name(part.as_str()));
+                        }
+                        Rule::sgi_aggregates => {
+                            for op in part.into_inner() {
+                                if op.as_rule() == Rule::sgi_aggregate {
+                                    aggregates.push(op.as_str().to_ascii_lowercase());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Two coordinates are a geographic pair, three a 3D position. Anything else
+    // the grammar cannot produce, but the check states the contract rather than
+    // trusting it.
+    if !(2..=3).contains(&coords.len()) {
+        return Err(ParseError::SemanticError(format!(
+            "CREATE STRUCTURE INDEX takes two or three coordinate properties, got {}",
+            coords.len()
+        )));
+    }
+    if let Some(m) = &metric {
+        let euclidean = m == "euclidean";
+        if euclidean && coords.len() != 3 {
+            return Err(ParseError::SemanticError(
+                "METRIC euclidean needs three coordinates (x, y, z)".to_string(),
+            ));
+        }
+        if !euclidean && coords.len() == 3 && m != "geospherical" && m != "geo" && m != "spherical" {
+            return Err(ParseError::SemanticError(format!("Unknown METRIC {m}")));
+        }
+    }
+    // `AGGREGATE` without `MEASURE` has nothing to aggregate.
+    if !aggregates.is_empty() && measure_prop.is_none() {
+        return Err(ParseError::SemanticError(
+            "AGGREGATE requires MEASURE to name the property to roll up".to_string(),
+        ));
+    }
+
+    query.create_structure_index_clause = Some(CreateStructureIndexClause {
+        name: name.ok_or_else(|| ParseError::SemanticError("Missing index name".to_string()))?,
+        label: label
+            .ok_or_else(|| ParseError::SemanticError("Missing node label".to_string()))?,
+        coords,
+        metric,
+        sequence_prop,
+        group_by_prop,
+        contact_radius,
+        measure_prop,
+        aggregates,
+    });
+    Ok(())
+}
+
 fn parse_drop_index_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
     let mut label = None;
     let mut property = None;
@@ -1124,6 +1274,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
     let mut dimensions = 1536; // Default
     let mut similarity = "cosine".to_string(); // Default
     let mut quantization = Quantization::None; // NDS-09; unchanged unless asked for
+    let mut params = crate::vector::HnswParams::default(); // #1971
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1148,7 +1299,8 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                 // 1536-dimension index, and the mismatch only surfaced later
                 // against the caller's *vector*, which is the wrong thing to
                 // blame (#474).
-                const ACCEPTED: [&str; 3] = ["dimensions", "similarity", "quantization"];
+                const ACCEPTED: [&str; 6] =
+                    ["dimensions", "similarity", "quantization", "m", "ef_construction", "ef"];
                 let mut unknown: Vec<&String> = options_map
                     .keys()
                     .filter(|k| !ACCEPTED.contains(&k.as_str()))
@@ -1162,9 +1314,33 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                         .join(", ");
                     return Err(ParseError::SemanticError(format!(
                         "CREATE VECTOR INDEX: unknown option {listed}. Accepted options are \
-`dimensions` (integer), `similarity` (string) and `quantization` (string)."
+`dimensions` (integer), `similarity` (string), `quantization` (string), \
+`m`, `ef_construction` and `ef` (integers)."
                     )));
                 }
+
+                // HNSW parameters (#1971). Range-checked here, so a value the
+                // index could not be built with is refused by the statement
+                // that gave it.
+                let positive = |key: &str| -> ParseResult<Option<usize>> {
+                    match options_map.get(key) {
+                        None => Ok(None),
+                        Some(PropertyValue::Integer(v)) if *v > 0 => Ok(Some(*v as usize)),
+                        Some(other) => Err(ParseError::SemanticError(format!(
+                            "CREATE VECTOR INDEX: `{key}` must be a positive integer, got {other:?}"
+                        ))),
+                    }
+                };
+                if let Some(m) = positive("m")? {
+                    params.m = m;
+                }
+                if let Some(ef_construction) = positive("ef_construction")? {
+                    params.ef_construction = ef_construction;
+                }
+                params.ef = positive("ef")?;
+                params
+                    .validate()
+                    .map_err(|e| ParseError::SemanticError(format!("CREATE VECTOR INDEX: {e}")))?;
 
                 if let Some(value) = options_map.get("dimensions") {
                     match value {
@@ -1216,6 +1392,7 @@ Accepted values are `none` and `fp16`."
     query.create_vector_index_clause = Some(CreateVectorIndexClause {
         index_name,
         quantization,
+        params,
         label: label.ok_or_else(|| ParseError::SemanticError("Missing label in CREATE VECTOR INDEX".to_string()))?,
         property_key: property_key.ok_or_else(|| ParseError::SemanticError("Missing property key in CREATE VECTOR INDEX".to_string()))?,
         dimensions,

@@ -58,7 +58,9 @@ pub struct ResourceQuotas {
     pub max_storage_bytes: Option<usize>,
     /// Maximum concurrent connections
     pub max_connections: Option<usize>,
-    /// Maximum query execution time in milliseconds
+    /// Maximum query execution time in milliseconds. `None` means the tenant
+    /// sets no limit of its own and the server's `SAMYAMA_QUERY_TIMEOUT`
+    /// governs; `Some` is a ceiling on top of it (#2046).
     pub max_query_time_ms: Option<u64>,
 }
 
@@ -70,7 +72,11 @@ impl Default for ResourceQuotas {
             max_memory_bytes: Some(1_073_741_824), // 1 GB
             max_storage_bytes: Some(10_737_418_240), // 10 GB
             max_connections: Some(100),
-            max_query_time_ms: Some(60_000),   // 60 seconds
+            // No limit of its own: the server's `SAMYAMA_QUERY_TIMEOUT`
+            // governs. It was 60 s, and since the engine takes the shorter of
+            // the two, raising `SAMYAMA_QUERY_TIMEOUT` past 60 s did nothing
+            // for any tenant left at the default (#2046).
+            max_query_time_ms: None,
         }
     }
 }
@@ -1070,7 +1076,7 @@ mod tests {
         assert_eq!(q.max_memory_bytes, Some(1_073_741_824));
         assert_eq!(q.max_storage_bytes, Some(10_737_418_240));
         assert_eq!(q.max_connections, Some(100));
-        assert_eq!(q.max_query_time_ms, Some(60_000));
+        assert_eq!(q.max_query_time_ms, None, "the server's timeout governs by default (#2046)");
     }
 
     #[test]

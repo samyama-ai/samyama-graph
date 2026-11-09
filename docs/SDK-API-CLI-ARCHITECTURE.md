@@ -190,6 +190,7 @@ sequenceDiagram
 | `status` | Server stats | `samyama-cli status` |
 | `ping` | Health check | `samyama-cli ping` |
 | `shell` | Interactive REPL | `samyama-cli shell` |
+| `load <kg>` | Download a published KG snapshot, check its SHA-256, import it | `samyama-cli load cricket` |
 
 **Output formats:** `--format table` (default), `--format json`, `--format csv`
 

@@ -100,6 +100,17 @@ class AsyncSamyamaClient:
         """Client against a running server at `url`."""
         return cls(await _to_thread(SamyamaClient.connect, url, **kwargs))
 
+    @classmethod
+    async def open_snapshot(
+        cls,
+        path: str,
+        dedup_keys: Optional[Sequence[str]] = None,
+        allow_conflicts: bool = False,
+    ) -> "AsyncSamyamaClient":
+        """In-process client holding the `.sgsnap` at `path` (#2092)."""
+        keys = None if dedup_keys is None else list(dedup_keys)
+        return cls(await _to_thread(SamyamaClient.open_snapshot, path, keys, allow_conflicts))
+
     @property
     def sync(self) -> SamyamaClient:
         """The blocking client underneath.
@@ -143,8 +154,18 @@ class AsyncSamyamaClient:
         stream = await _to_thread(self._client.query_stream, cypher, graph)
         return AsyncQueryStream(stream)
 
-    async def nlq(self, question: str) -> str:
-        return await _to_thread(self._client.nlq, question)
+    async def nlq(
+        self,
+        question: str,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        api_base_url: Optional[str] = None,
+    ) -> str:
+        return await _to_thread(
+            self._client.nlq, question,
+            provider=provider, model=model, api_key=api_key, api_base_url=api_base_url,
+        )
 
     async def status(self) -> Any:
         return await _to_thread(self._client.status)
@@ -157,6 +178,21 @@ class AsyncSamyamaClient:
 
     async def delete_graph(self, graph: str = "default") -> None:
         return await _to_thread(self._client.delete_graph, graph)
+
+    # ── snapshots (embedded only, #2092) ────────────────────────────────────
+
+    async def import_snapshot(
+        self,
+        path: str,
+        graph: str = "default",
+        dedup_keys: Optional[Sequence[str]] = None,
+        allow_conflicts: bool = False,
+    ) -> Dict[str, Any]:
+        keys = None if dedup_keys is None else list(dedup_keys)
+        return await _to_thread(self._client.import_snapshot, path, graph, keys, allow_conflicts)
+
+    async def export_snapshot(self, path: str, graph: str = "default") -> Dict[str, Any]:
+        return await _to_thread(self._client.export_snapshot, path, graph)
 
     # ── algorithms ──────────────────────────────────────────────────────────
 

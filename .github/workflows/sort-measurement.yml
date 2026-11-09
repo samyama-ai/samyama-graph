@@ -1,9 +1,10 @@
 name: Sort cost measurement
 on:
-  pull_request:
-    paths:
-      - 'examples/sort_cost_decompose.rs'
-      - '.github/workflows/sort-measurement.yml'
+  # This workflow's pull-request trigger moved into `ci.yml`, which calls it
+  # behind a `changes` output, so a pull request starts one workflow instead of
+  # three. It is a measurement rather than a test, so it is not in `ci-ok`'s
+  # needs and does not gate a merge.
+  workflow_call:
   workflow_dispatch:
 permissions:
   contents: read
