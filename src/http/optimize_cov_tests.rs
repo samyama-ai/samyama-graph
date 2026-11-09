@@ -850,6 +850,7 @@ async fn total_time_ms_excludes_time_spent_waiting_for_the_stream_reader() {
     // 400 iterations > the 256-slot channel, so the emitter blocks until the
     // stream is read. A slow reader must not inflate the solver's time.
     let app = app();
+    let wall_started = std::time::Instant::now();
     let job = start_job(
         app.clone(),
         r#"{"algorithm":"jaya","benchmark":"sphere","population_size":4,"iterations":400,"dim":2,"seed":5}"#,
@@ -858,13 +859,17 @@ async fn total_time_ms_excludes_time_spent_waiting_for_the_stream_reader() {
     let delay_ms = 1_500.0;
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms as u64)).await;
     let (_, events) = stream_events(app, &job).await;
+    let wall_ms = wall_started.elapsed().as_secs_f64() * 1_000.0;
     let (name, done) = events.last().unwrap();
     assert_eq!(name, "done");
     assert_eq!(events.iter().filter(|(n, _)| n == "iteration").count(), 400);
     let ms = done["total_time_ms"].as_f64().unwrap();
+    // The solve itself may take longer than this reader delay on a slower
+    // platform. What matters is that total_time_ms excludes the stall: the
+    // whole request must take at least most of the deliberate wait longer.
     assert!(
-        ms > 0.0 && ms < delay_ms,
-        "solver time {ms} ms must not include the {delay_ms} ms the reader waited"
+        ms > 0.0 && wall_ms - ms >= delay_ms * 0.75,
+        "solver time {ms} ms should exclude the reader stall; wall time was {wall_ms} ms with a {delay_ms} ms wait"
     );
 }
 
