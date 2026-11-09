@@ -1570,6 +1570,27 @@ impl GraphStore {
         self.admission
     }
 
+    /// Run `body` under `admission` with a tally of its own, then put back the
+    /// ceiling and tally that were in force before.
+    ///
+    /// For a write that does not go through a write log, so has no
+    /// `take_write_log` to clear its births: `/api/snapshot/import` is one.
+    /// Without the restore, an import's births would stay in the tally and be
+    /// charged a second time to whatever statement ran next — or, inside an
+    /// open session transaction, be mixed into that transaction's own count.
+    pub fn with_write_admission<T>(
+        &mut self,
+        admission: Option<WriteAdmission>,
+        body: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let saved = (self.admission, self.admission_births);
+        self.admission = admission;
+        self.admission_births = (0, 0);
+        let out = body(self);
+        (self.admission, self.admission_births) = saved;
+        out
+    }
+
     /// May one more node be created?
     ///
     /// Asked *before* the node exists. A creation path that does not ask is not
@@ -6771,6 +6792,9 @@ NodeDeleted { id, .. } => {
             IndexDefinition::Point { name, label, property } => {
                 (4u8, label.clone(), property.clone(), name.clone())
             }
+            IndexDefinition::VectorParams { label, property, .. } => {
+                (5u8, label.clone(), property.clone(), String::new())
+            }
         });
         IndexCatalog { definitions }
     }
@@ -6946,6 +6970,9 @@ NodeDeleted { id, .. } => {
         use crate::index::catalog::{IndexDefinition, RestoredIndexes};
         let mut report = RestoredIndexes::default();
         let mut any_vector = false;
+        // Applied after every index is declared, so a record that comes before
+        // its index's declaration still finds it (#1971).
+        let mut vector_params = Vec::new();
 
         for def in &catalog.definitions {
             match def {
@@ -6976,6 +7003,13 @@ NodeDeleted { id, .. } => {
                     self.create_point_index(name, label, property);
                     report.point += 1;
                 }
+                IndexDefinition::VectorParams { label, property, m, ef_construction, ef } => {
+                    vector_params.push((
+                        label,
+                        property,
+                        crate::vector::HnswParams { m: *m, ef_construction: *ef_construction, ef: *ef },
+                    ));
+                }
                 IndexDefinition::Vector {
                     name,
                     label,
@@ -7002,6 +7036,20 @@ NodeDeleted { id, .. } => {
                         report.failed += 1;
                     }
                 },
+            }
+        }
+
+        for (label, property, params) in vector_params {
+            match self.vector_index.set_params(label, property, params) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!("HNSW parameters for {label}.{property}, which has no vector index");
+                    report.failed += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("could not restore HNSW parameters on {label}.{property}: {e}");
+                    report.failed += 1;
+                }
             }
         }
 
@@ -7157,8 +7205,38 @@ NodeDeleted { id, .. } => {
         metric: DistanceMetric,
         quantization: crate::vector::index::Quantization,
     ) -> VectorResult<()> {
-        self.vector_index
-            .create_index_named(name, label, property_key, dimensions, metric, quantization)?;
+        self.create_vector_index_with_params(
+            name,
+            label,
+            property_key,
+            dimensions,
+            metric,
+            quantization,
+            crate::vector::HnswParams::default(),
+        )
+    }
+
+    /// Create a named vector index with the given HNSW parameters (#1971).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_vector_index_with_params(
+        &self,
+        name: Option<&str>,
+        label: &str,
+        property_key: &str,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: crate::vector::index::Quantization,
+        params: crate::vector::HnswParams,
+    ) -> VectorResult<()> {
+        self.vector_index.create_index_with_params(
+            name,
+            label,
+            property_key,
+            dimensions,
+            metric,
+            quantization,
+            params,
+        )?;
         self.mark_index_catalog_changed();
         Ok(())
     }
@@ -7180,18 +7258,20 @@ NodeDeleted { id, .. } => {
         query: &[f32],
         k: usize,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
-        self.vector_search_where(label, property_key, query, k, |_| true)
+        self.vector_search_where(label, property_key, query, k, None, |_| true)
     }
 
     /// The `k` nearest among the nodes `keep` passes (#1969): the search
     /// widens, and falls back to an exact scan, until it has `k` of them or
-    /// there are no more.
+    /// there are no more. `ef` is this query's search width (#1971); `None`
+    /// is the index's default.
     pub fn vector_search_where(
         &self,
         label: &str,
         property_key: &str,
         query: &[f32],
         k: usize,
+        ef: Option<usize>,
         keep: impl Fn(NodeId) -> bool,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
         // Only nodes that still carry the label: the HNSW graph cannot drop a
@@ -7199,7 +7279,7 @@ NodeDeleted { id, .. } => {
         // must not be returned (#1605).
         let label_key = Label::new(label);
         self.vector_index
-            .search_filtered(label, property_key, query, k, |id| {
+            .search_filtered_ef(label, property_key, query, k, ef, |id| {
                 self.get_node(id)
                     .is_some_and(|n| n.labels.contains(&label_key))
                     && keep(id)
@@ -7601,6 +7681,7 @@ mod tests {
             ("begin_deferred_bulk_load", "raises the deferral counter; it changes when the held-back finish runs, not what any read returns -- every structure it holds back is guarded against being read short (#1807)"),
             ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
             ("set_write_admission", "stores the quota ceiling this statement is admitted under; it refuses writes, it does not change one (#1483)"),
+            ("with_write_admission", "swaps the quota ceiling and tally around a caller's body; the body's writes go through mutators that bump on their own"),
             ("log_edge_write", "records what an edge write replaces for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
             ("log_edge_map", "records an edge's whole map for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),
             ("note_edge_created", "records a new edge's creation version for reads at an earlier version; a query reads the current version, which never consults it (#1200)"),

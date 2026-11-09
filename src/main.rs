@@ -736,19 +736,12 @@ fn cmd_auth_token(argv: &[String]) -> i32 {
         return 2;
     }
 
-    // `getrandom` is already in the tree; reading /dev/urandom directly keeps
-    // this to the standard library and makes the source of the entropy the
-    // obvious thing rather than a crate feature.
+    // The OS random source, through `getrandom`. This read /dev/urandom by path,
+    // which does not exist on Windows, so `auth-token` failed there (#1696).
     let mut raw = [0u8; 32];
-    match std::fs::File::open("/dev/urandom").and_then(|mut f| {
-        use std::io::Read;
-        f.read_exact(&mut raw)
-    }) {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("cannot read /dev/urandom: {e}");
-            return 1;
-        }
+    if let Err(e) = samyama::snapshot::encryption::os_random(&mut raw) {
+        eprintln!("{e}");
+        return 1;
     }
     let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
     let digest: String =
@@ -793,9 +786,11 @@ fn cmd_convert(argv: &[String]) -> i32 {
             "usage: samyama convert <input> <output> [--from FMT] [--to FMT]\n\
              \x20                      [--missing-endpoints fail|placeholder|drop]\n\
              \x20                      [--report report.json] [--require-lossless]\n\
+             \x20                      [--mapping mapping.yaml | --preset generic|skos|owl|samyama]\n\
              \x20      samyama convert --formats\n\n\
              The format comes from each file's extension; --from / --to override it.\n\
-             A path with no extension is a CSV directory.\n\n{}",
+             A path with no extension is a CSV directory.\n\
+             RDF input is mapped by --mapping or --preset (default: generic).\n\n{}",
             convert::format_matrix()
         );
     };
@@ -845,15 +840,6 @@ fn cmd_convert(argv: &[String]) -> i32 {
         usage();
         return 2;
     };
-    // The RDF mapping exists (`convert::rdf_mapping`, #1910) but no RDF format
-    // is readable until #1912 wires one in; until then a flag that would change
-    // the result is refused rather than ignored.
-    for flag in ["--mapping", "--preset"] {
-        if values.contains_key(flag) {
-            eprintln!("convert: {flag} applies to RDF input, which is not readable yet (#1912)");
-            return 2;
-        }
-    }
     let on_missing_endpoint = match values.get("--missing-endpoints").copied() {
         None | Some("fail") => EndpointPolicy::Fail,
         Some("placeholder") => EndpointPolicy::Placeholder,
@@ -906,9 +892,39 @@ fn cmd_convert(argv: &[String]) -> i32 {
         }
     }
 
+    // How RDF input becomes a graph (#1910): a mapping file, a preset, or
+    // neither (the `generic` preset). Both at once, or either for input that
+    // is not RDF, would be ignored, so it is refused instead.
+    let is_rdf = matches!(from, Format::Turtle | Format::NTriples | Format::RdfXml);
+    let mapping = match (values.get("--mapping"), values.get("--preset")) {
+        (Some(_), Some(_)) => {
+            eprintln!("convert: give --mapping or --preset, not both; a mapping file can name its preset");
+            return 2;
+        }
+        (Some(_), None) | (None, Some(_)) if !is_rdf => {
+            eprintln!("convert: --mapping and --preset apply to RDF input, not {from}");
+            return 2;
+        }
+        (Some(path), None) => match convert::rdf_mapping::Mapping::from_path(std::path::Path::new(path)) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("convert: {e}");
+                return 2;
+            }
+        },
+        (None, Some(name)) => match convert::rdf_mapping::Mapping::preset(name) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("convert: {e}");
+                return 2;
+            }
+        },
+        (None, None) => None,
+    };
+
     // Losses are judged here, after writing, so exit 1 means "converted, and
     // something was dropped" -- the report is still written.
-    let opts = Options { on_missing_endpoint, require_lossless: false };
+    let opts = Options { on_missing_endpoint, require_lossless: false, mapping };
     let file = match std::fs::File::open(input) {
         Ok(f) => f,
         Err(e) => {
@@ -917,7 +933,8 @@ fn cmd_convert(argv: &[String]) -> i32 {
         }
     };
     let mut store = samyama::graph::GraphStore::new();
-    let read = match convert::read(from, std::io::BufReader::new(file), &mut store, &opts) {
+    let name = std::path::Path::new(input).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let read = match convert::read_named(from, std::io::BufReader::new(file), &name, &mut store, &opts) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("convert: could not read {input} as {from}: {e}");
@@ -2152,7 +2169,7 @@ async fn start_server() {
             // asked to be audited, which is the state the flag exists to leave.
             Some(p) => match samyama::http::server::AuditLog::open(&p) {
                 Ok(l) => {
-                    println!("HTTP API: auditing state-changing requests to {p}");
+                    println!("HTTP and RESP: auditing state-changing requests to {p}");
                     Some(std::sync::Arc::new(l))
                 }
                 Err(e) => {
@@ -2578,6 +2595,9 @@ async fn start_server() {
     if !credentials.is_empty() {
         server = server.with_credentials(Arc::new(credentials));
     }
+    if let Some(log) = audit_log {
+        server = server.with_audit_log(log);
+    }
 
     println!("Server ready. Press Ctrl+C to stop.\n");
 
@@ -2625,7 +2645,25 @@ fn quota_overrides_from_args(
     let edges = quota_arg("--max-edges")?;
     let memory = quota_arg("--max-memory-bytes")?;
     let storage = quota_arg("--max-storage-bytes")?;
-    if nodes.is_none() && edges.is_none() && memory.is_none() && storage.is_none() {
+    // The one quota that had no flag, so the default tenant's query time limit
+    // could not be changed without code (#2046). Zero is refused rather than
+    // taken literally: a limit of 0 ms times out every statement, which is
+    // never what an operator typing it meant. `unlimited` is the way to say
+    // "no limit".
+    let query_time = quota_arg("--max-query-time-ms")?;
+    if query_time == Some(Some(0)) {
+        return Err(
+            "error: --max-query-time-ms 0 would time out every query; \
+             use `unlimited` for no limit"
+                .to_string(),
+        );
+    }
+    if nodes.is_none()
+        && edges.is_none()
+        && memory.is_none()
+        && storage.is_none()
+        && query_time.is_none()
+    {
         return Ok(None);
     }
     let mut q = samyama::persistence::tenant::ResourceQuotas::default();
@@ -2633,6 +2671,7 @@ fn quota_overrides_from_args(
     if let Some(v) = edges { q.max_edges = v; }
     if let Some(v) = memory { q.max_memory_bytes = v; }
     if let Some(v) = storage { q.max_storage_bytes = v; }
+    if let Some(v) = query_time { q.max_query_time_ms = v.map(|ms| ms as u64); }
     Ok(Some(q))
 }
 
