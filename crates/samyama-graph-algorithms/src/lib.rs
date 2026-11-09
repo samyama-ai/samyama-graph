@@ -23,6 +23,7 @@ pub mod centrality;
 pub mod centrality_extra;
 pub mod link_prediction;
 pub mod neighbour_sampling;
+pub mod subgraph_sampling;
 pub mod community_detect;
 pub mod metrics;
 pub mod pathfinding_extra;
@@ -51,6 +52,9 @@ pub use centrality::{
 pub use link_prediction::{predict_links, score_one, LinkScore, PairScore};
 pub use neighbour_sampling::{
     sample_neighbours, Direction as SampleDirection, Fanout, SampleError, SampleSpec, SampledEdge,
+};
+pub use subgraph_sampling::{
+    ego_network, forest_fire, random_walk_sample, snowball, stratified, Allocation as StratumAllocation,
 };
 pub use similarity_extra::{
     constraint, cosine_similarity, effective_size, node_similarity, overlap_coefficient,

@@ -108,6 +108,12 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
         Sampling,
         &["batch", "hop", "node", "neighbour"],
     ),
+    // Subgraph samples (ML-03, #1720): which nodes are in the sample.
+    read("algo.sample.forestFire", &["algo.forestFire", "algo.forestFireSample", "algo.forestFireSampling"], Sampling, &["node", "position"]),
+    read("algo.sample.snowball", &["algo.snowball", "algo.snowballSample", "algo.snowballSampling"], Sampling, &["node", "hop"]),
+    read("algo.sample.egoNetwork", &["algo.egoNetwork", "algo.ego", "algo.egoGraph"], Sampling, &["node", "distance"]),
+    read("algo.sample.randomWalk", &["algo.randomWalkSample", "algo.randomWalkSampling"], Sampling, &["node", "position"]),
+    read("algo.sample.stratified", &["algo.stratifiedSample", "algo.stratifiedSampling"], Sampling, &["node", "stratum"]),
     read("algo.maxFlow", &[], Path, &["max_flow"]),
     // A summary row (`total_weight`, `components`), then one row per tree
     // edge (`source`, `target`, `weight`).
