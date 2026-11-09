@@ -191,6 +191,7 @@ sequenceDiagram
 | `ping` | Health check | `samyama-cli ping` |
 | `shell` | Interactive REPL | `samyama-cli shell` |
 | `load <kg>` | Download a published KG snapshot, check its SHA-256, import it | `samyama-cli load cricket` |
+| `pull <kg>` | Download a published KG snapshot and check its SHA-256, keeping it as a file | `samyama-cli pull cricket` |
 
 **Output formats:** `--format table` (default), `--format json`, `--format csv`
 

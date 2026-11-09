@@ -17,6 +17,10 @@
 //! * It does not add to a graph that already holds data unless told to. An
 //!   import appends, so running `load cricket` twice would otherwise double
 //!   every node without a word.
+//!
+//! `pull <kg>` is the same download and the same check, kept as a file instead
+//! of sent to a server (#2003): for a machine with no server yet, or to fetch a
+//! large KG once and import it more than once.
 
 use samyama_sdk::{RemoteClient, SamyamaClient};
 use sha2::{Digest, Sha256};
@@ -347,6 +351,16 @@ async fn upload(
     Ok((count("nodes_imported")?, count("edges_imported")?))
 }
 
+/// No overall timeout: a large file legitimately takes minutes either way.
+/// A stalled connection is still caught by the read timeout.
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 /// The whole load. `say` receives progress lines (the CLI sends them to stderr,
 /// so `--format json` output on stdout stays parseable).
 pub async fn load_into(
@@ -374,14 +388,7 @@ pub async fn load_into(
         ));
     }
 
-    // No overall timeout: a large file legitimately takes minutes either way.
-    // A stalled connection is still caught by the read timeout.
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .read_timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|e| e.to_string())?;
-
+    let http = http_client()?;
     let url = url_for(kg, source);
     let scratch = Scratch(scratch_path(work_dir, kg));
     say(&format!(
@@ -405,6 +412,161 @@ pub async fn load_into(
         download: download_time,
         import: t.elapsed(),
     })
+}
+
+/// What `pull_to` did.
+#[derive(Debug)]
+pub struct Pulled {
+    pub path: PathBuf,
+    /// False when the file was already there and already the published one.
+    pub downloaded: bool,
+    pub elapsed: Duration,
+}
+
+/// The SHA-256 of the file at `path`, read in chunks so a 745 MB file is not
+/// held in memory.
+async fn sha256_of(path: &Path) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let mut f = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Where `pull` writes: `out` itself, or `kg.file` inside it when `out` is a
+/// directory, or `kg.file` in the current directory when there is no `out`.
+pub fn pull_path(kg: &Kg, out: Option<&Path>) -> PathBuf {
+    match out {
+        Some(p) if p.is_dir() => p.join(kg.file),
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from(kg.file),
+    }
+}
+
+/// Download `kg` to `dest` and check it, without a server.
+///
+/// The file is written beside `dest` under a temporary name and renamed into
+/// place only once its size and SHA-256 match, so `dest` is either the
+/// published file or absent: a failed or interrupted pull never leaves a file
+/// that looks finished. A `dest` that already holds the published file is
+/// checked and kept, with nothing downloaded. One that holds anything else is
+/// refused and left as it is.
+pub async fn pull_to(
+    kg: &Kg,
+    source: &str,
+    dest: &Path,
+    say: &dyn Fn(&str),
+) -> Result<Pulled, String> {
+    let started = Instant::now();
+    if let Ok(meta) = tokio::fs::symlink_metadata(dest).await {
+        let same = meta.is_file() && meta.len() == kg.bytes && sha256_of(dest).await? == kg.sha256;
+        if same {
+            say(&format!(
+                "{} already holds {} (sha256 {}…); nothing downloaded",
+                dest.display(),
+                kg.name,
+                &kg.sha256[..12]
+            ));
+            return Ok(Pulled {
+                path: dest.to_path_buf(),
+                downloaded: false,
+                elapsed: started.elapsed(),
+            });
+        }
+        return Err(format!(
+            "{} already exists and is not the published {}; it was left as it is. \
+             Delete it, or pass --output to write somewhere else; nothing was downloaded.",
+            dest.display(),
+            kg.file
+        ));
+    }
+
+    let dir = match dest.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let http = http_client()?;
+    let url = url_for(kg, source);
+    let scratch = Scratch(scratch_path(&dir, kg));
+    say(&format!(
+        "Downloading {} ({} bytes) from {url}",
+        kg.name, kg.bytes
+    ));
+    download(&http, &url, kg, &scratch.0, say).await?;
+
+    // Checked again: something may have appeared at `dest` during the download,
+    // and a rename would replace it without a word.
+    if tokio::fs::symlink_metadata(dest).await.is_ok() {
+        return Err(format!(
+            "{} appeared while downloading; it was left as it is and the download deleted",
+            dest.display()
+        ));
+    }
+    tokio::fs::rename(&scratch.0, dest)
+        .await
+        .map_err(|e| format!("could not move the download to {}: {e}", dest.display()))?;
+    // `scratch` now names nothing, so its cleanup is a no-op.
+    Ok(Pulled {
+        path: dest.to_path_buf(),
+        downloaded: true,
+        elapsed: started.elapsed(),
+    })
+}
+
+/// `samyama-cli pull <kg>`.
+pub async fn run_pull(
+    name: &str,
+    output: Option<&Path>,
+    server: &str,
+    source: &str,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let kg = find(name)?;
+    let dest = pull_path(kg, output);
+    let say = |line: &str| eprintln!("{line}");
+    let pulled = pull_to(kg, source, &dest, &say).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "kg": kg.name,
+                "path": pulled.path.display().to_string(),
+                "bytes": kg.bytes,
+                "sha256": kg.sha256,
+                "downloaded": pulled.downloaded,
+                "seconds": pulled.elapsed.as_secs_f64(),
+            }))?
+        );
+    } else {
+        if pulled.downloaded {
+            println!(
+                "Saved {} to {} ({} bytes, sha256 {}…) in {:.1}s",
+                kg.name,
+                pulled.path.display(),
+                kg.bytes,
+                &kg.sha256[..12],
+                pulled.elapsed.as_secs_f64()
+            );
+        }
+        println!(
+            "Import it into a running server with:\n  curl -X POST {}/api/snapshot/import -F \"file=@{}\"",
+            server.trim_end_matches('/'),
+            pulled.path.display()
+        );
+    }
+    Ok(())
 }
 
 /// `samyama-cli load --list`.
@@ -861,5 +1023,124 @@ mod tests {
 
         assert!(e.contains("the server refused the snapshot"), "{e}");
         assert!(work.is_empty());
+    }
+
+    // ---- pull ----
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn pull_keeps_the_checked_file_and_it_imports() {
+        let snap = make_snapshot().await;
+        let kg = entry_for(&snap);
+        let (source, hits) = spawn_source(snap.clone(), &kg).await;
+        let work = WorkDir::new("pull-ok");
+        let dest = work.0.join("demo.sgsnap");
+
+        let p = pull_to(&kg, &source, &dest, &quiet).await.unwrap();
+
+        assert!(p.downloaded);
+        assert_eq!(p.path, dest);
+        assert_eq!(std::fs::read(&dest).unwrap(), snap);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            names_in(&work.0),
+            ["demo.sgsnap"],
+            "a temporary file was left beside it"
+        );
+        // The kept file is a real snapshot: an engine imports it.
+        let server = spawn_engine().await;
+        let (nodes, edges) = upload(&http_client().unwrap(), &server, &dest, kg.file, kg.bytes)
+            .await
+            .unwrap();
+        assert_eq!((nodes, edges), (3, 2));
+    }
+
+    #[tokio::test]
+    async fn a_second_pull_checks_the_file_and_downloads_nothing() {
+        let snap = make_snapshot().await;
+        let kg = entry_for(&snap);
+        let (source, hits) = spawn_source(snap, &kg).await;
+        let work = WorkDir::new("pull-again");
+        let dest = work.0.join("demo.sgsnap");
+
+        pull_to(&kg, &source, &dest, &quiet).await.unwrap();
+        let again = pull_to(&kg, &source, &dest, &quiet).await.unwrap();
+
+        assert!(!again.downloaded);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "it downloaded twice");
+    }
+
+    #[tokio::test]
+    async fn a_different_file_already_there_is_refused_and_left_alone() {
+        let snap = make_snapshot().await;
+        let kg = entry_for(&snap);
+        let (source, hits) = spawn_source(snap, &kg).await;
+        let work = WorkDir::new("pull-other");
+        let dest = work.0.join("demo.sgsnap");
+        std::fs::write(&dest, b"someone's own file").unwrap();
+
+        let e = pull_to(&kg, &source, &dest, &quiet).await.unwrap_err();
+
+        assert!(e.contains("already exists and is not the published"), "{e}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"someone's own file");
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_pull_that_fails_its_check_leaves_no_file() {
+        let snap = make_snapshot().await;
+        let kg = entry_for(&snap);
+        let mut tampered = snap.clone();
+        tampered[0] ^= 0xff;
+        let (source, _) = spawn_source(tampered, &kg).await;
+        let work = WorkDir::new("pull-tamper");
+        let dest = work.0.join("demo.sgsnap");
+
+        let e = pull_to(&kg, &source, &dest, &quiet).await.unwrap_err();
+        assert!(e.contains("checksum mismatch"), "{e}");
+        assert!(work.is_empty(), "left {:?}", names_in(&work.0));
+
+        // And a truncated one, which only the size catches first.
+        let (source, _) = spawn_source(snap[..10].to_vec(), &kg).await;
+        let e = pull_to(&kg, &source, &dest, &quiet).await.unwrap_err();
+        assert!(e.contains("bytes but"), "{e}");
+        assert!(work.is_empty(), "left {:?}", names_in(&work.0));
+    }
+
+    #[tokio::test]
+    async fn a_missing_release_asset_leaves_no_file() {
+        let snap = make_snapshot().await;
+        let kg = entry_for(&snap);
+        let other = Kg {
+            file: "other.sgsnap",
+            ..entry_for(&snap)
+        };
+        let (source, _) = spawn_source(snap, &other).await;
+        let work = WorkDir::new("pull-404");
+
+        let e = pull_to(&kg, &source, &work.0.join("demo.sgsnap"), &quiet)
+            .await
+            .unwrap_err();
+
+        assert!(e.contains("404"), "{e}");
+        assert!(work.is_empty());
+    }
+
+    #[test]
+    fn the_pull_path_is_the_file_or_the_file_inside_a_directory() {
+        let kg = find("cricket").unwrap();
+        assert_eq!(pull_path(kg, None), PathBuf::from("cricket.sgsnap"));
+        let work = WorkDir::new("pull-path");
+        assert_eq!(pull_path(kg, Some(&work.0)), work.0.join("cricket.sgsnap"));
+        let named = work.0.join("mine.sgsnap");
+        assert_eq!(pull_path(kg, Some(&named)), named);
     }
 }

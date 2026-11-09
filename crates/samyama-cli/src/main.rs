@@ -114,6 +114,26 @@ enum Commands {
         #[arg(long, default_value = load::DEFAULT_SOURCE, env = "SAMYAMA_KG_SOURCE")]
         source: String,
     },
+    /// Download a published knowledge graph to a file, checked, without a server
+    ///
+    /// `samyama-cli pull cricket` fetches the same snapshot `load` does and
+    /// checks the same SHA-256, then keeps it as `./cricket.sgsnap` instead of
+    /// importing it. A file already there that matches is kept and nothing is
+    /// downloaded; one that does not match is refused and left alone. See
+    /// `load --list` for the KGs.
+    Pull {
+        /// Which KG, e.g. cricket (see `load --list`)
+        kg: String,
+
+        /// File to write, or a directory to write it into (default: the
+        /// snapshot's own name in the current directory)
+        #[arg(long, short)]
+        output: Option<std::path::PathBuf>,
+
+        /// Where snapshots are fetched from, as `<base>/<release tag>/<file>`
+        #[arg(long, default_value = load::DEFAULT_SOURCE, env = "SAMYAMA_KG_SOURCE")]
+        source: String,
+    },
     /// Inspect snapshots without importing them into a graph store
     Snapshot {
         #[command(subcommand)]
@@ -201,6 +221,10 @@ async fn main() {
                 )
                 .await
             }
+        }
+        Commands::Pull { kg, output, source } => {
+            let json = matches!(&cli.format, OutputFormat::Json);
+            load::run_pull(&kg, output.as_deref(), &cli.url, &source, json).await
         }
         Commands::Snapshot { command } => match command {
             SnapshotCommands::Keys { files, label, json } => {
@@ -664,6 +688,28 @@ mod cli_tests {
     }
 
     #[test]
+    fn pull_takes_a_kg_and_an_optional_output() {
+        let cli = Cli::try_parse_from(["samyama", "pull", "cricket"]).expect("parse");
+        match cli.command {
+            Commands::Pull { kg, output, source } => {
+                assert_eq!(kg, "cricket");
+                assert!(output.is_none());
+                assert_eq!(source, load::DEFAULT_SOURCE);
+            }
+            _ => panic!("parsed as a different subcommand"),
+        }
+        let cli =
+            Cli::try_parse_from(["samyama", "pull", "imdb", "-o", "/data/kgs"]).expect("parse");
+        match cli.command {
+            Commands::Pull { output, .. } => {
+                assert_eq!(output.as_deref(), Some(std::path::Path::new("/data/kgs")));
+            }
+            _ => panic!("parsed as a different subcommand"),
+        }
+        assert!(Cli::try_parse_from(["samyama", "pull"]).is_err(), "no KG");
+    }
+
+    #[test]
     fn every_subcommand_is_reachable_by_name() {
         // A subcommand that exists in the enum but is not registered would be
         // invisible; `doctor` and `completions` are the new ones and the two
@@ -672,7 +718,17 @@ mod cli_tests {
             .get_subcommands()
             .map(|c| c.get_name().to_string())
             .collect();
-        for want in ["query", "nlq", "status", "ping", "shell", "doctor", "completions", "load"] {
+        for want in [
+            "query",
+            "nlq",
+            "status",
+            "ping",
+            "shell",
+            "doctor",
+            "completions",
+            "load",
+            "pull",
+        ] {
             assert!(names.iter().any(|n| n == want), "missing subcommand `{want}` in {names:?}");
         }
     }
