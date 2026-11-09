@@ -7,7 +7,7 @@
 // exists to avoid.
 //
 // Read by `cargo run --release --example compatibility_report -- --queries
-// benchmarks/compat/neo4j-idioms.cypher`. Queries are separated by a `;` at
+// tests/fixtures/compat/neo4j-idioms.cypher`. Queries are separated by a `;` at
 // the end of a line.
 //
 // Add a query here when you meet an idiom in the wild, whether or not it

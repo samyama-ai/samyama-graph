@@ -51,7 +51,7 @@ import socket
 import sys
 from pathlib import Path
 
-CORPUS = Path(__file__).resolve().parent.parent / "benchmarks/compat/falkordb-idioms.cypher"
+CORPUS = Path(__file__).resolve().parent.parent / "tests/fixtures/compat/falkordb-idioms.cypher"
 
 # The graph every idiom runs against. Each name, label and property here is one
 # the corpus refers to: Alice and Bob, ages for ORDER BY, a KNOWS edge with

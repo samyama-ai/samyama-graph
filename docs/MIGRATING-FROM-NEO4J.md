@@ -123,7 +123,7 @@ Said here rather than discovered later:
 
 ## 5. Tell us what refused
 
-`benchmarks/compat/neo4j-idioms.cypher` is the corpus this engine is measured
+`tests/fixtures/compat/neo4j-idioms.cypher` is the corpus this engine is measured
 against, and it is written from Neo4j's documentation and from application code
 rather than from our feature list — one derived from our features would report
 100% of whatever we already do.
