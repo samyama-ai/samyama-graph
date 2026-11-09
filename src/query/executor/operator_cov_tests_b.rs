@@ -2339,7 +2339,7 @@ fn or_solve_same_seed_gives_the_same_result() {
     let mut names = vec![
         "Jaya", "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "SAMPJaya",
         "QOJaya", "EHRJaya", "BMR", "BWR", "BMWR", "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS",
-        "FPA", "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR", "LSHADE",
+        "FPA", "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR", "LSHADE", "CMAES",
     ];
     names.extend_from_slice(AlgorithmOperator::MULTI_OBJECTIVE_SOLVERS);
     for name in names {
