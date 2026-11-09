@@ -44,7 +44,10 @@ fn demo_binary() -> PathBuf {
     if dir.ends_with("deps") {
         dir.pop();
     }
-    let path = dir.join("examples").join("agentic_enrichment_demo");
+    // `.exe` on Windows, nothing elsewhere.
+    let path = dir
+        .join("examples")
+        .join(format!("agentic_enrichment_demo{}", std::env::consts::EXE_SUFFIX));
     assert!(
         path.exists(),
         "the demo binary is not at {}. It is the subject of this test, so a \

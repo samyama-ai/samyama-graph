@@ -320,7 +320,7 @@ pub fn export_tenant_with_compression(
     // bytes reaching the encoder are identical, so the file is too.
     let mut gz = std::io::BufWriter::with_capacity(
         EXPORT_BUFFER_BYTES,
-        GzEncoder::new(writer, Compression::new(compression_level.min(9))),
+        GzEncoder::new(CountingWriter::new(writer), Compression::new(compression_level.min(9))),
     );
 
     // The store's sources go forward with its data (#1911). When the graph
@@ -481,17 +481,46 @@ pub fn export_tenant_with_compression(
         Ok(())
     })?;
 
-    let finished = gz.into_inner().map_err(|e| e.into_error())?.finish()?;
-    let _ = finished;
+    let mut finished = gz.into_inner().map_err(|e| e.into_error())?.finish()?;
+    // Flushed here, not on drop: a buffered writer's drop discards the error of
+    // its last write, and an export that lost its tail must not report success.
+    finished.flush()?;
 
     Ok(ExportStats {
         node_count,
         edge_count: total_edge_count,
         labels,
         edge_types,
-        bytes_written: 0,
+        bytes_written: finished.count,
         dropped,
     })
+}
+
+/// Counts the bytes that pass through it to `inner`: the size of the file an
+/// export produced. `ExportStats::bytes_written` was a literal 0 from the first
+/// version of the export, so every caller was told an export wrote nothing
+/// (found by #2092's Python round-trip test).
+struct CountingWriter<W> {
+    inner: W,
+    count: u64,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, count: 0 }
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.count += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// What this export will not carry, for this graph (INT-06).
@@ -1946,6 +1975,32 @@ fn conflicting_definition<'a>(
 
 #[cfg(test)]
 mod tests {
+    /// `bytes_written` is the size of what the export wrote (#2092). It was a
+    /// literal 0 before, whatever the graph held.
+    #[test]
+    fn export_reports_the_bytes_it_wrote() {
+        let mut store = GraphStore::new();
+        for i in 0..50 {
+            let id = store.create_node("Item");
+            store
+                .set_node_property("default", id, "name", PropertyValue::String(format!("item-{i}")))
+                .unwrap();
+        }
+        let mut out = Vec::new();
+        let stats = export_tenant(&store, &mut out).unwrap();
+        assert!(!out.is_empty());
+        assert_eq!(stats.bytes_written, out.len() as u64);
+
+        // And it changes with what is written: a larger graph, more bytes.
+        for _ in 0..500 {
+            store.create_node("Item");
+        }
+        let mut bigger = Vec::new();
+        let stats = export_tenant(&store, &mut bigger).unwrap();
+        assert_eq!(stats.bytes_written, bigger.len() as u64);
+        assert!(bigger.len() > out.len());
+    }
+
     #[test]
     fn bounded_lines_reads_lines_as_lines_does() {
         let text = "a\r\nbb\n\nccc";

@@ -151,6 +151,28 @@ impl StructureRegistry {
     }
 
     /// Clear all explicit conventions.
+    /// Drop one convention by name, reporting whether it was there.
+    ///
+    /// `DROP STRUCTURE INDEX` needs to tell "removed" from "no such index",
+    /// because silently succeeding on a name nobody declared is how a typo
+    /// reads as a successful drop.
+    pub fn remove(&self, name: &str) -> bool {
+        let mut items = self.conventions.write().unwrap();
+        let before = items.len();
+        items.retain(|c| c.name != name);
+        items.len() != before
+    }
+
+    /// One convention by name.
+    pub fn get(&self, name: &str) -> Option<StructuralConvention> {
+        self.conventions
+            .read()
+            .unwrap()
+            .iter()
+            .find(|c| c.name == name)
+            .cloned()
+    }
+
     pub fn clear(&self) {
         self.conventions.write().unwrap().clear();
     }
