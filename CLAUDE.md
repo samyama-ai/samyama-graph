@@ -138,7 +138,7 @@ src/
 
 Outside `src/`: `crates/` (samyama-graph-algorithms, samyama-optimization,
 samyama-gpu, samyama-sdk, samyama-convert, samyama-cli), `sdk/` (Python, TypeScript), `openapi/`,
-`case_studies/`, `benchmarks/` (data) vs `benches/` (harnesses), `examples/`,
+`case_studies/`, `benches/` (harnesses and their inputs), `examples/`,
 `tests/`, `docs/`, `scripts/`, `ops/` — see CONTRIBUTING.md's Project Layout.
 
 ### Key Architectural Patterns

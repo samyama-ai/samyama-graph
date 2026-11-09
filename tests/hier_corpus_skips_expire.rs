@@ -1,6 +1,6 @@
 //! A benchmark skip must expire when the engine gains the capability (samyama-graph#444).
 //!
-//! `benchmarks/hier/queries.json` once carried four H9 queries skipped with a static
+//! `benches/hier/queries.json` once carried four H9 queries skipped with a static
 //! "engine gap" string. #439 closed the gap; nothing noticed, and the benchmark reported
 //! 108/108 while it was 108 of 112. A skip is now a probe — `{"reason", "error"}` — and
 //! this test runs every skipped query against the engine under `cargo test`:
@@ -20,7 +20,7 @@ use samyama::query::QueryEngine;
 use serde_json::json;
 use skip::{classify, describe_failure, parse_skip, Skip, SkipVerdict};
 
-const CORPUS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/benchmarks/hier/queries.json");
+const CORPUS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/benches/hier/queries.json");
 
 /// Every skipped corpus query, parsed. Panics on a skip that cannot expire.
 fn corpus_skips() -> Vec<(String, String, Skip)> {

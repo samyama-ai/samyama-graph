@@ -1,6 +1,6 @@
 //! The FalkorDB/RedisGraph migration corpus, checked on every run (DX-13, #1787).
 //!
-//! `benchmarks/compat/falkordb-idioms.cypher` holds idioms from FalkorDB's own
+//! `tests/fixtures/compat/falkordb-idioms.cypher` holds idioms from FalkorDB's own
 //! documentation, each run on FalkorDB before it was added, so a refusal here
 //! is a gap in this engine and not a mistake in the corpus.
 //!
@@ -19,7 +19,7 @@ use samyama::compat::{judge_all, split_queries};
 use samyama::graph::GraphStore;
 
 /// Where the corpus lives, relative to the crate root.
-const CORPUS_PATH: &str = "benchmarks/compat/falkordb-idioms.cypher";
+const CORPUS_PATH: &str = "tests/fixtures/compat/falkordb-idioms.cypher";
 
 /// Fewer queries than this means the corpus was not found or not split, and
 /// every assertion below would pass vacuously.
