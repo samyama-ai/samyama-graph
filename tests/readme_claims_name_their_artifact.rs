@@ -4,7 +4,7 @@
 //! publishes `result_lines_the_scan_cannot_see` for the README results outside it. Three of
 //! those have no harness suite behind them, so the register cannot hold them:
 //!
-//! - HIER "Latest: **108/108 agree**" — backed by `benchmarks/hier/results/PROVENANCE.json`,
+//! - HIER "Latest: **108/108 agree**" — backed by `benches/hier/results/PROVENANCE.json`,
 //!   an artifact in this repository that no suite publishes as a measurement;
 //! - the biomedical "96 of 100 queries" result, stated three times, measured once on
 //!   2026-04-02;
@@ -51,8 +51,8 @@ fn paragraph_around(text: &str, at: usize) -> &str {
 #[test]
 fn hier_agreement_matches_its_provenance_file() {
     let readme = readme();
-    let prov = json("benchmarks/hier/results/PROVENANCE.json");
-    let corpus = json("benchmarks/hier/queries.json");
+    let prov = json("benches/hier/results/PROVENANCE.json");
+    let corpus = json("benches/hier/queries.json");
 
     let queries = prov["queries"].as_u64().expect("PROVENANCE.queries");
     let agreed = prov["agreed"].as_u64().expect("PROVENANCE.agreed");
@@ -76,7 +76,7 @@ fn hier_agreement_matches_its_provenance_file() {
 
     let para = paragraph_around(&readme, cap.get(0).unwrap().start());
     assert!(
-        para.contains("benchmarks/hier/results/PROVENANCE.json"),
+        para.contains("benches/hier/results/PROVENANCE.json"),
         "the HIER agreement line must name the file it comes from"
     );
     assert!(

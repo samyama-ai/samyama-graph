@@ -25,7 +25,7 @@ use samyama::graph::{GraphStore, PropertyValue};
 use samyama::query::executor::record::Value;
 use samyama::query::{QueryEngine, RecordBatch};
 
-const CORPUS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/benchmarks/hier/queries.json");
+const CORPUS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/benches/hier/queries.json");
 
 /// Small enough for a debug build, large enough that every code the corpus pins exists:
 /// three years (Y2019–Y2021), three countries (CO0–CO2), and an ontology four levels deep

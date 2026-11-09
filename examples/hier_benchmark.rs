@@ -1,6 +1,6 @@
 //! HIER benchmark runner — hierarchy-heavy complex queries (ADR-035).
 //!
-//! Runs the corpus in `benchmarks/hier/queries.json` twice: once against a store with the
+//! Runs the corpus in `benches/hier/queries.json` twice: once against a store with the
 //! four hierarchy indexes declared, once against an identical store with none. Every query
 //! must return the **same answer** both ways; the difference in latency is the result.
 //!
@@ -63,9 +63,9 @@ struct Query {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let reps = arg_value(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(5usize);
-    let out = arg_value(&args, "--out").unwrap_or_else(|| "benchmarks/hier/results/results.csv".to_string());
+    let out = arg_value(&args, "--out").unwrap_or_else(|| "benches/hier/results/results.csv".to_string());
     let corpus_path =
-        arg_value(&args, "--corpus").unwrap_or_else(|| "benchmarks/hier/queries.json".to_string());
+        arg_value(&args, "--corpus").unwrap_or_else(|| "benches/hier/queries.json".to_string());
     let filter = arg_value(&args, "--class");
 
     let scale = HierScale::default();
