@@ -101,7 +101,8 @@ fn load_csv_end_to_end() {
         .execute(
             &format!(
                 "LOAD CSV FROM 'file://{}' AS row RETURN row",
-                outside.path().join("secret.csv").display()
+                // `\` in a Cypher string is an escape; Windows accepts `/`.
+                outside.path().join("secret.csv").display().to_string().replace('\\', "/")
             ),
             &GraphStore::new(),
         )

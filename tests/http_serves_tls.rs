@@ -54,7 +54,10 @@ fn certificates() -> (String, String, String) {
 }
 
 /// Start a server on an ephemeral port and return the port it took.
-async fn serve(cert: String, key: String) -> u16 {
+///
+/// `roots_pem` is the CA the probe trusts: readiness here has to be a
+/// *completed TLS handshake*, not a TCP connect.
+async fn serve(roots_pem: &str, cert: String, key: String) -> u16 {
     // Port 0 then read it back: a fixed port makes the test fail for the wrong
     // reason on a machine already using it, and two of these run at once.
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
@@ -67,15 +70,30 @@ async fn serve(cert: String, key: String) -> u16 {
         let _ = server.start().await;
     });
 
-    // Wait for the port to accept rather than sleeping a fixed amount, which
-    // is the flake this kind of test usually ships with.
+    // A bare `TcpStream::connect` proves only that something is listening, and
+    // this port speaks TLS. The probe connection was accepted, the server began
+    // a handshake on it, and the probe then dropped it mid-handshake. On Windows
+    // that abort surfaces on the *next* connection as
+    //
+    //     handshake: An established connection was aborted by the software
+    //     in your host machine. (os error 10053)
+    //
+    // which is why `a_verified_client_gets_an_answer_over_tls` failed there and
+    // only there, the first time this suite ran on Windows.
+    //
+    // It also made the neighbouring test pass for the wrong reason:
+    // `a_client_that_does_not_trust_the_root_is_refused` asserts that the
+    // failure arrives at the handshake, and an aborted connection satisfies that
+    // without any certificate having been checked. So the probe completing a
+    // real handshake is what gives that test its meaning back, not just a
+    // Windows fix.
     for _ in 0..200 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if get_over_tls(port, roots_pem).await.is_ok() {
             return port;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    panic!("the TLS server never accepted a connection on port {port}");
+    panic!("the TLS server never completed a handshake on port {port}");
 }
 
 /// A rustls client that trusts exactly `roots_pem` and nothing else.
@@ -118,7 +136,7 @@ async fn get_over_tls(port: u16, roots_pem: &str) -> Result<String, String> {
 #[tokio::test]
 async fn a_verified_client_gets_an_answer_over_tls() {
     let (ca, cert, key) = certificates();
-    let port = serve(cert, key).await;
+    let port = serve(&ca, cert, key).await;
 
     let body = get_over_tls(port, &ca)
         .await
@@ -141,9 +159,12 @@ async fn a_client_that_does_not_trust_the_root_is_refused() {
     // The control that makes the case above mean something. If verification
     // were off -- in the client or because the server is not really doing TLS
     // -- this would succeed too.
-    let (_ca, cert, key) = certificates();
+    let (ca, cert, key) = certificates();
     let (other_ca, _, _) = certificates();
-    let port = serve(cert, key).await;
+    // Probe with the root that *does* verify, then make the real attempt with
+    // the unrelated one: otherwise a refusal cannot be told from a server that
+    // was never ready.
+    let port = serve(&ca, cert, key).await;
 
     let err = get_over_tls(port, &other_ca)
         .await
