@@ -455,14 +455,71 @@ pub fn pull_path(kg: &Kg, out: Option<&Path>) -> PathBuf {
     }
 }
 
+/// Give the checked file at `tmp` the name `dest`, refusing if `dest` exists.
+///
+/// Not `rename`: it replaces whatever is at `dest`, so a file created there in
+/// the instant between a check and the rename would be overwritten without a
+/// word, and no check made beforehand can close that window. `hard_link` fails
+/// with `AlreadyExists` when `dest` exists, and the kernel makes that check and
+/// the link in one step, so there is no window. `tmp` keeps its own name and
+/// the caller's [`Scratch`] removes it.
+///
+/// A filesystem that cannot hard-link (FAT and exFAT drives, some network
+/// mounts) falls back to copying into a file opened with `create_new`, which is
+/// equally atomic about not replacing anything. The cost there is that `dest`
+/// is visible while the copy runs, so a copy that fails part-way removes the
+/// file it created.
+async fn place(tmp: &Path, dest: &Path) -> Result<(), String> {
+    match tokio::fs::hard_link(tmp, dest).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists(dest)),
+        Err(_) => copy_new(tmp, dest).await,
+    }
+}
+
+fn exists(dest: &Path) -> String {
+    format!(
+        "{} appeared while downloading; it was left as it is and the download deleted",
+        dest.display()
+    )
+}
+
+/// `place`'s fallback: copy `tmp` into a new `dest`, never over an existing one.
+async fn copy_new(tmp: &Path, dest: &Path) -> Result<(), String> {
+    let mut out = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .await
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(exists(dest)),
+        Err(e) => return Err(format!("could not create {}: {e}", dest.display())),
+    };
+    let copied = async {
+        let mut src = tokio::fs::File::open(tmp).await?;
+        tokio::io::copy(&mut src, &mut out).await?;
+        out.flush().await
+    }
+    .await;
+    if let Err(e) = copied {
+        drop(out);
+        // Ours: `create_new` made it a moment ago.
+        let _ = tokio::fs::remove_file(dest).await;
+        return Err(format!("could not write {}: {e}", dest.display()));
+    }
+    Ok(())
+}
+
 /// Download `kg` to `dest` and check it, without a server.
 ///
-/// The file is written beside `dest` under a temporary name and renamed into
-/// place only once its size and SHA-256 match, so `dest` is either the
-/// published file or absent: a failed or interrupted pull never leaves a file
-/// that looks finished. A `dest` that already holds the published file is
+/// The file is written beside `dest` under a temporary name and given the name
+/// `dest` only once its size and SHA-256 match, so `dest` is either the
+/// published file or absent: a failed or interrupted download never leaves a
+/// file that looks finished. A `dest` that already holds the published file is
 /// checked and kept, with nothing downloaded. One that holds anything else is
-/// refused and left as it is.
+/// refused and left as it is, whether it was there before the download or
+/// appeared during it (see [`place`]).
 pub async fn pull_to(
     kg: &Kg,
     source: &str,
@@ -506,18 +563,8 @@ pub async fn pull_to(
     ));
     download(&http, &url, kg, &scratch.0, say).await?;
 
-    // Checked again: something may have appeared at `dest` during the download,
-    // and a rename would replace it without a word.
-    if tokio::fs::symlink_metadata(dest).await.is_ok() {
-        return Err(format!(
-            "{} appeared while downloading; it was left as it is and the download deleted",
-            dest.display()
-        ));
-    }
-    tokio::fs::rename(&scratch.0, dest)
-        .await
-        .map_err(|e| format!("could not move the download to {}: {e}", dest.display()))?;
-    // `scratch` now names nothing, so its cleanup is a no-op.
+    place(&scratch.0, dest).await?;
+    // `scratch`'s cleanup now removes only the temporary name; `dest` keeps the file.
     Ok(Pulled {
         path: dest.to_path_buf(),
         downloaded: true,
@@ -1132,6 +1179,49 @@ mod tests {
 
         assert!(e.contains("404"), "{e}");
         assert!(work.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_final_step_never_replaces_a_file_already_at_the_destination() {
+        // The moment a check-then-rename cannot cover: `dest` already exists
+        // when the move happens. Called directly, because a test cannot land a
+        // file inside that instant from outside.
+        let work = WorkDir::new("place");
+        let tmp = work.0.join("download.tmp");
+        let dest = work.0.join("demo.sgsnap");
+        std::fs::write(&tmp, b"the checked download").unwrap();
+        std::fs::write(&dest, b"someone's own file").unwrap();
+
+        let e = place(&tmp, &dest).await.unwrap_err();
+
+        assert!(e.contains("appeared while downloading"), "{e}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"someone's own file");
+
+        // And with nothing there, the file arrives whole.
+        std::fs::remove_file(&dest).unwrap();
+        place(&tmp, &dest).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the checked download");
+    }
+
+    #[tokio::test]
+    async fn the_copy_fallback_never_replaces_a_file_either() {
+        // Used where the filesystem cannot hard-link; this machine can, so it
+        // is called directly.
+        let work = WorkDir::new("copy-new");
+        let tmp = work.0.join("download.tmp");
+        let dest = work.0.join("demo.sgsnap");
+        std::fs::write(&tmp, b"the checked download").unwrap();
+        std::fs::write(&dest, b"someone's own file").unwrap();
+
+        let e = copy_new(&tmp, &dest).await.unwrap_err();
+
+        assert!(e.contains("appeared while downloading"), "{e}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"someone's own file");
+
+        std::fs::remove_file(&dest).unwrap();
+        copy_new(&tmp, &dest).await.unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the checked download");
+        assert!(tmp.exists(), "the temporary name is the caller's to remove");
     }
 
     #[test]
