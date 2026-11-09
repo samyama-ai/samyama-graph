@@ -271,6 +271,16 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          # GitHub runs this step as `bash -e -o pipefail`, and `set -uo
+          # pipefail` does not clear `-e`. With `-e` active, the `cargo publish
+          # | tee` pipeline below aborts the whole step the moment cargo exits
+          # non-zero -- before $EXIT_CODE is read -- so the "already on
+          # crates.io" branch was unreachable and the skip it documents never
+          # happened. It went unnoticed because every failure until now was the
+          # genuine 403 (Trusted Publishing cannot create a crate), where
+          # aborting was the right outcome anyway. Turn `-e` off here; the loop
+          # inspects cargo's exit code itself and exits deliberately.
+          set +e
 
           # --no-verify: the step above already built every one of these
           # packages from its unpacked .crate, from this same checkout in this

@@ -75,6 +75,42 @@ Other methods on the client: `status()` (returns a `ServerStatus` with
 `status`, `version`, `nodes`, `edges`), `ping()`, `list_graphs()`,
 `delete_graph(graph="default")`.
 
+## Snapshots
+
+A `.sgsnap` file is a whole graph in one file. In embedded mode the client
+loads and saves one itself, so a notebook, an evaluation harness or an agent
+needs no server and no network:
+
+```python
+from samyama import SamyamaClient
+
+client = SamyamaClient.open_snapshot("pubmed.sgsnap")   # embedded, ready to query
+client.query_readonly("MATCH (a:Article) RETURN count(a) AS n")
+
+client.query('CREATE (:Note {text: "checked"})')
+report = client.export_snapshot("pubmed-annotated.sgsnap")
+print(report["nodes_exported"], report["bytes_written"], report["dropped"])
+```
+
+`import_snapshot(path)` adds a snapshot to a client's graph and returns a report
+with the keys of the server's import response (`nodes_imported`,
+`edges_imported`, `nodes_merged`, `merges_by_key`, `dedup_keys_unused`, ...)
+plus `duration_ms`. Pass `dedup_keys=["drugbank_id"]` to merge incoming nodes
+into existing ones that share a key value; `open_snapshot` takes the same
+argument. `export_snapshot` replaces any file at `path`, and its `dropped` list
+says what the format does not carry.
+
+**Vectors added with `add_vector` are not carried.** `add_vector` puts a vector
+in the vector index only, not on the node as a property, and a snapshot holds
+node properties and index *declarations*. After `open_snapshot` the index exists
+but is empty, and `vector_search` returns nothing; the export's `dropped` list
+does not report it yet. Re-add the vectors after opening.
+
+All three are embedded-only: a remote client raises `RuntimeError`, because a
+server imports and exports its own snapshots (`POST /api/snapshot/import` and
+`POST /api/snapshot/export`). A file that is missing
+or is not a snapshot raises `RuntimeError` and leaves the graph unchanged.
+
 ## asyncio
 
 `samyama_aio` wraps the same client, running each call on a worker thread so
@@ -95,6 +131,37 @@ asyncio.run(main())
 
 `AsyncSamyamaClient.connect(url, **kwargs)` takes the same keyword arguments as
 `SamyamaClient.connect`.
+
+## Natural-language queries
+
+`nlq` turns a question into Cypher. It returns the query and does not run it;
+a generated query that writes is refused.
+
+```python
+client = SamyamaClient.embedded()
+# ... load a graph ...
+cypher = client.nlq("Who does Alice know?", provider="openai")  # key from OPENAI_API_KEY
+result = client.query_readonly(cypher)
+```
+
+In embedded mode the translation happens in this process: the model is shown
+this graph's schema, as the server would show it. The provider is read from
+the same environment variables the server reads, and the keyword arguments
+take their place for one call:
+
+| argument       | environment variable it replaces                     |
+|----------------|------------------------------------------------------|
+| `provider`     | `NLQ_PROVIDER` — `openai`, `gemini`, `ollama`, `claudecode` or `mock`; no default |
+| `model`        | `NLQ_MODEL` (default `gpt-4o`)                       |
+| `api_key`      | the provider's own: `OPENAI_API_KEY`, `GEMINI_API_KEY` |
+| `api_base_url` | `NLQ_API_BASE_URL`                                   |
+
+No server is involved, but the provider still is: `openai` and `gemini` send
+the question and the schema summary to that service. `mock` answers a fixed
+query without leaving the process, for tests.
+
+A remote client asks the server (`POST /api/nlq`), which chooses its own
+provider, so passing any of these arguments to it raises `ValueError`.
 
 ## More
 
