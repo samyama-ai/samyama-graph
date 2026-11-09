@@ -1101,6 +1101,16 @@ pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse 
     }))
 }
 
+/// `GET /api/algorithms/catalog` — every algorithm `CALL algo.*` runs (#2013).
+///
+/// A client listed algorithms from its own hard-coded array, eight of the
+/// sixty-eight dispatched; this is the list `is_algorithm` itself reads, so
+/// it cannot name one that does not run or miss one that does.
+pub async fn algorithm_catalog_handler() -> impl IntoResponse {
+    let algorithms = crate::query::executor::algorithm_catalog::ALGORITHM_CATALOG;
+    Json(json!({ "count": algorithms.len(), "algorithms": algorithms }))
+}
+
 /// `GET /metrics` — Prometheus text exposition (REL-10).
 ///
 /// Hand-rolled rather than pulling in a metrics crate: what is exported here
@@ -1583,6 +1593,77 @@ fn json_scalar_value(val: &serde_json::Value) -> Option<PropertyValue> {
         }
         serde_json::Value::Bool(b) => Some(PropertyValue::Boolean(*b)),
         _ => None,
+    }
+}
+
+/// A JSON value as an imported property (#2047).
+///
+/// `Ok(None)` for `null`, which leaves the property unset as it always has.
+/// A list of scalars is a list property -- an embedding among them, which the
+/// store hands to any vector index on that label and key. Anything else is an
+/// error naming what was wrong: this used to be `None` too, so an `embedding`
+/// list was dropped from every node and the import still answered `ok`.
+fn json_property_value(val: &serde_json::Value) -> Result<Option<PropertyValue>, String> {
+    match val {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                json_scalar_value(item).ok_or_else(|| {
+                    format!(
+                        "element {i} of the list is {}; a list property holds \
+                         strings, numbers or booleans",
+                        json_kind(item)
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|v| Some(PropertyValue::Array(v))),
+        serde_json::Value::Object(_) => Err(
+            "a map is not a property value; a property is a scalar or a list of scalars"
+                .to_string(),
+        ),
+        scalar => Ok(json_scalar_value(scalar)),
+    }
+}
+
+fn json_kind(val: &serde_json::Value) -> &'static str {
+    match val {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "a list",
+        serde_json::Value::Object(_) => "a map",
+    }
+}
+
+/// Why `value` cannot be imported as `label.key`, when a vector index covers
+/// that property and the value is not a vector of the index's dimensions.
+///
+/// The store indexes a vector without reporting a mismatch -- a wrong-length
+/// embedding is stored on the node and left out of the index -- so the import
+/// checks first, while it can still refuse the whole request.
+fn vector_import_mismatch(
+    store: &crate::graph::GraphStore,
+    label: &str,
+    key: &str,
+    value: &PropertyValue,
+) -> Option<String> {
+    let index = store.vector_index.get_index(label, key)?;
+    let dimensions = index.read().ok()?.dimensions();
+    match value.to_vector() {
+        Some(v) if v.len() == dimensions => None,
+        Some(v) => Some(format!(
+            "the vector index on :{label}({key}) has {dimensions} dimensions; \
+             this vector has {}",
+            v.len()
+        )),
+        None => Some(format!(
+            "the vector index on :{label}({key}) holds lists of {dimensions} numbers; \
+             this value is not one"
+        )),
     }
 }
 
@@ -2823,25 +2904,42 @@ pub async fn import_json_handler(
                 .as_ref()
                 .and_then(endpoint_key_text)
         };
-        let rows: Vec<EdgeRow> = payload
+        // A property that cannot be imported refuses the request before
+        // anything is written, as it does for nodes below (#2047).
+        let rows: Result<Vec<EdgeRow>, String> = payload
             .edges
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(i, e)| {
                 let obj = e.as_object();
-                EdgeRow {
+                let mut props = Vec::new();
+                for (k, v) in obj.into_iter().flatten() {
+                    if k.as_str() == spec.source_key_col || k.as_str() == spec.target_key_col {
+                        continue;
+                    }
+                    if let Some(v) = json_property_value(v)
+                        .map_err(|e| format!("edge {i}, property `{k}`: {e}"))?
+                    {
+                        props.push((k.clone(), v));
+                    }
+                }
+                Ok(EdgeRow {
                     source: key(obj, &spec.source_key_col),
                     target: key(obj, &spec.target_key_col),
-                    props: obj
-                        .into_iter()
-                        .flatten()
-                        .filter(|(k, _)| {
-                            k.as_str() != spec.source_key_col && k.as_str() != spec.target_key_col
-                        })
-                        .filter_map(|(k, v)| json_scalar_value(v).map(|v| (k.clone(), v)))
-                        .collect(),
-                }
+                    props,
+                })
             })
             .collect();
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": e, "created": 0 })),
+                )
+                    .into_response()
+            }
+        };
         let outcome = state
             .mutate(&payload.graph, |store| {
                 import_edges(store, &spec, rows, strict)
@@ -2866,36 +2964,91 @@ pub async fn import_json_handler(
             .into_response();
     }
 
-    let mut count = 0usize;
-    state
+    // Every property is converted before any node is created, so a value that
+    // cannot be imported refuses the request with nothing written, rather than
+    // being left off the node it belonged to (#2047).
+    let mut rows: Vec<Vec<(String, PropertyValue)>> = Vec::with_capacity(payload.nodes.len());
+    for (i, node_json) in payload.nodes.iter().enumerate() {
+        let mut props = Vec::new();
+        for (k, v) in node_json.as_object().into_iter().flatten() {
+            match json_property_value(v) {
+                Ok(Some(v)) => props.push((k.clone(), v)),
+                Ok(None) => {}
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": format!("node {i}, property `{k}`: {e}"),
+                            "nodes_created": 0,
+                        })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        rows.push(props);
+    }
+
+    // What the store reports per property. A uniqueness violation is the
+    // case that reaches here; it used to be discarded with `let _`.
+    const REPORTED_ERRORS: usize = 20;
+    let outcome = state
         .mutate(&payload.graph, |store_guard| {
-            for node_json in &payload.nodes {
+            // Checked against the store under the write lock, before the
+            // first node, so an index created between the check and the
+            // write cannot slip a mismatch past it.
+            for (i, props) in rows.iter().enumerate() {
+                for (k, v) in props {
+                    if let Some(e) = vector_import_mismatch(store_guard, &payload.label, k, v) {
+                        return Err(format!("node {i}, property `{k}`: {e}"));
+                    }
+                }
+            }
+            let mut count = 0usize;
+            let mut failed = 0usize;
+            let mut errors: Vec<String> = Vec::new();
+            for (i, props) in rows.into_iter().enumerate() {
                 let node_id = store_guard.create_node(payload.label.as_str());
 
                 // Through `set_node_property`, not the `&mut Node` (#1505) —
                 // see the CSV handler above for why.
-                let props: Vec<(String, PropertyValue)> = node_json
-                    .as_object()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|(k, v)| json_scalar_value(v).map(|v| (k.to_string(), v)))
-                    .collect();
                 for (k, v) in props {
-                    let _ = store_guard.set_node_property(&payload.graph, node_id, k, v);
+                    if let Err(e) = store_guard.set_node_property(&payload.graph, node_id, k.clone(), v) {
+                        failed += 1;
+                        if errors.len() < REPORTED_ERRORS {
+                            errors.push(format!("node {i}, property `{k}`: {e}"));
+                        }
+                    }
                 }
                 count += 1;
             }
+            Ok((count, failed, errors))
         })
         .await;
 
-    Json(json!({
-        "status": "ok",
+    let (count, failed, errors) = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e, "nodes_created": 0 })),
+            )
+                .into_response()
+        }
+    };
+
+    let mut body = json!({
+        "status": if failed == 0 { "ok" } else { "partial" },
         "import_mode": "node",
         "nodes_created": count,
         "label": payload.label,
         "graph": payload.graph,
-    }))
-    .into_response()
+    });
+    if failed > 0 {
+        body["properties_not_written"] = json!(failed);
+        body["errors"] = json!(errors);
+    }
+    Json(body).into_response()
 }
 
 // ==================== Snapshot Handlers ====================
@@ -3003,13 +3156,12 @@ pub async fn restore_snapshot_handler(
         }
     };
 
-    // #1495: this handler takes the store lock directly rather than going
-    // through `AppState::mutate`, so the admission ceiling `mutate` installs
-    // was never set on the store, and the import loop calls `create_node`,
-    // which cannot refuse. Until here nothing on this path had a ceiling of
-    // any kind — a 64 GB body was the only limit on how much a caller could
-    // add. The header declares the counts, so the file is refused whole
-    // before any of it is written.
+    // #1495: a file whose header declares more than the quota allows is
+    // refused whole, before any of it is written. This is only the early
+    // answer. The header is whatever the uploader wrote, so a header declaring
+    // zero over a body of millions passes it; the limit itself is the
+    // admission installed around the import below, which every row is charged
+    // against.
     //
     // A header that cannot be read is left to the import below to report: the
     // peek's checks are a subset of the import's, so anything that fails here
@@ -3034,6 +3186,26 @@ pub async fn restore_snapshot_handler(
     // does not go through the mutation journal -- one journal entry per node of a
     // hundred-million-node snapshot is not the right shape for it.
     let mut store_guard = state.store.write().await;
+
+    // The ceiling every row of the import is charged against. The import takes
+    // the store lock itself rather than going through `AppState::mutate`, so
+    // nothing else installs one, and without it a body longer than its header
+    // was unbounded.
+    //
+    // "Used" is the larger of the quota counter and what the store holds. A
+    // snapshot import is not journalled, so the counter never learns of its
+    // rows; taken alone it would let each upload start again from the count
+    // before the last one.
+    let admission = state
+        .persistence
+        .as_ref()
+        .and_then(|pm| pm.write_admission(&default_graph()))
+        .map(|mut a| {
+            a.nodes_used = a.nodes_used.max(store_guard.node_count() as u64);
+            a.edges_used = a.edges_used.max(store_guard.edge_count() as u64);
+            a
+        });
+
     let cursor = std::io::Cursor::new(&data);
     let dedup_keys: Vec<String> = params
         .dedup_key
@@ -3049,21 +3221,27 @@ pub async fn restore_snapshot_handler(
     // Sniffs the file: an encrypted snapshot needs the key, a plaintext one is
     // read exactly as before. Dedup keys are not threaded through the encrypted
     // path yet and are refused rather than silently ignored.
-    let imported = if crate::snapshot::encryption::looks_encrypted(&data) {
-        match state.snapshot_key.as_deref() {
-            None => Err("this snapshot is encrypted and the server has no --snapshot-key".into()),
-            Some(_) if !dedup_key_refs.is_empty() => Err(
-                "deduplication on an encrypted snapshot is not supported yet".into(),
-            ),
-            Some(k) => crate::snapshot::import_tenant_maybe_encrypted(
-                &mut store_guard,
+    let imported = store_guard.with_write_admission(admission, |store| {
+        if crate::snapshot::encryption::looks_encrypted(&data) {
+            match state.snapshot_key.as_deref() {
+                None => Err(
+                    "this snapshot is encrypted and the server has no --snapshot-key".into(),
+                ),
+                Some(_) if !dedup_key_refs.is_empty() => Err(
+                    "deduplication on an encrypted snapshot is not supported yet".into(),
+                ),
+                Some(k) => crate::snapshot::import_tenant_maybe_encrypted(store, cursor, Some(k)),
+            }
+        } else {
+            crate::snapshot::import_tenant_with_merge_policy(
+                store,
                 cursor,
-                Some(k),
-            ),
+                &dedup_key_refs,
+                params.dedup_allow_conflicts,
+                params.merge_edges,
+            )
         }
-    } else {
-        crate::snapshot::import_tenant_with_merge_policy(&mut store_guard, cursor, &dedup_key_refs, params.dedup_allow_conflicts, params.merge_edges)
-    };
+    });
     match imported {
         Ok(stats) => {
             // HA-08: Persist snapshot atomically (tmp → fsync → rename → marker)
@@ -3137,6 +3315,16 @@ pub async fn restore_snapshot_handler(
             }))
             .into_response()
         }
+        // The import has already been rolled back, so nothing it read is left
+        // in the graph.
+        Err(e) if matches!(
+            e.downcast_ref::<crate::graph::GraphError>(),
+            Some(crate::graph::GraphError::QuotaExceeded(_))
+        ) => (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": e.to_string(), "nodes_imported": 0, "edges_imported": 0 })),
+        )
+            .into_response(),
         Err(e) => (
             axum::http::StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),

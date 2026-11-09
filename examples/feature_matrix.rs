@@ -327,14 +327,14 @@ fn capabilities() -> Vec<Capability> {
                 if_present: "Yes", if_absent: "No command",
             },
             rust_sdk: Cell {
-                evidence: Evidence { file: "crates/samyama-sdk/src/embedded.rs", needle: "fn nlq_pipeline" },
-                if_present: "**Embedded-only** — `EmbeddedClient::nlq_pipeline()` returns the \
-                             `NLQPipeline`; not on the shared trait",
+                evidence: Evidence { file: "crates/samyama-sdk/src/embedded.rs", needle: "pub async fn nlq_with" },
+                if_present: "Yes — `EmbeddedClient::nlq`/`nlq_with` in-process, \
+                             `RemoteClient::nlq` over `/api/nlq`; not on the shared trait",
                 if_absent: "No",
             },
             python_sdk: Cell {
-                evidence: Evidence { file: "sdk/python/src/lib.rs", needle: "nlq" },
-                if_present: "Yes", if_absent: "No method exposed",
+                evidence: Evidence { file: "sdk/python/src/lib.rs", needle: "fn nlq(" },
+                if_present: "Yes — `.nlq()`, embedded and remote", if_absent: "No method exposed",
             },
             typescript_sdk: Cell {
                 evidence: Evidence { file: "sdk/typescript/src/client.ts", needle: "nlq(" },

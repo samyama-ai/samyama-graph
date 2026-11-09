@@ -81,6 +81,20 @@ jobs:
       # architectures. `ci-ok` passed and was right to: skipped is success by
       # design. The filter was what was wrong (#1854).
       docs: ${{ steps.filter.outputs.docs }}
+      # A fourth: does this run need the macOS ARM64 and Windows legs? HW-16
+      # asks for every release to be tested on four platforms (#1696). Releases
+      # are cut from main, so every pull request into main and every push to it
+      # runs them, and the `ci-ok` that main requires waits for them. A pull
+      # request into dev does not: a Windows leg roughly doubles the wall clock,
+      # and dev reaches main only through a pull request that runs it anyway.
+      # Editing this file runs them too, so a change to the job is tested by
+      # the pull request that makes it.
+      platforms: ${{ steps.filter.outputs.platforms }}
+      # Two more, for the workflows folded in here. Both were separate
+      # PR-triggered workflows, so a pull request started three workflows where
+      # one will do. Neither gates a merge -- see their files.
+      catalogs: ${{ steps.filter.outputs.catalogs }}
+      sortcost: ${{ steps.filter.outputs.sortcost }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -92,6 +106,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
 
@@ -102,6 +117,9 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "conformance=true" >> "$GITHUB_OUTPUT"
             echo "docs=true" >> "$GITHUB_OUTPUT"
+            echo "platforms=true" >> "$GITHUB_OUTPUT"
+            echo "catalogs=true" >> "$GITHUB_OUTPUT"
+            echo "sortcost=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -110,6 +128,9 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "conformance=true" >> "$GITHUB_OUTPUT"
             echo "docs=true" >> "$GITHUB_OUTPUT"
+            echo "platforms=true" >> "$GITHUB_OUTPUT"
+            echo "catalogs=true" >> "$GITHUB_OUTPUT"
+            echo "sortcost=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -182,6 +203,67 @@ jobs:
           fi
           echo "docs=$DOCS" >> "$GITHUB_OUTPUT"
 
+          # macOS ARM64 and Windows: on the way to a release, or when this file
+          # changes. Skipped with the rest when no code is touched.
+          PLATFORMS=false
+          if [ "$CODE" = "true" ] && [ "${BASE_REF:-}" = "main" ]; then
+            echo "a pull request into main: the macOS and Windows legs run"
+            PLATFORMS=true
+          else
+            # Deliberately a loop and a string comparison, not
+            # `printf '%s\n' $CHANGED | grep -qx`. `grep -q` exits on its first
+            # match, and under `pipefail` the printf it orphans exits 141, which
+            # becomes the pipeline's status -- so a match reads as a miss as soon
+            # as the list outgrows the 64K pipe buffer, which it does at around a
+            # thousand paths. That fails *open*: the legs would be skipped and
+            # `ci-ok` would go green having measured nothing, which is #1134
+            # again. The CODE loop above pipes one path at a time, one write that
+            # cannot be orphaned, which is why it is safe and this would not be.
+            for f in $CHANGED; do
+              if [ "$f" = ".github/workflows/ci.yml" ]; then
+                echo "ci.yml changed: the macOS and Windows legs run"
+                PLATFORMS=true
+                break
+              fi
+            done
+          fi
+          if [ "$PLATFORMS" = "false" ]; then
+            echo "not a pull request into main; the macOS and Windows legs will be skipped"
+          fi
+          echo "platforms=$PLATFORMS" >> "$GITHUB_OUTPUT"
+          # The KG catalogs, folded in from `kg-catalogs.yml`. These are the
+          # paths that file's own `paths:` filter named.
+          CATALOG_PATHS='(^case_studies/[^/]+/questions\.json$|^case_studies/[^/]+/[^/]+\.sgqueries$|^case_studies/[^/]+/case\.env$|^\.github/workflows/kg-catalogs\.yml$|^\.github/workflows/ci\.yml$)'
+
+          CATALOGS=false
+          for f in $CHANGED; do
+            if printf '%s' "$f" | grep -qE "$CATALOG_PATHS"; then
+              echo "requires the KG catalog check: $f"
+              CATALOGS=true
+              break
+            fi
+          done
+          if [ "$CATALOGS" = "false" ]; then
+            echo "no KG catalog touched; that check will be skipped"
+          fi
+          echo "catalogs=$CATALOGS" >> "$GITHUB_OUTPUT"
+
+          # The sort-cost measurement, folded in from `sort-measurement.yml`.
+          SORTCOST_PATHS='(^examples/sort_cost_decompose\.rs$|^\.github/workflows/sort-measurement\.yml$|^\.github/workflows/ci\.yml$)'
+
+          SORTCOST=false
+          for f in $CHANGED; do
+            if printf '%s' "$f" | grep -qE "$SORTCOST_PATHS"; then
+              echo "requires the sort-cost measurement: $f"
+              SORTCOST=true
+              break
+            fi
+          done
+          if [ "$SORTCOST" = "false" ]; then
+            echo "sort-cost probe untouched; that measurement will be skipped"
+          fi
+          echo "sortcost=$SORTCOST" >> "$GITHUB_OUTPUT"
+
   docs-gate:
     # CH-DOC-EXEC for a PR that changes documentation and no code (#1854).
     #
@@ -215,6 +297,19 @@ jobs:
         # Byte-identical to the step inside `test`, so the two cannot drift into
         # disagreeing about what the gate is.
         run: cargo run --release --example doc_check
+
+      # The second gate a documentation-only change can break, and the one
+      # #1854 did not cover. CH-DOC-EXEC parses the Cypher in `*.md`;
+      # `readme_claims_name_their_artifact` asserts on README.md's *prose* --
+      # that the HIER line matches PROVENANCE.json, that every `N/100 queries`
+      # statement carries its measurement date, and that the XK02 headline
+      # agrees with the CSV figure and the table row it quotes. Those tests live
+      # in the `test` job, which a docs-only PR skips, so #1860 and then #2057
+      # each rewrote the README, merged green, and broke `test` on every open PR
+      # on both architectures. Running them here closes that for README prose
+      # the way the step above closed it for README Cypher.
+      - name: The README's claims still match the artifacts they name
+        run: cargo test --release --test readme_claims_name_their_artifact
 
   supply-chain:
     # REL-14 / TRUST-08 (#1042). Known advisories, licences outside the allow
@@ -313,6 +408,20 @@ jobs:
       # failed. Reads the lockfile, not a container: seconds, not minutes.
       - name: The Dockerfile's Rust is new enough for the lockfile
         run: python3 scripts/check_dockerfile_rust_pin.py
+
+      # The other way the container breaks without the Dockerfile being
+      # touched. v1.14.0 shipped with no image because #1833 moved `cli/` into
+      # `crates/samyama-cli` while the Dockerfile still said `COPY cli ./cli`
+      # (#2056 removed it). The pull request that broke it changed no
+      # Dockerfile line, so a gate keyed on Dockerfile changes would not have
+      # fired -- and nothing builds the image on a PR or in the nightly sweep,
+      # so the first build of a release is the release itself.
+      #
+      # This checks the Dockerfile's own COPY sources exist. It does not prove
+      # the image builds; only a build does that. It does catch the class that
+      # actually broke, in the PR that causes it, in under a second.
+      - name: The Dockerfile's COPY sources all exist
+        run: python3 scripts/check_dockerfile_copy_sources.py
 
       - name: Examples and benches compile
         # The sweep runs these; here we only prove they still build, which is
@@ -561,6 +670,68 @@ jobs:
           path: target/release/samyama
           retention-days: 1
           if-no-files-found: warn
+
+  # The two release platforms the `test` matrix does not cover (HW-16, #1696).
+  #
+  # A separate job rather than two more entries in `test`'s matrix because
+  # nearly every step there after `Tests` is Linux-specific (apt-get, the
+  # release binary the conformance job downloads, the GPML gates). What has to
+  # hold on every platform we ship to is the test suite itself, so that is what
+  # runs here. The python wheels for both platforms are built and tested by
+  # publish-pypi.yml, but only at release time and only through the SDK.
+  #
+  # macos-15 is arm64 (macos-14 retires 2026-11-02, see publish-pypi.yml).
+  # windows-2022 is pinned for the same reason publish-pypi.yml pins it: the
+  # floating windows-latest moved to an MSVC that broke the RocksDB build.
+  platforms:
+    name: platforms (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.platforms == 'true'
+    runs-on: ${{ matrix.os }}
+    # Cold, both runners compile RocksDB from source; Windows is the slower.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    steps:
+      # Windows runners default to core.autocrlf=true, which would hand the
+      # tests that read fixtures and corpora byte-for-byte CRLF files that no
+      # other platform sees.
+      - name: Check out with the repository's line endings
+        run: git config --global core.autocrlf false
+
+      # The first macos-15 run died at the linker with "No space left on
+      # device": every test binary and example links the whole engine
+      # statically, and the arm64 runner has far less free disk than the Linux
+      # ones. The Android SDK and the Xcode versions other than the selected one
+      # are the bulk of the image and nothing here uses them.
+      - name: Free disk space
+        if: runner.os == 'macOS'
+        run: |
+          df -h /
+          keep=$(xcode-select -p | sed 's#/Contents/Developer$##')
+          echo "keeping $keep"
+          sudo rm -rf "${ANDROID_HOME:-$HOME/Library/Android/sdk}" "$HOME/Library/Android"
+          for x in /Applications/Xcode*.app; do
+            [ "$(cd "$x" && pwd -P)" = "$(cd "$keep" && pwd -P)" ] && continue
+            [ -L "$x" ] && continue
+            sudo rm -rf "$x"
+          done
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate from ci-test: nothing compiled for Linux is reusable here.
+          shared-key: ci-platforms
+
+      - name: Tests
+        shell: bash
+        run: cargo test --workspace --no-fail-fast
 
   # One job for both SDKs.
   #
@@ -1146,6 +1317,30 @@ jobs:
           done
           echo "every excluded workspace lockfile is current"
 
+  # Folded in from `kg-catalogs.yml` and `sort-measurement.yml`, which were the
+  # only other workflows a pull request triggered. Called rather than copied, so
+  # each still has one definition and keeps its own schedule and dispatch.
+  #
+  # Neither is in `ci-ok`'s needs, which preserves exactly today's behaviour:
+  # the catalog check downloads published snapshots over the network, and the
+  # sort probe is a measurement, not a test. Folding them in is about one
+  # workflow per pull request, not about making them gate.
+  kg-catalogs:
+    name: KG catalogs
+    needs: changes
+    if: needs.changes.outputs.catalogs == 'true'
+    uses: ./.github/workflows/kg-catalogs.yml
+    permissions:
+      contents: read
+
+  sort-measurement:
+    name: sort cost measurement
+    needs: changes
+    if: needs.changes.outputs.sortcost == 'true'
+    uses: ./.github/workflows/sort-measurement.yml
+    permissions:
+      contents: read
+
   ci-ok:
     name: ci-ok
     # always() is load-bearing. Without it a failed dependency SKIPS this job, and
@@ -1163,6 +1358,7 @@ jobs:
       - snapshot-portability-read
       - sdk-compat
       - excluded-lockfiles
+      - platforms
     runs-on: ubuntu-latest
     steps:
       - name: Every suite either succeeded or was skipped

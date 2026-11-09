@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Samyama Graph Database API
-  version: 1.13.0
+  version: 1.14.0
   description: |
     HTTP API for the Samyama high-performance distributed graph database.
     Supports OpenCypher queries, graph status, and CRUD operations.
@@ -200,6 +200,54 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SchemaResponse'
+
+  /api/algorithms/catalog:
+    get:
+      operationId: getAlgorithmCatalog
+      summary: Algorithms `CALL algo.*` can run
+      description: |
+        Every graph algorithm the engine dispatches, with its aliases, category,
+        the columns each returned row carries, and whether it writes to the graph
+        (and so needs write access). Names resolve case-insensitively, with or
+        without the `algo.`/`samyama.` prefix. Parameters are not described yet.
+        The optimisation solvers `algo.or.solve` accepts are listed by
+        `/optimize/algorithms`.
+      responses:
+        '200':
+          description: Algorithm catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, algorithms]
+                properties:
+                  count:
+                    type: integer
+                  algorithms:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, aliases, category, yields, writes]
+                      properties:
+                        name:
+                          type: string
+                          example: algo.katz
+                        aliases:
+                          type: array
+                          items:
+                            type: string
+                          example: [algo.katzCentrality]
+                        category:
+                          type: string
+                          enum: [centrality, community, path, link_prediction, similarity,
+                                 structure, graph_metric, temporal, embedding, optimization]
+                        yields:
+                          type: array
+                          items:
+                            type: string
+                          example: [node, score]
+                        writes:
+                          type: boolean
 
   /api/import/csv:
     post:
@@ -620,7 +668,7 @@ paths:
                 $ref: '#/components/schemas/StatusResponse'
               example:
                 status: healthy
-                version: 1.13.0
+                version: 1.14.0
                 storage:
                   nodes: 2000
                   edges: 11000
@@ -1578,7 +1626,7 @@ components:
           type: string
           description: Server version
           examples:
-            - 1.13.0
+            - 1.14.0
         storage:
           type: object
           properties:

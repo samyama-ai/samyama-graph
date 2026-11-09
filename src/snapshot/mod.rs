@@ -320,7 +320,7 @@ pub fn export_tenant_with_compression(
     // bytes reaching the encoder are identical, so the file is too.
     let mut gz = std::io::BufWriter::with_capacity(
         EXPORT_BUFFER_BYTES,
-        GzEncoder::new(writer, Compression::new(compression_level.min(9))),
+        GzEncoder::new(CountingWriter::new(writer), Compression::new(compression_level.min(9))),
     );
 
     // The store's sources go forward with its data (#1911). When the graph
@@ -481,17 +481,46 @@ pub fn export_tenant_with_compression(
         Ok(())
     })?;
 
-    let finished = gz.into_inner().map_err(|e| e.into_error())?.finish()?;
-    let _ = finished;
+    let mut finished = gz.into_inner().map_err(|e| e.into_error())?.finish()?;
+    // Flushed here, not on drop: a buffered writer's drop discards the error of
+    // its last write, and an export that lost its tail must not report success.
+    finished.flush()?;
 
     Ok(ExportStats {
         node_count,
         edge_count: total_edge_count,
         labels,
         edge_types,
-        bytes_written: 0,
+        bytes_written: finished.count,
         dropped,
     })
+}
+
+/// Counts the bytes that pass through it to `inner`: the size of the file an
+/// export produced. `ExportStats::bytes_written` was a literal 0 from the first
+/// version of the export, so every caller was told an export wrote nothing
+/// (found by #2092's Python round-trip test).
+struct CountingWriter<W> {
+    inner: W,
+    count: u64,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, count: 0 }
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.count += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// What this export will not carry, for this graph (INT-06).
@@ -594,26 +623,94 @@ pub fn import_tenant_maybe_encrypted(
     import_tenant_with_dedup(store, dec, &[])
 }
 
+/// The longest line a snapshot may carry, in bytes, not counting its newline.
+///
+/// `BufRead::lines` has no limit: a gzip body that inflates to one line with no
+/// newline in it is read into a single `String` until memory runs out, whatever
+/// the header declares. One record per line means a line is one node, edge or
+/// declaration, and 64 MiB is far past any of those that a real export writes —
+/// a 4,096-dimension embedding is under 100 KB as JSON.
+pub const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// `BufRead::lines`, refusing a line longer than `max` bytes instead of
+/// buffering it.
+///
+/// The line is refused as soon as it passes `max`, before the rest of it is
+/// read. Line endings are stripped as `lines` strips them: `\n`, and a `\r`
+/// before it.
+struct BoundedLines<R> {
+    reader: R,
+    max: usize,
+}
+
+impl<R: BufRead> BoundedLines<R> {
+    fn new(reader: R, max: usize) -> Self {
+        Self { reader, max }
+    }
+
+    fn read_line(&mut self) -> std::io::Result<Option<String>> {
+        let mut line = Vec::new();
+        loop {
+            let available = match self.reader.fill_buf() {
+                Ok(buf) => buf,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            if available.is_empty() {
+                if line.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            }
+            let (take, done) = match available.iter().position(|&b| b == b'\n') {
+                Some(i) => (i, true),
+                None => (available.len(), false),
+            };
+            if line.len() + take > self.max {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("snapshot line longer than {} bytes", self.max),
+                ));
+            }
+            line.extend_from_slice(&available[..take]);
+            self.reader.consume(take + done as usize);
+            if done {
+                break;
+            }
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        String::from_utf8(line)
+            .map(Some)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
+impl<R: BufRead> Iterator for BoundedLines<R> {
+    type Item = std::io::Result<String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.read_line().transpose()
+    }
+}
+
 /// Read only line 0 of a snapshot and return its header.
 ///
-/// The header declares `node_count` and `edge_count`, so a caller can ask
-/// whether the file fits before any of it is written. `/api/snapshot/import`
-/// needs that: it takes the store lock directly rather than going through
-/// `AppState::mutate`, so the admission ceiling `mutate` installs was never
-/// set, and `create_node` cannot refuse in any case (#1495). Checking after
-/// the import is not equivalent — the graph is already over the limit by then,
-/// and undoing it is the rollback path, not admission control.
+/// The header declares `node_count` and `edge_count`, so a caller can refuse a
+/// file that says it will not fit before any of it is written. That is an early
+/// answer, not the limit: the header is whatever the uploader wrote, and a body
+/// longer than its header declares is held to the quota row by row inside the
+/// import, where each node asks `admit_node` and each edge `admit_edge`.
 ///
 /// Reads one line and stops; the rest of a hundred-million-node file is never
 /// decompressed.
 pub fn peek_header(reader: impl Read) -> Result<SnapshotHeader, Box<dyn std::error::Error>> {
     let decoder = GzDecoder::new(reader);
-    let mut buf_reader = BufReader::new(decoder);
-    let mut header_line = String::new();
-    if buf_reader.read_line(&mut header_line)? == 0 {
-        return Err("empty snapshot file: missing header".into());
-    }
-    let header: SnapshotHeader = serde_json::from_str(header_line.trim_end())?;
+    let header_line = BoundedLines::new(BufReader::new(decoder), MAX_LINE_BYTES)
+        .next()
+        .ok_or("empty snapshot file: missing header")??;
+    let header: SnapshotHeader = serde_json::from_str(&header_line)?;
     if header.format != "sgsnap" {
         return Err(format!(
             "invalid snapshot format: expected \"sgsnap\", got \"{}\"",
@@ -979,8 +1076,7 @@ fn import_tenant_inner(
     merged: &mut Vec<MergeUndo>,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
     let decoder = GzDecoder::new(reader);
-    let buf_reader = BufReader::new(decoder);
-    let mut lines = buf_reader.lines();
+    let mut lines = BoundedLines::new(BufReader::new(decoder), MAX_LINE_BYTES);
 
     // Parse header (first line)
     let header_line = lines
@@ -1314,6 +1410,7 @@ fn import_tenant_inner(
                 // by exactly one of its labels, and **which one was
                 // arbitrary** -- the snapshot's label order comes from a
                 // HashSet. `create_node_with_labels` indexes all of them.
+                store.admit_node()?;
                 let new_id = store.create_node_with_labels(
                     snap_node.labels.iter().map(|l| Label::new(l.as_str())),
                 );
@@ -1381,6 +1478,7 @@ fn import_tenant_inner(
                 id_remap.insert(snap_node.id, new_id);
             } else {
                 // v1: use full create_node with HashMap properties
+                store.admit_node()?;
                 let new_id = store.create_node_with_labels(
                     snap_node.labels.iter().map(|l| Label::new(l.as_str())),
                 );
@@ -1670,8 +1768,43 @@ fn import_tenant_inner(
         Some(snap) => {
             let existing = store.index_catalog().definitions;
             let mut accepted = crate::index::catalog::IndexCatalog::default();
+            // A vector index's HNSW parameters live in a `VectorParams` record
+            // that is written only when they are not the defaults (#1971), so
+            // two catalogs can declare the same `Vector` and still build it
+            // differently. Compare the parameters each side would build with,
+            // and skip a vector index's parameters along with the index.
+            let ours = effective_vector_params(&existing);
+            let theirs = effective_vector_params(&snap.definitions);
+            let skipped_vectors: std::collections::HashSet<(String, String)> = snap
+                .definitions
+                .iter()
+                .filter_map(|def| match def {
+                    crate::index::catalog::IndexDefinition::Vector { label, property, .. } => {
+                        let key = (label.clone(), property.clone());
+                        let differs = ours
+                            .get(&key)
+                            .is_some_and(|o| Some(o) != theirs.get(&key));
+                        (differs || conflicting_definition(&existing, def).is_some())
+                            .then_some(key)
+                    }
+                    _ => None,
+                })
+                .collect();
             for def in snap.definitions {
-                if let Some(theirs) = conflicting_definition(&existing, &def) {
+                if let Some(key) = vector_key(&def).filter(|k| skipped_vectors.contains(k)) {
+                    // Counted once per index, on its `Vector` record.
+                    if matches!(def, crate::index::catalog::IndexDefinition::Vector { .. }) {
+                        eprintln!(
+                            "[snapshot] kept the target's vector index on {}.{} ({}); \
+                             skipped the snapshot's ({})",
+                            key.0,
+                            key.1,
+                            ours.get(&key).map_or("absent".to_string(), |p| p.to_string()),
+                            theirs.get(&key).map_or("absent".to_string(), |p| p.to_string()),
+                        );
+                        index_conflicts += 1;
+                    }
+                } else if let Some(theirs) = conflicting_definition(&existing, &def) {
                     eprintln!(
                         "[snapshot] kept the target's index {:?}; skipped the snapshot's {:?}",
                         theirs, def
@@ -1772,6 +1905,41 @@ fn sample_value(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// The `(label, property)` a vector index or its parameters are declared on.
+fn vector_key(def: &crate::index::catalog::IndexDefinition) -> Option<(String, String)> {
+    use crate::index::catalog::IndexDefinition as D;
+    match def {
+        D::Vector { label, property, .. } | D::VectorParams { label, property, .. } => {
+            Some((label.clone(), property.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// The HNSW parameters each declared vector index is built with. An index
+/// with no `VectorParams` record has the defaults, which is why that record
+/// is not written for them (#1971).
+fn effective_vector_params(
+    defs: &[crate::index::catalog::IndexDefinition],
+) -> std::collections::HashMap<(String, String), crate::vector::HnswParams> {
+    use crate::index::catalog::IndexDefinition as D;
+    let mut out = std::collections::HashMap::new();
+    for def in defs {
+        if let D::Vector { label, property, .. } = def {
+            out.entry((label.clone(), property.clone()))
+                .or_insert_with(crate::vector::HnswParams::default);
+        }
+    }
+    for def in defs {
+        if let D::VectorParams { label, property, m, ef_construction, ef } = def {
+            if let Some(p) = out.get_mut(&(label.clone(), property.clone())) {
+                *p = crate::vector::HnswParams { m: *m, ef_construction: *ef_construction, ef: *ef };
+            }
+        }
+    }
+    out
+}
+
 /// The target's definition that `incoming` would silently replace, if any.
 ///
 /// Identical definitions are not conflicts: re-declaring one rebuilds it over
@@ -1795,6 +1963,11 @@ fn conflicting_definition<'a>(
                 (la == lb && pa == pb)
                     || (na.is_some() && na == nb)
             }
+            // Other HNSW parameters for the same index (#1971).
+            (
+                D::VectorParams { label: la, property: pa, .. },
+                D::VectorParams { label: lb, property: pb, .. },
+            ) => la == lb && pa == pb,
             _ => false,
         }
     })
@@ -1802,6 +1975,63 @@ fn conflicting_definition<'a>(
 
 #[cfg(test)]
 mod tests {
+    /// `bytes_written` is the size of what the export wrote (#2092). It was a
+    /// literal 0 before, whatever the graph held.
+    #[test]
+    fn export_reports_the_bytes_it_wrote() {
+        let mut store = GraphStore::new();
+        for i in 0..50 {
+            let id = store.create_node("Item");
+            store
+                .set_node_property("default", id, "name", PropertyValue::String(format!("item-{i}")))
+                .unwrap();
+        }
+        let mut out = Vec::new();
+        let stats = export_tenant(&store, &mut out).unwrap();
+        assert!(!out.is_empty());
+        assert_eq!(stats.bytes_written, out.len() as u64);
+
+        // And it changes with what is written: a larger graph, more bytes.
+        for _ in 0..500 {
+            store.create_node("Item");
+        }
+        let mut bigger = Vec::new();
+        let stats = export_tenant(&store, &mut bigger).unwrap();
+        assert_eq!(stats.bytes_written, bigger.len() as u64);
+        assert!(bigger.len() > out.len());
+    }
+
+    #[test]
+    fn bounded_lines_reads_lines_as_lines_does() {
+        let text = "a\r\nbb\n\nccc";
+        let got: Vec<String> = BoundedLines::new(text.as_bytes(), 3)
+            .map(Result::unwrap)
+            .collect();
+        let want: Vec<String> = text.lines().map(str::to_string).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn bounded_lines_refuses_a_line_past_the_limit() {
+        let mut lines = BoundedLines::new(std::io::BufReader::with_capacity(2, &b"abc\nabcd\n"[..]), 3);
+        assert_eq!(lines.next().unwrap().unwrap(), "abc");
+        let err = lines.next().unwrap().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_line_with_no_newline_is_refused_not_buffered() {
+        // The decompression-bomb shape: a body that inflates to one long line.
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(&vec![b'x'; MAX_LINE_BYTES + 1]).unwrap();
+        let data = gz.finish().unwrap();
+        let err = peek_header(data.as_slice()).unwrap_err();
+        assert!(err.to_string().contains("longer than"), "{err}");
+        let mut store = GraphStore::new();
+        let err = import_tenant(&mut store, data.as_slice()).unwrap_err();
+        assert!(err.to_string().contains("longer than"), "{err}");
+    }
+
     use super::*;
     use std::io::Cursor;
 

@@ -47,6 +47,19 @@ const UNGATED: &[(&str, &str)] = &[
         "a new suite that installs Airflow and Dagster from PyPI; making it block \
          every merge is a policy decision, separate from adding it (#1715)",
     ),
+    (
+        "kg-catalogs",
+        "downloads published snapshots over the network, so a rotted release URL \
+         would block every case_studies/ pull request; it did not gate a merge as \
+         its own workflow either, and making it gate is a policy decision separate \
+         from folding it into this one (#2117)",
+    ),
+    (
+        "sort-measurement",
+        "a measurement rather than a test -- it records three trials and uploads \
+         them, and there is no pass to assert; it did not gate a merge as its own \
+         workflow either (#2117)",
+    ),
 ];
 
 fn jobs(doc: &serde_yaml::Value) -> Vec<String> {

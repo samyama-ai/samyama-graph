@@ -13,6 +13,8 @@ verification tools, and dataset helpers. The automated scripts are called from
 | `check_dockerfile_rust_pin.py` | Checks that the Rust version pinned by the Dockerfile satisfies the resolved dependencies. | `python3 scripts/check_dockerfile_rust_pin.py` |
 | `check_lint_ratchet.sh` | Prevents the Clippy warning count from exceeding its configured ceiling. | `scripts/check_lint_ratchet.sh 796` |
 | `check_thread_determinism.sh` | Compares openCypher TCK results across thread counts. CI supplies the TCK feature directory. | `scripts/check_thread_determinism.sh /path/to/tck/features` |
+| `snapshot_property_audit.py` | Reports, for every node label and edge type in a `.sgsnap`, how many records carry each property, how many are empty and how many distinct values there are, and flags columns that are always empty, constant, or hold only a few values (#1815). It reads the file directly, needs no engine, and exits 2 on a snapshot it cannot fully read (truncated, unknown record type, missing fields). | `python3 scripts/snapshot_property_audit.py football.sgsnap --flagged-only` |
+| `test_snapshot_property_audit.py` | Tests the property audit against snapshots built to have the defects it exists to find. | `python3 scripts/test_snapshot_property_audit.py` |
 | `test_check_release_gate.py` | Tests the release-gate validator. | `python3 scripts/test_check_release_gate.py` |
 | `check_release_gate.py` | Blocks a release tag when its CH-REGRESS verdict is missing, stale, red, or does not cover the commit being tagged. | `python3 scripts/check_release_gate.py RELEASE-GATE.json --commit SHA` |
 | `triage_sla.py` | Reports the first-response time of every issue opened from outside the maintainer team, and fails if one opened since `SUPPORT.md` was published waited more than 2 business days. `triage-sla.yml` runs it on weekdays; it needs a token. | `GITHUB_TOKEN=$(gh auth token) python3 scripts/triage_sla.py` |
@@ -66,11 +68,13 @@ scripts/coverage.sh --lcov       # coverage/lcov.info
 | `download_ldbc_snb.sh` | Downloads and extracts LDBC SNB Interactive SF1 data used by the loader and SNB benchmarks. |
 | `download_finbench.sh` | Generates the synthetic LDBC FinBench files through the FinBench loader. |
 | `download_graphalytics.sh` | Downloads LDBC Graphalytics datasets; defaults to XS, with `--size S` or `--size all` for larger datasets. The S-size archives require `zstd`. |
+| `download_ann_datasets.py` | Downloads ann-benchmarks HDF5 datasets (SIFT-1M, GIST-1M, GloVe-100, DEEP) and converts each to the `base.fvecs`/`query.fvecs`/`groundtruth.ivecs`/`metric.txt` directory `ann_benchmark --dataset` reads; `--convert FILE` converts a local HDF5 file. Needs `numpy` and `h5py`. |
 
 ## Requirements
 
 The shell scripts require Bash. Python tools use the Python 3 standard library;
-checks that build or run Samyama need the repository's Rust toolchain. Dataset
+checks that build or run Samyama need the repository's Rust toolchain. `download_ann_datasets.py`
+is the exception: it needs `numpy` and `h5py`. Dataset
 helpers need network access; the Graphalytics S-size download also needs
 `zstd`. Coverage installs `cargo-llvm-cov` if needed.
 

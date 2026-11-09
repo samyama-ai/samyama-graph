@@ -97,7 +97,8 @@ subqueries, `FOREACH`, `MERGE … ON CREATE SET … ON MATCH SET`,
 | `OPTIONS {dimension: 3, similarityFunction: 'euclidean'}` | `OPTIONS {dimensions: 3, similarity: 'l2'}`. The keys are plural and renamed; the metrics are `cosine` and `l2` |
 | `vecf32([0.1, 0.2])` | a plain list, `[0.1, 0.2]`. Remove every `vecf32`: the query is refused with `UnknownFunction` ([#1897](https://github.com/samyama-ai/samyama-graph/issues/1897)) |
 | `db.idx.vector.queryNodes('Person', 'embedding', k, vec)` | `db.index.vector.queryNodes('Person', 'embedding', vec, k)`: **the vector and `k` swap places** |
-| `vec.euclideanDistance`, `vec.cosineDistance` | no equivalent function; rank with the vector index, or compute client-side |
+| `vec.euclideanDistance(a, b)`, `vec.cosineDistance(a, b)` | `vector.distance(a, b, 'EUCLIDEAN')`, `vector.distance(a, b, 'COSINE')` |
+| `YIELD node, score` from a vector query: `score` is a distance, lower is better | `score` is a similarity, higher is better; `YIELD node, distance` gives the distance |
 | `CREATE INDEX FOR ()-[k:KNOWS]-() ON (k.since)` | not supported: no index on a relationship property |
 | `CALL db.indexes()` | `SHOW INDEXES` |
 | `CALL dbms.procedures()` | not available |
