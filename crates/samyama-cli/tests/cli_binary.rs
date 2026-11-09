@@ -19,6 +19,8 @@ enum StatusMode {
     Healthy,
     Degraded,
     ServerError,
+    /// Authentication on, and this client has no credential: every route is 401.
+    Locked,
 }
 
 fn query_body(query: &str) -> (u16, String) {
@@ -83,7 +85,9 @@ fn respond(mut stream: TcpStream, mode: StatusMode) {
     let _ = reader.read_exact(&mut body);
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
 
-    let (code, payload) = if request_line.starts_with("GET /api/status") {
+    let (code, payload) = if matches!(mode, StatusMode::Locked) {
+        (401, "unauthorized\n".to_string())
+    } else if request_line.starts_with("GET /api/status") {
         match mode {
             StatusMode::Healthy => (
                 200,
@@ -96,6 +100,7 @@ fn respond(mut stream: TcpStream, mode: StatusMode) {
                     .to_string(),
             ),
             StatusMode::ServerError => (503, r#"{"error":"down"}"#.to_string()),
+            StatusMode::Locked => unreachable!("answered above"),
         }
     } else if request_line.starts_with("GET /api/memory") {
         (200, r#"{"graph":{"attributed_bytes":1048576},"index_memory_bytes":0}"#.to_string())
@@ -119,6 +124,7 @@ fn respond(mut stream: TcpStream, mode: StatusMode) {
     let reason = match code {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         500 => "Internal Server Error",
         _ => "Service Unavailable",
@@ -508,6 +514,23 @@ fn doctor_fails_on_a_server_that_is_not_persisting() {
     let out = stdout(&o);
     assert_eq!(o.status.code(), Some(1), "{out}");
     assert!(out.contains("writes are being refused"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn doctor_skips_every_server_check_when_the_server_wants_a_credential() {
+    let url = mock_server(StatusMode::Locked);
+    let dir = temp_home("doctor_locked");
+    let o = run(&["--url", &url, "--format", "json", "doctor", "--data-dir", dir.to_str().unwrap()]);
+    let v: serde_json::Value = serde_json::from_str(&stdout(&o)).expect("JSON");
+    let checks = v["checks"].as_array().unwrap();
+    let verdict = |n: &str| checks.iter().find(|c| c["name"] == n).unwrap()["verdict"].clone();
+    // Up, and asking for a password: not a failure, and not a slow server.
+    assert_eq!(verdict("server reachable"), "pass", "{v}");
+    for n in ["version match", "persistence", "server memory", "metrics", "latency"] {
+        assert_eq!(verdict(n), "skipped", "{n}: {v}");
+    }
+    assert_eq!(o.status.code(), Some(0), "{v}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

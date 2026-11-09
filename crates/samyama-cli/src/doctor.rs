@@ -286,14 +286,33 @@ pub fn check_server_memory(fetched: &Fetched, ram_mib: Option<u64>) -> Check {
     }
 }
 
+/// Is `line` a Prometheus sample of a `samyama_` metric with a numeric value?
+/// The text `samyama_` alone is not enough: a `# HELP` line, a label value or
+/// an error page can carry it with no sample behind it.
+fn is_samyama_sample(line: &str) -> bool {
+    let line = line.trim();
+    if line.starts_with('#') {
+        return false;
+    }
+    // Labels can hold spaces, so the value is whatever follows the closing brace.
+    let (name, rest) = match line.find('{') {
+        Some(i) => (&line[..i], line[i..].rsplit_once('}').map_or("", |(_, r)| r)),
+        None => line.split_once(char::is_whitespace).unwrap_or((line, "")),
+    };
+    name.starts_with("samyama_")
+        && rest.split_whitespace().next().is_some_and(|v| v.parse::<f64>().is_ok())
+}
+
 /// `fetched` is `GET /metrics`.
 pub fn check_metrics(fetched: &Fetched) -> Check {
     const NAME: &str = "metrics";
-    match answered(NAME, fetched) {
-        Ok(body) if body.contains("samyama_") => Check::new(NAME, Verdict::Pass,
-            format!("{} metric lines", body.lines().filter(|l| !l.starts_with('#')).count())),
-        Ok(_) => Check::new(NAME, Verdict::Warn, "/metrics answered with no samyama_ metric"),
-        Err(c) => c,
+    let body = match answered(NAME, fetched) {
+        Ok(b) => b,
+        Err(c) => return c,
+    };
+    match body.lines().filter(|l| is_samyama_sample(l)).count() {
+        0 => Check::new(NAME, Verdict::Warn, "/metrics answered with no samyama_ sample"),
+        n => Check::new(NAME, Verdict::Pass, format!("{n} samyama_ samples")),
     }
 }
 
@@ -315,6 +334,27 @@ pub fn check_latency(samples: Result<Vec<Duration>, String>) -> Check {
     } else {
         Check::new(NAME, Verdict::Pass, seen)
     }
+}
+
+/// The code, when the server wants a credential this client does not have.
+pub fn wants_credential(fetched: &Fetched) -> Option<u16> {
+    match fetched {
+        Ok((code @ (401 | 403), _)) => Some(*code),
+        _ => None,
+    }
+}
+
+/// The server answered, but only to ask for a credential. It is reachable, and
+/// nothing else about it was observed, so every server check is skipped rather
+/// than reported as broken: a locked door is not a fault in the house.
+pub fn credential_required(code: u16) -> Vec<Check> {
+    let why = format!("server answered {code}; doctor has no credential it accepts");
+    let mut checks = vec![
+        Check::new("server reachable", Verdict::Pass, format!("answered {code}")),
+        Check::new("version match", Verdict::Skipped, why.clone()),
+    ];
+    checks.extend(SERVER_ONLY.iter().map(|n| Check::new(n, Verdict::Skipped, why.clone())));
+    checks
 }
 
 /// For when no server answered: not observed is not the same as fine.
@@ -545,7 +585,38 @@ mod tests {
         assert_eq!(check_metrics(&Err("refused".into())).verdict, Verdict::Warn);
         assert_eq!(check_metrics(&got(200, "<html>")).verdict, Verdict::Warn);
         let c = check_metrics(&got(200, "# HELP x\nsamyama_nodes 3\n"));
-        assert_eq!((c.verdict, c.detail.as_str()), (Verdict::Pass, "1 metric lines"));
+        assert_eq!((c.verdict, c.detail.as_str()), (Verdict::Pass, "1 samyama_ samples"));
+    }
+
+    #[test]
+    fn metrics_needs_a_real_samyama_sample_not_just_the_text() {
+        let v = |b: &str| check_metrics(&got(200, b)).verdict;
+        // The text alone: in a comment, in a label, in an error page.
+        assert_eq!(v("# HELP samyama_nodes Nodes\n# TYPE samyama_nodes gauge\n"), Verdict::Warn);
+        assert_eq!(v("process_cpu{job=\"samyama_x\"} 1\n"), Verdict::Warn);
+        assert_eq!(v("<html>samyama_ is down</html>"), Verdict::Warn);
+        assert_eq!(v("samyama_nodes\n"), Verdict::Warn);
+        assert_eq!(v("samyama_nodes three\n"), Verdict::Warn);
+        // Real samples, with labels (spaces included) and a timestamp.
+        assert_eq!(v("samyama_queries_total{kind=\"a b\"} 7 1700000000\n"), Verdict::Pass);
+        assert_eq!(v("  samyama_up 1\n"), Verdict::Pass);
+    }
+
+    #[test]
+    fn a_server_that_wants_a_credential_is_reachable_and_every_server_check_skips() {
+        assert_eq!(wants_credential(&got(401, "")), Some(401));
+        assert_eq!(wants_credential(&got(403, "")), Some(403));
+        assert_eq!(wants_credential(&got(200, "{}")), None);
+        assert_eq!(wants_credential(&got(500, "")), None);
+        assert_eq!(wants_credential(&Err("refused".into())), None);
+        let cs = credential_required(401);
+        assert_eq!(cs[0].verdict, Verdict::Pass);
+        assert!(cs[1..].iter().all(|c| c.verdict == Verdict::Skipped), "{cs:?}");
+        let names: Vec<_> = cs.iter().map(|c| c.name).collect();
+        for n in ["version match", "persistence", "server memory", "metrics", "latency"] {
+            assert!(names.contains(&n), "{n} missing from {names:?}");
+        }
+        assert_eq!(report(cs).exit_code(), 0);
     }
 
     #[test]
@@ -618,8 +689,13 @@ mod tests {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         assert_eq!(check_resp_port(url, Some(port)).verdict, Verdict::Pass);
+        // A port held but not listening, rather than one just closed: a closed
+        // port can be taken by a test running alongside before the check runs.
+        let held = tokio::net::TcpSocket::new_v4().unwrap();
+        held.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let dead = held.local_addr().unwrap().port();
+        assert_eq!(check_resp_port(url, Some(dead)).verdict, Verdict::Fail);
         drop(l);
-        assert_eq!(check_resp_port(url, Some(port)).verdict, Verdict::Fail);
     }
 
     #[test]

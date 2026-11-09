@@ -556,6 +556,15 @@ async fn run_doctor(
     format: &OutputFormat,
 ) -> i32 {
     let mut checks = doctor::local_checks(url, data_dir);
+    let get = |path| async move { client.get_raw(path).await.map_err(|e| e.to_string()) };
+    // A server that wants a credential answers every endpoint the same way, and
+    // that is one finding, not five: it is up, and nothing else was observed.
+    let status_raw = get("/api/status").await;
+    if let Some(code) = doctor::wants_credential(&status_raw) {
+        checks.extend(doctor::credential_required(code));
+        checks.push(doctor::check_resp_port(url, resp_port));
+        return print_doctor(doctor::report(checks), format);
+    }
     // The server's own version, or the error that came back instead. Both are
     // findings; neither aborts the local checks, which is the point of running
     // `doctor` when the server is the thing that is broken.
@@ -567,8 +576,7 @@ async fn run_doctor(
     let reachable = status.is_ok();
     checks.extend(doctor::server_checks(status, env!("CARGO_PKG_VERSION")));
     if reachable {
-        let get = |path| async move { client.get_raw(path).await.map_err(|e| e.to_string()) };
-        checks.push(doctor::check_persistence(&get("/api/status").await));
+        checks.push(doctor::check_persistence(&status_raw));
         checks.push(doctor::check_server_memory(&get("/api/memory").await, doctor::local_ram_mib(url)));
         checks.push(doctor::check_metrics(&get("/metrics").await));
         checks.push(doctor::check_latency(probe_latency(client).await));
@@ -576,8 +584,11 @@ async fn run_doctor(
         checks.extend(doctor::server_only_skipped());
     }
     checks.push(doctor::check_resp_port(url, resp_port));
+    print_doctor(doctor::report(checks), format)
+}
 
-    let report = doctor::report(checks);
+/// Print a doctor report in the chosen format. Returns the process exit code.
+fn print_doctor(report: doctor::Report, format: &OutputFormat) -> i32 {
     match format {
         OutputFormat::Json => {
             match serde_json::to_string_pretty(&report) {
