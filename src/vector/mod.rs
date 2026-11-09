@@ -53,3 +53,5 @@ pub mod manager;
 
 pub use index::{VectorIndex, DistanceMetric, HnswParams, VectorError, VectorResult};
 pub use manager::{VectorIndexManager, IndexKey};
+
+pub mod strategy;
