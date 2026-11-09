@@ -1,7 +1,7 @@
 //! The migration corpus, checked on every run rather than when someone
 //! remembers to look (INT-11).
 //!
-//! `benchmarks/compat/neo4j-idioms.cypher` is written from the outside: shapes
+//! `tests/fixtures/compat/neo4j-idioms.cypher` is written from the outside: shapes
 //! that appear in Neo4j's documentation and in application code, not a list of
 //! what this engine supports. A corpus derived from our feature matrix would
 //! report 100% of whatever we already do.
@@ -62,7 +62,7 @@ const ACCEPTED_FLOOR: usize = 54;
 
 fn corpus() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("benchmarks/compat/neo4j-idioms.cypher");
+        .join("tests/fixtures/compat/neo4j-idioms.cypher");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("the corpus must be in the repository: {}: {e}", path.display()));
     split_queries(&text)

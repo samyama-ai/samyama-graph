@@ -16,7 +16,7 @@
 //
 // Read by `tests/falkordb_compatibility_corpus.rs` and by
 // `cargo run --release --example compatibility_report -- --queries
-// benchmarks/compat/falkordb-idioms.cypher`. Queries are separated by a `;` at
+// tests/fixtures/compat/falkordb-idioms.cypher`. Queries are separated by a `;` at
 // the end of a line. Protocol-level differences (graph names, `--compact`,
 // the `CYPHER` parameter prefix, `GRAPH.*` commands) are not Cypher and are
 // covered in `docs/MIGRATING-FROM-FALKORDB.md` instead.
