@@ -847,13 +847,14 @@ async fn a_heavier_solve_reports_a_longer_time_than_a_tiny_one() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn total_time_ms_excludes_time_spent_waiting_for_the_stream_reader() {
-    // 400 iterations > the 256-slot channel, so the emitter blocks until the
-    // stream is read. A slow reader must not inflate the solver's time.
+    // 257 iterations exceed the 256-slot channel, so the emitter blocks
+    // until the stream is read. Keep the solve small enough to finish before
+    // the deliberate reader delay on slower CI platforms.
     let app = app();
     let wall_started = std::time::Instant::now();
     let job = start_job(
         app.clone(),
-        r#"{"algorithm":"jaya","benchmark":"sphere","population_size":4,"iterations":400,"dim":2,"seed":5}"#,
+        r#"{"algorithm":"jaya","benchmark":"sphere","population_size":2,"iterations":257,"dim":1,"seed":5}"#,
     )
     .await;
     let delay_ms = 1_500.0;
@@ -862,7 +863,7 @@ async fn total_time_ms_excludes_time_spent_waiting_for_the_stream_reader() {
     let wall_ms = wall_started.elapsed().as_secs_f64() * 1_000.0;
     let (name, done) = events.last().unwrap();
     assert_eq!(name, "done");
-    assert_eq!(events.iter().filter(|(n, _)| n == "iteration").count(), 400);
+    assert_eq!(events.iter().filter(|(n, _)| n == "iteration").count(), 257);
     let ms = done["total_time_ms"].as_f64().unwrap();
     // The solve itself may take longer than this reader delay on a slower
     // platform. What matters is that total_time_ms excludes the stall: the
