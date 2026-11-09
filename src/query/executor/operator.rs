@@ -20153,6 +20153,31 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// The read-path run of fastRP or node2vec: `write: false`, streamed.
+    ///
+    /// The write target is still read, so `write: false` together with a
+    /// `writeProperty` is refused with its reason here too. Kept out of the
+    /// dispatch match so the arm stays one line: the catalogue test reads
+    /// algorithm names from lines there that start with a string literal.
+    fn execute_embedding_stream(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let fastrp = Self::canonical_name(&self.name) == "fastrp";
+        let call = if fastrp { "algo.fastRP" } else { "algo.node2vec" };
+        if self.embedding_write_target(call)?.is_some() {
+            return Err(ExecutionError::RuntimeError(format!(
+                "{call} writes unless `{}: false`, and writing requires write \
+                 access (MutQueryExecutor)",
+                Self::EMBEDDING_WRITE_KEY
+            )));
+        }
+        let embeddings = if fastrp {
+            self.fastrp_embeddings(store)?
+        } else {
+            self.node2vec_embeddings(store)?
+        };
+        self.stream_embeddings(store, embeddings);
+        Ok(())
+    }
+
     /// The read path's half of `emit_embeddings`: rows only, nothing stored.
     fn stream_embeddings(&mut self, store: &GraphStore, embeddings: Vec<(NodeId, Vec<f64>)>) {
         for (id, embedding) in embeddings {
@@ -21378,26 +21403,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
                 "reciprocity" => self.execute_reciprocity(store)?,
                 // An embedding reaches here only with `write: false` (#1736):
-                // without it the refusal above has already fired. The write
-                // target is still read, so `write: false` together with a
-                // `writeProperty` is refused with its reason here too.
-                "fastrp" | "node2vec" => {
-                    let fastrp = Self::canonical_name(&self.name) == "fastrp";
-                    let call = if fastrp { "algo.fastRP" } else { "algo.node2vec" };
-                    if self.embedding_write_target(call)?.is_some() {
-                        return Err(ExecutionError::RuntimeError(format!(
-                            "{call} writes unless `{}: false`, and writing requires write \
-                             access (MutQueryExecutor)",
-                            Self::EMBEDDING_WRITE_KEY
-                        )));
-                    }
-                    let embeddings = if fastrp {
-                        self.fastrp_embeddings(store)?
-                    } else {
-                        self.node2vec_embeddings(store)?
-                    };
-                    self.stream_embeddings(store, embeddings);
-                }
+                // without it the refusal above has already fired.
+                "fastrp" | "node2vec" => self.execute_embedding_stream(store)?,
                 // `or.solve`, the remaining mutating procedure, is refused from
                 // `MUTATING_PROCEDURES` before this match, so that the refusal and
                 // the routing decision read the same list (#1468).
