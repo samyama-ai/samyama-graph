@@ -17,7 +17,7 @@ kinds of baseline appear, in decreasing order of independence:
 3. **Implicit** — no `baseline` key: the runner executes the *same* Cypher against a store
    with no hierarchy declared, which is the cleanest index-on/index-off comparison.
 
-Regenerate with:  python3 benchmarks/hier/generate_corpus.py
+Regenerate with:  python3 benches/hier/generate_corpus.py
 """
 import json
 
@@ -266,7 +266,7 @@ corpus = {
     "corpus": "HIER — hierarchy-heavy complex queries",
     "adr": "ADR-035",
     "paper": "arXiv:2606.24677",
-    "generated_by": "benchmarks/hier/generate_corpus.py",
+    "generated_by": "benches/hier/generate_corpus.py",
     "classes": {
         "H1": "order test (is x under y?)",
         "H2": "single roll-up over a subtree, sizes spanning four orders of magnitude",
@@ -281,7 +281,7 @@ corpus = {
     },
     "queries": Q,
 }
-with open("benchmarks/hier/queries.json", "w") as f:
+with open("benches/hier/queries.json", "w") as f:
     json.dump(corpus, f, indent=1)
     f.write("\n")
 
