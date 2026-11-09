@@ -25,6 +25,8 @@ pub enum AlgorithmCategory {
     GraphMetric,
     Temporal,
     Embedding,
+    /// Draws part of the graph, as a GNN trainer's minibatches (ML-02).
+    Sampling,
     Optimization,
 }
 
@@ -99,6 +101,13 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     read("algo.dagLongestPath", &["algo.longestPath"], Path, &["node", "position"]),
     read("algo.transitiveClosure", &[], Path, &["source", "target"]),
     read("algo.randomWalk", &[], Path, &["node", "step"]),
+    read(
+        "algo.sample.neighbors",
+        &["algo.sample.neighbours", "algo.sampleNeighbors", "algo.sampleNeighbours",
+          "algo.neighbourSampling", "algo.neighborSampling"],
+        Sampling,
+        &["batch", "hop", "node", "neighbour"],
+    ),
     read("algo.maxFlow", &[], Path, &["max_flow"]),
     // A summary row (`total_weight`, `components`), then one row per tree
     // edge (`source`, `target`, `weight`).

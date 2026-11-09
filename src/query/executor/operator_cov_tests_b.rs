@@ -6762,6 +6762,7 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
         "symptomexplanation" => vec![pairs(40)],
         "modularity" => vec![pairs(0)],
         "fastrp" | "node2vec" => vec![lmap(&[("embeddingDimension", pint(4))])],
+        "sample.neighbors" => vec![node(0), lmap(&[("fanout", PropertyValue::Array(vec![pint(-1)]))])],
         // A path has no cycle and pairs it cannot reach; a triangle has both.
         "wienerindex" | "cycledetection" => return (triangle().0, vec![]),
         // The smallest graph with a non-empty 3-truss.
