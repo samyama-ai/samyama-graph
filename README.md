@@ -5,7 +5,7 @@
     <strong>99.9% of the openCypher TCK's evaluated scenarios pass · LDBC SNB Interactive 21/21 and BI 20/20, no timeouts · 1B edges on one machine</strong>
   </p>
   <p align="center">
-    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.14.0-blue" alt="Version"></a>
+    <a href="https://github.com/samyama-ai/samyama-graph/releases"><img src="https://img.shields.io/badge/version-1.15.0-blue" alt="Version"></a>
     <a href="https://github.com/samyama-ai/samyama-graph/actions/workflows/ci.yml"><img src="https://github.com/samyama-ai/samyama-graph/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
     <a href="https://graph.samyama.cloud/book/"><img src="https://img.shields.io/badge/book-read_the_docs-orange" alt="Book"></a>
@@ -31,7 +31,7 @@ below are the short version of why.
 ### Docker
 
 The image is public on GitHub Container Registry and needs no registry account.
-`latest` is the newest release; pin a version such as `:1.14.0` for a
+`latest` is the newest release; pin a version such as `:1.15.0` for a
 reproducible setup.
 
 **1 — Write `docker-compose.yml`** in an empty folder:
@@ -127,7 +127,7 @@ GRAPH.QUERY mydb "MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name"
 |----------|---------|---------|
 | Python | `pip install samyama` | `SamyamaClient.connect("http://localhost:8080")`, or `SamyamaClient.embedded()` to run the engine in-process |
 | TypeScript | `npm install samyama-sdk` | `SamyamaClient.connectHttp("http://localhost:8080")` (ESM, Node 18+) |
-| Rust | `samyama-sdk = { git = "https://github.com/samyama-ai/samyama-graph", tag = "v1.14.0" }` — `samyama-sdk` is not on crates.io yet | `RemoteClient` over HTTP, or `EmbeddedClient::new()` in-process |
+| Rust | `samyama-sdk = { git = "https://github.com/samyama-ai/samyama-graph", tag = "v1.15.0" }` — `samyama-sdk` is not on crates.io yet | `RemoteClient` over HTTP, or `EmbeddedClient::new()` in-process |
 
 Any Redis client also works over RESP on port 6379. Details:
 [Python](sdk/python/README.md) · [TypeScript](sdk/typescript/README.md) ·
