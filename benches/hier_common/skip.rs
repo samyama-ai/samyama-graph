@@ -99,7 +99,7 @@ pub fn describe_failure(id: &str, skip: &Skip, verdict: &SkipVerdict) -> Option<
         SkipVerdict::StillBlocked => None,
         SkipVerdict::Stale => Some(format!(
             "{id}: STALE SKIP — the query now runs, so \"{}\" is no longer true. Remove the \
-             skip from benchmarks/hier/generate_corpus.py and regenerate.",
+             skip from benches/hier/generate_corpus.py and regenerate.",
             skip.reason
         )),
         SkipVerdict::WrongReason(actual) => Some(format!(

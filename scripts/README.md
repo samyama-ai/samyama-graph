@@ -61,7 +61,7 @@ scripts/coverage.sh --lcov       # coverage/lcov.info
 
 | Script | What it does | Typical invocation |
 |---|---|---|
-| `falkordb_corpus_run.py` | Runs `benchmarks/compat/falkordb-idioms.cypher` on a FalkorDB and a Samyama server and reports how many idioms run on each, with every failure's error. Produces the "actually runs" figure in `docs/MIGRATING-FROM-FALKORDB.md`. Needs Docker and a fresh dedicated `--ephemeral` Samyama server for each run; existing data or schema is refused before setup. The docstring has the server commands. | `python3 scripts/falkordb_corpus_run.py --falkordb 6391 --samyama 6392 --import-dir /tmp/fk-import` |
+| `falkordb_corpus_run.py` | Runs `tests/fixtures/compat/falkordb-idioms.cypher` on a FalkorDB and a Samyama server and reports how many idioms run on each, with every failure's error. Produces the "actually runs" figure in `docs/MIGRATING-FROM-FALKORDB.md`. Needs Docker and a fresh dedicated `--ephemeral` Samyama server for each run; existing data or schema is refused before setup. The docstring has the server commands. | `python3 scripts/falkordb_corpus_run.py --falkordb 6391 --samyama 6392 --import-dir /tmp/fk-import` |
 
 ## Dataset helpers
 

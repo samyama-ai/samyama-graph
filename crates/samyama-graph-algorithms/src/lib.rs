@@ -1,4 +1,5 @@
 pub mod common;
+pub mod constrained_path;
 pub mod cpu_fallback;
 #[cfg(feature = "gpu")]
 pub mod gpu_dispatch;
@@ -30,6 +31,7 @@ pub mod temporal;
 pub mod embeddings;
 
 pub use common::{GraphView, NodeId};
+pub use constrained_path::{constrained_shortest_path, ConstrainedPath, ConstrainedPathError};
 pub use pagerank::{page_rank, page_rank_with, PageRankConfig};
 pub use progress::{NoProgress, Progress, Stopped};
 pub use community::{weakly_connected_components, WccResult, strongly_connected_components, SccResult};
