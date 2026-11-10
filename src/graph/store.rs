@@ -7284,6 +7284,31 @@ NodeDeleted { id, .. } => {
         ef: Option<usize>,
         keep: impl Fn(NodeId) -> bool,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
+        self.vector_search_where_planned(label, property_key, query, k, ef, None, keep)
+    }
+
+    /// Execute the planner's priced strategy; unknown estimates retain adaptive widening.
+    #[allow(clippy::too_many_arguments)]
+    pub fn vector_search_where_planned(
+        &self,
+        label: &str,
+        property_key: &str,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        strategy: Option<crate::vector::strategy::FilterStrategy>,
+        keep: impl Fn(NodeId) -> bool,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        if strategy == Some(crate::vector::strategy::FilterStrategy::Exact) {
+            let index = self.vector_index.get_index(label, property_key).ok_or_else(|| {
+                crate::vector::VectorError::IndexError(format!("no vector index on :{label}({property_key})"))
+            })?;
+            let label_key = Label::new(label);
+            let result = index.read().unwrap().search_exact_where(query, k, &|id| {
+                self.get_node(id).is_some_and(|n| n.labels.contains(&label_key)) && keep(id)
+            });
+            return result;
+        }
         // Only nodes that still carry the label: the HNSW graph cannot drop a
         // node, so one that lost the label, or was deleted, is still in it and
         // must not be returned (#1605).

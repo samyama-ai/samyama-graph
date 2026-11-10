@@ -14641,6 +14641,7 @@ pub struct VectorSearchOperator {
     /// This query's search width, from `{ef: ...}` (#1971). `None` is the
     /// index's default.
     ef: Option<usize>,
+    plan: Option<crate::vector::strategy::FilterPlan>,
     /// Search results
     results: Vec<(NodeId, f32)>,
     /// Current index in results
@@ -14667,6 +14668,7 @@ impl VectorSearchOperator {
             metric: None,
             filter: None,
             ef: None,
+            plan: None,
             results: Vec::new(),
             current: 0,
         }
@@ -14681,6 +14683,11 @@ impl VectorSearchOperator {
     /// Search with this width rather than the index's default (#1971).
     pub fn with_ef(mut self, ef: Option<usize>) -> Self {
         self.ef = ef;
+        self
+    }
+
+    pub fn with_plan(mut self, plan: Option<crate::vector::strategy::FilterPlan>) -> Self {
+        self.plan = plan;
         self
     }
 
@@ -14717,7 +14724,7 @@ impl VectorSearchOperator {
         // "no match".
         let error = std::cell::RefCell::new(None);
         let results = store
-            .vector_search_where(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, |id| {
+            .vector_search_where_planned(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, self.plan.as_ref().map(|p| p.strategy), |id| {
                 if error.borrow().is_some() {
                     return false;
                 }
@@ -14787,6 +14794,11 @@ impl PhysicalOperator for VectorSearchOperator {
         }
         if let Some(f) = &self.filter {
             details.push_str(&format!(", filter: {}", format_expression(f)));
+        }
+        if let Some(plan) = &self.plan {
+            details.push_str(&format!(", {}", plan.describe()));
+        } else if self.filter.is_some() {
+            details.push_str(", strategy=adaptive, selectivity=unknown, reason=unsupported predicate statistics");
         }
         OperatorDescription {
             name: "VectorSearch".to_string(),

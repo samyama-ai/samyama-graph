@@ -96,3 +96,7 @@ Retired 2026-10-14 because it no longer described anything in the repository (#1
 | Retired | Where to look now |
 |---|---|
 | `optimization/CASE_STUDY_HEALTHCARE.md` | It documented `examples/healthcare_demo.rs`, a Jaya hospital-staffing example that was replaced on 2026-02-06 and deleted on 2026-02-07. For the solvers, see [`crates/samyama-optimization/README.md`](../crates/samyama-optimization/README.md) and [ADR-026](./ADR/ADR-026-rao-optimization-crate.md); for a healthcare allocation problem that runs today, `healthcare_allocation_demo` in [`examples/README.md`](../examples/README.md). |
+
+### Vector benchmark methodology
+
+- **[benchmarks/](./benchmarks/)** — vector benchmark protocols, filtered-search strategy costs and checkpoint methodology; documents distinguish implemented scope from measurements still required.
