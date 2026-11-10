@@ -18036,6 +18036,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         ("symptomexplanation", "it reads each relationship's time, which a projection does not keep"),
         ("pca", "it reads node properties, which a projection does not keep"),
         ("or.solve", "it optimises over node properties, not over a graph view"),
+        ("split", "it can read node properties (time, source), which a projection does not keep"),
+        ("traintestsplit", "it can read node properties (time, source), which a projection does not keep"),
+        ("splitleakage", "it reads the stored split from node properties, which a projection does not keep"),
+        ("leakagecheck", "it reads the stored split from node properties, which a projection does not keep"),
     ];
 
     /// The projection `graph` names, or `None` when the call names none.
@@ -18197,6 +18201,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         (&["effectivesize"], "value"),
         (&["constraint", "burtconstraint"], "value"),
         (&["bellmanford"], "distance"),
+        (&["split", "traintestsplit"], "split"),
     ];
 
     /// The column `writeProperty` stores for this canonical name, if any.
@@ -18985,6 +18990,499 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             bind(&mut rec, "node2", p.b);
             rec.bind("score".to_string(), Value::Property(PropertyValue::Float(p.score)));
             self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// The config keys every literal map argument holds, merged.
+    fn config_map(&self) -> std::collections::HashMap<String, PropertyValue> {
+        let mut out = std::collections::HashMap::new();
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                out.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        out
+    }
+
+    /// A string config value, or `None` when absent; anything else is refused.
+    fn config_string(
+        cfg: &std::collections::HashMap<String, PropertyValue>,
+        call: &str,
+        key: &str,
+    ) -> ExecutionResult<Option<String>> {
+        match cfg.get(key) {
+            None | Some(PropertyValue::Null) => Ok(None),
+            Some(PropertyValue::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+            Some(other) => Err(ExecutionError::bad_argument(format!(
+                "{call}: `{key}` must be a non-empty string, got {other:?}"
+            ))),
+        }
+    }
+
+    /// `strategy`, required and one of the known ones. `random` is a split
+    /// (the negative control) but has no boundary for the leakage check to test.
+    fn split_strategy(
+        cfg: &std::collections::HashMap<String, PropertyValue>,
+        call: &str,
+        allow_random: bool,
+    ) -> ExecutionResult<String> {
+        let known: &[&str] = if allow_random {
+            &["entity", "community", "time", "source", "random"]
+        } else {
+            &["entity", "community", "time", "source"]
+        };
+        let strategy = Self::config_string(cfg, call, "strategy")?
+            .map(|s| s.to_ascii_lowercase())
+            .ok_or_else(|| {
+                ExecutionError::bad_argument(format!(
+                    "{call}: `strategy` is required: one of {}",
+                    known.join(", ")
+                ))
+            })?;
+        if !known.contains(&strategy.as_str()) {
+            return Err(ExecutionError::bad_argument(format!(
+                "{call}: unknown strategy `{strategy}`; expected one of {}{}",
+                known.join(", "),
+                if strategy == "random" {
+                    ". A random split keeps nothing together, so there is no boundary to \
+                     check it against: check it with the strategy it should have respected \
+                     (entity, community, time or source) to measure the leak it makes"
+                } else {
+                    ""
+                }
+            )));
+        }
+        Ok(strategy)
+    }
+
+    /// A sortable time from a property: a number, or a date/datetime as epoch
+    /// milliseconds. `true` marks a temporal value, so the two are not mixed.
+    /// A time of day has no date and so no place on a timeline; it is refused.
+    fn split_time_key(value: &PropertyValue) -> Option<(bool, f64)> {
+        match value {
+            PropertyValue::Integer(i) => Some((false, *i as f64)),
+            PropertyValue::Float(f) if !f.is_nan() => Some((false, *f)),
+            PropertyValue::Date(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::LocalDateTime { .. }
+            | PropertyValue::ZonedDateTime { .. } => {
+                value.as_epoch_millis().map(|ms| (true, ms as f64))
+            }
+            _ => None,
+        }
+    }
+
+    /// `property` read from every node in the view, refusing loudly when any
+    /// node lacks it: a node with no timestamp or source cannot be placed, and
+    /// dropping it silently would make the split smaller than the caller thinks.
+    fn split_property_values(
+        store: &GraphStore,
+        view: &crate::algo::GraphView,
+        call: &str,
+        strategy: &str,
+        property: &str,
+    ) -> ExecutionResult<Vec<(u64, PropertyValue)>> {
+        let mut ids = view.index_to_node.clone();
+        ids.sort_unstable();
+        let mut out = Vec::with_capacity(ids.len());
+        let mut missing = Vec::new();
+        for id in ids {
+            match store.node_property(NodeId::new(id), property) {
+                Some(v) if !matches!(v, PropertyValue::Null) => out.push((id, v)),
+                _ => missing.push(id),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(ExecutionError::bad_argument(format!(
+                "{call}: {strategy} reads `{property}` from every node, and {} of {} \
+                 node(s) have none (first: {:?}). Narrow the nodes with `label`, or set the \
+                 property, so none is left out without anyone noticing",
+                missing.len(),
+                missing.len() + out.len(),
+                &missing[..missing.len().min(5)]
+            )));
+        }
+        Ok(out)
+    }
+
+    /// The times of every node, all numbers or all dates.
+    fn split_times(
+        values: &[(u64, PropertyValue)],
+        call: &str,
+        property: &str,
+    ) -> ExecutionResult<Vec<(u64, f64)>> {
+        let mut kind = None;
+        let mut out = Vec::with_capacity(values.len());
+        for (id, v) in values {
+            let Some((temporal, t)) = Self::split_time_key(v) else {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `{property}` on node {id} is {v:?}; a time split needs a number \
+                     or a date/datetime on every node"
+                )));
+            };
+            if *kind.get_or_insert(temporal) != temporal {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `{property}` mixes numbers and dates (node {id}), which have no \
+                     common order"
+                )));
+            }
+            out.push((*id, t));
+        }
+        Ok(out)
+    }
+
+    /// A group key for a source value, keeping types apart: `1` and `'1'`
+    /// are different sources.
+    fn split_group_key(v: &PropertyValue) -> String {
+        format!("{v:?}")
+    }
+
+    /// `algo.split({strategy, ...})` -- a train/validation/test split that
+    /// keeps whole groups on one side of the boundary (ML-05, #1730).
+    ///
+    /// One row per node: `node`, `split` (`train`/`val`/`test`, or
+    /// `train`/`test` for two ratios) and `group` -- the entity component,
+    /// community, source value or time that decided it (null for `random`).
+    /// `writeProperty` stores `split` on each node, which is what
+    /// `algo.splitLeakage` reads back.
+    fn execute_split(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const CALL: &str = "algo.split";
+        Self::reject_unknown_config_keys(
+            &self.args,
+            CALL,
+            &[
+                "edgeType", "label", "property", "ratios", "seed", "strategy",
+            ],
+        )?;
+        let cfg = self.config_map();
+        let strategy = Self::split_strategy(&cfg, CALL, true)?;
+        let ratios: Vec<f64> = match cfg.get("ratios") {
+            None => vec![0.8, 0.1, 0.1],
+            Some(v) => {
+                let items = v.as_list_items().unwrap_or_default();
+                let nums: Vec<f64> = items
+                    .iter()
+                    .filter_map(|x| match x {
+                        PropertyValue::Integer(i) => Some(*i as f64),
+                        PropertyValue::Float(f) => Some(*f),
+                        _ => None,
+                    })
+                    .collect();
+                let sum: f64 = nums.iter().sum();
+                if !(2..=3).contains(&items.len())
+                    || nums.len() != items.len()
+                    || nums.iter().any(|r| !r.is_finite() || *r < 0.0)
+                    || (sum - 1.0).abs() > 1e-6
+                    || nums[0] <= 0.0
+                {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "{CALL}: `ratios` must be [train, test] or [train, val, test]: \
+                         non-negative numbers summing to 1, with train above 0; got {v:?}"
+                    )));
+                }
+                nums
+            }
+        };
+        let seed = match cfg.get("seed") {
+            None => 42u64,
+            Some(PropertyValue::Integer(n)) => *n as u64,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `seed` must be an integer, got {other:?}"
+                )))
+            }
+        };
+        let label = Self::config_string(&cfg, CALL, "label")?;
+        let edge_type = Self::config_string(&cfg, CALL, "edgeType")?;
+        let property = Self::config_string(&cfg, CALL, "property")?;
+        if strategy == "entity" && edge_type.is_none() {
+            return Err(ExecutionError::bad_argument(format!(
+                "{CALL}: strategy `entity` needs `edgeType`, the relationship that links two \
+                 records of one entity (SAME_AS, say). Without it every relationship would \
+                 count as \"same entity\" and the split would keep whole connected components \
+                 together"
+            )));
+        }
+        let needs_property = strategy == "time" || strategy == "source";
+        if needs_property != property.is_some() {
+            return Err(ExecutionError::bad_argument(if needs_property {
+                format!("{CALL}: strategy `{strategy}` needs `property`, the node property holding each record's {}",
+                    if strategy == "time" { "timestamp" } else { "source" })
+            } else {
+                format!("{CALL}: strategy `{strategy}` does not read `property`; only time and source do")
+            }));
+        }
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
+
+        // Groups, each sorted, ordered by their smallest node so the seed alone
+        // decides placement; and each node's `group` value.
+        let mut group_value: std::collections::HashMap<u64, PropertyValue> = Default::default();
+        let grouped = |mut groups: Vec<Vec<u64>>| {
+            for g in &mut groups {
+                g.sort_unstable();
+            }
+            groups.sort_unstable_by_key(|g| g[0]);
+            groups
+        };
+        let assigned: Vec<(u64, usize)> = match strategy.as_str() {
+            "random" => {
+                let groups = grouped(view.index_to_node.iter().map(|&n| vec![n]).collect());
+                crate::algo::assign_groups(&groups, &ratios, seed)
+            }
+            "entity" => {
+                let wcc = crate::algo::weakly_connected_components(&view);
+                let groups = grouped(wcc.components.into_values().collect());
+                for (i, g) in groups.iter().enumerate() {
+                    for &n in g {
+                        group_value.insert(n, PropertyValue::Integer(i as i64));
+                    }
+                }
+                crate::algo::assign_groups(&groups, &ratios, seed)
+            }
+            "community" => {
+                let comms = crate::algo::louvain(&view, 20);
+                let mut by: std::collections::BTreeMap<usize, Vec<u64>> = Default::default();
+                for (n, c) in crate::algo::with_ids(&view, &comms) {
+                    group_value.insert(n, PropertyValue::Integer(c as i64));
+                    by.entry(c).or_default().push(n);
+                }
+                crate::algo::assign_groups(&grouped(by.into_values().collect()), &ratios, seed)
+            }
+            "source" => {
+                let property = property.as_deref().unwrap_or_default();
+                let values = Self::split_property_values(
+                    store,
+                    &view,
+                    CALL,
+                    &format!("strategy `{strategy}`"),
+                    property,
+                )?;
+                let mut by: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
+                for (n, v) in values {
+                    by.entry(Self::split_group_key(&v)).or_default().push(n);
+                    group_value.insert(n, v);
+                }
+                crate::algo::assign_groups(&grouped(by.into_values().collect()), &ratios, seed)
+            }
+            _ => {
+                // time
+                let property = property.as_deref().unwrap_or_default();
+                let values = Self::split_property_values(
+                    store,
+                    &view,
+                    CALL,
+                    &format!("strategy `{strategy}`"),
+                    property,
+                )?;
+                let times = Self::split_times(&values, CALL, property)?;
+                group_value.extend(values);
+                crate::algo::time_split(&times, &ratios)
+            }
+        };
+
+        let names = crate::algo::split_names(ratios.len());
+        let mut assigned = assigned;
+        assigned.sort_unstable();
+        for (id, s) in assigned {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            rec.bind(
+                "split".to_string(),
+                Value::Property(PropertyValue::String(names[s].to_string())),
+            );
+            rec.bind(
+                "group".to_string(),
+                Value::Property(group_value.remove(&id).unwrap_or(PropertyValue::Null)),
+            );
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.splitLeakage({strategy, splitProperty, ...})` -- every leak across
+    /// a stored split's boundary (ML-05, #1730). No rows means a clean split.
+    ///
+    /// Reads the split from `splitProperty` (default `split`), so it checks a
+    /// split made anywhere -- `algo.split` with `writeProperty`, or a naive
+    /// `SET n.split = CASE WHEN rand() < 0.8 ...`, which is the negative
+    /// control. One row per leak: `node1, node2, split1, split2, reason`.
+    ///
+    /// * entity: two nodes within `hops` (default 3) over `edgeType`, in
+    ///   different splits. Walked hop by hop, not read from components.
+    /// * community: a Louvain community, recomputed on the graph as it is now,
+    ///   found in two splits -- one row per pair of splits, with its two
+    ///   smallest nodes and the count on each side in `reason`.
+    /// * source: likewise, for a value of `property`.
+    /// * time: a node whose time is after the earliest time of a later split,
+    ///   paired with that earliest node.
+    fn execute_split_leakage(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const CALL: &str = "algo.splitLeakage";
+        Self::reject_unknown_config_keys(
+            &self.args,
+            CALL,
+            &[
+                "edgeType",
+                "hops",
+                "label",
+                "property",
+                "splitProperty",
+                "strategy",
+            ],
+        )?;
+        let cfg = self.config_map();
+        let strategy = Self::split_strategy(&cfg, CALL, false)?;
+        let label = Self::config_string(&cfg, CALL, "label")?;
+        let edge_type = Self::config_string(&cfg, CALL, "edgeType")?;
+        let property = Self::config_string(&cfg, CALL, "property")?;
+        let split_property = Self::config_string(&cfg, CALL, "splitProperty")?
+            .unwrap_or_else(|| "split".to_string());
+        let hops = match cfg.get("hops") {
+            None => 3usize,
+            Some(PropertyValue::Integer(n)) if *n >= 1 => *n as usize,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `hops` must be an integer of at least 1, got {other:?}"
+                )))
+            }
+        };
+        if strategy == "entity" && edge_type.is_none() {
+            return Err(ExecutionError::bad_argument(format!(
+                "{CALL}: strategy `entity` needs `edgeType`, the relationship that links two \
+                 records of one entity (SAME_AS, say)"
+            )));
+        }
+        let needs_property = strategy == "time" || strategy == "source";
+        if needs_property != property.is_some() {
+            return Err(ExecutionError::bad_argument(if needs_property {
+                format!("{CALL}: strategy `{strategy}` needs `property`")
+            } else {
+                format!("{CALL}: strategy `{strategy}` does not read `property`; only time and source do")
+            }));
+        }
+        if strategy != "entity" && cfg.contains_key("hops") {
+            return Err(ExecutionError::bad_argument(format!(
+                "{CALL}: `hops` bounds the entity walk; strategy `{strategy}` does not read it"
+            )));
+        }
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
+
+        // The stored split of every node, refused when absent or not a split name.
+        let names = crate::algo::split_names(3);
+        let membership =
+            Self::split_property_values(store, &view, CALL, "split membership", &split_property)?;
+        let mut split_of = std::collections::HashMap::with_capacity(membership.len());
+        for (id, v) in &membership {
+            let s = match v {
+                PropertyValue::String(s) => names.iter().position(|n| n == s),
+                _ => None,
+            };
+            let Some(s) = s else {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `{split_property}` on node {id} is {v:?}; expected one of {}",
+                    names.join(", ")
+                )));
+            };
+            split_of.insert(*id, s);
+        }
+
+        let push = |this: &mut Self, a: u64, b: u64, sa: usize, sb: usize, reason: String| {
+            let mut rec = Record::new();
+            this.bind_node(store, &mut rec, "node1", a);
+            this.bind_node(store, &mut rec, "node2", b);
+            rec.bind(
+                "split1".to_string(),
+                Value::Property(PropertyValue::String(names[sa].to_string())),
+            );
+            rec.bind(
+                "split2".to_string(),
+                Value::Property(PropertyValue::String(names[sb].to_string())),
+            );
+            rec.bind(
+                "reason".to_string(),
+                Value::Property(PropertyValue::String(reason)),
+            );
+            this.results.push(rec);
+        };
+        match strategy.as_str() {
+            "entity" => {
+                let edge = edge_type.as_deref().unwrap_or_default();
+                for (a, b, d) in crate::algo::entity_leaks(&view, &split_of, hops) {
+                    push(
+                        self,
+                        a,
+                        b,
+                        split_of[&a],
+                        split_of[&b],
+                        format!("same entity: {d} {edge} hop(s) apart"),
+                    );
+                }
+            }
+            "community" | "source" => {
+                let keys: Vec<(u64, String)> = if strategy == "community" {
+                    let comms = crate::algo::louvain(&view, 20);
+                    crate::algo::with_ids(&view, &comms)
+                        .into_iter()
+                        .map(|(n, c)| (n, c.to_string()))
+                        .collect()
+                } else {
+                    let property = property.as_deref().unwrap_or_default();
+                    Self::split_property_values(
+                        store,
+                        &view,
+                        CALL,
+                        &format!("strategy `{strategy}`"),
+                        property,
+                    )?
+                    .iter()
+                    .map(|(n, v)| (*n, Self::split_group_key(v)))
+                    .collect()
+                };
+                for l in crate::algo::group_leaks(&keys, &split_of) {
+                    let what = if strategy == "community" {
+                        format!("community {}", l.key)
+                    } else {
+                        format!("source {}", l.key)
+                    };
+                    push(
+                        self,
+                        l.node_a,
+                        l.node_b,
+                        l.split_a,
+                        l.split_b,
+                        format!(
+                            "{what} is on both sides: {} node(s) in {}, {} in {}",
+                            l.count_a, names[l.split_a], l.count_b, names[l.split_b]
+                        ),
+                    );
+                }
+            }
+            _ => {
+                let property = property.as_deref().unwrap_or_default();
+                let values = Self::split_property_values(
+                    store,
+                    &view,
+                    CALL,
+                    &format!("strategy `{strategy}`"),
+                    property,
+                )?;
+                let times = Self::split_times(&values, CALL, property)?;
+                let time_of: std::collections::HashMap<u64, &PropertyValue> =
+                    values.iter().map(|(n, v)| (*n, v)).collect();
+                for (late, early, sl, se) in crate::algo::time_leaks(&times, &split_of, 3) {
+                    push(
+                        self,
+                        late,
+                        early,
+                        sl,
+                        se,
+                        format!(
+                            "{} {} is after {}'s earliest {}",
+                            names[sl], time_of[&late], names[se], time_of[&early]
+                        ),
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -21113,6 +21611,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "effectivesize" => self.execute_structural_holes(store, true)?,
                 "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
                 "reciprocity" => self.execute_reciprocity(store)?,
+                "split" | "traintestsplit" => self.execute_split(store)?,
+                "splitleakage" | "leakagecheck" => self.execute_split_leakage(store)?,
                 // The three mutating procedures are refused from `MUTATING_PROCEDURES`
                 // before this match, so that the refusal and the routing decision read
                 // the same list (#1468).
@@ -21216,6 +21716,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "effectivesize" => self.execute_structural_holes(store, true)?,
                 "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
                 "reciprocity" => self.execute_reciprocity(store)?,
+                "split" | "traintestsplit" => self.execute_split(store)?,
+                "splitleakage" | "leakagecheck" => self.execute_split_leakage(store)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             // Before the write-back, so a call refused here writes nothing.

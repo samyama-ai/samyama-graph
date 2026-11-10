@@ -28,6 +28,7 @@ pub mod pathfinding_extra;
 pub mod traversal;
 pub mod temporal;
 pub mod embeddings;
+pub mod split;
 
 pub use common::{GraphView, NodeId};
 pub use pagerank::{page_rank, page_rank_with, PageRankConfig};
@@ -86,3 +87,4 @@ pub use embeddings::{fastrp, node2vec, FastRpConfig, Node2VecConfig};
 #[cfg(test)]
 #[path = "lib_cov_tests.rs"]
 mod cov_tests;
+pub use split::{assign_groups, entity_leaks, group_leaks, split_names, time_leaks, time_split, GroupLeak};
