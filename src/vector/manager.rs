@@ -560,6 +560,53 @@ impl VectorIndexManager {
         Ok(())
     }
 
+    /// Publish a complete checksummed vector generation. The caller must hold
+    /// its graph mutation barrier for a consistent cross-index snapshot.
+    pub fn checkpoint_all(&self, path: &std::path::Path) -> VectorResult<()> {
+        use std::io::Write;
+        std::fs::create_dir_all(path)?;
+        let generation = format!("generation-{}", uuid::Uuid::new_v4());
+        let staged = path.join(&generation);
+        std::fs::create_dir(&staged)?;
+        // dump_all historically derived filenames from labels. Refuse path
+        // separators and ambiguous collisions before writing outside staging.
+        let mut filenames = std::collections::HashSet::new();
+        for key in self.list_indices() {
+            let name = format!("{}_{}.hnsw", key.label, key.property_key);
+            if std::path::Path::new(&name).components().count() != 1 || !filenames.insert(name) {
+                return Err(VectorError::IndexError("unsafe or colliding vector checkpoint filename".into()));
+            }
+        }
+        self.dump_all(&staged)?;
+        super::checkpoint::seal(&staged)?;
+        let mut pointer = tempfile::NamedTempFile::new_in(path)?;
+        writeln!(pointer, "{generation}")?;
+        pointer.as_file().sync_all()?;
+        pointer.persist(path.join("CURRENT")).map_err(|e| VectorError::Io(e.error))?;
+        std::fs::File::open(path)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Load only a fully verified generation, leaving live indexes intact on
+    /// corruption or decode errors. Legacy dumps remain readable.
+    pub fn recover_checkpoint(&self, path: &std::path::Path) -> VectorResult<()> {
+        let source = match super::checkpoint::generation(path)? {
+            Some(generation) => { super::checkpoint::verify(&generation)?; generation }
+            None => path.to_path_buf(),
+        };
+        if !source.exists() || !source.join("metadata.json").exists() { return Ok(()); }
+        let staged = Self::new();
+        staged.load_all(&source)?;
+        // Acquire all destination locks before publishing any component.
+        let mut indices = self.indices.write().unwrap();
+        let mut names = self.names.write().unwrap();
+        let mut models = self.model_ids.write().unwrap();
+        *indices = std::mem::take(&mut *staged.indices.write().unwrap());
+        *names = std::mem::take(&mut *staged.names.write().unwrap());
+        *models = std::mem::take(&mut *staged.model_ids.write().unwrap());
+        Ok(())
+    }
+
     /// Save all indices to a directory
     pub fn dump_all(&self, path: &std::path::Path) -> VectorResult<()> {
         if !path.exists() {
@@ -581,6 +628,7 @@ impl VectorIndexManager {
                 "property_key": key.property_key,
                 "dimensions": index.dimensions(),
                 "metric": index.metric(),
+                "quantization": index.quantization(),
                 "params": index.params(),
                 "filename": index_filename,
             });
@@ -589,6 +637,8 @@ impl VectorIndexManager {
             if let Some(model_id) = model_ids.get(key) {
                 entry["model_id"] = serde_json::Value::String(model_id.clone());
             }
+            entry["names"] = serde_json::json!(self.names.read().unwrap().iter()
+                .filter(|(_, target)| *target == key).map(|(name, _)| name.clone()).collect::<Vec<_>>());
             metadata.push(entry);
         }
 
@@ -637,7 +687,10 @@ impl VectorIndexManager {
                 &index_path,
                 dimensions,
                 metric,
-                Quantization::None,
+                match item.get("quantization") {
+                    Some(q) => serde_json::from_value(q.clone()).map_err(|e| VectorError::IndexError(e.to_string()))?,
+                    None => Quantization::None,
+                },
                 params,
             )?;
             
@@ -654,6 +707,11 @@ impl VectorIndexManager {
                 }
                 _ => {
                     model_ids.remove(&key);
+                }
+            }
+            if let Some(names) = item.get("names").and_then(|n| n.as_array()) {
+                for name in names.iter().filter_map(|n| n.as_str()) {
+                    self.names.write().unwrap().insert(name.to_string(), key.clone());
                 }
             }
             indices.insert(key, Arc::new(RwLock::new(index)));
