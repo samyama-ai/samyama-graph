@@ -28,6 +28,15 @@
 //! until it cannot fail at all. 0.90 sits below every sample here and far above
 //! the ~0.5 that a broken graph or a mis-scaled distance produces, so it
 //! catches the failure it exists for without catching the weather.
+//!
+//! # Since hnsw_rs 0.3.5 (#2120)
+//!
+//! 0.3.5 seeds the layer generator with a constant, so the spread above no
+//! longer happens within one version: a given corpus builds one graph and
+//! this test returns the same recall on every run. The floor stays where it
+//! is. It is still a bound on how good the index is, not on how lucky one
+//! build was, and `tests/vector_deterministic_build.rs` now checks the
+//! determinism itself.
 
 use samyama::graph::types::NodeId;
 use samyama::vector::index::{DistanceMetric, Quantization, VectorIndex};
@@ -96,12 +105,14 @@ fn hnsw_recall_stays_above_the_floor() {
     );
 }
 
-/// Independent builds per case. HNSW assigns layers at random, so one build
-/// says little: measured on the 200-vector corpus below, a build left 0 to ~5
-/// of its vectors unreachable from the entry point (62 misses in 60 builds on
-/// one run, 1 in 60 on the next), and an unreachable vector is not found at
-/// any search width -- not even at k = ef = n (#1498).
-const BUILDS: usize = 20;
+/// Builds per case. Under hnsw_rs 0.3.4 layers were drawn from an OS seed and
+/// one build said little: measured on the 200-vector corpus below, a build
+/// left 0 to ~5 of its vectors unreachable from the entry point (62 misses in
+/// 60 builds on one run, 1 in 60 on the next), and an unreachable vector is
+/// not found at any search width -- not even at k = ef = n (#1498). 0.3.5
+/// seeds the generator with a constant, so every build of the same corpus is
+/// the same graph and further builds repeat the first (#2120).
+const BUILDS: usize = 1;
 
 fn corpus(n: usize, seed: u64) -> Vec<Vec<f32>> {
     let mut seed = seed;
