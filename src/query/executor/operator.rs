@@ -18036,6 +18036,8 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         ("symptomexplanation", "it reads each relationship's time, which a projection does not keep"),
         ("pca", "it reads node properties, which a projection does not keep"),
         ("or.solve", "it optimises over node properties, not over a graph view"),
+        ("or.constrainedshortestpath", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
+        ("or.shortestpathwithconstraints", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
     ];
 
     /// The projection `graph` names, or `None` when the call names none.
@@ -20296,6 +20298,118 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// `algo.or.constrainedShortestPath(source, target, {resourceProperty,
+    /// maxResource [, costProperty, label, edgeType]})` (OPT-06, #1770).
+    ///
+    /// The cheapest path from `source` to `target` whose `resourceProperty`
+    /// adds up to at most `maxResource`. Cost is `costProperty`, or one per
+    /// relationship (hops) without it. Exact: see
+    /// `samyama_graph_algorithms::constrained_path`. One row, `path` (node
+    /// ids), `cost` and `resource`; no row when no path is within the limit,
+    /// as `weightedPath` gives none when there is no path.
+    fn execute_constrained_shortest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let call = "algo.or.constrainedShortestPath";
+        Self::reject_unknown_config_keys(
+            &self.args,
+            call,
+            &["costProperty", "edgeType", "label", "maxResource", "resourceProperty"],
+        )?;
+        let id = |i: usize, what: &str| match self.args.get(i) {
+            Some(Expression::Literal(PropertyValue::Integer(id))) if *id >= 0 => Ok(*id as u64),
+            other => Err(ExecutionError::bad_argument(format!(
+                "{call}: {what} must be a node id (a non-negative integer), got {other:?}"
+            ))),
+        };
+        let (source, target) = (id(0, "the source")?, id(1, "the target")?);
+        let config = match self.args.get(2) {
+            Some(Expression::Literal(PropertyValue::Map(m))) => m.clone(),
+            _ => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: the third argument must be a map of values with `resourceProperty` \
+                     and `maxResource`, e.g. {{resourceProperty: 'minutes', maxResource: 120}}. \
+                     A parameter inside the map is not read here; pass the whole map as one \
+                     parameter instead, e.g. $config"
+                )))
+            }
+        };
+        let text = |key: &str| match config.get(key) {
+            None => Ok(None),
+            Some(PropertyValue::String(v)) if !v.trim().is_empty() => Ok(Some(v.clone())),
+            Some(other) => Err(ExecutionError::bad_argument(format!(
+                "{call}: `{key}` must be a non-empty string, got {other:?}"
+            ))),
+        };
+        let resource_property = text("resourceProperty")?.ok_or_else(|| {
+            ExecutionError::bad_argument(format!(
+                "{call}: `resourceProperty` is required: the relationship property the limit is on"
+            ))
+        })?;
+        let cost_property = text("costProperty")?;
+        let (label, edge_type) = (text("label")?, text("edgeType")?);
+        let max_resource = match config.get("maxResource") {
+            Some(PropertyValue::Integer(v)) => *v as f64,
+            Some(PropertyValue::Float(v)) => *v,
+            None => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `maxResource` is required: the most `{resource_property}` a path may add up to"
+                )))
+            }
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `maxResource` must be a number, got {other:?}"
+                )))
+            }
+        };
+
+        // One view per property: a view holds one weight. Built from the same
+        // nodes and relationships, so they list the edges in the same order --
+        // checked, because the resources are matched to the costs by position.
+        let costs = self.view(store, label.as_deref(), edge_type.as_deref(), cost_property.as_deref())?;
+        let resources = self.view(store, label.as_deref(), edge_type.as_deref(), Some(&resource_property))?;
+        if costs.out_offsets != resources.out_offsets || costs.out_targets != resources.out_targets {
+            return Err(ExecutionError::RuntimeError(format!(
+                "{call}: the cost and resource views list different relationships"
+            )));
+        }
+        let resource_per_edge = resources.weights.as_deref().unwrap_or(&[]);
+
+        let found = crate::algo::constrained_shortest_path(
+            &costs,
+            resource_per_edge,
+            source,
+            target,
+            max_resource,
+            &|| check_deadline().is_err(),
+        )
+        .map_err(|e| match e {
+            crate::algo::ConstrainedPathError::Interrupted => {
+                ExecutionError::RuntimeError(format!("Query timed out: {call} was still searching"))
+            }
+            crate::algo::ConstrainedPathError::NegativeCost(_) => ExecutionError::bad_argument(format!(
+                "{call}: `{}` holds a negative value; {e}",
+                cost_property.as_deref().unwrap_or("cost")
+            )),
+            crate::algo::ConstrainedPathError::NegativeResource(_) => ExecutionError::bad_argument(
+                format!("{call}: `{resource_property}` holds a negative value; {e}"),
+            ),
+            other => ExecutionError::bad_argument(format!("{call}: {other}")),
+        })?;
+
+        if let Some(found) = found {
+            let mut record = Record::new();
+            record.bind(
+                "path".to_string(),
+                Value::Property(PropertyValue::Array(
+                    found.path.iter().map(|&n| PropertyValue::Integer(n as i64)).collect(),
+                )),
+            );
+            record.bind("cost".to_string(), Value::Property(PropertyValue::Float(found.cost)));
+            record.bind("resource".to_string(), Value::Property(PropertyValue::Float(found.resource)));
+            self.results.push(record);
+        }
+        Ok(())
+    }
+
     fn execute_weighted_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (source_node_id, target_node_id, weight_property)
         if self.args.len() < 3 {
@@ -21058,6 +21172,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "wcc" => self.execute_wcc(store)?,
                 "scc" => self.execute_scc(store)?,
                 "weightedpath" => self.execute_weighted_path(store)?,
+                "or.constrainedshortestpath" | "or.shortestpathwithconstraints" => {
+                    self.execute_constrained_shortest_path(store)?
+                }
                 "maxflow" => self.execute_max_flow(store)?,
                 "mst" => self.execute_mst(store)?,
                 "trianglecount" => self.execute_triangle_count(store)?,
@@ -21156,6 +21273,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "wcc" => self.execute_wcc(store)?,
                 "scc" => self.execute_scc(store)?,
                 "weightedpath" => self.execute_weighted_path(store)?,
+                "or.constrainedshortestpath" | "or.shortestpathwithconstraints" => {
+                    self.execute_constrained_shortest_path(store)?
+                }
                 "maxflow" => self.execute_max_flow(store)?,
                 "mst" => self.execute_mst(store)?,
                 "trianglecount" => self.execute_triangle_count(store)?,

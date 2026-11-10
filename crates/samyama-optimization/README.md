@@ -214,6 +214,46 @@ YIELD objective, feasible, gap, total_time_ms
 `gap` against the benchmark's known optimum, and both `null` for a
 multi-objective benchmark (see #1795 for why feasibility cannot be read there yet).
 
+### Graph-native templates (OPT-06)
+
+`algo.or.solve` optimises numbers stored on nodes. Some problems recur often
+enough to have their own procedure, which states the problem in graph terms
+and solves it exactly. The first one (#1770):
+
+**`algo.or.constrainedShortestPath(source, target, {config})`**, also callable
+as `algo.or.shortestPathWithConstraints`: the cheapest path from `source` to
+`target` whose `resourceProperty` adds up to at most `maxResource`. For
+example, the cheapest route whose travel time stays within two hours.
+
+```cypher
+CALL algo.or.constrainedShortestPath($source, $target,
+     {costProperty: 'cost', resourceProperty: 'minutes', maxResource: 120, edgeType: 'ROAD'})
+YIELD path, cost, resource
+RETURN path, cost, resource
+```
+
+`source` and `target` are node ids, as for `algo.weightedPath`: numbers or
+parameters, not expressions such as `id(n)`. The config is a map of values,
+or the whole map as one parameter (`$config`); a parameter *inside* the map is
+not read.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `resourceProperty` | The relationship property the limit is on. | required |
+| `maxResource` | The most the resource may add up to (`<=`). | required |
+| `costProperty` | The relationship property to minimise. | 1 per relationship (fewest hops) |
+| `label`, `edgeType` | Only these nodes and relationships. | all |
+
+It returns one row: `path` (node ids), `cost` and `resource`. When no path
+is within the limit, it returns no row. A negative cost or resource is
+refused, and so is a graph projection, which keeps only one weight.
+
+It is exact. The search keeps, at each node, only the partial paths that no
+other partial path there beats on both cost and resource, and expands them
+cheapest first. Its answers are checked against every simple path on 2,000
+random graphs (`constrained_path.rs`). The problem is NP-hard in general, so a
+large graph can take long. The query deadline stops it.
+
 ### Measuring a multi-objective front
 
 A multi-objective solve returns a front of trade-offs, not one answer, so its
