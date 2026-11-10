@@ -1170,6 +1170,31 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
         "AST cache misses since start.",
         stats.misses().to_string(),
     );
+    // The result cache holds whole answers, up to `result_cache_budget` bytes
+    // (256 MB by default), and was on neither this page nor `/api/memory`: the
+    // biggest structure the engine keeps outside the graph was invisible
+    // (#2080).
+    let result_stats = state.engine.result_cache_stats();
+    gauge(
+        "samyama_result_cache_entries",
+        "Query results held in the result cache.",
+        state.engine.result_cache_len().to_string(),
+    );
+    gauge(
+        "samyama_result_cache_bytes",
+        "Estimated bytes held by the result cache.",
+        state.engine.result_cache_bytes().to_string(),
+    );
+    gauge(
+        "samyama_result_cache_hits",
+        "Reads answered from the result cache since start.",
+        result_stats.hits().to_string(),
+    );
+    gauge(
+        "samyama_result_cache_misses",
+        "Cacheable reads the result cache could not answer since start.",
+        result_stats.misses().to_string(),
+    );
 
     // Per-index, because "indexes cost 4 GB" and "this one index costs 4 GB"
     // lead to different actions.
@@ -1258,6 +1283,12 @@ pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse 
         },
         "index_memory_bytes": index_bytes,
         "indexes": indexes,
+        // Outside the graph and the indexes, so outside `attributed_bytes` too.
+        "result_cache": {
+            "entries": state.engine.result_cache_len(),
+            "bytes": state.engine.result_cache_bytes(),
+            "budget_bytes": state.engine.result_cache_budget(),
+        },
         "tenants": state.tenant_manager.as_ref().map(|tm| tm.list_tenants().len()),
     }))
 }
