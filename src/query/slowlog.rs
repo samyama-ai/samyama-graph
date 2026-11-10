@@ -72,20 +72,25 @@ pub fn max_len_from(value: Option<&str>) -> usize {
 }
 
 /// Record one slow query, dropping the oldest when the ring is full.
+///
+/// The id and the timestamp are taken while the lock is held. Taken before it,
+/// two queries finishing together could take ids 5 and 6 and then enter the
+/// ring as 6, 5, so "newest first" would not be in id order.
 pub fn record(query: &str, elapsed_ms: u64, threshold_ms: u64, rows: usize, failed: bool) {
     let r = ring();
+    let query: String = query.chars().take(QUERY_CHARS).collect();
+    let mut entries = r.entries.lock().unwrap_or_else(|e| e.into_inner());
     let entry = SlowQuery {
         id: r.next_id.fetch_add(1, Ordering::Relaxed),
         timestamp_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64),
-        query: query.chars().take(QUERY_CHARS).collect(),
+        query,
         elapsed_ms,
         threshold_ms,
         rows,
         failed,
     };
-    let mut entries = r.entries.lock().unwrap_or_else(|e| e.into_inner());
     if entries.len() == r.max_len {
         entries.pop_front();
     }
