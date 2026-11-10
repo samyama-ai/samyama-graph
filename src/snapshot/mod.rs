@@ -10,6 +10,7 @@
 //! On import, old node IDs are remapped to new IDs via a HashMap.
 
 pub mod codec;
+pub mod content_hash;
 pub mod encryption;
 pub mod format;
 pub mod keys;

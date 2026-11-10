@@ -409,12 +409,38 @@ paths:
                   description: Target graph/tenant name
                 format:
                   type: string
-                  enum: [arrow, parquet]
+                  enum: [arrow, parquet, csv]
                   default: arrow
                   description: Output encoding
+                seed:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: Seeds rand() and randomUUID() for this statement, so the same query over the same graph returns the same bytes
+                snapshot_hash:
+                  type: string
+                  description: Pin the export to the graph an earlier manifest named; a different graph is refused with 409
+              additionalProperties: false
       responses:
         '200':
-          description: The result set
+          description: The result set, with its dataset manifest in headers (ML-08)
+          headers:
+            x-samyama-dataset-manifest:
+              description: 'JSON: snapshot_hash, query, seed, format, graph, engine_version, rows, content_hash'
+              schema:
+                type: string
+            x-samyama-snapshot-hash:
+              description: sha256 over the graph the query read
+              schema:
+                type: string
+            x-samyama-content-hash:
+              description: sha256 over the response body
+              schema:
+                type: string
+            x-samyama-seed:
+              description: The seed, or none
+              schema:
+                type: string
           content:
             application/vnd.apache.arrow.stream:
               schema:
@@ -425,7 +451,13 @@ paths:
                 type: string
                 format: binary
         '400':
-          description: Unknown format, unknown graph, or a query that does not run
+          description: Unknown format, unknown graph, an unknown request field, or a query that does not run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: snapshot_hash was given and the graph's content hash differs
           content:
             application/json:
               schema:

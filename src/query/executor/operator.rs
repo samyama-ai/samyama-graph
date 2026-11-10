@@ -533,6 +533,54 @@ pub(crate) mod statement_clock {
     }
 }
 
+/// The random source `rand()` and `randomUUID()` draw from (ML-08, #1747).
+///
+/// Unseeded, each call draws from the thread's generator, as before. Seeded --
+/// `POST /api/query/export` with `seed` -- the statement draws from one
+/// generator built from that seed, so the same query over the same graph with
+/// the same seed returns the same rows, byte for byte. Without that, a dataset
+/// sampled with `WHERE rand() < 0.1` could never be rebuilt.
+///
+/// Thread-local, like `statement_clock`: a statement runs on one thread, and a
+/// filter that calls `rand()` is never split across threads (see
+/// `FilterOperator::predicate_is_parallel`), so the draws come in row order.
+/// The generator is `StdRng` from `rand` 0.8, whose stream is fixed for that
+/// version; the export manifest records the engine version for that reason.
+pub mod statement_rng {
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static RNG: RefCell<Option<StdRng>> = const { RefCell::new(None) };
+    }
+
+    /// Seed this thread's statement generator. The guard unseeds it on drop.
+    pub fn seed(seed: u64) -> Guard {
+        RNG.with(|r| *r.borrow_mut() = Some(StdRng::seed_from_u64(seed)));
+        Guard
+    }
+
+    /// The next `rand()` value in `[0, 1)`.
+    pub fn next_f64() -> f64 {
+        RNG.with(|r| match r.borrow_mut().as_mut() {
+            Some(g) => g.gen::<f64>(),
+            None => rand::thread_rng().gen::<f64>(),
+        })
+    }
+
+    /// 128 random bits from the seeded generator, or `None` when unseeded.
+    pub fn seeded_u128() -> Option<u128> {
+        RNG.with(|r| r.borrow_mut().as_mut().map(|g| g.gen::<u128>()))
+    }
+
+    pub struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            RNG.with(|r| *r.borrow_mut() = None);
+        }
+    }
+}
+
 
 /// Build a `Duration` with `nanos` carried into `seconds`.
 ///
@@ -3751,11 +3799,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 _ => Err(ExecutionError::TypeError("exp() requires numeric".to_string())),
             }
         }
-        "rand" => {
-            use rand::Rng;
-            let val = rand::thread_rng().gen::<f64>();
-            Ok(Value::Property(PropertyValue::Float(val)))
-        }
+        "rand" => Ok(Value::Property(PropertyValue::Float(statement_rng::next_f64()))),
         "timestamp" => {
             let ts = statement_clock::now().timestamp_millis();
             Ok(Value::Property(PropertyValue::Integer(ts)))
@@ -4892,7 +4936,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "randomuuid" => {
             use std::time::{SystemTime, UNIX_EPOCH};
             let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-            let seed = t.as_nanos();
+            // A seeded statement draws the bits from its seed, so an export
+            // that mints ids rebuilds with the same ones (ML-08, #1747).
+            let seed = statement_rng::seeded_u128().unwrap_or(t.as_nanos());
             // Simple v4-like UUID (not cryptographically secure, but unique enough)
             let uuid = format!("{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
                 (seed & 0xFFFFFFFF) as u32,
@@ -7731,6 +7777,13 @@ impl FilterOperator {
     /// Unset in normal use. `0` forces parallel, a large value forces
     /// sequential.
     pub fn predicate_is_parallel(predicate: &Expression) -> bool {
+        // A predicate that draws random numbers stays on one thread: split
+        // across threads, the rows would take the draws in a different order
+        // each run, and a seeded statement would stop being reproducible
+        // (ML-08, #1747). `WHERE rand() < 0.1` is how datasets are sampled.
+        if super::planner::is_volatile(predicate) {
+            return false;
+        }
         let threshold = std::env::var("SAMYAMA_FILTER_PARALLEL_COST")
             .ok()
             .and_then(|v| v.parse().ok())
