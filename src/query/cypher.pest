@@ -6,7 +6,10 @@ COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 
 // Query structure
 query = { SOI ~ cypher_options? ~ explain_clause? ~ cypher_options? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
-explain_clause = { ^"PROFILE" | ^"EXPLAIN" }
+explain_clause = { (^"PROFILE" | ^"EXPLAIN") ~ explain_format? }
+// `EXPLAIN (FORMAT JSON)` / `PROFILE (FORMAT JSON)` (#2013): the plan as a
+// structured value instead of text, for a client that would otherwise parse it.
+explain_format = { "(" ~ ^"FORMAT" ~ ^"JSON" ~ ")" }
 // `CYPHER planner=cost plan=2 MATCH …` (LANG-06, #1616): options that choose
 // the planner and force one of its candidate plans, before or after EXPLAIN.
 // Keys and values are checked when the query is lowered, so an option this
