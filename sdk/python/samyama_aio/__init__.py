@@ -31,13 +31,22 @@ is the thing being ruled out, so checking the shape would check the wrong half.
 Cancellation
 ------------
 
-``asyncio.CancelledError`` propagates to the caller as usual, but the worker
-thread is **not** interrupted: Python cannot interrupt a thread inside a C
-call, and the engine has no query-cancellation API (samyama-graph#1393). So a
-cancelled ``await`` returns control to the loop while the query continues to
-completion in the background. That is documented here rather than papered
-over: a caller who needs a bound should use ``asyncio.timeout`` for
-responsiveness and know the work is still running underneath.
+Cancelling the task that awaits ``query``, ``query_readonly``, ``query_stream``
+or ``nlq`` -- directly, or through ``asyncio.timeout`` / ``wait_for`` -- stops
+the request (API-06, #1741). Each of those calls passes a
+:class:`samyama.CancelToken` to the blocking call and cancels it when the task
+is cancelled; the worker thread sees it within about 50 ms, drops the request
+and closes its connection, so neither the thread nor the socket is left behind.
+
+What that stops on the server: a stream stops producing rows when its
+connection closes. A buffered query the server has already started is not
+interrupted -- the engine has no cancel-this-query call (samyama-graph#1393) --
+and runs to its end or to the query deadline. The caller and its thread are
+free either way.
+
+The other methods (``status``, ``ping``, the algorithms, ...) are short and are
+not cancellable this way; a cancelled ``await`` on one returns at once while
+the call finishes on its thread.
 """
 
 from __future__ import annotations
@@ -48,7 +57,7 @@ import sys
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar
 
 try:  # pragma: no cover - import shape differs only by build
-    from samyama import SamyamaClient
+    from samyama import CancelToken, SamyamaClient
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "samyama_aio needs the compiled `samyama` extension. Build it with "
@@ -72,6 +81,17 @@ async def _to_thread(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
         return await asyncio.to_thread(fn, *args, **kwargs)
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
+
+
+async def _cancellable(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
+    """Run ``fn(..., cancel=token)`` on a worker thread; cancel the token if
+    the awaiting task is cancelled, so the thread stops waiting too (#1741)."""
+    token = CancelToken()
+    try:
+        return await _to_thread(fn, *args, cancel=token, **kwargs)
+    except asyncio.CancelledError:
+        token.cancel()
+        raise
 
 
 class AsyncSamyamaClient:
@@ -137,10 +157,10 @@ class AsyncSamyamaClient:
     # ── queries ─────────────────────────────────────────────────────────────
 
     async def query(self, cypher: str, graph: str = "default") -> Any:
-        return await _to_thread(self._client.query, cypher, graph)
+        return await _cancellable(self._client.query, cypher, graph)
 
     async def query_readonly(self, cypher: str, graph: str = "default") -> Any:
-        return await _to_thread(self._client.query_readonly, cypher, graph)
+        return await _cancellable(self._client.query_readonly, cypher, graph)
 
     async def query_stream(self, cypher: str, graph: str = "default") -> "AsyncQueryStream":
         """Stream a read query's rows (#1632); see ``SamyamaClient.query_stream``.
@@ -151,8 +171,13 @@ class AsyncSamyamaClient:
             async for row in await db.query_stream("MATCH (n) RETURN n.name AS name"):
                 ...
         """
-        stream = await _to_thread(self._client.query_stream, cypher, graph)
-        return AsyncQueryStream(stream)
+        token = CancelToken()
+        try:
+            stream = await _to_thread(self._client.query_stream, cypher, graph, cancel=token)
+        except asyncio.CancelledError:
+            token.cancel()
+            raise
+        return AsyncQueryStream(stream, token)
 
     async def nlq(
         self,
@@ -162,7 +187,7 @@ class AsyncSamyamaClient:
         api_key: Optional[str] = None,
         api_base_url: Optional[str] = None,
     ) -> str:
-        return await _to_thread(
+        return await _cancellable(
             self._client.nlq, question,
             provider=provider, model=model, api_key=api_key, api_base_url=api_base_url,
         )
@@ -278,8 +303,11 @@ class AsyncQueryStream:
     so the server stops producing rows the caller will not read.
     """
 
-    def __init__(self, stream: Any) -> None:
+    def __init__(self, stream: Any, token: Optional[Any] = None) -> None:
         self._stream = stream
+        # The token the stream was opened with: cancelling a task waiting on
+        # the next row cancels it, so the worker thread stops waiting too.
+        self._token = token
 
     @property
     def columns(self) -> List[str]:
@@ -289,7 +317,12 @@ class AsyncQueryStream:
         return self
 
     async def __anext__(self) -> Dict[str, Any]:
-        row = await _to_thread(_next_or_none, self._stream)
+        try:
+            row = await _to_thread(_next_or_none, self._stream)
+        except asyncio.CancelledError:
+            if self._token is not None:
+                self._token.cancel()
+            raise
         if row is None:
             raise StopAsyncIteration
         return row

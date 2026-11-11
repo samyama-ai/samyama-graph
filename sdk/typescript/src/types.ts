@@ -152,4 +152,9 @@ export interface ClientOptions {
   maxRetries?: number;
   /** Delay before the first retry, doubled each attempt (default: 100). */
   retryBaseDelayMs?: number;
+  /**
+   * Most requests this client has open at once (default: 10). Further calls
+   * wait for a slot; a stream holds its slot until it ends.
+   */
+  maxConnections?: number;
 }
