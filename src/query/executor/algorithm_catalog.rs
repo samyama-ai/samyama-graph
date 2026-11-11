@@ -406,6 +406,25 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         aka(opt("bestKnown", T::Float), "best_known"),
         aka(key("populationSize", T::Integer, D::Integer(50)), "population_size"),
         aka(key("maxIterations", T::Integer, D::Integer(100)), "max_iterations"),
+        // Not applied when left out: an unseeded solve draws from entropy (#2061).
+        opt("seed", T::Integer),
+    ]),
+    ("algo.negativeSampling", &[
+        LABEL,
+        EDGE_TYPE,
+        key("strategy", T::String, D::String("random")),
+        key("count", T::Integer, D::Integer(100)),
+        key("k", T::Integer, D::Integer(2)),
+        key("seed", T::Integer, D::Integer(42)),
+    ]),
+    ("algo.or.constrainedShortestPath", &[
+        SOURCE,
+        TARGET,
+        Param { name: "resourceProperty", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        Param { name: "maxResource", kind: ParamKind::Config, ty: T::Float, required: true, default: None, also: None },
+        opt("costProperty", T::String),
+        LABEL,
+        EDGE_TYPE,
     ]),
 ];
 
