@@ -229,6 +229,12 @@ pub enum Quantization {
     None,
     /// 16-bit floats. Half the memory, some recall.
     Fp16,
+    /// 8-bit integer codes with one f32 scale per vector (#1974): about a
+    /// quarter of f32's memory. The graph is built and searched on the
+    /// codes; a search through the graph store then reranks a wider
+    /// candidate set ([`Quantization::rerank_factor`]) with the node's own
+    /// f32 vector, so the distances it reports are exact.
+    Int8,
 }
 
 impl Quantization {
@@ -237,6 +243,7 @@ impl Quantization {
         match s.to_ascii_lowercase().as_str() {
             "none" | "f32" | "fp32" => Some(Self::None),
             "fp16" | "f16" | "half" => Some(Self::Fp16),
+            "int8" | "i8" | "sq8" => Some(Self::Int8),
             _ => None,
         }
     }
@@ -246,8 +253,67 @@ impl Quantization {
         match self {
             Self::None => std::mem::size_of::<f32>(),
             Self::Fp16 => std::mem::size_of::<f16>(),
+            Self::Int8 => std::mem::size_of::<i8>(),
         }
     }
+
+    /// Bytes held per vector beyond its values: `Int8`'s scale.
+    pub fn bytes_per_vector_overhead(self) -> usize {
+        match self {
+            Self::Int8 => SCALE_CODES,
+            _ => 0,
+        }
+    }
+
+    /// How many candidates, per result asked for, a search through the graph
+    /// store takes from the index before reranking them with the f32 vector
+    /// held on the node (#1974). 1 means no rerank: the index's own
+    /// distances are already the answer.
+    pub fn rerank_factor(self) -> usize {
+        match self {
+            Self::Int8 => 4,
+            _ => 1,
+        }
+    }
+}
+
+/// Trailing `i8`s of an int8 vector that hold its scale, as the bytes of an
+/// f32. Kept inside the vector because hnsw_rs hands the distance only the
+/// two slices it compares.
+const SCALE_CODES: usize = 4;
+
+/// Symmetric per-vector scalar quantization (#1974): `scale = max|v| / 127`,
+/// `code = round(v / scale)`, and the scale appended. A vector of zeros has
+/// scale 0 and all-zero codes. Non-finite values code as 0.
+fn quantize_i8(v: &[f32]) -> Vec<i8> {
+    let max = v.iter().filter(|x| x.is_finite()).fold(0f32, |m, x| m.max(x.abs()));
+    let scale = if max > 0.0 { max / 127.0 } else { 0.0 };
+    let mut out: Vec<i8> = Vec::with_capacity(v.len() + SCALE_CODES);
+    out.extend(v.iter().map(|x| {
+        if scale > 0.0 && x.is_finite() {
+            (x / scale).round().clamp(-127.0, 127.0) as i8
+        } else {
+            0
+        }
+    }));
+    out.extend(scale.to_bits().to_le_bytes().map(|b| b as i8));
+    out
+}
+
+/// The codes of an int8 vector and its scale.
+fn split_i8(codes: &[i8]) -> (&[i8], f32) {
+    let (values, scale) = codes.split_at(codes.len().saturating_sub(SCALE_CODES));
+    let mut bytes = [0u8; 4];
+    for (b, s) in bytes.iter_mut().zip(scale) {
+        *b = *s as u8;
+    }
+    (values, f32::from_bits(u32::from_le_bytes(bytes)))
+}
+
+/// An int8 vector widened back to f32: each code times the scale.
+fn dequantize_i8(codes: &[i8]) -> Vec<f32> {
+    let (values, scale) = split_i8(codes);
+    values.iter().map(|c| *c as f32 * scale).collect()
 }
 
 /// The HNSW build and search parameters of one index (#1971).
@@ -519,6 +585,16 @@ impl Distance<f16> for MetricDistance {
     }
 }
 
+/// Over the dequantized values, in f32, as for f16. The scale is per vector,
+/// so the two sides are widened with their own.
+impl Distance<i8> for MetricDistance {
+    fn eval(&self, va: &[i8], vb: &[i8]) -> f32 {
+        let (a, sa) = split_i8(va);
+        let (b, sb) = split_i8(vb);
+        self.rank(a.iter().zip(b).map(|(x, y)| (*x as f32 * sa, *y as f32 * sb)))
+    }
+}
+
 /// Stored vector entry for persistence
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StoredVector {
@@ -528,16 +604,19 @@ pub struct StoredVector {
 
 /// The HNSW graph, holding whichever element type the index was built for.
 ///
-/// Two variants rather than one generic index because `Hnsw` is typed on its
-/// element: an index that converted f16 to f32 at the boundary would keep the
-/// f32 copy inside the graph, and the memory saving -- the entire point of
-/// NDS-09's quantization -- would be a claim about the persistence copy only.
+/// A variant per element type rather than one generic index because `Hnsw`
+/// is typed on its element: an index that converted f16 to f32 at the
+/// boundary would keep the f32 copy inside the graph, and the memory saving
+/// -- the entire point of NDS-09's quantization -- would be a claim about
+/// nothing the index holds.
 ///
 /// An IVF index (#1975) has no graph: its lists hold positions into the same
 /// stored vectors, at whichever precision the index keeps them.
 enum Backend {
     F32(Hnsw<'static, f32, MetricDistance>),
     F16(Hnsw<'static, f16, MetricDistance>),
+    /// Int8 codes, each with its scale appended (#1974).
+    I8(Hnsw<'static, i8, MetricDistance>),
     Ivf(ivf::Ivf),
 }
 
@@ -554,7 +633,7 @@ pub struct VectorIndex {
     /// HNSW or IVF, and the IVF parameters (#1975).
     kind: IndexKind,
     /// The actual HNSW index, and the only copy of its vectors (#1973); or
-    /// the IVF lists, whose vectors are in `ivf_f32` / `ivf_f16`.
+    /// the IVF lists, whose vectors are in `ivf_f32` / `ivf_f16` / `ivf_i8`.
     backend: Backend,
     /// The node behind each entry, by position. A position is the entry's data
     /// id in the graph.
@@ -566,6 +645,8 @@ pub struct VectorIndex {
     /// It has no graph to hold them, so this is its one copy; empty for HNSW.
     ivf_f32: Vec<Vec<f32>>,
     ivf_f16: Vec<Vec<f16>>,
+    /// Int8 codes with their scale appended (#1974).
+    ivf_i8: Vec<Vec<i8>>,
     /// Stored vectors by the hash of their exact bits, as positions, so a
     /// query with a vector that is in the index finds it whether or not the
     /// graph can reach it (#1498).
@@ -749,6 +830,9 @@ impl VectorIndex {
             (IndexKind::Hnsw, Quantization::Fp16) => Backend::F16(Hnsw::new(
                 m, expected, 16, ef_construction, distance,
             )),
+            (IndexKind::Hnsw, Quantization::Int8) => Backend::I8(Hnsw::new(
+                m, expected, 16, ef_construction, distance,
+            )),
         };
         Self {
             dimensions,
@@ -761,6 +845,7 @@ impl VectorIndex {
             point_ids: Vec::new(),
             ivf_f32: Vec::new(),
             ivf_f16: Vec::new(),
+            ivf_i8: Vec::new(),
             exact: HashMap::new(),
             current: HashMap::new(),
             superseded: 0,
@@ -832,12 +917,14 @@ impl VectorIndex {
     /// Bytes held for the vectors themselves. Each kind keeps one copy: an
     /// HNSW index in its graph (#1973; before, a second copy kept for
     /// persistence doubled this), an IVF index in the list its lists point
-    /// into.
+    /// into. An int8 vector also holds its four-byte scale (#1974).
     ///
     /// Reported rather than asserted. A quantization that claims to halve
     /// memory has to be able to show it.
     pub fn vector_bytes(&self) -> usize {
-        self.entries() * self.dimensions * self.quantization.bytes_per_value()
+        self.entries()
+            * (self.dimensions * self.quantization.bytes_per_value()
+                + self.quantization.bytes_per_vector_overhead())
     }
 
     /// Bytes held by the HNSW navigable graph: each point's per-layer
@@ -874,6 +961,7 @@ impl VectorIndex {
             Backend::F16(h) => walk(h.get_point_indexation()),
             // The IVF's own structure: its centroids and its lists.
             Backend::Ivf(lists) => lists.bytes(),
+            Backend::I8(h) => walk(h.get_point_indexation()),
         }
     }
 
@@ -891,7 +979,8 @@ impl VectorIndex {
         let current = self.current.capacity() * (size_of::<u64>() + size_of::<usize>() + 1);
         let records = self.node_ids.capacity() * size_of::<u64>()
             + self.point_ids.capacity() * size_of::<PointId>()
-            + (self.ivf_f32.capacity() + self.ivf_f16.capacity()) * size_of::<Vec<f32>>();
+            + (self.ivf_f32.capacity() + self.ivf_f16.capacity() + self.ivf_i8.capacity())
+                * size_of::<Vec<f32>>();
         self.vector_bytes() + self.graph_bytes() + exact + current + records
     }
 
@@ -943,6 +1032,15 @@ impl VectorIndex {
                 self.exact.entry(key).or_default().push(pos);
                 Some(inserted_point(h.get_point_indexation(), &before, pos))
             }
+            Backend::I8(h) => {
+                // Quantized once, here, for the reason given for f16.
+                let q = quantize_i8(vector);
+                let before = layer_sizes(h.get_point_indexation());
+                h.insert((&q, pos));
+                let key = bits_key(&q, |v: i8| v as u8 as u64);
+                self.exact.entry(key).or_default().push(pos);
+                Some(inserted_point(h.get_point_indexation(), &before, pos))
+            }
             // An IVF list is a list of positions. The vector is placed by
             // the value stored, so a quantized index partitions the values
             // its searches compare. With no graph to hold it, the vector is
@@ -962,6 +1060,13 @@ impl VectorIndex {
                         let widened: Vec<f32> = q.iter().map(|v| v.to_f32()).collect();
                         lists.place(pos, &widened, self.metric);
                         self.ivf_f16.push(q);
+                    }
+                    Quantization::Int8 => {
+                        let q = quantize_i8(vector);
+                        let key = bits_key(&q, |v: i8| v as u8 as u64);
+                        self.exact.entry(key).or_default().push(pos);
+                        lists.place(pos, &dequantize_i8(&q), self.metric);
+                        self.ivf_i8.push(q);
                     }
                 }
                 None
@@ -1019,6 +1124,15 @@ impl VectorIndex {
         match &self.backend {
             Backend::F16(h) => h.get_point_indexation().get_point_data(self.point_ids.get(pos)?),
             Backend::Ivf(_) => self.ivf_f16.get(pos).cloned(),
+            _ => None,
+        }
+    }
+
+    /// The int8 codes at `pos`, scale appended (#1974).
+    fn i8_at(&self, pos: usize) -> Option<Vec<i8>> {
+        match &self.backend {
+            Backend::I8(h) => h.get_point_indexation().get_point_data(self.point_ids.get(pos)?),
+            Backend::Ivf(_) => self.ivf_i8.get(pos).cloned(),
             _ => None,
         }
     }
@@ -1200,6 +1314,7 @@ impl VectorIndex {
                     let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
                     h.search_filter(&q, want, ef_search, filter)
                 }
+                Backend::I8(h) => h.search_filter(&quantize_i8(query), want, ef_search, filter),
                 // Answered above.
                 Backend::Ivf(_) => Vec::new(),
             }
@@ -1298,6 +1413,16 @@ impl VectorIndex {
                     .map(|(i, v)| (NodeId::new(self.node_at(i)), distance.eval(&q, &v)))
                     .collect()
             }
+            Quantization::Int8 => {
+                let q = quantize_i8(query);
+                let key = bits_key(&q, |v: i8| v as u8 as u64);
+                self.exact.get(&key).into_iter().flatten()
+                    .filter(|&&i| self.is_current(i))
+                    .filter_map(|&i| Some((i, self.i8_at(i)?)))
+                    .filter(|(_, v)| *v == q)
+                    .map(|(i, v)| (NodeId::new(self.node_at(i)), distance.eval(&q, &v)))
+                    .collect()
+            }
         }
     }
 
@@ -1305,8 +1430,10 @@ impl VectorIndex {
     /// A quantized value widens back exactly -- f16 to f32 is lossless -- so
     /// this is the original value only when the index is unquantized, and the
     /// rounded one otherwise. That is what was stored, and what a reload must
-    /// reproduce. In position order, so a rebuild inserts them in the order
-    /// they first went in, and the same index rebuilds into the same graph.
+    /// reproduce. Int8 widens back to each code times its scale, which is not
+    /// the original value: int8 is lossy where f16 to f32 is not. In position
+    /// order, so a rebuild inserts them in the order they first went in, and
+    /// the same index rebuilds into the same graph.
     fn current_vectors(&self) -> Vec<StoredVector> {
         fn collect<T: Clone + Send + Sync>(
             index: &VectorIndex,
@@ -1335,10 +1462,13 @@ impl VectorIndex {
             Backend::F16(h) => collect(self, h.get_point_indexation(), |v| {
                 v.iter().map(|x| x.to_f32()).collect()
             }),
+            Backend::I8(h) => collect(self, h.get_point_indexation(), dequantize_i8),
             Backend::Ivf(_) => {
                 let f32s = self.ivf_f32.iter().cloned();
                 let f16s = self.ivf_f16.iter().map(|v| v.iter().map(|x| x.to_f32()).collect());
+                let i8s = self.ivf_i8.iter().map(|v| dequantize_i8(v));
                 f32s.chain(f16s)
+                    .chain(i8s)
                     .enumerate()
                     .filter(|(pos, _)| self.is_current(*pos))
                     .map(|(pos, vector)| StoredVector { node_id: self.node_at(pos), vector })
@@ -1403,6 +1533,13 @@ impl VectorIndex {
                 positions
                     .into_iter()
                     .filter_map(|i| Some((i, distance.eval(&q, &self.f16_at(i)?))))
+                    .collect()
+            }
+            Quantization::Int8 => {
+                let q = quantize_i8(query);
+                positions
+                    .into_iter()
+                    .filter_map(|i| Some((i, distance.eval(&q, &self.i8_at(i)?))))
                     .collect()
             }
         };
@@ -1481,6 +1618,13 @@ impl VectorIndex {
                 let rows = positions.iter().map(|&i| self.ivf_f32[i].as_slice()).collect();
                 score_f32(positions, rows)
             }
+            Backend::Ivf(_) if self.quantization == Quantization::Int8 => {
+                let q = quantize_i8(query);
+                (0..self.ivf_i8.len())
+                    .filter(|&i| wanted(i))
+                    .map(|i| (i, distance.eval(&q, &self.ivf_i8[i])))
+                    .collect()
+            }
             Backend::Ivf(_) => {
                 let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
                 (0..self.ivf_f16.len())
@@ -1490,6 +1634,10 @@ impl VectorIndex {
             }
             Backend::F16(h) => {
                 let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
+                scan_points(h.get_point_indexation(), wanted, |v| distance.eval(&q, v))
+            }
+            Backend::I8(h) => {
+                let q = quantize_i8(query);
                 scan_points(h.get_point_indexation(), wanted, |v| distance.eval(&q, v))
             }
         };
@@ -1738,7 +1886,9 @@ mod tests {
         assert_eq!(Quantization::parse("none"), Some(Quantization::None));
         assert_eq!(Quantization::parse("half"), Some(Quantization::Fp16));
         assert_eq!(Quantization::parse("fp16"), Some(Quantization::Fp16));
-        assert_eq!(Quantization::parse("int8"), None);
+        assert_eq!(Quantization::parse("int8"), Some(Quantization::Int8));
+        assert_eq!(Quantization::parse("int4"), None);
+        assert_eq!(Quantization::Int8.bytes_per_value(), 1);
         assert_eq!(Quantization::None.bytes_per_value(), 4);
         assert_eq!(Quantization::Fp16.bytes_per_value(), 2);
     }
