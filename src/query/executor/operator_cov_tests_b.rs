@@ -2223,7 +2223,7 @@ fn or_solve_every_single_objective_solver_dispatches() {
     for name in [
         "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "SAMPJaya", "QOJaya",
         "EHRJaya", "BMR", "BWR", "BMWR", "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
-        "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR", "LSHADE",
+        "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR", "LSHADE", "CMAES",
     ] {
         let mut store = solve_store();
         let rows = run_algo_mut(
@@ -2271,7 +2271,7 @@ fn or_solve_multi_objective_without_cost_properties_is_refused() {
 
 #[test]
 fn or_solve_multi_objective_reports_a_front() {
-    for name in ["NSGA2", "MOTLBO", "MOBMWR", "MORaoDE"] {
+    for name in ["NSGA2", "MOTLBO", "MOBMWR", "MORaoDE", "SPEA2", "MOEAD"] {
         let mut store = solve_store();
         let rows = run_algo_mut(
             &mut store,
@@ -2339,7 +2339,7 @@ fn or_solve_same_seed_gives_the_same_result() {
     let mut names = vec![
         "Jaya", "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "SAMPJaya",
         "QOJaya", "EHRJaya", "BMR", "BWR", "BMWR", "PSO", "DE", "GA", "SA", "ABC", "GSA", "HS",
-        "FPA", "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR", "LSHADE",
+        "FPA", "Firefly", "Cuckoo", "GWO", "Bat", "SAPHR", "LSHADE", "CMAES",
     ];
     names.extend_from_slice(AlgorithmOperator::MULTI_OBJECTIVE_SOLVERS);
     for name in names {
@@ -6766,6 +6766,13 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
         "sample.forestfire" | "sample.randomwalk" => vec![node(0), lmap(&[("size", pint(2))])],
         "sample.snowball" | "sample.egonetwork" => vec![node(0)],
         "sample.stratified" => vec![lmap(&[("fraction", PropertyValue::Float(0.5))])],
+        // A source, a target and a limit on a second relationship property;
+        // every relationship here carries `w`.
+        "or.constrainedshortestpath" => vec![
+            node(0),
+            node(3),
+            lmap(&[("resourceProperty", pstr("w")), ("maxResource", PropertyValue::Float(10.0))]),
+        ],
         // A path has no cycle and pairs it cannot reach; a triangle has both.
         "wienerindex" | "cycledetection" => return (triangle().0, vec![]),
         // The smallest graph with a non-empty 3-truss.
