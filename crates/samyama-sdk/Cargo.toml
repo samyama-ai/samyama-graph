@@ -24,6 +24,9 @@ reqwest = { version = "0.13.1", features = ["json"] }
 # Error handling
 thiserror = "1.0"
 
+# The pinned snapshot's digest, reported by SamyamaEnv (#2095)
+sha2 = "0.10"
+
 # Core graph database (for EmbeddedClient)
 # No default features: a library must not bring the server's allocator (ADR-038).
 samyama = { path = "../..", version = "1.14.0", default-features = false }
