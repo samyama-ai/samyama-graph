@@ -25,6 +25,7 @@ pub mod centrality_extra;
 pub mod link_prediction;
 pub mod neighbour_sampling;
 pub mod subgraph_sampling;
+pub mod negative_sampling;
 pub mod community_detect;
 pub mod metrics;
 pub mod pathfinding_extra;
@@ -58,6 +59,7 @@ pub use neighbour_sampling::{
 pub use subgraph_sampling::{
     ego_network, forest_fire, random_walk_sample, snowball, stratified, Allocation as StratumAllocation,
 };
+pub use negative_sampling::{negative_samples, NegativeStrategy};
 pub use similarity_extra::{
     constraint, cosine_similarity, effective_size, node_similarity, overlap_coefficient,
     reciprocity,

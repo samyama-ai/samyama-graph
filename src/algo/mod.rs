@@ -30,6 +30,7 @@ pub use samyama_graph_algorithms::{
     predict_links, score_one, LinkScore, PairScore,
     sample_neighbours, Fanout, SampleDirection, SampleError, SampleSpec, SampledEdge,
     ego_network, forest_fire, random_walk_sample, snowball, stratified, StratumAllocation,
+    negative_samples, NegativeStrategy,
     articulation_points, bridges, find_cycle, topological_sort, TopoResult,
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius, ranked_opt,
     louvain, modularity, with_ids,
