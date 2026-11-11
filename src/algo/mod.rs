@@ -29,6 +29,7 @@ pub use samyama_graph_algorithms::{
     eigenvector_centrality, harmonic_centrality, ranked,
     predict_links, score_one, LinkScore, PairScore,
     sample_neighbours, Fanout, SampleDirection, SampleError, SampleSpec, SampledEdge,
+    negative_samples, NegativeStrategy,
     articulation_points, bridges, find_cycle, topological_sort, TopoResult,
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius, ranked_opt,
     louvain, modularity, with_ids,
