@@ -1366,7 +1366,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                             None => {
                                 return Err(ParseError::SemanticError(format!(
                                     "CREATE VECTOR INDEX: unknown `quantization` {s:?}. \
-Accepted values are `none` and `fp16`."
+Accepted values are `none`, `fp16` and `int8`."
                                 )))
                             }
                         },

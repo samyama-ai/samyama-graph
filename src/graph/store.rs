@@ -7292,26 +7292,69 @@ NodeDeleted { id, .. } => {
         strategy: Option<crate::vector::strategy::FilterStrategy>,
         keep: impl Fn(NodeId) -> bool,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
-        if strategy == Some(crate::vector::strategy::FilterStrategy::Exact) {
+        // An int8 index answers from its codes (#1974). Take more candidates
+        // than asked for and rerank them with the f32 vector on the node.
+        let (factor, metric) = match self.vector_index.get_index(label, property_key) {
+            Some(index) => {
+                let index = index.read().unwrap();
+                (index.quantization().rerank_factor(), index.metric())
+            }
+            None => (1, crate::vector::DistanceMetric::Cosine),
+        };
+        let fetch = k.saturating_mul(factor);
+        let hits = if strategy == Some(crate::vector::strategy::FilterStrategy::Exact) {
             let index = self.vector_index.get_index(label, property_key).ok_or_else(|| {
                 crate::vector::VectorError::IndexError(format!("no vector index on :{label}({property_key})"))
             })?;
             let label_key = Label::new(label);
-            let result = index.read().unwrap().search_exact_where(query, k, &|id| {
+            let result = index.read().unwrap().search_exact_where(query, fetch, &|id| {
                 self.get_node(id).is_some_and(|n| n.labels.contains(&label_key)) && keep(id)
             });
-            return result;
+            result?
+        } else {
+            // Only nodes that still carry the label: the HNSW graph cannot drop a
+            // node, so one that lost the label, or was deleted, is still in it and
+            // must not be returned (#1605).
+            let label_key = Label::new(label);
+            self.vector_index
+                .search_filtered_ef(label, property_key, query, fetch, ef, |id| {
+                    self.get_node(id)
+                        .is_some_and(|n| n.labels.contains(&label_key))
+                        && keep(id)
+                })?
+        };
+        if factor > 1 {
+            Ok(self.rerank_vector_hits(property_key, metric, query, hits, k))
+        } else {
+            Ok(hits)
         }
-        // Only nodes that still carry the label: the HNSW graph cannot drop a
-        // node, so one that lost the label, or was deleted, is still in it and
-        // must not be returned (#1605).
-        let label_key = Label::new(label);
-        self.vector_index
-            .search_filtered_ef(label, property_key, query, k, ef, |id| {
-                self.get_node(id)
-                    .is_some_and(|n| n.labels.contains(&label_key))
-                    && keep(id)
-            })
+    }
+
+    /// The `k` nearest of `hits` by the f32 vector each node holds in
+    /// `property_key` (#1974), at the distance an unquantized index would
+    /// report. A node whose property is not a vector of the query's length
+    /// keeps the index's own distance.
+    fn rerank_vector_hits(
+        &self,
+        property_key: &str,
+        metric: crate::vector::DistanceMetric,
+        query: &[f32],
+        mut hits: Vec<(NodeId, f32)>,
+        k: usize,
+    ) -> Vec<(NodeId, f32)> {
+        for (id, d) in &mut hits {
+            let exact = self
+                .get_node(*id)
+                .and_then(|n| n.properties.get(property_key))
+                .and_then(|p| p.to_vector())
+                .filter(|v| v.len() == query.len());
+            if let Some(v) = exact {
+                *d = metric.distance(query, &v);
+            }
+        }
+        hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(k);
+        hits
     }
 
     /// Vector search across ALL indices (every label + property), merged to a
