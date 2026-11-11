@@ -296,7 +296,7 @@ mode.
    axis with the smallest `descendant_count` drives through `HierarchyDescendantScan` and an
    `Expand` into the fact table; the other axes are `HierarchyOrderTest` checks. HIER H4
    went from 0.2× to 23.4× in a single before/after run; the heuristic, the cases it
-   declines and the numbers are in `benchmarks/hier/README.md`.
+   declines and the numbers are in `benches/hier/README.md`.
 3. **`CALL … YIELD` composition** (engine gap, not ADR-035's, tracked as #348).
    `YIELD`-bound variables are not in scope for a following `WHERE`, which blocks
    hierarchy-filtered vector search — HIER class H9 — entirely.
@@ -307,7 +307,7 @@ mode.
    (7.5 MB of roll-up structures over 112 KB of order embedding on a 9,331-node ontology).
    A sqrt-decomposition or segment tree would trade a little query time for a lot of space.
 6. **Real-ontology validation and a PLL baseline** (#353) — see the "Not yet covered"
-   section of `benchmarks/hier/README.md`.
+   section of `benches/hier/README.md`.
 
 Tracked together in #354, with the four engine bugs the corpus surfaced (#345–#348).
 
@@ -318,6 +318,6 @@ Tracked together in #354, with the four engine bugs the corpus surfaced (#345–
 - Reference implementation: `relationship-hierarchy-index` (`src/relhier/`), validated
   exact against a brute-force oracle, `git merge-base`, and TimescaleDB.
 - Jagadish, *A Compression Technique to Materialize Transitive Closure* (chain decomposition).
-- `benchmarks/hier/` — the HIER benchmark category and its results.
+- `benches/hier/` — the HIER benchmark category and its results.
 - ADR-021 (columnar property store), ADR-022 (snapshot format), ADR-023 (WAL versioning),
   ADR-029 (index manager), ADR-017 (adjacency-aware aggregation planning — detector pattern).

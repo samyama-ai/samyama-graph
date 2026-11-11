@@ -170,6 +170,16 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
         LinkPrediction,
         &["node1", "node2"],
     ),
+    // The cheapest path within a limit on a second edge property
+    // (OPT-06, #1770). Two names, because both are what a caller
+    // reaches for. A read: it returns the path it found and both of
+    // its totals, and writes nothing.
+    read(
+        "algo.or.constrainedShortestPath",
+        &["algo.or.shortestPathWithConstraints"],
+        Optimization,
+        &["path", "cost", "resource"],
+    ),
 ];
 
 /// The entry a procedure name resolves to, by the same canonical form dispatch

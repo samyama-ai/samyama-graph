@@ -2,7 +2,7 @@
  "corpus": "HIER \u2014 hierarchy-heavy complex queries",
  "adr": "ADR-035",
  "paper": "arXiv:2606.24677",
- "generated_by": "benchmarks/hier/generate_corpus.py",
+ "generated_by": "benches/hier/generate_corpus.py",
  "classes": {
   "H1": "order test (is x under y?)",
   "H2": "single roll-up over a subtree, sizes spanning four orders of magnitude",

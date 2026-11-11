@@ -75,7 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
-use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
+use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, CMAESSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
 
 /// A store error on a write path, classified for the caller (#1483).
@@ -14588,6 +14588,7 @@ pub struct VectorSearchOperator {
     /// This query's search width, from `{ef: ...}` (#1971). `None` is the
     /// index's default.
     ef: Option<usize>,
+    plan: Option<crate::vector::strategy::FilterPlan>,
     /// Search results
     results: Vec<(NodeId, f32)>,
     /// Current index in results
@@ -14614,6 +14615,7 @@ impl VectorSearchOperator {
             metric: None,
             filter: None,
             ef: None,
+            plan: None,
             results: Vec::new(),
             current: 0,
         }
@@ -14628,6 +14630,11 @@ impl VectorSearchOperator {
     /// Search with this width rather than the index's default (#1971).
     pub fn with_ef(mut self, ef: Option<usize>) -> Self {
         self.ef = ef;
+        self
+    }
+
+    pub fn with_plan(mut self, plan: Option<crate::vector::strategy::FilterPlan>) -> Self {
+        self.plan = plan;
         self
     }
 
@@ -14664,7 +14671,7 @@ impl VectorSearchOperator {
         // "no match".
         let error = std::cell::RefCell::new(None);
         let results = store
-            .vector_search_where(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, |id| {
+            .vector_search_where_planned(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, self.plan.as_ref().map(|p| p.strategy), |id| {
                 if error.borrow().is_some() {
                     return false;
                 }
@@ -14734,6 +14741,11 @@ impl PhysicalOperator for VectorSearchOperator {
         }
         if let Some(f) = &self.filter {
             details.push_str(&format!(", filter: {}", format_expression(f)));
+        }
+        if let Some(plan) = &self.plan {
+            details.push_str(&format!(", {}", plan.describe()));
+        } else if self.filter.is_some() {
+            details.push_str(", strategy=adaptive, selectivity=unknown, reason=unsupported predicate statistics");
         }
         OperatorDescription {
             name: "VectorSearch".to_string(),
@@ -17961,9 +17973,9 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         "Rao1", "Rao2", "Rao3", "QORao", "TLBO", "ITLBO", "GOTLBO", "MOTLBO",
         "Jaya", "QOJaya", "SAMPJaya", "EHRJaya",
         "BMR", "BWR", "BMWR", "MOBMWR",
-        "PSO", "DE", "LSHADE", "GA", "SA", "ABC", "GSA", "HS", "FPA",
+        "PSO", "DE", "LSHADE", "CMAES", "GA", "SA", "ABC", "GSA", "HS", "FPA",
         "Firefly", "Cuckoo", "GWO", "Bat",
-        "NSGA2", "MORaoDE", "SAPHR",
+        "NSGA2", "MORaoDE", "SPEA2", "MOEAD", "SAPHR",
     ];
 
     /// The subset of `SOLVERS` that optimise more than one objective.
@@ -17975,7 +17987,7 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
     /// here rather than by remembering to edit an `||` chain — the omission
     /// that made `MOBMWR` and `MORaoDE` report a dispatch bug.
     const MULTI_OBJECTIVE_SOLVERS: &'static [&'static str] =
-        &["MOTLBO", "MOBMWR", "NSGA2", "MORaoDE"];
+        &["MOTLBO", "MOBMWR", "NSGA2", "MORaoDE", "SPEA2", "MOEAD"];
 
     /// Procedures that need `&mut GraphStore`, and the refusal the read path owes
     /// a caller who asks for one there.
@@ -18036,6 +18048,8 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         ("symptomexplanation", "it reads each relationship's time, which a projection does not keep"),
         ("pca", "it reads node properties, which a projection does not keep"),
         ("or.solve", "it optimises over node properties, not over a graph view"),
+        ("or.constrainedshortestpath", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
+        ("or.shortestpathwithconstraints", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
     ];
 
     /// The projection `graph` names, or `None` when the call names none.
@@ -20365,6 +20379,118 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// `algo.or.constrainedShortestPath(source, target, {resourceProperty,
+    /// maxResource [, costProperty, label, edgeType]})` (OPT-06, #1770).
+    ///
+    /// The cheapest path from `source` to `target` whose `resourceProperty`
+    /// adds up to at most `maxResource`. Cost is `costProperty`, or one per
+    /// relationship (hops) without it. Exact: see
+    /// `samyama_graph_algorithms::constrained_path`. One row, `path` (node
+    /// ids), `cost` and `resource`; no row when no path is within the limit,
+    /// as `weightedPath` gives none when there is no path.
+    fn execute_constrained_shortest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let call = "algo.or.constrainedShortestPath";
+        Self::reject_unknown_config_keys(
+            &self.args,
+            call,
+            &["costProperty", "edgeType", "label", "maxResource", "resourceProperty"],
+        )?;
+        let id = |i: usize, what: &str| match self.args.get(i) {
+            Some(Expression::Literal(PropertyValue::Integer(id))) if *id >= 0 => Ok(*id as u64),
+            other => Err(ExecutionError::bad_argument(format!(
+                "{call}: {what} must be a node id (a non-negative integer), got {other:?}"
+            ))),
+        };
+        let (source, target) = (id(0, "the source")?, id(1, "the target")?);
+        let config = match self.args.get(2) {
+            Some(Expression::Literal(PropertyValue::Map(m))) => m.clone(),
+            _ => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: the third argument must be a map of values with `resourceProperty` \
+                     and `maxResource`, e.g. {{resourceProperty: 'minutes', maxResource: 120}}. \
+                     A parameter inside the map is not read here; pass the whole map as one \
+                     parameter instead, e.g. $config"
+                )))
+            }
+        };
+        let text = |key: &str| match config.get(key) {
+            None => Ok(None),
+            Some(PropertyValue::String(v)) if !v.trim().is_empty() => Ok(Some(v.clone())),
+            Some(other) => Err(ExecutionError::bad_argument(format!(
+                "{call}: `{key}` must be a non-empty string, got {other:?}"
+            ))),
+        };
+        let resource_property = text("resourceProperty")?.ok_or_else(|| {
+            ExecutionError::bad_argument(format!(
+                "{call}: `resourceProperty` is required: the relationship property the limit is on"
+            ))
+        })?;
+        let cost_property = text("costProperty")?;
+        let (label, edge_type) = (text("label")?, text("edgeType")?);
+        let max_resource = match config.get("maxResource") {
+            Some(PropertyValue::Integer(v)) => *v as f64,
+            Some(PropertyValue::Float(v)) => *v,
+            None => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `maxResource` is required: the most `{resource_property}` a path may add up to"
+                )))
+            }
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `maxResource` must be a number, got {other:?}"
+                )))
+            }
+        };
+
+        // One view per property: a view holds one weight. Built from the same
+        // nodes and relationships, so they list the edges in the same order --
+        // checked, because the resources are matched to the costs by position.
+        let costs = self.view(store, label.as_deref(), edge_type.as_deref(), cost_property.as_deref())?;
+        let resources = self.view(store, label.as_deref(), edge_type.as_deref(), Some(&resource_property))?;
+        if costs.out_offsets != resources.out_offsets || costs.out_targets != resources.out_targets {
+            return Err(ExecutionError::RuntimeError(format!(
+                "{call}: the cost and resource views list different relationships"
+            )));
+        }
+        let resource_per_edge = resources.weights.as_deref().unwrap_or(&[]);
+
+        let found = crate::algo::constrained_shortest_path(
+            &costs,
+            resource_per_edge,
+            source,
+            target,
+            max_resource,
+            &|| check_deadline().is_err(),
+        )
+        .map_err(|e| match e {
+            crate::algo::ConstrainedPathError::Interrupted => {
+                ExecutionError::RuntimeError(format!("Query timed out: {call} was still searching"))
+            }
+            crate::algo::ConstrainedPathError::NegativeCost(_) => ExecutionError::bad_argument(format!(
+                "{call}: `{}` holds a negative value; {e}",
+                cost_property.as_deref().unwrap_or("cost")
+            )),
+            crate::algo::ConstrainedPathError::NegativeResource(_) => ExecutionError::bad_argument(
+                format!("{call}: `{resource_property}` holds a negative value; {e}"),
+            ),
+            other => ExecutionError::bad_argument(format!("{call}: {other}")),
+        })?;
+
+        if let Some(found) = found {
+            let mut record = Record::new();
+            record.bind(
+                "path".to_string(),
+                Value::Property(PropertyValue::Array(
+                    found.path.iter().map(|&n| PropertyValue::Integer(n as i64)).collect(),
+                )),
+            );
+            record.bind("cost".to_string(), Value::Property(PropertyValue::Float(found.cost)));
+            record.bind("resource".to_string(), Value::Property(PropertyValue::Float(found.resource)));
+            self.results.push(record);
+        }
+        Ok(())
+    }
+
     fn execute_weighted_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         // Arguments: (source_node_id, target_node_id, weight_property)
         if self.args.len() < 3 {
@@ -20659,6 +20785,10 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 "MOTLBO" => solve_with_seed!(MOTLBOSolver::new(solver_config), &problem),
                 "MOBMWR" => solve_with_seed!(MOBMWRSolver::new(solver_config, MOBMWRVariant::MOBMR), &problem),
                 "MORaoDE" => solve_with_seed!(MORaoDESolver::new(solver_config), &problem),
+                // Strength Pareto EA 2 (OPT-13, #1803).
+                "SPEA2" => solve_with_seed!(SPEA2Solver::new(solver_config), &problem),
+                // Decomposition-based MOEA (OPT-13, #1803).
+                "MOEAD" => solve_with_seed!(MOEADSolver::new(solver_config), &problem),
                 _ => solve_with_seed!(NSGA2Solver::new(solver_config), &problem), // Default multi
             };
             let total_time_ms = duration_ms(started.elapsed());
@@ -20740,6 +20870,8 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
                 // Success-history adaptive DE with linear population
                 // reduction (OPT-13, #1803).
                 "LSHADE" => solve_with_seed!(LSHADESolver::new(solver_config), &problem),
+                // Covariance matrix adaptation ES (OPT-13, #1803).
+                "CMAES" => solve_with_seed!(CMAESSolver::new(solver_config), &problem),
                 // Jaya by name, and by omitting `algorithm` -- the default is
                 // applied where the name is read, not here.
                 "Jaya" => solve_with_seed!(JayaSolver::new(solver_config), &problem),
@@ -21121,6 +21253,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "wcc" => self.execute_wcc(store)?,
                 "scc" => self.execute_scc(store)?,
                 "weightedpath" => self.execute_weighted_path(store)?,
+                "or.constrainedshortestpath" | "or.shortestpathwithconstraints" => {
+                    self.execute_constrained_shortest_path(store)?
+                }
                 "maxflow" => self.execute_max_flow(store)?,
                 "mst" => self.execute_mst(store)?,
                 "trianglecount" => self.execute_triangle_count(store)?,
@@ -21220,6 +21355,9 @@ impl PhysicalOperator for AlgorithmOperator {
                 "wcc" => self.execute_wcc(store)?,
                 "scc" => self.execute_scc(store)?,
                 "weightedpath" => self.execute_weighted_path(store)?,
+                "or.constrainedshortestpath" | "or.shortestpathwithconstraints" => {
+                    self.execute_constrained_shortest_path(store)?
+                }
                 "maxflow" => self.execute_max_flow(store)?,
                 "mst" => self.execute_mst(store)?,
                 "trianglecount" => self.execute_triangle_count(store)?,
