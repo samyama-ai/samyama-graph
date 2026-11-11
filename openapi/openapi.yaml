@@ -706,6 +706,8 @@ paths:
               id: analytics
               name: Analytics Team
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '201':
           description: Tenant created
           content:
@@ -785,6 +787,8 @@ paths:
             schema:
               $ref: '#/components/schemas/UpdateTenantRequest'
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: Updated tenant
           content:
@@ -828,6 +832,8 @@ paths:
                   type: string
                   description: Tenant/graph name.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: A sampled subgraph
           content:
@@ -870,6 +876,8 @@ paths:
                   type: string
                   description: Distance metric, e.g. cosine or euclidean.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The index was created
 
@@ -902,6 +910,8 @@ paths:
                   type: integer
                   description: Number of neighbours to return.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The nearest neighbours, closest first
           content:
@@ -941,6 +951,8 @@ paths:
                   type: string
                   format: binary
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The snapshot was imported
 
@@ -975,6 +987,8 @@ paths:
                         target_label: "FailureMode"
                         target_key: "name"
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: Policy accepted
           content:
@@ -1039,6 +1053,8 @@ paths:
         subgraph edges (for example MONITORS edges to FailureMode nodes). Values
         below the floor stay pending.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: Verification completed
           content:
@@ -1224,6 +1240,8 @@ paths:
                     Return at most this many nodes, chosen as the top
                     macro-subtrees.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The hierarchy's cues
           content:
@@ -1424,6 +1442,8 @@ paths:
                     A start and goal node whose manifold-guided A* shortest path
                     is returned in `astar_path`; null when no path exists.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The convention's cues
           content:
@@ -1486,6 +1506,17 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
 components:
+  responses:
+    BadRequest:
+      description: |
+        The request could not be read or acted on: broken JSON, a missing or
+        mistyped field, a body that is not the declared Content-Type, a
+        multipart body with no boundary, or a query string missing a
+        parameter. Always JSON, never plain text (API-01).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
   schemas:
     QueryRequest:
       type: object

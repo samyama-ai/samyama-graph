@@ -6568,8 +6568,10 @@
     "request": {
       "not_a_query": "x"
     },
-    "response": "Failed to deserialize the JSON body into the target type: missing field `query` at line 1 column 20",
-    "status": 422
+    "response": {
+      "error": "Failed to deserialize the JSON body into the target type: missing field `query` at line 1 column 20"
+    },
+    "status": 400
   },
   {
     "method": "POST",
