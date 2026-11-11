@@ -2,6 +2,7 @@
 //! 
 //! Implements Text-to-Cypher translation using LLMs.
 
+pub mod cache;
 pub mod client;
 pub mod metrics;
 #[cfg(test)] #[path = "test_http_cov.rs"] pub(crate) mod test_http;
@@ -32,18 +33,35 @@ pub struct Translation {
     /// Tokens the provider reported; see [`client::TokenUsage`].
     pub usage: client::TokenUsage,
     /// How long the model call took. The schema summary and the safety check
-    /// around it are not included.
+    /// around it are not included. Zero when `cached`.
     pub llm_latency: std::time::Duration,
+    /// Answered from the translation cache (AI-13): no model was called, so
+    /// `usage` reports no tokens.
+    pub cached: bool,
 }
 
 pub struct NLQPipeline {
     client: client::NLQClient,
+    model: cache::ModelKey,
+    cache: &'static cache::TranslationCache,
 }
 
 impl NLQPipeline {
+    /// A pipeline that remembers its translations in the process-wide cache
+    /// ([`cache::shared`]).
     pub fn new(config: NLQConfig) -> NLQResult<Self> {
         let client = client::NLQClient::new(&config)?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            model: cache::ModelKey::of(&config),
+            cache: cache::shared(),
+        })
+    }
+
+    /// The same pipeline, remembering translations in `cache` instead.
+    pub fn with_cache(mut self, cache: &'static cache::TranslationCache) -> Self {
+        self.cache = cache;
+        self
     }
 
     pub async fn text_to_cypher(&self, question: &str, schema_summary: &str) -> NLQResult<String> {
@@ -53,7 +71,22 @@ impl NLQPipeline {
     }
 
     /// [`Self::text_to_cypher`], with what the model call cost (COST-07).
+    ///
+    /// A question already translated over the same schema by the same model is
+    /// answered from the cache, without a model call (AI-13). Only a
+    /// translation that passed the safety check is remembered, so a cached
+    /// answer is one a fresh call would also have returned.
     pub async fn translate(&self, question: &str, schema_summary: &str) -> NLQResult<Translation> {
+        let key = cache::CacheKey::new(question, schema_summary, &self.model);
+        if let Some(cypher) = self.cache.get(&key) {
+            return Ok(Translation {
+                cypher,
+                usage: client::TokenUsage::default(),
+                llm_latency: std::time::Duration::ZERO,
+                cached: true,
+            });
+        }
+
         let prompt = Self::build_prompt(question, schema_summary);
 
         let completion = self.client.complete(&prompt).await?;
@@ -62,10 +95,12 @@ impl NLQPipeline {
         let cleaned_cypher = Self::extract_cypher(&completion.text);
 
         if self.is_safe_query(&cleaned_cypher) {
+            self.cache.put(key, cleaned_cypher.clone());
             Ok(Translation {
                 cypher: cleaned_cypher,
                 usage: completion.usage,
                 llm_latency: completion.latency,
+                cached: false,
             })
         } else {
             Err(NLQError::ValidationError("Generated query contains write operations or unsafe keywords".to_string()))
