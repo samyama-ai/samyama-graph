@@ -1092,6 +1092,28 @@ fn unknown_algorithms_get_a_hint_and_the_catalogue() {
 }
 
 #[test]
+fn unknown_algorithm_lists_every_catalogued_name() {
+    // #2013: the list was typed by hand and named 11 of the algorithms that dispatch.
+    let (mut store, _) = path4();
+    let e = algo_err(&mut store, "algo.zzz", vec![]);
+    // Names, with any `(args)` signature split off: `shortestPath(source, target)`.
+    let listed: std::collections::HashSet<&str> = e
+        .split("Available: ")
+        .nth(1)
+        .and_then(|rest| rest.split(" (arguments").next())
+        .unwrap_or_else(|| panic!("no Available list: {e}"))
+        .split(|c: char| !(c.is_alphanumeric() || c == '.' || c == '_'))
+        .collect();
+    let missing: Vec<&str> = super::super::algorithm_catalog::ALGORITHM_CATALOG
+        .iter()
+        .map(|entry| entry.name.trim_start_matches("algo."))
+        .filter(|name| !listed.contains(name))
+        .collect();
+    assert!(missing.is_empty(), "not in the Available list: {missing:?}");
+    assert!(e.contains("GET /api/algorithms/catalog"), "{e}");
+}
+
+#[test]
 fn mutating_algorithms_are_refused_on_the_read_path() {
     let (store, _) = path4();
     for name in ["algo.or.solve", "algo.fastRP", "algo.node2vec"] {

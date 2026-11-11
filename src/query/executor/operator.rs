@@ -17878,17 +17878,43 @@ impl std::ops::Deref for AlgoView {
 }
 
 impl AlgorithmOperator {
-    /// Every algorithm this operator dispatches, with its calling convention.
+    /// Every algorithm this operator dispatches, read from the catalog.
     ///
     /// `Unknown algorithm: algo.bfs` gave the caller nothing to go on -- the
     /// name they wanted (`algo.shortestPath`) is not guessable from it, and
     /// the procedures do not share an argument shape either, so even the right
-    /// name fails on the first attempt. Listing both removes two rounds of
-    /// trial and error.
-    fn available() -> &'static str {
-        "pageRank({config}), shortestPath(source, target), weightedPath(source, target, weightProperty), \
-maxFlow(source, sink [, capacityProperty]), mst([weightProperty]), cdlp([label, edgeType, config]), \
-lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
+    /// name fails on the first attempt. The list used to be typed here by hand
+    /// and had fallen to 11 of the names that dispatch; reading the catalog
+    /// keeps it whole as algorithms are added. The argument shapes that list
+    /// carried are kept for those 11, and the endpoint has the rest.
+    fn available() -> String {
+        const SIGNATURES: &[(&str, &str)] = &[
+            ("pageRank", "pageRank({config})"),
+            ("shortestPath", "shortestPath(source, target)"),
+            ("weightedPath", "weightedPath(source, target, weightProperty)"),
+            ("maxFlow", "maxFlow(source, sink [, capacityProperty])"),
+            ("mst", "mst([weightProperty])"),
+            ("cdlp", "cdlp([label, edgeType, config])"),
+            ("lcc", "lcc([label, edgeType])"),
+            ("wcc", "wcc()"),
+            ("scc", "scc()"),
+            ("triangleCount", "triangleCount()"),
+            ("or.solve", "or.solve({config})"),
+        ];
+        let names: Vec<&str> = super::algorithm_catalog::ALGORITHM_CATALOG
+            .iter()
+            .map(|e| {
+                let name = e.name.strip_prefix("algo.").unwrap_or(e.name);
+                SIGNATURES
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(name, |(_, sig)| *sig)
+            })
+            .collect();
+        format!(
+            "{} (arguments and columns: GET /api/algorithms/catalog)",
+            names.join(", ")
+        )
     }
 
     /// Error for a procedure name that does not dispatch, naming what does.
