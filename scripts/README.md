@@ -13,6 +13,8 @@ verification tools, and dataset helpers. The automated scripts are called from
 | `check_dockerfile_rust_pin.py` | Checks that the Rust version pinned by the Dockerfile satisfies the resolved dependencies. | `python3 scripts/check_dockerfile_rust_pin.py` |
 | `check_lint_ratchet.sh` | Prevents the Clippy warning count from exceeding its configured ceiling. | `scripts/check_lint_ratchet.sh 796` |
 | `check_thread_determinism.sh` | Compares openCypher TCK results across thread counts. CI supplies the TCK feature directory. | `scripts/check_thread_determinism.sh /path/to/tck/features` |
+| `adoption_report.py` | Records stars, forks and open issues from GitHub and downloads from crates.io, PyPI and npm for this repository, so growth shows as movement (DX-14, #1788). Package names come from the repo's manifests; a source that cannot be read is reported as unavailable or not published, never as 0. `--previous` adds the change in running totals since an earlier `--json` report. Needs no engine; `GITHUB_TOKEN` is optional. | `python3 scripts/adoption_report.py --json --out report.json` |
+| `test_adoption_report.py` | Tests the adoption report offline, with fake responses and a throwaway local server. | `python3 scripts/test_adoption_report.py` |
 | `snapshot_property_audit.py` | Reports, for every node label and edge type in a `.sgsnap`, how many records carry each property, how many are empty and how many distinct values there are, and flags columns that are always empty, constant, or hold only a few values (#1815). It reads the file directly, needs no engine, and exits 2 on a snapshot it cannot fully read (truncated, unknown record type, missing fields). | `python3 scripts/snapshot_property_audit.py football.sgsnap --flagged-only` |
 | `test_snapshot_property_audit.py` | Tests the property audit against snapshots built to have the defects it exists to find. | `python3 scripts/test_snapshot_property_audit.py` |
 | `test_check_release_gate.py` | Tests the release-gate validator. | `python3 scripts/test_check_release_gate.py` |
@@ -59,7 +61,7 @@ scripts/coverage.sh --lcov       # coverage/lcov.info
 
 | Script | What it does | Typical invocation |
 |---|---|---|
-| `falkordb_corpus_run.py` | Runs `benchmarks/compat/falkordb-idioms.cypher` on a FalkorDB and a Samyama server and reports how many idioms run on each, with every failure's error. Produces the "actually runs" figure in `docs/MIGRATING-FROM-FALKORDB.md`. Needs Docker and a fresh dedicated `--ephemeral` Samyama server for each run; existing data or schema is refused before setup. The docstring has the server commands. | `python3 scripts/falkordb_corpus_run.py --falkordb 6391 --samyama 6392 --import-dir /tmp/fk-import` |
+| `falkordb_corpus_run.py` | Runs `tests/fixtures/compat/falkordb-idioms.cypher` on a FalkorDB and a Samyama server and reports how many idioms run on each, with every failure's error. Produces the "actually runs" figure in `docs/MIGRATING-FROM-FALKORDB.md`. Needs Docker and a fresh dedicated `--ephemeral` Samyama server for each run; existing data or schema is refused before setup. The docstring has the server commands. | `python3 scripts/falkordb_corpus_run.py --falkordb 6391 --samyama 6392 --import-dir /tmp/fk-import` |
 
 ## Dataset helpers
 

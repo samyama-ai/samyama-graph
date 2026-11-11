@@ -12,7 +12,7 @@ run yourself:
 | LDBC SNB BI | `cargo bench --bench ldbc_bi_benchmark` |
 | FinBench | `cargo bench --bench finbench_benchmark` |
 | Graphalytics | `cargo bench --bench graphalytics_benchmark` |
-| HIER (hierarchy) | `cargo run --release --example hier_benchmark` (corpus: `benchmarks/hier/`) |
+| HIER (hierarchy) | `cargo run --release --example hier_benchmark` (corpus: `benches/hier/`) |
 | Memory footprint | `cargo bench --bench memory_footprint` |
 | Cardinality accuracy | `cargo bench --bench cardinality_accuracy` |
 | Ingestion profile | `cargo bench --bench ingest_profile` |
@@ -110,7 +110,7 @@ and the unindexed run is the ground truth. **106 of 112 agree.**
 
 > **Provenance.** Commit `2e3ff44`, Vultr `voc-c-16c-32gb` (16 vCPU / 31 GB, AMD EPYC-Rome),
 > 20 reps, median per query, load average 0.19 at the start of the run. The artifact behind this
-> table is [`benchmarks/hier/results/`](../benchmarks/hier/results/), and
+> table is [`benches/hier/results/`](../benches/hier/results/), and
 > `PROVENANCE.json` there carries the same commit, host and load so the two can be checked
 > against each other — which is what the previous figures could not be (#476).
 >
@@ -135,7 +135,7 @@ differentiator rather than the engine.
 
 Roll-up latency is flat in subtree size — 16.0 ns at 1 node, 16.6 ns at 137,257 — which is
 what makes H2 and H10 win by orders of magnitude. See
-[`benchmarks/hier/README.md`](../benchmarks/hier/README.md) for the full accounting,
+[`benches/hier/README.md`](../benches/hier/README.md) for the full accounting,
 including the engine gaps the corpus surfaced.
 
 ## openCypher TCK — Cypher conformance

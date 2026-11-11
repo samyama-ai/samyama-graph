@@ -24,7 +24,7 @@ The input format and the `--json` option are described in
 The report reads Cypher only. The protocol differences in section 2 are not
 Cypher, so it cannot see them.
 
-[`benchmarks/compat/falkordb-idioms.cypher`](../benchmarks/compat/falkordb-idioms.cypher)
+[`tests/fixtures/compat/falkordb-idioms.cypher`](../tests/fixtures/compat/falkordb-idioms.cypher)
 holds 53 idioms from FalkorDB's documentation, each one run on FalkorDB before it
 was added. Against it:
 
@@ -199,7 +199,7 @@ switch over.
 
 ## 6. Tell us what refused
 
-`benchmarks/compat/falkordb-idioms.cypher` is measured by
+`tests/fixtures/compat/falkordb-idioms.cypher` is measured by
 `tests/falkordb_compatibility_corpus.rs` on every run, so a change that stops one
 of the 37 accepted idioms from parsing fails the build. If your report names a
 cause that is not in that file, add the query. Run it on FalkorDB first, because

@@ -119,10 +119,10 @@ async fn the_algorithm_catalogue_lists_every_solver_once() {
     let (status, json) = get_json(app(), "/optimize/algorithms").await;
     assert_eq!(status, StatusCode::OK);
     let algos = json.as_array().unwrap();
-    assert_eq!(algos.len(), 24);
+    assert_eq!(algos.len(), 27);
     let ids: std::collections::HashSet<&str> =
         algos.iter().map(|a| a["id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 24, "duplicate ids");
+    assert_eq!(ids.len(), 27, "duplicate ids");
     let nsga2 = algos.iter().find(|a| a["id"] == "nsga2").unwrap();
     assert_eq!(nsga2["multi_objective"], true);
     assert_eq!(nsga2["family"], "multi-objective");
@@ -401,6 +401,7 @@ fn every_single_objective_solver_runs_on_every_single_objective_benchmark() {
         "pso",
         "de",
         "lshade",
+        "cmaes",
         "ga",
     ];
     for algo in algos {
@@ -550,7 +551,7 @@ fn no_uc2_front_point_is_infeasible_when_reported_feasible() {
 
 #[test]
 fn every_multi_objective_solver_runs_on_every_multi_objective_benchmark() {
-    let algos = ["mo_bmr", "mo_bwr", "mo_bmwr", "mo_rao_de", "nsga2"];
+    let algos = ["mo_bmr", "mo_bwr", "mo_bmwr", "mo_rao_de", "nsga2", "spea2", "moead"];
     for bench in multi_objective_benchmarks() {
         for algo in algos {
             let out = run_solver(algo, true, bench, 2, 0, cfg(), Some(5))
@@ -901,7 +902,7 @@ async fn error_and_cancel_events_carry_no_time() {
 async fn every_algorithm_reports_a_measured_time_over_http() {
     let (_, algos) = get_json(app(), "/optimize/algorithms").await;
     let algos = algos.as_array().unwrap();
-    assert_eq!(algos.len(), 24);
+    assert_eq!(algos.len(), 27);
     for a in algos {
         let id = a["id"].as_str().unwrap();
         let bench = if a["multi_objective"].as_bool().unwrap() {

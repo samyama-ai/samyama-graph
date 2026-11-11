@@ -134,7 +134,7 @@ anything; a number from a loaded machine is not a measurement.
 | Program | What it does | Data it needs |
 |---|---|---|
 | `b3_runner` | Paper 5 B3 — loads N snapshots into one `GraphStore` and runs queries from a CSV (id,name,kg,category,hops,cypher). | `--snapshots a.sgsnap,b.sgsnap,... --queries <csv>`. |
-| `hier_benchmark` | The HIER corpus (`benchmarks/hier/queries.json`) run twice — with the four hierarchy indexes and with none. Equal answers are the gate; the latency difference is the result (ADR-035). | Generated in-process; `--out` for results. |
+| `hier_benchmark` | The HIER corpus (`benches/hier/queries.json`) run twice — with the four hierarchy indexes and with none. Equal answers are the gate; the latency difference is the result (ADR-035). | Generated in-process; `--out` for results. |
 | `hier_export_csv` | Dumps the HIER graph from the same `hier_common::build()` the benchmark runs against, as CSV, so another engine holds the identical graph. | Generated in-process; `--out`. |
 | `itbench_substrate_bench` | PERF-19 — the agent turn budget (p95 <= 500 ms, p99 <= 2 s, nothing over 5 s) measured on the substrate study's query mix, which this file finally writes down. | Built-in query mix; `--json`. |
 | `ldbc_http_serve` | Serves an LDBC SNB extract over the HTTP API so Samyama is measured across the same wire as the engines it is compared with (PERF-04), not in-process. | `--data-dir <ldbc extract>`. |
@@ -264,4 +264,4 @@ definition could be established, that is said plainly rather than guessed at.
 | **ADR-035**, **ADR-037**, **ADR-038** | Architecture Decision Records. | **Yes**, in `docs/ADR/`. |
 | **OEH** | The index type `ontology_loader` declares over a hierarchy. | **No.** The acronym is not expanded here. |
 | **GAK** | Generation-Augmented Knowledge — inverts RAG: the database notices a gap in its own knowledge, asks a model to fill it, writes the answer back. | **Yes**, in `agentic_enrichment_demo.rs`'s own header. |
-| **HIER** | The hierarchy-heavy benchmark corpus at `benchmarks/hier/queries.json`. | **Yes**, the corpus is in this repository. |
+| **HIER** | The hierarchy-heavy benchmark corpus at `benches/hier/queries.json`. | **Yes**, the corpus is in this repository. |

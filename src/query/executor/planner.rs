@@ -4137,8 +4137,18 @@ impl QueryPlanner {
                 }
             }
 
+            let plan = vector_filter.as_ref().and_then(|filter| {
+                let selectivity = vector_filter_selectivity(filter, &node_var, &label, store)?;
+                let index = store.vector_index.get_index(&label, &property)?;
+                let index = index.read().ok()?;
+                let params = index.params();
+                Some(crate::vector::strategy::FilterPlan::estimate(
+                    index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, selectivity,
+                ))
+            });
             Ok(Box::new(
                 VectorSearchOperator::new(label, property, query_vector, k, node_var, score_var)
+                    .with_plan(plan)
                     .with_filter(vector_filter)
                     .with_ef(ef)
                     .with_distance_var(distance_var),
@@ -11612,6 +11622,7 @@ mod tests {
             show_indexes: false,
             show_constraints: false,
             profile: false,
+            plan_json: false,
             analyze: false,
             hints: Vec::new(),
             plan_options: Default::default(),
@@ -12885,3 +12896,23 @@ mod tests {
 #[cfg(test)]
 #[path = "planner_cov_tests.rs"]
 mod cov_tests;
+
+/// Estimate only supported node-property comparisons. Unsupported shapes retain
+/// adaptive runtime routing rather than pretending an arbitrary estimate is fact.
+fn vector_filter_selectivity(expr: &Expression, variable: &str, label: &str, store: &GraphStore) -> Option<f64> {
+    let Expression::Binary { left, op, right } = expr else { return None; };
+    if matches!(op, BinaryOp::And) {
+        return Some(vector_filter_selectivity(left, variable, label, store)? * vector_filter_selectivity(right, variable, label, store)?);
+    }
+    let (Expression::Property { variable: v, property }, Expression::Literal(literal)) = (left.as_ref(), right.as_ref()) else { return None; };
+    if v != variable { return None; }
+    let value = literal;
+    let label = Label::new(label);
+    let stats = store.statistics();
+    if !stats.property_stats.contains_key(&(label.clone(), property.clone())) { return None; }
+    if matches!(op, BinaryOp::Eq) {
+        Some(stats.estimate_equality_selectivity_for_value(&label, property, value))
+    } else {
+        stats.estimate_comparison_selectivity(&label, property, op, value)
+    }
+}

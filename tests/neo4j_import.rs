@@ -11,7 +11,7 @@ use samyama::query::QueryEngine;
 
 fn fixture(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("benchmarks/migrate")
+        .join("tests/fixtures/migrate")
         .join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
