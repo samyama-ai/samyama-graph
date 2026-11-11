@@ -179,8 +179,19 @@ if ! step benches; then
     timeout 1800 cargo bench --bench "$b" -- "${flags[@]}" \
       >"${LOGS}/bench-${b}.log" 2>&1
     rc=$?
-    printf "%-10s %-34s %4ss\n" \
-      "$([ $rc -eq 0 ] && echo OK || echo "FAIL${rc}")" "$b" "$(( $(date +%s) - start ))" \
+    # A bench whose dataset is absent prints SKIP: and exits 0 -- the same
+    # convention the case studies below use. Counting it as OK would be the
+    # #449 defect again, reporting success for a bench that measured nothing,
+    # so a skip is reported as a skip. Six benches already behave this way and
+    # were all being counted as OK.
+    if grep -q "^SKIP:" "${LOGS}/bench-${b}.log"; then
+      r="SKIP"
+    elif [ $rc -eq 0 ]; then
+      r="OK"
+    else
+      r="FAIL${rc}"
+    fi
+    printf "%-10s %-34s %4ss\n" "$r" "$b" "$(( $(date +%s) - start ))" \
       >> "${RESULTS}/benches.txt"
   done
   mark benches
@@ -230,7 +241,7 @@ B="$R/benches.txt";      judged benches     || B=/nonexistent
 C="$R/case-studies.txt"; judged casestudies || C=/nonexistent
 [ -f "$T" ] && echo "tests:        $(sed -n 2p "$T")"
 [ -f "$E" ] && echo "examples:     OK=$(c '^OK' "$E") PANIC=$(c '^PANIC' "$E") OOM=$(c '^OOM' "$E") other=$(grep -cE '^(NEEDS-INPUT|SKIP)' "$E")"
-[ -f "$B" ] && echo "benches:      OK=$(c '^OK' "$B") FAIL=$(c '^FAIL' "$B")"
+[ -f "$B" ] && echo "benches:      OK=$(c '^OK' "$B") SKIP=$(c '^SKIP' "$B") FAIL=$(c '^FAIL' "$B")"
 [ -f "$C" ] && echo "case studies: OK=$(c '^OK' "$C") SKIP=$(c '^SKIP' "$C") FAIL=$(c '^FAIL' "$C")"
 echo
 echo "results in ${RESULTS}"
