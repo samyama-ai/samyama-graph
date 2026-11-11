@@ -6950,3 +6950,178 @@ fn config_map_filters_are_read_and_accepted() {
         assert!(e.contains(&format!("unknown config key `{key}`")), "{e}");
     }
 }
+
+#[test]
+fn every_algorithm_has_a_parameter_row() {
+    use super::super::algorithm_catalog::{ALGORITHM_CATALOG, PARAMETERS};
+    let catalogued: Vec<&str> = ALGORITHM_CATALOG.iter().map(|e| e.name).collect();
+    let mut rows: Vec<&str> = PARAMETERS.iter().map(|(n, _)| *n).collect();
+    assert_eq!(rows.len(), catalogued.len(), "one row per algorithm");
+    rows.sort();
+    rows.dedup();
+    assert_eq!(rows.len(), catalogued.len(), "a duplicated row");
+    for name in catalogued {
+        assert!(rows.contains(&name), "{name} has no PARAMETERS row");
+    }
+    for (name, params) in PARAMETERS {
+        let mut seen = std::collections::HashSet::new();
+        for p in *params {
+            assert!(seen.insert((p.name, p.kind)), "{name}: {} listed twice", p.name);
+            assert!(!(p.required && p.default.is_some()), "{name}: {} is required and has a default", p.name);
+        }
+    }
+}
+
+/// Where an algorithm checks its config keys, the catalogue lists exactly
+/// those keys: the refusal for an unknown key names the ones it reads, and
+/// that list is compared with the catalogue's.
+#[test]
+fn config_keys_match_what_each_algorithm_reads() {
+    use super::super::algorithm_catalog::{ParamKind, ALGORITHM_CATALOG};
+    const PROBE: &str = "__catalogue_probe__";
+    let mut checked = 0;
+    let mut wrong = Vec::new();
+    for entry in ALGORITHM_CATALOG {
+        let (mut store, mut args) = catalogue_call(&AlgorithmOperator::canonical_name(entry.name));
+        match args.iter_mut().find_map(|a| match a {
+            Expression::Literal(PropertyValue::Map(m)) => Some(m),
+            _ => None,
+        }) {
+            Some(m) => {
+                m.insert(PROBE.to_string(), pint(1));
+            }
+            None => args.push(lmap(&[(PROBE, pint(1))])),
+        }
+        let result = if entry.writes {
+            run_algo_mut(&mut store, entry.name, args)
+        } else {
+            run_algo(&store, entry.name, args)
+        };
+        let Err(e) = result else { continue };
+        let e = e.to_string();
+        if !e.contains(&format!("unknown config key `{PROBE}`")) {
+            continue;
+        }
+        let reads = e
+            .split("This algorithm reads: ")
+            .nth(1)
+            .and_then(|rest| rest.split(". Keys").next())
+            .unwrap_or_else(|| panic!("{}: unparsed refusal {e}", entry.name));
+        let mut engine: Vec<&str> = reads.split(", ").collect();
+        engine.sort();
+        let mut listed: Vec<&str> = entry
+            .parameters()
+            .iter()
+            .filter(|p| p.kind == ParamKind::Config)
+            .flat_map(|p| std::iter::once(p.name).chain(p.also))
+            .collect();
+        listed.sort();
+        listed.dedup();
+        if engine != listed {
+            wrong.push(format!("{}: engine reads {engine:?}, catalogue lists {listed:?}", entry.name));
+        }
+        checked += 1;
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    // Fifteen dispatch functions check their keys and serve 28 names. Fewer
+    // would mean the probe stopped reaching a check, and the comparison above
+    // silently covering less.
+    assert!(checked >= 28, "only {checked} algorithms reported their keys");
+}
+
+/// Each listed default is the value the algorithm uses: passing it explicitly
+/// returns exactly what leaving it out does.
+#[test]
+fn listed_defaults_are_the_values_used() {
+    use super::super::algorithm_catalog::{ParamDefault, ParamKind, ALGORITHM_CATALOG};
+    let as_value = |d: ParamDefault| match d {
+        ParamDefault::Integer(i) => pint(i),
+        ParamDefault::Float(f) => PropertyValue::Float(f),
+        ParamDefault::Boolean(b) => PropertyValue::Boolean(b),
+        ParamDefault::String(s) => pstr(s),
+        ParamDefault::FloatList(l) => {
+            PropertyValue::Array(l.iter().map(|f| PropertyValue::Float(*f)).collect())
+        }
+    };
+    // Rows as text, without the columns that measure the run rather than
+    // describe the answer. A node is its id: each run builds a fresh graph,
+    // and the node record carries the millisecond it was created.
+    let render = |rows: ExecutionResult<Vec<Record>>| -> String {
+        match rows {
+            Err(e) => format!("error: {e}"),
+            Ok(rows) => rows
+                .iter()
+                .map(|r| {
+                    let mut cols: Vec<String> = r
+                        .bound_variables()
+                        .into_iter()
+                        .filter(|c| !c.contains("time"))
+                        .map(|c| match r.get(&c) {
+                            Some(Value::Node(id, _)) | Some(Value::NodeRef(id)) => {
+                                format!("{c}=node {}", id.as_u64())
+                            }
+                            other => format!("{c}={other:?}"),
+                        })
+                        .collect();
+                    cols.sort();
+                    cols.join(",")
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    };
+    let mut wrong = Vec::new();
+    let mut compared = 0;
+    // or.solve draws a fresh random population on every call -- a seed is
+    // opt-in in the solver crate and `CALL` passes none -- so two identical
+    // calls already differ and its defaults cannot be checked this way.
+    for entry in ALGORITHM_CATALOG.iter().filter(|e| e.name != "algo.or.solve") {
+        let canonical = AlgorithmOperator::canonical_name(entry.name);
+        let run = |extra: Option<(&str, PropertyValue)>| {
+            let (mut store, mut args) = catalogue_call(&canonical);
+            if let Some((k, v)) = extra {
+                match args.iter_mut().find_map(|a| match a {
+                    Expression::Literal(PropertyValue::Map(m)) => Some(m),
+                    _ => None,
+                }) {
+                    Some(m) => {
+                        m.insert(k.to_string(), v);
+                    }
+                    None => args.push(lmap(&[(k, v)])),
+                }
+            }
+            if entry.writes {
+                render(run_algo_mut(&mut store, entry.name, args))
+            } else {
+                render(run_algo(&store, entry.name, args))
+            }
+        };
+        let plain = run(None);
+        // A key the test's own call already sets to something else (fastRP's
+        // small embedding, or.solve's short run) has no default to compare.
+        let preset: Vec<String> = catalogue_call(&canonical)
+            .1
+            .iter()
+            .filter_map(|a| match a {
+                Expression::Literal(PropertyValue::Map(m)) => Some(m.keys().cloned().collect::<Vec<_>>()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        for p in entry.parameters().iter().filter(|p| p.kind == ParamKind::Config) {
+            let Some(default) = p.default else { continue };
+            if preset.iter().any(|k| k == p.name || Some(k.as_str()) == p.also) {
+                continue;
+            }
+            let explicit = run(Some((p.name, as_value(default))));
+            if explicit != plain {
+                wrong.push(format!("{} {}: default {default:?} changes the result", entry.name, p.name));
+            }
+            compared += 1;
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    assert!(compared > 40, "compared only {compared} defaults");
+}
+
+

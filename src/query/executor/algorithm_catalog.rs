@@ -8,9 +8,12 @@
 //!
 //! `yields` is the set of columns each algorithm's rows carry, measured by
 //! running it (see `every_catalogued_algorithm_yields_its_listed_columns`), not
-//! copied from doc comments. Parameters are not described yet.
+//! copied from doc comments. `parameters` are read from each `execute_*`
+//! function; where the function checks its config keys against an allow-list,
+//! `config_keys_match_what_each_algorithm_reads` holds the two together.
 
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 
 /// What kind of question an algorithm answers; groups the catalogue for a UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -29,7 +32,7 @@ pub enum AlgorithmCategory {
 }
 
 /// One callable algorithm.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct AlgorithmEntry {
     /// The spelling to show; any case and the `samyama.` prefix also resolve.
     pub name: &'static str,
@@ -181,6 +184,268 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
         &["path", "cost", "resource"],
     ),
 ];
+
+/// How an argument is passed: by position, or as a key of the config map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamKind {
+    Positional,
+    Config,
+}
+
+/// The value an argument takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamType {
+    Integer,
+    Float,
+    Boolean,
+    String,
+    /// A node id, as `id(n)` returns it.
+    NodeId,
+    List,
+}
+
+/// The value used when an optional argument is left out.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ParamDefault {
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+    String(&'static str),
+    FloatList(&'static [f64]),
+}
+
+/// One argument an algorithm reads.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Param {
+    pub name: &'static str,
+    pub kind: ParamKind,
+    #[serde(rename = "type")]
+    pub ty: ParamType,
+    pub required: bool,
+    /// `None` when the argument is required, or when leaving it out means
+    /// "not applied" (no label filter, no weight) rather than a value.
+    pub default: Option<ParamDefault>,
+    /// A second spelling the engine also accepts for this key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub also: Option<&'static str>,
+}
+
+use ParamDefault as D;
+use ParamType as T;
+
+/// A positional argument.
+const fn pos(name: &'static str, ty: ParamType, required: bool) -> Param {
+    Param { name, kind: ParamKind::Positional, ty, required, default: None, also: None }
+}
+
+/// An optional config-map key with a default.
+const fn key(name: &'static str, ty: ParamType, default: ParamDefault) -> Param {
+    Param { name, kind: ParamKind::Config, ty, required: false, default: Some(default), also: None }
+}
+
+/// An optional config-map key that is simply not applied when left out.
+const fn opt(name: &'static str, ty: ParamType) -> Param {
+    Param { name, kind: ParamKind::Config, ty, required: false, default: None, also: None }
+}
+
+/// A config key read under a second spelling as well.
+const fn aka(p: Param, also: &'static str) -> Param {
+    Param { also: Some(also), ..p }
+}
+
+const LABEL: Param = opt("label", T::String);
+const EDGE_TYPE: Param = opt("edgeType", T::String);
+const UNDIRECTED: Param = key("undirected", T::Boolean, D::Boolean(true));
+const SOURCE: Param = pos("source", T::NodeId, true);
+const TARGET: Param = pos("target", T::NodeId, true);
+/// `label` and `edgeType` from the config map, for every algorithm that builds
+/// its graph with `structural_view` (which also takes a leading string as the
+/// label).
+const FILTERS: &[Param] = &[LABEL, EDGE_TYPE];
+const METRIC: &[Param] = &[LABEL, EDGE_TYPE, UNDIRECTED];
+const PATH_ENUM: &[Param] = &[
+    SOURCE,
+    TARGET,
+    pos("k", T::Integer, false),
+    LABEL,
+    EDGE_TYPE,
+    opt("weightProperty", T::String),
+    opt("heuristicProperty", T::String),
+    key("k", T::Integer, D::Integer(3)),
+    key("limit", T::Integer, D::Integer(1000)),
+];
+
+/// The arguments each catalogued algorithm reads, by catalogue name.
+///
+/// Every entry has a row, an empty one included, so a new algorithm cannot be
+/// added without saying what it takes (`every_algorithm_has_a_parameter_row`).
+pub const PARAMETERS: &[(&str, &[Param])] = &[
+    ("algo.pageRank", &[
+        pos("label", T::String, false),
+        pos("edgeType", T::String, false),
+        key("damping", T::Float, D::Float(0.85)),
+        key("iterations", T::Integer, D::Integer(20)),
+    ]),
+    ("algo.articleRank", &[LABEL, EDGE_TYPE, key("dampingFactor", T::Float, D::Float(0.85)), key("iterations", T::Integer, D::Integer(20))]),
+    ("algo.personalizedPageRank", &[
+        pos("sources", T::List, false),
+        LABEL,
+        EDGE_TYPE,
+        key("dampingFactor", T::Float, D::Float(0.85)),
+        key("iterations", T::Integer, D::Integer(100)),
+    ]),
+    ("algo.katz", &[
+        LABEL,
+        EDGE_TYPE,
+        key("alpha", T::Float, D::Float(0.1)),
+        key("beta", T::Float, D::Float(1.0)),
+        key("iterations", T::Integer, D::Integer(1000)),
+        key("tolerance", T::Float, D::Float(1e-6)),
+    ]),
+    ("algo.hits", &[LABEL, EDGE_TYPE, key("iterations", T::Integer, D::Integer(500)), key("tolerance", T::Float, D::Float(1e-8))]),
+    ("algo.voteRank", &[pos("k", T::Integer, false), LABEL, EDGE_TYPE, key("k", T::Integer, D::Integer(10))]),
+    ("algo.degree", METRIC),
+    ("algo.closeness", METRIC),
+    ("algo.betweenness", METRIC),
+    ("algo.harmonic", METRIC),
+    ("algo.eigenvector", METRIC),
+    ("algo.kCore", METRIC),
+    ("algo.wcc", &[pos("label", T::String, false), pos("edgeType", T::String, false), LABEL, EDGE_TYPE]),
+    ("algo.scc", &[]),
+    ("algo.cdlp", &[pos("label", T::String, false), pos("edgeType", T::String, false), key("maxIterations", T::Integer, D::Integer(100))]),
+    ("algo.louvain", FILTERS),
+    ("algo.modularity", &[pos("partition", T::List, true), LABEL, EDGE_TYPE]),
+    ("algo.biconnectedComponents", FILTERS),
+    ("algo.kTruss", &[pos("k", T::Integer, false), LABEL, EDGE_TYPE, key("k", T::Integer, D::Integer(3))]),
+    ("algo.shortestPath", &[SOURCE, TARGET, opt("weight_property", T::String)]),
+    ("algo.weightedPath", &[SOURCE, TARGET, pos("weightProperty", T::String, true)]),
+    ("algo.allShortestPaths", PATH_ENUM),
+    ("algo.aStar", PATH_ENUM),
+    ("algo.yens", PATH_ENUM),
+    ("algo.bellmanFord", &[SOURCE, LABEL, EDGE_TYPE]),
+    ("algo.allPairsShortestPath", FILTERS),
+    ("algo.dagLongestPath", FILTERS),
+    ("algo.transitiveClosure", FILTERS),
+    ("algo.randomWalk", &[SOURCE, LABEL, EDGE_TYPE, key("steps", T::Integer, D::Integer(10)), key("seed", T::Integer, D::Integer(42))]),
+    ("algo.maxFlow", &[SOURCE, pos("sink", T::NodeId, true), pos("capacityProperty", T::String, false)]),
+    ("algo.mst", &[pos("weightProperty", T::String, false)]),
+    ("algo.commonNeighbors", &[pos("node1", T::NodeId, false), pos("node2", T::NodeId, false), LABEL, EDGE_TYPE, key("limit", T::Integer, D::Integer(100))]),
+    ("algo.jaccard", &[pos("node1", T::NodeId, false), pos("node2", T::NodeId, false), LABEL, EDGE_TYPE, key("limit", T::Integer, D::Integer(100))]),
+    ("algo.adamicAdar", &[pos("node1", T::NodeId, false), pos("node2", T::NodeId, false), LABEL, EDGE_TYPE, key("limit", T::Integer, D::Integer(100))]),
+    ("algo.nodeSimilarity", &[
+        pos("topK", T::Integer, false),
+        LABEL,
+        EDGE_TYPE,
+        key("topK", T::Integer, D::Integer(10)),
+        key("cutoff", T::Float, D::Float(0.0)),
+    ]),
+    ("algo.overlap", FILTERS),
+    ("algo.cosine", FILTERS),
+    ("algo.topologicalSort", FILTERS),
+    ("algo.cycleDetection", FILTERS),
+    ("algo.bridges", FILTERS),
+    ("algo.articulationPoints", FILTERS),
+    ("algo.bipartite", FILTERS),
+    ("algo.maximalMatching", FILTERS),
+    ("algo.colouring", FILTERS),
+    ("algo.dominatingSet", FILTERS),
+    ("algo.effectiveSize", FILTERS),
+    ("algo.constraint", FILTERS),
+    ("algo.triangleCount", &[]),
+    ("algo.lcc", &[pos("label", T::String, false), pos("edgeType", T::String, false)]),
+    ("algo.squareClustering", FILTERS),
+    ("algo.eccentricity", METRIC),
+    ("algo.diameter", METRIC),
+    ("algo.radius", METRIC),
+    ("algo.averageNeighborDegree", METRIC),
+    ("algo.degreeAssortativity", METRIC),
+    ("algo.wienerIndex", FILTERS),
+    ("algo.transitivity", FILTERS),
+    ("algo.globalEfficiency", FILTERS),
+    ("algo.richClub", &[pos("k", T::Integer, false), LABEL, EDGE_TYPE, key("k", T::Integer, D::Integer(1))]),
+    ("algo.reciprocity", FILTERS),
+    ("algo.temporalReachability", &[SOURCE, LABEL, EDGE_TYPE, opt("timeProperty", T::String), opt("startTime", T::Integer)]),
+    ("algo.propagationRanking", &[SOURCE, LABEL, EDGE_TYPE, opt("timeProperty", T::String), opt("startTime", T::Integer)]),
+    ("algo.temporalShortestPath", &[SOURCE, TARGET, LABEL, EDGE_TYPE, opt("timeProperty", T::String), opt("startTime", T::Integer)]),
+    ("algo.symptomExplanation", &[pos("symptoms", T::List, true), LABEL, EDGE_TYPE, opt("timeProperty", T::String)]),
+    ("algo.pca", &[pos("label", T::String, true), pos("properties", T::List, true), pos("nComponents", T::Integer, false)]),
+    ("algo.fastRP", &[
+        LABEL,
+        EDGE_TYPE,
+        key("embeddingDimension", T::Integer, D::Integer(128)),
+        key("iterationWeights", T::List, D::FloatList(&[1.0, 1.0, 1.0])),
+        key("seed", T::Integer, D::Integer(387_844_754_753)),
+        key("normalize", T::Boolean, D::Boolean(true)),
+        key("writeProperty", T::String, D::String("embedding")),
+    ]),
+    ("algo.node2vec", &[
+        LABEL,
+        EDGE_TYPE,
+        key("embeddingDimension", T::Integer, D::Integer(128)),
+        key("walkLength", T::Integer, D::Integer(40)),
+        key("walksPerNode", T::Integer, D::Integer(10)),
+        key("returnFactor", T::Float, D::Float(1.0)),
+        key("inOutFactor", T::Float, D::Float(1.0)),
+        key("windowSize", T::Integer, D::Integer(5)),
+        key("seed", T::Integer, D::Integer(336_337_323_314)),
+        key("writeProperty", T::String, D::String("embedding")),
+    ]),
+    ("algo.or.solve", &[
+        Param { name: "label", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        Param { name: "property", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        key("algorithm", T::String, D::String("Jaya")),
+        aka(opt("costProperty", T::String), "cost_property"),
+        aka(opt("costProperties", T::List), "cost_properties"),
+        aka(key("lowerBound", T::Float, D::Float(0.0)), "min"),
+        aka(key("upperBound", T::Float, D::Float(100.0)), "max"),
+        aka(opt("minTotal", T::Float), "min_total"),
+        opt("budget", T::Float),
+        aka(opt("bestKnown", T::Float), "best_known"),
+        aka(key("populationSize", T::Integer, D::Integer(50)), "population_size"),
+        aka(key("maxIterations", T::Integer, D::Integer(100)), "max_iterations"),
+    ]),
+];
+
+impl AlgorithmEntry {
+    /// The arguments this algorithm reads, from [`PARAMETERS`].
+    pub fn parameters(&self) -> &'static [Param] {
+        PARAMETERS
+            .iter()
+            .find(|(name, _)| *name == self.name)
+            .map(|(_, params)| *params)
+            .unwrap_or(&[])
+    }
+
+    /// Whether `graph` may name a projection to run on (ALGO-05), from the
+    /// operator's own refusal list.
+    pub fn runs_on_projection(&self) -> bool {
+        super::operator::AlgorithmOperator::runs_on_projection(self.name)
+    }
+
+    /// The column `writeProperty` stores on each node, when this algorithm can
+    /// write its result back (ALGO-06), from the operator's own table.
+    pub fn write_back_column(&self) -> Option<&'static str> {
+        super::operator::AlgorithmOperator::write_back_column_for(self.name)
+    }
+}
+
+impl Serialize for AlgorithmEntry {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut s = serializer.serialize_struct("AlgorithmEntry", 8)?;
+        s.serialize_field("name", self.name)?;
+        s.serialize_field("aliases", self.aliases)?;
+        s.serialize_field("category", &self.category)?;
+        s.serialize_field("parameters", self.parameters())?;
+        s.serialize_field("yields", self.yields)?;
+        s.serialize_field("writes", &self.writes)?;
+        s.serialize_field("runs_on_projection", &self.runs_on_projection())?;
+        s.serialize_field("write_back_column", &self.write_back_column())?;
+        s.end()
+    }
+}
 
 /// The entry a procedure name resolves to, by the same canonical form dispatch
 /// uses (any case, optional `algo.`/`samyama.` prefix, GDS spellings).
