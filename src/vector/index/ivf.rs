@@ -45,8 +45,8 @@
 //! vector list, which partitions the same vectors, possibly differently.
 
 use super::{
-    Backend, DistanceMetric, HnswParams, IndexKind, IvfParams, MetricDistance, Quantization,
-    VectorError, VectorIndex, VectorResult,
+    dequantize_i8, quantize_i8, Backend, DistanceMetric, HnswParams, IndexKind, IvfParams,
+    MetricDistance, Quantization, VectorError, VectorIndex, VectorResult,
 };
 use crate::graph::NodeId;
 use crate::vector::distance;
@@ -351,6 +351,7 @@ impl VectorIndex {
             Quantization::Fp16 => {
                 Cow::Owned(self.stored_f16[pos].1.iter().map(|v| v.to_f32()).collect())
             }
+            Quantization::Int8 => Cow::Owned(dequantize_i8(&self.stored_i8[pos].1)),
         }
     }
 
@@ -472,7 +473,11 @@ impl VectorIndex {
         let distance = MetricDistance(self.metric);
         let q16: Vec<f16> = match self.quantization {
             Quantization::Fp16 => query.iter().map(|v| f16::from_f32(*v)).collect(),
-            Quantization::None => Vec::new(),
+            Quantization::None | Quantization::Int8 => Vec::new(),
+        };
+        let q8: Vec<i8> = match self.quantization {
+            Quantization::Int8 => quantize_i8(query),
+            Quantization::None | Quantization::Fp16 => Vec::new(),
         };
         // (position, node, rank) of every probed entry that passed.
         let mut scored: Vec<(usize, NodeId, f32)> = Vec::new();
@@ -490,6 +495,7 @@ impl VectorIndex {
                     let d = match self.quantization {
                         Quantization::None => distance.eval(query, &self.stored_f32[pos].vector),
                         Quantization::Fp16 => distance.eval(&q16, &self.stored_f16[pos].1),
+                        Quantization::Int8 => distance.eval(&q8, &self.stored_i8[pos].1),
                     };
                     if d.is_finite() {
                         scored.push((pos, node, d));

@@ -163,14 +163,14 @@ fn an_unrecognised_quantization_is_refused_rather_than_defaulted() {
     // asked for `fp8` would believe their index was a quarter of the size.
     for bad in [
         "CREATE VECTOR INDEX x FOR (n:X) ON (n.v) OPTIONS {dimensions: 4, quantization: 'fp8'}",
-        "CREATE VECTOR INDEX x FOR (n:X) ON (n.v) OPTIONS {dimensions: 4, quantization: 'int8'}",
+        "CREATE VECTOR INDEX x FOR (n:X) ON (n.v) OPTIONS {dimensions: 4, quantization: 'int4'}",
         "CREATE VECTOR INDEX x FOR (n:X) ON (n.v) OPTIONS {dimensions: 4, quantization: 7}",
     ] {
         assert!(parse_query(bad).is_err(), "{bad} should be refused");
     }
     // The spellings that are accepted, so the refusal above is about the value
     // and not about the option existing.
-    for good in ["none", "fp16", "f16", "FP16"] {
+    for good in ["none", "fp16", "f16", "FP16", "int8", "INT8"] {
         let ddl = format!(
             "CREATE VECTOR INDEX x FOR (n:X) ON (n.v) OPTIONS {{dimensions: 4, quantization: '{good}'}}"
         );
