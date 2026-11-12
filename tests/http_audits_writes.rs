@@ -13,9 +13,11 @@
 //! remembers it exists.
 //!
 //! The consequence, asserted below rather than hidden: a **read** submitted as
-//! `POST /api/query` is recorded too. Telling it apart means parsing Cypher in
-//! a middleware, and a log that occasionally over-records is worth more than
-//! one that occasionally misses a write.
+//! `POST /api/query` is recorded too, because a log that occasionally
+//! over-records is worth more than one that occasionally misses a write. The
+//! query handler reports the statement's graph, kind and hash on the response
+//! (#2081), so the read's entry says `is_write: false` and the writes can be
+//! filtered out without the audit layer parsing Cypher.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -110,6 +112,14 @@ async fn a_write_is_recorded_with_the_subject_that_made_it() {
     assert_eq!(e["method"], "POST");
     assert_eq!(e["path"], "/api/query");
     assert_eq!(e["status"], 200);
+    assert_eq!(e["protocol"], "http");
+    assert_eq!(e["tenant"], "default");
+    assert_eq!(e["is_write"], true);
+    assert_eq!(
+        e["query_hash"],
+        digest_of("CREATE (:N {n: 1})"),
+        "the SHA-256 of the statement, the same hash RESP records for it"
+    );
     assert!(
         e["at"].as_str().is_some_and(|t| t.contains('T')),
         "an entry needs a timestamp, got {:?}",
@@ -163,6 +173,13 @@ async fn a_refused_request_is_recorded() {
         rows[0]["subject"], "unauthenticated",
         "nothing authenticated, so there is no subject to name"
     );
+    // Refused before the handler ran, so nothing reported the statement:
+    // unknown, which is not "not a write".
+    for field in ["tenant", "is_write", "query_hash"] {
+        assert!(rows[0][field].is_null(), "{field} on a refused request: {}", rows[0]);
+    }
+    let text = std::fs::read_to_string(&f.log_path).unwrap_or_default();
+    assert!(!text.contains("DETACH"), "the statement text is never recorded:\n{text}");
 }
 
 #[tokio::test]
@@ -173,6 +190,40 @@ async fn a_read_submitted_as_a_post_is_recorded_too() {
     let _ = f.app.clone().oneshot(post_query("MATCH (n) RETURN count(n)", Some(TOKEN))).await;
     let rows = entries(&f.log_path);
     assert_eq!(rows.len(), 1, "a POST is recorded whether or not it wrote");
+    assert_eq!(rows[0]["is_write"], false, "but it says it did not write: {}", rows[0]);
+    assert_eq!(rows[0]["query_hash"], digest_of("MATCH (n) RETURN count(n)"));
+}
+
+#[tokio::test]
+async fn a_statement_that_does_not_parse_is_recorded_as_a_write() {
+    // As on RESP: whether it would have written cannot be known, and the safe
+    // reading for an audit log is that it might have.
+    let f = fixture(credentials("ops", TOKEN));
+    let _ = f.app.clone().oneshot(post_query("CREATE (:N", Some(TOKEN))).await;
+    let rows = entries(&f.log_path);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["is_write"], true, "{}", rows[0]);
+}
+
+#[tokio::test]
+async fn a_route_that_runs_no_statement_reports_none() {
+    // Only the query route knows a statement. Elsewhere the fields are null
+    // rather than guessed, and the entry is still written.
+    let f = fixture(credentials("ops", TOKEN));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/nlq")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .body(Body::from(r#"{"question":"how many nodes?"}"#))
+        .expect("request");
+    let _ = f.app.clone().oneshot(req).await;
+    let rows = entries(&f.log_path);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["path"], "/api/nlq");
+    for field in ["tenant", "is_write", "query_hash"] {
+        assert!(rows[0][field].is_null(), "{field}: {}", rows[0]);
+    }
 }
 
 #[tokio::test]

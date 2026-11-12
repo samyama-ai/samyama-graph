@@ -385,6 +385,23 @@ async fn serve_tls(
 #[derive(Clone, Debug)]
 pub struct Subject(pub crate::auth::Credential);
 
+/// What `POST /api/query` tells the audit layer about the statement it ran
+/// (#2081): the layer never reads the body, so it cannot work these out.
+#[derive(Clone, Debug)]
+pub struct AuditedQuery {
+    pub tenant: String,
+    pub is_write: bool,
+    pub query_hash: String,
+}
+
+/// SHA-256 of a statement, hex. Enough to tell two writes apart or to match one
+/// against a known query, without the text, which carries the data. One
+/// function for both protocols, so the same statement hashes the same on each.
+pub fn query_hash(query: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(query.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Append-only record of every request that can change state (REL-08).
 ///
 /// One JSON object per line, flushed on every write. An audit log buffered in
@@ -414,16 +431,30 @@ impl AuditLog {
     /// Record one entry. Failures are reported and do not fail the request:
     /// a full disk must not become a denial of service on the API, and the
     /// warning is what says the log has a hole.
-    fn record(&self, subject: &str, method: &str, path: &str, status: u16) {
-        let line = format!(
-            "{{\"at\":\"{}\",\"protocol\":\"http\",\"subject\":{},\"method\":\"{}\",\"path\":{},\"status\":{}}}\n",
-            chrono::Utc::now().to_rfc3339(),
-            serde_json::to_string(subject).unwrap_or_else(|_| "\"?\"".into()),
-            method,
-            serde_json::to_string(path).unwrap_or_else(|_| "\"?\"".into()),
-            status,
-        );
-        self.append(&line);
+    /// `query` is what the query handler reported about the statement, or
+    /// `None` for a route that runs no statement or a request refused before
+    /// the handler ran. Its three fields are then `null`: unknown, which is not
+    /// the same as "not a write", and the entry is kept either way.
+    fn record(
+        &self,
+        subject: &str,
+        method: &str,
+        path: &str,
+        status: u16,
+        query: Option<&AuditedQuery>,
+    ) {
+        let entry = serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "protocol": "http",
+            "subject": subject,
+            "method": method,
+            "path": path,
+            "status": status,
+            "tenant": query.map(|q| q.tenant.as_str()),
+            "is_write": query.map(|q| q.is_write),
+            "query_hash": query.map(|q| q.query_hash.as_str()),
+        });
+        self.append(&format!("{entry}\n"));
     }
 
     /// Record one RESP write (#2081). `query_hash` is the SHA-256 of the
@@ -471,9 +502,11 @@ impl AuditLog {
 /// is added rather than the day someone remembers.
 ///
 /// The consequence, stated rather than hidden: a **read** submitted as
-/// `POST /api/query` is recorded too. Telling it apart means parsing Cypher in
-/// a middleware, and an audit log that occasionally over-records is worth more
-/// than one that occasionally misses a write.
+/// `POST /api/query` is recorded too, since an audit log that occasionally
+/// over-records is worth more than one that occasionally misses a write. It is
+/// recorded with `is_write: false`, which the query handler reports on the
+/// response along with the graph and the statement's hash (#2081), so a reader
+/// can filter the writes without this layer parsing Cypher.
 ///
 /// The body is never recorded. It carries the query, which carries the data.
 async fn audit(
@@ -499,7 +532,8 @@ async fn audit(
         .get::<Subject>()
         .map(|s| s.0.name.clone())
         .unwrap_or_else(|| "unauthenticated".to_string());
-    log.record(&subject, method.as_str(), &path, res.status().as_u16());
+    let query = res.extensions().get::<AuditedQuery>();
+    log.record(&subject, method.as_str(), &path, res.status().as_u16(), query);
     res
 }
 
