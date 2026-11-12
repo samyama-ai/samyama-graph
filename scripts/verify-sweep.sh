@@ -179,17 +179,23 @@ if ! step benches; then
     timeout 1800 cargo bench --bench "$b" -- "${flags[@]}" \
       >"${LOGS}/bench-${b}.log" 2>&1
     rc=$?
-    # A bench whose dataset is absent prints SKIP: and exits 0 -- the same
-    # convention the case studies below use. Counting it as OK would be the
-    # #449 defect again, reporting success for a bench that measured nothing,
-    # so a skip is reported as a skip. Six benches already behave this way and
-    # were all being counted as OK.
-    if grep -q "^SKIP:" "${LOGS}/bench-${b}.log"; then
-      r="SKIP"
-    elif [ $rc -eq 0 ]; then
-      r="OK"
-    else
+    # A bench whose dataset is absent prints SKIP: and exits 0. Counting that
+    # as OK would be the #449 defect again -- reporting success for a bench
+    # that measured nothing -- so a skip is reported as a skip.
+    #
+    # `rc -eq 0` is required for a SKIP, and is checked FIRST, because a
+    # non-zero exit must outrank the marker: a bench that skips one dataset
+    # and then fails on another prints SKIP: and still broke. Testing the
+    # marker first would file that as SKIP and pass the gate, which is the
+    # same laundering in the other direction. Nothing in benches/ does this
+    # today -- all eight SKIP: sites return immediately -- so this orders the
+    # guarantee rather than fixing a live case.
+    if [ $rc -ne 0 ]; then
       r="FAIL${rc}"
+    elif grep -q "^SKIP:" "${LOGS}/bench-${b}.log"; then
+      r="SKIP"
+    else
+      r="OK"
     fi
     printf "%-10s %-34s %4ss\n" "$r" "$b" "$(( $(date +%s) - start ))" \
       >> "${RESULTS}/benches.txt"
