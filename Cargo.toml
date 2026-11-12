@@ -307,6 +307,12 @@ harness = false
 name = "ann_benchmark"
 harness = false
 
+# Recall stability under insert, delete and update (#1986). Its shared code
+# is in benches/churn_common and is tested by tests/vector_churn_harness.rs.
+[[bench]]
+name = "vector_churn_benchmark"
+harness = false
+
 [[bench]]
 name = "vector_distance"
 harness = false
