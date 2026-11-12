@@ -46,6 +46,7 @@
 
 use crate::graph::NodeId;
 use crate::vector::distance;
+use crate::vector::exact::{self, ExactBackend};
 use half::f16;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -413,7 +414,7 @@ fn cosine_rank(dot: f32, norm_a: f32, norm_b: f32) -> f32 {
 
 /// Continuous at 0 (both sides give 1), positive, and larger for a smaller
 /// dot product: the order of `-dot`, without a negative value.
-fn inner_product_rank(dot: f32) -> f32 {
+pub(super) fn inner_product_rank(dot: f32) -> f32 {
     if dot >= 0.0 {
         1.0 / (1.0 + dot)
     } else {
@@ -974,19 +975,51 @@ impl VectorIndex {
         k: usize,
         keep: &dyn Fn(NodeId) -> bool,
     ) -> Vec<(NodeId, f32)> {
+        let (scored, backend) = self.brute_force_where_with(query, k, keep, exact::gpu_min_work());
+        exact::record(backend);
+        scored
+    }
+
+    /// [`brute_force_where`](Self::brute_force_where), sending an f32 scan of
+    /// at least `gpu_min_work` candidates x dimensions to the GPU when the
+    /// build and the host allow it (#1977; see [`exact`]), and saying which
+    /// device answered.
+    pub(super) fn brute_force_where_with(
+        &self,
+        query: &[f32],
+        k: usize,
+        keep: &dyn Fn(NodeId) -> bool,
+        gpu_min_work: usize,
+    ) -> (Vec<(NodeId, f32)>, ExactBackend) {
         let distance = MetricDistance(self.metric);
+        let mut backend = ExactBackend::Cpu;
         // The query is quantized to match what is stored, so the exact search
         // answers the same question the graph does. Comparing a full-precision
         // query against quantized vectors would make the fallback disagree with
         // the index it is standing in for, which is worse than either.
         let mut scored: Vec<(NodeId, f32)> = match self.quantization {
-            Quantization::None => self
-                .stored_f32
-                .iter()
-                .enumerate()
-                .filter(|(i, sv)| self.is_current(*i) && keep(NodeId::new(sv.node_id)))
-                .map(|(_, sv)| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
-                .collect(),
+            Quantization::None => {
+                let rows: Vec<&StoredVector> = self
+                    .stored_f32
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, sv)| self.is_current(*i) && keep(NodeId::new(sv.node_id)))
+                    .map(|(_, sv)| sv)
+                    .collect();
+                match exact::gpu_ranks(self.metric, query, &rows, self.dimensions, gpu_min_work) {
+                    Some(ranks) => {
+                        backend = ExactBackend::Gpu;
+                        rows.iter()
+                            .zip(ranks)
+                            .map(|(sv, d)| (NodeId::new(sv.node_id), d))
+                            .collect()
+                    }
+                    None => rows
+                        .iter()
+                        .map(|sv| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
+                        .collect(),
+                }
+            }
             Quantization::Fp16 => {
                 let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
                 self.stored_f16
@@ -1001,7 +1034,7 @@ impl VectorIndex {
             scored.drain(..).filter(|(_, d)| d.is_finite()).collect();
         scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
-        scored
+        (scored, backend)
     }
 
     /// Get dimensions
