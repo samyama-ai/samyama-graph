@@ -1147,9 +1147,19 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
     );
     gauge(
         "samyama_memory_attributed_bytes",
-        "Resident bytes attributed to the graph. An estimate from a walk of the          structures, and a floor: allocator slack and the Arc-held indexes are not          counted.",
+        "Resident bytes attributed to the graph. An estimate from a walk of the structures, and a floor: allocator slack is not counted, and the indexes are reported separately in samyama_index_memory_bytes.",
         r.attributed().to_string(),
     );
+    // What the OS says the process holds, so the estimates above have something
+    // to be compared against (#2080). Absent, not zero, where there is no
+    // procfs to read it from: a zero would plot as a process using no memory.
+    if let Some(rss) = process_resident_bytes() {
+        gauge(
+            "samyama_process_resident_memory_bytes",
+            "Resident set size of the server process, from /proc/self/status (VmRSS). Not an estimate. Its gap to attributed + index + result cache bytes is allocator slack and memory no walk reaches.",
+            rss.to_string(),
+        );
+    }
     gauge(
         "samyama_index_memory_bytes",
         "Resident bytes held by every index: property, unique constraint, full-text, vector (including its HNSW graph) and hierarchy.",
@@ -1237,11 +1247,15 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
 ///
 /// **Every figure is an estimate and the response says so.** It is a walk of
 /// the structures, not a reading of the allocator: `HashMap` load factor,
-/// `BTreeMap` node overhead and allocator slack are not visible from here, and
-/// the `Arc`-held hierarchy and vector indexes are still not walked at all.
-/// `attributed_bytes` is a floor on the graph's footprint, not the process's
-/// RSS, and calling it `total` would invite exactly the comparison it cannot
-/// survive.
+/// `BTreeMap` node overhead and allocator slack are not visible from here.
+/// Every index, vector and hierarchy included, is in `indexes`, outside
+/// `attributed_bytes`. `attributed_bytes` is a floor on the graph's footprint,
+/// not the process's RSS, and calling it `total` would invite exactly the
+/// comparison it cannot survive.
+///
+/// The RSS is in `process`, beside what the walks account for, so the gap
+/// between them is a number on the page and not a subtraction somebody has to
+/// know to do (#2080).
 pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
     let r = store_guard.memory_report();
@@ -1249,12 +1263,16 @@ pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse 
     let index_bytes: usize = indexes.iter().map(|i| i.bytes).sum();
     let nodes = store_guard.node_count();
     let edges = store_guard.edge_count();
+    let result_cache_bytes = state.engine.result_cache_bytes();
+    let accounted = (r.attributed() + index_bytes + result_cache_bytes) as u64;
+    let rss = process_resident_bytes();
     Json(json!({
         "estimate": true,
         "note": concat!(
             "A walk of the graph's structures, not a reading of the allocator. ",
-            "Allocator slack, hash-map load factor and the Arc-held vector and ",
-            "hierarchy indexes are not included, so these are floors."),
+            "Allocator slack and hash-map load factor are not included, so these ",
+            "are floors. Indexes, vector and hierarchy included, are under ",
+            "indexes, outside attributed_bytes."),
         "graph": {
             "nodes": nodes,
             "edges": edges,
@@ -1286,11 +1304,42 @@ pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse 
         // Outside the graph and the indexes, so outside `attributed_bytes` too.
         "result_cache": {
             "entries": state.engine.result_cache_len(),
-            "bytes": state.engine.result_cache_bytes(),
+            "bytes": result_cache_bytes,
             "budget_bytes": state.engine.result_cache_budget(),
+        },
+        // The one figure here that is a reading and not an estimate. Null where
+        // the platform has no procfs. The gap is signed: the walks count
+        // capacity, so on a small graph they can exceed what is resident, and
+        // clamping that to 0 would hide an over-count.
+        "process": {
+            "resident_bytes": rss,
+            "accounted_bytes": accounted,
+            "rss_minus_accounted_bytes": rss.map(|r| r as i64 - accounted as i64),
         },
         "tenants": state.tenant_manager.as_ref().map(|tm| tm.list_tenants().len()),
     }))
+}
+
+/// The server process's resident set size in bytes, from `/proc/self/status`.
+///
+/// `None` where there is no procfs (macOS, Windows), so callers report the
+/// figure as absent rather than as a process holding no memory. `VmRSS` and not
+/// `/proc/self/statm`: statm counts pages, and the page size differs between
+/// the x86 and ARM machines this runs on.
+pub fn process_resident_bytes() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .as_deref()
+        .and_then(parse_vm_rss)
+}
+
+/// `VmRSS:     1234 kB` from a `/proc/<pid>/status` body, in bytes. The kernel
+/// always writes kB; any other unit is refused rather than guessed at.
+pub fn parse_vm_rss(status: &str) -> Option<u64> {
+    let rest = status.lines().find_map(|l| l.strip_prefix("VmRSS:"))?;
+    let mut parts = rest.split_whitespace();
+    let kib: u64 = parts.next()?.parse().ok()?;
+    (parts.next()? == "kB").then(|| kib * 1024)
 }
 
 /// Handler for graph schema introspection
