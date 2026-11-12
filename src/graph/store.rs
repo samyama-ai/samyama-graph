@@ -1753,6 +1753,7 @@ impl GraphStore {
         out.extend(self.hierarchy_index.list().into_iter().map(|h| crate::index::IndexMemory {
             kind: "hierarchy",
             entries: h.nodes,
+            superseded: None,
             label: String::new(),
             property: h.edge_types.join("|"),
             name: Some(h.name),
@@ -1762,6 +1763,7 @@ impl GraphStore {
             crate::index::IndexMemory {
                 kind: "graph_projection",
                 entries: p.nodes,
+                superseded: None,
                 label: p.spec.node_label.unwrap_or_default(),
                 property: p.spec.edge_type.unwrap_or_default(),
                 name: Some(p.name),
@@ -1772,6 +1774,7 @@ impl GraphStore {
             |(name, label, property, bytes, entries)| crate::index::IndexMemory {
                 kind: "point",
                 entries,
+                superseded: None,
                 label,
                 property,
                 name: Some(name),
