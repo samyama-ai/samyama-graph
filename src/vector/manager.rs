@@ -375,6 +375,7 @@ impl VectorIndexManager {
                     property: key.property_key.clone(),
                     bytes: index.resident_bytes(),
                     entries: index.len(),
+                    superseded: Some(index.superseded()),
                 }
             })
             .collect()
