@@ -106,7 +106,9 @@ enum Invocation {
     /// `plan_share` and `result_cache_gain`. This one exited 2 instead, which
     /// is what failed the nightly on 2026-11-09 and 2026-11-10.
     ///
-    /// A *wrong* dataset argument stays an error -- see the two checks below.
+    /// A *wrong* dataset argument stays an error -- see the three checks
+    /// below: two source groups named at once, `--base` without `--query`,
+    /// and a `--gt` with no source to go with.
     /// Only the complete absence of one is a skip.
     NoDataset,
 }
@@ -171,7 +173,17 @@ fn parse_args() -> Result<Invocation, String> {
         a.synthetic.is_some(),
     ];
     match sources.iter().filter(|s| **s).count() {
-        0 => return Ok(Invocation::NoDataset),
+        0 => {
+            // A skip means no dataset was named *at all*. `--gt` names the
+            // ground truth of a TEXMEX layout, so a lone `--gt` is a
+            // half-written invocation, not an unparameterised sweep: the
+            // caller asked for a dataset and spelled it wrong, and must be
+            // told so rather than handed a silent skip.
+            if a.gt.is_some() {
+                return Err("--gt goes with --base and --query".into());
+            }
+            return Ok(Invocation::NoDataset);
+        }
         1 => {}
         _ => return Err("--base/--query, --dataset and --synthetic are alternatives".into()),
     }

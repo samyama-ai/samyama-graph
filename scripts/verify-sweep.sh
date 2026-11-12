@@ -216,12 +216,20 @@ if ! step casestudies; then
     rc=$?
     # A case study whose snapshot has not been published prints SKIP: and
     # exits 0; that is distinct from a failure and is reported as such.
-    if grep -q "^SKIP:" "${LOGS}/case-${n}.log"; then
-      r="SKIP"
-    elif [ $rc -eq 0 ]; then
-      r="OK"
-    else
+    #
+    # `rc -ne 0` is tested FIRST, for the reason given in the benches stage:
+    # a non-zero exit must outrank the marker, or a run that skips one step
+    # and then breaks on another is filed as a skip and passes the gate.
+    # `_lib/run_case_study.sh` exits 0 immediately after its one SKIP: line,
+    # so no case study reaches that path today -- this orders the guarantee
+    # rather than fixing a live case, and keeps both stages classifying
+    # identically.
+    if [ $rc -ne 0 ]; then
       r="FAIL${rc}"
+    elif grep -q "^SKIP:" "${LOGS}/case-${n}.log"; then
+      r="SKIP"
+    else
+      r="OK"
     fi
     printf "%-8s %-24s %4ss\n" "$r" "$n" "$(( $(date +%s) - start ))" \
       >> "${RESULTS}/case-studies.txt"
