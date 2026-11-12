@@ -19435,6 +19435,75 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         Ok(())
     }
 
+    /// `algo.negativeSampling({strategy, count, k, seed})` yielding `node1,
+    /// node2`: pairs that are not edges, for training link prediction (ML-04,
+    /// #1725). See `samyama_graph_algorithms::negative_sampling` for the three
+    /// strategies and the rules every negative keeps.
+    ///
+    /// Each option is refused, not clamped, when it is out of range: a
+    /// `count` of 0 or a `k` of 1 is a mistake to report, and a silent
+    /// substitute would hand back a training set the caller did not ask for.
+    fn execute_negative_sampling(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        /// Strategies by the name a caller passes.
+        const STRATEGIES: [&str; 3] = ["random", "degree", "khop"];
+        const DEFAULT_COUNT: i64 = 100;
+        const DEFAULT_K: i64 = 2;
+        const DEFAULT_SEED: u64 = 42;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "negativeSampling",
+            &["count", "edgeType", "k", "label", "seed", "strategy"],
+        )?;
+        let (mut strategy, mut count, mut k, mut seed) =
+            ("random".to_string(), DEFAULT_COUNT, DEFAULT_K, DEFAULT_SEED);
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::String(v)) = m.get("strategy") {
+                    strategy = v.to_lowercase();
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("count") {
+                    count = *v;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("k") {
+                    k = *v;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("seed") {
+                    seed = *v as u64;
+                }
+            }
+        }
+        if count < 1 {
+            return Err(ExecutionError::bad_argument(format!(
+                "algo.negativeSampling(): `count` must be at least 1, got {count}"
+            )));
+        }
+        let which = match strategy.as_str() {
+            "random" => crate::algo::NegativeStrategy::Random,
+            "degree" => crate::algo::NegativeStrategy::DegreeMatched,
+            "khop" if k >= 2 => crate::algo::NegativeStrategy::KHop(k as usize),
+            "khop" => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "algo.negativeSampling(): `k` must be at least 2 for the khop strategy, \
+                     got {k}; pairs 1 hop apart are edges"
+                )))
+            }
+            other => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "algo.negativeSampling(): unknown strategy `{other}`; use one of {}",
+                    STRATEGIES.map(|s| format!("`{s}`")).join(", ")
+                )))
+            }
+        };
+        let view = self.structural_view(store)?;
+        for (a, b) in crate::algo::negative_samples(&view, which, count as usize, seed) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node1", a);
+            self.bind_node(store, &mut rec, "node2", b);
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
     /// `algo.articleRank()` -- PageRank that discounts prolific linkers.
     fn execute_article_rank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         Self::reject_unknown_config_keys(&self.args, "articleRank", &["dampingFactor", "edgeType", "iterations", "label"])?;
@@ -21376,6 +21445,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,
@@ -21485,6 +21555,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,

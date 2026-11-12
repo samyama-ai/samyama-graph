@@ -162,6 +162,15 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
             "history", "iterations", "max_iterations", "front_size",
         ],
     ),
+    // Negative sampling for link prediction (ML-04, #1725): pairs
+    // that are NOT edges, to train against. It yields the pair and
+    // nothing else -- there is no score to report for a non-edge.
+    read(
+        "algo.negativeSampling",
+        &["algo.negativeSamples"],
+        LinkPrediction,
+        &["node1", "node2"],
+    ),
     // The cheapest path within a limit on a second edge property
     // (OPT-06, #1770). Two names, because both are what a caller
     // reaches for. A read: it returns the path it found and both of
