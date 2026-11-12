@@ -456,6 +456,27 @@ pub async fn query_handler(
     subject: Option<Extension<Subject>>,
     headers: axum::http::HeaderMap,
     Json(payload): Json<QueryRequest>,
+) -> axum::response::Response {
+    // What the audit layer cannot see from outside: it never reads the body,
+    // so the statement's kind, graph and hash travel back on the response
+    // (#2081). A statement that does not parse counts as a write, as on RESP.
+    let audit = crate::http::server::AuditedQuery {
+        tenant: payload.graph.clone(),
+        is_write: state.engine.statement_is_write(&payload.query).unwrap_or(true),
+        query_hash: crate::http::server::query_hash(&payload.query),
+    };
+    let mut res = run_query(State(state), subject, headers, Json(payload))
+        .await
+        .into_response();
+    res.extensions_mut().insert(audit);
+    res
+}
+
+async fn run_query(
+    State(state): State<AppState>,
+    subject: Option<Extension<Subject>>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<QueryRequest>,
 ) -> impl IntoResponse {
     // Tenant binding and the statement's role (#1328). The route itself was
     // let through at Read by `require_credential`.
