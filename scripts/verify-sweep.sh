@@ -179,8 +179,25 @@ if ! step benches; then
     timeout 1800 cargo bench --bench "$b" -- "${flags[@]}" \
       >"${LOGS}/bench-${b}.log" 2>&1
     rc=$?
-    printf "%-10s %-34s %4ss\n" \
-      "$([ $rc -eq 0 ] && echo OK || echo "FAIL${rc}")" "$b" "$(( $(date +%s) - start ))" \
+    # A bench whose dataset is absent prints SKIP: and exits 0. Counting that
+    # as OK would be the #449 defect again -- reporting success for a bench
+    # that measured nothing -- so a skip is reported as a skip.
+    #
+    # `rc -eq 0` is required for a SKIP, and is checked FIRST, because a
+    # non-zero exit must outrank the marker: a bench that skips one dataset
+    # and then fails on another prints SKIP: and still broke. Testing the
+    # marker first would file that as SKIP and pass the gate, which is the
+    # same laundering in the other direction. Nothing in benches/ does this
+    # today -- all eight SKIP: sites return immediately -- so this orders the
+    # guarantee rather than fixing a live case.
+    if [ $rc -ne 0 ]; then
+      r="FAIL${rc}"
+    elif grep -q "^SKIP:" "${LOGS}/bench-${b}.log"; then
+      r="SKIP"
+    else
+      r="OK"
+    fi
+    printf "%-10s %-34s %4ss\n" "$r" "$b" "$(( $(date +%s) - start ))" \
       >> "${RESULTS}/benches.txt"
   done
   mark benches
@@ -199,12 +216,20 @@ if ! step casestudies; then
     rc=$?
     # A case study whose snapshot has not been published prints SKIP: and
     # exits 0; that is distinct from a failure and is reported as such.
-    if grep -q "^SKIP:" "${LOGS}/case-${n}.log"; then
-      r="SKIP"
-    elif [ $rc -eq 0 ]; then
-      r="OK"
-    else
+    #
+    # `rc -ne 0` is tested FIRST, for the reason given in the benches stage:
+    # a non-zero exit must outrank the marker, or a run that skips one step
+    # and then breaks on another is filed as a skip and passes the gate.
+    # `_lib/run_case_study.sh` exits 0 immediately after its one SKIP: line,
+    # so no case study reaches that path today -- this orders the guarantee
+    # rather than fixing a live case, and keeps both stages classifying
+    # identically.
+    if [ $rc -ne 0 ]; then
       r="FAIL${rc}"
+    elif grep -q "^SKIP:" "${LOGS}/case-${n}.log"; then
+      r="SKIP"
+    else
+      r="OK"
     fi
     printf "%-8s %-24s %4ss\n" "$r" "$n" "$(( $(date +%s) - start ))" \
       >> "${RESULTS}/case-studies.txt"
@@ -230,7 +255,7 @@ B="$R/benches.txt";      judged benches     || B=/nonexistent
 C="$R/case-studies.txt"; judged casestudies || C=/nonexistent
 [ -f "$T" ] && echo "tests:        $(sed -n 2p "$T")"
 [ -f "$E" ] && echo "examples:     OK=$(c '^OK' "$E") PANIC=$(c '^PANIC' "$E") OOM=$(c '^OOM' "$E") other=$(grep -cE '^(NEEDS-INPUT|SKIP)' "$E")"
-[ -f "$B" ] && echo "benches:      OK=$(c '^OK' "$B") FAIL=$(c '^FAIL' "$B")"
+[ -f "$B" ] && echo "benches:      OK=$(c '^OK' "$B") SKIP=$(c '^SKIP' "$B") FAIL=$(c '^FAIL' "$B")"
 [ -f "$C" ] && echo "case studies: OK=$(c '^OK' "$C") SKIP=$(c '^SKIP' "$C") FAIL=$(c '^FAIL' "$C")"
 echo
 echo "results in ${RESULTS}"

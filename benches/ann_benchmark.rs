@@ -92,7 +92,28 @@ fn one(s: &str, flag: &str) -> Result<usize, String> {
     }
 }
 
-fn parse_args() -> Result<Args, String> {
+/// What the command line asked for.
+enum Invocation {
+    /// A dataset was named: run the sweep.
+    Run(Args),
+    /// No dataset was named at all.
+    ///
+    /// `scripts/verify-sweep.sh` runs every `benches/*.rs` with no arguments,
+    /// so this is the normal way the nightly invokes this bench -- not a usage
+    /// mistake, and it must not fail the sweep. Every other data-hungry bench
+    /// already answers this case with `SKIP:` and exit 0: `ldbc_benchmark`,
+    /// `ldbc_bi_benchmark`, `ingest_profile`, `cold_start_share`,
+    /// `plan_share` and `result_cache_gain`. This one exited 2 instead, which
+    /// is what failed the nightly on 2026-11-09 and 2026-11-10.
+    ///
+    /// A *wrong* dataset argument stays an error -- see the three checks
+    /// below: two source groups named at once, `--base` without `--query`,
+    /// and a `--gt` with no source to go with.
+    /// Only the complete absence of one is a skip.
+    NoDataset,
+}
+
+fn parse_args() -> Result<Invocation, String> {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
@@ -153,9 +174,15 @@ fn parse_args() -> Result<Args, String> {
     ];
     match sources.iter().filter(|s| **s).count() {
         0 => {
-            return Err(
-                "give a dataset: --base/--query[/--gt], --dataset DIR, or --synthetic NxDIM".into(),
-            )
+            // A skip means no dataset was named *at all*. `--gt` names the
+            // ground truth of a TEXMEX layout, so a lone `--gt` is a
+            // half-written invocation, not an unparameterised sweep: the
+            // caller asked for a dataset and spelled it wrong, and must be
+            // told so rather than handed a silent skip.
+            if a.gt.is_some() {
+                return Err("--gt goes with --base and --query".into());
+            }
+            return Ok(Invocation::NoDataset);
         }
         1 => {}
         _ => return Err("--base/--query, --dataset and --synthetic are alternatives".into()),
@@ -163,7 +190,7 @@ fn parse_args() -> Result<Args, String> {
     if a.base.is_some() != a.query.is_some() {
         return Err("--base and --query go together".into());
     }
-    Ok(a)
+    Ok(Invocation::Run(a))
 }
 
 struct Dataset {
@@ -313,7 +340,18 @@ fn opt(v: Option<u64>) -> String {
 fn main() {
     bench_setup::init();
     let a = match parse_args() {
-        Ok(a) => a,
+        Ok(Invocation::Run(a)) => a,
+        Ok(Invocation::NoDataset) => {
+            eprintln!("SKIP: ann_benchmark needs a dataset.");
+            eprintln!(
+                "      Pass --synthetic NxDIM for clustered synthetic vectors, --dataset DIR, \
+                 or --base/--query[/--gt] for a TEXMEX layout."
+            );
+            eprintln!(
+                "      Skipping rather than failing: the benchmark did not run, it did not break."
+            );
+            return;
+        }
         Err(e) => {
             eprintln!("ann_benchmark: {e}");
             std::process::exit(2);
