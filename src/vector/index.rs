@@ -43,6 +43,8 @@
 //! alongside the HNSW structure. On serialization, this vector list is saved via
 //! `bincode`. On load, a fresh HNSW index is constructed and all stored vectors are
 //! re-inserted. This trades load-time speed for implementation simplicity.
+//! A checkpoint generation also carries the graph itself (`graph_io`), and
+//! recovery from a verified one reloads it without re-inserting (#1973).
 
 use crate::graph::NodeId;
 use crate::vector::distance;
@@ -51,6 +53,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use hnsw_rs::prelude::*;
 use thiserror::Error;
+
+/// Graph dump and reload for checkpoints (#1973).
+pub(crate) mod graph_io;
 
 /// Vector index errors
 #[derive(Error, Debug)]
