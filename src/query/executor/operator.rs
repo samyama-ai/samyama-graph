@@ -3091,7 +3091,7 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
     "tostringornull", "toupper", "touppercase", "trim", "type", "valuetype",
     "vector.distance", "vector.similarity.cosine", "vector.similarity.euclidean",
-    "vector_distance",
+    "vector.similarity.maxsim", "vector.similarity.sparsedot", "vector_distance",
 ];
 
 /// Is `name` a function this engine implements?
@@ -3283,6 +3283,8 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("point.withinbbox", 3),
     ("vector.similarity.cosine", 2),
     ("vector.similarity.euclidean", 2),
+    ("vector.similarity.maxsim", 2),
+    ("vector.similarity.sparsedot", 2),
     ("vector.distance", 3),
     ("vector_distance", 3),
 ];
@@ -4834,6 +4836,54 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let metric = crate::vector::DistanceMetric::L2;
             Ok(Value::Property(PropertyValue::Float(metric.score(metric.distance(&a, &b)))))
         }
+        // Late-interaction (ColBERT) scoring over multi-vectors (#1978): for
+        // each query token, its best match among the document's tokens, summed.
+        // Not in Neo4j. Raw dot or cosine, not the [0, 1] rescale of the
+        // functions above: a MaxSim is a sum, so it has no fixed range anyway.
+        "vector.similarity.maxsim" => {
+            let who = "vector.similarity.maxSim";
+            let query = multi_vector_arg(&args[0], who)?;
+            let doc = multi_vector_arg(&args[1], who)?;
+            if query[0].len() != doc[0].len() {
+                return Err(ExecutionError::bad_argument(format!(
+                    "`{who}()` takes query and document tokens of the same dimension; \
+                     got {} and {}",
+                    query[0].len(),
+                    doc[0].len()
+                )));
+            }
+            let cosine = match args.get(2) {
+                None => false,
+                Some(Value::Property(PropertyValue::String(m))) => {
+                    match m.to_ascii_uppercase().as_str() {
+                        "DOT" => false,
+                        "COSINE" => true,
+                        other => {
+                            return Err(ExecutionError::bad_argument(format!(
+                                "`{who}()`: unknown metric '{other}'; expected DOT or COSINE"
+                            )))
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{who}()` takes the metric as a string, DOT or COSINE"
+                    )))
+                }
+            };
+            if cosine && query.iter().chain(&doc).any(|t| is_zero_vector(t)) {
+                // As `vector.similarity.cosine`: a zero token has no direction.
+                return Ok(Value::Null);
+            }
+            Ok(Value::Property(PropertyValue::Float(max_sim(&query, &doc, cosine))))
+        }
+        // The inner product of two sparse vectors (#1978), the scoring of
+        // learned sparse retrievers such as SPLADE. Not in Neo4j.
+        "vector.similarity.sparsedot" => {
+            let who = "vector.similarity.sparseDot";
+            let (a, b) = (sparse_vector_arg(&args[0], who)?, sparse_vector_arg(&args[1], who)?);
+            Ok(Value::Property(PropertyValue::Float(sparse_dot(&a, &b))))
+        }
         // A distance, lower is better, by the metric named in the third
         // argument -- Neo4j's `vector_distance`, under both spellings.
         "vector.distance" | "vector_distance" => {
@@ -5035,6 +5085,176 @@ fn vector_pair(a: &Value, b: &Value, who: &str) -> ExecutionResult<(Vec<f32>, Ve
 
 fn is_zero_vector(v: &[f32]) -> bool {
     v.iter().all(|x| *x == 0.0)
+}
+
+/// A multi-vector argument of `vector.similarity.maxSim` (#1978): a non-empty
+/// list of vectors (one per token), all of one dimension. Either a list
+/// literal of lists or a stored property holding one.
+fn multi_vector_arg(v: &Value, who: &str) -> ExecutionResult<Vec<Vec<f32>>> {
+    let bad = || {
+        ExecutionError::TypeError(format!(
+            "`{who}()` takes multi-vectors: non-empty lists of vectors, \
+             such as [[0.1, 0.2], [0.3, 0.4]]"
+        ))
+    };
+    let token = |t: Option<Vec<f32>>| match t {
+        Some(t) if !t.is_empty() && t.iter().all(|x| x.is_finite()) => Ok(t),
+        _ => Err(bad()),
+    };
+    let tokens = match v {
+        Value::List(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Property(pv) => token(pv.to_vector()),
+                Value::List(_) => vector_arg(item, who).map_err(|_| bad()),
+                _ => Err(bad()),
+            })
+            .collect::<ExecutionResult<Vec<_>>>()?,
+        Value::Property(PropertyValue::Array(items)) => items
+            .iter()
+            .map(|item| token(item.to_vector()))
+            .collect::<ExecutionResult<Vec<_>>>()?,
+        _ => return Err(bad()),
+    };
+    if tokens.is_empty() {
+        return Err(bad());
+    }
+    let dim = tokens[0].len();
+    if let Some(t) = tokens.iter().find(|t| t.len() != dim) {
+        return Err(ExecutionError::bad_argument(format!(
+            "`{who}()` takes tokens of the same dimension; got {dim} and {}",
+            t.len()
+        )));
+    }
+    Ok(tokens)
+}
+
+/// ColBERT's MaxSim: the sum over query tokens of the best dot product (or
+/// cosine) against any document token. In f64. No token may be zero when
+/// `cosine` is set; the caller checks.
+fn max_sim(query: &[Vec<f32>], doc: &[Vec<f32>], cosine: bool) -> f64 {
+    let dot = |a: &[f32], b: &[f32]| -> f64 {
+        a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum()
+    };
+    let norm = |a: &[f32]| dot(a, a).sqrt();
+    let doc_norms: Vec<f64> = doc.iter().map(|d| norm(d)).collect();
+    query
+        .iter()
+        .map(|q| {
+            let qn = norm(q);
+            doc.iter()
+                .zip(&doc_norms)
+                .map(|(d, dn)| if cosine { dot(q, d) / (qn * dn) } else { dot(q, d) })
+                .fold(f64::NEG_INFINITY, f64::max)
+        })
+        .sum()
+}
+
+/// A sparse vector argument of `vector.similarity.sparseDot` (#1978), as
+/// `(dimension, weight)` pairs sorted by dimension. Two spellings:
+///
+/// * `{indices: [3, 17], values: [0.5, 1.2]}` -- Qdrant's, parallel lists;
+/// * `{`3`: 0.5, `17`: 1.2}` -- a map from dimension to weight. Cypher map keys
+///   are strings, so each key must read as a non-negative integer.
+///
+/// Dimensions are non-negative integers, each at most once; weights are
+/// finite numbers. An empty map is the empty vector, whose product with
+/// anything is 0.
+fn sparse_vector_arg(v: &Value, who: &str) -> ExecutionResult<Vec<(u64, f64)>> {
+    let bad = |why: &str| {
+        ExecutionError::bad_argument(format!(
+            "`{who}()` takes sparse vectors, {{indices: [..], values: [..]}} or \
+             {{`<dimension>`: weight, ..}}; {why}"
+        ))
+    };
+    let entries: Vec<(String, Value)> = match v {
+        Value::Map(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        Value::Property(PropertyValue::Map(m)) => m
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::Property(v.clone())))
+            .collect(),
+        _ => return Err(bad("got something that is not a map")),
+    };
+    let weight = |w: &Value| match w {
+        Value::Property(PropertyValue::Float(f)) if f.is_finite() => Some(*f),
+        Value::Property(PropertyValue::Integer(i)) => Some(*i as f64),
+        _ => None,
+    };
+    let list = |l: &Value| -> Option<Vec<Value>> {
+        match l {
+            Value::List(items) => Some(items.clone()),
+            Value::Property(PropertyValue::Array(items)) => {
+                Some(items.iter().cloned().map(Value::Property).collect())
+            }
+            Value::Property(PropertyValue::Vector(items)) => Some(
+                items
+                    .iter()
+                    .map(|f| Value::Property(PropertyValue::Float(*f as f64)))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    };
+    let has = |k: &str| entries.iter().any(|(key, _)| key == k);
+    let mut pairs: Vec<(u64, f64)> = if entries.len() == 2 && has("indices") && has("values") {
+        let get = |k: &str| entries.iter().find(|(key, _)| key == k).map(|(_, v)| v).unwrap();
+        let indices = list(get("indices")).ok_or_else(|| bad("`indices` is not a list"))?;
+        let values = list(get("values")).ok_or_else(|| bad("`values` is not a list"))?;
+        if indices.len() != values.len() {
+            return Err(bad(&format!(
+                "`indices` has {} entries and `values` {}",
+                indices.len(),
+                values.len()
+            )));
+        }
+        indices
+            .iter()
+            .zip(&values)
+            .map(|(i, w)| {
+                let i = match i {
+                    Value::Property(PropertyValue::Integer(i)) if *i >= 0 => *i as u64,
+                    _ => return Err(bad("an index is not a non-negative integer")),
+                };
+                let w = weight(w).ok_or_else(|| bad("a value is not a finite number"))?;
+                Ok((i, w))
+            })
+            .collect::<ExecutionResult<_>>()?
+    } else {
+        entries
+            .iter()
+            .map(|(k, w)| {
+                let i = k.parse::<u64>().map_err(|_| {
+                    bad(&format!("key '{k}' is not a non-negative integer dimension"))
+                })?;
+                let w = weight(w).ok_or_else(|| {
+                    bad(&format!("the weight of '{k}' is not a finite number"))
+                })?;
+                Ok((i, w))
+            })
+            .collect::<ExecutionResult<_>>()?
+    };
+    pairs.sort_by_key(|(i, _)| *i);
+    if let Some(w) = pairs.windows(2).find(|w| w[0].0 == w[1].0) {
+        return Err(bad(&format!("dimension {} appears twice", w[0].0)));
+    }
+    Ok(pairs)
+}
+
+/// The inner product of two sparse vectors sorted by dimension: a merge.
+fn sparse_dot(a: &[(u64, f64)], b: &[(u64, f64)]) -> f64 {
+    let (mut i, mut j, mut sum) = (0, 0, 0.0);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                sum += a[i].1 * b[j].1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    sum
 }
 
 /// Helper: extract integer from Value
