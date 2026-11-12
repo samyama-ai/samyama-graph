@@ -7343,9 +7343,10 @@ NodeDeleted { id, .. } => {
         k: usize,
     ) -> Vec<(NodeId, f32)> {
         for (id, d) in &mut hits {
+            // Column first, row as fallback (#1187): a node's properties
+            // live in the column store, so its row copy may not hold them.
             let exact = self
-                .get_node(*id)
-                .and_then(|n| n.properties.get(property_key))
+                .node_property(*id, property_key)
                 .and_then(|p| p.to_vector())
                 .filter(|v| v.len() == query.len());
             if let Some(v) = exact {
