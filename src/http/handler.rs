@@ -3590,6 +3590,8 @@ pub async fn nlq_handler(
                 "cypher": t.cypher,
                 "usage": t.usage,
                 "llm_latency_ms": t.llm_latency.as_secs_f64() * MILLIS_PER_SECOND,
+                // From the translation cache: no model call, no tokens (AI-13).
+                "cached": t.cached,
             })),
         )
             .into_response(),
