@@ -1242,6 +1242,25 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
         ));
     }
 
+    // Dead entries a vector index still walks through (#1972). A ratio that
+    // climbs towards a fifth means a rebuild is near; one that stays high
+    // means deletes are outpacing it.
+    out.push_str(
+        "# HELP samyama_vector_index_superseded Entries in a vector index's graph that no longer answer for a node.\n",
+    );
+    out.push_str("# TYPE samyama_vector_index_superseded gauge\n");
+    for i in &indexes {
+        if let Some(dead) = i.superseded {
+            out.push_str(&format!(
+                "samyama_vector_index_superseded{{label=\"{}\",property=\"{}\",name=\"{}\"}} {}\n",
+                i.label.replace('"', ""),
+                i.property.replace('"', ""),
+                i.name.as_deref().unwrap_or("").replace('"', ""),
+                dead
+            ));
+        }
+    }
+
     // Query latency last, because it is the part an operator opens this page
     // for. Everything above describes the graph; this describes what asking it
     // questions costs (REL-10).
