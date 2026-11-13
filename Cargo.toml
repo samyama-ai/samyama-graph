@@ -142,7 +142,7 @@ percent-encoding = "2.3"   # URL encoding
 mime = "0.3"               # MIME types
 
 # Vector Search (Phase 6)
-hnsw_rs = "0.3.4"
+hnsw_rs = "0.3.5"
 # Promoted from a transitive dependency for NDS-09's fp16 vector quantization.
 # `half::f16` satisfies `Hnsw`'s `Clone + Send + Sync` bound, so the index holds
 # the quantized values rather than converting at the boundary -- which is what
