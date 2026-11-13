@@ -6784,6 +6784,7 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
         "symptomexplanation" => vec![pairs(40)],
         "modularity" => vec![pairs(0)],
         "fastrp" | "node2vec" => vec![lmap(&[("embeddingDimension", pint(4))])],
+        "sample.neighbors" => vec![node(0), lmap(&[("fanout", PropertyValue::Array(vec![pint(-1)]))])],
         // A source, a target and a limit on a second relationship property;
         // every relationship here carries `w`.
         "or.constrainedshortestpath" => vec![

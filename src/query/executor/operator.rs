@@ -19468,6 +19468,147 @@ impl AlgorithmOperator {
         Ok(())
     }
 
+    /// `algo.sample.neighbors(seeds, {fanout, direction, weightProperty,
+    /// batchSize, seed})` yielding `batch, hop, node, neighbour`: GNN-style
+    /// neighbour sampling, one minibatch at a time (ML-02, #1717). See
+    /// `samyama_graph_algorithms::neighbour_sampling` for the rules every
+    /// sample keeps.
+    ///
+    /// `seeds` is a node id or a list of them. `fanout` is required: one
+    /// entry per hop, each at least 1, or -1 for every neighbour. Sampling is
+    /// uniform unless `weightProperty` names a weight. Each option is refused,
+    /// not clamped, when it is out of range: a training set drawn from a
+    /// silently substituted fanout is not the one the caller asked for.
+    fn execute_neighbour_sampling(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const WHAT: &str = "algo.sample.neighbors()";
+        const DEFAULT_SEED: u64 = 42;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "sample.neighbors",
+            &["batchSize", "direction", "edgeType", "fanout", "label", "seed", "weightProperty"],
+        )?;
+        let bad = |msg: String| ExecutionError::bad_argument(format!("{WHAT}: {msg}"));
+
+        let seed_ids: Vec<i64> = match self.args.first() {
+            Some(Expression::Literal(PropertyValue::Integer(n))) => vec![*n],
+            Some(Expression::Literal(PropertyValue::Array(items))) => items
+                .iter()
+                .map(|v| match v {
+                    PropertyValue::Integer(n) => Ok(*n),
+                    other => Err(bad(format!("every seed must be a node id, got {other:?}"))),
+                })
+                .collect::<ExecutionResult<_>>()?,
+            _ => {
+                return Err(bad(
+                    "the first argument must be a node id or a list of node ids, \
+                     e.g. algo.sample.neighbors([1, 2], {fanout: [10, 5]})"
+                        .to_string(),
+                ))
+            }
+        };
+        if seed_ids.is_empty() {
+            return Err(bad("the list of seed nodes is empty".to_string()));
+        }
+
+        let (mut fanout, mut direction, mut weight, mut batch_size, mut seed) =
+            (None, crate::algo::SampleDirection::Out, None, None, DEFAULT_SEED);
+        let (mut label, mut edge_type) = (None, None);
+        for arg in &self.args {
+            let Expression::Literal(PropertyValue::Map(m)) = arg else { continue };
+            for (key, value) in m {
+                match (key.as_str(), value) {
+                    ("fanout", PropertyValue::Array(hops)) => {
+                        let mut parsed = Vec::with_capacity(hops.len());
+                        for (i, h) in hops.iter().enumerate() {
+                            parsed.push(match h {
+                                PropertyValue::Integer(-1) => crate::algo::Fanout::All,
+                                PropertyValue::Integer(n) if *n >= 1 => crate::algo::Fanout::AtMost(*n as usize),
+                                other => {
+                                    return Err(bad(format!(
+                                        "`fanout` entry {i} is {other:?}; each hop's fanout is a \
+                                         whole number of at least 1, or -1 for every neighbour"
+                                    )))
+                                }
+                            });
+                        }
+                        fanout = Some(parsed);
+                    }
+                    ("fanout", other) => {
+                        return Err(bad(format!(
+                            "`fanout` must be a list with one entry per hop, e.g. [10, 5]; got {other:?}"
+                        )))
+                    }
+                    ("direction", PropertyValue::String(d)) => {
+                        direction = match d.to_ascii_lowercase().as_str() {
+                            "out" | "outgoing" => crate::algo::SampleDirection::Out,
+                            "in" | "incoming" => crate::algo::SampleDirection::In,
+                            "both" | "any" | "undirected" => crate::algo::SampleDirection::Both,
+                            _ => return Err(bad(format!(
+                                "unknown `direction` {d:?}; use 'out', 'in' or 'both'"
+                            ))),
+                        }
+                    }
+                    ("weightProperty", PropertyValue::String(w)) => weight = Some(w.clone()),
+                    ("batchSize", PropertyValue::Integer(n)) if *n >= 1 => batch_size = Some(*n as usize),
+                    ("batchSize", other) => {
+                        return Err(bad(format!("`batchSize` must be at least 1, got {other:?}")))
+                    }
+                    ("seed", PropertyValue::Integer(n)) => seed = *n as u64,
+                    ("label", PropertyValue::String(v)) => label = Some(v.clone()),
+                    ("edgeType", PropertyValue::String(v)) => edge_type = Some(v.clone()),
+                    (k @ ("direction" | "weightProperty" | "seed" | "label" | "edgeType"), other) => {
+                        return Err(bad(format!("`{k}` has the wrong type: {other:?}")))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some(fanouts) = fanout else {
+            return Err(bad(
+                "`fanout` is required: one entry per hop, e.g. {fanout: [10, 5]}".to_string(),
+            ));
+        };
+        if fanouts.is_empty() {
+            return Err(bad("`fanout` is empty; give at least one hop".to_string()));
+        }
+
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), weight.as_deref())?;
+        let mut seeds = Vec::with_capacity(seed_ids.len());
+        for id in seed_ids {
+            let idx = u64::try_from(id).ok().and_then(|raw| view.node_to_index.get(&raw).copied());
+            seeds.push(idx.ok_or_else(|| {
+                ExecutionError::RuntimeError(format!(
+                    "{WHAT}: node {id} is not in the projected graph -- check the \
+                     `label` and `edgeType` filters"
+                ))
+            })?);
+        }
+        let spec = crate::algo::SampleSpec {
+            fanouts,
+            direction,
+            weighted: weight.is_some(),
+            batch_size: batch_size.unwrap_or(seeds.len()),
+            seed,
+        };
+        let rows = crate::algo::sample_neighbours(&view, &seeds, &spec).map_err(|e| match e {
+            crate::algo::SampleError::BadWeight { from, to, weight: w } => bad(format!(
+                "the relationship from node {from} to node {to} has `{}` = {w}; a sampling \
+                 weight must be a finite number of at least 0",
+                weight.as_deref().unwrap_or("weight")
+            )),
+            other => ExecutionError::RuntimeError(format!("{WHAT}: {other:?}")),
+        })?;
+        for r in rows {
+            let mut rec = Record::new();
+            rec.bind("batch".to_string(), Value::Property(PropertyValue::Integer(r.batch as i64)));
+            rec.bind("hop".to_string(), Value::Property(PropertyValue::Integer(r.hop as i64)));
+            self.bind_node(store, &mut rec, "node", r.node);
+            self.bind_node(store, &mut rec, "neighbour", r.neighbour);
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
     /// `algo.negativeSampling({strategy, count, k, seed})` yielding `node1,
     /// node2`: pairs that are not edges, for training link prediction (ML-04,
     /// #1725). See `samyama_graph_algorithms::negative_sampling` for the three
@@ -21329,6 +21470,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "sample.neighbors" | "sample.neighbours" | "sampleneighbors" | "sampleneighbours"
+                | "neighboursampling" | "neighborsampling" => self.execute_neighbour_sampling(store)?,
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
@@ -21436,6 +21579,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "sample.neighbors" | "sample.neighbours" | "sampleneighbors" | "sampleneighbours"
+                | "neighboursampling" | "neighborsampling" => self.execute_neighbour_sampling(store)?,
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
