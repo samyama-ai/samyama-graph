@@ -209,8 +209,8 @@ fn streaming_a_query_that_does_not_parse_is_an_error() {
 fn slow_queries_are_counted_and_fast_ones_are_not() {
     let engine = QueryEngine::new().with_slow_query_ms(5);
     let before = crate::query::metrics::snapshot();
-    engine.log_if_slow("RETURN 1", std::time::Duration::from_millis(50), 1, true);
-    engine.log_if_slow("RETURN 1", std::time::Duration::from_millis(1), 1, false);
+    engine.log_if_slow("RETURN 1", std::time::Duration::from_millis(50), 1, true, false);
+    engine.log_if_slow("RETURN 1", std::time::Duration::from_millis(1), 1, false, true);
     let after = crate::query::metrics::snapshot();
     // Counters are process-wide; other tests may add to them, never subtract.
     assert!(after.slow > before.slow);
