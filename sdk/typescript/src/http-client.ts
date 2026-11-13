@@ -48,6 +48,44 @@ export interface RequestOptions {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * May a request be sent again after it was sent and failed (#2175)?
+ *
+ * `"safe"` for a request that cannot change anything: a `readOnly` query, NLQ
+ * translation, status, schema. `"unsafe"` for anything that may write: a
+ * timed-out write may already have been applied, and sending it again is how
+ * one `CREATE` became three nodes with the default settings.
+ */
+type Replay = "safe" | "unsafe";
+
+/**
+ * Error codes Node reports when the connection was never established, so the
+ * request never reached the server and may be sent again whatever it was.
+ */
+const NOT_CONNECTED = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/** Did this `fetch` failure happen before the request was sent? */
+function neverConnected(err: unknown): boolean {
+  const cause = (err as { cause?: unknown } | null)?.cause as
+    | { code?: string; errors?: { code?: string }[] }
+    | undefined;
+  if (!cause) return false; // a browser says nothing; assume it was sent
+  if (cause.code && NOT_CONNECTED.has(cause.code)) return true;
+  // Happy-eyeballs tries several addresses and reports an AggregateError.
+  return (
+    Array.isArray(cause.errors) &&
+    cause.errors.length > 0 &&
+    cause.errors.every((e) => !!e.code && NOT_CONNECTED.has(e.code))
+  );
+}
+
+/**
  * HTTP transport for the Samyama SDK.
  * Uses the native `fetch` API (works in Node.js 18+ and browsers).
  */
@@ -75,14 +113,21 @@ export class HttpTransport {
   /**
    * Is this failure worth retrying?
    *
-   * A timeout or a connection failure, and nothing else. An HTTP error is the
-   * server answering; repeating a request it has already refused achieves
-   * nothing, and blindly repeating a write is how one duplicate becomes
-   * several. A caller's own `AbortSignal` firing is never retried — the caller
-   * asked to stop.
+   * A connection that was never established, for any request: it never
+   * reached the server. A timeout or a dropped connection only when `replay`
+   * is `"safe"`: the server may already have run the request, and repeating a
+   * write it has applied is how one `CREATE` became three (#2175). An HTTP
+   * error is the server answering and is never retried. A caller's own
+   * `AbortSignal` firing is never retried — the caller asked to stop.
    */
-  private static retryable(err: unknown, callerSignal?: AbortSignal): boolean {
+  private static retryable(
+    err: unknown,
+    replay: Replay,
+    callerSignal?: AbortSignal,
+  ): boolean {
     if (callerSignal?.aborted) return false;
+    if (err instanceof TypeError && neverConnected(err)) return true;
+    if (replay !== "safe") return false;
     if (err instanceof DOMException && err.name === "TimeoutError") return true;
     if (err instanceof DOMException && err.name === "AbortError") return true;
     return err instanceof TypeError; // fetch's network-failure shape
@@ -98,6 +143,7 @@ export class HttpTransport {
     path: string,
     init: RequestInit,
     opts: RequestOptions = {},
+    replay: Replay = "unsafe",
   ): Promise<Response> {
     const timeoutMs = opts.timeoutMs ?? this.options.timeoutMs;
     let delay = this.options.retryBaseDelayMs;
@@ -115,7 +161,7 @@ export class HttpTransport {
       } catch (err) {
         if (
           attempt >= this.options.maxRetries ||
-          !HttpTransport.retryable(err, opts.signal)
+          !HttpTransport.retryable(err, replay, opts.signal)
         ) {
           throw err;
         }
@@ -137,8 +183,9 @@ export class HttpTransport {
     path: string,
     init: RequestInit,
     opts?: RequestOptions,
+    replay: Replay = "unsafe",
   ): Promise<T> {
-    const response = await this.request(path, init, opts);
+    const response = await this.request(path, init, opts, replay);
     if (!response.ok) return HttpTransport.fail(response);
     return (await response.json()) as T;
   }
@@ -161,6 +208,9 @@ export class HttpTransport {
         body: JSON.stringify(body),
       },
       opts,
+      // The server refuses a `read_only` write, so only that can be replayed
+      // after a timeout; anything else may be a write.
+      opts?.readOnly ? "safe" : "unsafe",
     );
   }
 
@@ -273,6 +323,7 @@ export class HttpTransport {
         body: JSON.stringify(body),
       },
       opts,
+      "safe", // translation has no side effects
     );
     if (typeof response.cypher !== "string") {
       throw new Error("/api/nlq response has no `cypher` string");
@@ -282,7 +333,7 @@ export class HttpTransport {
 
   /** Get server status via GET /api/status */
   async status(opts?: RequestOptions): Promise<ServerStatus> {
-    return this.json<ServerStatus>("/api/status", {}, opts);
+    return this.json<ServerStatus>("/api/status", {}, opts, "safe");
   }
 
   /**
@@ -302,7 +353,7 @@ export class HttpTransport {
 
   /** Get graph schema via GET /api/schema */
   async schema(opts?: RequestOptions): Promise<GraphSchema> {
-    return this.json<GraphSchema>("/api/schema", {}, opts);
+    return this.json<GraphSchema>("/api/schema", {}, opts, "safe");
   }
 
   /** Generic POST request returning typed JSON response */
