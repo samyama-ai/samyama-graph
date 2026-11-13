@@ -226,3 +226,88 @@ async fn each_index_gets_its_own_labelled_series() {
         "{body}"
     );
 }
+
+// --- process RSS (#2080) ---------------------------------------------
+
+use samyama::http::handler::parse_vm_rss;
+
+#[test]
+fn vm_rss_is_read_in_bytes() {
+    let status = "Name:\tsamyama\nVmPeak:\t  900000 kB\nVmRSS:\t  123456 kB\nVmData:\t 50000 kB\n";
+    assert_eq!(parse_vm_rss(status), Some(123_456 * 1024));
+}
+
+#[test]
+fn a_status_without_vm_rss_gives_none_not_zero() {
+    // A kernel thread's status has no VmRSS line. Zero would read as a
+    // process holding no memory.
+    assert_eq!(parse_vm_rss("Name:\tkthreadd\nState:\tS (sleeping)\n"), None);
+    assert_eq!(parse_vm_rss(""), None);
+}
+
+#[test]
+fn a_vm_rss_that_is_not_a_kilobyte_count_is_refused() {
+    assert_eq!(parse_vm_rss("VmRSS:\t  12x kB\n"), None);
+    assert_eq!(parse_vm_rss("VmRSS:\t  12 MB\n"), None);
+    assert_eq!(parse_vm_rss("VmRSS:\t  12\n"), None);
+}
+
+#[test]
+fn the_peak_is_not_mistaken_for_the_resident_size() {
+    // VmHWM is the peak RSS and sorts next to VmRSS; only the current one is
+    // the figure asked for.
+    assert_eq!(
+        parse_vm_rss("VmHWM:\t 999 kB\nVmRSS:\t 7 kB\n"),
+        Some(7 * 1024)
+    );
+}
+
+#[tokio::test]
+async fn memory_reports_the_process_beside_what_it_accounts_for() {
+    let v = memory_of(&[
+        "UNWIND range(1, 200) AS i CREATE (:P {name: 'n' + toString(i)})",
+        "CREATE INDEX ON :P(name)",
+    ])
+    .await;
+    let p = &v["process"];
+    let accounted = u(&v, &["graph", "attributed_bytes"])
+        + u(&v, &["index_memory_bytes"])
+        + u(&v, &["result_cache", "bytes"]);
+    assert_eq!(
+        u(&v, &["process", "accounted_bytes"]),
+        accounted,
+        "accounted is the graph, the indexes and the result cache, nothing else"
+    );
+    if cfg!(target_os = "linux") {
+        let rss = p["resident_bytes"].as_u64().expect("Linux has procfs");
+        assert!(rss > 0, "{p}");
+        assert_eq!(
+            p["rss_minus_accounted_bytes"].as_i64().expect("a number"),
+            rss as i64 - accounted as i64,
+            "{p}"
+        );
+    } else {
+        assert!(p["resident_bytes"].is_null(), "no procfs: absent, not made up: {p}");
+        assert!(p["rss_minus_accounted_bytes"].is_null(), "{p}");
+    }
+}
+
+#[tokio::test]
+async fn metrics_export_the_process_resident_size_where_it_can_be_read() {
+    let body = metrics_of(&["CREATE (:P)"]).await;
+    let name = "samyama_process_resident_memory_bytes";
+    if cfg!(target_os = "linux") {
+        assert!(body.contains(&format!("# HELP {name} ")), "no HELP for {name}");
+        assert!(body.contains(&format!("# TYPE {name} gauge")), "no TYPE for {name}");
+        let value: u64 = body
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{name} ")))
+            .expect("a sample")
+            .parse()
+            .expect("an integer");
+        assert!(value > 0, "a running process holds some memory");
+    } else {
+        // A 0 would plot as a process using no memory.
+        assert!(!body.contains(name), "exported on a platform with no procfs");
+    }
+}

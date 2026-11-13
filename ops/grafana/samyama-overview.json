@@ -107,11 +107,12 @@
     {
       "type": "timeseries",
       "title": "Memory attributed",
-      "description": "samyama_memory_attributed_bytes is what the engine can account for, not RSS. A gap between the two is unattributed memory and is worth an issue.",
+      "description": "attributed and indexes are what the engine can account for; resident is the process's RSS as the OS reports it (Linux only). A gap between resident and the rest that keeps growing is unattributed memory and is worth an issue.",
       "gridPos": { "h": 7, "w": 8, "x": 8, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
       "targets": [
+        { "expr": "samyama_process_resident_memory_bytes{job=\"$job\"}", "legendFormat": "resident" },
         { "expr": "samyama_memory_attributed_bytes{job=\"$job\"}", "legendFormat": "attributed" },
         { "expr": "samyama_index_memory_bytes{job=\"$job\"}", "legendFormat": "indexes" },
         { "expr": "sum by (label, property) (samyama_index_bytes{job=\"$job\"})", "legendFormat": "{{label}}.{{property}}" }

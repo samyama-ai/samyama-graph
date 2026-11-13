@@ -101,6 +101,7 @@ fn metrics_exported() -> BTreeSet<String> {
         "samyama_nodes",
         "samyama_edges",
         "samyama_memory_attributed_bytes",
+        "samyama_process_resident_memory_bytes",
         "samyama_index_memory_bytes",
         "samyama_index_bytes",
         "samyama_query_cache_entries",
