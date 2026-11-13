@@ -136,6 +136,7 @@ pub mod compat;
 pub mod pii;
 pub mod schema_doc;
 pub mod provenance;
+pub mod idempotency;
 pub mod rdf;
 pub mod sparql;
 pub mod vector;
