@@ -120,6 +120,11 @@ class SamyamaClient:
     def query(
         self, cypher: str, graph: str = "default", cancel: CancelToken | None = None
     ) -> QueryResult: ...
+    def query_with_idempotency_key(
+        self, cypher: str, key: str, graph: str = "default"
+    ) -> QueryResult:
+        """Run a write that is safe to send again under the same key (#2176)."""
+        ...
     def query_readonly(
         self, cypher: str, graph: str = "default", cancel: CancelToken | None = None
     ) -> QueryResult:
