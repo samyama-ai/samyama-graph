@@ -32,30 +32,75 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Locate the compiled example beside the test binary.
+/// Locate the compiled example, without assuming where Cargo puts it.
 ///
-/// `cargo test` builds examples, so this exists whenever the tests do. It is
-/// found by walking up from the test binary (`target/<profile>/deps/<name>`)
-/// rather than assuming `debug`: CI runs debug, a release check runs release,
-/// and a hardcoded profile silently tests a stale binary from the other one.
+/// Cargo splits `target/` in two: an *artifact* directory for final outputs,
+/// which is where a compiled example lands, and a *build* directory for
+/// intermediates (`build.build-dir`, stabilised in 1.91). Both default to
+/// `target`, so the split is easy to miss -- and the Cargo Book is explicit
+/// that the build directory's layout "is internal to Cargo, and we can change
+/// this if needed".
+///
+/// This used to walk up two levels from `current_exe()`, which its own comment
+/// described as `target/<profile>/deps/<name>`. That is a path in the BUILD
+/// directory. Rust 1.100 rearranged it, the walk landed inside a build script's
+/// `out/`, and all five tests here failed on every open pull request (#2178).
+/// The example had not moved; the anchor had.
+///
+/// So the first anchor is `CARGO_TARGET_TMPDIR`, which Cargo documents as a
+/// directory inside the *target* directory and sets for every integration test
+/// -- the same side of the split as the example. `current_exe()` is still tried
+/// after it, because it is correct on Cargo versions before the rearrangement
+/// and costs nothing to keep.
+///
+/// Neither anchor's depth is assumed, which is the actual lesson of #2178: a
+/// hardcoded number of `pop()`s is a bet on a layout Cargo does not promise.
+/// Each ancestor is tried in turn and the first holding `examples/<name>` wins,
+/// so a future rearrangement changes which ancestor matches instead of breaking
+/// the test. The search cannot wander into the wrong profile -- the ancestors of
+/// `target/debug/tmp` do not include `target/release` -- and it cannot match the
+/// sources in `<repo>/examples`, which are `.rs` files rather than a binary with
+/// this name. If nothing matches, the panic lists every directory it looked in
+/// rather than naming one and implying the others were impossible.
 fn demo_binary() -> PathBuf {
-    let mut dir = std::env::current_exe().expect("current exe");
-    dir.pop(); // deps/
-    if dir.ends_with("deps") {
-        dir.pop();
-    }
     // `.exe` on Windows, nothing elsewhere.
-    let path = dir
-        .join("examples")
-        .join(format!("agentic_enrichment_demo{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        path.exists(),
-        "the demo binary is not at {}. It is the subject of this test, so a \
-         missing binary is a failure and not a reason to skip: a skip here is \
-         how the demo goes ungoverned again without anything going red.\n\
-         Build it with: cargo build --example agentic_enrichment_demo",
-        path.display()
-    );
+    let exe = format!("agentic_enrichment_demo{}", std::env::consts::EXE_SUFFIX);
+
+    let mut anchors = vec![PathBuf::from(env!("CARGO_TARGET_TMPDIR"))];
+    if let Ok(exe_path) = std::env::current_exe() {
+        anchors.push(exe_path);
+    }
+
+    // Six is enough to reach the artifact directory from either anchor
+    // (`target/<profile>/tmp` is three, a build-dir path a little more) and
+    // stops well short of the filesystem root, so a missing binary reports a
+    // short list instead of every directory up to `/`.
+    let mut tried = Vec::new();
+    let mut found = None;
+    'anchors: for anchor in &anchors {
+        for dir in anchor.ancestors().take(6) {
+            let candidate = dir.join("examples").join(&exe);
+            // `is_file`, not `exists`: a directory of that name is not a binary
+            // we can run, and saying "found" of one would fail later and
+            // further away.
+            if candidate.is_file() {
+                found = Some(candidate);
+                break 'anchors;
+            }
+            tried.push(candidate);
+        }
+    }
+
+    let path = found.unwrap_or_else(|| {
+        let looked: String = tried.iter().map(|p| format!("\n  {}", p.display())).collect();
+        panic!(
+            "the demo binary was not found. It is the subject of this test, so a \
+             missing binary is a failure and not a reason to skip: a skip here is \
+             how the demo goes ungoverned again without anything going red.\n\
+             Build it with: cargo build --example agentic_enrichment_demo\n\
+             Looked in:{looked}"
+        )
+    });
 
     // The staleness guard, and it is not theoretical: `cargo test --test
     // gak_demo_writes_are_governed` does not rebuild examples, so while writing
