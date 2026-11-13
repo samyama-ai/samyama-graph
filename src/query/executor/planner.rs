@@ -1735,10 +1735,10 @@ impl QueryPlanner {
         // Handle CREATE CONSTRAINT
         if let Some(clause) = &query.create_constraint_clause {
             return Ok(ExecutionPlan {
-                root: Box::new(CreateConstraintOperator::new(
-                    clause.label.clone(),
-                    clause.property.clone(),
-                )),
+                root: Box::new(
+                    CreateConstraintOperator::new(clause.label.clone(), clause.property.clone())
+                        .with_on_duplicate(clause.on_duplicate),
+                ),
                 output_columns: vec![],
                 is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });

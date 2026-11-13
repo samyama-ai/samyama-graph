@@ -30,7 +30,7 @@ A declaration is what the structure needs to be rebuilt and nothing it contains
 | structure | declaration | queried through |
 |---|---|---|
 | B-tree property index | label, property | a `WHERE n.prop = v` or inline `{prop: v}` the planner turns into `IndexScan` |
-| unique constraint | label, property | the same lookup; consulted on every write (`eb02825`, #542) |
+| unique constraint | label, property; and, in a record of its own (`UniqueConstraintUpsert`), whether a repeated `CREATE` of a key updates the node holding it (`OPTIONS {onDuplicate: 'update'}`, #2176) | the same lookup; consulted on every write (`eb02825`, #542) |
 | full-text | **name**, label, property | `db.index.fulltext.queryNodes(name, text)` |
 | vector | name, label, property, dimensions, metric, quantization | `db.index.vector.queryNodes(label, property, vector, k)` or `(name, k, vector)`; `/api/vector-search` |
 | hierarchy | the edge type, direction, and the hierarchy's regime parameters | the pattern shapes ADR-035 §8 detects |

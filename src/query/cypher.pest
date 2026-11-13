@@ -149,8 +149,8 @@ show_constraints_stmt = { ^"SHOW" ~ ^"CONSTRAINTS" }
 create_constraint_stmt = { ^"CREATE" ~ ^"CONSTRAINT" ~ (constraint_modern | constraint_legacy) }
 // Neo4j 4+/5 form. The optional name must not swallow the `IF` or `FOR` keyword, and is
 // kept in its own rule so it is not mistaken for the pattern variable.
-constraint_modern = { constraint_name? ~ if_not_exists? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"REQUIRE" ~ property_access ~ ^"IS" ~ ^"UNIQUE" }
-constraint_legacy = { ^"ON" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ASSERT" ~ property_access ~ ^"IS" ~ ^"UNIQUE" }
+constraint_modern = { constraint_name? ~ if_not_exists? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"REQUIRE" ~ property_access ~ ^"IS" ~ ^"UNIQUE" ~ options? }
+constraint_legacy = { ^"ON" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ASSERT" ~ property_access ~ ^"IS" ~ ^"UNIQUE" ~ options? }
 constraint_name = @{ !(^"IF" ~ !(ASCII_ALPHANUMERIC | "_")) ~ !(^"FOR" ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 if_not_exists = { ^"IF" ~ ^"NOT" ~ ^"EXISTS" }
 options = { ^"OPTIONS" ~ "{" ~ property_list? ~ "}" }

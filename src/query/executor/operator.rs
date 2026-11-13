@@ -90,6 +90,30 @@ use ndarray::Array1;
 /// resource limits must not be classified two different ways.
 ///
 /// Everything else keeps the class it had.
+/// The node a `CREATE` updates instead of making a new one, when a key it
+/// gives is held under a unique constraint declared
+/// `OPTIONS {onDuplicate: 'update'}` (#2176). The update is applied here --
+/// labels added, properties set, each a new version of the node -- and the
+/// node returned for the caller to bind. `None`: create as usual.
+fn create_as_update(
+    store: &mut GraphStore,
+    tenant_id: &str,
+    labels: &[Label],
+    literal: &HashMap<String, PropertyValue>,
+    evaluated: &HashMap<String, PropertyValue>,
+) -> ExecutionResult<Option<NodeId>> {
+    let properties = || literal.iter().chain(evaluated.iter());
+    let target = store
+        .upsert_target(labels, properties())
+        .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+    if let Some(node_id) = target {
+        store
+            .upsert_node(tenant_id, node_id, labels, properties())
+            .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+    }
+    Ok(target)
+}
+
 fn write_error(e: crate::graph::GraphError) -> ExecutionError {
     if matches!(e, crate::graph::GraphError::QuotaExceeded(_)) {
         return ExecutionError::Coded {
@@ -15522,18 +15546,12 @@ impl PhysicalOperator for CreateNodeOperator {
             // WithSkipLimit1 [1], WithSkipLimit2 [2]).
             let mut scope = Record::new();
             for (labels, properties, variable, property_exprs) in &self.nodes_to_create {
-                // The whole label set at once, which for `CREATE ({...})` is
-                // empty. Passing a "primary" label meant an unlabelled node was
-                // created with `Label("")` (#625).
-                // Refused before the node exists, not after it fails to persist: a
-                // quota breach is a rejected write, not a durability failure (#1483).
-                store.admit_node().map_err(write_error)?;
-                let node_id = store.create_node_with_labels(labels.iter().cloned());
-
                 // With no input row, only the nodes this CREATE has made so far are
                 // bound. Anything else a value refers to is an error rather than a
                 // silent null -- quietly storing nothing for a property is the failure
-                // this check exists to remove.
+                // this check exists to remove. Evaluated before the node exists: the
+                // node being created is not in `scope`, so nothing here can read it,
+                // and the values decide whether a node is created at all (#2176).
                 let mut evaluated: HashMap<String, PropertyValue> = HashMap::new();
                 if let Some(exprs) = property_exprs {
                     for (key, expr) in exprs {
@@ -15542,7 +15560,6 @@ impl PhysicalOperator for CreateNodeOperator {
                                 evaluated.insert(key.clone(), p);
                             }
                             None => {
-                                let _ = store.delete_node(tenant_id, node_id);
                                 return Err(ExecutionError::RuntimeError(format!(
                                     "CREATE property `{key}` refers to a variable that is not bound here; bind it first with MATCH, WITH or UNWIND"
                                 )));
@@ -15550,6 +15567,26 @@ impl PhysicalOperator for CreateNodeOperator {
                         }
                     }
                 }
+
+                // A key held under an `onDuplicate: 'update'` constraint: the
+                // holder is updated and bound in place of a new node (#2176).
+                if let Some(node_id) =
+                    create_as_update(store, tenant_id, labels, properties, &evaluated)?
+                {
+                    if let Some(v) = variable {
+                        scope.bind(v.clone(), Value::NodeRef(node_id));
+                    }
+                    self.created_nodes.push((node_id, variable.clone()));
+                    continue;
+                }
+
+                // The whole label set at once, which for `CREATE ({...})` is
+                // empty. Passing a "primary" label meant an unlabelled node was
+                // created with `Label("")` (#625).
+                // Refused before the node exists, not after it fails to persist: a
+                // quota breach is a rejected write, not a durability failure (#1483).
+                store.admit_node().map_err(write_error)?;
+                let node_id = store.create_node_with_labels(labels.iter().cloned());
 
                 // Set properties using store.set_node_property to trigger indexing
                 for (key, value) in properties.iter().chain(evaluated.iter()) {
@@ -16010,12 +16047,28 @@ impl PhysicalOperator for CompositeCreateIndexOperator {
 pub struct CreateConstraintOperator {
     label: Label,
     property: String,
+    on_duplicate: Option<crate::query::ast::OnDuplicate>,
     executed: bool,
 }
 
 impl CreateConstraintOperator {
     pub fn new(label: Label, property: String) -> Self {
-        Self { label, property, executed: false }
+        Self {
+            label,
+            property,
+            on_duplicate: None,
+            executed: false,
+        }
+    }
+
+    /// `OPTIONS {onDuplicate: ...}` from the DDL (#2176). `None` leaves an
+    /// existing constraint's mode alone.
+    pub fn with_on_duplicate(
+        mut self,
+        on_duplicate: Option<crate::query::ast::OnDuplicate>,
+    ) -> Self {
+        self.on_duplicate = on_duplicate;
+        self
     }
 }
 
@@ -16038,6 +16091,15 @@ impl PhysicalOperator for CreateConstraintOperator {
         store
             .create_unique_constraint(&self.label, &self.property)
             .map_err(ExecutionError::RuntimeError)?;
+        if let Some(mode) = self.on_duplicate {
+            store
+                .set_unique_constraint_on_duplicate(
+                    &self.label,
+                    &self.property,
+                    mode == crate::query::ast::OnDuplicate::Update,
+                )
+                .map_err(ExecutionError::RuntimeError)?;
+        }
 
         self.executed = true;
         Ok(Some(Record::new()))
@@ -16054,7 +16116,14 @@ impl PhysicalOperator for CreateConstraintOperator {
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
             name: "CreateConstraint".to_string(),
-            details: format!("UNIQUE :{}({})", self.label.as_str(), self.property),
+            details: match self.on_duplicate {
+                Some(crate::query::ast::OnDuplicate::Update) => format!(
+                    "UNIQUE :{}({}) ON DUPLICATE UPDATE",
+                    self.label.as_str(),
+                    self.property
+                ),
+                _ => format!("UNIQUE :{}({})", self.label.as_str(), self.property),
+            },
             children: Vec::new(),
         }
     }
@@ -17275,13 +17344,10 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                 // edge wiring below then treats it exactly like a matched variable.
                 let mut record = record;
                 for (handle, labels, properties, property_exprs) in &self.nodes_to_create {
-                    // Refused before the node exists, not after it fails to persist: a
-                    // quota breach is a rejected write, not a durability failure (#1483).
-                    store.admit_node().map_err(write_error)?;
-                    let node_id = store.create_node_with_labels(labels.iter().cloned());
                     // Non-literal property values (`{id: row.id}`) are evaluated against
                     // this row, so each created node gets the value belonging to its own
-                    // match rather than a constant.
+                    // match rather than a constant. Before the node exists, because the
+                    // values decide whether one is created (#2176).
                     let mut evaluated: HashMap<String, PropertyValue> = HashMap::new();
                     if let Some(exprs) = property_exprs {
                         for (key, expr) in exprs {
@@ -17300,6 +17366,21 @@ impl PhysicalOperator for MatchCreateEdgeOperator {
                             evaluated.insert(key.clone(), pv);
                         }
                     }
+                    // A key held under an `onDuplicate: 'update'` constraint: the
+                    // holder is updated and bound for this row (#2176).
+                    if let Some(node_id) =
+                        create_as_update(store, tenant_id, labels, properties, &evaluated)?
+                    {
+                        if let Some(node) = store.get_node(node_id) {
+                            record
+                                .bind(handle.clone(), Value::Node(node_id, Box::new(node.clone())));
+                        }
+                        continue;
+                    }
+                    // Refused before the node exists, not after it fails to persist: a
+                    // quota breach is a rejected write, not a durability failure (#1483).
+                    store.admit_node().map_err(write_error)?;
+                    let node_id = store.create_node_with_labels(labels.iter().cloned());
                     for (key, value) in properties.iter().chain(evaluated.iter()) {
                         if let Err(e) = store.set_node_property(tenant_id, node_id, key.clone(), value.clone())
                         {
