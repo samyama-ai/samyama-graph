@@ -42,6 +42,37 @@ bowlers, a graph-native count) → Player-of-the-Match leaders → busiest venue
 largest tournaments. Every query returns real rows from the snapshot — the
 [Definition of Done](../DEFINITION_OF_DONE.md) gate fails the build otherwise.
 
+## Question catalog
+
+[`cricket.sgqueries`](./cricket.sgqueries) holds 47 questions (14 easy, 24 medium,
+9 hard; three unanswerable), built with `catalog-build --release` against the pinned
+snapshot (#1154). [`questions.json`](questions.json) is its source, and the NLQ
+accuracy benchmark
+([competitor-benchmarks#260](https://git.samyama.ai/Samyama.ai/samyama-graph-competitor-benchmarks/issues/260))
+reads it as its question set. Every entry is checked
+weekly against the published snapshot by
+[`kg-catalogs.yml`](../../.github/workflows/kg-catalogs.yml).
+
+```bash
+samyama queries list case_studies/cricket/cricket.sgqueries
+samyama queries run  case_studies/cricket/cricket.sgqueries --snapshot cricket.sgsnap \
+    --entry <id> [--param name=value]...
+samyama verify cricket.sgsnap --queries case_studies/cricket/cricket.sgqueries
+```
+
+Batting and bowling rows are per innings (`innings_num`), so a Test player can have
+two `BATTED_IN` edges for one match: "highest innings" reads one edge, career totals
+sum them. Player names are Cricsheet's short form (`V Kohli`), and 145 of them are
+shared by more than one player, so the templates' samples are names held by one
+player only.
+
+**Data caveat the catalog surfaces.** 208 of the 877 venues are recorded twice, once
+as the ground (`Edgbaston`) and once with its city appended (`Edgbaston,
+Birmingham`), so a count per `Venue` node splits one ground's matches between the
+two. The venue questions match both names, and `ck_venues_recorded_twice` counts the
+doubled grounds so a corrected snapshot shows up as a changed answer. The "Busiest
+venues" showcase query above still counts each name separately.
+
 ## Data & license
 
 Source: [Cricsheet.org](https://cricsheet.org) ball-by-ball data, **CC BY 4.0**.
