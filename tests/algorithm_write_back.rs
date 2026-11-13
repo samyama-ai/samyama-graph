@@ -97,6 +97,8 @@ fn leading_args(canonical: &str, store: &GraphStore, engine: &QueryEngine) -> St
     match canonical {
         "bellmanford" => format!("{source}, "),
         "personalizedpagerank" | "personalisedpagerank" => format!("[{source}], "),
+        // `strategy` is required, and a second config map is merged into the first.
+        "split" | "traintestsplit" => "{strategy: 'random'}, ".to_string(),
         _ => String::new(),
     }
 }

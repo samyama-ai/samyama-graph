@@ -6809,6 +6809,17 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
                 ])],
             )
         }
+        "split" => vec![lmap(&[("strategy", pstr("random"))])],
+        // A stored split with the path cut in half: an entity leak across it.
+        "splitleakage" => {
+            let mut store = path;
+            for (k, &id) in ids.iter().enumerate() {
+                let side = if k < 2 { "train" } else { "test" };
+                store.set_node_property(TENANT, NodeId::new(id as u64), "split", side).unwrap();
+            }
+            let args = vec![lmap(&[("strategy", pstr("entity")), ("edgeType", pstr("E"))])];
+            return (store, args);
+        }
         _ => vec![],
     };
     (path, args)

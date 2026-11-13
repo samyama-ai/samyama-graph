@@ -29,6 +29,8 @@ pub enum AlgorithmCategory {
     Temporal,
     Embedding,
     Optimization,
+    /// Prepares a training dataset: leakage-safe splits and their check (ML-05).
+    Dataset,
 }
 
 /// One callable algorithm.
@@ -153,6 +155,10 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     read("algo.pca", &[], Embedding, &["node", "projection"]),
     write("algo.fastRP", Embedding, &["node", "embedding"]),
     write("algo.node2vec", Embedding, &["node", "embedding"]),
+    // Training datasets (ML-05, #1730). `split` keeps whole groups on one side;
+    // `splitLeakage` reads a stored split back and lists every leak across it.
+    read("algo.split", &["algo.trainTestSplit"], Dataset, &["node", "split", "group"]),
+    read("algo.splitLeakage", &["algo.leakageCheck"], Dataset, &["node1", "node2", "split1", "split2", "reason"]),
     // Optimisation. A single-objective solve also yields `history`,
     // `iterations` and `max_iterations`; a multi-objective one yields
     // `front_size` instead.
