@@ -306,7 +306,7 @@ impl Default for EmbeddedClient {
 }
 
 /// Convert a RecordBatch from the query engine into an SDK QueryResult.
-fn record_batch_to_query_result(batch: &RecordBatch, store: &GraphStore) -> QueryResult {
+pub(crate) fn record_batch_to_query_result(batch: &RecordBatch, store: &GraphStore) -> QueryResult {
     let mut nodes_map: HashMap<String, SdkNode> = HashMap::new();
     let mut edges_map: HashMap<String, SdkEdge> = HashMap::new();
     let mut records = Vec::new();
