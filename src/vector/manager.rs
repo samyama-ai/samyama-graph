@@ -584,6 +584,16 @@ impl VectorIndexManager {
         writeln!(pointer, "{generation}")?;
         pointer.as_file().sync_all()?;
         pointer.persist(path.join("CURRENT")).map_err(|e| VectorError::Io(e.error))?;
+        // Make the rename's directory entry durable. Unix only, for the
+        // reason already written down in `snapshot::persist` (#1696): a
+        // directory is opened like a file there and fsyncing it is what
+        // commits a rename, while Windows refuses to open one with
+        // `File::open` ("Access is denied", os error 5) and NTFS journals
+        // the rename itself, so there is no directory entry to flush.
+        //
+        // Without the guard this failed on every publish, not only a
+        // republish, because the fsync follows the rename unconditionally.
+        #[cfg(unix)]
         std::fs::File::open(path)?.sync_all()?;
         Ok(())
     }
