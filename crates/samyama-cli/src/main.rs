@@ -81,6 +81,9 @@ enum Commands {
         /// Data directory to test for writability
         #[arg(long, default_value = "./samyama_data", env = "SAMYAMA_DATA")]
         data_dir: std::path::PathBuf,
+        /// RESP port on the server's host to test for a listener
+        #[arg(long)]
+        resp_port: Option<u16>,
     },
     /// Print a shell completion script to stdout
     ///
@@ -161,12 +164,12 @@ async fn main() {
         Commands::Status => run_status(&client, &cli.format).await,
         Commands::Ping => run_ping(&client, &cli.format).await,
         Commands::Shell { graph } => run_shell(&client, &graph, &cli.format).await,
-        Commands::Doctor { data_dir } => {
+        Commands::Doctor { data_dir, resp_port } => {
             // `doctor` reports its findings and exits on its own code: an
             // unreachable server is a finding, not a CLI error, and routing it
             // through the error path below would print it twice and lose the
             // checks that did run.
-            let code = run_doctor(&client, &cli.url, &data_dir, &cli.format).await;
+            let code = run_doctor(&client, &cli.url, &data_dir, resp_port, &cli.format).await;
             std::process::exit(code);
         }
         Commands::Completions { shell } => {
@@ -530,14 +533,38 @@ fn format_csv_value(v: &serde_json::Value) -> String {
     }
 }
 
+/// Time `RETURN 1` round trips. The first is not counted: it pays for the
+/// connection and the parse, which is not what is being measured.
+async fn probe_latency(client: &RemoteClient) -> Result<Vec<std::time::Duration>, String> {
+    let mut samples = Vec::with_capacity(doctor::PROBES);
+    for i in 0..=doctor::PROBES {
+        let start = std::time::Instant::now();
+        client.query_readonly("default", "RETURN 1").await.map_err(|e| e.to_string())?;
+        if i > 0 {
+            samples.push(start.elapsed());
+        }
+    }
+    Ok(samples)
+}
+
 /// Run the doctor checks and print them. Returns the process exit code.
 async fn run_doctor(
     client: &RemoteClient,
     url: &str,
     data_dir: &std::path::Path,
+    resp_port: Option<u16>,
     format: &OutputFormat,
 ) -> i32 {
     let mut checks = doctor::local_checks(url, data_dir);
+    let get = |path| async move { client.get_raw(path).await.map_err(|e| e.to_string()) };
+    // A server that wants a credential answers every endpoint the same way, and
+    // that is one finding, not five: it is up, and nothing else was observed.
+    let status_raw = get("/api/status").await;
+    if let Some(code) = doctor::wants_credential(&status_raw) {
+        checks.extend(doctor::credential_required(code));
+        checks.push(doctor::check_resp_port(url, resp_port));
+        return print_doctor(doctor::report(checks), format);
+    }
     // The server's own version, or the error that came back instead. Both are
     // findings; neither aborts the local checks, which is the point of running
     // `doctor` when the server is the thing that is broken.
@@ -546,9 +573,22 @@ async fn run_doctor(
         .await
         .map(|s| s.version)
         .map_err(|e| e.to_string());
+    let reachable = status.is_ok();
     checks.extend(doctor::server_checks(status, env!("CARGO_PKG_VERSION")));
+    if reachable {
+        checks.push(doctor::check_persistence(&status_raw));
+        checks.push(doctor::check_server_memory(&get("/api/memory").await, doctor::local_ram_mib(url)));
+        checks.push(doctor::check_metrics(&get("/metrics").await));
+        checks.push(doctor::check_latency(probe_latency(client).await));
+    } else {
+        checks.extend(doctor::server_only_skipped());
+    }
+    checks.push(doctor::check_resp_port(url, resp_port));
+    print_doctor(doctor::report(checks), format)
+}
 
-    let report = doctor::report(checks);
+/// Print a doctor report in the chosen format. Returns the process exit code.
+fn print_doctor(report: doctor::Report, format: &OutputFormat) -> i32 {
     match format {
         OutputFormat::Json => {
             match serde_json::to_string_pretty(&report) {

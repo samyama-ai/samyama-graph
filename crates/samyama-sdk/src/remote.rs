@@ -113,6 +113,16 @@ impl RemoteClient {
         }
     }
 
+    /// `GET path` on the server: the status code and the body as text, whatever
+    /// the code. For a caller that reads an endpoint the SDK has no model for,
+    /// and for whom a 404 is an answer rather than an error.
+    pub async fn get_raw(&self, path: &str) -> SamyamaResult<(u16, String)> {
+        let url = format!("{}{path}", self.http_base_url);
+        let response = self.send_with_retry(|| self.http_client.get(&url)).await?;
+        let code = response.status().as_u16();
+        Ok((code, response.text().await?))
+    }
+
     /// The settings this client was built with.
     pub fn config(&self) -> &ConnectionConfig {
         &self.config

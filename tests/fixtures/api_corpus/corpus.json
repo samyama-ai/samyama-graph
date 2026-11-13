@@ -6427,7 +6427,8 @@
       "status": "healthy",
       "storage": {
         "edges": 4,
-        "nodes": 8
+        "nodes": 8,
+        "persistence_degraded": false
       },
       "version": "<version>"
     },
