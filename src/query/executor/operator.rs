@@ -17827,6 +17827,16 @@ pub(crate) fn records_bytes<'a>(records: impl Iterator<Item = &'a Record>) -> us
 }
 
 /// Algorithm operator: CALL algo.pageRank(...)
+/// The five subgraph samplers behind `algo.sample.*` (ML-03, #1720).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubgraphMethod {
+    ForestFire,
+    Snowball,
+    EgoNetwork,
+    RandomWalk,
+    Stratified,
+}
+
 pub struct AlgorithmOperator {
     /// Procedure name
     name: String,
@@ -18074,6 +18084,9 @@ impl AlgorithmOperator {
         ("symptomexplanation", "it reads each relationship's time, which a projection does not keep"),
         ("pca", "it reads node properties, which a projection does not keep"),
         ("or.solve", "it optimises over node properties, not over a graph view"),
+        ("sample.stratified", "it groups nodes by their labels, which a projection does not keep"),
+        ("stratifiedsample", "it groups nodes by their labels, which a projection does not keep"),
+        ("stratifiedsampling", "it groups nodes by their labels, which a projection does not keep"),
         ("or.constrainedshortestpath", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
         ("or.shortestpathwithconstraints", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
     ];
@@ -19463,6 +19476,356 @@ impl AlgorithmOperator {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", id);
             rec.bind("step".to_string(), Value::Property(PropertyValue::Integer(i as i64)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.sample.neighbors(seeds, {fanout, direction, weightProperty,
+    /// batchSize, seed})` yielding `batch, hop, node, neighbour`: GNN-style
+    /// neighbour sampling, one minibatch at a time (ML-02, #1717). See
+    /// `samyama_graph_algorithms::neighbour_sampling` for the rules every
+    /// sample keeps.
+    ///
+    /// `seeds` is a node id or a list of them. `fanout` is required: one
+    /// entry per hop, each at least 1, or -1 for every neighbour. Sampling is
+    /// uniform unless `weightProperty` names a weight. Each option is refused,
+    /// not clamped, when it is out of range: a training set drawn from a
+    /// silently substituted fanout is not the one the caller asked for.
+    fn execute_neighbour_sampling(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const WHAT: &str = "algo.sample.neighbors()";
+        const DEFAULT_SEED: u64 = 42;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "sample.neighbors",
+            &["batchSize", "direction", "edgeType", "fanout", "label", "seed", "weightProperty"],
+        )?;
+        let bad = |msg: String| ExecutionError::bad_argument(format!("{WHAT}: {msg}"));
+
+        let seed_ids: Vec<i64> = match self.args.first() {
+            Some(Expression::Literal(PropertyValue::Integer(n))) => vec![*n],
+            Some(Expression::Literal(PropertyValue::Array(items))) => items
+                .iter()
+                .map(|v| match v {
+                    PropertyValue::Integer(n) => Ok(*n),
+                    other => Err(bad(format!("every seed must be a node id, got {other:?}"))),
+                })
+                .collect::<ExecutionResult<_>>()?,
+            _ => {
+                return Err(bad(
+                    "the first argument must be a node id or a list of node ids, \
+                     e.g. algo.sample.neighbors([1, 2], {fanout: [10, 5]})"
+                        .to_string(),
+                ))
+            }
+        };
+        if seed_ids.is_empty() {
+            return Err(bad("the list of seed nodes is empty".to_string()));
+        }
+
+        let (mut fanout, mut direction, mut weight, mut batch_size, mut seed) =
+            (None, crate::algo::SampleDirection::Out, None, None, DEFAULT_SEED);
+        let (mut label, mut edge_type) = (None, None);
+        for arg in &self.args {
+            let Expression::Literal(PropertyValue::Map(m)) = arg else { continue };
+            for (key, value) in m {
+                match (key.as_str(), value) {
+                    ("fanout", PropertyValue::Array(hops)) => {
+                        let mut parsed = Vec::with_capacity(hops.len());
+                        for (i, h) in hops.iter().enumerate() {
+                            parsed.push(match h {
+                                PropertyValue::Integer(-1) => crate::algo::Fanout::All,
+                                PropertyValue::Integer(n) if *n >= 1 => crate::algo::Fanout::AtMost(*n as usize),
+                                other => {
+                                    return Err(bad(format!(
+                                        "`fanout` entry {i} is {other:?}; each hop's fanout is a \
+                                         whole number of at least 1, or -1 for every neighbour"
+                                    )))
+                                }
+                            });
+                        }
+                        fanout = Some(parsed);
+                    }
+                    ("fanout", other) => {
+                        return Err(bad(format!(
+                            "`fanout` must be a list with one entry per hop, e.g. [10, 5]; got {other:?}"
+                        )))
+                    }
+                    ("direction", PropertyValue::String(d)) => {
+                        direction = match d.to_ascii_lowercase().as_str() {
+                            "out" | "outgoing" => crate::algo::SampleDirection::Out,
+                            "in" | "incoming" => crate::algo::SampleDirection::In,
+                            "both" | "any" | "undirected" => crate::algo::SampleDirection::Both,
+                            _ => return Err(bad(format!(
+                                "unknown `direction` {d:?}; use 'out', 'in' or 'both'"
+                            ))),
+                        }
+                    }
+                    ("weightProperty", PropertyValue::String(w)) => weight = Some(w.clone()),
+                    ("batchSize", PropertyValue::Integer(n)) if *n >= 1 => batch_size = Some(*n as usize),
+                    ("batchSize", other) => {
+                        return Err(bad(format!("`batchSize` must be at least 1, got {other:?}")))
+                    }
+                    ("seed", PropertyValue::Integer(n)) => seed = *n as u64,
+                    ("label", PropertyValue::String(v)) => label = Some(v.clone()),
+                    ("edgeType", PropertyValue::String(v)) => edge_type = Some(v.clone()),
+                    (k @ ("direction" | "weightProperty" | "seed" | "label" | "edgeType"), other) => {
+                        return Err(bad(format!("`{k}` has the wrong type: {other:?}")))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some(fanouts) = fanout else {
+            return Err(bad(
+                "`fanout` is required: one entry per hop, e.g. {fanout: [10, 5]}".to_string(),
+            ));
+        };
+        if fanouts.is_empty() {
+            return Err(bad("`fanout` is empty; give at least one hop".to_string()));
+        }
+
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), weight.as_deref())?;
+        let mut seeds = Vec::with_capacity(seed_ids.len());
+        for id in seed_ids {
+            let idx = u64::try_from(id).ok().and_then(|raw| view.node_to_index.get(&raw).copied());
+            seeds.push(idx.ok_or_else(|| {
+                ExecutionError::RuntimeError(format!(
+                    "{WHAT}: node {id} is not in the projected graph -- check the \
+                     `label` and `edgeType` filters"
+                ))
+            })?);
+        }
+        let spec = crate::algo::SampleSpec {
+            fanouts,
+            direction,
+            weighted: weight.is_some(),
+            batch_size: batch_size.unwrap_or(seeds.len()),
+            seed,
+        };
+        let rows = crate::algo::sample_neighbours(&view, &seeds, &spec).map_err(|e| match e {
+            crate::algo::SampleError::BadWeight { from, to, weight: w } => bad(format!(
+                "the relationship from node {from} to node {to} has `{}` = {w}; a sampling \
+                 weight must be a finite number of at least 0",
+                weight.as_deref().unwrap_or("weight")
+            )),
+            other => ExecutionError::RuntimeError(format!("{WHAT}: {other:?}")),
+        })?;
+        for r in rows {
+            let mut rec = Record::new();
+            rec.bind("batch".to_string(), Value::Property(PropertyValue::Integer(r.batch as i64)));
+            rec.bind("hop".to_string(), Value::Property(PropertyValue::Integer(r.hop as i64)));
+            self.bind_node(store, &mut rec, "node", r.node);
+            self.bind_node(store, &mut rec, "neighbour", r.neighbour);
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.sample.forestFire`, `.snowball`, `.egoNetwork`, `.randomWalk` and
+    /// `.stratified`: a smaller piece of the graph to train or test on (ML-03,
+    /// #1720). See `samyama_graph_algorithms::subgraph_sampling` for what each
+    /// method does and the rules every sample keeps.
+    ///
+    /// The first argument is the seed node(s): a node id or a list of them.
+    /// Forest fire may omit it and start anywhere; stratified sampling takes
+    /// none. Each option is refused, not clamped, when it is out of range: a
+    /// sample drawn from a silently substituted size is not the one asked for.
+    fn execute_subgraph_sampling(&mut self, store: &GraphStore, method: SubgraphMethod) -> ExecutionResult<()> {
+        use SubgraphMethod::*;
+        const DEFAULT_SEED: u64 = 42;
+        let (name, keys): (&str, &[&str]) = match method {
+            ForestFire => ("sample.forestFire", &["direction", "edgeType", "forwardProbability", "label", "seed", "size"]),
+            Snowball => ("sample.snowball", &["direction", "edgeType", "hops", "label", "maxNodes", "perNode", "seed"]),
+            EgoNetwork => ("sample.egoNetwork", &["direction", "edgeType", "hops", "label"]),
+            RandomWalk => (
+                "sample.randomWalk",
+                &["direction", "edgeType", "label", "maxSteps", "restartProbability", "seed", "size"],
+            ),
+            Stratified => ("sample.stratified", &["fraction", "perStratum", "seed"]),
+        };
+        Self::reject_unknown_config_keys(&self.args, name, keys)?;
+        let what = format!("algo.{name}()");
+        let bad = |msg: String| ExecutionError::bad_argument(format!("{what}: {msg}"));
+
+        let empty = HashMap::new();
+        let config = self
+            .args
+            .iter()
+            .find_map(|a| match a {
+                Expression::Literal(PropertyValue::Map(m)) => Some(m),
+                _ => None,
+            })
+            .unwrap_or(&empty);
+        let int = |key: &str, min: i64| -> ExecutionResult<Option<i64>> {
+            match config.get(key) {
+                None => Ok(None),
+                Some(PropertyValue::Integer(n)) if *n >= min => Ok(Some(*n)),
+                Some(other) => Err(bad(format!("`{key}` must be a whole number of at least {min}, got {other:?}"))),
+            }
+        };
+        let probability = |key: &str, default: f64| -> ExecutionResult<f64> {
+            let p = match config.get(key) {
+                None => return Ok(default),
+                Some(PropertyValue::Float(f)) => *f,
+                Some(PropertyValue::Integer(n)) => *n as f64,
+                Some(other) => return Err(bad(format!("`{key}` must be a number between 0 and 1, got {other:?}"))),
+            };
+            if (0.0..=1.0).contains(&p) {
+                Ok(p)
+            } else {
+                Err(bad(format!("`{key}` must be between 0 and 1, got {p}")))
+            }
+        };
+        let text = |key: &str| -> ExecutionResult<Option<String>> {
+            match config.get(key) {
+                None => Ok(None),
+                Some(PropertyValue::String(v)) => Ok(Some(v.clone())),
+                Some(other) => Err(bad(format!("`{key}` must be a string, got {other:?}"))),
+            }
+        };
+        let seed = match config.get("seed") {
+            None => DEFAULT_SEED,
+            Some(PropertyValue::Integer(n)) => *n as u64,
+            Some(other) => return Err(bad(format!("`seed` must be a whole number, got {other:?}"))),
+        };
+
+        // The seed nodes: a node id or a list of them, as the first argument.
+        let seed_ids: Option<Vec<i64>> = match self.args.first() {
+            Some(Expression::Literal(PropertyValue::Integer(n))) => Some(vec![*n]),
+            Some(Expression::Literal(PropertyValue::Array(items))) => Some(
+                items
+                    .iter()
+                    .map(|v| match v {
+                        PropertyValue::Integer(n) => Ok(*n),
+                        other => Err(bad(format!("every seed must be a node id, got {other:?}"))),
+                    })
+                    .collect::<ExecutionResult<_>>()?,
+            ),
+            _ => None,
+        };
+
+        if method == Stratified {
+            if seed_ids.is_some() {
+                return Err(bad("stratified sampling draws from every node and takes no seed nodes".to_string()));
+            }
+            let allocation = match (config.get("fraction"), int("perStratum", 1)?) {
+                (Some(_), Some(_)) => return Err(bad("give `fraction` or `perStratum`, not both".to_string())),
+                (None, Some(k)) => crate::algo::StratumAllocation::PerStratum(k as usize),
+                (Some(PropertyValue::Float(f)), None) if *f > 0.0 && *f <= 1.0 => {
+                    crate::algo::StratumAllocation::Fraction(*f)
+                }
+                (Some(PropertyValue::Integer(1)), None) => crate::algo::StratumAllocation::Fraction(1.0),
+                (Some(other), None) => {
+                    return Err(bad(format!("`fraction` must be above 0 and at most 1, got {other:?}")))
+                }
+                (None, None) => {
+                    return Err(bad(
+                        "say how much of each label group to take: `fraction` (e.g. 0.1) or `perStratum` (e.g. 100)"
+                            .to_string(),
+                    ))
+                }
+            };
+            // A node's stratum is its set of labels, sorted and joined, so
+            // every node is in exactly one; an unlabelled node is in "".
+            let population: Vec<(u64, String)> = store
+                .all_nodes()
+                .into_iter()
+                .map(|n| {
+                    let mut labels: Vec<&str> = n.labels.iter().map(|l| l.as_str()).collect();
+                    labels.sort_unstable();
+                    (n.id.as_u64(), labels.join(":"))
+                })
+                .collect();
+            for (id, stratum) in crate::algo::stratified(&population, allocation, seed) {
+                let mut rec = Record::new();
+                self.bind_node(store, &mut rec, "node", id);
+                rec.bind("stratum".to_string(), Value::Property(PropertyValue::String(stratum)));
+                self.results.push(rec);
+            }
+            return Ok(());
+        }
+
+        let seed_ids = match (seed_ids, method) {
+            (Some(ids), _) if ids.is_empty() => return Err(bad("the list of seed nodes is empty".to_string())),
+            (Some(ids), _) => ids,
+            (None, ForestFire) => Vec::new(),
+            (None, _) => {
+                return Err(bad(format!(
+                    "the first argument must be a seed node id or a list of them, e.g. algo.{name}([1, 2], {{...}})"
+                )))
+            }
+        };
+        let direction = match text("direction")?.map(|d| d.to_ascii_lowercase()).as_deref() {
+            None | Some("out") | Some("outgoing") => crate::algo::SampleDirection::Out,
+            Some("in") | Some("incoming") => crate::algo::SampleDirection::In,
+            Some("both") | Some("any") | Some("undirected") => crate::algo::SampleDirection::Both,
+            Some(d) => return Err(bad(format!("unknown `direction` {d:?}; use 'out', 'in' or 'both'"))),
+        };
+        let (label, edge_type) = (text("label")?, text("edgeType")?);
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
+        let mut seeds = Vec::with_capacity(seed_ids.len());
+        for id in seed_ids {
+            let idx = u64::try_from(id).ok().and_then(|raw| view.node_to_index.get(&raw).copied());
+            seeds.push(idx.ok_or_else(|| {
+                ExecutionError::RuntimeError(format!(
+                    "{what}: node {id} is not in the projected graph -- check the `label` and `edgeType` filters"
+                ))
+            })?);
+        }
+        // The sample size, for the two methods that take one.
+        let size = |view_nodes: usize| -> ExecutionResult<usize> {
+            let Some(n) = int("size", 1)? else {
+                return Err(bad("`size` is required: how many nodes the sample should hold".to_string()));
+            };
+            if n as usize > view_nodes {
+                return Err(bad(format!(
+                    "`size` is {n}, and the projected graph has only {view_nodes} nodes"
+                )));
+            }
+            Ok(n as usize)
+        };
+
+        let (column, rows): (&str, Vec<(u64, i64)>) = match method {
+            ForestFire => {
+                let n = size(view.node_count)?;
+                let p = probability("forwardProbability", 0.7)?;
+                let order = crate::algo::forest_fire(&view, &seeds, n, p, direction, seed);
+                ("position", order.into_iter().enumerate().map(|(i, id)| (id, i as i64)).collect())
+            }
+            RandomWalk => {
+                let n = size(view.node_count)?;
+                let p = probability("restartProbability", 0.15)?;
+                let max_steps = int("maxSteps", 1)?.map_or(n.saturating_mul(100), |m| m as usize);
+                let order = crate::algo::random_walk_sample(&view, &seeds, n, p, max_steps, direction, seed);
+                ("position", order.into_iter().enumerate().map(|(i, id)| (id, i as i64)).collect())
+            }
+            Snowball => {
+                let hops = int("hops", 1)?.unwrap_or(2) as usize;
+                let per_node = match config.get("perNode") {
+                    None | Some(PropertyValue::Integer(-1)) => crate::algo::Fanout::All,
+                    Some(PropertyValue::Integer(k)) if *k >= 1 => crate::algo::Fanout::AtMost(*k as usize),
+                    Some(other) => {
+                        return Err(bad(format!(
+                            "`perNode` must be at least 1, or -1 for every neighbour; got {other:?}"
+                        )))
+                    }
+                };
+                let max_nodes = int("maxNodes", 1)?.map(|m| m as usize);
+                let got = crate::algo::snowball(&view, &seeds, hops, per_node, max_nodes, direction, seed);
+                ("hop", got.into_iter().map(|(id, h)| (id, h as i64)).collect())
+            }
+            EgoNetwork => {
+                let hops = int("hops", 0)?.unwrap_or(1) as usize;
+                let got = crate::algo::ego_network(&view, &seeds, hops, direction);
+                ("distance", got.into_iter().map(|(id, d)| (id, d as i64)).collect())
+            }
+            Stratified => unreachable!("answered above"),
+        };
+        for (id, n) in rows {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            rec.bind(column.to_string(), Value::Property(PropertyValue::Integer(n)));
             self.results.push(rec);
         }
         Ok(())
@@ -21329,6 +21692,23 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "sample.neighbors" | "sample.neighbours" | "sampleneighbors" | "sampleneighbours"
+                | "neighboursampling" | "neighborsampling" => self.execute_neighbour_sampling(store)?,
+                "sample.forestfire" | "forestfire" | "forestfiresample" | "forestfiresampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::ForestFire)?
+                }
+                "sample.snowball" | "snowball" | "snowballsample" | "snowballsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Snowball)?
+                }
+                "sample.egonetwork" | "egonetwork" | "ego" | "egograph" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::EgoNetwork)?
+                }
+                "sample.randomwalk" | "randomwalksample" | "randomwalksampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::RandomWalk)?
+                }
+                "sample.stratified" | "stratifiedsample" | "stratifiedsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Stratified)?
+                }
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
@@ -21436,6 +21816,23 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "sample.neighbors" | "sample.neighbours" | "sampleneighbors" | "sampleneighbours"
+                | "neighboursampling" | "neighborsampling" => self.execute_neighbour_sampling(store)?,
+                "sample.forestfire" | "forestfire" | "forestfiresample" | "forestfiresampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::ForestFire)?
+                }
+                "sample.snowball" | "snowball" | "snowballsample" | "snowballsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Snowball)?
+                }
+                "sample.egonetwork" | "egonetwork" | "ego" | "egograph" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::EgoNetwork)?
+                }
+                "sample.randomwalk" | "randomwalksample" | "randomwalksampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::RandomWalk)?
+                }
+                "sample.stratified" | "stratifiedsample" | "stratifiedsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Stratified)?
+                }
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,

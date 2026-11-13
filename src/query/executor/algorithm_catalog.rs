@@ -28,6 +28,8 @@ pub enum AlgorithmCategory {
     GraphMetric,
     Temporal,
     Embedding,
+    /// Draws part of the graph, as a GNN trainer's minibatches (ML-02).
+    Sampling,
     Optimization,
 }
 
@@ -102,6 +104,19 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     read("algo.dagLongestPath", &["algo.longestPath"], Path, &["node", "position"]),
     read("algo.transitiveClosure", &[], Path, &["source", "target"]),
     read("algo.randomWalk", &[], Path, &["node", "step"]),
+    read(
+        "algo.sample.neighbors",
+        &["algo.sample.neighbours", "algo.sampleNeighbors", "algo.sampleNeighbours",
+          "algo.neighbourSampling", "algo.neighborSampling"],
+        Sampling,
+        &["batch", "hop", "node", "neighbour"],
+    ),
+    // Subgraph samples (ML-03, #1720): which nodes are in the sample.
+    read("algo.sample.forestFire", &["algo.forestFire", "algo.forestFireSample", "algo.forestFireSampling"], Sampling, &["node", "position"]),
+    read("algo.sample.snowball", &["algo.snowball", "algo.snowballSample", "algo.snowballSampling"], Sampling, &["node", "hop"]),
+    read("algo.sample.egoNetwork", &["algo.egoNetwork", "algo.ego", "algo.egoGraph"], Sampling, &["node", "distance"]),
+    read("algo.sample.randomWalk", &["algo.randomWalkSample", "algo.randomWalkSampling"], Sampling, &["node", "position"]),
+    read("algo.sample.stratified", &["algo.stratifiedSample", "algo.stratifiedSampling"], Sampling, &["node", "stratum"]),
     read("algo.maxFlow", &[], Path, &["max_flow"]),
     // A summary row (`total_weight`, `components`), then one row per tree
     // edge (`source`, `target`, `weight`).
