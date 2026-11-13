@@ -578,6 +578,9 @@ pub async fn request_context(
         .map(str::to_string)
         .unwrap_or_else(new_request_id);
     let span = request_span(&id, "http");
+    // A caller's W3C `traceparent` makes this span part of its trace (#2077).
+    #[cfg(feature = "otel")]
+    crate::otel::continue_trace(&span, req.headers());
     span.record("method", req.method().as_str());
     span.record("path", req.uri().path());
     req.extensions_mut().insert(RequestId(id.clone()));
@@ -711,7 +714,14 @@ impl AppState {
         graph: &str,
         body: impl FnOnce(&mut GraphStore) -> T,
     ) -> T {
-        let mut store = self.store.write().await;
+        use tracing::Instrument;
+        // Stages of the request's trace (#2077): the wait for the writer's
+        // lock is where contention shows.
+        let mut store = self
+            .store
+            .write()
+            .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write"))
+            .await;
         if let Some(pm) = &self.persistence {
             store.enable_write_log();
             // The quota, resolved before the body runs. Checked here it is
@@ -723,6 +733,8 @@ impl AppState {
         let out = body(&mut store);
         if let Some(pm) = &self.persistence {
             let mutations = store.take_write_log();
+            let _persist =
+                tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64).entered();
             match pm.apply_mutations(graph, &store, &mutations) {
                 Ok(n) => tracing::debug!("persisted {n} entities from {} mutations", mutations.len()),
                 Err(e) => {
