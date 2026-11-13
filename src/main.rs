@@ -2359,6 +2359,12 @@ async fn start_server() {
                         }
                         Err(e) => eprintln!("  Error restoring indexes for '{}': {}", tenant, e),
                     }
+                    // Idempotency keys (#2176). Without them a client retrying
+                    // a write whose reply was lost in the restart would run it
+                    // a second time -- the duplicate the key exists to stop.
+                    if let Err(e) = pm.restore_idempotency(tenant, &mut graph) {
+                        eprintln!("  Error restoring idempotency keys for '{}': {}", tenant, e);
+                    }
                 }
                 println!(
                     "Recovery complete. Total: {} nodes, {} edges, {} indexes in-memory",
