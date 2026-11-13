@@ -84,18 +84,57 @@ describe("connection management", () => {
     }
   });
 
-  test("a timeout is retried the configured number of times", async () => {
+  test("a timed-out read is retried the configured number of times", async () => {
     // Counted at the server: one connection per attempt. Timing alone would
-    // pass for a client that never retried and simply waited longer.
+    // pass for a client that never retried and simply waited longer. Only a
+    // read is repeated after a timeout (#2175).
     const s = await blackHole();
     const t = new HttpTransport(s.url, {
       timeoutMs: 120,
       maxRetries: 2,
       retryBaseDelayMs: 10,
     });
-    await assert.rejects(() => t.query("RETURN 1"));
+    await assert.rejects(() => t.query("RETURN 1", "default", { readOnly: true }));
     assert.equal(s.connections(), 3, "expected one attempt plus two retries");
     s.close();
+  });
+
+  test("a timed-out write is sent once (#2175)", async () => {
+    // The server may have applied a write whose answer never came; sending it
+    // again is how one CREATE became three nodes with the defaults.
+    const s = await blackHole();
+    const t = new HttpTransport(s.url, {
+      timeoutMs: 120,
+      maxRetries: 2,
+      retryBaseDelayMs: 10,
+    });
+    await assert.rejects(
+      () => t.query("CREATE (:Order {id: 1})"),
+      (err: unknown) => err instanceof DOMException && err.name === "TimeoutError",
+    );
+    assert.equal(s.connections(), 1, "a timed-out write was sent again");
+    s.close();
+  });
+
+  test("a refused connection is retried even for a write (#2175)", async () => {
+    // It never reached the server, so sending it again cannot apply it twice.
+    // Counted by the delay: two backoff sleeps of 40 + 80 ms.
+    const probe = createServer();
+    const port = await new Promise<number>((resolve) =>
+      probe.listen(0, "127.0.0.1", () => {
+        const a = probe.address();
+        resolve(typeof a === "object" && a ? a.port : 0);
+      }),
+    );
+    await new Promise((r) => probe.close(r));
+    const t = new HttpTransport(`http://127.0.0.1:${port}`, {
+      timeoutMs: 2000,
+      maxRetries: 2,
+      retryBaseDelayMs: 40,
+    });
+    const started = Date.now();
+    await assert.rejects(() => t.query("CREATE (:Order {id: 1})"), TypeError);
+    assert.ok(Date.now() - started >= 100, "the refused write was not retried");
   });
 
   test("retry can be switched off", async () => {

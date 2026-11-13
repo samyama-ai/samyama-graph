@@ -32,6 +32,12 @@ pub struct ConnectionConfig {
     /// Idle connections kept per host.
     pub pool_max_idle_per_host: usize,
     /// How many times a *retryable* failure is retried. Zero disables retry.
+    ///
+    /// A connection failure is retryable for every request. A timeout is
+    /// retryable only for requests that cannot write (`query_readonly`,
+    /// streaming reads, `nlq`, `status`): a write that timed out may already
+    /// have been applied, so it is reported as [`SamyamaError::Timeout`]
+    /// rather than sent again (#2175).
     pub max_retries: u32,
     /// Delay before the first retry; doubled each attempt.
     ///
@@ -120,17 +126,23 @@ impl RemoteClient {
 
     /// Is this failure worth retrying?
     ///
-    /// Only connection and timeout failures. A 4xx is the server answering, and
-    /// retrying it repeats a request the server has already refused; a 5xx may
-    /// have had an effect, and a blind retry of a non-idempotent write is how a
-    /// retry turns one duplicate into several.
-    fn is_retryable(err: &reqwest::Error) -> bool {
-        err.is_timeout() || err.is_connect()
+    /// A connection failure always: the request never reached the server, so
+    /// sending it again cannot apply it twice. A timeout only when `replay` is
+    /// [`Replay::Safe`]: a timed-out request may already have been executed,
+    /// and repeating a write the server has applied is how one `CREATE`
+    /// became three with the default settings (#2175).
+    ///
+    /// A 4xx is the server answering, and retrying it repeats a request the
+    /// server has already refused; a 5xx may have had an effect, so neither is
+    /// retried.
+    fn is_retryable(err: &reqwest::Error, replay: Replay) -> bool {
+        err.is_connect() || (replay == Replay::Safe && err.is_timeout())
     }
 
     /// Send with retry and exponential backoff.
     async fn send_with_retry(
         &self,
+        replay: Replay,
         make: impl Fn() -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let mut delay = self.config.retry_base_delay;
@@ -138,7 +150,7 @@ impl RemoteClient {
         loop {
             match make().send().await {
                 Ok(r) => return Ok(r),
-                Err(e) if attempt < self.config.max_retries && Self::is_retryable(&e) => {
+                Err(e) if attempt < self.config.max_retries && Self::is_retryable(&e, replay) => {
                     tokio::time::sleep(delay).await;
                     delay *= 2;
                     attempt += 1;
@@ -212,11 +224,10 @@ impl RemoteClient {
         let url = format!("{}/api/nlq", self.http_base_url);
         let body = serde_json::json!({ "question": question });
 
-        // Translation has no side effects on the server, so the retry policy
-        // that applies to queries (connection and timeout failures only) is
-        // safe here too.
+        // Translation has no side effects on the server, so a timeout is
+        // retried as well as a connection failure.
         let response = self
-            .send_with_retry(|| self.http_client.post(&url).json(&body))
+            .send_with_retry(Replay::Safe, || self.http_client.post(&url).json(&body))
             .await?;
 
         let status = response.status();
@@ -321,7 +332,8 @@ impl RemoteClient {
         // The client-wide timeout is a deadline for the whole body, which a
         // stream must not have; the per-wait bound below replaces it.
         let whole_stream = std::time::Duration::from_secs(60 * 60 * 24 * 365);
-        let send = self.send_with_retry(|| {
+        // Sent `read_only`: the server refuses a write, so a replay is safe.
+        let send = self.send_with_retry(Replay::Safe, || {
             self.http_client
                 .post(&url)
                 .header(reqwest::header::ACCEPT, NDJSON)
@@ -400,8 +412,15 @@ impl RemoteClient {
             body["params"] = params;
         }
 
+        // A `read_only` request is refused by the server if it writes, so it
+        // can be repeated after a timeout. Anything else may be a write.
+        let replay = if read_only {
+            Replay::Safe
+        } else {
+            Replay::Unsafe
+        };
         let response = self
-            .send_with_retry(|| self.http_client.post(&url).json(&body))
+            .send_with_retry(replay, || self.http_client.post(&url).json(&body))
             .await?;
 
         if response.status().is_success() {
@@ -445,7 +464,9 @@ impl SamyamaClient for RemoteClient {
 
     async fn status(&self) -> SamyamaResult<ServerStatus> {
         let url = format!("{}/api/status", self.http_base_url);
-        let response = self.send_with_retry(|| self.http_client.get(&url)).await?;
+        let response = self
+            .send_with_retry(Replay::Safe, || self.http_client.get(&url))
+            .await?;
 
         if response.status().is_success() {
             let status: ServerStatus = response.json().await?;
@@ -471,6 +492,20 @@ impl SamyamaClient for RemoteClient {
 
 const NDJSON: &str = "application/x-ndjson";
 
+/// May a request be sent again after it timed out (#2175)?
+///
+/// A timeout says nothing about whether the server ran the request. Only a
+/// request that cannot change anything (a `read_only` query, NLQ translation,
+/// a status check) is [`Safe`](Replay::Safe) to repeat. A connection failure
+/// is retried either way, since the request never arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Replay {
+    /// Has no effect on the server; repeat it after a timeout.
+    Safe,
+    /// May write; after a timeout report [`SamyamaError::Timeout`] instead.
+    Unsafe,
+}
+
 /// `fut`, or a timeout error if `limit` passes first. `None` waits forever.
 async fn bounded<T>(
     limit: Option<std::time::Duration>,
@@ -478,9 +513,9 @@ async fn bounded<T>(
 ) -> SamyamaResult<T> {
     match limit {
         None => Ok(fut.await),
-        Some(d) => tokio::time::timeout(d, fut).await.map_err(|_| {
-            SamyamaError::ConnectionError(format!("no data from the server for {d:?}"))
-        }),
+        Some(d) => tokio::time::timeout(d, fut)
+            .await
+            .map_err(|_| SamyamaError::Timeout(format!("no data from the server for {d:?}"))),
     }
 }
 
