@@ -687,6 +687,71 @@ paths:
             text/plain:
               schema:
                 type: string
+  /api/slowlog:
+    get:
+      operationId: getSlowlog
+      summary: Recent slow queries
+      description: >
+        The most recent queries that ran past `SLOW_QUERY_MS`, newest first, from
+        an in-memory ring of `SAMYAMA_SLOWLOG_MAX_LEN` entries (default 128). The
+        same queries the `slow query` log line names, without access to the
+        server's stderr. Admin role when credentials are configured: entries hold
+        query text from every tenant. Query text is cut at 512 characters.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Entries to return; defaults to, and is capped at, `max_len`.
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        '200':
+          description: The slow-query log
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  len:
+                    type: integer
+                  max_len:
+                    type: integer
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                          description: Monotonic per process; not reused after a reset.
+                        timestamp_ms:
+                          type: integer
+                          description: When the query finished, ms since the Unix epoch.
+                        query:
+                          type: string
+                        elapsed_ms:
+                          type: integer
+                        threshold_ms:
+                          type: integer
+                        rows:
+                          type: integer
+                        failed:
+                          type: boolean
+    delete:
+      operationId: resetSlowlog
+      summary: Clear the slow-query log
+      description: Empties the ring. Admin role when credentials are configured.
+      responses:
+        '200':
+          description: How many entries were cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cleared:
+                    type: integer
   /api/status:
     get:
       operationId: getStatus

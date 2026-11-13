@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use super::handler::{
-    query_handler, export_handler, import_parquet_handler, status_handler, memory_handler, metrics_handler, schema_handler, sample_handler,
+    query_handler, export_handler, import_parquet_handler, status_handler, memory_handler, metrics_handler, slowlog_handler, slowlog_reset_handler, schema_handler, sample_handler,
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
     set_enrich_policy_handler, enrich_handler, verify_handler,
@@ -197,9 +197,12 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::auth::Role {
     use crate::auth::Role;
     use axum::http::Method;
+    // The slow-query log holds query text from every tenant, literals
+    // included, so reading it is an operator's view, not a reader's (#2079).
     if path.starts_with("/api/tenants")
         || path == "/api/snapshot/import"
         || path == "/api/enrich/policy"
+        || path == "/api/slowlog"
     {
         return Role::Admin;
     }
@@ -956,6 +959,7 @@ impl HttpServer {
             .route("/api/status", get(status_handler))
             .route("/api/memory", get(memory_handler))
             .route("/metrics", get(metrics_handler))
+            .route("/api/slowlog", get(slowlog_handler).delete(slowlog_reset_handler))
             .route("/api/schema", get(schema_handler))
             .route("/api/algorithms/catalog", get(algorithm_catalog_handler))
             .route("/api/sample", post(sample_handler))
