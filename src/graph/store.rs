@@ -1345,6 +1345,12 @@ pub struct GraphStore {
     /// path of writes that changed no index at all.
     index_catalog_dirty: std::sync::atomic::AtomicBool,
 
+    /// Replies to keyed writes, so a retried write is answered and not run
+    /// again (#2176). Here rather than in a transport so that every transport
+    /// sharing the store shares the keys, and under the same lock as the
+    /// writes they describe.
+    idempotency: crate::idempotency::IdempotencyLog,
+
     /// Hierarchy (OEH) index registry — subsumption + index-resident roll-up (ADR-035)
     pub hierarchy_index: Arc<HierarchyIndexManager>,
 
@@ -1496,6 +1502,7 @@ impl GraphStore {
             point_index: Default::default(),
             property_index: Arc::new(IndexManager::new()),
             index_catalog_dirty: std::sync::atomic::AtomicBool::new(false),
+            idempotency: Default::default(),
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
             structure_registry: Arc::new(crate::index::structure::StructureRegistry::new()),
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
@@ -6739,6 +6746,16 @@ NodeDeleted { id, .. } => {
     pub fn clear_index_catalog_dirty(&self) {
         self.index_catalog_dirty
             .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The replies remembered for keyed writes (#2176).
+    pub fn idempotency(&self) -> &crate::idempotency::IdempotencyLog {
+        &self.idempotency
+    }
+
+    /// The replies remembered for keyed writes, to record one (#2176).
+    pub fn idempotency_mut(&mut self) -> &mut crate::idempotency::IdempotencyLog {
+        &mut self.idempotency
     }
 
     /// Every index declaration in the store, in the order `SHOW INDEXES` sorts
