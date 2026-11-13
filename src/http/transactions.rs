@@ -159,7 +159,16 @@ pub async fn begin_handler(State(state): State<AppState>) -> Response {
     Json(json!({ "tx": id, "version": version, "timeout_seconds": limit.as_secs() })).into_response()
 }
 
-pub async fn commit_handler(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+pub async fn commit_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    // Refused before the transaction is touched, so the client can commit it
+    // again without the header (#2176).
+    if headers.contains_key(crate::idempotency::HEADER) {
+        return super::handler::key_not_supported("on a transaction COMMIT");
+    }
     let mut txn = {
         let mut sessions = state.transactions.lock().await;
         let past_deadline = match sessions.get_mut(&id) {

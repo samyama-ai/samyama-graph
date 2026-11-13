@@ -387,6 +387,23 @@ impl PersistenceManager {
         store: &GraphStore,
         mutations: &[crate::graph::event::Mutation],
     ) -> Result<usize, PersistenceError> {
+        self.apply_mutations_keyed(tenant, store, mutations, &Default::default())
+    }
+
+    /// [`Self::apply_mutations`], plus idempotency records written in the same
+    /// RocksDB commit as the statement's last rows (#2176).
+    ///
+    /// A record is staged only if every row was: a key on disk means its write
+    /// is on disk. A statement large enough to span several commits has its
+    /// earlier rows on disk before the key, which is the order a crash must
+    /// see -- a key without its write would turn a retry into a lost write.
+    pub fn apply_mutations_keyed(
+        &self,
+        tenant: &str,
+        store: &GraphStore,
+        mutations: &[crate::graph::event::Mutation],
+        keys: &crate::idempotency::PendingWrites,
+    ) -> Result<usize, PersistenceError> {
         use crate::graph::event::Mutation;
         use std::collections::HashMap;
 
@@ -463,7 +480,9 @@ impl PersistenceManager {
         let per_row = !self.tenants.admits_batch(tenant, new_nodes, new_edges);
 
         let mut usage = UsageDelta::default();
-        let result = self.write_batch(tenant, store, &order, &last, &exists, per_row, &mut usage);
+        let result = self.write_batch(
+            tenant, store, &order, &last, &exists, per_row, &mut usage, keys,
+        );
         // Counted even when a row failed: every row before it is on disk.
         let flushed = usage.flush(&self.tenants, tenant);
         let written = result?;
@@ -508,11 +527,18 @@ impl PersistenceManager {
         exists: &std::collections::HashMap<(bool, u64), bool>,
         per_row: bool,
         usage: &mut UsageDelta,
+        keys: &crate::idempotency::PendingWrites,
     ) -> Result<usize, PersistenceError> {
         let mut wal = wal::lock(&self.wal);
         let mut rows = storage::RowBatch::default();
-        let result =
-            self.stage_rows(tenant, store, order, last, exists, per_row, usage, &mut wal, &mut rows);
+        let result = self
+            .stage_rows(
+                tenant, store, order, last, exists, per_row, usage, &mut wal, &mut rows,
+            )
+            .and_then(|written| {
+                self.stage_idempotency(keys, &mut rows)?;
+                Ok(written)
+            });
         // Committed whether or not a row failed: the rows staged before the
         // failure are the ones the old per-row writes had already put on disk.
         // Their records first.
@@ -520,6 +546,22 @@ impl PersistenceManager {
         let written = result?;
         committed?;
         Ok(written)
+    }
+
+    /// Stage idempotency records and the deletion of expired ones (#2176).
+    fn stage_idempotency(
+        &self,
+        keys: &crate::idempotency::PendingWrites,
+        rows: &mut storage::RowBatch,
+    ) -> Result<(), PersistenceError> {
+        for (tenant, key, record) in &keys.puts {
+            self.storage
+                .stage_put_idempotency(rows, tenant, key, record)?;
+        }
+        for (tenant, key) in &keys.deletes {
+            self.storage.stage_delete_idempotency(rows, tenant, key)?;
+        }
+        Ok(())
     }
 
     /// Sync the WAL, then commit the staged rows: the order a crash must see.
@@ -796,7 +838,30 @@ impl PersistenceManager {
             }
         }
         let indexes = self.restore_index_catalog(tenant, store)?;
+        self.restore_idempotency(tenant, store)?;
         Ok((node_count, edge_count, indexes))
+    }
+
+    /// Reload a tenant's idempotency records, so a retry that arrives after a
+    /// restart is still answered rather than run again (#2176). Records that
+    /// expired while the server was down are deleted, not loaded.
+    pub fn restore_idempotency(
+        &self,
+        tenant: &str,
+        store: &mut GraphStore,
+    ) -> Result<usize, PersistenceError> {
+        let (now, ttl) = (crate::idempotency::now_ms(), crate::idempotency::ttl());
+        let mut loaded = 0;
+        for (key, record) in self.storage.scan_idempotency(tenant)? {
+            if now.saturating_sub(record.created_ms) >= ttl.as_millis() as u64 {
+                self.storage.delete_idempotency(tenant, &key)?;
+            } else {
+                store.idempotency_mut().restore(tenant, &key, record);
+                loaded += 1;
+            }
+        }
+        store.idempotency_mut().finish_restore();
+        Ok(loaded)
     }
 
     /// Create a checkpoint

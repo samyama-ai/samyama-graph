@@ -21,6 +21,25 @@ paths:
       description: |
         Execute an OpenCypher query against the graph database.
         Supports both read (MATCH) and write (CREATE, SET, DELETE, MERGE) queries.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+          description: |
+            Makes an autocommit write safe to retry (#2176). The reply to a
+            write that succeeded is kept for `SAMYAMA_IDEMPOTENCY_TTL_SECS`
+            (default 24 h); the same request sent again with the same key gets
+            that reply back, with `Idempotent-Replayed: true`, and the write
+            does not run again -- including after a restart, and when the
+            requests arrive concurrently. The same key with a different
+            request (statement, graph, dialect or parameters) is refused with
+            422. A failed write is not kept, so its retry runs. Visible ASCII,
+            no spaces. Ignored on reads. Refused inside a transaction (`tx`)
+            and on a transaction COMMIT, where it is not supported yet.
       requestBody:
         required: true
         content:
@@ -184,6 +203,46 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+
+  /api/requests/{key}:
+    get:
+      operationId: getRequestStatus
+      summary: Did a write sent with this Idempotency-Key commit?
+      description: |
+        Answers a client whose reply was lost (#2176). A keyed write still
+        running is waited for, not reported as unknown. 404 means no write
+        with this key committed within the retention period: it was not sent,
+        it failed, it never reached the server, or its record expired.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A write with this key committed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { type: string }
+                  committed: { type: boolean }
+                  version: { type: integer }
+                  status: { type: integer }
+                  committed_at_ms: { type: integer }
+        '404':
+          description: No write with this key committed within the retention period
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { type: string }
+                  committed: { type: boolean }
+                  retention_secs: { type: integer }
+                  error: { type: string }
 
   /api/schema:
     get:

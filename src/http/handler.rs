@@ -5,7 +5,7 @@ use crate::http::server::{AppState, Subject};
 use crate::query::Value;
 use axum::http::StatusCode;
 use axum::{
-    extract::{Extension, Json, Multipart, Query, State},
+    extract::{Extension, Json, Multipart, Path, Query, State},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -525,6 +525,11 @@ async fn run_query(
         }
     };
 
+    let idempotency_key = match idempotency_key(&headers) {
+        Ok(k) => k,
+        Err(refusal) => return refusal,
+    };
+
     // Streaming is opt-in by content negotiation (API-07, #1393): a client
     // that does not send `Accept: application/x-ndjson` gets the buffered JSON
     // envelope it always got. See `stream_query` for what the stream promises.
@@ -533,6 +538,9 @@ async fn run_query(
     }
 
     if let Some(tx) = payload.tx.as_deref() {
+        if idempotency_key.is_some() {
+            return key_not_supported("inside a transaction");
+        }
         return query_in_transaction(&state, tx, &payload, &params).await;
     }
 
@@ -552,6 +560,13 @@ async fn run_query(
     let use_cache = !is_write && payload.cache.unwrap_or_else(result_cache_default);
     let time_limit = state.query_time_limit(&payload.graph);
     let mut served_from_cache = false;
+
+    // A key on a read changes nothing: running a read twice is already safe.
+    if is_write {
+        if let Some(key) = idempotency_key.as_deref() {
+            return keyed_write(&state, key, &payload, &params, time_limit).await;
+        }
+    }
 
     // A write refused because an earlier one did not reach disk (#1274). Asked
     // before the write rather than after, so the client gets 503 and the store
@@ -1055,6 +1070,39 @@ fn render_query_result(
     served_from_cache: bool,
     snapshot_version: u64,
 ) -> axum::response::Response {
+    let (status, body) = query_result_body(result, full_props, served_from_cache, snapshot_version);
+    json_bytes(status, body)
+}
+
+/// A JSON reply from a body already serialised.
+fn json_bytes(status: StatusCode, body: Vec<u8>) -> axum::response::Response {
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
+/// The status and serialised body of a query's reply.
+///
+/// Bytes rather than a `Response` so a keyed write can keep exactly what it
+/// sent and send it again (#2176).
+fn query_result_body(
+    result: Result<crate::query::RecordBatch, Box<dyn std::error::Error>>,
+    full_props: &HashMap<u64, HashMap<String, PropertyValue>>,
+    served_from_cache: bool,
+    snapshot_version: u64,
+) -> (StatusCode, Vec<u8>) {
+    let serialised = |status: StatusCode, body: Result<Vec<u8>, serde_json::Error>| match body {
+        Ok(b) => (status, b),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "error": format!("could not serialise the result: {e}") })
+                .to_string()
+                .into_bytes(),
+        ),
+    };
     match result {
         Ok(batch) => {
             let mut nodes = HashMap::new();
@@ -1082,7 +1130,7 @@ fn render_query_result(
             let mut edge_list: Vec<_> = edges.into_iter().collect();
             edge_list.sort_by_key(|(k, _)| k.parse::<u64>().unwrap_or(u64::MAX));
 
-            Json(QueryResponse {
+            let body = serde_json::to_vec(&QueryResponse {
                 nodes: node_list.into_iter().map(|(_, v)| v).collect(),
                 edges: edge_list.into_iter().map(|(_, v)| v).collect(),
                 columns: batch.columns,
@@ -1092,12 +1140,209 @@ fn render_query_result(
                 notifications: crate::query::executor::operator::notifications::take(),
                 snapshot_version,
                 plan_hash: batch.plan_hash.map(|h| format!("{h:016x}")),
-            })
-            .into_response()
+            });
+            serialised(StatusCode::OK, body)
         }
-        Err(e) => (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e.to_string() })),
+        Err(e) => serialised(
+            StatusCode::BAD_REQUEST,
+            serde_json::to_vec(&json!({ "error": e.to_string() })),
+        ),
+    }
+}
+
+/// The `Idempotency-Key` header, if the request has one (#2176). A malformed
+/// key is refused rather than ignored: ignoring it is what made a retried
+/// write a duplicate.
+#[allow(clippy::result_large_err)]
+fn idempotency_key(
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<String>, axum::response::Response> {
+    let refuse = |e: String| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
+    let mut values = headers.get_all(crate::idempotency::HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(refuse("more than one Idempotency-Key header".to_string()));
+    }
+    let key = value
+        .to_str()
+        .map_err(|_| refuse("the Idempotency-Key header is not visible ASCII".to_string()))?;
+    crate::idempotency::validate_key(key).map_err(refuse)?;
+    Ok(Some(key.to_string()))
+}
+
+/// An `Idempotency-Key` where it is not implemented yet. Refused, not
+/// ignored: a client that sent one is relying on it.
+pub(crate) fn key_not_supported(where_: &str) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": format!(
+                "Idempotency-Key is not supported {where_} yet (#2176); the request was not run. \
+                 Send the key on an autocommit write to /api/query, or drop the header."
+            ),
+        })),
+    )
+        .into_response()
+}
+
+/// The reply to a key that has already been used: the first reply again, or a
+/// refusal if the key was used for a different request. `None` for a miss.
+fn answer_seen(seen: crate::idempotency::Lookup) -> Option<axum::response::Response> {
+    use crate::idempotency::Lookup;
+    match seen {
+        Lookup::Miss => None,
+        Lookup::Replay(r) => {
+            let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::OK);
+            let mut res = json_bytes(status, r.body);
+            res.headers_mut().insert(
+                crate::idempotency::REPLAYED_HEADER,
+                axum::http::HeaderValue::from_static("true"),
+            );
+            Some(res)
+        }
+        Lookup::Conflict => Some(
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "this Idempotency-Key was already used for a different request; \
+                              it was not run. Use a new key for each distinct write.",
+                    "code": crate::query::error_code::IDEMPOTENCY_KEY_REUSED,
+                })),
+            )
+                .into_response(),
+        ),
+    }
+}
+
+/// An autocommit write sent with an `Idempotency-Key` (#2176).
+///
+/// The key is looked up and recorded under the store's write lock, in the same
+/// critical section as the write, so two requests with one key cannot both
+/// run: the second waits for the lock, finds the first's record and gets its
+/// reply. A first look under the read lock answers a retry without queueing
+/// behind writers, and without being refused when writes are.
+///
+/// Only a write that succeeded is recorded. A failed statement is undone, so
+/// running it again on a retry is right.
+async fn keyed_write(
+    state: &AppState,
+    key: &str,
+    payload: &QueryRequest,
+    params: &HashMap<String, PropertyValue>,
+    time_limit: Option<std::time::Duration>,
+) -> axum::response::Response {
+    use crate::idempotency as idem;
+    let fingerprint = idem::fingerprint(
+        &payload.query,
+        &payload.graph,
+        payload.dialect.as_deref(),
+        &payload.params,
+    );
+    let ttl = idem::ttl();
+    let seen = state.store.read().await.idempotency().lookup(
+        &payload.graph,
+        key,
+        &fingerprint,
+        idem::now_ms(),
+        ttl,
+    );
+    if let Some(answer) = answer_seen(seen) {
+        return answer;
+    }
+
+    if let Some(refusal) = state.writes_refused() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": refusal })),
+        )
+            .into_response();
+    }
+
+    let outcome = state
+        .mutate(&payload.graph, |store| {
+            let seen =
+                store
+                    .idempotency()
+                    .lookup(&payload.graph, key, &fingerprint, idem::now_ms(), ttl);
+            if seen != idem::Lookup::Miss {
+                return Err(seen);
+            }
+            let result = state.engine.execute_mut_with_params_within(
+                &payload.query,
+                store,
+                &payload.graph,
+                params,
+                time_limit,
+            );
+            let props = result
+                .as_ref()
+                .map(|b| merged_node_properties(&b.records, store))
+                .unwrap_or_default();
+            let version = store.current_version;
+            let (status, body) = query_result_body(result, &props, false, version);
+            if status.is_success() {
+                let record = idem::Record {
+                    fingerprint: fingerprint.clone(),
+                    status: status.as_u16(),
+                    body: body.clone(),
+                    version,
+                    created_ms: idem::now_ms(),
+                };
+                store
+                    .idempotency_mut()
+                    .record(&payload.graph, key, record, ttl);
+            }
+            Ok((status, body))
+        })
+        .await;
+    match outcome {
+        Ok((status, body)) => json_bytes(status, body),
+        Err(seen) => answer_seen(seen).expect("a miss is not returned as Err"),
+    }
+}
+
+/// `GET /api/requests/:key`: did a write sent with this `Idempotency-Key`
+/// commit? (#2176)
+///
+/// Taken under the read lock, so a keyed write still running is waited for
+/// rather than reported as unknown. A 404 means no write with this key
+/// committed within the retention period: it was never sent, it failed, it
+/// had not reached the server, or its record has expired.
+pub async fn request_status_handler(
+    State(state): State<AppState>,
+    subject: Option<Extension<Subject>>,
+    Path(key): Path<String>,
+) -> axum::response::Response {
+    use crate::idempotency as idem;
+    let graph = default_graph();
+    if let Some(Extension(Subject(user))) = &subject {
+        if let Err(e) = user.authorize_graph(&graph) {
+            return (StatusCode::FORBIDDEN, Json(json!({ "error": e }))).into_response();
+        }
+    }
+    let ttl = idem::ttl();
+    let store = state.store.read().await;
+    match store.idempotency().get(&graph, &key, idem::now_ms(), ttl) {
+        Some(r) => Json(json!({
+            "key": key,
+            "committed": true,
+            "version": r.version,
+            "status": r.status,
+            "committed_at_ms": r.created_ms,
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "key": key,
+                "committed": false,
+                "retention_secs": ttl.as_secs(),
+                "error": "no write with this Idempotency-Key committed within the retention \
+                          period: it was not sent, it failed, it never reached the server, or \
+                          its record expired",
+            })),
         )
             .into_response(),
     }
