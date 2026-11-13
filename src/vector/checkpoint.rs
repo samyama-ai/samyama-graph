@@ -48,7 +48,16 @@ pub(super) fn seal(path: &Path) -> VectorResult<()> {
             .map_err(|_| bad("non-UTF8 checkpoint filename"))?;
         filename(&name)?;
         files.insert(name, digest(&entry.path())?);
-        std::fs::File::open(entry.path())?.sync_all()?;
+        // Opened for writing, not with `File::open`. `sync_all` is
+        // `FlushFileBuffers` on Windows, which needs a handle carrying write
+        // access and returns "Access is denied" (os error 5) without one --
+        // so the read-only handle this used to take failed every
+        // `checkpoint_all` on Windows, not only a republish (#1696). A
+        // read-only fsync is fine on Unix, which is why it survived here.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(entry.path())?
+            .sync_all()?;
     }
     let mut out = std::fs::File::create(path.join("manifest.json"))?;
     serde_json::to_writer(&mut out, &Manifest { version: 1, files })
@@ -56,8 +65,9 @@ pub(super) fn seal(path: &Path) -> VectorResult<()> {
     out.flush()?;
     out.sync_all()?;
     // Unix only -- same reason as the sibling fsync in `manager`, and as
-    // `snapshot::persist` (#1696). The per-file fsync in the loop above is
-    // a *file* and is fine on both platforms; this one is the directory.
+    // `snapshot::persist` (#1696). This one is the directory, which Windows
+    // refuses to open at all; the per-file fsyncs above are files, and are
+    // portable now that they are taken on a writable handle.
     #[cfg(unix)]
     std::fs::File::open(path)?.sync_all()?;
     Ok(())
