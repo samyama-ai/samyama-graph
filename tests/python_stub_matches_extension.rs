@@ -30,6 +30,7 @@ const STUB: &str = include_str!("../sdk/python/samyama-stubs/__init__.pyi");
 fn rust_methods() -> BTreeMap<String, BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     let mut pending_sig: Option<String> = None;
+    let mut pending_new = false;
     let mut in_pymethods = false;
 
     for line in LIB.lines() {
@@ -49,6 +50,13 @@ fn rust_methods() -> BTreeMap<String, BTreeMap<String, String>> {
         if !in_pymethods {
             continue;
         }
+        // `#[new]` marks the constructor: Python calls it as `Class(...)`, and
+        // the stub declares it as `__init__`, which is a dunder and skipped.
+        // Read as a method it would be a `new` that Python never exposes.
+        if t.starts_with("#[new]") {
+            pending_new = true;
+            continue;
+        }
         if let Some(rest) = t.strip_prefix("#[pyo3(signature = (") {
             pending_sig = Some(rest.trim_end_matches("))]").to_string());
             continue;
@@ -56,7 +64,10 @@ fn rust_methods() -> BTreeMap<String, BTreeMap<String, String>> {
         if let Some(rest) = t.strip_prefix("fn ") {
             let name = rest.split('(').next().unwrap_or("").trim().to_string();
             let sig = pending_sig.take().unwrap_or_default();
-            if name.starts_with("__") || name == "require_embedded" {
+            if std::mem::take(&mut pending_new)
+                || name.starts_with("__")
+                || name == "require_embedded"
+            {
                 continue;
             }
             let mut defaults = BTreeMap::new();

@@ -50,6 +50,19 @@ class ServerStatus:
     def edges(self) -> int: ...
     def __repr__(self) -> str: ...
 
+class RequestCancelled(Exception):
+    """A request stopped by its `CancelToken` before it finished (API-06)."""
+
+class CancelToken:
+    """Stops a request in flight (API-06): pass as `cancel=`, call `cancel()`
+    from any thread. The waiting call raises `RequestCancelled` within about
+    50 ms and its connection is closed. A token stays cancelled."""
+
+    def __init__(self) -> None: ...
+    def cancel(self) -> None: ...
+    @property
+    def cancelled(self) -> bool: ...
+
 class QueryStream:
     """Rows of a streamed query, one dict per row keyed by column (#1632).
 
@@ -84,19 +97,29 @@ class SamyamaClient:
         connect_timeout_seconds: float | None = 5.0,
         max_retries: int = 2,
         retry_base_delay_ms: int = 100,
+        pool_max_idle_per_host: int = 8,
+        pool_idle_timeout_seconds: float | None = 90.0,
     ) -> SamyamaClient:
         """A client for a server already running at `url`.
 
         `timeout_seconds` bounds a whole request; `None` means no timeout, which
         is what this used to do unconditionally (samyama-graph#1326).
+        Connections are pooled: `pool_max_idle_per_host` idle ones are kept
+        for reuse (0 turns reuse off) for `pool_idle_timeout_seconds` each.
         """
         ...
 
-    def query(self, cypher: str, graph: str = "default") -> QueryResult: ...
-    def query_readonly(self, cypher: str, graph: str = "default") -> QueryResult:
+    def query(
+        self, cypher: str, graph: str = "default", cancel: CancelToken | None = None
+    ) -> QueryResult: ...
+    def query_readonly(
+        self, cypher: str, graph: str = "default", cancel: CancelToken | None = None
+    ) -> QueryResult:
         """Refuses a write rather than performing one."""
         ...
-    def query_stream(self, cypher: str, graph: str = "default") -> QueryStream:
+    def query_stream(
+        self, cypher: str, graph: str = "default", cancel: CancelToken | None = None
+    ) -> QueryStream:
         """Iterate a read query's rows as the server produces them, one dict per row."""
         ...
     def nlq(
@@ -106,6 +129,7 @@ class SamyamaClient:
         model: str | None = None,
         api_key: str | None = None,
         api_base_url: str | None = None,
+        cancel: CancelToken | None = None,
     ) -> str:
         """Translate a question into read-only Cypher, without running it.
 
