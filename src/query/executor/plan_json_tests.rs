@@ -191,3 +191,46 @@ fn explain_json_on_a_write_describes_it_and_writes_nothing() {
     assert!(matches!(field(field(json, "root"), "operator"), PropertyValue::String(_)));
     assert_eq!(store.node_count(), before, "EXPLAIN must not run the write");
 }
+
+
+/// A write followed by `WITH` is parsed by the general clause pipeline, not the
+/// shape-specific rules: the path the merge agent's hold on #2059 named.
+const PIPELINE: &str = "MATCH (p:Person) SET p.seen = true WITH p RETURN p.age AS age";
+
+#[test]
+fn profile_on_the_clause_pipeline_is_a_profile_not_an_explain() {
+    for prefix in ["PROFILE", "PROFILE (FORMAT JSON)"] {
+        let q = parse_query(&format!("{prefix} {PIPELINE}")).unwrap();
+        assert!(q.needs_clause_pipeline, "the fixture must take the pipeline path");
+        assert!(q.profile && !q.explain, "{prefix}: profile={} explain={}", q.profile, q.explain);
+    }
+    let q = parse_query(&format!("EXPLAIN (FORMAT JSON) {PIPELINE}")).unwrap();
+    assert!(q.explain && !q.profile && q.plan_json);
+}
+
+#[test]
+fn the_write_executor_refuses_profile_json_rather_than_answering_something_else() {
+    // It does not profile. Answering with an EXPLAIN document, or running the
+    // statement and returning its rows, would both be read as a profile.
+    for cypher in [
+        format!("PROFILE (FORMAT JSON) {PIPELINE}"),
+        "PROFILE (FORMAT JSON) CREATE (n:Person {age: 50}) RETURN n".to_string(),
+    ] {
+        let mut store = people();
+        let q = parse_query(&cypher).unwrap();
+        let err = crate::query::executor::MutQueryExecutor::new(&mut store, "default".to_string())
+            .execute(&q)
+            .expect_err(&cypher);
+        assert!(err.to_string().contains("EXPLAIN (FORMAT JSON)"), "{cypher}: {err}");
+        assert_eq!(store.node_count(), 3, "{cypher} wrote");
+        let seen = parse_query("MATCH (p:Person) WHERE p.seen = true RETURN p").unwrap();
+        assert!(QueryExecutor::new(&store).execute(&seen).unwrap().records.is_empty(), "{cypher} wrote");
+    }
+    // EXPLAIN (FORMAT JSON) of the same statement still answers, and writes nothing.
+    let mut store = people();
+    let q = parse_query(&format!("EXPLAIN (FORMAT JSON) {PIPELINE}")).unwrap();
+    let b = crate::query::executor::MutQueryExecutor::new(&mut store, "default".to_string())
+        .execute(&q)
+        .unwrap();
+    assert_eq!(b.columns, vec!["plan".to_string()]);
+}
