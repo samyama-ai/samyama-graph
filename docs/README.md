@@ -59,6 +59,7 @@ eight of eighteen documents (#1450).
 
 - **[DATA-HANDLING.md](./DATA-HANDLING.md)** — what leaves the machine and when; the authentication, TLS, audit and at-rest-encryption surfaces.
 - **[DATA-PROVENANCE.md](./DATA-PROVENANCE.md)** — how model-generated and ingested data are kept apart.
+- **[REPRODUCIBLE-DATASETS.md](./REPRODUCIBLE-DATASETS.md)** — exports addressable by (snapshot hash, query, seed), and rebuilding them byte for byte.
 - **[pii-waivers.json](./pii-waivers.json)** — findings from the published-snapshot PII scan that have been reviewed and accepted, each with its reason.
 
 ### Interfaces and operations

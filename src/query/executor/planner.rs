@@ -8590,7 +8590,7 @@ fn choose_anchor_index(
 /// `timestamp()` and the temporal constructors read the statement clock, which
 /// is fixed for the statement, so they are not volatile. `rand()`,
 /// `randomUUID()` and the `*.realtime` functions read a fresh value each call.
-fn is_volatile(expr: &Expression) -> bool {
+pub(crate) fn is_volatile(expr: &Expression) -> bool {
     match expr {
         Expression::Function { name, args, .. } => {
             let name = name.to_ascii_lowercase();

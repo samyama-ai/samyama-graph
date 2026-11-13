@@ -1417,6 +1417,10 @@ pub struct GraphStore {
     /// here counts, so a mutator added later makes a projection look stale,
     /// never fresh: the safe direction.
     data_changes: std::sync::atomic::AtomicU64,
+    /// The last content hash computed and the `data_changes` it was computed
+    /// at (ML-08, #1747). A hash is one pass over the whole graph, so an
+    /// export reuses it until the data changes.
+    content_hash_memo: std::sync::Mutex<Option<(u64, String)>>,
     /// Where this graph's data came from, from the `.sgsnap` headers it was
     /// imported from or a converter that built it (#1911). Written back into
     /// the header of every export.
@@ -1511,6 +1515,7 @@ impl GraphStore {
             statistics_cache: std::sync::RwLock::new(None),
             epoch: std::sync::atomic::AtomicU64::new(0),
             data_changes: std::sync::atomic::AtomicU64::new(0),
+            content_hash_memo: std::sync::Mutex::new(None),
             snapshot_sources: Vec::new(),
             snapshot_sources_epoch: 0,
             snapshot_sources_stale: false,
@@ -5008,6 +5013,11 @@ NodeDeleted { id, .. } => {
     /// How many times data may have changed: the epoch, less housekeeping.
     /// Equal readings mean no node, relationship, label or property changed in
     /// between. See `data_changes`.
+    /// The memo `snapshot::content_hash::cached_content_hash` keeps.
+    pub(crate) fn content_hash_memo(&self) -> &std::sync::Mutex<Option<(u64, String)>> {
+        &self.content_hash_memo
+    }
+
     pub fn data_changes(&self) -> u64 {
         self.data_changes.load(std::sync::atomic::Ordering::Relaxed)
     }
