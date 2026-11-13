@@ -379,6 +379,29 @@ impl RemoteClient {
             .await
     }
 
+    /// Run `cypher` under an idempotency key the caller chose (#2176).
+    ///
+    /// Every call that may write is already sent with a key of its own, so
+    /// the client's own retries cannot apply it twice. That key is new per
+    /// call, though: if this call fails, a second call is a second write.
+    /// A caller that wants to try again after an error that does not say
+    /// whether the write landed — a timeout, a dropped connection — picks
+    /// the key itself and sends it again: a write that committed under it
+    /// answers with its first reply and does not run again, for as long as
+    /// the server keeps the key (`SAMYAMA_IDEMPOTENCY_TTL_SECS`, 24 h by
+    /// default). The same key with a different statement is refused.
+    ///
+    /// Visible ASCII, no spaces, at most 255 bytes.
+    pub async fn query_with_idempotency_key(
+        &self,
+        graph: &str,
+        cypher: &str,
+        key: &str,
+    ) -> SamyamaResult<QueryResult> {
+        self.post_query_keyed(graph, cypher, serde_json::json!({}), false, Some(key.to_string()))
+            .await
+    }
+
     /// Execute a POST request to /api/query with bound `params`.
     ///
     /// `read_only` asks the server to refuse the statement if it writes
@@ -389,6 +412,23 @@ impl RemoteClient {
         cypher: &str,
         params: serde_json::Value,
         read_only: bool,
+    ) -> SamyamaResult<QueryResult> {
+        // A request that may write carries a key, made once here and not per
+        // attempt, so a retry of a write the server already applied is
+        // answered with the first reply instead of running again (#2176). A
+        // server older than the key ignores the header.
+        let key = (!read_only).then(new_idempotency_key);
+        self.post_query_keyed(graph, cypher, params, read_only, key)
+            .await
+    }
+
+    async fn post_query_keyed(
+        &self,
+        graph: &str,
+        cypher: &str,
+        params: serde_json::Value,
+        read_only: bool,
+        key: Option<String>,
     ) -> SamyamaResult<QueryResult> {
         let url = format!("{}/api/query", self.http_base_url);
         let mut body = serde_json::json!({ "query": cypher, "graph": graph });
@@ -401,7 +441,13 @@ impl RemoteClient {
         }
 
         let response = self
-            .send_with_retry(|| self.http_client.post(&url).json(&body))
+            .send_with_retry(|| {
+                let request = self.http_client.post(&url).json(&body);
+                match &key {
+                    Some(key) => request.header(IDEMPOTENCY_KEY, key),
+                    None => request,
+                }
+            })
             .await?;
 
         if response.status().is_success() {
@@ -470,6 +516,14 @@ impl SamyamaClient for RemoteClient {
 }
 
 const NDJSON: &str = "application/x-ndjson";
+
+/// The header that makes a write safe to send again (#2176).
+const IDEMPOTENCY_KEY: &str = "Idempotency-Key";
+
+/// A key no other write will have.
+fn new_idempotency_key() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
 
 /// `fut`, or a timeout error if `limit` passes first. `None` waits forever.
 async fn bounded<T>(

@@ -47,6 +47,19 @@ export interface RequestOptions {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** The header that makes a write safe to send again (#2176). */
+const IDEMPOTENCY_KEY = "Idempotency-Key";
+
+/** A key no other write will have. */
+export function newIdempotencyKey(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  // Older runtimes: unique enough to tell one write from another, which is
+  // all a key has to do.
+  const hex = (n: number) => Math.floor(Math.random() * 16 ** n).toString(16).padStart(n, "0");
+  return `${Date.now().toString(16)}-${hex(8)}-${hex(8)}-${hex(8)}`;
+}
+
 /**
  * HTTP transport for the Samyama SDK.
  * Uses the native `fetch` API (works in Node.js 18+ and browsers).
@@ -147,17 +160,25 @@ export class HttpTransport {
   async query(
     cypher: string,
     graph: string = "default",
-    opts?: RequestOptions & { readOnly?: boolean },
+    opts?: RequestOptions & { readOnly?: boolean; idempotencyKey?: string },
   ): Promise<QueryResult> {
     // `read_only` makes the server refuse a write before it runs (#1628);
     // only sent when asked, so a plain query's body is what it always was.
     const body: Record<string, unknown> = { query: cypher, graph };
     if (opts?.readOnly) body.read_only = true;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    // A request that may write carries a key, made once here and not per
+    // attempt, so a retry of a write the server already applied is answered
+    // with the first reply instead of running again (#2176). A server older
+    // than the key ignores the header.
+    if (!opts?.readOnly) {
+      headers[IDEMPOTENCY_KEY] = opts?.idempotencyKey ?? newIdempotencyKey();
+    }
     return this.json<QueryResult>(
       "/api/query",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(body),
       },
       opts,
