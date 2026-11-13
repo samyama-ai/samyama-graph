@@ -7314,6 +7314,28 @@ NodeDeleted { id, .. } => {
             })
     }
 
+    /// The `k` nearest among `candidates` that still carry the label and pass
+    /// `keep`, by exact distance, reading only the candidates (#445). The
+    /// hierarchy-first plan: the candidates are a subtree from the OEH index.
+    pub fn vector_search_among(
+        &self,
+        label: &str,
+        property_key: &str,
+        query: &[f32],
+        k: usize,
+        candidates: &[NodeId],
+        keep: impl Fn(NodeId) -> bool,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        let index = self.vector_index.get_index(label, property_key).ok_or_else(|| {
+            crate::vector::VectorError::IndexError(format!("no vector index on :{label}({property_key})"))
+        })?;
+        let label_key = Label::new(label);
+        let result = index.read().unwrap().search_exact_among(query, k, candidates, &|id| {
+            self.get_node(id).is_some_and(|n| n.labels.contains(&label_key)) && keep(id)
+        });
+        result
+    }
+
     /// Vector search across ALL indices (every label + property), merged to a
     /// global top-k. Backs the "no label given" default in the vector-search API.
     pub fn vector_search_all(&self, query: &[f32], k: usize) -> VectorResult<Vec<(NodeId, f32)>> {
