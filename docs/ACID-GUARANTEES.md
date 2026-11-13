@@ -171,6 +171,27 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
   - It is a request, not a proof: `sync_data` returns when the kernel says the
     device has the bytes, and whether the device lied is a property of the
     device.
+- **A retried write is not a second write, when it carries a key** (#2176).
+  A client whose reply was lost cannot tell whether its write committed, and
+  without a key a retry runs again. With one, the record of the reply is
+  written in the same RocksDB write as the rows, so it is exactly as durable
+  as they are and a retry after a restart still gets the first reply back.
+  - HTTP autocommit: the `Idempotency-Key` header on `POST /api/query`;
+    `GET /api/requests/{key}` asks whether it committed.
+  - HTTP transaction: a repeated `POST /api/tx/{id}/commit` answers what the
+    first did instead of 404. An `Idempotency-Key` on COMMIT covers a client
+    that re-runs the whole transaction: the re-run is rolled back and the
+    first reply returned.
+  - RESP: a trailing `IDEMPOTENCY_KEY <key>` pair on `GRAPH.QUERY` or
+    `GRAPH.COMMIT`. The pair name is reserved and is not a query parameter.
+  - Records are kept for `SAMYAMA_IDEMPOTENCY_TTL_SECS` (default 24 h). The
+    same key with a different request is refused and not run. Only a write
+    that succeeded is recorded. A key on a statement *inside* a transaction is
+    refused; it belongs on the COMMIT.
+  - A schema can make a repeated `CREATE` of a unique key an update rather
+    than a refusal: `CREATE CONSTRAINT ... IS UNIQUE OPTIONS {onDuplicate: 'update'}`.
+    That works without a key, at the cost of making every such `CREATE` an
+    upsert.
 - **Write order**: the log is appended after the memory mutation, not before (§1).
 - **A write that does not reach disk is now reported as a failure**, and the
   process stops accepting writes (#1274). It used to be a `warn!` line and a
