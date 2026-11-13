@@ -86,7 +86,7 @@ fn scoped_query(root: &str, k: usize) -> String {
     format!(
         "CALL db.index.vector.queryNodes('Term', 'emb', [{x}, {y}], {k}) YIELD node, distance \
          MATCH (r:Term {{code: '{root}'}}) WHERE subsumes(node, r) \
-         RETURN node.code AS c ORDER BY distance, c"
+         RETURN node.code AS c, distance ORDER BY distance, c"
     )
 }
 
