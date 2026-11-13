@@ -291,7 +291,7 @@ mod tests {
         const EPS: f32 = 1e-4;
         for metric in [DistanceMetric::Cosine, DistanceMetric::InnerProduct] {
             let index = index(metric);
-            let keep_even = |id: NodeId| id.as_u64() % 2 == 0 || id.as_u64() >= 1000;
+            let keep_even = |id: NodeId| id.as_u64().is_multiple_of(2) || id.as_u64() >= 1000;
             for (seed, keep) in [
                 (7u64, &(|_: NodeId| true) as &dyn Fn(NodeId) -> bool),
                 (12345, &keep_even as &dyn Fn(NodeId) -> bool),
