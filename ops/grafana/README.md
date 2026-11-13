@@ -32,6 +32,15 @@ JSON object per line on **stderr**, with `timestamp`, `level`, `target`,
 stream holds nothing but JSON. Text on stdout remains the default, and any
 other value is refused at start-up rather than read as text.
 
+Every HTTP request and every RESP command runs inside a `request` span with a
+`request_id`, `protocol` (`http` or `resp`) and, once known, `tenant`; HTTP
+spans add `method` and `path`, RESP spans the `command`. Each event the request
+causes, the slow-query line included, carries that span, so filtering on one
+`request_id` gives everything one request did. HTTP returns the id in the
+`X-Request-Id` response header, and keeps the caller's own `X-Request-Id` when
+it is 1 to 128 characters of letters, digits and `-` `_` `.` `:`; anything else
+is replaced with a fresh id rather than written into the log.
+
 The panel and the log use the same threshold on purpose. A dashboard and a log
 that disagree about what "slow" means give an operator two numbers and a reason
 to trust neither.
