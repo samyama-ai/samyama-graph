@@ -114,7 +114,8 @@ pub struct RowBatch {
 }
 
 impl RowBatch {
-    /// Rows staged since the last commit.
+    /// Writes staged since the last commit: rows, and the idempotency
+    /// records that ride with them (#2176).
     pub fn len(&self) -> usize {
         self.rows
     }
@@ -472,6 +473,85 @@ impl PersistentStorage {
         batch.rows = 0;
         self.db.write_opt(staged, &self.write_opts)?;
         Ok(())
+    }
+
+    /// Where a tenant's idempotency records start in the `indices` column
+    /// family (#2176). The tenant is length-prefixed so that one tenant's name
+    /// cannot be a prefix of another's range.
+    fn idempotency_prefix(tenant: &str) -> String {
+        format!("idem:{}:{}:", tenant.len(), tenant)
+    }
+
+    /// Stage an idempotency record into the same commit as a statement's rows,
+    /// so the write and its key reach the disk together (#2176).
+    pub fn stage_put_idempotency(
+        &self,
+        batch: &mut RowBatch,
+        tenant: &str,
+        key: &str,
+        record: &crate::idempotency::Record,
+    ) -> StorageResult<()> {
+        let cf = self
+            .db
+            .cf_handle("indices")
+            .ok_or_else(|| StorageError::ColumnFamily("indices".to_string()))?;
+        let k = format!("{}{}", Self::idempotency_prefix(tenant), key);
+        batch
+            .inner
+            .put_cf(&cf, k.as_bytes(), bincode::serialize(record)?);
+        batch.rows += 1;
+        Ok(())
+    }
+
+    /// Stage the removal of an expired idempotency record.
+    pub fn stage_delete_idempotency(
+        &self,
+        batch: &mut RowBatch,
+        tenant: &str,
+        key: &str,
+    ) -> StorageResult<()> {
+        let cf = self
+            .db
+            .cf_handle("indices")
+            .ok_or_else(|| StorageError::ColumnFamily("indices".to_string()))?;
+        let k = format!("{}{}", Self::idempotency_prefix(tenant), key);
+        batch.inner.delete_cf(&cf, k.as_bytes());
+        batch.rows += 1;
+        Ok(())
+    }
+
+    /// A tenant's idempotency records, as `(key, record)`, for recovery.
+    pub fn scan_idempotency(
+        &self,
+        tenant: &str,
+    ) -> StorageResult<Vec<(String, crate::idempotency::Record)>> {
+        let cf = self
+            .db
+            .cf_handle("indices")
+            .ok_or_else(|| StorageError::ColumnFamily("indices".to_string()))?;
+        let prefix = Self::idempotency_prefix(tenant);
+        let mut out = Vec::new();
+        let iter = self.db.iterator_cf(
+            &cf,
+            rocksdb::IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward),
+        );
+        for item in iter {
+            let (k, v) = item?;
+            let Some(key) = k.strip_prefix(prefix.as_bytes()) else {
+                break;
+            };
+            let key = String::from_utf8_lossy(key).into_owned();
+            out.push((key, bincode::deserialize(&v)?));
+        }
+        Ok(out)
+    }
+
+    /// Remove an idempotency record now, outside any statement: an expired
+    /// one found at start-up.
+    pub fn delete_idempotency(&self, tenant: &str, key: &str) -> StorageResult<()> {
+        let mut batch = RowBatch::default();
+        self.stage_delete_idempotency(&mut batch, tenant, key)?;
+        self.commit_rows(&mut batch)
     }
 
     /// Create a snapshot
