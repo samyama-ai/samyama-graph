@@ -390,6 +390,19 @@ pub struct CreateConstraintClause {
     pub variable: String,
     pub label: Label,
     pub property: String,
+    /// `OPTIONS {onDuplicate: ...}`, when given. `None` leaves an existing
+    /// constraint's mode as it is and declares a new one as `Error` (#2176).
+    pub on_duplicate: Option<OnDuplicate>,
+}
+
+/// What a `CREATE` repeating a key of a unique constraint does (#2176).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnDuplicate {
+    /// Refused as a constraint violation. The default, and openCypher's.
+    Error,
+    /// The node holding the key is updated with the `CREATE`'s labels and
+    /// properties, as a new version, instead of a second node being made.
+    Update,
 }
 
 /// CALL clause: CALL db.index.vector.queryNodes('Person', 'embedding', [...], 10) YIELD node, score

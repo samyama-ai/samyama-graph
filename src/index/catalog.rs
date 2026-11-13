@@ -67,6 +67,12 @@ pub enum IndexDefinition {
         ef_construction: usize,
         ef: Option<usize>,
     },
+    /// The unique constraint on `label.property` was declared with
+    /// `OPTIONS {onDuplicate: 'update'}`: a `CREATE` that repeats a key the
+    /// constraint already holds updates the holder instead of being refused
+    /// (#2176). A record of its own beside `UniqueConstraint`, not a field on
+    /// it, for the bincode reason `VectorParams` gives; last for the same one.
+    UniqueConstraintUpsert { label: String, property: String },
 }
 
 /// Every index declaration a tenant has, as one record.

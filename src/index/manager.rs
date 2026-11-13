@@ -4,7 +4,7 @@
 
 use crate::graph::{Label, NodeId, PropertyValue};
 use super::property_index::PropertyIndex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 /// Key for identifying a property index
@@ -47,6 +47,9 @@ pub struct IndexManager {
     indices: RwLock<HashMap<PropertyIndexKey, Arc<RwLock<PropertyIndex>>>>,
     /// Unique constraints (label, property) pairs
     unique_constraints: RwLock<HashMap<PropertyIndexKey, Arc<RwLock<PropertyIndex>>>>,
+    /// The unique constraints declared `OPTIONS {onDuplicate: 'update'}`: a
+    /// `CREATE` repeating a key one of these holds updates the holder (#2176).
+    upsert_constraints: RwLock<HashSet<PropertyIndexKey>>,
 }
 
 impl IndexManager {
@@ -54,6 +57,7 @@ impl IndexManager {
         Self {
             indices: RwLock::new(HashMap::new()),
             unique_constraints: RwLock::new(HashMap::new()),
+            upsert_constraints: RwLock::new(HashSet::new()),
         }
     }
 
@@ -291,6 +295,52 @@ impl IndexManager {
         if let Some(index) = constraints.get(&key) {
             index.write().unwrap().remove(value, node_id);
         }
+    }
+
+    /// Whether a `CREATE` repeating a key of the unique constraint on
+    /// `label.property` updates the node holding it, rather than being
+    /// refused. Set or cleared; a constraint that does not exist is ignored.
+    pub fn set_constraint_upsert(&self, label: &Label, property: &str, update: bool) -> bool {
+        let key = PropertyIndexKey {
+            label: label.clone(),
+            property: property.to_string(),
+        };
+        if !self.unique_constraints.read().unwrap().contains_key(&key) {
+            return false;
+        }
+        let mut set = self.upsert_constraints.write().unwrap();
+        if update {
+            set.insert(key)
+        } else {
+            set.remove(&key)
+        }
+    }
+
+    /// Is the unique constraint on `label.property` declared
+    /// `onDuplicate: 'update'`?
+    pub fn is_upsert_constraint(&self, label: &Label, property: &str) -> bool {
+        let set = self.upsert_constraints.read().unwrap();
+        !set.is_empty()
+            && set.contains(&PropertyIndexKey {
+                label: label.clone(),
+                property: property.to_string(),
+            })
+    }
+
+    /// Any constraint at all declared `onDuplicate: 'update'`? The create path
+    /// asks this first, so a graph without one pays a single set read.
+    pub fn has_any_upsert_constraints(&self) -> bool {
+        !self.upsert_constraints.read().unwrap().is_empty()
+    }
+
+    /// The constraints declared `onDuplicate: 'update'`.
+    pub fn list_upsert_constraints(&self) -> Vec<(Label, String)> {
+        self.upsert_constraints
+            .read()
+            .unwrap()
+            .iter()
+            .map(|k| (k.label.clone(), k.property.clone()))
+            .collect()
     }
 
     /// List all constraints

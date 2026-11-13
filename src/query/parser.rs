@@ -1227,6 +1227,7 @@ fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &
     let mut variable = None;
     let mut label = None;
     let mut property = None;
+    let mut on_duplicate = None;
 
     // Both the legacy `ON ... ASSERT` and modern `FOR ... REQUIRE` forms wrap their parts
     // in a sub-rule; unwrap it so the field extraction below is shared. `constraint_name`
@@ -1258,6 +1259,34 @@ fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &
                     }
                 }
             }
+            Rule::options => {
+                // Unknown keys refused, as CREATE VECTOR INDEX refuses them
+                // (#474): a misspelt `onDuplicte` silently ignored would leave
+                // retried writes refused while the caller believes they update.
+                let options_map = parse_properties(inner)?;
+                for key in options_map.keys() {
+                    if key != "onDuplicate" {
+                        return Err(ParseError::SemanticError(format!(
+                            "CREATE CONSTRAINT: unknown option `{key}`. The accepted option is \
+`onDuplicate` ('error' or 'update')."
+                        )));
+                    }
+                }
+                on_duplicate = match options_map.get("onDuplicate") {
+                    None => None,
+                    Some(PropertyValue::String(v)) if v.eq_ignore_ascii_case("update") => {
+                        Some(OnDuplicate::Update)
+                    }
+                    Some(PropertyValue::String(v)) if v.eq_ignore_ascii_case("error") => {
+                        Some(OnDuplicate::Error)
+                    }
+                    Some(other) => {
+                        return Err(ParseError::SemanticError(format!(
+                            "CREATE CONSTRAINT: `onDuplicate` must be 'error' or 'update', got {other:?}"
+                        )))
+                    }
+                };
+            }
             _ => {}
         }
     }
@@ -1266,6 +1295,7 @@ fn parse_create_constraint_statement(pair: pest::iterators::Pair<Rule>, query: &
         variable: variable.ok_or_else(|| ParseError::SemanticError("Missing variable".to_string()))?,
         label: label.ok_or_else(|| ParseError::SemanticError("Missing label".to_string()))?,
         property: property.ok_or_else(|| ParseError::SemanticError("Missing property".to_string()))?,
+        on_duplicate,
     });
     Ok(())
 }
