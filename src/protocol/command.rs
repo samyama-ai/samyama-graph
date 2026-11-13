@@ -17,6 +17,9 @@ use tracing::{debug, error, warn};
 /// poll must not hang behind it.
 const INFO_STORE_WAIT: Duration = Duration::from_millis(100);
 
+/// The trailing argument pair that carries an idempotency key (#2176).
+pub const IDEMPOTENCY_KEY_ARG: &str = "IDEMPOTENCY_KEY";
+
 /// What a RESP command will put in the audit log once its reply is known.
 pub(crate) struct AuditEntry {
     command: String,
@@ -192,14 +195,95 @@ impl CommandHandler {
     /// them. If they cannot be persisted the transaction is rolled back and the
     /// reply is an error (#1274).
     pub fn commit_transaction_on(&self, store: &mut GraphStore) -> RespValue {
+        self.commit_keyed_on(store, None)
+    }
+
+    /// `GRAPH.COMMIT [IDEMPOTENCY_KEY key]` (#2176).
+    ///
+    /// For a client that lost the COMMIT reply with its connection and runs
+    /// the transaction again from GRAPH.BEGIN. When a COMMIT under the key has
+    /// already succeeded, this transaction is rolled back and the first reply
+    /// returned. `Err` is a refusal that leaves the transaction open — a
+    /// malformed key, or one used for a different request — so the caller
+    /// keeps the lock and the client can commit without the key.
+    pub fn commit_transaction_with_args_on(
+        &self,
+        args: &[RespValue],
+        store: &mut GraphStore,
+    ) -> Result<RespValue, RespValue> {
+        let key = match Self::split_idempotency_key(args.get(1..).unwrap_or(&[])) {
+            Ok((key, rest)) if rest.is_empty() => key,
+            Ok(_) => {
+                return Err(RespValue::Error(format!(
+                    "ERR GRAPH.COMMIT takes no arguments but {IDEMPOTENCY_KEY_ARG} key; \
+                     the transaction is still open"
+                )))
+            }
+            Err(e) => {
+                return Err(RespValue::Error(format!(
+                    "ERR {e}; the transaction is still open"
+                )))
+            }
+        };
+        if let Some(key) = &key {
+            let seen = store.idempotency().lookup(
+                "default",
+                key,
+                &Self::resp_commit_fingerprint(),
+                crate::idempotency::now_ms(),
+                crate::idempotency::ttl(),
+            );
+            match seen {
+                crate::idempotency::Lookup::Miss => {}
+                crate::idempotency::Lookup::Conflict => {
+                    return Err(Self::answer_seen(seen).expect("a conflict has a reply"));
+                }
+                crate::idempotency::Lookup::Replay(_) => {
+                    let _ = self.rollback_transaction_on(store);
+                    return Ok(Self::answer_seen(seen).expect("a replay has a reply"));
+                }
+            }
+        }
+        Ok(self.commit_keyed_on(store, key.as_deref()))
+    }
+
+    /// COMMIT, recording `key` in the same write as the rows when there is one.
+    /// Remembered in memory only once on disk, so a failed commit is never
+    /// replayed as a committed one.
+    fn commit_keyed_on(&self, store: &mut GraphStore, key: Option<&str>) -> RespValue {
+        let Some(version) = store.session_transaction_version() else {
+            return RespValue::Error("ERR no transaction is open".to_string());
+        };
+        let reply = RespValue::Integer(version as i64);
+        let record = key.map(|k| {
+            (
+                k,
+                Self::reply_record(Self::resp_commit_fingerprint(), &reply, version),
+            )
+        });
         let outcome = match &self.persistence {
-            Some(pm) => pm.commit_session_transaction("default", store),
+            Some(pm) => {
+                let keys = crate::idempotency::PendingWrites {
+                    puts: record
+                        .iter()
+                        .map(|(k, r)| ("default".to_string(), k.to_string(), r.clone()))
+                        .collect(),
+                    deletes: Vec::new(),
+                };
+                pm.commit_session_transaction_keyed("default", store, &keys)
+            }
             None => store.commit_session_transaction().map_err(|e| e.to_string()),
         };
-        match outcome {
-            Ok(version) => RespValue::Integer(version as i64),
-            Err(e) => RespValue::Error(format!("ERR {e}")),
+        if let Err(e) = outcome {
+            return RespValue::Error(format!("ERR {e}"));
         }
+        if let Some((k, r)) = record {
+            let log = store.idempotency_mut();
+            log.record("default", k, r, crate::idempotency::ttl());
+            // Already written with the commit above.
+            let _ = log.take_pending();
+        }
+        reply
     }
 
     /// GRAPH.ROLLBACK: undo the transaction. What it logged for persistence
@@ -241,6 +325,16 @@ impl CommandHandler {
             Ok(None) => return RespValue::Error("ERR null query".to_string()),
             Err(e) => return RespValue::Error(format!("ERR {}", e)),
         };
+        match Self::split_idempotency_key(&args[3..]) {
+            Ok((None, _)) => {}
+            Ok((Some(_), _)) => {
+                return RespValue::Error(format!(
+                    "ERR {IDEMPOTENCY_KEY_ARG} is not supported on a statement inside a \
+                     transaction; the statement was not run. Send it on GRAPH.COMMIT."
+                ))
+            }
+            Err(e) => return RespValue::Error(format!("ERR {e}")),
+        }
         let params = match Self::params_from_args(&query_str, &args[3..]) {
             Ok(p) => p,
             Err(e) => return RespValue::Error(format!("ERR {e}")),
@@ -267,6 +361,106 @@ impl CommandHandler {
         match result {
             Ok(batch) => self.format_query_result(batch),
             Err(e) => RespValue::Error(format!("ERR {}", e)),
+        }
+    }
+
+    /// Take the idempotency key out of the trailing `name value` pairs (#2176).
+    ///
+    /// `GRAPH.QUERY default "CREATE ..." IDEMPOTENCY_KEY order-17` is the RESP
+    /// form of the HTTP `Idempotency-Key` header: the pair is reserved, in any
+    /// case, and is not a query parameter. A malformed key, or two, is refused
+    /// rather than ignored: ignoring it is what made a retried write a
+    /// duplicate. An odd trailing argument is left for `params_from_args` to
+    /// refuse with its own message.
+    pub fn split_idempotency_key(
+        rest: &[RespValue],
+    ) -> Result<(Option<String>, Vec<RespValue>), String> {
+        let mut key = None;
+        let mut others = Vec::with_capacity(rest.len());
+        let mut pairs = rest.chunks_exact(2);
+        for pair in &mut pairs {
+            let is_key = matches!(pair[0].as_string(), Ok(Some(ref n)) if n.eq_ignore_ascii_case(IDEMPOTENCY_KEY_ARG));
+            if !is_key {
+                others.extend_from_slice(pair);
+                continue;
+            }
+            if key.is_some() {
+                return Err(format!("more than one {IDEMPOTENCY_KEY_ARG}"));
+            }
+            let value = match pair[1].as_string() {
+                Ok(Some(v)) => v,
+                Ok(None) => return Err(format!("null {IDEMPOTENCY_KEY_ARG}")),
+                Err(e) => return Err(e.to_string()),
+            };
+            crate::idempotency::validate_key(&value)?;
+            key = Some(value);
+        }
+        others.extend_from_slice(pairs.remainder());
+        Ok((key, others))
+    }
+
+    /// What a keyed `GRAPH.QUERY` is, for its fingerprint: the parameters as
+    /// sent, before typing, so the same text sent again is the same request.
+    /// `resp` as the dialect keeps it apart from an HTTP request, whose reply
+    /// is JSON and could not be replayed here.
+    fn resp_fingerprint(query: &str, graph: &str, params: &[RespValue]) -> String {
+        let params = params
+            .chunks_exact(2)
+            .map(|pair| {
+                let text = |v: &RespValue| v.as_string().ok().flatten();
+                let value =
+                    text(&pair[1]).map_or(serde_json::Value::Null, serde_json::Value::String);
+                (text(&pair[0]).unwrap_or_default(), value)
+            })
+            .collect();
+        crate::idempotency::fingerprint(query, graph, Some("resp"), &params)
+    }
+
+    /// A `GRAPH.COMMIT` under a key, for its fingerprint. Never the same request
+    /// as a query, nor as an HTTP COMMIT, whose reply is JSON.
+    fn resp_commit_fingerprint() -> String {
+        crate::idempotency::fingerprint("COMMIT", "default", Some("resp-tx"), &Default::default())
+    }
+
+    /// The reply to a key already used: the first reply again, or a refusal
+    /// if the key was used for a different request. `None` for a miss.
+    fn answer_seen(seen: crate::idempotency::Lookup) -> Option<RespValue> {
+        use crate::idempotency::Lookup;
+        match seen {
+            Lookup::Miss => None,
+            Lookup::Replay(record) => {
+                let mut buf = bytes::BytesMut::from(&record.body[..]);
+                Some(match RespValue::decode(&mut buf) {
+                    Ok(Some(reply)) => reply,
+                    _ => RespValue::Error(
+                        "ERR the reply recorded for this IDEMPOTENCY_KEY could not be read; \
+                         the write committed and was not run again"
+                            .to_string(),
+                    ),
+                })
+            }
+            Lookup::Conflict => Some(RespValue::Error(format!(
+                "ERR {}: this IDEMPOTENCY_KEY was already used for a different request; \
+                 it was not run. Use a new key for each distinct write.",
+                crate::query::error_code::IDEMPOTENCY_KEY_REUSED
+            ))),
+        }
+    }
+
+    /// The record of a reply, to replay it to a retry.
+    fn reply_record(
+        fingerprint: String,
+        reply: &RespValue,
+        version: u64,
+    ) -> crate::idempotency::Record {
+        let mut body = Vec::new();
+        let _ = reply.encode(&mut body);
+        crate::idempotency::Record {
+            fingerprint,
+            status: 200,
+            body,
+            version,
+            created_ms: crate::idempotency::now_ms(),
         }
     }
 
@@ -347,7 +541,11 @@ impl CommandHandler {
             Err(e) => return RespValue::Error(format!("ERR {}", e)),
         };
 
-        let params = match Self::params_from_args(&query_str, &args[3..]) {
+        let (idem_key, param_args) = match Self::split_idempotency_key(&args[3..]) {
+            Ok(split) => split,
+            Err(e) => return RespValue::Error(format!("ERR {e}")),
+        };
+        let params = match Self::params_from_args(&query_str, &param_args) {
             Ok(p) => p,
             Err(e) => return RespValue::Error(format!("ERR {e}")),
         };
@@ -364,8 +562,31 @@ impl CommandHandler {
 
         let time_limit = self.tenant_manager.query_time_limit(&graph_name);
 
+        // A key on a read is accepted and has nothing to do, as over HTTP.
+        let idem = idem_key.filter(|_| is_write_query).map(|key| {
+            (
+                key,
+                Self::resp_fingerprint(&query_str, &graph_name, &param_args),
+            )
+        });
+
         // Execute query with appropriate method
         let result = if is_write_query {
+            // A retry of a keyed write that committed is answered under the
+            // read lock: without queueing behind writers, and without being
+            // refused when writes are (#2176).
+            if let Some((key, fp)) = &idem {
+                let seen = store.read().await.idempotency().lookup(
+                    &graph_name,
+                    key,
+                    fp,
+                    crate::idempotency::now_ms(),
+                    crate::idempotency::ttl(),
+                );
+                if let Some(reply) = Self::answer_seen(seen) {
+                    return reply;
+                }
+            }
             // Once one write has not reached disk, the store is ahead of the
             // disk and every later write widens the gap: a restart replays a
             // prefix that does not include the first failure and may not
@@ -386,6 +607,21 @@ impl CommandHandler {
 
         let mut store_guard = store.write().await;
 
+            // Looked up again under the write lock, in the same critical
+            // section as the write: two requests with one key cannot both run.
+            if let Some((key, fp)) = &idem {
+                let seen = store_guard.idempotency().lookup(
+                    &graph_name,
+                    key,
+                    fp,
+                    crate::idempotency::now_ms(),
+                    crate::idempotency::ttl(),
+                );
+                if let Some(reply) = Self::answer_seen(seen) {
+                    return reply;
+                }
+            }
+
             // Record what the statement changes, so persistence does not depend on
             // what it returns (#1094).
             if let Some(ref persist_mgr) = self.persistence {
@@ -398,13 +634,32 @@ impl CommandHandler {
 
             // Set current tenant for indexing events
             // In a more complex architecture, the store_guard would be isolated
-            let res = self.query_engine.execute_mut_with_params_within(
-                &query_str,
-                &mut *store_guard,
-                &graph_name,
-                &params,
-                time_limit,
-            );
+            let res = self
+                .query_engine
+                .execute_mut_with_params_within(
+                    &query_str,
+                    &mut *store_guard,
+                    &graph_name,
+                    &params,
+                    time_limit,
+                )
+                .map(|batch| self.format_query_result(batch));
+
+            // Only a write that succeeded is recorded: a failed statement is
+            // undone, so running it again on a retry is right.
+            if let (Some((key, fp)), Ok(reply)) = (&idem, &res) {
+                let version = store_guard.current_version;
+                let record = Self::reply_record(fp.clone(), reply, version);
+                store_guard.idempotency_mut().record(
+                    &graph_name,
+                    key,
+                    record,
+                    crate::idempotency::ttl(),
+                );
+            }
+            // Taken without persistence too, so they do not pile up in a queue
+            // nothing drains.
+            let keys = store_guard.idempotency_mut().take_pending();
 
             // Persist on the outcome of the *store*, not of the statement. A
             // statement that fails is now undone along with what it journalled
@@ -413,7 +668,12 @@ impl CommandHandler {
             // store keeps this right whichever way a statement ends.
             let persist_failed = if let Some(ref persist_mgr) = self.persistence {
                 let mutations = store_guard.take_write_log();
-                match persist_mgr.apply_mutations(&graph_name, &store_guard, &mutations) {
+                match persist_mgr.apply_mutations_keyed(
+                    &graph_name,
+                    &store_guard,
+                    &mutations,
+                    &keys,
+                ) {
                     Ok(n) => {
                         debug!("Persisted {} entities from {} mutations", n, mutations.len());
                         None
@@ -446,16 +706,14 @@ impl CommandHandler {
             let store_guard = store.read().await;
             let res = self
                 .query_engine
-                .execute_with_params_within(&query_str, &*store_guard, &params, time_limit);
+                .execute_with_params_within(&query_str, &*store_guard, &params, time_limit)
+                .map(|batch| self.format_query_result(batch));
             drop(store_guard);
             res
         };
 
         match result {
-            Ok(batch) => {
-                // Format result as RESP array
-                self.format_query_result(batch)
-            }
+            Ok(reply) => reply,
             Err(e) => {
                 error!("Query error: {}", e);
                 RespValue::Error(format!("ERR {}", e))

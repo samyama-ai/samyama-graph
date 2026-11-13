@@ -282,7 +282,15 @@ async fn respond_unaudited(
         }
         (Some("GRAPH.COMMIT"), Some(_)) => {
             let mut open = txn.open.take().expect("matched Some");
-            handler.commit_transaction_on(&mut open.guard)
+            let args = value.as_array().unwrap_or(&[]);
+            match handler.commit_transaction_with_args_on(args, &mut open.guard) {
+                Ok(reply) => reply,
+                // Refused with the transaction left open: keep the lock.
+                Err(refused) => {
+                    txn.open = Some(open);
+                    refused
+                }
+            }
         }
         (Some("GRAPH.ROLLBACK"), Some(_)) => {
             let mut open = txn.open.take().expect("matched Some");
@@ -1648,6 +1656,399 @@ mod tests {
             assert_eq!(r, "*2\r\n*1\r\n$1\r\nt\r\n*1\r\n:3\r\n");
             drop(s);
             server.await.unwrap();
+        }
+    }
+
+    /// #2176: the RESP side of the idempotency key, through the same
+    /// per-connection dispatch a socket uses.
+    mod idempotency_key {
+        use super::*;
+
+        async fn ask(
+            handler: &CommandHandler,
+            store: &Arc<RwLock<GraphStore>>,
+            txn: &mut ConnTxn,
+            parts: &[&str],
+        ) -> RespValue {
+            respond(handler, &cmd(parts), store, txn, None).await
+        }
+
+        async fn count(
+            handler: &CommandHandler,
+            store: &Arc<RwLock<GraphStore>>,
+            label: &str,
+        ) -> i64 {
+            let q = format!("MATCH (n:{label}) RETURN count(n)");
+            match ask(
+                handler,
+                store,
+                &mut ConnTxn::default(),
+                &["GRAPH.QUERY", "default", &q],
+            )
+            .await
+            {
+                RespValue::Array(rows) => match &rows[1] {
+                    RespValue::Array(cells) => match cells[0] {
+                        RespValue::Integer(n) => n,
+                        ref other => panic!("count was {other:?}"),
+                    },
+                    other => panic!("row was {other:?}"),
+                },
+                other => panic!("count failed: {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn the_same_key_twice_creates_one_node_and_replays_the_reply() {
+            let (handler, store) = (
+                CommandHandler::new(None),
+                Arc::new(RwLock::new(GraphStore::new())),
+            );
+            let mut c = ConnTxn::default();
+            let q = [
+                "GRAPH.QUERY",
+                "default",
+                "CREATE (n:Order {id: $id}) RETURN n.id",
+                "id",
+                "7",
+                "IDEMPOTENCY_KEY",
+                "o-7",
+            ];
+            let first = ask(&handler, &store, &mut c, &q).await;
+            assert!(!is_error(&first), "{first:?}");
+            let second = ask(&handler, &store, &mut c, &q).await;
+            assert_eq!(second, first, "the first reply");
+            assert_eq!(count(&handler, &store, "Order").await, 1);
+
+            // The pair may come first and in any case; it is not a parameter.
+            let lower = [
+                "GRAPH.QUERY",
+                "default",
+                "CREATE (n:Order {id: $id}) RETURN n.id",
+                "idempotency_key",
+                "o-7",
+                "id",
+                "7",
+            ];
+            assert_eq!(ask(&handler, &store, &mut c, &lower).await, first);
+            assert_eq!(count(&handler, &store, "Order").await, 1);
+
+            // Without a key a repeated write still runs twice.
+            ask(
+                &handler,
+                &store,
+                &mut c,
+                &["GRAPH.QUERY", "default", "CREATE (:Plain)"],
+            )
+            .await;
+            ask(
+                &handler,
+                &store,
+                &mut c,
+                &["GRAPH.QUERY", "default", "CREATE (:Plain)"],
+            )
+            .await;
+            assert_eq!(count(&handler, &store, "Plain").await, 2);
+        }
+
+        #[tokio::test]
+        async fn a_key_reused_for_a_different_request_is_refused_and_not_run() {
+            let (handler, store) = (
+                CommandHandler::new(None),
+                Arc::new(RwLock::new(GraphStore::new())),
+            );
+            let mut c = ConnTxn::default();
+            ask(
+                &handler,
+                &store,
+                &mut c,
+                &[
+                    "GRAPH.QUERY",
+                    "default",
+                    "CREATE (:A)",
+                    "IDEMPOTENCY_KEY",
+                    "k",
+                ],
+            )
+            .await;
+            let other = ask(
+                &handler,
+                &store,
+                &mut c,
+                &[
+                    "GRAPH.QUERY",
+                    "default",
+                    "CREATE (:B)",
+                    "IDEMPOTENCY_KEY",
+                    "k",
+                ],
+            )
+            .await;
+            assert!(
+                matches!(&other, RespValue::Error(e) if e.contains("IdempotencyKeyReused")),
+                "{other:?}"
+            );
+            assert_eq!(count(&handler, &store, "B").await, 0);
+        }
+
+        #[tokio::test]
+        async fn a_malformed_or_doubled_key_is_refused_not_ignored() {
+            let (handler, store) = (
+                CommandHandler::new(None),
+                Arc::new(RwLock::new(GraphStore::new())),
+            );
+            let mut c = ConnTxn::default();
+            for q in [
+                &[
+                    "GRAPH.QUERY",
+                    "default",
+                    "CREATE (:Bad)",
+                    "IDEMPOTENCY_KEY",
+                    "has space",
+                ][..],
+                &[
+                    "GRAPH.QUERY",
+                    "default",
+                    "CREATE (:Bad)",
+                    "IDEMPOTENCY_KEY",
+                    "a",
+                    "IDEMPOTENCY_KEY",
+                    "b",
+                ][..],
+            ] {
+                assert!(is_error(&ask(&handler, &store, &mut c, q).await), "{q:?}");
+            }
+            assert_eq!(count(&handler, &store, "Bad").await, 0);
+        }
+
+        #[tokio::test]
+        async fn a_failed_write_is_not_remembered_and_its_retry_runs() {
+            let (handler, store) = (
+                CommandHandler::new(None),
+                Arc::new(RwLock::new(GraphStore::new())),
+            );
+            let mut c = ConnTxn::default();
+            ask(
+                &handler,
+                &store,
+                &mut c,
+                &[
+                    "GRAPH.QUERY",
+                    "default",
+                    "CREATE CONSTRAINT FOR (n:U) REQUIRE n.id IS UNIQUE",
+                ],
+            )
+            .await;
+            ask(
+                &handler,
+                &store,
+                &mut c,
+                &["GRAPH.QUERY", "default", "CREATE (:U {id: 1})"],
+            )
+            .await;
+            let q = [
+                "GRAPH.QUERY",
+                "default",
+                "CREATE (:U {id: 1})",
+                "IDEMPOTENCY_KEY",
+                "u",
+            ];
+            assert!(is_error(&ask(&handler, &store, &mut c, &q).await));
+            ask(
+                &handler,
+                &store,
+                &mut c,
+                &["GRAPH.QUERY", "default", "MATCH (n:U) DELETE n"],
+            )
+            .await;
+            assert!(
+                !is_error(&ask(&handler, &store, &mut c, &q).await),
+                "the retry did not run"
+            );
+            assert_eq!(count(&handler, &store, "U").await, 1);
+        }
+
+        #[tokio::test]
+        async fn a_key_on_a_statement_inside_a_transaction_is_refused() {
+            let (handler, store) = (
+                CommandHandler::new(None),
+                Arc::new(RwLock::new(GraphStore::new())),
+            );
+            let mut c = ConnTxn::default();
+            ask(&handler, &store, &mut c, &["GRAPH.BEGIN"]).await;
+            let r = ask(
+                &handler,
+                &store,
+                &mut c,
+                &[
+                    "GRAPH.QUERY",
+                    "default",
+                    "CREATE (:T)",
+                    "IDEMPOTENCY_KEY",
+                    "k",
+                ],
+            )
+            .await;
+            assert!(
+                matches!(&r, RespValue::Error(e) if e.contains("GRAPH.COMMIT")),
+                "{r:?}"
+            );
+            ask(&handler, &store, &mut c, &["GRAPH.COMMIT"]).await;
+            assert_eq!(count(&handler, &store, "T").await, 0);
+        }
+
+        /// The connection dropped before the COMMIT reply arrived, and the
+        /// client runs the transaction again from GRAPH.BEGIN under its key.
+        #[tokio::test]
+        async fn a_transaction_run_again_under_a_committed_key_is_rolled_back() {
+            async fn run(
+                handler: &CommandHandler,
+                store: &Arc<RwLock<GraphStore>>,
+                c: &mut ConnTxn,
+            ) -> RespValue {
+                ask(handler, store, c, &["GRAPH.BEGIN"]).await;
+                ask(
+                    handler,
+                    store,
+                    c,
+                    &["GRAPH.QUERY", "default", "CREATE (:Paid)"],
+                )
+                .await;
+                ask(
+                    handler,
+                    store,
+                    c,
+                    &["GRAPH.COMMIT", "IDEMPOTENCY_KEY", "pay-1"],
+                )
+                .await
+            }
+            let (handler, store) = (
+                CommandHandler::new(None),
+                Arc::new(RwLock::new(GraphStore::new())),
+            );
+            let first = run(&handler, &store, &mut ConnTxn::default()).await;
+            assert!(matches!(first, RespValue::Integer(_)), "{first:?}");
+            let mut again = ConnTxn::default();
+            let second = run(&handler, &store, &mut again).await;
+            assert_eq!(second, first, "the first commit's reply");
+            assert!(again.open.is_none(), "the re-run still holds the lock");
+            assert_eq!(count(&handler, &store, "Paid").await, 1);
+        }
+
+        #[tokio::test]
+        async fn a_refused_commit_key_leaves_the_transaction_open() {
+            let (handler, store) = (
+                CommandHandler::new(None),
+                Arc::new(RwLock::new(GraphStore::new())),
+            );
+            let mut c = ConnTxn::default();
+            ask(
+                &handler,
+                &store,
+                &mut c,
+                &[
+                    "GRAPH.QUERY",
+                    "default",
+                    "CREATE (:Other)",
+                    "IDEMPOTENCY_KEY",
+                    "shared",
+                ],
+            )
+            .await;
+            ask(&handler, &store, &mut c, &["GRAPH.BEGIN"]).await;
+            ask(
+                &handler,
+                &store,
+                &mut c,
+                &["GRAPH.QUERY", "default", "CREATE (:Mine)"],
+            )
+            .await;
+            for q in [
+                &["GRAPH.COMMIT", "IDEMPOTENCY_KEY", "shared"][..],
+                &["GRAPH.COMMIT", "IDEMPOTENCY_KEY", "has space"][..],
+                &["GRAPH.COMMIT", "extra"][..],
+            ] {
+                let r = ask(&handler, &store, &mut c, q).await;
+                assert!(is_error(&r), "{q:?} answered {r:?}");
+                assert!(c.open.is_some(), "{q:?} closed the transaction");
+            }
+            assert!(matches!(
+                ask(&handler, &store, &mut c, &["GRAPH.COMMIT"]).await,
+                RespValue::Integer(_)
+            ));
+            assert_eq!(count(&handler, &store, "Mine").await, 1);
+        }
+
+        /// The record is written with the rows, so it survives a restart.
+        #[tokio::test]
+        async fn keys_survive_a_restart() {
+            let dir = tempfile::tempdir().unwrap();
+            let q = [
+                "GRAPH.QUERY",
+                "default",
+                "CREATE (:Durable)",
+                "IDEMPOTENCY_KEY",
+                "d-1",
+            ];
+            let (first, committed) = {
+                let pm = Arc::new(crate::persistence::PersistenceManager::new(dir.path()).unwrap());
+                let (handler, store) = (
+                    CommandHandler::new(Some(pm)),
+                    Arc::new(RwLock::new(GraphStore::new())),
+                );
+                let mut c = ConnTxn::default();
+                let first = ask(&handler, &store, &mut c, &q).await;
+                ask(&handler, &store, &mut c, &["GRAPH.BEGIN"]).await;
+                ask(
+                    &handler,
+                    &store,
+                    &mut c,
+                    &["GRAPH.QUERY", "default", "CREATE (:InTx)"],
+                )
+                .await;
+                let committed = ask(
+                    &handler,
+                    &store,
+                    &mut c,
+                    &["GRAPH.COMMIT", "IDEMPOTENCY_KEY", "t-1"],
+                )
+                .await;
+                (first, committed)
+            };
+            assert!(
+                !is_error(&first) && !is_error(&committed),
+                "{first:?} {committed:?}"
+            );
+
+            let pm = Arc::new(crate::persistence::PersistenceManager::new(dir.path()).unwrap());
+            let mut recovered = GraphStore::new();
+            pm.recover_into("default", &mut recovered).unwrap();
+            let (handler, store) = (
+                CommandHandler::new(Some(pm)),
+                Arc::new(RwLock::new(recovered)),
+            );
+            let mut c = ConnTxn::default();
+            assert_eq!(ask(&handler, &store, &mut c, &q).await, first);
+            ask(&handler, &store, &mut c, &["GRAPH.BEGIN"]).await;
+            ask(
+                &handler,
+                &store,
+                &mut c,
+                &["GRAPH.QUERY", "default", "CREATE (:InTx)"],
+            )
+            .await;
+            assert_eq!(
+                ask(
+                    &handler,
+                    &store,
+                    &mut c,
+                    &["GRAPH.COMMIT", "IDEMPOTENCY_KEY", "t-1"]
+                )
+                .await,
+                committed
+            );
+            assert_eq!(count(&handler, &store, "Durable").await, 1);
+            assert_eq!(count(&handler, &store, "InTx").await, 1);
         }
     }
 }
