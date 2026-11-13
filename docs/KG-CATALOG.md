@@ -65,7 +65,17 @@ It loads into an empty server and stops, before downloading, if the server alrea
 data (`--force` adds anyway). A server started with no flags allows 1M nodes and 10M edges,
 which two of these exceed: start it with `--max-nodes unlimited --max-edges unlimited
 --max-memory-bytes unlimited` for clinical-trials (7.8M nodes, about 17 GB of memory while
-loading) and imdb (1.9M nodes). A file you already have is imported in one call:
+loading) and imdb (1.9M nodes).
+
+To keep the file instead, for a machine with no server yet or a large KG you will import
+more than once, `pull` does the same download and the same check and saves it:
+
+```bash
+samyama-cli pull cricket        # writes ./cricket.sgsnap; -o names a file or a directory
+```
+
+A file that is already there and matches is kept with nothing downloaded; one that does not
+match is refused and left alone. A file you have is imported in one call:
 
 ```bash
 curl -X POST localhost:8080/api/snapshot/import -F "file=@cricket.sgsnap"
