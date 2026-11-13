@@ -58,6 +58,10 @@ pub(super) fn seal(path: &Path) -> VectorResult<()> {
         .map_err(|e| bad(e.to_string()))?;
     out.flush()?;
     out.sync_all()?;
+    // Unix only -- same reason as the sibling fsync in `manager`, and as
+    // `snapshot::persist` (#1696). The per-file fsync in the loop above is
+    // a *file* and is fine on both platforms; this one is the directory.
+    #[cfg(unix)]
     std::fs::File::open(path)?.sync_all()?;
     Ok(())
 }
