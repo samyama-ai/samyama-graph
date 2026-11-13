@@ -347,7 +347,19 @@ impl PersistenceManager {
     /// reached the disk is overwritten with the rolled-back state. Returns the
     /// commit version, or why the commit was refused.
     pub fn commit_session_transaction(&self, tenant: &str, store: &mut GraphStore) -> Result<u64, String> {
-        self.commit_session_transaction_detailed(tenant, store)
+        self.commit_session_transaction_keyed(tenant, store, &Default::default())
+    }
+
+    /// [`Self::commit_session_transaction`], with idempotency records written in
+    /// the same RocksDB commit as the transaction's rows (#2176), so a COMMIT is
+    /// on disk as committed exactly when its writes are.
+    pub fn commit_session_transaction_keyed(
+        &self,
+        tenant: &str,
+        store: &mut GraphStore,
+        keys: &crate::idempotency::PendingWrites,
+    ) -> Result<u64, String> {
+        self.commit_session_transaction_detailed_keyed(tenant, store, keys)
             .map_err(|refusal| refusal.message)
     }
 
@@ -364,13 +376,24 @@ impl PersistenceManager {
         tenant: &str,
         store: &mut GraphStore,
     ) -> Result<u64, CommitRefusal> {
+        self.commit_session_transaction_detailed_keyed(tenant, store, &Default::default())
+    }
+
+    /// [`Self::commit_session_transaction_detailed`], with the idempotency
+    /// records of [`Self::commit_session_transaction_keyed`] (#2176).
+    fn commit_session_transaction_detailed_keyed(
+        &self,
+        tenant: &str,
+        store: &mut GraphStore,
+        keys: &crate::idempotency::PendingWrites,
+    ) -> Result<u64, CommitRefusal> {
         use crate::graph::event::Mutation;
         let clean = |message: String| CommitRefusal { message, disk_matches_memory: true };
         if store.session_transaction_version().is_none() {
             return store.commit_session_transaction().map_err(|e| clean(e.to_string()));
         }
         let mutations = store.take_write_log();
-        let failure = match self.apply_mutations(tenant, store, &mutations) {
+        let failure = match self.apply_mutations_keyed(tenant, store, &mutations, keys) {
             Ok(_) => return store.commit_session_transaction().map_err(|e| clean(e.to_string())),
             Err(e) => e,
         };
