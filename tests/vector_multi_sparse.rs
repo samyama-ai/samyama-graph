@@ -190,14 +190,14 @@ fn maxsim_over_stored_properties_ranks_documents() {
                 vector.similarity.maxSim([[1.0, 0.0], [0.0, 1.0]], d.toks) AS score \
          ORDER BY score DESC",
     );
-    // a: 1 + 1 = 2.  b: 0.6 + 0.8 = 1.4.  c: -1 + -1 = -2.
+    // a: 1 + 1 = 2.  b: 0.6 + 0.8 = 1.4.  c: each query token's best match
+    // is the orthogonal doc token, so max(-1, 0) + max(0, -1) = 0.
     let got: Vec<(String, f64)> = r
         .iter()
         .map(|r| (string(r, "name"), float(r, "score")))
         .collect();
     assert_eq!(got.len(), 3, "{got:?}");
-    for ((name, score), (want_name, want)) in got.iter().zip([("a", 2.0), ("b", 1.4), ("c", -2.0)])
-    {
+    for ((name, score), (want_name, want)) in got.iter().zip([("a", 2.0), ("b", 1.4), ("c", 0.0)]) {
         assert_eq!(name, want_name, "{got:?}");
         assert_close(*score, want, name);
     }
