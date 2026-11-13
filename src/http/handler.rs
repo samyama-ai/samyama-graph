@@ -1154,7 +1154,7 @@ fn query_result_body(
 /// key is refused rather than ignored: ignoring it is what made a retried
 /// write a duplicate.
 #[allow(clippy::result_large_err)]
-fn idempotency_key(
+pub(crate) fn idempotency_key(
     headers: &axum::http::HeaderMap,
 ) -> Result<Option<String>, axum::response::Response> {
     let refuse = |e: String| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
@@ -1179,8 +1179,9 @@ pub(crate) fn key_not_supported(where_: &str) -> axum::response::Response {
         StatusCode::BAD_REQUEST,
         Json(json!({
             "error": format!(
-                "Idempotency-Key is not supported {where_} yet (#2176); the request was not run. \
-                 Send the key on an autocommit write to /api/query, or drop the header."
+                "Idempotency-Key is not supported {where_}; the request was not run. \
+                 Send the key on an autocommit write to /api/query or on the transaction's \
+                 COMMIT, or drop the header."
             ),
         })),
     )
@@ -1189,7 +1190,7 @@ pub(crate) fn key_not_supported(where_: &str) -> axum::response::Response {
 
 /// The reply to a key that has already been used: the first reply again, or a
 /// refusal if the key was used for a different request. `None` for a miss.
-fn answer_seen(seen: crate::idempotency::Lookup) -> Option<axum::response::Response> {
+pub(crate) fn answer_seen(seen: crate::idempotency::Lookup) -> Option<axum::response::Response> {
     use crate::idempotency::Lookup;
     match seen {
         Lookup::Miss => None,

@@ -38,8 +38,8 @@ paths:
             requests arrive concurrently. The same key with a different
             request (statement, graph, dialect or parameters) is refused with
             422. A failed write is not kept, so its retry runs. Visible ASCII,
-            no spaces. Ignored on reads. Refused inside a transaction (`tx`)
-            and on a transaction COMMIT, where it is not supported yet.
+            no spaces. Ignored on reads. Refused on a statement inside a
+            transaction (`tx`): send it on the transaction's COMMIT instead.
       requestBody:
         required: true
         content:
@@ -137,16 +137,38 @@ paths:
     post:
       operationId: commitTransaction
       summary: Commit a transaction
-      description: Keeps every write the transaction made, persists them, and releases the lock.
+      description: |
+        Keeps every write the transaction made, persists them, and releases the lock.
+
+        A COMMIT is safe to send again (#2176). The commit is recorded under
+        the transaction id in the same write as its rows, so a second COMMIT
+        of a transaction that committed gets the first reply back, with
+        `Idempotent-Replayed: true`, instead of 404 -- including after a
+        restart.
       parameters:
         - name: id
           in: path
           required: true
           schema:
             type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+          description: |
+            For a client that cannot tell whether its transaction committed
+            and runs it again from BEGIN. When a COMMIT under this key has
+            already succeeded, this transaction is rolled back and the first
+            reply returned with `Idempotent-Replayed: true`. A key used for an
+            autocommit write is refused with 422 and the transaction is left
+            open. Kept for `SAMYAMA_IDEMPOTENCY_TTL_SECS`, like a key on
+            `/api/query`. Visible ASCII, no spaces.
       responses:
         '200':
-          description: Committed
+          description: "Committed, or the reply to an earlier commit (`Idempotent-Replayed: true`)"
           content:
             application/json:
               schema:
@@ -158,14 +180,26 @@ paths:
                     type: boolean
                   version:
                     type: integer
+        '400':
+          description: A malformed Idempotency-Key; the transaction is left open
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: No such open transaction (already ended, or timed out and rolled back)
+          description: No such open transaction (never begun, or rolled back)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: The transaction timed out and was rolled back
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The Idempotency-Key was used for a different request; the transaction is left open
           content:
             application/json:
               schema:
@@ -199,6 +233,12 @@ paths:
                     type: boolean
         '404':
           description: No such open transaction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The transaction committed; it cannot be rolled back
           content:
             application/json:
               schema:
