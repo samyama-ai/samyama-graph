@@ -236,7 +236,7 @@ async fn a_malformed_key_is_refused_not_ignored() {
 }
 
 #[tokio::test]
-async fn a_key_where_it_is_not_supported_yet_is_refused_not_ignored() {
+async fn a_key_on_a_statement_inside_a_transaction_is_refused_not_ignored() {
     let app = app();
     let in_tx = send(
         &app,
@@ -247,16 +247,176 @@ async fn a_key_where_it_is_not_supported_yet_is_refused_not_ignored() {
     )
     .await;
     assert_eq!(in_tx.status, StatusCode::BAD_REQUEST);
+    assert!(String::from_utf8_lossy(&in_tx.body).contains("COMMIT"));
+    assert_eq!(count(&app, "T").await, 0);
+}
 
-    let commit = Request::builder()
+fn post(uri: &str, key: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder()
         .method("POST")
-        .uri("/api/tx/any/commit")
-        .header("idempotency-key", "k")
-        .body(Body::empty())
-        .unwrap();
-    let commit = send(&app, commit).await;
-    assert_eq!(commit.status, StatusCode::BAD_REQUEST);
-    assert!(String::from_utf8_lossy(&commit.body).contains("Idempotency-Key"));
+        .uri(uri)
+        .header("content-type", "application/json");
+    if let Some(k) = key {
+        b = b.header("idempotency-key", k);
+    }
+    b.body(Body::from("{}")).expect("request")
+}
+
+/// BEGIN, one CREATE of `label` inside it; the transaction id.
+async fn open_tx(app: &axum::Router, label: &str) -> String {
+    let begun = send(app, post("/api/tx/begin", None)).await;
+    assert_eq!(begun.status, StatusCode::OK);
+    let tx = begun.json()["tx"].as_str().expect("tx id").to_string();
+    let created = send(
+        app,
+        query_body(
+            serde_json::json!({ "query": format!("CREATE (:{label})"), "tx": tx }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::OK);
+    tx
+}
+
+async fn commit(app: &axum::Router, tx: &str, key: Option<&str>) -> Reply {
+    send(app, post(&format!("/api/tx/{tx}/commit"), key)).await
+}
+
+/// The COMMIT reply was lost and the client sends it again. It used to get
+/// 404, which reads as "not committed" and leads the client to run it again.
+#[tokio::test]
+async fn a_commit_asked_again_answers_what_the_first_did() {
+    let app = app();
+    let tx = open_tx(&app, "Again").await;
+    let first = commit(&app, &tx, None).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert!(!first.replayed);
+
+    let second = commit(&app, &tx, None).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert!(second.replayed);
+    assert_eq!(second.body, first.body);
+    assert_eq!(count(&app, "Again").await, 1);
+
+    let rollback = send(&app, post(&format!("/api/tx/{tx}/rollback"), None)).await;
+    assert_eq!(
+        rollback.status,
+        StatusCode::CONFLICT,
+        "a committed transaction cannot be rolled back"
+    );
+    assert_eq!(count(&app, "Again").await, 1);
+}
+
+#[tokio::test]
+async fn a_commit_of_a_transaction_never_begun_is_still_not_found() {
+    let app = app();
+    assert_eq!(
+        commit(&app, "never", None).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        commit(&app, "never", Some("k")).await.status,
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// The client could not tell whether its transaction committed and ran it
+/// again from BEGIN with the same key. The second run is rolled back and the
+/// first commit's reply returned: one node, not two.
+#[tokio::test]
+async fn a_transaction_run_again_under_a_committed_key_is_rolled_back() {
+    let app = app();
+    let first_tx = open_tx(&app, "Order").await;
+    let first = commit(&app, &first_tx, Some("order-1")).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert!(!first.replayed);
+
+    let second_tx = open_tx(&app, "Order").await;
+    let second = commit(&app, &second_tx, Some("order-1")).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert!(second.replayed);
+    assert_eq!(second.body, first.body, "the first commit's reply");
+    assert_eq!(
+        count(&app, "Order").await,
+        1,
+        "the re-run was not rolled back"
+    );
+
+    // The re-run released the lock: the store still takes writes.
+    assert_eq!(
+        send(&app, query("CREATE (:After)", None)).await.status,
+        StatusCode::OK
+    );
+    // A new key is a new transaction.
+    let third_tx = open_tx(&app, "Order").await;
+    assert!(!commit(&app, &third_tx, Some("order-2")).await.replayed);
+    assert_eq!(count(&app, "Order").await, 2);
+}
+
+/// A key already used for an autocommit write is a different request. The
+/// COMMIT is refused and the transaction left open, so it can be committed
+/// without the key.
+#[tokio::test]
+async fn a_commit_under_a_key_used_for_something_else_is_refused_and_left_open() {
+    let app = app();
+    send(&app, query("CREATE (:Other)", Some("shared"))).await;
+    let tx = open_tx(&app, "Mine").await;
+    let refused = commit(&app, &tx, Some("shared")).await;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let committed = commit(&app, &tx, None).await;
+    assert_eq!(
+        committed.status,
+        StatusCode::OK,
+        "the transaction was not left open"
+    );
+    assert!(!committed.replayed);
+    assert_eq!(count(&app, "Mine").await, 1);
+}
+
+#[tokio::test]
+async fn a_malformed_key_on_commit_is_refused_and_the_transaction_left_open() {
+    let app = app();
+    let tx = open_tx(&app, "Kept").await;
+    assert_eq!(
+        commit(&app, &tx, Some("has space")).await.status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(commit(&app, &tx, None).await.status, StatusCode::OK);
+    assert_eq!(count(&app, "Kept").await, 1);
+}
+
+/// The record of a commit is written with its rows, so it survives a restart
+/// that happens before the client's retry.
+#[tokio::test]
+async fn a_committed_transaction_is_remembered_across_a_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (tx, first) = {
+        let pm = Arc::new(PersistenceManager::new(dir.path()).expect("persistence"));
+        let store = Arc::new(RwLock::new(GraphStore::new()));
+        let app = HttpServer::new(store, 0).with_persistence(pm).router();
+        let tx = open_tx(&app, "Paid").await;
+        (tx.clone(), commit(&app, &tx, Some("pay-1")).await)
+    };
+    assert_eq!(first.status, StatusCode::OK);
+
+    let pm = Arc::new(PersistenceManager::new(dir.path()).expect("reopen"));
+    let mut store = GraphStore::new();
+    pm.recover_into("default", &mut store).expect("recover");
+    let app = HttpServer::new(Arc::new(RwLock::new(store)), 0)
+        .with_persistence(pm)
+        .router();
+
+    let asked_again = commit(&app, &tx, None).await;
+    assert_eq!(asked_again.status, StatusCode::OK);
+    assert_eq!(asked_again.body, first.body);
+
+    let rerun = open_tx(&app, "Paid").await;
+    let replayed = commit(&app, &rerun, Some("pay-1")).await;
+    assert!(replayed.replayed);
+    assert_eq!(replayed.body, first.body);
+    assert_eq!(count(&app, "Paid").await, 1);
 }
 
 #[tokio::test]

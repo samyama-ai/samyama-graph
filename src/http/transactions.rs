@@ -98,6 +98,32 @@ pub fn roll_back(mut txn: HttpTxn) {
     let _ = txn.guard.take_write_log();
 }
 
+/// The idempotency slot a committed transaction is recorded under (#2176).
+/// The space keeps it apart from every client key: `validate_key` refuses one.
+fn committed_slot(id: &str) -> String {
+    format!("tx {id}")
+}
+
+/// What a COMMIT is, for a key's fingerprint: any two COMMITs are the same
+/// request, and a COMMIT is never the same request as an autocommit query.
+fn commit_fingerprint() -> String {
+    crate::idempotency::fingerprint("COMMIT", "default", Some("tx"), &Default::default())
+}
+
+/// The earlier reply to a COMMIT of `id`, if it committed and is remembered.
+fn committed_reply(guard: &GraphStore, id: &str) -> Option<Response> {
+    let record = guard
+        .idempotency()
+        .get(
+            "default",
+            &committed_slot(id),
+            crate::idempotency::now_ms(),
+            crate::idempotency::ttl(),
+        )?
+        .clone();
+    super::handler::answer_seen(crate::idempotency::Lookup::Replay(record))
+}
+
 fn error(status: StatusCode, message: String) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
@@ -164,15 +190,23 @@ pub async fn commit_handler(
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    // Refused before the transaction is touched, so the client can commit it
-    // again without the header (#2176).
-    if headers.contains_key(crate::idempotency::HEADER) {
-        return super::handler::key_not_supported("on a transaction COMMIT");
-    }
+    // A malformed key is refused before the transaction is touched, so it
+    // can still be committed (#2176).
+    let key = match super::handler::idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(refused) => return refused,
+    };
     let mut txn = {
         let mut sessions = state.transactions.lock().await;
         let past_deadline = match sessions.get_mut(&id) {
-            None => return sessions.refused(&id),
+            None => {
+                // Not open. If it committed, answer what the commit did: a
+                // client asking again is one whose first reply was lost.
+                let refused = sessions.refused(&id);
+                drop(sessions);
+                let guard = state.store.read().await;
+                return committed_reply(&guard, &id).unwrap_or(refused);
+            }
             Some(txn) => (Instant::now() > txn.deadline).then_some(txn.limit),
         };
         // Past the deadline but not yet reaped: expire it here, the same way
@@ -183,20 +217,84 @@ pub async fn commit_handler(
             }
             return sessions.refused(&id);
         }
+        // A key already used is decided before the transaction is taken out,
+        // so a key used for something else leaves it open to be committed
+        // without the header.
+        if let Some(key) = &key {
+            let txn = sessions.get_mut(&id).expect("checked above");
+            let seen = txn.guard.idempotency().lookup(
+                "default",
+                key,
+                &commit_fingerprint(),
+                crate::idempotency::now_ms(),
+                crate::idempotency::ttl(),
+            );
+            match seen {
+                crate::idempotency::Lookup::Miss => {}
+                crate::idempotency::Lookup::Conflict => {
+                    return super::handler::answer_seen(seen).expect("a conflict has a reply");
+                }
+                // This transaction re-runs one that committed under the key:
+                // its writes would be the second copy. Roll them back and give
+                // the first commit's reply.
+                crate::idempotency::Lookup::Replay(_) => {
+                    let txn = sessions.remove(&id).expect("checked above");
+                    roll_back(txn);
+                    return super::handler::answer_seen(seen).expect("a replay has a reply");
+                }
+            }
+        }
         sessions.remove(&id).expect("checked above")
     };
-    // Persisted before the reply; refused and rolled back if it cannot be (#1274).
-    let version = match &state.persistence {
-        Some(pm) => match pm.commit_session_transaction("default", &mut txn.guard) {
-            Ok(v) => v,
-            Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
-        },
-        None => match txn.guard.commit_session_transaction() {
-            Ok(v) => v,
-            Err(e) => return error(StatusCode::CONFLICT, e.to_string()),
-        },
+
+    // The reply is built before the commit so it can be written with it.
+    let Some(version) = txn.guard.session_transaction_version() else {
+        return error(
+            StatusCode::CONFLICT,
+            format!("transaction '{id}' is not open in the store"),
+        );
     };
-    Json(json!({ "tx": id, "committed": true, "version": version })).into_response()
+    let body = json!({ "tx": id, "committed": true, "version": version });
+    let record = crate::idempotency::Record {
+        fingerprint: commit_fingerprint(),
+        status: StatusCode::OK.as_u16(),
+        body: serde_json::to_vec(&body).unwrap_or_default(),
+        version,
+        created_ms: crate::idempotency::now_ms(),
+    };
+    let mut slots = vec![committed_slot(&id)];
+    slots.extend(key);
+
+    // Persisted before the reply, in the same write as the records; refused
+    // and rolled back if it cannot be (#1274). Remembered in memory only once
+    // on disk, so a failed commit is never replayed as a committed one.
+    let committed = match &state.persistence {
+        Some(pm) => {
+            let keys = crate::idempotency::PendingWrites {
+                puts: slots
+                    .iter()
+                    .map(|slot| ("default".to_string(), slot.clone(), record.clone()))
+                    .collect(),
+                deletes: Vec::new(),
+            };
+            pm.commit_session_transaction_keyed("default", &mut txn.guard, &keys)
+                .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))
+        }
+        None => txn
+            .guard
+            .commit_session_transaction()
+            .map_err(|e| error(StatusCode::CONFLICT, e.to_string())),
+    };
+    if let Err(refused) = committed {
+        return refused;
+    }
+    let log = txn.guard.idempotency_mut();
+    for slot in &slots {
+        log.record("default", slot, record.clone(), crate::idempotency::ttl());
+    }
+    // Already written with the commit above.
+    let _ = log.take_pending();
+    Json(body).into_response()
 }
 
 pub async fn rollback_handler(State(state): State<AppState>, Path(id): Path<String>) -> Response {
@@ -204,7 +302,20 @@ pub async fn rollback_handler(State(state): State<AppState>, Path(id): Path<Stri
         let mut sessions = state.transactions.lock().await;
         match sessions.remove(&id) {
             Some(txn) => txn,
-            None => return sessions.refused(&id),
+            None => {
+                // A committed transaction cannot be rolled back; saying "no
+                // such transaction" would hide that it committed (#2176).
+                let refused = sessions.refused(&id);
+                drop(sessions);
+                let guard = state.store.read().await;
+                if committed_reply(&guard, &id).is_some() {
+                    return error(
+                        StatusCode::CONFLICT,
+                        format!("transaction '{id}' was committed; it cannot be rolled back"),
+                    );
+                }
+                return refused;
+            }
         }
     };
     roll_back(txn);
@@ -310,7 +421,8 @@ mod tests {
         let tx = begin(&app).await;
         post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
         let (status, _) = post_json(&app, &format!("/api/tx/{tx}/rollback"), json!({})).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "a committed transaction was rolled back");
+        // 409, not 404: "no such transaction" would hide that it committed (#2176).
+        assert_eq!(status, StatusCode::CONFLICT, "a committed transaction was rolled back");
         let (status, _) =
             post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "a query ran in a finished transaction");
