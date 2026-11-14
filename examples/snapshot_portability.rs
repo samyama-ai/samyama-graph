@@ -91,7 +91,7 @@ fn value_bytes(v: &PropertyValue) -> Vec<u8> {
 }
 
 /// What a query would see, reduced to numbers that can cross a machine.
-fn fingerprint(store: &GraphStore) -> BTreeMap<String, String> {
+pub fn fingerprint(store: &GraphStore) -> BTreeMap<String, String> {
     let nodes = store.all_nodes();
     let edges = store.all_edges();
 
