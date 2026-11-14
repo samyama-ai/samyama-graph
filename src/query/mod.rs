@@ -81,6 +81,7 @@ pub mod csv_source;
 pub mod span;
 pub mod suggest;
 pub mod metrics;
+pub mod slowlog;
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -298,6 +299,7 @@ impl QueryEngine {
         elapsed: std::time::Duration,
         rows: usize,
         succeeded: bool,
+        is_write: bool,
     ) {
         let ms = elapsed.as_millis() as u64;
         let slow = self.slow_query_ms != 0 && ms >= self.slow_query_ms;
@@ -311,6 +313,9 @@ impl QueryEngine {
         if !slow {
             return;
         }
+        // Kept as well as logged, so `/api/slowlog` can answer what the log
+        // line says without access to the server's stderr (#2079).
+        crate::query::slowlog::record(query_str, ms, self.slow_query_ms, rows, !succeeded);
         // Truncated: a generated query can be megabytes, and a log line that
         // fills the disk is its own outage.
         let text: String = query_str.chars().take(512).collect();
@@ -318,6 +323,11 @@ impl QueryEngine {
             elapsed_ms = ms,
             rows,
             threshold_ms = self.slow_query_ms,
+            failed = !succeeded,
+            is_write,
+            // Groups repeats of one statement without reading 512 characters
+            // of each, and survives the truncation above (#2076).
+            query_hash = %query_hash(query_str),
             query = %text,
             "slow query"
         );
@@ -394,6 +404,21 @@ impl QueryEngine {
         let query = Arc::new(parse_query(query_str).map_err(|e| with_span(Box::new(e), query_str))?);
         self.ast_cache.lock().unwrap().put(normalized, Arc::clone(&query));
         Ok(query)
+    }
+
+    /// `cached_parse` for a statement about to run: one that does not parse is
+    /// a failed query and is counted as one (#2080).
+    ///
+    /// The parse ran before the timer and before `log_if_slow`, so a syntax
+    /// error left `samyama_queries_total` and `samyama_queries_failed_total`
+    /// where they were -- a client sending nothing but broken statements showed
+    /// a clean failure rate. `statement_is_write` keeps the uncounted form: it
+    /// classifies, and the run that follows it is the one that counts.
+    fn parse_to_run(&self, query_str: &str) -> Result<Arc<Query>, Box<dyn std::error::Error>> {
+        let started = std::time::Instant::now();
+        self.cached_parse(query_str).inspect_err(|_| {
+            self.log_if_slow(query_str, started.elapsed(), 0, false, false);
+        })
     }
 
     /// Whether this statement can change the graph, answered by the parser.
@@ -490,12 +515,15 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        let mut query = self.cached_parse(query_str)?;
+        let parse_started = std::time::Instant::now();
+        let mut query = self.parse_to_run(query_str)?;
         // Only a non-Cypher dialect rewrites the AST, so only that pays for a
         // private copy; the shared one is never modified.
         if dialect != crate::query::ast::Dialect::Cypher {
             let mut own = (*query).clone();
             crate::query::dialect::apply(&mut own, dialect).map_err(|e| {
+                // Refused before it ran, like a parse error, and counted as one.
+                self.log_if_slow(query_str, parse_started.elapsed(), 0, false, false);
                 with_span(
                     Box::new(crate::query::ParseError::Coded {
                         code: e.code(),
@@ -534,6 +562,7 @@ impl QueryEngine {
             started.elapsed(),
             outcome.as_ref().map(|b| b.records.len()).unwrap_or(0),
             outcome.is_ok(),
+            false,
         );
         let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 
@@ -573,7 +602,7 @@ impl QueryEngine {
         sink: &mut dyn FnMut(&[String], Vec<executor::Record>) -> Result<(), String>,
         time_limit: Option<std::time::Duration>,
     ) -> Result<StreamedResult, Box<dyn std::error::Error>> {
-        let query = self.cached_parse(query_str)?;
+        let query = self.parse_to_run(query_str)?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
@@ -596,7 +625,7 @@ impl QueryEngine {
             rows += records.len();
             sink(columns, records).map_err(executor::ExecutionError::RuntimeError)
         });
-        self.log_if_slow(query_str, started.elapsed(), rows, outcome.is_ok());
+        self.log_if_slow(query_str, started.elapsed(), rows, outcome.is_ok(), false);
         let (columns, plan_hash) = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
         Ok(StreamedResult { columns, rows, plan_hash })
     }
@@ -658,7 +687,8 @@ impl QueryEngine {
         params: &BoundParams,
         time_limit: Option<std::time::Duration>,
     ) -> Result<(RecordBatch, bool), Box<dyn std::error::Error>> {
-        let query = self.cached_parse(query_str)?;
+        let started = std::time::Instant::now();
+        let query = self.parse_to_run(query_str)?;
         let mut effective = query.params.clone();
         effective.extend(params.clone());
         let key = ResultKey {
@@ -672,6 +702,10 @@ impl QueryEngine {
             let mut cache = self.result_cache.lock().unwrap();
             if let Some(hit) = cache.get(&key) {
                 self.result_stats.record_hit();
+                // A hit is a query answered, and it returned before anything
+                // was counted: `/metrics` showed fewer queries than were served
+                // and a latency histogram of misses only (#2080).
+                self.log_if_slow(query_str, started.elapsed(), hit.records.len(), true, false);
                 return Ok((hit.clone(), true));
             }
         }
@@ -820,7 +854,7 @@ impl QueryEngine {
         params: &BoundParams,
         time_limit: Option<std::time::Duration>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        let query = self.cached_parse(query_str)?;
+        let query = self.parse_to_run(query_str)?;
         let deadline = self.deadline(time_limit);
 
         // Both sides of this: the span on the error (#1358) and the timing
@@ -846,11 +880,29 @@ impl QueryEngine {
             started.elapsed(),
             outcome.as_ref().map(|b| b.records.len()).unwrap_or(0),
             outcome.is_ok(),
+            query.is_write(),
         );
         let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 
         Ok(result)
     }
+}
+
+/// A short, stable digest of a statement, for logs (#2076).
+///
+/// The first 16 hex digits of the SHA-256 of the whitespace-normalised text,
+/// the same normalisation the parse cache keys on, so two spellings of one
+/// statement that differ only in spacing hash alike. Stable across processes
+/// and releases, unlike `DefaultHasher`, so a hash read in one log can be
+/// searched for in another.
+pub fn query_hash(query_str: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized = query_str.split_whitespace().collect::<Vec<_>>().join(" ");
+    Sha256::digest(normalized.as_bytes())
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// An error carrying the message it had plus a caret pointing into the query.

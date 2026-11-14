@@ -21,6 +21,16 @@ scrape_configs:
    the pointer, not the answer.
 4. **The slow-query log** carries the query *text*, which is the part you can
    act on. Set `SLOW_QUERY_MS` to a number below your p95 and read the log.
+   Each line also carries `elapsed_ms`, `rows`, `failed`, `is_write` and a
+   `query_hash` (16 hex digits of the SHA-256 of the whitespace-normalised
+   text), so repeats of one statement group without reading the text.
+
+For a log collector (Loki, Vector, Fluent Bit), start the server with
+`--log-format json` or `SAMYAMA_LOG_FORMAT=json`. Every log event is then one
+JSON object per line on **stderr**, with `timestamp`, `level`, `target`,
+`fields` and the enclosing spans; stdout keeps the start-up banner, so the log
+stream holds nothing but JSON. Text on stdout remains the default, and any
+other value is refused at start-up rather than read as text.
 
 The panel and the log use the same threshold on purpose. A dashboard and a log
 that disagree about what "slow" means give an operator two numbers and a reason

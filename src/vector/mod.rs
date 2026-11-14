@@ -53,3 +53,6 @@ pub mod manager;
 
 pub use index::{VectorIndex, DistanceMetric, HnswParams, VectorError, VectorResult};
 pub use manager::{VectorIndexManager, IndexKey};
+
+mod checkpoint;
+pub mod strategy;
