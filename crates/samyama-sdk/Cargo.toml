@@ -24,6 +24,9 @@ reqwest = { version = "0.13.1", features = ["json"] }
 # Error handling
 thiserror = "1.0"
 
+# Idempotency keys for writes (#2176)
+uuid = { version = "1.8", features = ["v4"] }
+
 # Core graph database (for EmbeddedClient)
 # No default features: a library must not bring the server's allocator (ADR-038).
 samyama = { path = "../..", version = "1.14.0", default-features = false }

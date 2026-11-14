@@ -424,6 +424,47 @@ impl SamyamaClient {
         }
     }
 
+    /// Execute a Cypher query under an idempotency key the caller chose (#2176).
+    ///
+    /// Every `query` against a server is already sent with a key of its own,
+    /// so the client's own retries cannot apply a write twice. That key is new
+    /// per call, though: if the call raises, calling again is a second write.
+    /// A caller that wants to try again after an error that does not say
+    /// whether the write landed (a timeout, a dropped connection) picks the
+    /// key itself and sends it again: a write that committed under it answers
+    /// with its first result and does not run again, for as long as the server
+    /// keeps the key (`SAMYAMA_IDEMPOTENCY_TTL_SECS`, 24 h by default). The
+    /// same key with a different statement is refused.
+    ///
+    /// Visible ASCII, no spaces, at most 255 bytes. Refused on an embedded
+    /// client, which has no reply to lose and no server to keep the key.
+    #[pyo3(signature = (cypher, key, graph="default"))]
+    fn query_with_idempotency_key(
+        &self,
+        py: Python<'_>,
+        cypher: &str,
+        key: &str,
+        graph: &str,
+    ) -> PyResult<QueryResult> {
+        let result = py.detach(|| {
+            let rt = get_runtime();
+            match &*self.inner {
+                ClientInner::Embedded(_) => Err(samyama_sdk::SamyamaError::QueryError(
+                    "an idempotency key needs a server to keep it; an embedded client \
+                     has no reply to lose, so call query instead"
+                        .to_string(),
+                )),
+                ClientInner::Remote(c) => {
+                    rt.block_on(c.query_with_idempotency_key(graph, cypher, key))
+                }
+            }
+        });
+        match result {
+            Ok(r) => convert_query_result(r),
+            Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
+        }
+    }
+
     /// Execute a read-only Cypher query.
     ///
     /// See `query` for what `graph` does -- and does not -- select.
