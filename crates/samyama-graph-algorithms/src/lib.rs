@@ -1,4 +1,5 @@
 pub mod common;
+pub mod constrained_path;
 pub mod cpu_fallback;
 #[cfg(feature = "gpu")]
 pub mod gpu_dispatch;
@@ -22,6 +23,7 @@ pub mod pca;
 pub mod centrality;
 pub mod centrality_extra;
 pub mod link_prediction;
+pub mod negative_sampling;
 pub mod community_detect;
 pub mod metrics;
 pub mod pathfinding_extra;
@@ -30,6 +32,7 @@ pub mod temporal;
 pub mod embeddings;
 
 pub use common::{GraphView, NodeId};
+pub use constrained_path::{constrained_shortest_path, ConstrainedPath, ConstrainedPathError};
 pub use pagerank::{page_rank, page_rank_with, PageRankConfig};
 pub use progress::{NoProgress, Progress, Stopped};
 pub use community::{weakly_connected_components, WccResult, strongly_connected_components, SccResult};
@@ -48,6 +51,7 @@ pub use centrality::{
     eigenvector_centrality, harmonic_centrality, ranked, Scores,
 };
 pub use link_prediction::{predict_links, score_one, LinkScore, PairScore};
+pub use negative_sampling::{negative_samples, NegativeStrategy};
 pub use similarity_extra::{
     constraint, cosine_similarity, effective_size, node_similarity, overlap_coefficient,
     reciprocity,

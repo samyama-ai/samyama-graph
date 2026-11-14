@@ -836,14 +836,15 @@ impl PersistenceManager {
     /// Save vector indices to disk
     pub fn checkpoint_vectors(&self, vector_index: &crate::vector::VectorIndexManager) -> Result<(), PersistenceError> {
         let vector_path = self.base_path.join("vectors");
-        vector_index.dump_all(&vector_path)
+        vector_index.checkpoint_all(&vector_path)
             .map_err(|e| PersistenceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 
     /// Load vector indices from disk
     pub fn recover_vectors(&self, vector_index: &crate::vector::VectorIndexManager) -> Result<(), PersistenceError> {
         let vector_path = self.base_path.join("vectors");
-        vector_index.load_all(&vector_path)
+        vector_index.recover_checkpoint(&vector_path)
+            .map(|_| ())
             .map_err(|e| PersistenceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 }
