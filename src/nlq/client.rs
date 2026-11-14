@@ -47,6 +47,57 @@ pub struct Completion {
     /// Wall-clock time of the call, from sending the request to having the
     /// parsed answer.
     pub latency: Duration,
+    /// Whether a requested [`ResponseSchema`] was actually sent to the
+    /// provider, so the answer is constrained by construction.
+    ///
+    /// `false` both when no schema was asked for and when one was asked for
+    /// and the provider cannot take it -- see [`supports_response_schema`].
+    /// A caller that needs the guarantee must read this rather than assume
+    /// it: asking for a schema and being handed free text is the case a
+    /// silent `Ok` would hide, and the answer still has to be validated.
+    pub schema_enforced: bool,
+}
+
+/// A JSON Schema an answer must satisfy, for schema-constrained decoding
+/// (`EVAL-09`, #1743; the runner that uses it is #2130).
+///
+/// The same schema is spelled three ways by the three HTTP providers, and
+/// **they do not accept the same dialect**:
+///
+/// | provider | field | dialect |
+/// |---|---|---|
+/// | OpenAI / vLLM | `response_format.json_schema` | JSON Schema, and `strict` requires `additionalProperties: false` with every property listed in `required` |
+/// | Ollama | `format` | JSON Schema |
+/// | Gemini | `generationConfig.responseSchema` | an OpenAPI 3.0 subset, which rejects `additionalProperties` among others |
+///
+/// This type passes `schema` through as given rather than translating
+/// between those dialects, so a schema written for one provider can be
+/// refused by another with a 400. Translation is a real piece of work and
+/// is deliberately not in this change; what is here is the plumbing and the
+/// honest record of where it stops.
+#[derive(Clone, Debug)]
+pub struct ResponseSchema {
+    /// A short name for the schema. OpenAI requires one; the others ignore it.
+    pub name: String,
+    /// The JSON Schema itself.
+    pub schema: serde_json::Value,
+}
+
+/// Whether a provider can be asked for schema-constrained output at all.
+///
+/// The Claude Code CLI takes a prompt and returns text with no request body
+/// to carry a schema, and the mock calls no model, so for those two a
+/// requested schema is dropped and [`Completion::schema_enforced`] is
+/// `false`. They are not errors: a caller that can validate and repair its
+/// own output still works against them, which is why this reports a
+/// capability instead of refusing the call.
+pub fn supports_response_schema(provider: &LLMProvider) -> bool {
+    match provider {
+        LLMProvider::OpenAI | LLMProvider::Ollama | LLMProvider::Gemini => true,
+        LLMProvider::ClaudeCode | LLMProvider::Mock => false,
+        // Refused by `new`, so not reachable through a constructed client.
+        LLMProvider::AzureOpenAI | LLMProvider::Anthropic => false,
+    }
 }
 
 pub struct NLQClient {
@@ -113,11 +164,35 @@ impl NLQClient {
     /// ([`crate::nlq::metrics`]), so agent and enrichment calls through this
     /// client are counted as well as NLQ.
     pub async fn complete(&self, prompt: &str) -> NLQResult<Completion> {
+        self.complete_structured(prompt, None).await
+    }
+
+    /// The model's answer to `prompt`, asked to satisfy `schema`.
+    ///
+    /// When `schema` is `Some` and the provider can take one
+    /// ([`supports_response_schema`]), it is sent in that provider's own
+    /// field and the answer comes back constrained by construction, with
+    /// [`Completion::schema_enforced`] set. When the provider cannot take
+    /// one, the call still goes out unconstrained and `schema_enforced` is
+    /// `false` -- the caller is told rather than refused, because a caller
+    /// that validates its own output works either way.
+    ///
+    /// The answer is **not** validated against `schema` here. A provider can
+    /// return something that does not satisfy it (and Gemini and OpenAI
+    /// disagree about which schemas they will even accept), so validating
+    /// and repairing belongs to the caller. That is #2130's `SignatureRunner`;
+    /// this is the transport it needs.
+    pub async fn complete_structured(
+        &self,
+        prompt: &str,
+        schema: Option<&ResponseSchema>,
+    ) -> NLQResult<Completion> {
         let started = Instant::now();
+        let sent = schema.filter(|_| supports_response_schema(&self.config.provider));
         let answer = match self.config.provider {
-            LLMProvider::OpenAI => self.openai_chat(prompt).await,
-            LLMProvider::Ollama => self.ollama_chat(prompt).await,
-            LLMProvider::Gemini => self.gemini_chat(prompt).await,
+            LLMProvider::OpenAI => self.openai_chat(prompt, sent).await,
+            LLMProvider::Ollama => self.ollama_chat(prompt, sent).await,
+            LLMProvider::Gemini => self.gemini_chat(prompt, sent).await,
             LLMProvider::ClaudeCode => self
                 .claude_code_generate(prompt)
                 .await
@@ -140,6 +215,7 @@ impl NLQClient {
                     text,
                     usage,
                     latency,
+                    schema_enforced: sent.is_some(),
                 })
             }
             Err(e) => {
@@ -149,7 +225,11 @@ impl NLQClient {
         }
     }
 
-    async fn openai_chat(&self, prompt: &str) -> NLQResult<(String, TokenUsage)> {
+    async fn openai_chat(
+        &self,
+        prompt: &str,
+        schema: Option<&ResponseSchema>,
+    ) -> NLQResult<(String, TokenUsage)> {
         #[derive(Serialize)]
         struct Message {
             role: String,
@@ -161,6 +241,30 @@ impl NLQClient {
             model: &'a str,
             messages: Vec<Message>,
             temperature: f32,
+            /// Omitted entirely when no schema was asked for, so a request
+            /// without one is byte-for-byte what it was before.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            response_format: Option<ResponseFormat<'a>>,
+        }
+
+        #[derive(Serialize)]
+        struct ResponseFormat<'a> {
+            #[serde(rename = "type")]
+            kind: &'static str,
+            json_schema: JsonSchema<'a>,
+        }
+
+        #[derive(Serialize)]
+        struct JsonSchema<'a> {
+            name: &'a str,
+            schema: &'a serde_json::Value,
+            /// `strict` is what makes the decode constrained rather than
+            /// merely requested, which is the point of `EVAL-09`. OpenAI
+            /// only accepts it for a schema with
+            /// `additionalProperties: false` and every property in
+            /// `required`; a schema without those is rejected with a 400
+            /// rather than silently relaxed.
+            strict: bool,
         }
 
         #[derive(Deserialize)]
@@ -200,6 +304,14 @@ impl NLQClient {
                     Message { role: "user".to_string(), content: prompt.to_string() },
                 ],
                 temperature: 0.0,
+                response_format: schema.map(|s| ResponseFormat {
+                    kind: "json_schema",
+                    json_schema: JsonSchema {
+                        name: &s.name,
+                        schema: &s.schema,
+                        strict: true,
+                    },
+                }),
             })
             .send()
             .await
@@ -221,13 +333,21 @@ impl NLQClient {
         Ok((text, usage))
     }
 
-    async fn ollama_chat(&self, prompt: &str) -> NLQResult<(String, TokenUsage)> {
+    async fn ollama_chat(
+        &self,
+        prompt: &str,
+        schema: Option<&ResponseSchema>,
+    ) -> NLQResult<(String, TokenUsage)> {
         #[derive(Serialize)]
         struct Request<'a> {
             model: &'a str,
             prompt: String,
             system: String,
             stream: bool,
+            /// Ollama takes the JSON Schema itself here, not a wrapper, and
+            /// has no name for it. Omitted when no schema was asked for.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            format: Option<&'a serde_json::Value>,
         }
 
         #[derive(Deserialize)]
@@ -248,6 +368,7 @@ impl NLQClient {
                 prompt: prompt.to_string(),
                 system: system_prompt,
                 stream: false,
+                format: schema.map(|s| &s.schema),
             })
             .send()
             .await
@@ -281,12 +402,16 @@ impl NLQClient {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    async fn gemini_chat(&self, prompt: &str) -> NLQResult<(String, TokenUsage)> {
+    async fn gemini_chat(
+        &self,
+        prompt: &str,
+        schema: Option<&ResponseSchema>,
+    ) -> NLQResult<(String, TokenUsage)> {
         #[derive(Serialize)]
-        struct Request {
+        struct Request<'a> {
             contents: Vec<Content>,
             #[serde(rename = "generationConfig")]
-            generation_config: GenerationConfig,
+            generation_config: GenerationConfig<'a>,
         }
 
         #[derive(Serialize, Deserialize)]
@@ -301,8 +426,18 @@ impl NLQClient {
         }
 
         #[derive(Serialize)]
-        struct GenerationConfig {
+        struct GenerationConfig<'a> {
             temperature: f32,
+            /// Gemini constrains the decode only when *both* of these are
+            /// set: the schema alone is ignored without the MIME type.
+            /// Both are omitted when no schema was asked for.
+            #[serde(rename = "responseMimeType", skip_serializing_if = "Option::is_none")]
+            response_mime_type: Option<&'static str>,
+            /// An OpenAPI 3.0 schema subset, not full JSON Schema. Passed
+            /// through as given, so a schema carrying `additionalProperties`
+            /// -- which OpenAI's `strict` mode requires -- is refused here.
+            #[serde(rename = "responseSchema", skip_serializing_if = "Option::is_none")]
+            response_schema: Option<&'a serde_json::Value>,
         }
 
         #[derive(Deserialize)]
@@ -343,7 +478,11 @@ impl NLQClient {
                         parts: vec![Part { text: full_prompt }],
                     }
                 ],
-                generation_config: GenerationConfig { temperature: 0.0 },
+                generation_config: GenerationConfig {
+                    temperature: 0.0,
+                    response_mime_type: schema.map(|_| "application/json"),
+                    response_schema: schema.map(|s| &s.schema),
+                },
             })
             .send()
             .await
