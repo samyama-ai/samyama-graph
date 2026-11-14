@@ -14562,6 +14562,19 @@ impl PhysicalOperator for IndexScanOperator {
     }
 }
 
+/// A vector search restricted to the reflexive subtree under one hierarchy
+/// root (#445): `CALL db.index.vector.queryNodes(...) YIELD node MATCH (r:L
+/// {k: v}) WHERE subsumes(node, r)`, with `r` pinned to one node.
+#[derive(Debug, Clone)]
+pub struct HierarchyScope {
+    /// The pinned root.
+    pub root: NodeId,
+    /// The hierarchy index that answers `subsumes(node, r)` for this root.
+    pub index: String,
+    /// The variable the root is bound to, for EXPLAIN.
+    pub anchor: String,
+}
+
 /// Vector search operator: CALL db.index.vector.queryNodes(...)
 pub struct VectorSearchOperator {
     /// Label to search in
@@ -14589,6 +14602,8 @@ pub struct VectorSearchOperator {
     /// index's default.
     ef: Option<usize>,
     plan: Option<crate::vector::strategy::FilterPlan>,
+    /// The hierarchy subtree the search is restricted to (#445).
+    scope: Option<HierarchyScope>,
     /// Search results
     results: Vec<(NodeId, f32)>,
     /// Current index in results
@@ -14616,6 +14631,7 @@ impl VectorSearchOperator {
             filter: None,
             ef: None,
             plan: None,
+            scope: None,
             results: Vec::new(),
             current: 0,
         }
@@ -14638,6 +14654,12 @@ impl VectorSearchOperator {
         self
     }
 
+    /// Search only the subtree under a hierarchy root (#445).
+    pub fn with_scope(mut self, scope: Option<HierarchyScope>) -> Self {
+        self.scope = scope;
+        self
+    }
+
     /// Bind the raw distance to this variable (`YIELD distance`, #1980).
     pub fn with_distance_var(mut self, distance_var: Option<String>) -> Self {
         self.distance_var = distance_var;
@@ -14652,7 +14674,28 @@ impl VectorSearchOperator {
         // missing metric here only means there is nothing to score.
         self.metric = store.vector_index.metric(&self.label, &self.property_key);
 
-        let Some(filter) = &self.filter else {
+        // The subtree, from the index named when the plan was made. An index
+        // that has since become unusable drops the restriction: the WHERE
+        // above still applies, so the rows stay right and only the k
+        // guarantee is lost, as it is without the scope.
+        let entry = self
+            .scope
+            .as_ref()
+            .and_then(|scope| store.hierarchy_index.usable_named(&scope.index).map(|e| (scope.root, e)));
+        let guard = entry.as_ref().map(|(root, e)| (*root, e.read().unwrap()));
+        let hierarchy = guard.as_ref().and_then(|(root, g)| {
+            let index = g.index.as_ref()?;
+            Some((index, index.poset().idx(*root)?))
+        });
+        let in_scope = |id: NodeId| match hierarchy {
+            Some((index, root)) => index
+                .poset()
+                .idx(id)
+                .is_some_and(|x| index.subsumes(x, root)),
+            None => true,
+        };
+
+        if self.filter.is_none() && hierarchy.is_none() {
             self.results = store
                 .vector_search_where(
                     &self.label,
@@ -14664,25 +14707,40 @@ impl VectorSearchOperator {
                 )
                 .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
             return Ok(());
-        };
+        }
         // The search asks about one node at a time and takes a yes or no, so
         // the first error is kept and raised after it: a predicate that fails
         // must fail the query, as it would above the search, not read as
         // "no match".
         let error = std::cell::RefCell::new(None);
-        let results = store
-            .vector_search_where_planned(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, self.plan.as_ref().map(|p| p.strategy), |id| {
-                if error.borrow().is_some() {
-                    return false;
-                }
-                let mut record = Record::new();
-                record.bind(self.node_var.clone(), Value::NodeRef(id));
-                eval_predicate_standalone(filter, &record, store).unwrap_or_else(|e| {
-                    *error.borrow_mut() = Some(e);
-                    false
-                })
+        let keep = |id: NodeId| {
+            if error.borrow().is_some() || !in_scope(id) {
+                return false;
+            }
+            let Some(filter) = &self.filter else { return true };
+            let mut record = Record::new();
+            record.bind(self.node_var.clone(), Value::NodeRef(id));
+            eval_predicate_standalone(filter, &record, store).unwrap_or_else(|e| {
+                *error.borrow_mut() = Some(e);
+                false
             })
-            .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+        };
+        let strategy = self.plan.as_ref().map(|p| p.strategy);
+        let results = match hierarchy {
+            // Hierarchy-first: enumerate the subtree from the index and score
+            // only it.
+            Some((index, root)) if strategy == Some(crate::vector::strategy::FilterStrategy::Exact) => {
+                let candidates: Vec<NodeId> = index
+                    .descendants(root)
+                    .into_iter()
+                    .map(|i| index.poset().node_at(i))
+                    .collect();
+                store.vector_search_among(&self.label, &self.property_key, &self.query_vector, self.k, &candidates, keep)
+            }
+            // Vector-first: the graph search, with the subtree test as its filter.
+            _ => store.vector_search_where_planned(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, strategy, keep),
+        }
+        .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
         if let Some(e) = error.into_inner() {
             return Err(e);
         }
@@ -14741,6 +14799,12 @@ impl PhysicalOperator for VectorSearchOperator {
         }
         if let Some(f) = &self.filter {
             details.push_str(&format!(", filter: {}", format_expression(f)));
+        }
+        if let Some(scope) = &self.scope {
+            details.push_str(&format!(
+                ", hierarchy: subsumes({}, {}) via {} (root id {})",
+                self.node_var, scope.anchor, scope.index, scope.root.as_u64()
+            ));
         }
         if let Some(plan) = &self.plan {
             details.push_str(&format!(", {}", plan.describe()));
