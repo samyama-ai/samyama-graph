@@ -3,6 +3,7 @@
 //! Handles indexing for different node labels and property keys.
 
 use crate::graph::NodeId;
+use crate::vector::index::graph_io::GRAPH_SUFFIXES;
 use crate::vector::index::{HnswParams, Quantization};
 use crate::vector::index::{VectorIndex, DistanceMetric, VectorError, VectorResult};
 use std::collections::HashMap;
@@ -13,6 +14,23 @@ use std::sync::{Arc, RwLock};
 pub struct IndexKey {
     pub label: String,
     pub property_key: String,
+}
+
+/// What [`VectorIndexManager::recover_checkpoint`] did for each index (#1973).
+///
+/// An index is either reloaded from its HNSW graph, with no distance work,
+/// or rebuilt by re-inserting its vector list -- because the generation has
+/// no graph for it (written before graphs were, an empty index, a legacy
+/// dump), or because its graph failed its checksum or its consistency checks.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointRecovery {
+    /// Indexes whose graph was reloaded as written.
+    pub graphs_loaded: usize,
+    /// Indexes rebuilt from their vector list.
+    pub rebuilt: usize,
+    /// Vectors inserted into a graph to rebuild those indexes. Zero when
+    /// every index was reloaded from its graph.
+    pub vectors_reinserted: usize,
 }
 
 /// Manager for all vector indices in the system
@@ -578,7 +596,7 @@ impl VectorIndexManager {
                 return Err(VectorError::IndexError("unsafe or colliding vector checkpoint filename".into()));
             }
         }
-        self.dump_all(&staged)?;
+        self.write_all(&staged, true)?;
         super::checkpoint::seal(&staged)?;
         let mut pointer = tempfile::NamedTempFile::new_in(path)?;
         writeln!(pointer, "{generation}")?;
@@ -600,14 +618,23 @@ impl VectorIndexManager {
 
     /// Load only a fully verified generation, leaving live indexes intact on
     /// corruption or decode errors. Legacy dumps remain readable.
-    pub fn recover_checkpoint(&self, path: &std::path::Path) -> VectorResult<()> {
-        let source = match super::checkpoint::generation(path)? {
-            Some(generation) => { super::checkpoint::verify(&generation)?; generation }
-            None => path.to_path_buf(),
+    ///
+    /// Each index whose graph verified is reloaded from it without
+    /// re-inserting a vector; any other is rebuilt from its vector list
+    /// (#1973). The report says which happened.
+    pub fn recover_checkpoint(&self, path: &std::path::Path) -> VectorResult<CheckpointRecovery> {
+        let (source, graphs) = match super::checkpoint::generation(path)? {
+            Some(generation) => {
+                let graphs = super::checkpoint::verify(&generation)?;
+                (generation, Some(graphs))
+            }
+            None => (path.to_path_buf(), None),
         };
-        if !source.exists() || !source.join("metadata.json").exists() { return Ok(()); }
+        if !source.exists() || !source.join("metadata.json").exists() {
+            return Ok(CheckpointRecovery::default());
+        }
         let staged = Self::new();
-        staged.load_all(&source)?;
+        let report = staged.read_all(&source, graphs.as_ref())?;
         // Acquire all destination locks before publishing any component.
         let mut indices = self.indices.write().unwrap();
         let mut names = self.names.write().unwrap();
@@ -615,11 +642,17 @@ impl VectorIndexManager {
         *indices = std::mem::take(&mut *staged.indices.write().unwrap());
         *names = std::mem::take(&mut *staged.names.write().unwrap());
         *models = std::mem::take(&mut *staged.model_ids.write().unwrap());
-        Ok(())
+        Ok(report)
     }
 
     /// Save all indices to a directory
     pub fn dump_all(&self, path: &std::path::Path) -> VectorResult<()> {
+        self.write_all(path, false)
+    }
+
+    /// Save all indices, and with `graphs` each one's HNSW graph too, read
+    /// under the same lock as its vector list so the two agree (#1973).
+    fn write_all(&self, path: &std::path::Path, graphs: bool) -> VectorResult<()> {
         if !path.exists() {
             std::fs::create_dir_all(path)?;
         }
@@ -633,6 +666,9 @@ impl VectorIndexManager {
             let index_filename = format!("{}_{}.hnsw", key.label, key.property_key);
             let index_path = path.join(&index_filename);
             index.dump(&index_path)?;
+            if graphs {
+                index.dump_graph(path, &index_filename)?;
+            }
 
             let mut entry = serde_json::json!({
                 "label": key.label,
@@ -663,13 +699,27 @@ impl VectorIndexManager {
 
     /// Load all indices from a directory
     pub fn load_all(&self, path: &std::path::Path) -> VectorResult<()> {
+        self.read_all(path, None).map(|_| ())
+    }
+
+    /// Load all indices. `graphs` names the graph files a checkpoint
+    /// manifest verified; an index whose three graph files are all among
+    /// them is reloaded from its graph, and any other -- or one whose graph
+    /// will not load -- is rebuilt from its vector list (#1973). `None`
+    /// trusts no graph file, since nothing has checked them.
+    fn read_all(
+        &self,
+        path: &std::path::Path,
+        graphs: Option<&std::collections::BTreeSet<String>>,
+    ) -> VectorResult<CheckpointRecovery> {
+        let mut report = CheckpointRecovery::default();
         if !path.exists() {
-            return Ok(());
+            return Ok(report);
         }
 
         let metadata_path = path.join("metadata.json");
         if !metadata_path.exists() {
-            return Ok(());
+            return Ok(report);
         }
 
         let metadata_file = std::fs::File::open(metadata_path)?;
@@ -694,16 +744,36 @@ impl VectorIndexManager {
                     .map_err(|e| crate::vector::VectorError::IndexError(e.to_string()))?,
                 None => HnswParams::default(),
             };
-            let index = VectorIndex::load_with_params(
-                &index_path,
-                dimensions,
-                metric,
-                match item.get("quantization") {
-                    Some(q) => serde_json::from_value(q.clone()).map_err(|e| VectorError::IndexError(e.to_string()))?,
-                    None => Quantization::None,
-                },
-                params,
-            )?;
+            let quantization = match item.get("quantization") {
+                Some(q) => serde_json::from_value(q.clone()).map_err(|e| VectorError::IndexError(e.to_string()))?,
+                None => Quantization::None,
+            };
+            let verified = graphs.is_some_and(|ok| {
+                GRAPH_SUFFIXES.iter().all(|s| ok.contains(&format!("{filename}{s}")))
+            });
+            let reloaded = if verified {
+                match VectorIndex::load_graph(path, filename, dimensions, metric, quantization, params) {
+                    Ok(index) => Some(index),
+                    Err(e) => {
+                        eprintln!("[vector] {filename}: {e}; rebuilding from the vector list");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let index = match reloaded {
+                Some(index) => {
+                    report.graphs_loaded += 1;
+                    index
+                }
+                None => {
+                    let index = VectorIndex::load_with_params(&index_path, dimensions, metric, quantization, params)?;
+                    report.rebuilt += 1;
+                    report.vectors_reinserted += index.len();
+                    index
+                }
+            };
             
             let key = IndexKey {
                 label: label.to_string(),
@@ -728,7 +798,7 @@ impl VectorIndexManager {
             indices.insert(key, Arc::new(RwLock::new(index)));
         }
 
-        Ok(())
+        Ok(report)
     }
 }
 
