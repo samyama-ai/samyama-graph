@@ -456,6 +456,27 @@ pub async fn query_handler(
     subject: Option<Extension<Subject>>,
     headers: axum::http::HeaderMap,
     Json(payload): Json<QueryRequest>,
+) -> axum::response::Response {
+    // What the audit layer cannot see from outside: it never reads the body,
+    // so the statement's kind, graph and hash travel back on the response
+    // (#2081). A statement that does not parse counts as a write, as on RESP.
+    let audit = crate::http::server::AuditedQuery {
+        tenant: payload.graph.clone(),
+        is_write: state.engine.statement_is_write(&payload.query).unwrap_or(true),
+        query_hash: crate::http::server::query_hash(&payload.query),
+    };
+    let mut res = run_query(State(state), subject, headers, Json(payload))
+        .await
+        .into_response();
+    res.extensions_mut().insert(audit);
+    res
+}
+
+async fn run_query(
+    State(state): State<AppState>,
+    subject: Option<Extension<Subject>>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<QueryRequest>,
 ) -> impl IntoResponse {
     // Tenant binding and the statement's role (#1328). The route itself was
     // let through at Read by `require_credential`.
@@ -1211,6 +1232,25 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
         ));
     }
 
+    // Dead entries a vector index still walks through (#1972). A ratio that
+    // climbs towards a fifth means a rebuild is near; one that stays high
+    // means deletes are outpacing it.
+    out.push_str(
+        "# HELP samyama_vector_index_superseded Entries in a vector index's graph that no longer answer for a node.\n",
+    );
+    out.push_str("# TYPE samyama_vector_index_superseded gauge\n");
+    for i in &indexes {
+        if let Some(dead) = i.superseded {
+            out.push_str(&format!(
+                "samyama_vector_index_superseded{{label=\"{}\",property=\"{}\",name=\"{}\"}} {}\n",
+                i.label.replace('"', ""),
+                i.property.replace('"', ""),
+                i.name.as_deref().unwrap_or("").replace('"', ""),
+                dead
+            ));
+        }
+    }
+
     // Query latency last, because it is the part an operator opens this page
     // for. Everything above describes the graph; this describes what asking it
     // questions costs (REL-10).
@@ -1291,6 +1331,32 @@ pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse 
         },
         "tenants": state.tenant_manager.as_ref().map(|tm| tm.list_tenants().len()),
     }))
+}
+
+/// `?limit=N` on `GET /api/slowlog`.
+#[derive(Debug, Deserialize)]
+pub struct SlowlogParams {
+    limit: Option<usize>,
+}
+
+/// `GET /api/slowlog` — the most recent queries past `SLOW_QUERY_MS`, newest
+/// first (#2079). `limit` defaults to, and is capped at, the ring's size.
+///
+/// `samyama_slow_queries_total` said slow queries happened; this says which,
+/// without access to the server's stderr.
+pub async fn slowlog_handler(Query(params): Query<SlowlogParams>) -> impl IntoResponse {
+    use crate::query::slowlog;
+    let limit = params.limit.unwrap_or(slowlog::max_len()).min(slowlog::max_len());
+    Json(json!({
+        "len": slowlog::len(),
+        "max_len": slowlog::max_len(),
+        "entries": slowlog::recent(limit),
+    }))
+}
+
+/// `DELETE /api/slowlog` — empty the ring; reports how many entries it held.
+pub async fn slowlog_reset_handler() -> impl IntoResponse {
+    Json(json!({ "cleared": crate::query::slowlog::reset() }))
 }
 
 /// Handler for graph schema introspection

@@ -43,6 +43,8 @@
 //! alongside the HNSW structure. On serialization, this vector list is saved via
 //! `bincode`. On load, a fresh HNSW index is constructed and all stored vectors are
 //! re-inserted. This trades load-time speed for implementation simplicity.
+//! A checkpoint generation also carries the graph itself (`graph_io`), and
+//! recovery from a verified one reloads it without re-inserting (#1973).
 
 use crate::graph::NodeId;
 use crate::vector::distance;
@@ -51,6 +53,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use hnsw_rs::prelude::*;
 use thiserror::Error;
+
+/// Graph dump and reload for checkpoints (#1973).
+pub(crate) mod graph_io;
 
 /// Vector index errors
 #[derive(Error, Debug)]
@@ -795,25 +800,28 @@ impl VectorIndex {
         }
 
         // The graph still holds entries that no longer answer for a node
-        // (#1968). Ask for enough extra to cover them, and drop them after.
+        // (#1968). They are skipped during the walk, not after it (#1972):
+        // the search passes through a dead entry to reach its neighbours but
+        // never counts it among the results, so it neither takes a result
+        // slot nor needs the width widened to make room for it.
         let total = self.entries();
-        let fetch = (k + self.superseded).min(total);
+        let want = k.min(n);
         let ef_search = match ef.or(self.params.ef) {
-            Some(ef) => ef.max(fetch),
-            None => (fetch * 2).max(64),
+            Some(ef) => ef.max(want),
+            None => (want * 2).max(64),
         }
         .min(total);
-        // Tombstones increase both the result over-fetch and the search width.
         // Once the estimated layer-0 neighbour work (ef * 2m) reaches the
         // live population, scanning the live vectors is a better bounded
-        // choice than walking a wider, deletion-polluted random graph. It
-        // also avoids a full-length but low-recall result from that graph.
+        // choice than walking a deletion-polluted random graph.
         // Clean indexes retain their ANN path and configured search width.
         if self.superseded > 0
             && ef_search.saturating_mul(self.params.m).saturating_mul(2) >= n
         {
-            return Ok(self.report(self.brute_force_search(query, k.min(n))));
+            return Ok(self.report(self.brute_force_search(query, want)));
         }
+        let live = |id: &usize| self.is_current(*id);
+        let filter: Option<&dyn FilterT> = if self.superseded > 0 { Some(&live) } else { None };
         // hnsw_rs 0.2.1 can panic deep in search_layer (hnsw.rs:938,
         // `return_points.peek().unwrap()`) on certain graphs. A panic here would
         // unwind across the await point and take the whole server down, so a single
@@ -821,13 +829,13 @@ impl VectorIndex {
         // surface a clean error instead.
         let results = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match &self.backend {
-                Backend::F32(h) => h.search(query, fetch, ef_search),
+                Backend::F32(h) => h.search_filter(query, want, ef_search, filter),
                 // The query is quantized to the stored precision before the
                 // search, so the graph is walked with the same arithmetic it
                 // was built with.
                 Backend::F16(h) => {
                     let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
-                    h.search(&q, fetch, ef_search)
+                    h.search_filter(&q, want, ef_search, filter)
                 }
             }
         })) {
@@ -845,12 +853,13 @@ impl VectorIndex {
         };
 
         // Data ids are positions in the stored list; only a node's current
-        // entry answers for it.
+        // entry answers for it. The filter has already dropped the rest; this
+        // keeps the guarantee local should the walk ever return one anyway.
         let mut neighbors: Vec<(NodeId, f32)> = results
             .into_iter()
             .filter(|res| self.is_current(res.d_id))
             .map(|res| (NodeId::new(self.node_at(res.d_id)), res.distance))
-            .take(k.min(n))
+            .take(want)
             .collect();
 
         // HNSW can build a graph in which a stored vector has no path from the
