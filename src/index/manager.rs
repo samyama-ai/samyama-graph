@@ -33,6 +33,12 @@ pub struct IndexMemory {
     pub bytes: usize,
     /// Indexed node references, counting a node once per value it holds.
     pub entries: usize,
+    /// Vector indexes only: entries still in the graph that no longer answer
+    /// for a node (deleted, or replaced by a later value), awaiting the
+    /// rebuild that runs once they reach a fifth of the graph (#1972).
+    /// `entries` counts the live ones only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded: Option<usize>,
 }
 
 /// Manager for all property indices
@@ -138,6 +144,7 @@ impl IndexManager {
                     property: key.property.clone(),
                     bytes,
                     entries,
+                    superseded: None,
                 });
             }
         }

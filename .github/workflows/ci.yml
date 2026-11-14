@@ -278,8 +278,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs == 'true' && needs.changes.outputs.code != 'true'
     runs-on: ubuntu-latest
-    # A warm `ci-test` cache makes this a link step. A cold one is a full release
-    # build, hence the headroom.
+    # A warm `ci-gates` cache makes this a link step. A cold one is a full
+    # release build, hence the headroom.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -290,9 +290,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          # The same key the `test` job uses, so this restores that cache
-          # instead of building the workspace from scratch.
-          shared-key: ci-test
+          # The key the `gates` job uses, so this restores a cache that already
+          # holds a release build instead of building the workspace from
+          # scratch. It was `ci-test` while the gates lived in `test` and `test`
+          # therefore built both profiles (#2173).
+          shared-key: ci-gates
       - name: CH-DOC-EXEC -- the Cypher in our documentation parses
         # Byte-identical to the step inside `test`, so the two cannot drift into
         # disagreeing about what the gate is.
@@ -350,18 +352,27 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
-    # A warm run takes about 40 minutes on ARM; a cold-cache one (a new stable
-    # toolchain, an evicted cache) needs about 50. At 45 a cold ARM run was
-    # cancelled before its post-run cache save, so every following run on the
-    # branch started cold too and could never pass (#1608).
+    # Tests and a compile check, and nothing else: the conformance gates moved
+    # to `gates` so that the dev and release builds stop running in sequence in
+    # one job (#2173).
+    #
+    # Left at 60 rather than lowered to what `Tests` alone needs. The last
+    # measurement -- 35m42s on ARM, 20m02s on x86 -- was taken with the gates
+    # still here, sharing a cache with the release build, so what this job costs
+    # on its own is not yet known. Lower it once a run says. It must stay above a
+    # COLD run whatever the number: at 45 a cold ARM run was cancelled before its
+    # post-run cache save, so every following run on the branch started cold too
+    # and could never pass (#1608).
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         # ARM64 because we publish for it: linux-aarch64 and macos-aarch64
         # wheels, and a linux/arm64 image. Until this entry nothing ran on the
-        # architecture we ship to (#1044), and atomics ordering, FMA contraction
-        # in the numeric parity checks and C `char` signedness all differ there.
+        # architecture we ship to (#1044), and atomics ordering and C `char`
+        # signedness both differ there. FMA contraction does too; the gate that
+        # reads it is CH-ALGO-PARITY, which runs on both architectures in
+        # `gates`.
         os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
@@ -428,6 +439,67 @@ jobs:
         # what actually breaks when a signature changes.
         run: cargo check --workspace --all-targets
 
+  # The conformance gates, lifted out of `test` (#2173).
+  #
+  # They were steps in `test`, after a 36-minute `cargo test`, which put two full
+  # compilations of the workspace in one job: the dev build the tests need, then a
+  # cold `--release` build for the gates. `[profile.release]` is `lto = true` with
+  # `codegen-units = 1`, so that second build is the most expensive link Cargo
+  # offers. CH-META-PATH measured 12m05s on ARM not because a metamorphic test is
+  # slow but because it is the FIRST `--release` step and pays for the whole
+  # build; every gate after it took one to two minutes.
+  #
+  # Run in sequence that is ~65 minutes on ARM against a 60-minute limit, so
+  # `test (ubuntu-24.04-arm)` was cancelled 4m43s into its last gate. A cancelled
+  # run never reaches `Post Run Swatinem/rust-cache@v2`, so it saves no cache and
+  # the next run starts staler and is cancelled sooner -- #1608's trap, closed on
+  # #2152, #2161 and #2162 in turn.
+  #
+  # `timeout-minutes` is per job, so the fix is to stop doing the two builds in
+  # sequence rather than to raise the ceiling. This job runs BESIDE `test`, not
+  # after it: total compute is roughly unchanged and the critical path halves.
+  #
+  # The matrix is the same two architectures, because the matrix has a reason.
+  # But only a gate whose VERDICT can differ by architecture needs to run twice,
+  # and three of the nine cannot: CH-DOC-EXEC parses markdown, CH-API compares a
+  # route table against a YAML document, and LINT-RATCHET counts clippy warnings.
+  # Those are x86-only, and the GATES step asserts they really were skipped on
+  # ARM rather than trusting the `if:`.
+  gates:
+    name: gates (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.os }}
+    # The cold release build is ~12 minutes on ARM and the gates themselves ~11,
+    # so this sits well inside the limit. Left at 60 rather than lowered because
+    # the first run is what measures it; lower it once there is a number.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        # libclang is required by zstd-sys and is the single most common
+        # first-build failure on a clean host (CONTRIBUTING documents it).
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake pkg-config libssl-dev clang libclang-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # A separate key from `test`'s `ci-test`, deliberately. Sharing one key
+          # would have the two jobs race to save it, and the winner would decide
+          # whether the cache held the dev target dir or the release one -- worse
+          # than the single job that held both. The other jobs that do `--release`
+          # builds (`docs-gate`, `snapshot-portability`,
+          # `snapshot-portability-read`) restore this key instead of `ci-test`.
+          shared-key: ci-gates
+
       # ---- Conformance gates (spec 18 §5: these block commits, not releases,
       # because they are fast and catch the most damaging classes).
       #
@@ -473,6 +545,7 @@ jobs:
 
       - name: CH-DOC-EXEC — the Cypher in our documentation parses
         id: ch_doc_exec
+        if: matrix.os == 'ubuntu-latest'
         # Runs even if an earlier gate failed, and the run-all-gates step
         # below turns any failure into the job's failure. See that step.
         continue-on-error: true
@@ -484,6 +557,7 @@ jobs:
 
       - name: CH-API — the OpenAPI document and the server describe one API
         id: ch_api
+        if: matrix.os == 'ubuntu-latest'
         # Runs even if an earlier gate failed, and the run-all-gates step
         # below turns any failure into the job's failure. See that step.
         continue-on-error: true
@@ -545,6 +619,7 @@ jobs:
         run: ./scripts/check_thread_determinism.sh /tmp/openCypher/tck/features
 
       - name: The release gate refuses for three reasons, not one
+        if: matrix.os == 'ubuntu-latest'
         # It is the missing and the stale verdict that actually happen, and
         # both look like "nothing is wrong" to a check that only compares a
         # status string. This runs in CI because a gate nobody tests is a gate
@@ -552,9 +627,11 @@ jobs:
         run: python3 scripts/test_check_release_gate.py
 
       - name: Corpus runner reset preflights
+        if: matrix.os == 'ubuntu-latest'
         run: python3 -m unittest discover -s scripts -p test_falkordb_corpus_run.py
 
       - name: The triage-SLA measurement counts neither weekends nor labels
+        if: matrix.os == 'ubuntu-latest'
         # The daily measurement itself lives in triage-sla.yml, because whether
         # an issue got a reply is not a property of a PR. Its rules are, and a
         # change that breaks them should fail here, not on some later weekday.
@@ -562,6 +639,7 @@ jobs:
 
       - name: LINT-RATCHET — the clippy warning count may not rise
         id: lint_ratchet
+        if: matrix.os == 'ubuntu-latest'
         # Runs even if an earlier gate failed, and the run-all-gates step
         # below turns any failure into the job's failure. See that step.
         continue-on-error: true
@@ -597,7 +675,7 @@ jobs:
           cargo build --release --bin samyama
           python3 scripts/api_stability.py --check
 
-      - name: GATES — every gate above ran, and every one of them passed
+      - name: GATES — every gate this architecture runs ran, and every one passed
         # Each gate is `continue-on-error` so that one red does not skip the
         # rest. This step is what makes the job fail, and it is the only place
         # that does.
@@ -610,8 +688,14 @@ jobs:
         # measuring nothing for months. A gate nobody can see is a gate nobody
         # fixes.
         #
-        # `skipped` is failed here too. A gate that did not run has not passed,
-        # and treating the two alike is the defect this step exists to remove.
+        # `skipped` is failed here too, for every gate this architecture is
+        # expected to run. A gate that did not run has not passed, and treating
+        # the two alike is the defect this step exists to remove.
+        #
+        # The three architecture-independent gates are checked the OTHER way on
+        # ARM: they must be `skipped`, and a real outcome fails. Otherwise the
+        # `if:` above could drift back to running them and the only symptom
+        # would be the wall clock this split exists to cut (#2173).
         if: always()
         env:
           CH_META_PATH_OUTCOME: ${{ steps.ch_meta_path.outcome }}
@@ -623,34 +707,60 @@ jobs:
           LINT_RATCHET_OUTCOME: ${{ steps.lint_ratchet.outcome }}
           CH_ALGO_PARITY_OUTCOME: ${{ steps.ch_algo_parity.outcome }}
           CH_API_STABILITY_OUTCOME: ${{ steps.ch_api_stability.outcome }}
+          IS_X86: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
           failed=""
+          outcome_of() {
+            eval "printf '%s' \"\$$(echo "$1" | tr '[:lower:]' '[:upper:]')_OUTCOME\""
+          }
           check() {
-            eval "outcome=\$$(echo "$1" | tr '[:lower:]' '[:upper:]')_OUTCOME"
+            outcome=$(outcome_of "$1")
             case "$outcome" in
               success) printf '  PASS  %s\n' "$2" ;;
               *)       printf '  FAIL  %s (%s)\n' "$2" "$outcome"; failed="$failed $2" ;;
             esac
           }
+          # Gates whose verdict can differ by architecture. Both legs run these:
+          # CH-DETERM-THREADS reads atomics ordering, CH-ALGO-PARITY reads FMA
+          # contraction, CH-API-STABILITY and CH-IMPORT compare recorded bytes
+          # and numbers, and CH-META-PATH and CH-TCK are the engine answering.
           check ch_meta_path "CH-META-PATH"
           check ch_import "CH-IMPORT"
-          check ch_doc_exec "CH-DOC-EXEC"
-          check ch_api "CH-API"
           check ch_tck "CH-TCK"
           check ch_determ_threads "CH-DETERM-THREADS"
-          check lint_ratchet "LINT-RATCHET"
           check ch_algo_parity "CH-ALGO-PARITY"
           check ch_api_stability "CH-API-STABILITY"
+          # Architecture-independent, so x86 only -- and asserted to be absent
+          # on ARM rather than merely left out.
+          if [ "$IS_X86" = "true" ]; then
+            check ch_doc_exec "CH-DOC-EXEC"
+            check ch_api "CH-API"
+            check lint_ratchet "LINT-RATCHET"
+          else
+            for pair in ch_doc_exec:CH-DOC-EXEC ch_api:CH-API lint_ratchet:LINT-RATCHET; do
+              id=${pair%%:*}
+              nm=${pair#*:}
+              outcome=$(outcome_of "$id")
+              if [ "$outcome" = "skipped" ]; then
+                printf '  n/a   %s (architecture-independent; runs on x86)\n' "$nm"
+              else
+                printf '  FAIL  %s ran here (%s) but is declared x86-only\n' "$nm" "$outcome"
+                failed="$failed $nm"
+              fi
+            done
+          fi
           if [ -n "$failed" ]; then
             echo
             echo "failed gates:$failed"
             exit 1
           fi
           echo
-          echo "all gates ran and passed"
+          echo "every gate expected on this architecture ran and passed"
 
-      # The release binary the conformance job needs, so it does not spend ten
-      # minutes building the same thing. `conformance.yml` used to run its own
+      # The release binary the `gpml`, `orchestration` and `sdk-compat` jobs
+      # need, so they do not spend ten minutes building the same thing. It is
+      # uploaded from here rather than from `test` because this is the job that
+      # now does the release build (#2173). `conformance.yml` used to run its own
       # `cargo build --release --bin samyama`, averaging 10m 49s over 61 runs,
       # and a separate workflow cannot reuse this job's output -- which is the
       # reason that job is now in this file rather than its own (#1865).
@@ -894,7 +1004,9 @@ jobs:
   # differ between two exports of one graph.
   snapshot-portability:
     name: snapshot written on ${{ matrix.writer }}
-    needs: [changes, test]
+    # `gates` rather than `test`: what this job needs from an earlier job is a
+    # warm RELEASE cache, and that is the build `gates` now does (#2173).
+    needs: [changes, gates]
     if: needs.changes.outputs.code == 'true'
     timeout-minutes: 30
     strategy:
@@ -911,7 +1023,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-test
+          shared-key: ci-gates
       - name: Write the snapshot
         run: |
           set -euo pipefail
@@ -944,7 +1056,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-test
+          shared-key: ci-gates
       - uses: actions/download-artifact@v4
         with:
           name: sgsnap-from-${{ matrix.writer }}
@@ -973,7 +1085,7 @@ jobs:
   # It lived in `conformance.yml` until #1865. Folding it here does two things a
   # separate workflow could not:
   #
-  #   It takes the release binary from `test` instead of building its own. Two
+  #   It takes the release binary from `gates` instead of building its own. Two
   #   workflows cannot share an artifact -- a workflow cannot `needs:` a job in
   #   another one -- and that duplicate build averaged 10m 49s over 61 runs.
   #
@@ -988,7 +1100,7 @@ jobs:
   #   explicitly rather than simply omitted.
   gpml:
     name: GPML path-pattern conformance
-    needs: [changes, test]
+    needs: [changes, gates]
     if: needs.changes.outputs.conformance == 'true'
     runs-on: ubuntu-latest
     # Was 45 while a dead Grafeo adapter burned 60s per case on 84 cases (#1858).
@@ -1093,7 +1205,7 @@ jobs:
   # records the exemption so it cannot be forgotten.
   orchestration:
     name: orchestration (Airflow and Dagster reference pipelines)
-    needs: [changes, test]
+    needs: [changes, gates]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1163,7 +1275,7 @@ jobs:
   # breaks it is not enforced, and "enforced in CI" is the requirement.
   sdk-compat:
     name: sdk-compat (published SDKs against this build)
-    needs: [changes, test]
+    needs: [changes, gates]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1352,6 +1464,7 @@ jobs:
       - triage-sla-contract
       - supply-chain
       - test
+      - gates
       - docs-gate
       - sdks
       - snapshot-portability

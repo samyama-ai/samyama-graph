@@ -518,6 +518,26 @@ async fn a_parameter_the_query_never_uses_is_a_400() {
 }
 
 #[tokio::test]
+async fn explain_format_json_returns_the_plan_as_nested_json() {
+    // #2013: the plan arrives as an object a client reads, not text it parses.
+    let r = post_json(
+        routes(state()),
+        "/api/query",
+        json!({ "query": "EXPLAIN (FORMAT JSON) MATCH (n) RETURN n" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let j = r.json();
+    assert_eq!(j["columns"], json!(["plan"]));
+    let plan = &j["records"][0][0];
+    assert_eq!(plan["format_version"], 1, "{plan}");
+    assert_eq!(plan["kind"], "explain");
+    assert!(plan["root"]["operator"].is_string(), "{plan}");
+    assert!(plan["root"]["children"].is_array(), "{plan}");
+    assert!(plan["candidate_plans"].is_array(), "{plan}");
+}
+
+#[tokio::test]
 async fn a_bound_parameter_is_returned_as_its_value() {
     let r = post_json(
         routes(state()),
@@ -1887,6 +1907,22 @@ async fn algorithm_catalog_lists_every_algorithm_the_engine_dispatches() {
     assert_eq!(katz["writes"], false);
     let fast_rp = list.iter().find(|e| e["name"] == "algo.fastRP").unwrap();
     assert_eq!(fast_rp["writes"], true);
+
+    // Parameters: what to pass, how, and the value used when left out.
+    let alpha = katz["parameters"].as_array().unwrap().iter().find(|p| p["name"] == "alpha").unwrap();
+    assert_eq!(*alpha, serde_json::json!({
+        "name": "alpha", "kind": "config", "type": "float", "required": false, "default": 0.1
+    }));
+    let path = list.iter().find(|e| e["name"] == "algo.shortestPath").unwrap();
+    assert_eq!(path["parameters"][0]["kind"], "positional");
+    assert_eq!(path["parameters"][0]["type"], "node_id");
+    assert_eq!(path["parameters"][0]["required"], true);
+    // Projection and write-back support, read from the operator's own tables.
+    assert_eq!(katz["runs_on_projection"], true);
+    assert_eq!(katz["write_back_column"], "score");
+    let pca = list.iter().find(|e| e["name"] == "algo.pca").unwrap();
+    assert_eq!(pca["runs_on_projection"], false);
+    assert!(pca["write_back_column"].is_null());
 }
 
 #[tokio::test]
