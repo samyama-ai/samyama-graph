@@ -1907,6 +1907,22 @@ async fn algorithm_catalog_lists_every_algorithm_the_engine_dispatches() {
     assert_eq!(katz["writes"], false);
     let fast_rp = list.iter().find(|e| e["name"] == "algo.fastRP").unwrap();
     assert_eq!(fast_rp["writes"], true);
+
+    // Parameters: what to pass, how, and the value used when left out.
+    let alpha = katz["parameters"].as_array().unwrap().iter().find(|p| p["name"] == "alpha").unwrap();
+    assert_eq!(*alpha, serde_json::json!({
+        "name": "alpha", "kind": "config", "type": "float", "required": false, "default": 0.1
+    }));
+    let path = list.iter().find(|e| e["name"] == "algo.shortestPath").unwrap();
+    assert_eq!(path["parameters"][0]["kind"], "positional");
+    assert_eq!(path["parameters"][0]["type"], "node_id");
+    assert_eq!(path["parameters"][0]["required"], true);
+    // Projection and write-back support, read from the operator's own tables.
+    assert_eq!(katz["runs_on_projection"], true);
+    assert_eq!(katz["write_back_column"], "score");
+    let pca = list.iter().find(|e| e["name"] == "algo.pca").unwrap();
+    assert_eq!(pca["runs_on_projection"], false);
+    assert!(pca["write_back_column"].is_null());
 }
 
 #[tokio::test]
