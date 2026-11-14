@@ -457,6 +457,9 @@ pub async fn query_handler(
     headers: axum::http::HeaderMap,
     Json(payload): Json<QueryRequest>,
 ) -> axum::response::Response {
+    // The graph is in the body, which the request layer never reads; name it
+    // on the request's span here so every event below carries it (#2076).
+    tracing::Span::current().record("tenant", crate::logging::loggable_name(&payload.graph));
     // What the audit layer cannot see from outside: it never reads the body,
     // so the statement's kind, graph and hash travel back on the response
     // (#2081). A statement that does not parse counts as a write, as on RESP.
@@ -589,7 +592,11 @@ async fn run_query(
         snapshot_version = version;
         (result, props)
     } else {
-        let store_guard = state.store.read().await;
+        let store_guard = {
+            use tracing::Instrument;
+            // A stage of the request's trace (#2077).
+            state.store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+        };
         // The result cache is keyed on the statement text, which does not say which
         // dialect it was read under, so a GQL request must not be served from it until
         // the key carries the dialect. Bypassing is the conservative half of that:
@@ -742,14 +749,28 @@ async fn stream_query(
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamMsg>(STREAM_CHANNEL_CHUNKS);
-    let guard = std::sync::Arc::clone(&state.store).read_owned().await;
+    let guard = {
+        use tracing::Instrument;
+        // A stage of the request's trace (#2077).
+        std::sync::Arc::clone(&state.store)
+            .read_owned()
+            .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read"))
+            .await
+    };
     let engine = std::sync::Arc::clone(&state.engine);
     let time_limit = state.query_time_limit(&payload.graph);
     let runtime = tokio::runtime::Handle::current();
     let stall = stream_stall_budget();
     let query = payload.query;
+    // A blocking thread inherits neither the caller's span nor its subscriber;
+    // carry both across, so a slow streamed query is logged under its request
+    // like any other, by the same subscriber (#2076).
+    let span = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(|d| d.clone());
 
     tokio::task::spawn_blocking(move || {
+        let _subscriber = tracing::dispatcher::set_default(&dispatch);
+        let _request = span.enter();
         // A send that waits at most `stall` for room in the channel.
         let send = |msg: StreamMsg| -> Result<(), String> {
             match runtime.block_on(tokio::time::timeout(stall, tx.send(msg))) {

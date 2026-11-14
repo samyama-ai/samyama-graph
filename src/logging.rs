@@ -89,10 +89,102 @@ where
 /// it line by line would fail on the first banner line. stderr carries the
 /// log events and nothing else. Both go through `SubscriberInitExt::init`,
 /// which also forwards `log`-crate records.
+///
+/// With OpenTelemetry export asked for (#2077, see `crate::otel`), the same
+/// log output is kept, filtered at `info` as the plain subscriber is, and the
+/// export layer is added beside it; without it the subscriber is exactly the
+/// one above.
 pub fn init(format: LogFormat) {
     use tracing_subscriber::util::SubscriberInitExt;
+    #[cfg(feature = "otel")]
+    if let Some(provider) = crate::otel::from_env() {
+        use tracing_subscriber::filter::LevelFilter;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::Layer;
+        let logs = match format {
+            LogFormat::Text => tracing_subscriber::fmt::layer().boxed(),
+            LogFormat::Json => tracing_subscriber::fmt::layer()
+                .json()
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_writer(std::io::stderr)
+                .boxed(),
+        };
+        tracing_subscriber::registry()
+            .with(logs.with_filter(LevelFilter::INFO))
+            .with(crate::otel::layer(&provider))
+            .init();
+        return;
+    }
     match format {
         LogFormat::Text => tracing_subscriber::fmt::init(),
         LogFormat::Json => json_subscriber(std::io::stderr).init(),
     }
+}
+
+/// Flush what is still waiting to be exported. Call on the way out.
+pub fn shutdown() {
+    #[cfg(feature = "otel")]
+    crate::otel::shutdown();
+}
+
+// ── Request correlation (#2076) ────────────────────────────────────────────
+//
+// A log line from a busy server is one of many interleaved, and a slow-query
+// warning or a persistence error said nothing about which request caused it.
+// Every HTTP request and every RESP command now runs inside a `request` span
+// carrying an id, so each event inside it carries the same id: in JSON the
+// span is written on every line (`with_current_span`), in text it prefixes
+// the line. On HTTP the id goes back in `X-Request-Id`, so a caller holding a
+// response can find its log lines, and a caller's own id is kept when it sends
+// one, so the trace it started continues here.
+
+/// The header a request id is read from and written to.
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// The longest request id taken from a caller.
+pub const MAX_REQUEST_ID_LEN: usize = 128;
+
+/// A fresh request id: 32 hex digits, random.
+pub fn new_request_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// A caller's request id, if it is one this server will log.
+///
+/// It is written into every log line of the request, so it is held to what an
+/// id looks like: 1 to [`MAX_REQUEST_ID_LEN`] characters of letters, digits
+/// and `-` `_` `.` `:`. Anything else -- a newline, a quote, a 10 KB header --
+/// is not logged; the request gets a fresh id instead, rather than an error,
+/// because a bad correlation header is no reason to refuse a query.
+pub fn accept_request_id(supplied: &str) -> Option<&str> {
+    let ok = !supplied.is_empty()
+        && supplied.len() <= MAX_REQUEST_ID_LEN
+        && supplied
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'));
+    ok.then_some(supplied)
+}
+
+/// A caller-supplied name -- a graph, say -- as it may appear in a log line:
+/// itself when it passes the request-id rule, else a placeholder. The graph
+/// is recorded before anything checks it, and a name with a newline in it
+/// would otherwise forge a line in the text log.
+pub fn loggable_name(supplied: &str) -> &str {
+    accept_request_id(supplied).unwrap_or("(unloggable)")
+}
+
+/// The span a request runs in. `tenant` and `command` are filled in later by
+/// whoever knows them -- the HTTP query handler reads the graph from the body,
+/// which no layer outside it has parsed.
+pub fn request_span(request_id: &str, protocol: &'static str) -> tracing::Span {
+    tracing::info_span!(
+        "request",
+        request_id = %request_id,
+        protocol,
+        method = tracing::field::Empty,
+        path = tracing::field::Empty,
+        command = tracing::field::Empty,
+        tenant = tracing::field::Empty,
+    )
 }

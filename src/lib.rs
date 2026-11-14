@@ -117,6 +117,8 @@
 
 pub mod auth;
 pub mod logging;
+#[cfg(feature = "otel")]
+pub mod otel;
 pub mod allocator;
 pub mod graph;
 pub mod query;
