@@ -844,6 +844,7 @@ impl PersistenceManager {
     pub fn recover_vectors(&self, vector_index: &crate::vector::VectorIndexManager) -> Result<(), PersistenceError> {
         let vector_path = self.base_path.join("vectors");
         vector_index.recover_checkpoint(&vector_path)
+            .map(|_| ())
             .map_err(|e| PersistenceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
     }
 }
