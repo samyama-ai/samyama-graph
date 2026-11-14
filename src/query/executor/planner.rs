@@ -3076,8 +3076,9 @@ impl QueryPlanner {
 
         // 2. Handle CALL if present
         if let Some(call_clause) = &query.call_clause {
-            let pushdown = Self::vector_call_pushdown(query, call_clause);
-            let call_op = self.plan_call_filtered(call_clause, store, pushdown)?;
+            let scope = Self::vector_hierarchy_scope(query, call_clause, store);
+            let pushdown = Self::vector_call_pushdown(query, call_clause, scope.is_some());
+            let call_op = self.plan_call_filtered(call_clause, store, pushdown, scope)?;
             if let Some(existing_op) = operator {
                 // Check for shared variables to decide between Join and Cartesian Product
                 let mut shared_vars = Vec::new();
@@ -3797,7 +3798,7 @@ impl QueryPlanner {
     }
 
     fn plan_call(&self, call_clause: &CallClause, store: &GraphStore) -> ExecutionResult<OperatorBox> {
-        self.plan_call_filtered(call_clause, store, None)
+        self.plan_call_filtered(call_clause, store, None, None)
     }
 
     /// The part of `CALL db.index.vector.queryNodes(...) YIELD node WHERE ...`
@@ -3816,20 +3817,19 @@ impl QueryPlanner {
     /// that calls `rand()` would be drawn once inside the search and again
     /// above it, so a node could count towards k and then be dropped, giving
     /// short results and a skewed sample. Those stay above the search.
-    fn vector_call_pushdown(query: &Query, call_clause: &CallClause) -> Option<Expression> {
+    ///
+    /// `anchored` is set when the only MATCH pins one node that the search is
+    /// scoped under (`vector_hierarchy_scope`): that MATCH contributes exactly
+    /// one row, so it does not share the WHERE any more than no MATCH does.
+    fn vector_call_pushdown(query: &Query, call_clause: &CallClause, anchored: bool) -> Option<Expression> {
         if call_clause.procedure_name != "db.index.vector.queryNodes"
-            || !query.match_clauses.is_empty()
+            || !(query.match_clauses.is_empty() || anchored)
             || query.with_clause.is_some()
         {
             return None;
         }
         let where_clause = query.where_clause.as_ref()?;
-        let node_var = call_clause
-            .yield_items
-            .iter()
-            .find(|item| item.name == "node")
-            .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
-            .unwrap_or_else(|| "node".to_string());
+        let node_var = Self::vector_node_var(call_clause);
         flatten_and_predicates(&where_clause.predicate)
             .into_iter()
             .filter(|conjunct| {
@@ -3844,11 +3844,98 @@ impl QueryPlanner {
             })
     }
 
+    /// The variable `YIELD node` binds.
+    fn vector_node_var(call_clause: &CallClause) -> String {
+        call_clause
+            .yield_items
+            .iter()
+            .find(|item| item.name == "node")
+            .map(|item| item.alias.clone().unwrap_or_else(|| item.name.clone()))
+            .unwrap_or_else(|| "node".to_string())
+    }
+
+    /// A vector search the WHERE confines to one hierarchy subtree (#445):
+    ///
+    /// ```text
+    /// CALL db.index.vector.queryNodes(...) YIELD node
+    /// MATCH (r:Term {code: "T0"}) WHERE subsumes(node, r) ...
+    /// ```
+    ///
+    /// Recognised only when the query's one MATCH is that single node
+    /// pattern, it pins exactly one node (`resolve_pinned_node`), and a
+    /// top-level conjunct of the WHERE is `subsumes(node, r)` or
+    /// `subsumes(node, r, 'index')`. The index that answers it is fixed from
+    /// the root alone only when no other usable hierarchy holds the root --
+    /// otherwise which one `subsumes` consults depends on `node`.
+    ///
+    /// Returned with the subtree's size, which the OEH index answers without
+    /// enumerating it: that is the cardinality the planner orders the two
+    /// searches by. As with the property pushdown (#1969), the subtree then
+    /// decides which nodes count towards k; the WHERE is still applied above,
+    /// so no row passes that did not before -- the search just no longer
+    /// returns fewer than k because the global nearest lay outside the subtree.
+    fn vector_hierarchy_scope(
+        query: &Query,
+        call_clause: &CallClause,
+        store: &GraphStore,
+    ) -> Option<(super::operator::HierarchyScope, usize)> {
+        if call_clause.procedure_name != "db.index.vector.queryNodes"
+            || query.with_clause.is_some()
+            || query.match_clauses.len() != 1
+            || store.hierarchy_index.is_empty()
+        {
+            return None;
+        }
+        let mc = &query.match_clauses[0];
+        if mc.optional || mc.pattern.paths.len() != 1 {
+            return None;
+        }
+        let path = &mc.pattern.paths[0];
+        if !path.segments.is_empty() || path.path_variable.is_some() {
+            return None;
+        }
+        let anchor = path.start.variable.as_ref()?;
+        let node_var = Self::vector_node_var(call_clause);
+        if *anchor == node_var || path.start.property_exprs.as_ref().is_some_and(|p| !p.is_empty()) {
+            return None;
+        }
+        let where_clause = query.where_clause.as_ref()?;
+        let named = flatten_and_predicates(&where_clause.predicate).into_iter().find_map(|c| match c {
+            Expression::Function { name, args, distinct: false }
+                if name.eq_ignore_ascii_case("subsumes") && (args.len() == 2 || args.len() == 3) =>
+            {
+                match (&args[0], &args[1], args.get(2)) {
+                    (Expression::Variable(x), Expression::Variable(y), None)
+                        if *x == node_var && y == anchor => Some(None),
+                    (Expression::Variable(x), Expression::Variable(y), Some(Expression::Literal(PropertyValue::String(n))))
+                        if *x == node_var && y == anchor => Some(Some(n.clone())),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })?;
+        let root = super::hierarchy_detector::resolve_pinned_node(store, &path.start)?;
+        let entry = match &named {
+            Some(n) => store.hierarchy_index.usable_named(n)?,
+            None => store.hierarchy_index.only_usable_containing(root)?,
+        };
+        let guard = entry.read().ok()?;
+        let index = guard.index.as_ref()?;
+        let subtree = index.descendant_count(index.poset().idx(root)?);
+        let scope = super::operator::HierarchyScope {
+            root,
+            index: guard.spec.name.clone(),
+            anchor: anchor.clone(),
+        };
+        Some((scope, subtree))
+    }
+
     fn plan_call_filtered(
         &self,
         call_clause: &CallClause,
         store: &GraphStore,
         vector_filter: Option<Expression>,
+        scope: Option<(super::operator::HierarchyScope, usize)>,
     ) -> ExecutionResult<OperatorBox> {
         if call_clause.procedure_name == "db.index.fulltext.queryNodes" {
             // Neo4j's signature: (indexName, queryString) with an optional
@@ -4137,18 +4224,42 @@ impl QueryPlanner {
                 }
             }
 
-            let plan = vector_filter.as_ref().and_then(|filter| {
-                let selectivity = vector_filter_selectivity(filter, &node_var, &label, store)?;
-                let index = store.vector_index.get_index(&label, &property)?;
-                let index = index.read().ok()?;
-                let params = index.params();
-                Some(crate::vector::strategy::FilterPlan::estimate(
-                    index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, selectivity,
-                ))
-            });
+            // With a hierarchy scope the subtree size is the estimate (#445):
+            // exact over the subtree when it is small, the graph search with
+            // the subtree as its filter when it is most of the index. A
+            // further filter whose selectivity is unknown is priced as
+            // passing everything, the dearest case for the exact side.
+            let (scope, subtree) = match scope {
+                Some((scope, subtree)) => (Some(scope), Some(subtree)),
+                None => (None, None),
+            };
+            let plan = if let Some(subtree) = subtree {
+                let filter_selectivity = vector_filter
+                    .as_ref()
+                    .map_or(Some(1.0), |filter| vector_filter_selectivity(filter, &node_var, &label, store))
+                    .unwrap_or(1.0);
+                store.vector_index.get_index(&label, &property).and_then(|index| {
+                    let index = index.read().ok()?;
+                    let params = index.params();
+                    Some(crate::vector::strategy::FilterPlan::estimate_enumerated(
+                        index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, subtree, filter_selectivity,
+                    ))
+                })
+            } else {
+                vector_filter.as_ref().and_then(|filter| {
+                    let selectivity = vector_filter_selectivity(filter, &node_var, &label, store)?;
+                    let index = store.vector_index.get_index(&label, &property)?;
+                    let index = index.read().ok()?;
+                    let params = index.params();
+                    Some(crate::vector::strategy::FilterPlan::estimate(
+                        index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, selectivity,
+                    ))
+                })
+            };
             Ok(Box::new(
                 VectorSearchOperator::new(label, property, query_vector, k, node_var, score_var)
                     .with_plan(plan)
+                    .with_scope(scope)
                     .with_filter(vector_filter)
                     .with_ef(ef)
                     .with_distance_var(distance_var),
