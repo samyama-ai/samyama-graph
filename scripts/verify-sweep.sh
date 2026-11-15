@@ -118,9 +118,17 @@ if ! step tests; then
   cargo test --workspace --release -j "$JOBS" >"${LOGS}/tests.log" 2>&1
   rc=$?
   {
+    # `$7`, not `$6`. Splitting "test result: ok. 5 passed; 0 failed; ..." on
+    # space *and* `;` leaves an empty field where the `;` was, so the failed
+    # count is $7 and $6 is "". `f+=$6` therefore summed nothing and this file
+    # reported `failed=0` for every run, including one with five failures
+    # (2026-11-14). That matters beyond the summary: the gate below asserts
+    # `failed=0`, so that check passed unconditionally and only the `exit=0`
+    # line was holding the stage -- one live guard where there were meant to
+    # be two.
     echo "exit=${rc}"
     grep -E "^test result" "${LOGS}/tests.log" \
-      | awk -F'[ ;]' '{p+=$4; f+=$6} END {print "passed=" p " failed=" f}'
+      | awk -F'[ ;]' '{p+=$4; f+=$7} END {print "passed=" p " failed=" f}'
     grep -E "^test .* FAILED" "${LOGS}/tests.log" | head -20
   } > "${RESULTS}/tests.txt"
   mark tests
