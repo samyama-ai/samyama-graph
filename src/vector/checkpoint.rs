@@ -1,10 +1,13 @@
 //! Immutable, checksummed generations. CURRENT is the atomic publication point.
-//! These files still contain vector-list dumps, not HNSW graph topology.
+//! Each holds every index's vector list and, where it could be written, its
+//! HNSW graph (#1973). The vector list is required; the graph is an
+//! accelerator, and a graph file that fails its checksum only costs a rebuild.
+use super::index::graph_io::GRAPH_SUFFIXES;
 use super::{VectorError, VectorResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     path::{Component, Path},
 };
@@ -48,18 +51,35 @@ pub(super) fn seal(path: &Path) -> VectorResult<()> {
             .map_err(|_| bad("non-UTF8 checkpoint filename"))?;
         filename(&name)?;
         files.insert(name, digest(&entry.path())?);
-        std::fs::File::open(entry.path())?.sync_all()?;
+        // Opened for writing, not with `File::open`. `sync_all` is
+        // `FlushFileBuffers` on Windows, which needs a handle carrying write
+        // access and returns "Access is denied" (os error 5) without one --
+        // so the read-only handle this used to take failed every
+        // `checkpoint_all` on Windows, not only a republish (#1696). A
+        // read-only fsync is fine on Unix, which is why it survived here.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(entry.path())?
+            .sync_all()?;
     }
     let mut out = std::fs::File::create(path.join("manifest.json"))?;
     serde_json::to_writer(&mut out, &Manifest { version: 1, files })
         .map_err(|e| bad(e.to_string()))?;
     out.flush()?;
     out.sync_all()?;
+    // Unix only -- same reason as the sibling fsync in `manager`, and as
+    // `snapshot::persist` (#1696). This one is the directory, which Windows
+    // refuses to open at all; the per-file fsyncs above are files, and are
+    // portable now that they are taken on a writable handle.
+    #[cfg(unix)]
     std::fs::File::open(path)?.sync_all()?;
     Ok(())
 }
 /// Validate all bytes and metadata before any live index is replaced.
-pub(super) fn verify(path: &Path) -> VectorResult<()> {
+/// Returns the graph files that passed; a graph file that failed is left
+/// out rather than failing the generation, since its index can be rebuilt
+/// from its vector list, which is never optional.
+pub(super) fn verify(path: &Path) -> VectorResult<BTreeSet<String>> {
     let manifest: Manifest =
         serde_json::from_reader(std::fs::File::open(path.join("manifest.json"))?)
             .map_err(|e| bad(e.to_string()))?;
@@ -69,9 +89,20 @@ pub(super) fn verify(path: &Path) -> VectorResult<()> {
     if !manifest.files.contains_key("metadata.json") {
         return Err(bad("checkpoint has no metadata"));
     }
+    let mut graphs = BTreeSet::new();
     for (name, expected) in &manifest.files {
         filename(name)?;
-        if digest(&path.join(name))? != *expected {
+        let graph = GRAPH_SUFFIXES.iter().any(|s| name.ends_with(s));
+        let matches = match digest(&path.join(name)) {
+            Ok(actual) => actual == *expected,
+            Err(_) if graph => false,
+            Err(e) => return Err(e),
+        };
+        if graph {
+            if matches {
+                graphs.insert(name.clone());
+            }
+        } else if !matches {
             return Err(bad(format!("vector checkpoint checksum mismatch: {name}")));
         }
     }
@@ -91,11 +122,14 @@ pub(super) fn verify(path: &Path) -> VectorResult<()> {
             .as_str()
             .ok_or_else(|| bad("missing filename"))?;
         filename(file)?;
+        if GRAPH_SUFFIXES.iter().any(|s| file.ends_with(s)) {
+            return Err(bad("vector list named as a graph file"));
+        }
         if !manifest.files.contains_key(file) {
             return Err(bad("index file absent from manifest"));
         }
     }
-    Ok(())
+    Ok(graphs)
 }
 pub(super) fn generation(root: &Path) -> VectorResult<Option<std::path::PathBuf>> {
     let current = root.join("CURRENT");

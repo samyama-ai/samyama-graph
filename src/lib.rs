@@ -116,6 +116,7 @@
 #![warn(clippy::all)]
 
 pub mod auth;
+pub mod logging;
 pub mod allocator;
 pub mod graph;
 pub mod query;

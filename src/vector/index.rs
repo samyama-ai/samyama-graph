@@ -43,6 +43,8 @@
 //! alongside the HNSW structure. On serialization, this vector list is saved via
 //! `bincode`. On load, a fresh HNSW index is constructed and all stored vectors are
 //! re-inserted. This trades load-time speed for implementation simplicity.
+//! A checkpoint generation also carries the graph itself (`graph_io`), and
+//! recovery from a verified one reloads it without re-inserting (#1973).
 
 use crate::graph::NodeId;
 use crate::vector::distance;
@@ -51,6 +53,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use hnsw_rs::prelude::*;
 use thiserror::Error;
+
+/// Graph dump and reload for checkpoints (#1973).
+pub(crate) mod graph_io;
 
 /// Vector index errors
 #[derive(Error, Debug)]
@@ -1079,6 +1084,55 @@ impl VectorIndex {
             });
         }
         Ok(self.report(self.brute_force_where(query, k, keep)))
+    }
+
+    /// `search_exact_where` over a candidate set rather than the whole index
+    /// (#445): only `candidates` are read, so a hierarchy subtree is scored
+    /// without visiting the vectors outside it. Candidates without a current
+    /// entry are skipped. The answer equals `search_exact_where` with a `keep`
+    /// that passes exactly the candidates, ties included: entries are scored
+    /// in storage order, as the full scan scores them.
+    pub fn search_exact_among(
+        &self,
+        query: &[f32],
+        k: usize,
+        candidates: &[NodeId],
+        keep: &dyn Fn(NodeId) -> bool,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        if query.len() != self.dimensions {
+            return Err(VectorError::DimensionMismatch {
+                expected: self.dimensions,
+                got: query.len(),
+            });
+        }
+        let mut positions: Vec<usize> = candidates
+            .iter()
+            .filter_map(|id| self.current.get(&id.as_u64()).copied())
+            .collect();
+        positions.sort_unstable();
+        positions.dedup();
+        let distance = MetricDistance(self.metric);
+        let mut scored: Vec<(NodeId, f32)> = match self.quantization {
+            Quantization::None => positions
+                .into_iter()
+                .filter_map(|i| self.stored_f32.get(i))
+                .filter(|sv| keep(NodeId::new(sv.node_id)))
+                .map(|sv| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
+                .collect(),
+            Quantization::Fp16 => {
+                let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
+                positions
+                    .into_iter()
+                    .filter_map(|i| self.stored_f16.get(i))
+                    .filter(|(id, _)| keep(NodeId::new(*id)))
+                    .map(|(id, v)| (NodeId::new(*id), distance.eval(&q, v)))
+                    .collect()
+            }
+        };
+        scored.retain(|(_, d)| d.is_finite());
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k);
+        Ok(self.report(scored))
     }
 
     fn brute_force_where(
