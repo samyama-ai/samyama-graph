@@ -14,11 +14,17 @@ use std::io::{BufRead, BufReader};
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
+    let argv: Vec<String> = std::env::args().collect();
+    match samyama::logging::LogFormat::from_args_and_env(&argv) {
+        Ok(format) => samyama::logging::init(format),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
 
     // Subcommands are handled before the demo and the server, so `verify` is a
     // tool that exits with a status rather than a database that starts up.
-    let argv: Vec<String> = std::env::args().collect();
     match argv.get(1).map(|s| s.as_str()) {
         Some("verify") => std::process::exit(cmd_verify(&argv)),
         Some("catalog-build") => std::process::exit(cmd_catalog_build(&argv)),

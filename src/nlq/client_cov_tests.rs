@@ -471,3 +471,155 @@ fn usage_serialises_with_null_for_what_was_not_reported() {
         serde_json::json!({ "prompt_tokens": null, "completion_tokens": 2, "total_tokens": null })
     );
 }
+
+// ------------------------------------------- schema-constrained decoding
+//
+// `EVAL-09` (#1743) asks for output constrained by a schema rather than
+// requested in prose. These tests assert the *payload* each provider is
+// sent, because that is the whole of what this layer does: whether the
+// model then obeys is the provider's business, and validating the answer is
+// #2130's `SignatureRunner`. Each provider is checked both ways -- with a
+// schema and without -- since a request that quietly carries a schema field
+// when none was asked for would change every existing call.
+
+fn schema() -> ResponseSchema {
+    ResponseSchema {
+        name: "cypher_answer".to_string(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": { "cypher": { "type": "string" } },
+            "required": ["cypher"],
+            "additionalProperties": false,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn openai_sends_the_schema_as_a_strict_json_schema() {
+    let srv = MockHttp::serve(vec![(200, openai_ok("RETURN 1"))]);
+    let client =
+        NLQClient::new(&cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
+
+    let out = client
+        .complete_structured("q", Some(&schema()))
+        .await
+        .unwrap();
+    assert!(out.schema_enforced, "the schema went out, so it is enforced");
+
+    let body = srv.requests()[0].json();
+    assert_eq!(body["response_format"]["type"], "json_schema");
+    assert_eq!(body["response_format"]["json_schema"]["name"], "cypher_answer");
+    // `strict` is what constrains the decode; without it the schema is a
+    // suggestion and `EVAL-09` is not satisfied.
+    assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+    assert_eq!(
+        body["response_format"]["json_schema"]["schema"]["required"][0],
+        "cypher"
+    );
+}
+
+#[tokio::test]
+async fn openai_omits_response_format_when_no_schema_is_asked_for() {
+    let srv = MockHttp::serve(vec![(200, openai_ok("RETURN 1"))]);
+    let client =
+        NLQClient::new(&cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
+
+    let out = client.complete("q").await.unwrap();
+    assert!(!out.schema_enforced);
+    assert!(
+        srv.requests()[0].json().get("response_format").is_none(),
+        "an unconstrained request must be what it was before this change"
+    );
+}
+
+#[tokio::test]
+async fn ollama_sends_the_schema_as_format() {
+    let srv = MockHttp::serve(vec![(200, r#"{"response": "RETURN 1"}"#.to_string())]);
+    let client = NLQClient::new(&cfg(LLMProvider::Ollama, &srv.base_url, None, None)).unwrap();
+
+    let out = client
+        .complete_structured("q", Some(&schema()))
+        .await
+        .unwrap();
+    assert!(out.schema_enforced);
+
+    let body = srv.requests()[0].json();
+    // Ollama takes the schema itself, with no wrapper and no name.
+    assert_eq!(body["format"]["type"], "object");
+    assert_eq!(body["format"]["required"][0], "cypher");
+}
+
+#[tokio::test]
+async fn ollama_omits_format_when_no_schema_is_asked_for() {
+    let srv = MockHttp::serve(vec![(200, r#"{"response": ""}"#.to_string())]);
+    let client = NLQClient::new(&cfg(LLMProvider::Ollama, &srv.base_url, None, None)).unwrap();
+
+    assert!(!client.complete("q").await.unwrap().schema_enforced);
+    assert!(srv.requests()[0].json().get("format").is_none());
+}
+
+#[tokio::test]
+async fn gemini_sends_both_the_mime_type_and_the_schema() {
+    let srv = MockHttp::serve(vec![(
+        200,
+        r#"{"candidates":[{"content":{"parts":[{"text":"RETURN 1"}]}}]}"#.to_string(),
+    )]);
+    let client =
+        NLQClient::new(&cfg(LLMProvider::Gemini, &srv.base_url, Some("k"), None)).unwrap();
+
+    let out = client
+        .complete_structured("q", Some(&schema()))
+        .await
+        .unwrap();
+    assert!(out.schema_enforced);
+
+    let gc = &srv.requests()[0].json()["generationConfig"];
+    // Gemini constrains the decode only when BOTH are set: the schema alone
+    // is ignored without the MIME type, which is the easy half to get wrong.
+    assert_eq!(gc["responseMimeType"], "application/json");
+    assert_eq!(gc["responseSchema"]["type"], "object");
+    assert_eq!(gc["temperature"], 0.0);
+}
+
+#[tokio::test]
+async fn gemini_omits_both_when_no_schema_is_asked_for() {
+    let srv = MockHttp::serve(vec![(
+        200,
+        r#"{"candidates":[{"content":{"parts":[{"text":"x"}]}}]}"#.to_string(),
+    )]);
+    let client =
+        NLQClient::new(&cfg(LLMProvider::Gemini, &srv.base_url, Some("k"), None)).unwrap();
+
+    assert!(!client.complete("q").await.unwrap().schema_enforced);
+    let gc = &srv.requests()[0].json()["generationConfig"];
+    assert!(gc.get("responseMimeType").is_none());
+    assert!(gc.get("responseSchema").is_none());
+}
+
+#[tokio::test]
+async fn a_provider_that_cannot_take_a_schema_answers_anyway_and_says_so() {
+    // The mock calls no model and has no request body to carry a schema.
+    // Asking for one must not fail the call -- a caller that validates its
+    // own output still works -- but it must not claim the guarantee either.
+    let client = NLQClient::new(&cfg(LLMProvider::Mock, "http://unused", None, None)).unwrap();
+
+    let out = client
+        .complete_structured("q", Some(&schema()))
+        .await
+        .unwrap();
+    assert_eq!(out.text, "MATCH (n) RETURN n LIMIT 10");
+    assert!(
+        !out.schema_enforced,
+        "asking for a schema a provider cannot take must report unenforced, \
+         not silently pass for enforced"
+    );
+}
+
+#[test]
+fn only_the_http_providers_can_be_asked_for_a_schema() {
+    assert!(supports_response_schema(&LLMProvider::OpenAI));
+    assert!(supports_response_schema(&LLMProvider::Ollama));
+    assert!(supports_response_schema(&LLMProvider::Gemini));
+    assert!(!supports_response_schema(&LLMProvider::ClaudeCode));
+    assert!(!supports_response_schema(&LLMProvider::Mock));
+}

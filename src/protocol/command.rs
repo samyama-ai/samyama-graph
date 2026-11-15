@@ -116,8 +116,7 @@ impl CommandHandler {
     }
 
     fn query_hash(query: &str) -> String {
-        use sha2::{Digest, Sha256};
-        Sha256::digest(query.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+        crate::http::server::query_hash(query)
     }
 
     /// Access the shared tenant registry (for HTTP wiring in main).
