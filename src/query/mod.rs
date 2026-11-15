@@ -81,6 +81,7 @@ pub mod csv_source;
 pub mod span;
 pub mod suggest;
 pub mod metrics;
+pub mod slowlog;
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -312,6 +313,9 @@ impl QueryEngine {
         if !slow {
             return;
         }
+        // Kept as well as logged, so `/api/slowlog` can answer what the log
+        // line says without access to the server's stderr (#2079).
+        crate::query::slowlog::record(query_str, ms, self.slow_query_ms, rows, !succeeded);
         // Truncated: a generated query can be megabytes, and a log line that
         // fills the disk is its own outage.
         let text: String = query_str.chars().take(512).collect();
