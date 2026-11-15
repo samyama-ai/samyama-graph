@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use super::handler::{
-    query_handler, export_handler, import_parquet_handler, status_handler, memory_handler, metrics_handler, schema_handler, sample_handler,
+    query_handler, export_handler, import_parquet_handler, status_handler, memory_handler, metrics_handler, slowlog_handler, slowlog_reset_handler, schema_handler, sample_handler,
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
     set_enrich_policy_handler, enrich_handler, verify_handler,
@@ -197,9 +197,12 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::auth::Role {
     use crate::auth::Role;
     use axum::http::Method;
+    // The slow-query log holds query text from every tenant, literals
+    // included, so reading it is an operator's view, not a reader's (#2079).
     if path.starts_with("/api/tenants")
         || path == "/api/snapshot/import"
         || path == "/api/enrich/policy"
+        || path == "/api/slowlog"
     {
         return Role::Admin;
     }
@@ -552,6 +555,46 @@ fn is_loopback(host: &str) -> bool {
 /// the default. `CorsLayer::permissive()` was the previous behaviour and it
 /// accepts any origin with credentials-free requests — enough for a page on the
 /// open web to drive `/api/query`, which executes arbitrary Cypher (#1328).
+/// The request's id, as `request_context` settled it, for anything inside
+/// that wants to name the request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestId(pub String);
+
+/// Give every request an id and run it inside a `request` span (#2076).
+///
+/// The caller's `X-Request-Id` is kept when it is a plausible id, else one is
+/// made; either way it is returned in `X-Request-Id` on the response, so a
+/// caller can quote it, and every log event the request causes -- the
+/// slow-query warning included -- carries it.
+pub async fn request_context(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use crate::logging::{accept_request_id, new_request_id, request_span, REQUEST_ID_HEADER};
+    use tracing::Instrument;
+
+    let id = req
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(accept_request_id)
+        .map(str::to_string)
+        .unwrap_or_else(new_request_id);
+    let span = request_span(&id, "http");
+    span.record("method", req.method().as_str());
+    span.record("path", req.uri().path());
+    req.extensions_mut().insert(RequestId(id.clone()));
+
+    let mut res = next.run(req).instrument(span).await;
+    // Accepted ids are ASCII letters, digits and four punctuation marks, and
+    // made ones are hex, so this cannot fail; if it ever did, the response
+    // goes out without the header rather than not at all.
+    if let Ok(v) = axum::http::HeaderValue::from_str(&id) {
+        res.headers_mut().insert(REQUEST_ID_HEADER, v);
+    }
+    res
+}
+
 fn cors_layer(origins: &[String]) -> CorsLayer {
     if origins.is_empty() {
         return CorsLayer::new();
@@ -570,6 +613,11 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
         .allow_origin(parsed)
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
+        // A browser hides response headers from script unless they are
+        // exposed; the request id is for the caller to read (#2076).
+        .expose_headers([axum::http::HeaderName::from_static(
+            crate::logging::REQUEST_ID_HEADER,
+        )])
 }
 
 /// Shared application state for HTTP routes
@@ -956,6 +1004,7 @@ impl HttpServer {
             .route("/api/status", get(status_handler))
             .route("/api/memory", get(memory_handler))
             .route("/metrics", get(metrics_handler))
+            .route("/api/slowlog", get(slowlog_handler).delete(slowlog_reset_handler))
             .route("/api/schema", get(schema_handler))
             .route("/api/algorithms/catalog", get(algorithm_catalog_handler))
             .route("/api/sample", post(sample_handler))
@@ -1041,7 +1090,9 @@ impl HttpServer {
             }));
         }
 
-        app
+        // Outside everything, the audit layer included, so a request refused
+        // for its credential still has an id and its log lines still carry it.
+        app.layer(axum::middleware::from_fn(request_context))
     }
 }
 

@@ -862,7 +862,7 @@ fn match_pattern(query: &Query, store: &GraphStore) -> Option<HierarchyPattern> 
 /// Requires a label (so the search is a label scan, not a full scan) and at least one
 /// property. Ambiguity is a rejection, not a coin flip: if two nodes match the pin, the
 /// query means something the index cannot express in one roll-up.
-fn resolve_pinned_node(store: &GraphStore, pattern: &NodePattern) -> Option<NodeId> {
+pub(crate) fn resolve_pinned_node(store: &GraphStore, pattern: &NodePattern) -> Option<NodeId> {
     let props = pattern.properties.as_ref()?;
     if props.is_empty() || pattern.labels.is_empty() {
         return None;
