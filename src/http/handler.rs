@@ -457,6 +457,9 @@ pub async fn query_handler(
     headers: axum::http::HeaderMap,
     Json(payload): Json<QueryRequest>,
 ) -> axum::response::Response {
+    // The graph is in the body, which the request layer never reads; name it
+    // on the request's span here so every event below carries it (#2076).
+    tracing::Span::current().record("tenant", crate::logging::loggable_name(&payload.graph));
     // What the audit layer cannot see from outside: it never reads the body,
     // so the statement's kind, graph and hash travel back on the response
     // (#2081). A statement that does not parse counts as a write, as on RESP.
@@ -748,8 +751,15 @@ async fn stream_query(
     let runtime = tokio::runtime::Handle::current();
     let stall = stream_stall_budget();
     let query = payload.query;
+    // A blocking thread inherits neither the caller's span nor its subscriber;
+    // carry both across, so a slow streamed query is logged under its request
+    // like any other, by the same subscriber (#2076).
+    let span = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(|d| d.clone());
 
     tokio::task::spawn_blocking(move || {
+        let _subscriber = tracing::dispatcher::set_default(&dispatch);
+        let _request = span.enter();
         // A send that waits at most `stall` for room in the channel.
         let send = |msg: StreamMsg| -> Result<(), String> {
             match runtime.block_on(tokio::time::timeout(stall, tx.send(msg))) {
@@ -1107,12 +1117,16 @@ fn render_query_result(
 pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
     let stats = state.engine.cache_stats();
+    // The one thing here that can stop being true of a running server: after a
+    // failed persist, every write is refused until a restart (#2082).
+    let degraded = crate::persistence::health::is_degraded();
     Json(json!({
-        "status": "healthy",
+        "status": if degraded { "degraded" } else { "healthy" },
         "version": crate::VERSION,
         "storage": {
             "nodes": store_guard.node_count(),
             "edges": store_guard.edge_count(),
+            "persistence_degraded": degraded,
         },
         "cache": {
             "hits": stats.hits(),
@@ -1331,6 +1345,32 @@ pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse 
         },
         "tenants": state.tenant_manager.as_ref().map(|tm| tm.list_tenants().len()),
     }))
+}
+
+/// `?limit=N` on `GET /api/slowlog`.
+#[derive(Debug, Deserialize)]
+pub struct SlowlogParams {
+    limit: Option<usize>,
+}
+
+/// `GET /api/slowlog` — the most recent queries past `SLOW_QUERY_MS`, newest
+/// first (#2079). `limit` defaults to, and is capped at, the ring's size.
+///
+/// `samyama_slow_queries_total` said slow queries happened; this says which,
+/// without access to the server's stderr.
+pub async fn slowlog_handler(Query(params): Query<SlowlogParams>) -> impl IntoResponse {
+    use crate::query::slowlog;
+    let limit = params.limit.unwrap_or(slowlog::max_len()).min(slowlog::max_len());
+    Json(json!({
+        "len": slowlog::len(),
+        "max_len": slowlog::max_len(),
+        "entries": slowlog::recent(limit),
+    }))
+}
+
+/// `DELETE /api/slowlog` — empty the ring; reports how many entries it held.
+pub async fn slowlog_reset_handler() -> impl IntoResponse {
+    Json(json!({ "cleared": crate::query::slowlog::reset() }))
 }
 
 /// Handler for graph schema introspection
