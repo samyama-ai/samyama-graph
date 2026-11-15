@@ -122,6 +122,28 @@ fn run() -> Result<(), String> {
     csv.flush().map_err(|e| e.to_string())
 }
 fn main() {
+    // `scripts/verify-sweep.sh` runs every `benches/*.rs` with no arguments,
+    // so this is the normal way the nightly invokes this bench -- not a usage
+    // mistake, and it must not fail the sweep. `ann_benchmark` answers the
+    // same case with `SKIP:` and exit 0 (#2151), as do `ldbc_benchmark`,
+    // `ldbc_bi_benchmark`, `ingest_profile`, `cold_start_share`, `plan_share`,
+    // `persist_row_cost` and `result_cache_gain`. This one exited 2 instead,
+    // which is what failed the nightly on 2026-11-14, the first sweep after
+    // the bench reached `main`.
+    //
+    // Only the *complete absence* of arguments is a skip. A partial
+    // invocation -- `--n 20000` with no `--csv` -- still fails with
+    // "--csv FILE is required": the caller asked for a run and spelled it
+    // wrong, and must be told so rather than handed a silent skip.
+    let named: Vec<String> = std::env::args().skip(1).filter(|a| a != "--bench").collect();
+    if named.is_empty() {
+        eprintln!("SKIP: filtered_ann_benchmark needs an output path.");
+        eprintln!("      Pass --csv FILE, optionally with --n, --dim, --queries and --ef.");
+        eprintln!(
+            "      Skipping rather than failing: the benchmark did not run, it did not break."
+        );
+        return;
+    }
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(2);
