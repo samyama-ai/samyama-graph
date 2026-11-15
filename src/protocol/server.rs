@@ -210,8 +210,27 @@ async fn respond(
     txn: &mut ConnTxn,
     credentials: Option<&[crate::auth::Credential]>,
 ) -> RespValue {
+    use tracing::Instrument;
+    // One id per command, as one per HTTP request (#2076). RESP has no header
+    // to return it in, so it is for the log alone: it ties together the lines
+    // one command causes.
+    let span = crate::logging::request_span(&crate::logging::new_request_id(), "resp");
+    if let Ok(args) = value.as_array() {
+        if let Some(Ok(Some(name))) = args.first().map(|v| v.as_string()) {
+            // Both are the client's bytes, so both pass the same rule as an id.
+            let name = name.to_uppercase();
+            span.record("command", crate::logging::loggable_name(&name));
+            if name.starts_with("GRAPH.") {
+                if let Some(Ok(Some(graph))) = args.get(1).map(|v| v.as_string()) {
+                    span.record("tenant", crate::logging::loggable_name(&graph));
+                }
+            }
+        }
+    }
     let entry = handler.audit_entry_for(value);
-    let reply = respond_unaudited(handler, value, store, txn, credentials).await;
+    let reply = respond_unaudited(handler, value, store, txn, credentials)
+        .instrument(span)
+        .await;
     if let Some(entry) = entry {
         // `unauthenticated` is a state, not a name, as in the HTTP entries.
         let subject = txn.authenticated_as.as_ref().map_or("unauthenticated", |c| c.name.as_str());
