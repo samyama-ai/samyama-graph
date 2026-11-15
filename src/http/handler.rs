@@ -457,6 +457,9 @@ pub async fn query_handler(
     headers: axum::http::HeaderMap,
     Json(payload): Json<QueryRequest>,
 ) -> axum::response::Response {
+    // The graph is in the body, which the request layer never reads; name it
+    // on the request's span here so every event below carries it (#2076).
+    tracing::Span::current().record("tenant", crate::logging::loggable_name(&payload.graph));
     // What the audit layer cannot see from outside: it never reads the body,
     // so the statement's kind, graph and hash travel back on the response
     // (#2081). A statement that does not parse counts as a write, as on RESP.
@@ -763,8 +766,15 @@ async fn stream_query(
     let runtime = tokio::runtime::Handle::current();
     let stall = stream_stall_budget();
     let query = payload.query;
+    // A blocking thread inherits neither the caller's span nor its subscriber;
+    // carry both across, so a slow streamed query is logged under its request
+    // like any other, by the same subscriber (#2076).
+    let span = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(|d| d.clone());
 
     tokio::task::spawn_blocking(move || {
+        let _subscriber = tracing::dispatcher::set_default(&dispatch);
+        let _request = span.enter();
         // A send that waits at most `stall` for room in the channel.
         let send = |msg: StreamMsg| -> Result<(), String> {
             match runtime.block_on(tokio::time::timeout(stall, tx.send(msg))) {
@@ -1353,12 +1363,16 @@ pub async fn request_status_handler(
 pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
     let stats = state.engine.cache_stats();
+    // The one thing here that can stop being true of a running server: after a
+    // failed persist, every write is refused until a restart (#2082).
+    let degraded = crate::persistence::health::is_degraded();
     Json(json!({
-        "status": "healthy",
+        "status": if degraded { "degraded" } else { "healthy" },
         "version": crate::VERSION,
         "storage": {
             "nodes": store_guard.node_count(),
             "edges": store_guard.edge_count(),
+            "persistence_degraded": degraded,
         },
         "cache": {
             "hits": stats.hits(),
