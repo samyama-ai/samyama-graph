@@ -18,12 +18,9 @@ pub enum ParseError {
 pub struct SparqlParser;
 
 impl SparqlParser {
-    /// Parse a SPARQL query string
-    ///
-    /// TODO: Implement using spargebra::Query::parse
-    pub fn parse(_query: &str) -> Result<(), ParseError> {
-        // TODO: Implement parsing
-        Ok(())
+    /// Parse a SPARQL 1.1 query into its algebra.
+    pub fn parse(query: &str) -> Result<spargebra::Query, ParseError> {
+        spargebra::Query::parse(query, None).map_err(|e| ParseError::Syntax(e.to_string()))
     }
 
     /// Parse a SPARQL UPDATE string
@@ -40,8 +37,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_stub() {
-        let result = SparqlParser::parse("SELECT * WHERE { ?s ?p ?o }");
-        assert!(result.is_ok());
+    fn a_query_parses_and_bad_text_is_a_syntax_error() {
+        assert!(matches!(
+            SparqlParser::parse("SELECT * WHERE { ?s ?p ?o }"),
+            Ok(spargebra::Query::Select { .. })
+        ));
+        assert!(matches!(
+            SparqlParser::parse("SELEC ?s"),
+            Err(ParseError::Syntax(_))
+        ));
     }
 }
