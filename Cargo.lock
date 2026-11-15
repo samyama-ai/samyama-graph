@@ -4041,7 +4041,7 @@ dependencies = [
 
 [[package]]
 name = "samyama"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4116,7 +4116,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-cli"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "axum",
  "clap",
@@ -4136,7 +4136,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-convert"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "samyama",
  "serde",
@@ -4146,7 +4146,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-gpu"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "bytemuck",
  "cudarc",
@@ -4157,7 +4157,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-graph-algorithms"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "ndarray",
  "rand 0.8.8",
@@ -4170,7 +4170,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-optimization"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "criterion",
  "ndarray",
@@ -4183,7 +4183,7 @@ dependencies = [
 
 [[package]]
 name = "samyama-sdk"
-version = "1.14.0"
+version = "1.15.0"
 dependencies = [
  "async-trait",
  "axum",
