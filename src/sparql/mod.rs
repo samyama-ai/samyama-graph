@@ -84,24 +84,40 @@ impl SparqlEngine {
         }
     }
 
-    /// Execute a SPARQL query
-    ///
-    /// TODO: Full implementation
-    pub fn query(&self, _query_str: &str) -> SparqlResult<SparqlResults> {
-        // TODO: Implement query execution
-        // 1. Parse query using SparqlParser
-        // 2. Optimize using optimizer
-        // 3. Execute using SparqlExecutor
-        // 4. Return results
-        Ok(SparqlResults::empty())
+    /// Execute a SPARQL query. SELECT and ASK are evaluated; a form or
+    /// feature that is not evaluated yet is an error, never an empty result.
+    pub fn query(&self, query_str: &str) -> SparqlResult<SparqlResults> {
+        use spargebra::Query;
+        let query = SparqlParser::parse(query_str).map_err(|e| SparqlError::Parse(e.to_string()))?;
+        let run = |p| self.executor.evaluate(p).map_err(|e| SparqlError::Execution(e.to_string()));
+        match &query {
+            Query::Select { pattern, .. } => {
+                let solutions = run(pattern)?;
+                Ok(SparqlResults::Bindings { variables: projected(pattern), solutions })
+            }
+            Query::Ask { pattern, .. } => Ok(SparqlResults::Boolean(!run(pattern)?.is_empty())),
+            Query::Construct { .. } | Query::Describe { .. } => Err(SparqlError::Execution(
+                "CONSTRUCT and DESCRIBE are not evaluated yet".into(),
+            )),
+        }
     }
 
-    /// Execute a SPARQL UPDATE operation
-    ///
-    /// TODO: Full implementation
+    /// Execute a SPARQL UPDATE operation. Not implemented: refused rather
+    /// than reported as done, since a caller would read `Ok` as "written".
     pub fn update(&mut self, _update_str: &str) -> SparqlResult<()> {
-        // TODO: Implement update execution
-        Ok(())
+        Err(SparqlError::Execution("SPARQL UPDATE is not supported yet".into()))
+    }
+}
+
+/// The variables a SELECT returns, in the order it names them.
+fn projected(pattern: &spargebra::algebra::GraphPattern) -> Vec<String> {
+    use spargebra::algebra::GraphPattern as P;
+    match pattern {
+        P::Project { variables, .. } => variables.iter().map(|v| v.as_str().to_string()).collect(),
+        P::Distinct { inner } | P::Reduced { inner } | P::Slice { inner, .. } | P::OrderBy { inner, .. } => {
+            projected(inner)
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -124,21 +140,11 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // The engine is a declared-but-unimplemented surface (see the TODOs).
-    // These pin what the stubs return today so a real implementation shows
-    // up as a deliberate change rather than a silent one.
-
     #[test]
-    fn stub_query_returns_empty_bindings_and_update_succeeds() {
+    fn update_is_refused_rather_than_reported_as_written() {
         let mut engine = SparqlEngine::new(RdfStore::new());
-        match engine.query("ASK { ?s ?p ?o }").unwrap() {
-            SparqlResults::Bindings { variables, solutions } => {
-                assert!(variables.is_empty() && solutions.is_empty())
-            }
-            other => panic!("expected empty bindings, got {other:?}"),
-        }
-        assert!(engine.update("INSERT DATA { <a:s> <a:p> <a:o> }").is_ok());
-        assert_eq!(engine.store.len(), 0, "the update stub writes nothing");
+        assert!(engine.update("INSERT DATA { <a:s> <a:p> <a:o> }").is_err());
+        assert_eq!(engine.store.len(), 0);
     }
 
     #[test]
@@ -172,6 +178,7 @@ mod tests {
         assert_eq!(SparqlParseError::Unsupported("f".into()).to_string(), "Unsupported feature: f");
         assert_eq!(ExecutionError::Query("g".into()).to_string(), "Query error: g");
         assert_eq!(ExecutionError::TypeMismatch("h".into()).to_string(), "Type mismatch: h");
+        assert_eq!(ExecutionError::Unsupported("k".into()).to_string(), "Unsupported SPARQL feature: k");
         assert_eq!(HttpError::Server("i".into()).to_string(), "Server error: i");
         assert_eq!(HttpError::InvalidRequest("j".into()).to_string(), "Invalid request: j");
     }
