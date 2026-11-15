@@ -22,7 +22,7 @@ on:
 jobs:
   bump:
     name: Bump versions and open a release PR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
