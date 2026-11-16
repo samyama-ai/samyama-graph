@@ -8211,6 +8211,7 @@ mod tests {
             ("commit_session_transaction", "drops the rollback journal, keeping every write already applied and already bumped; rollback_session_transaction, which does change rows, bumps (#1200 step 6)"),
             ("add_snapshot_sources", "records where the data came from, for the next export's header; no query reads it, and it must not bump: it records the current epoch to tell later writes apart (#1911)"),
             ("record_snapshot_sources", "records where the data came from, for the next export's header; no query reads it, and it must not bump: it records the current epoch to tell later writes apart (#1911)"),
+            ("idempotency_mut", "hands out the log of replies remembered for keyed writes; no query reads it, and the write a key guards bumps on its own path (#2176)"),
         ];
 
         let src = std::fs::read_to_string(concat!(
