@@ -40,7 +40,7 @@ fn points(n: usize, seed: u64) -> Vec<Vec<f32>> {
 /// nodes, each indexed as its CREATE writes it.
 fn docs() -> GraphStore {
     let mut s = GraphStore::new();
-    let mut run = |s: &mut GraphStore, q: &str| {
+    let run = |s: &mut GraphStore, q: &str| {
         let query = parse_query(q).unwrap_or_else(|e| panic!("{q}: {e:?}"));
         MutQueryExecutor::new(s, "default".to_string())
             .execute(&query)
