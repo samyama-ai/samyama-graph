@@ -6558,6 +6558,14 @@ pub trait PhysicalOperator: Send {
     /// Reset the operator to start from the beginning
     fn reset(&mut self);
 
+    /// Work this operator did that its time and row counts do not show, as
+    /// `(counter, value)` pairs, for PROFILE (#1970). Empty for an operator
+    /// with nothing to add. Read when the operator first produces and when it
+    /// finishes, like [`memory_bytes`](Self::memory_bytes).
+    fn work(&self) -> Vec<(&'static str, u64)> {
+        Vec::new()
+    }
+
     /// Bytes this operator holds in rows it has buffered, or `None` for one
     /// that streams a row at a time (#2078).
     ///
@@ -14828,6 +14836,24 @@ pub struct VectorSearchOperator {
     results: Vec<(NodeId, f32)>,
     /// Current index in results
     current: usize,
+    /// What the search did, for PROFILE (#1970); `None` until it has run.
+    work: Option<SearchWork>,
+}
+
+/// The work one vector search did (#1970): what its strategy cost, which its
+/// time alone does not say.
+#[derive(Clone, Copy, Debug, Default)]
+struct SearchWork {
+    /// Distances computed, by the graph walk and by exact scans.
+    distances: u64,
+    /// HNSW searches the widening loop ran; 0 when the plan went straight to
+    /// an exact scan.
+    graph_searches: u64,
+    /// Times widening abandoned the graph for an exact scan.
+    exact_fallbacks: u64,
+    /// Times the WHERE pushed into the search (#1969), or the hierarchy
+    /// scope (#445), was evaluated for a candidate.
+    filter_checks: u64,
 }
 
 impl VectorSearchOperator {
@@ -14854,6 +14880,7 @@ impl VectorSearchOperator {
             scope: None,
             results: Vec::new(),
             current: 0,
+            work: None,
         }
     }
 
@@ -14890,6 +14917,23 @@ impl VectorSearchOperator {
         if !self.results.is_empty() || self.current > 0 {
             return Ok(());
         }
+        let before = crate::vector::work::Work::now();
+        let checks = std::cell::Cell::new(0u64);
+        let outcome = self.search(store, &checks);
+        let did = crate::vector::work::Work::now().since(before);
+        // Added to, not replaced: a search that found nothing runs again on
+        // the next pull, and PROFILE's time covers both runs.
+        let w = self.work.get_or_insert_with(SearchWork::default);
+        w.distances += did.distances;
+        w.graph_searches += did.graph_searches;
+        w.exact_fallbacks += did.exact_fallbacks;
+        w.filter_checks += checks.get();
+        outcome
+    }
+
+    /// Run the search into `self.results`, counting each filter evaluation
+    /// in `checks`.
+    fn search(&mut self, store: &GraphStore, checks: &std::cell::Cell<u64>) -> ExecutionResult<()> {
         // A missing index is reported by the search itself (#1660), so a
         // missing metric here only means there is nothing to score.
         self.metric = store.vector_index.metric(&self.label, &self.property_key);
@@ -14934,6 +14978,7 @@ impl VectorSearchOperator {
         // "no match".
         let error = std::cell::RefCell::new(None);
         let keep = |id: NodeId| {
+            checks.set(checks.get() + 1);
             if error.borrow().is_some() || !in_scope(id) {
                 return false;
             }
@@ -15010,6 +15055,16 @@ impl PhysicalOperator for VectorSearchOperator {
 
     fn reset(&mut self) {
         self.current = 0;
+    }
+
+    fn work(&self) -> Vec<(&'static str, u64)> {
+        let Some(w) = self.work else { return Vec::new() };
+        vec![
+            ("distances", w.distances),
+            ("graph_searches", w.graph_searches),
+            ("exact_fallbacks", w.exact_fallbacks),
+            ("filter_checks", w.filter_checks),
+        ]
     }
 
     fn describe(&self) -> OperatorDescription {

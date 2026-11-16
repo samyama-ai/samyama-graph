@@ -402,6 +402,9 @@ impl MetricDistance {
 
 impl Distance<f32> for MetricDistance {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+        // Every distance the index computes, in the graph and in the exact
+        // scans, comes through here, so this is where PROFILE counts them.
+        super::work::distance();
         self.rank_f32(va, vb)
     }
 }
@@ -429,6 +432,7 @@ fn inner_product_rank(dot: f32) -> f32 {
 /// Computed in f32, as `CosineDistanceF16` is, for its reason.
 impl Distance<f16> for MetricDistance {
     fn eval(&self, va: &[f16], vb: &[f16]) -> f32 {
+        super::work::distance();
         self.rank(va.iter().zip(vb).map(|(a, b)| (a.to_f32(), b.to_f32())))
     }
 }

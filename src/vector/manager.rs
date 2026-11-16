@@ -1030,8 +1030,10 @@ fn widen(
             .unwrap_or_else(|| candidates.saturating_mul(2).max(64))
             .max(candidates);
         if k > 0 && len > 0 && width.saturating_mul(params.m).saturating_mul(2) >= len {
+            super::work::exact_fallback();
             return index.search_exact_where(query, k, &keep);
         }
+        super::work::graph_search();
         let mut seen = std::collections::HashSet::new();
         let kept: Vec<(NodeId, f32)> = index
             .search_ef(query, fetch, ef)?
@@ -1044,6 +1046,7 @@ fn widen(
         }
         fetch = (fetch * 2).min(len);
         if fetch > len / 4 {
+            super::work::exact_fallback();
             return index.search_exact_where(query, k, &keep);
         }
     }
