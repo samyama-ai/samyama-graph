@@ -38,11 +38,13 @@
 //!
 //! ## Persistence strategy
 //!
-//! HNSW indices (from `hnsw_rs`) don't expose an iterator over stored vectors.
-//! To support persistence, all inserted vectors are also stored in a `Vec<StoredVector>`
-//! alongside the HNSW structure. On serialization, this vector list is saved via
-//! `bincode`. On load, a fresh HNSW index is constructed and all stored vectors are
-//! re-inserted. This trades load-time speed for implementation simplicity.
+//! The HNSW graph holds the only copy of each vector (#1973). The index keeps,
+//! per entry, the node it belongs to and where the graph put it, and reads the
+//! values back from the graph's points: by position for an exact match, and by
+//! walking the graph's point list for a scan or a dump. Until #1973 a second
+//! copy was kept beside the graph for persistence, doubling the vector memory.
+//! On serialization the current vectors are read from the graph and saved via
+//! `bincode`; on load a fresh HNSW index is constructed and they are re-inserted.
 //! A checkpoint generation also carries the graph itself (`graph_io`), and
 //! recovery from a verified one reloads it without re-inserting (#1973).
 
@@ -461,17 +463,19 @@ pub struct VectorIndex {
     quantization: Quantization,
     /// Graph shape and default search width (#1971).
     params: HnswParams,
-    /// The actual HNSW index
+    /// The actual HNSW index, and the only copy of the vectors (#1973).
     backend: Backend,
-    /// All inserted vectors (for persistence — HNSW doesn't expose iteration),
-    /// held at the index's own precision so this copy is halved too.
-    stored_f32: Vec<StoredVector>,
-    stored_f16: Vec<(u64, Vec<f16>)>,
-    /// Stored vectors by the hash of their exact bits, as positions into
-    /// `stored_f32` / `stored_f16`, so a query with a vector that is in the
-    /// index finds it whether or not the graph can reach it (#1498).
+    /// The node behind each entry, by position. A position is the entry's data
+    /// id in the graph.
+    node_ids: Vec<u64>,
+    /// Where the graph keeps each entry's vector, by position, so one vector
+    /// is read back without a second copy or a walk of the graph (#1973).
+    point_ids: Vec<PointId>,
+    /// Stored vectors by the hash of their exact bits, as positions, so a
+    /// query with a vector that is in the index finds it whether or not the
+    /// graph can reach it (#1498).
     exact: HashMap<u64, Vec<usize>>,
-    /// Each node's current entry, as a position into the stored list (#1968).
+    /// Each node's current entry, as a position (#1968).
     /// HNSW has no delete, so a node that is deleted, leaves the label, or is
     /// given a new vector keeps its old entry in the graph; only the position
     /// named here answers for the node. The graph's data ids are positions,
@@ -491,6 +495,77 @@ fn bits_key<T: Copy>(values: &[T], to_bits: impl Fn(T) -> u64) -> u64 {
         to_bits(*v).hash(&mut h);
     }
     h.finish()
+}
+
+/// Layers an `hnsw_rs` graph can have: the `16` every graph here is built
+/// with, which is also the crate's own ceiling (`NB_LAYER_MAX`).
+const LAYERS: usize = 16;
+
+/// Points on each layer of the graph.
+fn layer_sizes<T: Clone + Send + Sync>(points: &PointIndexation<'_, T>) -> [usize; LAYERS] {
+    std::array::from_fn(|layer| points.get_layer_nb_point(layer))
+}
+
+/// Where the graph put the point just inserted with data id `pos`, given the
+/// layer sizes from before the insert. `hnsw_rs` appends a new point to the
+/// end of the one layer it draws for it, so that layer is the one that grew,
+/// and the point's slot is its old size. Should the crate ever place points
+/// otherwise, the point is found by its data id instead: slower, never wrong.
+fn inserted_point<T: Clone + Send + Sync>(
+    points: &PointIndexation<'_, T>,
+    before: &[usize; LAYERS],
+    pos: usize,
+) -> PointId {
+    let grown = (0..LAYERS).find(|&layer| points.get_layer_nb_point(layer) > before[layer]);
+    if let Some(layer) = grown {
+        let id = PointId(layer as u8, before[layer] as i32);
+        if points.get_point_data(&id).is_some() {
+            return id;
+        }
+    }
+    points
+        .into_iter()
+        .find(|p| p.get_origin_id() == pos)
+        .map(|p| p.get_point_id())
+        .expect("a point just inserted is in the graph")
+}
+
+/// Every point of the graph whose data id `wanted` passes, scored by `eval`,
+/// as `(position, distance)`. Points come in the graph's order, not by
+/// position. An empty graph has no entry point, and its iterator would
+/// unwrap one, so it is not walked.
+fn scan_points<T: Clone + Send + Sync>(
+    points: &PointIndexation<'_, T>,
+    wanted: impl Fn(usize) -> bool,
+    eval: impl Fn(&[T]) -> f32,
+) -> Vec<(usize, f32)> {
+    if points.get_nb_point() == 0 {
+        return Vec::new();
+    }
+    points
+        .into_iter()
+        .filter(|p| wanted(p.get_origin_id()))
+        .map(|p| (p.get_origin_id(), eval(p.get_v())))
+        .collect()
+}
+
+/// Ranked by distance, ties by position: the order a scan over a position
+/// list gave before the vectors moved into the graph (#1973), so an exact
+/// search answers the same whichever way it reads them.
+fn rank_scored(
+    mut scored: Vec<(usize, f32)>,
+    node_of: impl Fn(usize) -> u64,
+) -> Vec<(NodeId, f32)> {
+    scored.retain(|(_, d)| d.is_finite());
+    scored.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    scored
+        .into_iter()
+        .map(|(pos, d)| (NodeId::new(node_of(pos)), d))
+        .collect()
 }
 
 // Implement Debug manually because Hnsw doesn't implement it
@@ -561,8 +636,8 @@ impl VectorIndex {
             quantization,
             params,
             backend,
-            stored_f32: Vec::new(),
-            stored_f16: Vec::new(),
+            node_ids: Vec::new(),
+            point_ids: Vec::new(),
             exact: HashMap::new(),
             current: HashMap::new(),
             superseded: 0,
@@ -590,13 +665,13 @@ impl VectorIndex {
         }
     }
 
-    /// Bytes held for the vectors themselves, across both copies the index
-    /// keeps: the HNSW's and the one kept for persistence.
+    /// Bytes held for the vectors themselves. The graph's copy is the only
+    /// one (#1973); before, a second copy kept for persistence doubled this.
     ///
     /// Reported rather than asserted. A quantization that claims to halve
     /// memory has to be able to show it.
     pub fn vector_bytes(&self) -> usize {
-        2 * self.entries() * self.dimensions * self.quantization.bytes_per_value()
+        self.entries() * self.dimensions * self.quantization.bytes_per_value()
     }
 
     /// Bytes held by the HNSW navigable graph: each point's per-layer
@@ -634,8 +709,8 @@ impl VectorIndex {
         }
     }
 
-    /// Everything this index holds resident: both vector copies, the HNSW
-    /// graph, the exact-match table (#1498), and the map from each node to its
+    /// Everything this index holds resident: the vectors, the HNSW graph,
+    /// each entry's node and place in the graph, the exact-match table (#1498), and the map from each node to its
     /// current entry (#1968). What `SHOW INDEXES`, the memory endpoint and the
     /// metrics report for a vector index.
     pub fn resident_bytes(&self) -> usize {
@@ -646,8 +721,8 @@ impl VectorIndex {
         // of the index: at 8 f32 dimensions the vector is 32 bytes and this
         // entry 17.
         let current = self.current.capacity() * (size_of::<u64>() + size_of::<usize>() + 1);
-        let records = self.stored_f32.capacity() * size_of::<StoredVector>()
-            + self.stored_f16.capacity() * size_of::<(u64, Vec<f16>)>();
+        let records = self.node_ids.capacity() * size_of::<u64>()
+            + self.point_ids.capacity() * size_of::<PointId>();
         self.vector_bytes() + self.graph_bytes() + exact + current + records
     }
 
@@ -668,15 +743,13 @@ impl VectorIndex {
         // MetricDistance never returns a negative distance, which is what the
         // search_layer assertions (hnsw.rs:937-938) actually require.
         let pos = self.entries();
-        match &mut self.backend {
+        let point = match &mut self.backend {
             Backend::F32(h) => {
+                let before = layer_sizes(h.get_point_indexation());
                 h.insert((vector, pos));
                 let key = bits_key(vector, |v: f32| v.to_bits() as u64);
                 self.exact.entry(key).or_default().push(pos);
-                self.stored_f32.push(StoredVector {
-                    node_id: node_id.0,
-                    vector: vector.clone(),
-                });
+                inserted_point(h.get_point_indexation(), &before, pos)
             }
             Backend::F16(h) => {
                 // Quantized once, here, and the graph is built on the values a
@@ -684,12 +757,15 @@ impl VectorIndex {
                 // only the stored copy would build the graph on one set of
                 // vectors and answer from another.
                 let q: Vec<f16> = vector.iter().map(|v| f16::from_f32(*v)).collect();
+                let before = layer_sizes(h.get_point_indexation());
                 h.insert((&q, pos));
                 let key = bits_key(&q, |v: f16| v.to_bits() as u64);
                 self.exact.entry(key).or_default().push(pos);
-                self.stored_f16.push((node_id.0, q));
+                inserted_point(h.get_point_indexation(), &before, pos)
             }
-        }
+        };
+        self.node_ids.push(node_id.0);
+        self.point_ids.push(point);
         // A node given a new vector: the old entry stops answering for it.
         if self.current.insert(node_id.0, pos).is_some() {
             self.superseded += 1;
@@ -713,13 +789,26 @@ impl VectorIndex {
 
     /// Entries in the graph, current or not.
     fn entries(&self) -> usize {
-        self.stored_f32.len() + self.stored_f16.len()
+        self.node_ids.len()
     }
 
     fn node_at(&self, pos: usize) -> u64 {
-        match self.quantization {
-            Quantization::None => self.stored_f32[pos].node_id,
-            Quantization::Fp16 => self.stored_f16[pos].0,
+        self.node_ids[pos]
+    }
+
+    /// The vector at `pos`, read from the graph, at the index's precision.
+    /// `None` for a position the index does not have, or the other precision.
+    fn f32_at(&self, pos: usize) -> Option<Vec<f32>> {
+        match &self.backend {
+            Backend::F32(h) => h.get_point_indexation().get_point_data(self.point_ids.get(pos)?),
+            _ => None,
+        }
+    }
+
+    fn f16_at(&self, pos: usize) -> Option<Vec<f16>> {
+        match &self.backend {
+            Backend::F16(h) => h.get_point_indexation().get_point_data(self.point_ids.get(pos)?),
+            _ => None,
         }
     }
 
@@ -749,7 +838,7 @@ impl VectorIndex {
 
     /// Rebuild from the current entries with `params`.
     fn rebuild_with(&mut self, params: HnswParams) {
-        let live: Vec<StoredVector> = self.iter_stored().collect();
+        let live: Vec<StoredVector> = self.current_vectors();
         let mut fresh = Self::build(self.dimensions, self.metric, self.quantization, params, live.len());
         for sv in &live {
             // Every entry here was accepted at this dimension already.
@@ -912,9 +1001,9 @@ impl VectorIndex {
                 let key = bits_key(query, |v: f32| v.to_bits() as u64);
                 self.exact.get(&key).into_iter().flatten()
                     .filter(|&&i| self.is_current(i))
-                    .map(|&i| &self.stored_f32[i])
-                    .filter(|sv| sv.vector.as_slice() == query)
-                    .map(|sv| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
+                    .filter_map(|&i| Some((i, self.f32_at(i)?)))
+                    .filter(|(_, v)| v.as_slice() == query)
+                    .map(|(i, v)| (NodeId::new(self.node_at(i)), distance.eval(query, &v)))
                     .collect()
             }
             Quantization::Fp16 => {
@@ -922,9 +1011,9 @@ impl VectorIndex {
                 let key = bits_key(&q, |v: f16| v.to_bits() as u64);
                 self.exact.get(&key).into_iter().flatten()
                     .filter(|&&i| self.is_current(i))
-                    .map(|&i| &self.stored_f16[i])
+                    .filter_map(|&i| Some((i, self.f16_at(i)?)))
                     .filter(|(_, v)| v.iter().zip(&q).all(|(a, b)| a.to_bits() == b.to_bits()))
-                    .map(|(id, v)| (NodeId::new(*id), distance.eval(&q, v)))
+                    .map(|(i, v)| (NodeId::new(self.node_at(i)), distance.eval(&q, &v)))
                     .collect()
             }
         }
@@ -934,16 +1023,37 @@ impl VectorIndex {
     /// A quantized value widens back exactly -- f16 to f32 is lossless -- so
     /// this is the original value only when the index is unquantized, and the
     /// rounded one otherwise. That is what was stored, and what a reload must
-    /// reproduce.
-    fn iter_stored(&self) -> impl Iterator<Item = StoredVector> + '_ {
-        let f32s = self.stored_f32.iter().enumerate().map(|(i, sv)| (i, sv.clone()));
-        let f16s = self.stored_f16.iter().enumerate().map(|(i, (id, v))| {
-            let vector = v.iter().map(|x| x.to_f32()).collect();
-            (i, StoredVector { node_id: *id, vector })
-        });
-        f32s.chain(f16s)
-            .filter(|(i, _)| self.is_current(*i))
-            .map(|(_, sv)| sv)
+    /// reproduce. In position order, so a rebuild inserts them in the order
+    /// they first went in, and the same index rebuilds into the same graph.
+    fn current_vectors(&self) -> Vec<StoredVector> {
+        fn collect<T: Clone + Send + Sync>(
+            index: &VectorIndex,
+            points: &PointIndexation<'_, T>,
+            widen: impl Fn(&[T]) -> Vec<f32>,
+        ) -> Vec<StoredVector> {
+            let mut slots: Vec<Option<Vec<f32>>> = vec![None; index.entries()];
+            if points.get_nb_point() > 0 {
+                for p in points {
+                    let pos = p.get_origin_id();
+                    if pos < slots.len() && index.is_current(pos) {
+                        slots[pos] = Some(widen(p.get_v()));
+                    }
+                }
+            }
+            slots
+                .into_iter()
+                .enumerate()
+                .filter_map(|(pos, v)| {
+                    Some(StoredVector { node_id: index.node_at(pos), vector: v? })
+                })
+                .collect()
+        }
+        match &self.backend {
+            Backend::F32(h) => collect(self, h.get_point_indexation(), |v| v.to_vec()),
+            Backend::F16(h) => collect(self, h.get_point_indexation(), |v| {
+                v.iter().map(|x| x.to_f32()).collect()
+            }),
+        }
     }
 
     /// Exact nearest-neighbour search by linear scan over stored vectors.
@@ -998,26 +1108,22 @@ impl VectorIndex {
             .collect();
         positions.sort_unstable();
         positions.dedup();
+        positions.retain(|&i| keep(NodeId::new(self.node_at(i))));
         let distance = MetricDistance(self.metric);
-        let mut scored: Vec<(NodeId, f32)> = match self.quantization {
+        let scored: Vec<(usize, f32)> = match self.quantization {
             Quantization::None => positions
                 .into_iter()
-                .filter_map(|i| self.stored_f32.get(i))
-                .filter(|sv| keep(NodeId::new(sv.node_id)))
-                .map(|sv| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
+                .filter_map(|i| Some((i, distance.eval(query, &self.f32_at(i)?))))
                 .collect(),
             Quantization::Fp16 => {
                 let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
                 positions
                     .into_iter()
-                    .filter_map(|i| self.stored_f16.get(i))
-                    .filter(|(id, _)| keep(NodeId::new(*id)))
-                    .map(|(id, v)| (NodeId::new(*id), distance.eval(&q, v)))
+                    .filter_map(|i| Some((i, distance.eval(&q, &self.f16_at(i)?))))
                     .collect()
             }
         };
-        scored.retain(|(_, d)| d.is_finite());
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut scored = rank_scored(scored, |pos| self.node_at(pos));
         scored.truncate(k);
         Ok(self.report(scored))
     }
@@ -1033,27 +1139,19 @@ impl VectorIndex {
         // answers the same question the graph does. Comparing a full-precision
         // query against quantized vectors would make the fallback disagree with
         // the index it is standing in for, which is worse than either.
-        let mut scored: Vec<(NodeId, f32)> = match self.quantization {
-            Quantization::None => self
-                .stored_f32
-                .iter()
-                .enumerate()
-                .filter(|(i, sv)| self.is_current(*i) && keep(NodeId::new(sv.node_id)))
-                .map(|(_, sv)| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
-                .collect(),
-            Quantization::Fp16 => {
+        let wanted = |i: usize| {
+            i < self.entries() && self.is_current(i) && keep(NodeId::new(self.node_at(i)))
+        };
+        let scored: Vec<(usize, f32)> = match &self.backend {
+            Backend::F32(h) => {
+                scan_points(h.get_point_indexation(), wanted, |v| distance.eval(query, v))
+            }
+            Backend::F16(h) => {
                 let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
-                self.stored_f16
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, (id, _))| self.is_current(*i) && keep(NodeId::new(*id)))
-                    .map(|(_, (id, v))| (NodeId::new(*id), distance.eval(&q, v)))
-                    .collect()
+                scan_points(h.get_point_indexation(), wanted, |v| distance.eval(&q, v))
             }
         };
-        let mut scored: Vec<(NodeId, f32)> =
-            scored.drain(..).filter(|(_, d)| d.is_finite()).collect();
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut scored = rank_scored(scored, |pos| self.node_at(pos));
         scored.truncate(k);
         scored
     }
@@ -1086,7 +1184,7 @@ impl VectorIndex {
         // Always f32 on disk, whatever the index holds. Quantization is a
         // runtime memory choice, not a file format: a snapshot written by a
         // quantized index has to load into an unquantized one and the reverse.
-        let as_f32: Vec<StoredVector> = self.iter_stored().collect();
+        let as_f32: Vec<StoredVector> = self.current_vectors();
         bincode::serialize_into(writer, &as_f32)
             .map_err(|e| VectorError::IndexError(format!("serialization error: {}", e)))?;
         Ok(())
@@ -1315,7 +1413,8 @@ mod tests {
         }
         assert_eq!(q.quantization(), Quantization::Fp16);
         assert_eq!(q.vector_bytes() * 2, f.vector_bytes());
-        assert_eq!(f.vector_bytes(), 2 * 3 * 4 * 4);
+        // Three vectors of four f32 values, held once (#1973).
+        assert_eq!(f.vector_bytes(), 3 * 4 * 4);
         let hits = q.search(&[0.0, 1.0, 0.0, 0.0], 2).unwrap();
         assert_eq!(hits[0].0, NodeId::new(2));
         assert_eq!(hits.len(), 2);

@@ -52,8 +52,11 @@ included, at the index's precision).
 
 Still not zero-rebuild startup. Ordinary server startup does not read these
 checkpoints; it rebuilds indexes from node rows. Restart integration tied to a
-consistent RocksDB generation, a single in-memory vector copy (the index still
-keeps its own list next to the graph's points), and 1M/10M restart/RSS
-measurements remain. Do not load this cache into ordinary startup without a
+consistent RocksDB generation and 1M/10M restart/RSS measurements remain.
+
+The index no longer keeps its own vector list next to the graph's points: the
+graph holds the only in-memory copy, and the index keeps per entry only its
+node id and the point's place in the graph (16 bytes), so `vector_bytes()`
+halved (#1973). The node property column still holds a copy of its own. Do not load this cache into ordinary startup without a
 freshness/generation contract: an old but checksum-valid index must not hide
 newer persisted writes. No startup-speed or memory figure is claimed.
