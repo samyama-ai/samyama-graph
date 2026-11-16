@@ -218,6 +218,9 @@ struct ResultKey {
     /// a refresh, drop or re-create changes the answer without changing any
     /// data, so the epoch alone would serve the old one.
     projections: u64,
+    /// `GraphStore::features`' generation: a `feature.get` answered before
+    /// the latest materialization is not served after it (ML-07).
+    features: u64,
 }
 
 /// Canonical, order-independent rendering of bound parameters.
@@ -696,6 +699,7 @@ impl QueryEngine {
             params: canonical_params(&effective),
             epoch: store.epoch(),
             projections: store.graph_projections.generation(),
+            features: store.features.generation(),
         };
 
         {
@@ -718,7 +722,10 @@ impl QueryEngine {
         // epoch would publish an answer computed partly before it. Storing
         // nothing when the epoch moved is the honest outcome: the answer is
         // still returned, it is just not remembered.
-        if store.epoch() == key.epoch && store.graph_projections.generation() == key.projections {
+        if store.epoch() == key.epoch
+            && store.graph_projections.generation() == key.projections
+            && store.features.generation() == key.features
+        {
             self.insert_with_budget(key, batch.clone());
         }
         Ok((batch, false))

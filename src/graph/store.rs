@@ -1355,6 +1355,10 @@ pub struct GraphStore {
     /// In memory only; see `crate::graph::projection`.
     pub graph_projections: Arc<crate::graph::projection::GraphProjections>,
 
+    /// Declarative feature definitions and their latest values (ML-07).
+    /// In memory only; see `crate::graph::feature`.
+    pub features: Arc<crate::graph::feature::FeatureRegistry>,
+
     /// Columnar storage for node properties
     pub node_columns: ColumnStore,
 
@@ -1499,6 +1503,7 @@ impl GraphStore {
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
             structure_registry: Arc::new(crate::index::structure::StructureRegistry::new()),
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
+            features: Arc::new(crate::graph::feature::FeatureRegistry::new()),
             node_columns: ColumnStore::new(),
             edge_columns: ColumnStore::new(),
             index_sender: None,
@@ -6606,6 +6611,8 @@ NodeDeleted { id, .. } => {
         self.hierarchy_index = Arc::new(HierarchyIndexManager::new());
         // A projection is a copy of data that `clear` just removed.
         self.graph_projections = Arc::new(crate::graph::projection::GraphProjections::new());
+        // Materialized feature values name nodes `clear` just removed.
+        self.features = Arc::new(crate::graph::feature::FeatureRegistry::new());
         self.node_columns = ColumnStore::new();
         self.edge_columns = ColumnStore::new();
         self.next_node_id = 1;
