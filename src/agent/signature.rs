@@ -67,6 +67,9 @@ pub struct SignatureOutcome<O> {
     pub total_tokens: Option<u64>,
     /// Per-direction token counts, preserved for consumers such as NLQ billing.
     pub usage: TokenUsage,
+    /// Exact elapsed time across attempts. Keep this for callers that expose
+    /// sub-millisecond latency rather than rebuilding it from `latency_ms`.
+    pub latency: Duration,
     pub latency_ms: u64,
 }
 
@@ -165,6 +168,7 @@ impl SignatureRunner {
                             completion_tokens,
                             total_tokens: tokens,
                         },
+                        latency,
                         latency_ms: latency.as_millis().min(u64::MAX as u128) as u64,
                     });
                 }
