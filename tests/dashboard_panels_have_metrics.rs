@@ -107,6 +107,7 @@ fn metrics_exported() -> BTreeSet<String> {
         "samyama_query_cache_entries",
         "samyama_query_cache_hits",
         "samyama_query_cache_misses",
+        "samyama_active_connections",
     ] {
         out.insert(name.to_string());
     }
@@ -144,8 +145,12 @@ fn the_store_gauges_named_here_are_the_ones_the_handler_renders() {
         if name.starts_with("samyama_query_duration") || name.starts_with("samyama_queries") {
             continue; // rendered by the metrics module, checked above
         }
-        if name == "samyama_slow_queries_total" {
-            continue;
+        if name == "samyama_slow_queries_total"
+            || name == "samyama_persistence_degraded"
+            || name.starts_with("samyama_mutations_persisted")
+            || name.starts_with("samyama_persistence_errors")
+        {
+            continue; // rendered by the metrics module too
         }
         assert!(
             handler.contains(&name),

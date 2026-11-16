@@ -131,6 +131,29 @@
           "legendFormat": "hit ratio"
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Load: clients and queries running",
+      "description": "connections is what max_connections counts (open RESP connections plus HTTP requests in progress, this scrape included). running is queries executing now; a query still waiting for the store lock is not running yet. connections climbing while running stays flat means clients are queued behind the lock.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "samyama_active_connections{job=\"$job\"}", "legendFormat": "connections" },
+        { "expr": "samyama_queries_in_flight{job=\"$job\"}", "legendFormat": "running" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Persistence: writes reaching disk",
+      "description": "degraded is 1 once a write failed to reach disk: writes are refused until a restart, so alert on it. persisted is mutations written per second; errors is failed attempts per second.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "samyama_persistence_degraded{job=\"$job\"}", "legendFormat": "degraded" },
+        { "expr": "rate(samyama_mutations_persisted_total{job=\"$job\"}[5m])", "legendFormat": "persisted/s" },
+        { "expr": "rate(samyama_persistence_errors_total{job=\"$job\"}[5m])", "legendFormat": "errors/s" }
+      ]
     }
   ],
   "__inputs": [

@@ -1275,6 +1275,21 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
         }
     }
 
+    // Clients being served now: RESP connections and HTTP requests in flight,
+    // the same count `max_connections` admits against (#1594, #2080). Absent
+    // where the server runs without a tenant manager, which counts nothing.
+    if let Some(usage) = state
+        .tenant_manager
+        .as_ref()
+        .and_then(|tm| tm.get_usage("default").ok())
+    {
+        out.push_str(&format!(
+            "# HELP samyama_active_connections Clients being served now: open RESP connections and HTTP requests in progress, as max_connections counts them. This scrape is one of them.\n\
+             # TYPE samyama_active_connections gauge\n\
+             samyama_active_connections {}\n",
+            usage.active_connections
+        ));
+    }
     // Query latency last, because it is the part an operator opens this page
     // for. Everything above describes the graph; this describes what asking it
     // questions costs (REL-10).
