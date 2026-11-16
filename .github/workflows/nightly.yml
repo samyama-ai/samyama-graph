@@ -47,7 +47,7 @@ env:
 jobs:
   sweep:
     name: sweep (${{ matrix.stage }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
       # One stage failing must not cancel the others -- each answers its own
@@ -106,7 +106,7 @@ jobs:
   # compiles all of it whether an integer comes back as an `int` or as
   # something else entirely.
   python-extension:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
