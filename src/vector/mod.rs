@@ -55,4 +55,5 @@ pub use index::{VectorIndex, DistanceMetric, HnswParams, VectorError, VectorResu
 pub use manager::{VectorIndexManager, IndexKey};
 
 mod checkpoint;
+pub mod muvera;
 pub mod strategy;
