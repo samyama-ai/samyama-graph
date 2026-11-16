@@ -275,27 +275,10 @@ fn validate_invariant(value: &Value, invariant: &OutputInvariant) -> Result<(), 
 /// Validate the JSON Schema subset used by signatures. Unsupported keywords
 /// are rejected rather than silently treated as satisfied.
 fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    validate_schema_definition(schema, path)?;
     let Some(object) = schema.as_object() else {
         return Err(format!("schema at {path} must be an object"));
     };
-    for key in object.keys() {
-        if !matches!(
-            key.as_str(),
-            "type"
-                | "properties"
-                | "required"
-                | "items"
-                | "enum"
-                | "const"
-                | "additionalProperties"
-                | "minLength"
-                | "minItems"
-                | "minimum"
-                | "maximum"
-        ) {
-            return Err(format!("unsupported JSON Schema keyword `{key}` at {path}"));
-        }
-    }
     if let Some(expected) = object.get("type").and_then(Value::as_str) {
         let matches = match expected {
             "object" => value.is_object(),
@@ -369,17 +352,117 @@ fn validate_schema(value: &Value, schema: &Value, path: &str) -> Result<(), Stri
                 }
             }
         }
-        if object.get("additionalProperties") == Some(&Value::Bool(false)) {
-            for name in fields.keys() {
-                if !properties.is_some_and(|properties| properties.contains_key(name)) {
+        for (name, extra_value) in fields.iter().filter(|(name, _)| {
+            !properties.is_some_and(|properties| properties.contains_key(*name))
+        }) {
+            match object.get("additionalProperties") {
+                Some(Value::Bool(false)) => {
                     return Err(format!("{path}.{name} is not allowed"));
                 }
+                Some(extra_schema) if extra_schema.is_object() => {
+                    validate_schema(extra_value, extra_schema, &format!("{path}.{name}"))?;
+                }
+                _ => {}
             }
         }
     }
     if let (Some(items), Some(array)) = (object.get("items"), value.as_array()) {
         for (index, item) in array.iter().enumerate() {
             validate_schema(item, items, &format!("{path}[{index}]"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Check the schema itself before applying it to a value. A malformed known
+/// keyword must fail closed too; otherwise `as_str`/`as_array` lookups below
+/// could silently skip a constraint supplied with the wrong JSON type.
+fn validate_schema_definition(schema: &Value, path: &str) -> Result<(), String> {
+    let Some(object) = schema.as_object() else {
+        return Err(format!("schema at {path} must be an object"));
+    };
+    for key in object.keys() {
+        if !matches!(
+            key.as_str(),
+            "type"
+                | "properties"
+                | "required"
+                | "items"
+                | "enum"
+                | "const"
+                | "additionalProperties"
+                | "minLength"
+                | "minItems"
+                | "minimum"
+                | "maximum"
+        ) {
+            return Err(format!("unsupported JSON Schema keyword `{key}` at {path}"));
+        }
+    }
+    if let Some(kind) = object.get("type") {
+        let Some(kind) = kind.as_str() else {
+            return Err(format!("schema type at {path} must be a string"));
+        };
+        if !matches!(
+            kind,
+            "object" | "array" | "string" | "integer" | "number" | "boolean" | "null"
+        ) {
+            return Err(format!("unsupported schema type `{kind}` at {path}"));
+        }
+    }
+    if let Some(required) = object.get("required") {
+        let Some(required) = required.as_array() else {
+            return Err(format!(
+                "schema required at {path} must be an array of strings"
+            ));
+        };
+        if required.iter().any(|name| !name.is_string()) {
+            return Err(format!(
+                "schema required at {path} must contain only strings"
+            ));
+        }
+    }
+    if let Some(properties) = object.get("properties") {
+        let Some(properties) = properties.as_object() else {
+            return Err(format!("schema properties at {path} must be an object"));
+        };
+        for (name, child) in properties {
+            validate_schema_definition(child, &format!("{path}.{name}"))?;
+        }
+    }
+    if let Some(items) = object.get("items") {
+        validate_schema_definition(items, &format!("{path}[]"))?;
+    }
+    if let Some(values) = object.get("enum") {
+        if !values.is_array() {
+            return Err(format!("schema enum at {path} must be an array"));
+        }
+    }
+    if let Some(additional) = object.get("additionalProperties") {
+        match additional {
+            Value::Bool(_) => {}
+            Value::Object(_) => validate_schema_definition(additional, &format!("{path}.*"))?,
+            _ => {
+                return Err(format!(
+                    "schema additionalProperties at {path} must be a boolean or schema"
+                ))
+            }
+        }
+    }
+    for key in ["minLength", "minItems"] {
+        if let Some(minimum) = object.get(key) {
+            if minimum.as_u64().is_none() {
+                return Err(format!(
+                    "schema {key} at {path} must be a non-negative integer"
+                ));
+            }
+        }
+    }
+    for key in ["minimum", "maximum"] {
+        if let Some(bound) = object.get(key) {
+            if bound.as_f64().is_none() {
+                return Err(format!("schema {key} at {path} must be a number"));
+            }
         }
     }
     Ok(())
@@ -435,6 +518,44 @@ mod tests {
                 .unwrap_err()
                 .contains("required")
         );
+    }
+
+    #[test]
+    fn rejects_malformed_known_schema_keywords() {
+        for schema in [
+            json!({"type": 7}),
+            json!({"required": "name"}),
+            json!({"required": ["name", 7]}),
+            json!({"properties": []}),
+            json!({"additionalProperties": "yes"}),
+            json!({"minLength": -1}),
+        ] {
+            assert!(
+                validate_schema(&json!({}), &schema, "output").is_err(),
+                "{schema}"
+            );
+        }
+        // Validate every declared property schema, including absent optional
+        // properties, so malformed constraints cannot hide behind omission.
+        assert!(validate_schema(
+            &json!({}),
+            &json!({"properties": {"optional": {"type": 7}}}),
+            "output"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn applies_schema_to_additional_properties() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"known": {"type": "string"}},
+            "additionalProperties": {"type": "string"}
+        });
+        assert!(validate_schema(&json!({"extra": "ok"}), &schema, "output").is_ok());
+        assert!(validate_schema(&json!({"extra": 7}), &schema, "output")
+            .unwrap_err()
+            .contains("must be string"));
     }
 
     #[test]
