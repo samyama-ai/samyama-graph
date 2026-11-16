@@ -95,6 +95,16 @@ impl CommandHandler {
                 (named_graph(), Some(Self::query_hash(&query)))
             }
             "GRAPH.DELETE" => (named_graph(), None),
+            // Emptying the slow-query log changes server state, as HTTP's
+            // `DELETE /api/slowlog` does, and is recorded like it (#2079).
+            "GRAPH.SLOWLOG"
+                if args
+                    .get(1)
+                    .and_then(|v| v.as_string().ok().flatten())
+                    .is_some_and(|s| s.eq_ignore_ascii_case("RESET")) =>
+            {
+                (None, None)
+            }
             // These name no graph: the transaction is on the only one served.
             "GRAPH.COMMIT" | "GRAPH.ROLLBACK" => (Some("default".to_string()), None),
             _ => return None,
@@ -163,6 +173,7 @@ impl CommandHandler {
             "GRAPH.NLQ" => self.handle_graph_nlq(args, store, auth).await,
             "GRAPH.DELETE" => self.handle_graph_delete(args, store, auth).await,
             "GRAPH.LIST" => self.handle_graph_list(args, store, auth).await,
+            "GRAPH.SLOWLOG" => self.handle_graph_slowlog(args, auth),
             "PING" => self.handle_ping(args),
             "ECHO" => self.handle_echo(args),
             "INFO" => self.handle_info(store).await,
@@ -460,6 +471,62 @@ impl CommandHandler {
                 error!("Query error: {}", e);
                 RespValue::Error(format!("ERR {}", e))
             }
+        }
+    }
+
+    /// GRAPH.SLOWLOG GET [count] | LEN | RESET: the slow-query log over RESP
+    /// (#2079), as `GET`/`DELETE /api/slowlog` serve it over HTTP.
+    ///
+    /// The shape follows Redis's `SLOWLOG`: GET returns the newest entries
+    /// first, each a flat field/value array so a RESP2 client reads it without
+    /// a map type; LEN an integer; RESET the number of entries cleared, as the
+    /// HTTP route reports it. Admin only when credentials are configured, as on
+    /// HTTP: entries hold query text from every tenant, literals included.
+    fn handle_graph_slowlog(&self, args: &[RespValue], auth: Option<&crate::auth::Credential>) -> RespValue {
+        use crate::query::slowlog;
+        if let Some(user) = auth {
+            if let Err(e) = user.authorize_role(crate::auth::Role::Admin) {
+                return RespValue::Error(format!("ERR {e}"));
+            }
+        }
+        let arg = |i: usize| args.get(i).and_then(|v| v.as_string().ok().flatten());
+        let usage = || {
+            RespValue::Error(
+                "ERR usage: GRAPH.SLOWLOG GET [count] | GRAPH.SLOWLOG LEN | GRAPH.SLOWLOG RESET"
+                    .to_string(),
+            )
+        };
+        let int = |n: u64| RespValue::Integer(i64::try_from(n).unwrap_or(i64::MAX));
+        let text = |s: &str| RespValue::BulkString(Some(s.as_bytes().to_vec()));
+        match (arg(1).map(|s| s.to_ascii_uppercase()).as_deref(), args.len()) {
+            (Some("GET"), 2 | 3) => {
+                let limit = match arg(2) {
+                    None => slowlog::max_len(),
+                    Some(n) => match n.parse::<usize>() {
+                        Ok(n) => n.min(slowlog::max_len()),
+                        Err(_) => return RespValue::Error(format!("ERR count must be a non-negative integer, got '{n}'")),
+                    },
+                };
+                RespValue::Array(
+                    slowlog::recent(limit)
+                        .into_iter()
+                        .map(|e| {
+                            RespValue::Array(vec![
+                                text("id"), int(e.id),
+                                text("timestamp_ms"), int(e.timestamp_ms),
+                                text("elapsed_ms"), int(e.elapsed_ms),
+                                text("threshold_ms"), int(e.threshold_ms),
+                                text("rows"), int(e.rows as u64),
+                                text("failed"), int(e.failed as u64),
+                                text("query"), text(&e.query),
+                            ])
+                        })
+                        .collect(),
+                )
+            }
+            (Some("LEN"), 2) => int(slowlog::len() as u64),
+            (Some("RESET"), 2) => int(slowlog::reset() as u64),
+            _ => usage(),
         }
     }
 

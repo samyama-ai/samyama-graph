@@ -1659,6 +1659,32 @@ components:
             query did not state and that the choice was observable in the rows.
           items:
             $ref: '#/components/schemas/Notification'
+        stats:
+          $ref: '#/components/schemas/QueryStats'
+
+    QueryStats:
+      type: object
+      description: >-
+        What one statement cost (COST-06). Only what is measured for free;
+        rows examined and peak memory are not reported (use PROFILE for rows
+        per operator).
+      properties:
+        elapsed_ms:
+          type: number
+          description: >-
+            Parsing, planning and running the statement, in milliseconds. A
+            result-cache hit reports the lookup, not the original run.
+        lock_wait_ms:
+          type: number
+          description: >-
+            Waiting for the store's read or write lock before the statement
+            started; contention shows here. 0 inside a transaction.
+        rows:
+          type: integer
+          description: Rows in the result.
+        is_write:
+          type: boolean
+          description: Whether the statement was run as a write.
 
     Notification:
       type: object

@@ -188,3 +188,24 @@ async fn info_reports_the_server_as_it_is() {
     assert_eq!(field(&after, "nodes_total"), Some(2), "{after}");
     assert_eq!(field(&after, "store_busy"), None, "{after}");
 }
+
+/// Emptying the slow-query log changes server state and is recorded, as
+/// `DELETE /api/slowlog` is on HTTP; reading it is not (#2079).
+#[tokio::test]
+async fn emptying_the_slow_query_log_is_recorded_and_reading_it_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.jsonl");
+    let port = serve(Some(&path)).await;
+    let mut c = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    send(&mut c, &["GRAPH.SLOWLOG", "GET"]).await;
+    send(&mut c, &["GRAPH.SLOWLOG", "LEN"]).await;
+    let reset = send(&mut c, &["GRAPH.SLOWLOG", "reset"]).await;
+    assert!(reset.starts_with(':'), "{reset}");
+
+    let log = entries(&path);
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0]["command"], "GRAPH.SLOWLOG");
+    assert_eq!(log[0]["ok"], true);
+    assert!(log[0]["tenant"].is_null(), "the log is the server's, not a graph's");
+}
