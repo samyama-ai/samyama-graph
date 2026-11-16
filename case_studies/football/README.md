@@ -47,6 +47,43 @@ See [`queries.cypher`](queries.cypher). The narrative: all-time tournament winne
 top goal scorers → highest-scoring matches → prolific hosts → confederation strength →
 busiest stadiums → multi-tournament veterans → goal patterns by stage.
 
+## Question catalog
+
+[`football.sgqueries`](./football.sgqueries) holds 56 questions (15 easy, 26 medium,
+15 hard; four unanswerable), built with `catalog-build --release` against the pinned
+snapshot. [`questions.json`](questions.json) is its source, and the NLQ accuracy
+benchmark
+([competitor-benchmarks#260](https://git.samyama.ai/Samyama.ai/samyama-graph-competitor-benchmarks/issues/260))
+reads it as its question set. Every entry is checked
+weekly against the published snapshot by
+[`kg-catalogs.yml`](../../.github/workflows/kg-catalogs.yml).
+
+```bash
+samyama queries list case_studies/football/football.sgqueries
+samyama queries run  case_studies/football/football.sgqueries --snapshot football.sgsnap \
+    --entry <id> [--param name=value]...
+samyama verify football.sgsnap --queries case_studies/football/football.sgqueries
+```
+
+The graph holds men's and women's World Cups together (22 men's, 8 women's), and a
+`Team` node stands for both of a nation's sides, so team totals combine them unless
+a question filters on the tournament name. A goal is linked to its scorer and match
+but not to a team, so team goal totals come from `home_score`/`away_score`. Player
+names are `given_name + ' ' + family_name`, except the 474 players recorded by one
+name (`Pelé`, `Marta`), whose `given_name` is `'not applicable'`; player samples are
+names held by one player only. `Manager` nodes have no relationships, so "who managed
+X" is one of the unanswerable questions.
+
+**Data caveats the catalog surfaces.** `Match.result` records the winner of a
+penalty shootout, so 43 matches are level on goals but not a `draw`
+(`fb_penalty_shootouts`); the win questions say "shootouts included". Stages are
+spelled two ways (`semi-final`/`semi-finals`, `quarter-final`/`quarter-finals`), and
+the 1950 deciding matches are `final round`, not `final`. Four US stadiums are
+recorded twice under different cities (Rose Bowl: Los Angeles and Pasadena; Giants,
+Foxboro and Stanford Stadium likewise), so a per-`Stadium` count splits their
+matches; `fb_shared_stadium_names` lists them (with the two genuinely different
+Olympiastadions), so a corrected snapshot shows up as a changed answer.
+
 ## Data & license
 
 Source: [DataHub World Cup Datasets](https://datahub.io/football/worldcup)
