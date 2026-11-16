@@ -8,8 +8,8 @@
 //!
 //! The counts are per thread: what a search on another thread does is not
 //! added to this one's.
-use samyama::graph::{GraphStore, Label, NodeId, PropertyValue};
-use samyama::query::executor::{QueryExecutor, Value};
+use samyama::graph::{GraphStore, NodeId, PropertyValue};
+use samyama::query::executor::{MutQueryExecutor, QueryExecutor, Value};
 use samyama::query::parser::parse_query;
 use samyama::vector::work::Work;
 use samyama::vector::{DistanceMetric, VectorIndex};
@@ -36,17 +36,41 @@ fn points(n: usize, seed: u64) -> Vec<Vec<f32>> {
         .collect()
 }
 
+/// Built through Cypher, the path a user takes: the index first, then the
+/// nodes, each indexed as its CREATE writes it.
 fn docs() -> GraphStore {
     let mut s = GraphStore::new();
-    s.create_vector_index("Doc", "v", DIM, DistanceMetric::L2)
-        .unwrap();
+    let mut run = |s: &mut GraphStore, q: &str| {
+        let query = parse_query(q).unwrap_or_else(|e| panic!("{q}: {e:?}"));
+        MutQueryExecutor::new(s, "default".to_string())
+            .execute(&query)
+            .unwrap_or_else(|e| panic!("{q}: {e:?}"));
+    };
+    run(
+        &mut s,
+        &format!("CREATE VECTOR INDEX doc_v FOR (d:Doc) ON (d.v) OPTIONS {{dimensions: {DIM}, similarity: 'euclidean'}}"),
+    );
     for (i, v) in points(N, 0x9E37_79B9_7F4A_7C15).into_iter().enumerate() {
-        let mut props = HashMap::new();
-        props.insert("g".to_string(), PropertyValue::Integer((i % 10) as i64));
-        props.insert("v".to_string(), PropertyValue::Vector(v));
-        s.create_node_with_properties("default", vec![Label::new("Doc")], props);
+        run(
+            &mut s,
+            &format!("CREATE (:Doc {{g: {}, v: {}}})", i % 10, literal(&v)),
+        );
     }
+    assert_eq!(
+        s.vector_index
+            .get_index("Doc", "v")
+            .expect("index")
+            .read()
+            .unwrap()
+            .len(),
+        N
+    );
     s
+}
+
+fn literal(v: &[f32]) -> String {
+    let parts: Vec<String> = v.iter().map(|x| format!("{x:?}")).collect();
+    format!("[{}]", parts.join(", "))
 }
 
 fn plan(s: &GraphStore, q: &str) -> PropertyValue {
@@ -107,9 +131,7 @@ fn vector_work(json: &PropertyValue) -> HashMap<String, i64> {
 }
 
 fn query_vector() -> String {
-    let q = points(1, 42).remove(0);
-    let parts: Vec<String> = q.iter().map(|x| format!("{x:?}")).collect();
-    format!("[{}]", parts.join(", "))
+    literal(&points(1, 42)[0])
 }
 
 #[test]
@@ -118,7 +140,7 @@ fn an_unfiltered_search_reports_its_graph_walk() {
     let json = plan(
         &s,
         &format!(
-            "PROFILE (FORMAT JSON) CALL db.index.vector.queryNodes('Doc', 'v', 10, {}) \
+            "PROFILE (FORMAT JSON) CALL db.index.vector.queryNodes('Doc', 'v', {}, 10) \
              YIELD node RETURN node",
             query_vector()
         ),
@@ -139,7 +161,7 @@ fn a_filtered_search_reports_its_filter_checks() {
     let json = plan(
         &s,
         &format!(
-            "PROFILE (FORMAT JSON) CALL db.index.vector.queryNodes('Doc', 'v', 10, {}) \
+            "PROFILE (FORMAT JSON) CALL db.index.vector.queryNodes('Doc', 'v', {}, 10) \
              YIELD node WHERE node.g = 3 RETURN node",
             query_vector()
         ),
@@ -159,7 +181,7 @@ fn the_text_profile_carries_the_counters_on_the_vector_line_only() {
     let text = match plan(
         &s,
         &format!(
-            "PROFILE CALL db.index.vector.queryNodes('Doc', 'v', 10, {}) YIELD node RETURN node",
+            "PROFILE CALL db.index.vector.queryNodes('Doc', 'v', {}, 10) YIELD node RETURN node",
             query_vector()
         ),
     ) {
