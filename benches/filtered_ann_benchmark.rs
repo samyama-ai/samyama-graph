@@ -249,6 +249,8 @@ fn graph_sweep(base: &Vectors, queries: &Vectors, efs: &[usize], path: &str) -> 
                         }
                     }
                 }
+                // As `two_hop`: the anchor is not part of its own reach.
+                seen.remove(&node_of[x]);
                 seen
             };
 

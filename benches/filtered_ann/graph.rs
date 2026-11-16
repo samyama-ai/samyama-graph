@@ -40,7 +40,12 @@ pub fn knn_graph(base: &Vectors, degree: usize) -> Vec<Vec<u32>> {
 }
 
 /// Nodes reachable from `x` in one or two hops over the first `degree` links
-/// of each list.
+/// of each list, `x` itself excluded.
+///
+/// Excluded even when a link comes back to it (`x -> a -> x`, common in a
+/// k-NN graph). Neo4j's relationship isomorphism would let `*1..2` return
+/// `x` that way; this engine's does not, so the statements say `<> x` and
+/// the oracle agrees with them whichever way that is settled.
 pub fn two_hop(adj: &[Vec<u32>], x: usize, degree: usize) -> Vec<bool> {
     let mut mask = vec![false; adj.len()];
     for &a in adj[x].iter().take(degree) {
@@ -49,6 +54,7 @@ pub fn two_hop(adj: &[Vec<u32>], x: usize, degree: usize) -> Vec<bool> {
             mask[b as usize] = true;
         }
     }
+    mask[x] = false;
     mask
 }
 
@@ -84,8 +90,8 @@ fn literal(v: &[f32]) -> String {
 /// it returns fewer than `k` whenever the global nearest lie outside the reach.
 pub fn cypher_post(degree: usize, anchor_id: usize, query: &[f32], k: usize) -> String {
     format!(
-        "CALL db.index.vector.queryNodes('V', 'v', {k}, {q}) YIELD node \
-         MATCH (node)<-[:{t}*1..2]-(x:V {{id: {anchor_id}}}) \
+        "CALL db.index.vector.queryNodes('V', 'v', {q}, {k}) YIELD node \
+         MATCH (node)<-[:{t}*1..2]-(x:V {{id: {anchor_id}}}) WHERE node <> x \
          RETURN DISTINCT node.id AS id",
         q = literal(query),
         t = edge_type(degree),
@@ -96,7 +102,7 @@ pub fn cypher_post(degree: usize, anchor_id: usize, query: &[f32], k: usize) -> 
 /// distance per reached node.
 pub fn cypher_exact(degree: usize, anchor_id: usize, query: &[f32], k: usize) -> String {
     format!(
-        "MATCH (x:V {{id: {anchor_id}}})-[:{t}*1..2]->(n:V) WITH DISTINCT n \
+        "MATCH (x:V {{id: {anchor_id}}})-[:{t}*1..2]->(n:V) WHERE n <> x WITH DISTINCT n \
          RETURN n.id AS id, vector.distance(n.v, {q}, 'EUCLIDEAN') AS d ORDER BY d, id LIMIT {k}",
         q = literal(query),
         t = edge_type(degree),

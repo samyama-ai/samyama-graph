@@ -50,10 +50,11 @@ fn two_hop_is_out_and_out_of_out() {
     let adj = knn_graph(&line(10), 2);
     let reach = two_hop(&adj, 0, 2);
     let got: Vec<usize> = (0..10).filter(|&i| reach[i]).collect();
-    // 0 -> {1, 2}; 1 -> {0, 2}; 2 -> {1, 3}. The anchor comes back via 1.
-    assert_eq!(got, vec![0, 1, 2, 3]);
+    // 0 -> {1, 2}; 1 -> {0, 2}; 2 -> {1, 3}. The anchor comes back via 1,
+    // and is left out: it is where the walk starts, not where it reaches.
+    assert_eq!(got, vec![1, 2, 3]);
     let one = two_hop(&adj, 0, 1);
-    assert_eq!((0..10).filter(|&i| one[i]).collect::<Vec<_>>(), vec![0, 1]);
+    assert_eq!((0..10).filter(|&i| one[i]).collect::<Vec<_>>(), vec![1]);
 }
 
 #[test]

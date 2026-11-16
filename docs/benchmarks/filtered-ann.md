@@ -46,9 +46,11 @@ be passed with or without `--csv`.
   records the mean measured (`mean_reach`), not a target.
 - **Correlation.** Set by the anchor: the corpus node nearest the query
   (positive), a seeded random node (none), or the farthest (negative).
-- **Truth.** The same f64 oracle, over `out(x) ∪ out(out(x))`. That is what
-  `(x)-[:T*1..2]->(n)` matches on a graph with no self-loops or parallel edges,
-  so it can include `x`.
+- **Truth.** The same f64 oracle, over `out(x) ∪ out(out(x))` minus `x`
+  itself. The statements say `WHERE n <> x` to match. Under Neo4j's
+  relationship isomorphism `(x)-[:T*1..2]->(n)` can return `x` through a link
+  back to it (`x -> a -> x`); this engine's traversal did not in CI, so the
+  anchor is excluded on both sides rather than left to that difference.
 
 The four strategies are timed with the traversal included in every one:
 
@@ -56,7 +58,7 @@ The four strategies are timed with the traversal included in every one:
 |---|---|
 | `traverse+auto` | two hops through the store's adjacency, then the reach as the vector search's filter (`search_filtered_ef`), across the ef sweep. This is the in-process form of a two-system pipeline: the graph DB returns ids and the vector DB filters on them, minus both network hops. |
 | `traverse+exact` | the same walk, then an exact scan of the reach |
-| `cypher-post` | `CALL db.index.vector.queryNodes(...) YIELD node MATCH (node)<-[:T*1..2]-(x {id: X})`. This is what a user writes today; the traversal filters the top k after the search, so expect short results |
+| `cypher-post` | `CALL db.index.vector.queryNodes(...) YIELD node MATCH (node)<-[:T*1..2]-(x {id: X}) WHERE node <> x`. This is what a user writes today; the traversal filters the top k after the search, so expect short results |
 | `cypher-exact` | `MATCH (x {id: X})-[:T*1..2]->(n) ... ORDER BY vector.distance(...) LIMIT k` |
 
 Statement text is parsed outside the timed region, while planning and execution are timed.
