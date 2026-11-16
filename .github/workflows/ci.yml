@@ -52,7 +52,7 @@ jobs:
   # (cargo-deny)` reported, skipped, under exactly its required name -- and
   # fails for a MATRIX job, because an `if:`-skipped matrix is never expanded
   # and reports as `test (${{ matrix.os }})`, so the required
-  # `test (ubuntu-latest)` never appeared at all. #1860 was MERGEABLE and
+  # `test (ubuntu-24.04)` never appeared at all. #1860 was MERGEABLE and
   # permanently BLOCKED for five days on precisely that.
   #
   # The single required context is now `ci-ok`, which has a fixed name and
@@ -64,7 +64,7 @@ jobs:
   # regression.
   changes:
     name: changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       code: ${{ steps.filter.outputs.code }}
       # A separate question from `code`. A storage-layer change runs the test
@@ -277,7 +277,7 @@ jobs:
     name: docs-gate (CH-DOC-EXEC)
     needs: changes
     if: needs.changes.outputs.docs == 'true' && needs.changes.outputs.code != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # A warm `ci-gates` cache makes this a link step. A cold one is a full
     # release build, hence the headroom.
     timeout-minutes: 30
@@ -320,7 +320,7 @@ jobs:
     name: supply-chain (cargo-deny)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -373,7 +373,7 @@ jobs:
         # signedness both differ there. FMA contraction does too; the gate that
         # reads it is CH-ALGO-PARITY, which runs on both architectures in
         # `gates`.
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
 
@@ -477,7 +477,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
 
@@ -545,7 +545,7 @@ jobs:
 
       - name: CH-DOC-EXEC — the Cypher in our documentation parses
         id: ch_doc_exec
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         # Runs even if an earlier gate failed, and the run-all-gates step
         # below turns any failure into the job's failure. See that step.
         continue-on-error: true
@@ -557,7 +557,7 @@ jobs:
 
       - name: CH-API — the OpenAPI document and the server describe one API
         id: ch_api
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         # Runs even if an earlier gate failed, and the run-all-gates step
         # below turns any failure into the job's failure. See that step.
         continue-on-error: true
@@ -619,7 +619,7 @@ jobs:
         run: ./scripts/check_thread_determinism.sh /tmp/openCypher/tck/features
 
       - name: The release gate refuses for three reasons, not one
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         # It is the missing and the stale verdict that actually happen, and
         # both look like "nothing is wrong" to a check that only compares a
         # status string. This runs in CI because a gate nobody tests is a gate
@@ -627,11 +627,11 @@ jobs:
         run: python3 scripts/test_check_release_gate.py
 
       - name: Corpus runner reset preflights
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         run: python3 -m unittest discover -s scripts -p test_falkordb_corpus_run.py
 
       - name: The triage-SLA measurement counts neither weekends nor labels
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         # The daily measurement itself lives in triage-sla.yml, because whether
         # an issue got a reply is not a property of a PR. Its rules are, and a
         # change that breaks them should fail here, not on some later weekday.
@@ -639,7 +639,7 @@ jobs:
 
       - name: LINT-RATCHET — the clippy warning count may not rise
         id: lint_ratchet
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         # Runs even if an earlier gate failed, and the run-all-gates step
         # below turns any failure into the job's failure. See that step.
         continue-on-error: true
@@ -707,7 +707,7 @@ jobs:
           LINT_RATCHET_OUTCOME: ${{ steps.lint_ratchet.outcome }}
           CH_ALGO_PARITY_OUTCOME: ${{ steps.ch_algo_parity.outcome }}
           CH_API_STABILITY_OUTCOME: ${{ steps.ch_api_stability.outcome }}
-          IS_X86: ${{ matrix.os == 'ubuntu-latest' }}
+          IS_X86: ${{ matrix.os == 'ubuntu-24.04' }}
         run: |
           failed=""
           outcome_of() {
@@ -772,7 +772,7 @@ jobs:
       # a missing artifact as "build it yourself", which is exactly what it did
       # before, so the degraded path is the old behaviour rather than a new one.
       - name: Keep the release binary for the conformance job
-        if: always() && matrix.os == 'ubuntu-latest'
+        if: always() && matrix.os == 'ubuntu-24.04'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -866,7 +866,7 @@ jobs:
     name: sdks (typescript transport, python MCP tools)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Each half had 10. Sequential now, so the sum plus room for a cold cargo
     # cache on the `cargo check`.
     timeout-minutes: 25
@@ -1013,10 +1013,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - writer: ubuntu-latest
+          - writer: ubuntu-24.04
             reader: ubuntu-24.04-arm
           - writer: ubuntu-24.04-arm
-            reader: ubuntu-latest
+            reader: ubuntu-24.04
     runs-on: ${{ matrix.writer }}
     steps:
       - uses: actions/checkout@v4
@@ -1046,10 +1046,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - writer: ubuntu-latest
+          - writer: ubuntu-24.04
             reader: ubuntu-24.04-arm
           - writer: ubuntu-24.04-arm
-            reader: ubuntu-latest
+            reader: ubuntu-24.04
     runs-on: ${{ matrix.reader }}
     steps:
       - uses: actions/checkout@v4
@@ -1102,7 +1102,7 @@ jobs:
     name: GPML path-pattern conformance
     needs: [changes, gates]
     if: needs.changes.outputs.conformance == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Was 45 while a dead Grafeo adapter burned 60s per case on 84 cases (#1858).
     # With that fixed the whole of run.sh is about a minute, and the build is the
     # only slow part -- and it is now usually downloaded rather than built.
@@ -1207,7 +1207,7 @@ jobs:
     name: orchestration (Airflow and Dagster reference pipelines)
     needs: [changes, gates]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -1277,7 +1277,7 @@ jobs:
     name: sdk-compat (published SDKs against this build)
     needs: [changes, gates]
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -1343,7 +1343,7 @@ jobs:
   # `test` and the two snapshot jobs take their check names from a matrix. When an
   # `if:` skips a matrix job, GitHub never expands the matrix, so the check is
   # reported under the LITERAL name -- `test (${{ matrix.os }})` -- and the names
-  # protection requires, `test (ubuntu-latest)` and `test (ubuntu-24.04-arm)`, are
+  # protection requires, `test (ubuntu-24.04)` and `test (ubuntu-24.04-arm)`, are
   # never reported at all. A required context that never reports leaves the pull
   # request permanently BLOCKED.
   #
@@ -1365,7 +1365,7 @@ jobs:
   # it.
   triage-sla-contract:
     name: triage SLA role lookup (workflow token)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     # Match the scheduled SLA workflow. Metadata read is implicit in GitHub's
     # repository token; the permission endpoint must not need a maintainer PAT.
@@ -1400,7 +1400,7 @@ jobs:
   # look relevant would have skipped the commit that broke it.
   excluded-lockfiles:
     name: excluded workspace lockfiles are current
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -1472,7 +1472,7 @@ jobs:
       - sdk-compat
       - excluded-lockfiles
       - platforms
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Every suite either succeeded or was skipped
         env:
