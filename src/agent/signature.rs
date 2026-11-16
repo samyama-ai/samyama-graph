@@ -2,7 +2,7 @@
 
 use super::{AgentError, AgentResult};
 use crate::graph::GraphStore;
-use crate::nlq::client::{NLQClient, ResponseSchema};
+use crate::nlq::client::{NLQClient, ResponseSchema, TokenUsage};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
@@ -17,10 +17,24 @@ pub struct Demonstration {
 /// A validation rule applied after decoding and before returning output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutputInvariant {
-    ValidCypherReadOnly { field: String },
-    ValidCypherParseable { field: String },
-    RegisteredToolNamesOnly { field: String, allowed: Vec<String> },
-    NonEmptyProvenanceCitations { field: String },
+    ValidCypherReadOnly {
+        field: String,
+    },
+    ValidCypherParseable {
+        field: String,
+    },
+    RegisteredToolNamesOnly {
+        field: String,
+        allowed: Vec<String>,
+    },
+    /// Each object in the named array has a JSON object encoded in this string field.
+    ValidJsonObjectsInArray {
+        field: String,
+        string_field: String,
+    },
+    NonEmptyProvenanceCitations {
+        field: String,
+    },
 }
 
 /// The declarative contract for one model operation.
@@ -51,6 +65,8 @@ pub struct SignatureOutcome<O> {
     pub attempts_to_success: usize,
     /// Total across attempts, or `None` if any provider call omitted usage.
     pub total_tokens: Option<u64>,
+    /// Per-direction token counts, preserved for consumers such as NLQ billing.
+    pub usage: TokenUsage,
     pub latency_ms: u64,
 }
 
@@ -89,6 +105,21 @@ impl SignatureRunner {
         I: Serialize,
         O: DeserializeOwned,
     {
+        self.invoke_without_store(client, signature, input).await
+    }
+
+    /// Invoke a signature that has no graph-backed invariant. This keeps
+    /// callers such as NLQ and enrichment from constructing a dummy store.
+    pub async fn invoke_without_store<I, O>(
+        &self,
+        client: &NLQClient,
+        signature: &SignatureSpec,
+        input: &I,
+    ) -> AgentResult<SignatureOutcome<O>>
+    where
+        I: Serialize,
+        O: DeserializeOwned,
+    {
         let input = serde_json::to_value(input)
             .map_err(|e| AgentError::ExecutionError(format!("signature input is not JSON: {e}")))?;
         validate_schema(&input, &signature.input_schema, "input")
@@ -100,6 +131,8 @@ impl SignatureRunner {
             schema: signature.output_schema.clone(),
         };
         let mut tokens = Some(0u64);
+        let mut prompt_tokens = Some(0u64);
+        let mut completion_tokens = Some(0u64);
         let mut latency = Duration::ZERO;
         let max_attempts = self.max_repairs.saturating_add(1);
 
@@ -112,6 +145,8 @@ impl SignatureRunner {
                 (Some(total), Some(call_tokens)) => Some(total.saturating_add(call_tokens)),
                 _ => None,
             };
+            prompt_tokens = add_reported(prompt_tokens, completion.usage.prompt_tokens);
+            completion_tokens = add_reported(completion_tokens, completion.usage.completion_tokens);
             latency = latency.saturating_add(completion.latency);
 
             let validation =
@@ -125,6 +160,11 @@ impl SignatureRunner {
                         output,
                         attempts_to_success: attempt,
                         total_tokens: tokens,
+                        usage: TokenUsage {
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens: tokens,
+                        },
                         latency_ms: latency.as_millis().min(u64::MAX as u128) as u64,
                     });
                 }
@@ -148,6 +188,13 @@ impl SignatureRunner {
             "signature {} exhausted its attempt budget",
             signature.id
         )))
+    }
+}
+
+fn add_reported(total: Option<u64>, next: Option<u64>) -> Option<u64> {
+    match (total, next) {
+        (Some(total), Some(next)) => Some(total.saturating_add(next)),
+        _ => None,
     }
 }
 
@@ -239,7 +286,7 @@ fn validate_invariant(value: &Value, invariant: &OutputInvariant) -> Result<(), 
                 .map_err(|e| format!("field `{field}` is not parseable Cypher: {e}"))?;
             if matches!(invariant, OutputInvariant::ValidCypherReadOnly { .. }) && parsed.is_write()
             {
-                return Err(format!("field `{field}` contains a write query"));
+                return Err(format!("field `{field}` contains write operations"));
             }
         }
         OutputInvariant::RegisteredToolNamesOnly { field, allowed } => {
@@ -254,6 +301,30 @@ fn validate_invariant(value: &Value, invariant: &OutputInvariant) -> Result<(), 
                     .ok_or_else(|| format!("{field}[{index}].tool must be a string"))?;
                 if !allowed.iter().any(|registered| registered == tool) {
                     return Err(format!("tool `{tool}` is not registered"));
+                }
+            }
+        }
+        OutputInvariant::ValidJsonObjectsInArray {
+            field,
+            string_field,
+        } => {
+            let items = value
+                .get(field)
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("field `{field}` must be an array"))?;
+            for (index, item) in items.iter().enumerate() {
+                let encoded = item
+                    .get(string_field)
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!("{field}[{index}].{string_field} must be a JSON string")
+                    })?;
+                let parsed: Value = serde_json::from_str(encoded)
+                    .map_err(|e| format!("{field}[{index}].{string_field} is invalid JSON: {e}"))?;
+                if !parsed.is_object() {
+                    return Err(format!(
+                        "{field}[{index}].{string_field} must encode a JSON object"
+                    ));
                 }
             }
         }
@@ -465,6 +536,29 @@ mod tests {
             }
         )
         .is_ok());
+    }
+
+    #[test]
+    fn tool_arguments_must_be_encoded_json_objects() {
+        let rule = OutputInvariant::ValidJsonObjectsInArray {
+            field: "calls".into(),
+            string_field: "args_json".into(),
+        };
+        assert!(validate_invariant(
+            &json!({"calls":[{"args_json":"{\"query\":\"MATCH (n) RETURN n\"}"}]}),
+            &rule
+        )
+        .is_ok());
+        assert!(
+            validate_invariant(&json!({"calls":[{"args_json":"not json"}]}), &rule)
+                .unwrap_err()
+                .contains("invalid JSON")
+        );
+        assert!(
+            validate_invariant(&json!({"calls":[{"args_json":"[]"}]}), &rule)
+                .unwrap_err()
+                .contains("must encode a JSON object")
+        );
     }
 
     #[test]
