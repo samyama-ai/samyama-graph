@@ -6,6 +6,7 @@ pub mod executor;
 pub mod planner;
 pub mod tools;
 pub mod enrich;
+pub mod signature;
 
 use crate::graph::GraphStore;
 use crate::nlq::client::NLQClient;
