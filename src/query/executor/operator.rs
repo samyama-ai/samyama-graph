@@ -3078,7 +3078,8 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "date", "date.truncate", "datetime", "datetime.fromepoch",
     "datetime.fromepochmillis", "datetime.truncate", "degrees", "distance", "duration",
     "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
-    "duration_between", "e", "elementid", "endnode", "exists", "exp", "floor",
+    "duration_between", "e", "elementid", "endnode", "exists", "exp",
+    "feature.value", "feature.vector", "floor",
     "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id",
     "isempty", "isnan", "keys", "labels", "last", "left", "length", "localdatetime",
     "localdatetime.truncate", "localtime", "localtime.truncate", "log", "log10",
@@ -3281,6 +3282,8 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("haslabels", 2),
     ("point.distance", 2),
     ("point.withinbbox", 3),
+    ("feature.value", 2),
+    ("feature.vector", 2),
     ("vector.similarity.cosine", 2),
     ("vector.similarity.euclidean", 2),
     ("vector.similarity.maxsim", 2),
@@ -4818,6 +4821,33 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             }
             let inside = p.x >= ll.x && p.x <= ur.x && p.y >= ll.y && p.y <= ur.y;
             Ok(Value::Property(PropertyValue::Boolean(inside)))
+        }
+        // A materialized feature's value for one entity (ML-13, #1768), read
+        // per row: `MATCH (c:Customer) RETURN c.name, feature.value('spend', c)`.
+        // `feature.vector(['a', 'b'], c)` is the entity's feature vector, in
+        // the order named. Both read the latest materialization; null for an
+        // entity a feature has no value for. See `feature_ops`.
+        "feature.value" | "feature.vector" => {
+            let store = store.ok_or_else(|| ExecutionError::RuntimeError(format!(
+                "{name}() requires graph context")))?;
+            let who = if lowered == "feature.value" { "feature.value" } else { "feature.vector" };
+            let names = super::feature_ops::feature_names(&args[0], who)?;
+            if who == "feature.value" && names.len() != 1 {
+                return Err(ExecutionError::bad_argument(format!(
+                    "feature.value takes one feature name; for several, call \
+                     feature.vector({names:?}, n)")));
+            }
+            let Some(id) = super::feature_ops::entity_id(&args[1]) else {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{who}: the entity must be a node or its integer id, got {:?}", args[1])));
+            };
+            let values = store.features.lookup(&names, id)
+                .map_err(|e| ExecutionError::bad_argument(e.to_string()))?;
+            if who == "feature.value" {
+                Ok(Value::Property(values.into_iter().next().flatten().unwrap_or(PropertyValue::Null)))
+            } else {
+                Ok(super::feature_ops::value_list(values))
+            }
         }
         // Neo4j 5's vector functions (#1980). The similarities are the
         // `score` of `db.index.vector.queryNodes` for the same pair, from the
