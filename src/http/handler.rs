@@ -592,7 +592,11 @@ async fn run_query(
         snapshot_version = version;
         (result, props)
     } else {
-        let store_guard = state.store.read().await;
+        let store_guard = {
+            use tracing::Instrument;
+            // A stage of the request's trace (#2077).
+            state.store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+        };
         // The result cache is keyed on the statement text, which does not say which
         // dialect it was read under, so a GQL request must not be served from it until
         // the key carries the dialect. Bypassing is the conservative half of that:
@@ -745,7 +749,14 @@ async fn stream_query(
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamMsg>(STREAM_CHANNEL_CHUNKS);
-    let guard = std::sync::Arc::clone(&state.store).read_owned().await;
+    let guard = {
+        use tracing::Instrument;
+        // A stage of the request's trace (#2077).
+        std::sync::Arc::clone(&state.store)
+            .read_owned()
+            .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read"))
+            .await
+    };
     let engine = std::sync::Arc::clone(&state.engine);
     let time_limit = state.query_time_limit(&payload.graph);
     let runtime = tokio::runtime::Handle::current();
