@@ -97,11 +97,11 @@ impl CommandHandler {
             "GRAPH.DELETE" => (named_graph(), None),
             // Emptying the slow-query log changes server state, as HTTP's
             // `DELETE /api/slowlog` does, and is recorded like it (#2079).
+            // `RESET` as our subcommand, or after a graph name in FalkorDB's form.
             "GRAPH.SLOWLOG"
-                if args
-                    .get(1)
-                    .and_then(|v| v.as_string().ok().flatten())
-                    .is_some_and(|s| s.eq_ignore_ascii_case("RESET")) =>
+                if args.iter().skip(1).take(2).any(|v| {
+                    v.as_string().ok().flatten().is_some_and(|s| s.eq_ignore_ascii_case("RESET"))
+                }) =>
             {
                 (None, None)
             }
@@ -482,6 +482,11 @@ impl CommandHandler {
     /// a map type; LEN an integer; RESET the number of entries cleared, as the
     /// HTTP route reports it. Admin only when credentials are configured, as on
     /// HTTP: entries hold query text from every tenant, literals included.
+    ///
+    /// FalkorDB's form, `GRAPH.SLOWLOG <graph>` and `GRAPH.SLOWLOG <graph>
+    /// RESET`, is answered too, in FalkorDB's reply shape, so a client moving
+    /// over keeps working. As everywhere else, the graph must be `default`;
+    /// `GET`, `LEN` and `RESET` are read as subcommands, never as a graph.
     fn handle_graph_slowlog(&self, args: &[RespValue], auth: Option<&crate::auth::Credential>) -> RespValue {
         use crate::query::slowlog;
         if let Some(user) = auth {
@@ -526,6 +531,29 @@ impl CommandHandler {
             }
             (Some("LEN"), 2) => int(slowlog::len() as u64),
             (Some("RESET"), 2) => int(slowlog::reset() as u64),
+            (Some("GET" | "LEN" | "RESET"), _) | (None, _) => usage(),
+            (Some(_), 2 | 3) if arg(1).as_deref() != Some("default") => RespValue::Error(format!(
+                "ERR this build serves a single graph ('default'); graph '{}' does not exist",
+                arg(1).unwrap_or_default()
+            )),
+            // FalkorDB: each entry is [timestamp (s), command, query, duration (ms)].
+            (Some(_), 2) => RespValue::Array(
+                slowlog::recent(slowlog::max_len())
+                    .into_iter()
+                    .map(|e| {
+                        RespValue::Array(vec![
+                            text(&(e.timestamp_ms / 1000).to_string()),
+                            text("GRAPH.QUERY"),
+                            text(&e.query),
+                            text(&e.elapsed_ms.to_string()),
+                        ])
+                    })
+                    .collect(),
+            ),
+            (Some(_), 3) if arg(2).is_some_and(|s| s.eq_ignore_ascii_case("RESET")) => {
+                slowlog::reset();
+                RespValue::SimpleString("OK".to_string())
+            }
             _ => usage(),
         }
     }

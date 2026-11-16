@@ -200,12 +200,18 @@ async fn emptying_the_slow_query_log_is_recorded_and_reading_it_is_not() {
 
     send(&mut c, &["GRAPH.SLOWLOG", "GET"]).await;
     send(&mut c, &["GRAPH.SLOWLOG", "LEN"]).await;
+    send(&mut c, &["GRAPH.SLOWLOG", "default"]).await;
     let reset = send(&mut c, &["GRAPH.SLOWLOG", "reset"]).await;
     assert!(reset.starts_with(':'), "{reset}");
+    // FalkorDB's form of the same reset.
+    let reset = send(&mut c, &["GRAPH.SLOWLOG", "default", "RESET"]).await;
+    assert!(reset.starts_with("+OK"), "{reset}");
 
     let log = entries(&path);
-    assert_eq!(log.len(), 1, "{log:?}");
-    assert_eq!(log[0]["command"], "GRAPH.SLOWLOG");
-    assert_eq!(log[0]["ok"], true);
-    assert!(log[0]["tenant"].is_null(), "the log is the server's, not a graph's");
+    assert_eq!(log.len(), 2, "{log:?}");
+    for e in &log {
+        assert_eq!(e["command"], "GRAPH.SLOWLOG");
+        assert_eq!(e["ok"], true);
+        assert!(e["tenant"].is_null(), "the log is the server's, not a graph's");
+    }
 }

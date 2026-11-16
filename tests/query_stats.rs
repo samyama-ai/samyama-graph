@@ -65,8 +65,9 @@ async fn elapsed_grows_with_the_work_the_statement_does() {
 }
 
 /// Contention is reported where it happened: in `lock_wait_ms`, not mixed
-/// into `elapsed_ms`. The lower bound is the time this test held the lock
-/// itself, so it does not depend on the machine's speed.
+/// into `elapsed_ms`. The request may reach the lock some way into the hold
+/// (on a loaded CI runner, 20 ms in), so the bound is half the hold: well
+/// above zero, which is what a missing measurement reports.
 #[tokio::test]
 async fn waiting_for_the_lock_is_reported_apart_from_running() {
     let store = Arc::new(RwLock::new(GraphStore::new()));
@@ -81,7 +82,7 @@ async fn waiting_for_the_lock_is_reported_apart_from_running() {
         drop(guard);
         let s = pending.await.unwrap()["stats"].clone();
         let waited = f(&s["lock_wait_ms"]);
-        assert!(waited >= held.as_millis() as f64 * 0.9, "{q}: waited {waited} ms of {held:?}: {s}");
+        assert!(waited >= held.as_millis() as f64 * 0.5, "{q}: waited {waited} ms of {held:?}: {s}");
         assert!(f(&s["elapsed_ms"]) < waited, "{q}: the wait is not counted as running: {s}");
     }
 }

@@ -21,7 +21,13 @@
           1
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -47,7 +53,13 @@
           1.5
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -73,7 +85,13 @@
           "x"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -99,7 +117,13 @@
           true
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -125,7 +149,13 @@
           null
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -155,7 +185,13 @@
           ]
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -184,7 +220,13 @@
           }
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -212,7 +254,13 @@
           2
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -238,7 +286,13 @@
           6
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -264,7 +318,13 @@
           4
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -312,7 +372,13 @@
           }
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -362,7 +428,13 @@
           }
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -426,7 +498,13 @@
           }
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -461,7 +539,13 @@
           }
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -496,7 +580,13 @@
           "Dan"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 4
+      }
     },
     "status": 200
   },
@@ -522,7 +612,13 @@
           null
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -557,7 +653,13 @@
           "Alice"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 4
+      }
     },
     "status": 200
   },
@@ -586,7 +688,13 @@
           "Carol"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -618,7 +726,13 @@
           null
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 3
+      }
     },
     "status": 200
   },
@@ -647,7 +761,13 @@
           "Dan"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -673,7 +793,13 @@
           "Alice"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -699,7 +825,13 @@
           "Carol"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -725,7 +857,13 @@
           2
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -765,7 +903,13 @@
           "Globex"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 4
+      }
     },
     "status": 200
   },
@@ -791,7 +935,13 @@
           129
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -817,7 +967,13 @@
           32.25
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -845,7 +1001,13 @@
           41
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -876,7 +1038,13 @@
           ]
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -912,7 +1080,13 @@
           1
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 3
+      }
     },
     "status": 200
   },
@@ -940,7 +1114,13 @@
           2
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -972,7 +1152,13 @@
           6
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 3
+      }
     },
     "status": 200
   },
@@ -1001,7 +1187,13 @@
           2
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -1030,7 +1222,13 @@
           "Bob"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -1056,7 +1254,13 @@
           2
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1082,7 +1286,13 @@
           "Carol"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1111,7 +1321,13 @@
           ]
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1140,7 +1356,13 @@
           "WORKS_AT"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -1170,7 +1392,13 @@
           ]
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1196,7 +1424,13 @@
           1
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1222,7 +1456,13 @@
           "unknown"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1257,7 +1497,13 @@
           "younger"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 4
+      }
     },
     "status": 200
   },
@@ -1289,7 +1535,13 @@
           5
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1325,7 +1577,13 @@
           -1
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1358,7 +1616,13 @@
           ]
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1388,7 +1652,13 @@
           "7"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1414,7 +1684,13 @@
           null
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1440,7 +1716,13 @@
           null
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1466,7 +1748,13 @@
           "Project (p) [estimated rows=4 cost=8]\n+- NodeScan (var=p, labels=[\"Person\"]) [estimated rows=4 cost=4]\n\n--- Row budget ---\nper-operator row budget: 50000000 rows; an operator producing more is refused with Samyama.ClientError.Statement.RowBudgetExceeded\n\n--- Statistics ---\nGraph Statistics:\n  Total nodes: 6\n  Total edges: 4\n  Avg out-degree: 0.67\n  Labels:\n    :Person = 4 nodes\n    :Company = 2 nodes\n    :Employee = 1 nodes\n  Edge types:\n    :KNOWS = 2 edges\n    :WORKS_AT = 2 edges\n"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1495,7 +1783,13 @@
           ]
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1521,7 +1815,13 @@
           1
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1550,7 +1850,13 @@
           ]
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1579,7 +1885,13 @@
           ]
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1609,7 +1921,13 @@
           ]
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1637,7 +1955,13 @@
           "azc"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1667,7 +1991,13 @@
           "cba"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1699,7 +2029,13 @@
           ]
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1725,7 +2061,13 @@
           3
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1751,7 +2093,13 @@
           true
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1781,7 +2129,13 @@
           false
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1811,7 +2165,13 @@
           true
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1839,7 +2199,13 @@
           8.0
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1867,7 +2233,13 @@
           3.5
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1893,7 +2265,13 @@
           "2024-01-15"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1919,7 +2297,13 @@
           "2024-01-15T10:30Z"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1950,7 +2334,13 @@
           }
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -1976,7 +2366,13 @@
           2024
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2002,7 +2398,13 @@
           4
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2028,7 +2430,13 @@
           2
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2068,7 +2476,13 @@
           25
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 4
+      }
     },
     "status": 200
   },
@@ -2090,7 +2504,13 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 0
+      }
     },
     "status": 200
   },
@@ -2112,7 +2532,13 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 0
+      }
     },
     "status": 200
   },
@@ -2138,7 +2564,13 @@
           null
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2164,7 +2596,13 @@
           4
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2190,7 +2628,13 @@
           4
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2216,7 +2660,13 @@
           1
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2245,7 +2695,13 @@
           "ops"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -2274,7 +2730,13 @@
           "Dan"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -2300,7 +2762,13 @@
           8
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2332,7 +2800,13 @@
           "Person"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 3
+      }
     },
     "status": 200
   },
@@ -2361,7 +2835,13 @@
           "WORKS_AT"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -2402,7 +2882,13 @@
           "since"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 6
+      }
     },
     "status": 200
   },
@@ -2442,7 +2928,13 @@
           "Company"
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 3
+      }
     },
     "status": 200
   },
@@ -2468,7 +2960,13 @@
           6
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2494,7 +2992,13 @@
           6
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2520,7 +3024,13 @@
           1
         ]
       ],
-      "snapshot_version": 11
+      "snapshot_version": 11,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2540,7 +3050,13 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 12
+      "snapshot_version": 12,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 0
+      }
     },
     "status": 200
   },
@@ -2584,7 +3100,13 @@
           }
         ]
       ],
-      "snapshot_version": 13
+      "snapshot_version": 13,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2604,7 +3126,13 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 14
+      "snapshot_version": 14,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 0
+      }
     },
     "status": 200
   },
@@ -2630,7 +3158,13 @@
           99
         ]
       ],
-      "snapshot_version": 15
+      "snapshot_version": 15,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2658,7 +3192,13 @@
           "x"
         ]
       ],
-      "snapshot_version": 16
+      "snapshot_version": 16,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2684,7 +3224,13 @@
           null
         ]
       ],
-      "snapshot_version": 17
+      "snapshot_version": 17,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2713,7 +3259,13 @@
           ]
         ]
       ],
-      "snapshot_version": 18
+      "snapshot_version": 18,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2741,7 +3293,13 @@
           ]
         ]
       ],
-      "snapshot_version": 19
+      "snapshot_version": 19,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2767,7 +3325,13 @@
           1
         ]
       ],
-      "snapshot_version": 20
+      "snapshot_version": 20,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2793,7 +3357,13 @@
           1
         ]
       ],
-      "snapshot_version": 21
+      "snapshot_version": 21,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2819,7 +3389,13 @@
           true
         ]
       ],
-      "snapshot_version": 22
+      "snapshot_version": 22,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2839,7 +3415,13 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 23
+      "snapshot_version": 23,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 0
+      }
     },
     "status": 200
   },
@@ -2859,7 +3441,13 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 24
+      "snapshot_version": 24,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 0
+      }
     },
     "status": 200
   },
@@ -2879,7 +3467,13 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 25
+      "snapshot_version": 25,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 0
+      }
     },
     "status": 200
   },
@@ -2905,7 +3499,13 @@
           0
         ]
       ],
-      "snapshot_version": 25
+      "snapshot_version": 25,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2927,7 +3527,13 @@
       "records": [
         []
       ],
-      "snapshot_version": 26
+      "snapshot_version": 26,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2949,7 +3555,13 @@
       "records": [
         []
       ],
-      "snapshot_version": 27
+      "snapshot_version": 27,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -2979,7 +3591,13 @@
           "BTREE"
         ]
       ],
-      "snapshot_version": 27
+      "snapshot_version": 27,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3001,7 +3619,13 @@
       "records": [
         []
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": true,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3031,7 +3655,13 @@
           "UNIQUE"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3057,7 +3687,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3092,7 +3728,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 4
+      }
     },
     "status": 200
   },
@@ -3121,7 +3763,13 @@
           "Globex"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -3143,7 +3791,13 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 0
+      }
     },
     "status": 200
   },
@@ -3176,7 +3830,13 @@
           }
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3210,7 +3870,13 @@
           ]
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3236,7 +3902,13 @@
           []
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3262,7 +3934,13 @@
           {}
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3290,7 +3968,13 @@
           -1.5
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3316,7 +4000,13 @@
           9223372036854775807
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3366,7 +4056,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3404,7 +4100,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3430,7 +4132,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3456,7 +4164,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3482,7 +4196,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3508,7 +4228,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3534,7 +4260,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3560,7 +4292,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3586,7 +4324,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3612,7 +4356,13 @@
           0
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3641,7 +4391,13 @@
           1
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -3667,7 +4423,13 @@
           1
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3689,7 +4451,13 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 0
+      }
     },
     "status": 200
   },
@@ -3711,7 +4479,13 @@
       "notifications": [],
       "plan_hash": "<hex>",
       "records": [],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 0
+      }
     },
     "status": 200
   },
@@ -3740,7 +4514,13 @@
           2
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 2
+      }
     },
     "status": 200
   },
@@ -3766,7 +4546,13 @@
           0
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3792,7 +4578,13 @@
           6
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3818,7 +4610,13 @@
           2
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3856,7 +4654,13 @@
           2
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3882,7 +4686,13 @@
           2
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3908,7 +4718,13 @@
           4
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3937,7 +4753,13 @@
           ]
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3967,7 +4789,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -3995,7 +4823,13 @@
           "Dan"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4031,7 +4865,13 @@
           1
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 3
+      }
     },
     "status": 200
   },
@@ -4057,7 +4897,13 @@
           "Bob"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4083,7 +4929,13 @@
           4
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4123,7 +4975,13 @@
           41
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 4
+      }
     },
     "status": 200
   },
@@ -4149,7 +5007,13 @@
           "n=1"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4178,7 +5042,13 @@
           ]
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4204,7 +5074,13 @@
           false
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4230,7 +5106,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4256,7 +5138,13 @@
           1
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4286,7 +5174,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4312,7 +5206,13 @@
           "Project (a, b) [estimated rows=1 cost=5]\n+- Expand ((a)-[:KNOWS]->(b)) [estimated rows=1 cost=5]\n   +- NodeScan (var=a, labels=[\"Person\"]) [estimated rows=4 cost=4]\n\n--- Row budget ---\nper-operator row budget: 50000000 rows; an operator producing more is refused with Samyama.ClientError.Statement.RowBudgetExceeded\n\n--- Statistics ---\nGraph Statistics:\n  Total nodes: 8\n  Total edges: 4\n  Avg out-degree: 0.50\n  Labels:\n    :Person = 4 nodes\n    :Company = 2 nodes\n    :Employee = 1 nodes\n    :Merged = 1 nodes\n    :Merged2 = 1 nodes\n    :Temp = 0 nodes\n    :Temp2 = 0 nodes\n  Edge types:\n    :KNOWS = 2 edges\n    :WORKS_AT = 2 edges\n    :TMP = 0 edges\n"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4338,7 +5238,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4364,7 +5270,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4390,7 +5302,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4416,7 +5334,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4442,7 +5366,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4468,7 +5398,13 @@
           5
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4494,7 +5430,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4520,7 +5462,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4564,7 +5512,13 @@
           "Temp2"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 7
+      }
     },
     "status": 200
   },
@@ -4590,7 +5544,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4620,7 +5580,13 @@
           ]
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4650,7 +5616,13 @@
           }
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4678,7 +5650,13 @@
           1
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4704,7 +5682,13 @@
           1
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4732,7 +5716,13 @@
           "Bob"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4758,7 +5748,13 @@
           "KNOWS"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4784,7 +5780,13 @@
           false
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4810,7 +5812,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4836,7 +5844,13 @@
           36
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4862,7 +5876,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4892,7 +5912,13 @@
           "true"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4918,7 +5944,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4944,7 +5976,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -4974,7 +6012,13 @@
           "a"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5002,7 +6046,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5034,7 +6084,13 @@
           0.0
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5064,7 +6120,13 @@
           0.0
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5092,7 +6154,13 @@
           0.0
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5118,7 +6186,13 @@
           31.5
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5144,7 +6218,13 @@
           6.701989754294367
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5314,7 +6394,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5340,7 +6426,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5366,7 +6458,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5392,7 +6490,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5418,7 +6522,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5444,7 +6554,13 @@
           5
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5470,7 +6586,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5496,7 +6618,13 @@
           8
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5540,7 +6668,13 @@
           "Temp2"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 7
+      }
     },
     "status": 200
   },
@@ -5570,7 +6704,13 @@
           ]
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5600,7 +6740,13 @@
           }
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5628,7 +6774,13 @@
           1
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5654,7 +6806,13 @@
           1
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5682,7 +6840,13 @@
           "Bob"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5708,7 +6872,13 @@
           "KNOWS"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5734,7 +6904,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5760,7 +6936,13 @@
           36
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5786,7 +6968,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5816,7 +7004,13 @@
           "true"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5842,7 +7036,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5868,7 +7068,13 @@
           null
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5898,7 +7104,13 @@
           "a"
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5926,7 +7138,13 @@
           true
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5958,7 +7176,13 @@
           0.0
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -5988,7 +7212,13 @@
           0.0
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -6016,7 +7246,13 @@
           0.0
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -6042,7 +7278,13 @@
           31.5
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -6068,7 +7310,13 @@
           6.701989754294367
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
@@ -6373,7 +7621,13 @@
           ]
         ]
       ],
-      "snapshot_version": 28
+      "snapshot_version": 28,
+      "stats": {
+        "elapsed_ms": "<ms>",
+        "is_write": false,
+        "lock_wait_ms": "<ms>",
+        "rows": 1
+      }
     },
     "status": 200
   },
