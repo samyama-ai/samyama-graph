@@ -172,6 +172,7 @@ One thing, verified:
 | **Introspection** | `db.labels` / `db.relationshipTypes` / `db.propertyKeys` | ✅ | Names only, no counts |
 | | `db.schema.visualization` | ✅ | Distinct `(:Src)-[:T]->(:Tgt)` triples. Walked only the first 1000 edges of each type until #1348 — the answer was a sample presented as the schema |
 | | `db.schema.forLLM(token_budget)` | ✅ | Not openCypher. One call: label counts, property types with null fraction, distinct count and sample values, relationship triples with counts, one example query. Budget defaults to 2000 tokens (estimated at 4 bytes each); a truncated answer says so in the text and in the `complete` column |
+| **RDF** | `rdf.sparql(query [, baseIri]) YIELD row` | ✅ | Not openCypher (#2100). SPARQL 1.1 SELECT or ASK over the graph read as RDF, with no copy, as `POST /api/sparql` answers it. One row per solution; `row` maps each bound variable to a Cypher value (typed literals as the value they encode, IRIs as strings), and an unbound variable reads `null`. ASK yields `{result: bool}`. Base defaults to `https://samyama.ai/rdf/`. CONSTRUCT, DESCRIBE and UPDATE are errors, never empty rows. Arguments are string literals |
 
 ## Known inconsistency
 
