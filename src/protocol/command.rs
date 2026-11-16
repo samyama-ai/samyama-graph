@@ -377,8 +377,8 @@ impl CommandHandler {
     ) -> Result<(Option<String>, Vec<RespValue>), String> {
         let mut key = None;
         let mut others = Vec::with_capacity(rest.len());
-        let mut pairs = rest.chunks_exact(2);
-        for pair in &mut pairs {
+        let (pairs, remainder) = rest.as_chunks::<2>();
+        for pair in pairs {
             let is_key = matches!(pair[0].as_string(), Ok(Some(ref n)) if n.eq_ignore_ascii_case(IDEMPOTENCY_KEY_ARG));
             if !is_key {
                 others.extend_from_slice(pair);
@@ -395,7 +395,7 @@ impl CommandHandler {
             crate::idempotency::validate_key(&value)?;
             key = Some(value);
         }
-        others.extend_from_slice(pairs.remainder());
+        others.extend_from_slice(remainder);
         Ok((key, others))
     }
 
@@ -405,7 +405,9 @@ impl CommandHandler {
     /// is JSON and could not be replayed here.
     fn resp_fingerprint(query: &str, graph: &str, params: &[RespValue]) -> String {
         let params = params
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let text = |v: &RespValue| v.as_string().ok().flatten();
                 let value =
