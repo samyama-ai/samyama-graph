@@ -31,6 +31,9 @@ pub const PROBES: usize = 20;
 /// Names of the checks that need a server, for when none answered.
 const SERVER_ONLY: [&str; 4] = ["persistence", "server memory", "metrics", "latency"];
 
+/// How long `nlq endpoint` waits for the provider to accept a connection.
+const NLQ_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// What a `GET` came back with: the status code and body, or why there is none.
 pub type Fetched = Result<(u16, String), String>;
 
@@ -171,6 +174,60 @@ fn check_data_dir(dir: &std::path::Path) -> Check {
     }
 }
 
+/// Can this shell reach the NLQ provider at all? (#2082)
+///
+/// `nlq config` says the variables are filled in; this says the address they
+/// name answers. A typo in `NLQ_API_BASE_URL`, an Ollama that is not running,
+/// or a firewall in front of the provider all pass `nlq config` and fail at a
+/// user's first question.
+///
+/// It opens a TCP connection and closes it: no request is sent, so no key
+/// leaves the machine and no tokens are spent. A connection is not an answer
+/// (a wrong key or model still fails later), so this checks the network path
+/// only. `Warn`, not `Fail`: NLQ is optional and the database runs without it.
+/// Like `nlq config`, it reads this shell's variables, not the server's.
+fn check_nlq_endpoint(get: impl Fn(&str) -> Option<String>, timeout: Duration) -> Check {
+    use samyama::persistence::tenant::LLMProvider;
+    use std::net::ToSocketAddrs;
+    const NAME: &str = "nlq endpoint";
+    if get("NLQ_PROVIDER").is_none_or(|p| p.trim().is_empty()) {
+        return Check::new(NAME, Verdict::Skipped, "NLQ_PROVIDER is not set in this shell");
+    }
+    // An invalid configuration is `nlq config`'s finding; reporting it twice
+    // would count one problem as two warnings.
+    let Ok(config) = samyama::nlq::config_from(&get) else {
+        return Check::new(NAME, Verdict::Skipped, "nlq config is not valid; see that check");
+    };
+    if matches!(config.provider, LLMProvider::ClaudeCode | LLMProvider::Mock) {
+        return Check::new(NAME, Verdict::Skipped,
+            format!("provider {:?} makes no network call", config.provider));
+    }
+    let base = samyama::nlq::client::api_base_url(&config);
+    // Only Azure has no default, and `config_from` refuses it until it is
+    // implemented; kept so that day does not turn into "not a usable URL".
+    if base.is_empty() {
+        return Check::new(NAME, Verdict::Warn, format!(
+            "provider {:?} has no default endpoint; set NLQ_API_BASE_URL", config.provider));
+    }
+    let parsed = url::Url::parse(&base).ok();
+    let target = parsed.as_ref().and_then(|u| Some((u.host_str()?.to_string(), u.port_or_known_default()?)));
+    let Some((host, port)) = target else {
+        return Check::new(NAME, Verdict::Warn, format!("{base} is not a usable URL"));
+    };
+    let addr = match (host.trim_matches(['[', ']']), port).to_socket_addrs() {
+        Ok(mut a) => a.next(),
+        Err(e) => return Check::new(NAME, Verdict::Warn, format!("cannot resolve {host}: {e}")),
+    };
+    let Some(addr) = addr else {
+        return Check::new(NAME, Verdict::Warn, format!("{host} resolves to no address"));
+    };
+    match std::net::TcpStream::connect_timeout(&addr, timeout) {
+        Ok(_) => Check::new(NAME, Verdict::Pass,
+            format!("{host}:{port} accepts connections (no request was sent)")),
+        Err(e) => Check::new(NAME, Verdict::Warn, format!("{host}:{port} ({addr}): {e}")),
+    }
+}
+
 /// Everything that can be decided without talking to a server.
 pub fn local_checks(url: &str, data_dir: &std::path::Path) -> Vec<Check> {
     vec![
@@ -180,6 +237,7 @@ pub fn local_checks(url: &str, data_dir: &std::path::Path) -> Vec<Check> {
         check_data_dir(data_dir),
         check_open_files(open_file_limit().as_deref()),
         check_nlq(|v| std::env::var(v).ok()),
+        check_nlq_endpoint(|v| std::env::var(v).ok(), NLQ_CONNECT_TIMEOUT),
     ]
 }
 
@@ -680,6 +738,79 @@ mod tests {
         let c = check_nlq(keyed);
         assert_eq!(c.verdict, Verdict::Pass);
         assert!(!c.detail.contains("not-a-real-key"), "{}", c.detail);
+    }
+
+    /// Variables for `provider` with its key set, and `NLQ_API_BASE_URL` when given.
+    fn nlq_env(provider: &'static str, base: Option<String>) -> impl Fn(&str) -> Option<String> {
+        move |v: &str| match v {
+            "NLQ_PROVIDER" => Some(provider.to_string()),
+            "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" | "GEMINI_API_KEY" | "AZURE_OPENAI_API_KEY" => {
+                Some("not-a-real-key".to_string())
+            }
+            "NLQ_API_BASE_URL" => base.clone(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_nlq_endpoint_is_judged_by_whether_it_accepts_a_connection() {
+        let t = Duration::from_secs(2);
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = format!("http://127.0.0.1:{}/v1", l.local_addr().unwrap().port());
+        let c = check_nlq_endpoint(nlq_env("openai", Some(open)), t);
+        assert_eq!(c.verdict, Verdict::Pass, "{}", c.detail);
+        assert!(!c.detail.contains("not-a-real-key"), "{}", c.detail);
+        // Held but not listening, as in the RESP test: a closed port could be
+        // taken by a test running alongside.
+        let held = tokio::net::TcpSocket::new_v4().unwrap();
+        held.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let dead = format!("http://127.0.0.1:{}", held.local_addr().unwrap().port());
+        let c = check_nlq_endpoint(nlq_env("ollama", Some(dead)), t);
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+        assert!(c.detail.contains("127.0.0.1"), "names the address: {}", c.detail);
+        let c = check_nlq_endpoint(nlq_env("openai", Some("not a url".into())), t);
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+        let c = check_nlq_endpoint(nlq_env("openai", Some("http://no-such-host.invalid".into())), t);
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+        drop(l);
+    }
+
+    #[test]
+    fn the_nlq_endpoint_is_skipped_when_there_is_nothing_to_reach() {
+        let t = Duration::from_millis(100);
+        assert_eq!(check_nlq_endpoint(|_| None, t).verdict, Verdict::Skipped);
+        // A provider without its key is `nlq config`'s warning, not a second one.
+        let keyless = |v: &str| (v == "NLQ_PROVIDER").then(|| "openai".to_string());
+        assert_eq!(check_nlq_endpoint(keyless, t).verdict, Verdict::Skipped);
+        for p in ["claudecode", "mock"] {
+            assert!(samyama::nlq::config_from(nlq_env(p, None)).is_ok(), "{p} is a valid config");
+            let c = check_nlq_endpoint(nlq_env(p, None), t);
+            assert_eq!(c.verdict, Verdict::Skipped, "{p}: {}", c.detail);
+        }
+        // Azure and Anthropic are refused as not implemented, which `nlq
+        // config` reports; there is no endpoint to try.
+        for p in ["azure", "anthropic"] {
+            assert!(samyama::nlq::config_from(nlq_env(p, None)).is_err(), "{p}");
+            assert_eq!(check_nlq_endpoint(nlq_env(p, None), t).verdict, Verdict::Skipped, "{p}");
+        }
+    }
+
+    #[test]
+    fn the_nlq_endpoint_is_the_one_the_server_would_call() {
+        use samyama::persistence::tenant::{LLMProvider, NLQConfig};
+        let cfg = |provider, base: Option<&str>| NLQConfig {
+            enabled: true,
+            provider,
+            model: String::new(),
+            api_key: None,
+            api_base_url: base.map(str::to_string),
+            system_prompt: None,
+        };
+        let url = samyama::nlq::client::api_base_url;
+        assert_eq!(url(&cfg(LLMProvider::OpenAI, None)), "https://api.openai.com/v1");
+        assert_eq!(url(&cfg(LLMProvider::Ollama, None)), "http://localhost:11434");
+        assert_eq!(url(&cfg(LLMProvider::OpenAI, Some("http://proxy:9000"))), "http://proxy:9000");
+        assert_eq!(url(&cfg(LLMProvider::AzureOpenAI, None)), "");
     }
 
     #[test]
