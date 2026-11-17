@@ -1,0 +1,13 @@
+{
+  "arch": "x86_64",
+  "edge_digest": "fa174081bbc6609f",
+  "edge_types": "KNOWS:2,WORKS_AT:1",
+  "edges": "3",
+  "engine_version": "1.10.0",
+  "exported_nodes": "ExportStats { node_count: 4, edge_count: 3, labels: [\"Company\", \"Employee\", \"Person\"], edge_types: [\"KNOWS\", \"WORKS_AT\"], bytes_written: 0, dropped: [Dropped { what: \"edge_creation_timestamps\", count: 3, detail: \"Edges carry id, endpoints, type and properties. Creation time is not among them, so a temporal query over edge age answers differently after a round trip. Node timestamps do survive.\" }] }",
+  "labels": "Company:1,Employee:1,Person:2",
+  "node_digest": "47dd2b622bb1267b",
+  "nodes": "4",
+  "os": "linux",
+  "snapshot_bytes": "637"
+}

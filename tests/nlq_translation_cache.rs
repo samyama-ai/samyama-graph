@@ -37,7 +37,7 @@ async fn fake_model() -> (String, Arc<AtomicUsize>) {
             async move {
                 let n = c.fetch_add(1, Ordering::SeqCst) + 1;
                 Json(json!({
-                    "choices": [{"message": {"content": format!("MATCH (p:Person) RETURN p.name LIMIT {n}")}}],
+                    "choices": [{"message": {"content": format!(r#"{{"cypher":"MATCH (p:Person) RETURN p.name LIMIT {n}"}}"#)}}],
                     "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}
                 }))
             }
