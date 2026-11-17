@@ -781,6 +781,37 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
+  # PERF-18 (#2207): retired-instruction counts of five hot loops under
+  # Valgrind, which -- unlike wall-clock time on a shared runner -- repeat to
+  # within ~0.3%. Fails on growth over 3% against benches/instruction_counts.json.
+  # The toolchain is pinned because a new rustc moves the counts on its own;
+  # bumping it means re-running scripts/check_instruction_counts.py --update.
+  instruction-counts:
+    name: instruction-counts (hot loops under Valgrind)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.100.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: instruction-counts
+
+      - name: Valgrind and gungraun-runner (same version as the gungraun crate)
+        run: |
+          sudo apt-get install -y --no-install-recommends valgrind >/dev/null
+          cargo install gungraun-runner --version 0.20.0 --locked
+
+      - name: PERF-18
+        run: |
+          cargo bench --locked --bench instruction_counts -- --save-summary=json
+          python3 scripts/check_instruction_counts.py
+
+
   # The two release platforms the `test` matrix does not cover (HW-16, #1696).
   #
   # A separate job rather than two more entries in `test`'s matrix because
@@ -1461,6 +1492,7 @@ jobs:
     if: always()
     needs:
       - changes
+      - instruction-counts
       - triage-sla-contract
       - supply-chain
       - test

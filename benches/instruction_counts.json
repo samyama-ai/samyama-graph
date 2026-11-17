@@ -1,0 +1,14 @@
+{
+  "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+  "valgrind": "valgrind-3.22.0",
+  "tolerance_pct": 3,
+  "counts": {
+    "expand/one_hop": 29859493,
+    "expand/two_hop": 90657906,
+    "oeh_probe/subsumes_1000": 50559,
+    "parse/match_where_return": 367507,
+    "snapshot_export/export_2000": 44794374,
+    "snapshot_import/import_2000": 89719590,
+    "vector_distance/cosine_and_l2_256x128": 76984
+  }
+}
