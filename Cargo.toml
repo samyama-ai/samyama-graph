@@ -410,3 +410,7 @@ harness = false
 [[bench]]
 name = "filtered_ann_benchmark"
 harness = false
+
+[[bench]]
+name = "hybrid_retrieval_benchmark"
+harness = false

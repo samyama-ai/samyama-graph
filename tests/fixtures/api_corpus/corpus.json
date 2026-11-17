@@ -6336,7 +6336,7 @@
       "query": "CALL db.nope()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Procedure.NotFound] Unknown procedure: `db.nope`. The schema procedures are db.checkIntegrity, db.index.fulltext.queryNodes, db.index.point.nearest, db.index.vector.queryNodes, db.labels, db.propertyKeys, db.relationshipTypes, db.schema.forLLM, db.schema.visualization; graph algorithms are called as `algo.<name>()`.\n --> 1:6\n  |\n1 | CALL db.nope()\n  |      ^^^^^^^"
+      "error": "[Samyama.ClientError.Procedure.NotFound] Unknown procedure: `db.nope`. The schema procedures are db.checkIntegrity, db.hybrid.search, db.index.fulltext.queryNodes, db.index.point.nearest, db.index.vector.queryNodes, db.labels, db.propertyKeys, db.relationshipTypes, db.schema.forLLM, db.schema.visualization; graph algorithms are called as `algo.<name>()`.\n --> 1:6\n  |\n1 | CALL db.nope()\n  |      ^^^^^^^"
     },
     "status": 400
   },

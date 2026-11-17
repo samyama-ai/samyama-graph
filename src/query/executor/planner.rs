@@ -904,6 +904,7 @@ fn plan_return_projection(
 /// `every_listed_procedure_plans` keeps the list honest.
 pub const KNOWN_DB_PROCEDURES: &[&str] = &[
     "db.checkIntegrity",
+    "db.hybrid.search",
     "db.index.fulltext.queryNodes",
     "db.index.point.nearest",
     "db.index.vector.queryNodes",
@@ -4065,6 +4066,19 @@ impl QueryPlanner {
             return Ok(Box::new(super::point_ops::PointNearestOperator::new(
                 label, property, centre, k, node_var, distance_var,
             )));
+        }
+
+        // BM25 + vector + local expansion, fused and reranked (#1279).
+        if super::hybrid_ops::is_procedure(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::hybrid_ops::HybridSearchOperator::new(
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
         }
 
         // Similarity graphs from a vector index (#1979).
