@@ -1602,7 +1602,16 @@ impl QueryPlanner {
         if query.show_indexes {
             return Ok(ExecutionPlan {
                 root: Box::new(ShowIndexesOperator::new()),
-                output_columns: vec!["label".to_string(), "property".to_string(), "type".to_string()],
+                // The last two are a vector index's dead entries (#1972),
+                // null for the other kinds; appended so a reader of the first
+                // three by position is unaffected.
+                output_columns: vec![
+                    "label".to_string(),
+                    "property".to_string(),
+                    "type".to_string(),
+                    "superseded".to_string(),
+                    "supersededRatio".to_string(),
+                ],
                 is_write: false, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
         }

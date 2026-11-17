@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use super::handler::{
-    query_handler, export_handler, import_parquet_handler, status_handler, memory_handler, metrics_handler, slowlog_handler, slowlog_reset_handler, schema_handler, sample_handler,
+    query_handler, export_handler, import_parquet_handler, status_handler, changes_handler, memory_handler, metrics_handler, slowlog_handler, slowlog_reset_handler, schema_handler, sample_handler,
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
     set_enrich_policy_handler, enrich_handler, verify_handler,
@@ -581,6 +581,9 @@ pub async fn request_context(
         .map(str::to_string)
         .unwrap_or_else(new_request_id);
     let span = request_span(&id, "http");
+    // A caller's W3C `traceparent` makes this span part of its trace (#2077).
+    #[cfg(feature = "otel")]
+    crate::otel::continue_trace(&span, req.headers());
     span.record("method", req.method().as_str());
     span.record("path", req.uri().path());
     req.extensions_mut().insert(RequestId(id.clone()));
@@ -714,7 +717,14 @@ impl AppState {
         graph: &str,
         body: impl FnOnce(&mut GraphStore) -> T,
     ) -> T {
-        let mut store = self.store.write().await;
+        use tracing::Instrument;
+        // Stages of the request's trace (#2077): the wait for the writer's
+        // lock is where contention shows.
+        let mut store = self
+            .store
+            .write()
+            .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write"))
+            .await;
         if let Some(pm) = &self.persistence {
             store.enable_write_log();
             // The quota, resolved before the body runs. Checked here it is
@@ -730,6 +740,8 @@ impl AppState {
         let keys = store.idempotency_mut().take_pending();
         if let Some(pm) = &self.persistence {
             let mutations = store.take_write_log();
+            let _persist =
+                tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64).entered();
             match pm.apply_mutations_keyed(graph, &store, &mutations, &keys) {
                 Ok(n) => tracing::debug!("persisted {n} entities from {} mutations", mutations.len()),
                 Err(e) => {
@@ -1007,6 +1019,7 @@ impl HttpServer {
             .route("/api/verify", post(verify_handler))
             .route("/api/nlq", post(nlq_handler))
             .route("/api/status", get(status_handler))
+            .route("/api/changes", get(changes_handler))
             .route("/api/memory", get(memory_handler))
             .route("/metrics", get(metrics_handler))
             .route("/api/slowlog", get(slowlog_handler).delete(slowlog_reset_handler))
