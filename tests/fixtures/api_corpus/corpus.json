@@ -3577,7 +3577,9 @@
       "columns": [
         "label",
         "property",
-        "type"
+        "type",
+        "superseded",
+        "supersededRatio"
       ],
       "edges": [],
       "engine_version": "<version>",
@@ -3588,7 +3590,9 @@
         [
           "Person",
           "name",
-          "BTREE"
+          "BTREE",
+          null,
+          null
         ]
       ],
       "snapshot_version": 27,
