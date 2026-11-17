@@ -72,7 +72,7 @@ fn on_linux_the_binary_carries_every_probe() {
     let mut found: BTreeMap<String, usize> = BTreeMap::new();
     let mut lines = text.lines().map(str::trim).peekable();
     while let Some(l) = lines.next() {
-        if l != "Provider: samyama" {
+        if !l.ends_with("Provider: samyama") {
             continue;
         }
         let name = lines.next().and_then(|n| n.strip_prefix("Name: ")).unwrap_or("").to_string();
