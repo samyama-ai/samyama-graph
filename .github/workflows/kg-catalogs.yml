@@ -44,7 +44,7 @@ on:
   # One trap worth keeping written down: a job condition is not sufficient on
   # its own for a MATRIX job. When an `if:` skips a matrix job, GitHub never
   # expands the matrix, so the check reports under its literal name
-  # (`test (${{ matrix.os }})`) and the required `test (ubuntu-latest)` never
+  # (`test (${{ matrix.os }})`) and the required `test (ubuntu-24.04)` never
   # appears -- #1860 was MERGEABLE yet permanently BLOCKED that way. A skipped
   # job with a FIXED name does satisfy its requirement. This job has a fixed
   # name, so it is safe.
@@ -55,7 +55,7 @@ permissions:
 jobs:
   catalogs:
     name: Verify every KG catalog against its published snapshot
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:

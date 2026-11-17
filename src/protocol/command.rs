@@ -384,7 +384,11 @@ impl CommandHandler {
             }
         }
 
-        let mut store_guard = store.write().await;
+        // Stages of the command's trace (#2077), as on HTTP.
+        let mut store_guard = {
+            use tracing::Instrument;
+            store.write().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write")).await
+        };
 
             // Record what the statement changes, so persistence does not depend on
             // what it returns (#1094).
@@ -413,6 +417,8 @@ impl CommandHandler {
             // store keeps this right whichever way a statement ends.
             let persist_failed = if let Some(ref persist_mgr) = self.persistence {
                 let mutations = store_guard.take_write_log();
+                let _persist =
+                    tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64).entered();
                 match persist_mgr.apply_mutations(&graph_name, &store_guard, &mutations) {
                     Ok(n) => {
                         debug!("Persisted {} entities from {} mutations", n, mutations.len());
@@ -443,7 +449,10 @@ impl CommandHandler {
                 ))),
             }
         } else {
-            let store_guard = store.read().await;
+            let store_guard = {
+                use tracing::Instrument;
+                store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+            };
             let res = self
                 .query_engine
                 .execute_with_params_within(&query_str, &*store_guard, &params, time_limit);
@@ -2169,8 +2178,8 @@ mod tests {
             // the shape the old prefix check let through (#1156).
             let srv = MockHttp::serve(vec![(
                 200,
-                r#"{"response": "MATCH (n) DETACH DELETE n"}"#.to_string(),
-            )]);
+                r#"{"response":"{\"cypher\":\"MATCH (n) DETACH DELETE n\"}"}"#.to_string(),
+            ); 3]);
             let r = handler
                 .translate_nlq(
                     "delete everything",
@@ -2179,7 +2188,7 @@ mod tests {
                 )
                 .await;
             assert!(err_text(&r).contains("write operations"), "{r:?}");
-            assert_eq!(srv.requests().len(), 1, "the model was asked once");
+            assert_eq!(srv.requests().len(), 3, "invalid structured output is repaired twice");
             assert_eq!(s.read().await.node_count(), 1, "nothing was deleted");
         }
 
