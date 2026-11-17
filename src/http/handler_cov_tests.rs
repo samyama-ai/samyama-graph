@@ -2632,7 +2632,7 @@ async fn nlq_returns_the_tokens_and_latency_of_its_model_call() {
     let srv = crate::nlq::test_http::MockHttp::serve(vec![(
         200,
         json!({
-            "choices": [ { "message": { "content": "MATCH (n:Person) RETURN n.name LIMIT 5" } } ],
+            "choices": [ { "message": { "content": r#"{"cypher":"MATCH (n:Person) RETURN n.name LIMIT 5"}"# } } ],
             "usage": { "prompt_tokens": 412, "completion_tokens": 17, "total_tokens": 429 }
         })
         .to_string(),
@@ -2662,7 +2662,7 @@ async fn nlq_returns_the_tokens_and_latency_of_its_model_call() {
 async fn nlq_says_null_when_the_provider_reported_no_tokens() {
     let srv = crate::nlq::test_http::MockHttp::serve(vec![(
         200,
-        json!({ "choices": [ { "message": { "content": "MATCH (n) RETURN n" } } ] }).to_string(),
+        json!({ "choices": [ { "message": { "content": r#"{"cypher":"MATCH (n) RETURN n"}"# } } ] }).to_string(),
     )]);
     let j = post_json(
         routes(state_asking(&srv.base_url)),
