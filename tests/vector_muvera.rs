@@ -62,9 +62,12 @@ fn integer(r: &Record, col: &str) -> i64 {
     }
 }
 
-/// Deterministic tokens, roughly uniform in [-1, 1).
+/// Deterministic tokens, roughly uniform in [-1, 1). Distinct seeds give
+/// distinct streams: `2 * seed + 1` is odd (xorshift needs a non-zero
+/// state) and one-to-one, where `seed | 1` made 106 and 107 the same
+/// document.
 fn tokens(n: usize, seed: u64) -> Vec<Vec<f32>> {
-    let mut x = seed | 1;
+    let mut x = seed.wrapping_mul(2).wrapping_add(1);
     (0..n)
         .map(|_| {
             (0..DIM)
