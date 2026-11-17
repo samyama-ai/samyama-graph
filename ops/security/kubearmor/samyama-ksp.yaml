@@ -1,0 +1,85 @@
+# KubeArmor policy for the Samyama server on Kubernetes (#2218, REL-16).
+#
+#   kubectl apply -f ops/security/kubearmor/samyama-ksp.yaml
+#
+# Selects pods labelled app.kubernetes.io/name=samyama (the Helm chart's label,
+# #2204) and allows the same paths as ops/security/apparmor/usr.bin.samyama:
+# tests/mac_profiles_agree.rs keeps the two lists equal. `action: Allow` with a
+# file default posture of block makes everything else a refusal, so the
+# server cannot read /etc/shadow or the service-account token, and cannot
+# start a shell.
+#
+# CI checks this file against the AppArmor profile but does not run it in a
+# cluster: that needs KubeArmor installed in a Kubernetes cluster, a follow-up
+# to #2218. The AppArmor profile is what CI runs under a real workload.
+apiVersion: security.kubearmor.com/v1
+kind: KubeArmorPolicy
+metadata:
+  name: samyama-allow
+  namespace: default
+spec:
+  severity: 7
+  message: "samyama: access outside the allowed paths"
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: samyama
+  process:
+    matchPaths:
+      - path: /usr/local/bin/samyama
+      - path: /usr/bin/samyama
+  file:
+    matchDirectories:
+      # read-write
+      - dir: /var/lib/samyama/
+        recursive: true
+      - dir: /data/
+        recursive: true
+      - dir: /tmp/
+        recursive: true
+      - dir: /var/log/samyama/
+        recursive: true
+      # read-only
+      - dir: /etc/samyama/
+        recursive: true
+        readOnly: true
+      - dir: /etc/ssl/
+        recursive: true
+        readOnly: true
+      - dir: /usr/share/ca-certificates/
+        recursive: true
+        readOnly: true
+      - dir: /usr/share/zoneinfo/
+        recursive: true
+        readOnly: true
+      - dir: /proc/
+        recursive: true
+        readOnly: true
+      - dir: /sys/fs/cgroup/
+        recursive: true
+        readOnly: true
+      - dir: /sys/devices/system/cpu/
+        recursive: true
+        readOnly: true
+      - dir: /sys/kernel/mm/transparent_hugepage/
+        recursive: true
+        readOnly: true
+      # the dynamic loader and libc, which AppArmor's abstractions/base allows
+      - dir: /lib/
+        recursive: true
+        readOnly: true
+      - dir: /usr/lib/
+        recursive: true
+        readOnly: true
+    matchPaths:
+      - path: /etc/localtime
+        readOnly: true
+      - path: /etc/resolv.conf
+        readOnly: true
+      - path: /etc/hosts
+        readOnly: true
+      - path: /etc/nsswitch.conf
+        readOnly: true
+      - path: /dev/urandom
+        readOnly: true
+      - path: /dev/null
+  action: Allow
