@@ -164,7 +164,7 @@ impl NLQPipeline {
             Ok(Translation {
                 cypher: cleaned_cypher,
                 usage: outcome.usage,
-                llm_latency: std::time::Duration::from_millis(outcome.latency_ms),
+                llm_latency: outcome.latency,
                 cached: false,
             })
         } else {

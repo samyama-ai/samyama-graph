@@ -320,6 +320,25 @@ pub fn check_implemented(provider: &LLMProvider) -> NLQResult<()> {
     }
 }
 
+/// Where requests for `config` go: `NLQ_API_BASE_URL` when set, the
+/// provider's public endpoint otherwise. Empty for a provider with no network
+/// endpoint (Claude Code, Mock) and for Azure, which has no default and must be
+/// configured. `samyama-cli doctor` reads this so it checks the address the
+/// server would call, not a copy of it (#2082).
+pub fn api_base_url(config: &NLQConfig) -> String {
+    config.api_base_url.clone().unwrap_or_else(|| {
+        match config.provider {
+            LLMProvider::OpenAI => "https://api.openai.com/v1".to_string(),
+            LLMProvider::Ollama => "http://localhost:11434".to_string(),
+            LLMProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            LLMProvider::AzureOpenAI => String::new(),
+            LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
+            LLMProvider::ClaudeCode => String::new(),
+            LLMProvider::Mock => String::new(),
+        }
+    })
+}
+
 impl NLQClient {
     pub fn new(config: &NLQConfig) -> NLQResult<Self> {
         check_implemented(&config.provider)?;
@@ -328,20 +347,7 @@ impl NLQClient {
             .build()
             .map_err(|e| NLQError::ConfigError(e.to_string()))?;
 
-        let api_base_url = config
-            .api_base_url
-            .clone()
-            .unwrap_or_else(|| match config.provider {
-                LLMProvider::OpenAI => "https://api.openai.com/v1".to_string(),
-                LLMProvider::Ollama => "http://localhost:11434".to_string(),
-                LLMProvider::Gemini => {
-                    "https://generativelanguage.googleapis.com/v1beta".to_string()
-                }
-                LLMProvider::AzureOpenAI => String::new(),
-                LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
-                LLMProvider::ClaudeCode => String::new(),
-                LLMProvider::Mock => String::new(),
-            });
+        let api_base_url = api_base_url(config);
 
         Ok(Self {
             client,
