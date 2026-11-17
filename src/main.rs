@@ -54,6 +54,8 @@ async fn main() {
     println!();
 
     start_server().await;
+    // Spans still waiting in the export batch (#2077).
+    samyama::logging::shutdown();
 }
 
 /// `samyama queries list <catalog>`
