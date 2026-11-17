@@ -16543,11 +16543,16 @@ impl PhysicalOperator for ShowIndexesOperator {
             // find out whether it had been created was to search it and read
             // an empty result -- which is what a correct index over no matching
             // data also returns.
-            let mut rows: Vec<(String, String, String)> = store
+            // The fourth field is a vector index's dead entries and its live
+            // ones (#1972); `None` for every other kind.
+            type Row = (String, String, String, Option<(usize, usize)>);
+            let mut rows: Vec<Row> = store
                 .property_index
                 .list_indexes()
                 .into_iter()
-                .map(|(label, property)| (label.as_str().to_string(), property, "BTREE".to_string()))
+                .map(|(label, property)| {
+                    (label.as_str().to_string(), property, "BTREE".to_string(), None)
+                })
                 .collect();
             rows.extend(
                 store
@@ -16557,12 +16562,15 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .map(|k| {
                         // With its HNSW parameters (#1971), in the bracket the
                         // other kinds use for their name.
-                        let params = store
-                            .vector_index
-                            .get_index(&k.label, &k.property_key)
-                            .map(|i| i.read().unwrap().params())
-                            .unwrap_or_default();
-                        (k.label, k.property_key, format!("VECTOR[{params}]"))
+                        let index = store.vector_index.get_index(&k.label, &k.property_key);
+                        let index = index.as_ref().map(|i| i.read().unwrap());
+                        let params = index.as_ref().map(|i| i.params()).unwrap_or_default();
+                        // Deleted and replaced vectors stay in the graph until
+                        // a fifth of it is dead and it is rebuilt (#1968), and a
+                        // search walks through them. How many there are is what
+                        // says how far from that rebuild the index is (#1972).
+                        let dead = index.as_ref().map(|i| (i.superseded(), i.len()));
+                        (k.label, k.property_key, format!("VECTOR[{params}]"), dead)
                     }),
             );
             // Full-text indexes too, or the only way to learn that one exists
@@ -16575,7 +16583,7 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .listing()
                     .into_iter()
                     .map(|(name, label, property)| {
-                        (label, property, format!("FULLTEXT[{name}]"))
+                        (label, property, format!("FULLTEXT[{name}]"), None)
                     }),
             );
             rows.extend(
@@ -16583,18 +16591,34 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .point_index
                     .listing()
                     .into_iter()
-                    .map(|(name, label, property)| (label, property, format!("POINT[{name}]"))),
+                    .map(|(name, label, property)| {
+                        (label, property, format!("POINT[{name}]"), None)
+                    }),
             );
             // Both registries are hash maps, so the listing order is otherwise
             // arbitrary and differs run to run.
             rows.sort();
 
             let mut records = Vec::new();
-            for (label, property, kind) in rows {
+            for (label, property, kind, dead) in rows {
                 let mut record = Record::new();
                 record.bind("label".to_string(), Value::Property(PropertyValue::String(label)));
                 record.bind("property".to_string(), Value::Property(PropertyValue::String(property)));
                 record.bind("type".to_string(), Value::Property(PropertyValue::String(kind)));
+                // `superseded`: entries still in a vector index's graph that no
+                // longer answer for a node. `supersededRatio`: their share of
+                // the graph, which triggers a rebuild at 0.2. Null for the
+                // kinds that delete in place.
+                let (superseded, ratio) = match dead {
+                    Some((dead, live)) => {
+                        let total = dead + live;
+                        let ratio = if total == 0 { 0.0 } else { dead as f64 / total as f64 };
+                        (PropertyValue::Integer(dead as i64), PropertyValue::Float(ratio))
+                    }
+                    None => (PropertyValue::Null, PropertyValue::Null),
+                };
+                record.bind("superseded".to_string(), Value::Property(superseded));
+                record.bind("supersededRatio".to_string(), Value::Property(ratio));
                 records.push(record);
             }
             self.results = Some(records.into_iter());
