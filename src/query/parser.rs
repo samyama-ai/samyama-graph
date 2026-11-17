@@ -183,7 +183,8 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
             match inner.as_rule() {
                 Rule::explain_clause => {
                     query.explain = true;
-                    query.profile = inner.as_str().eq_ignore_ascii_case("PROFILE");
+                    query.profile = inner.as_str().to_uppercase().starts_with("PROFILE");
+                    query.plan_json = inner.into_inner().any(|p| p.as_rule() == Rule::explain_format);
                 }
                 Rule::cypher_options => parse_cypher_options(inner, &mut query.plan_options)?,
                 Rule::pipeline_stmt => {
@@ -584,6 +585,8 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
                             } else {
                                 query.explain = true;
                             }
+                            query.plan_json =
+                                inner.into_inner().any(|p| p.as_rule() == Rule::explain_format);
                         }
                         Rule::union_clause => {
                             // Check if UNION ALL (inner has "ALL" text)

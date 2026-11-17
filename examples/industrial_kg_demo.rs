@@ -99,7 +99,13 @@ async fn main() {
     println!("=========================================================================");
 
     let client = EmbeddedClient::new();
-    let tenant = "industrial_plant";
+    // `default` is the only graph an embedded client serves. `EmbeddedClient`
+    // used to accept any name and quietly serve `default`'s rows anyway; #2139
+    // made it refuse a foreign graph, for the reason #1110 recorded on the
+    // RESP side -- `GRAPH.DELETE analytics` emptied `default`. The store API
+    // below still takes a graph argument and ignores it, so only the `query`
+    // calls noticed, and they now refuse rather than mislead.
+    let tenant = "default";
 
     // ==================================================================================
     // STEP 1: Build Asset Hierarchy
