@@ -803,6 +803,7 @@ jobs:
 
       - name: Valgrind and gungraun-runner (same version as the gungraun crate)
         run: |
+          sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends valgrind >/dev/null
           cargo install gungraun-runner --version 0.20.0 --locked
 
