@@ -522,8 +522,9 @@ impl<'a> QueryExecutor<'a> {
             return whole(self.execute_union(query)?, sink);
         }
 
-        // Plan the query
-        let mut plan = self.planner.plan(query, self.store)?;
+        // Plan the query: a stage of the request's trace (#2077).
+        let mut plan = tracing::debug_span!("samyama.query.plan")
+            .in_scope(|| self.planner.plan(query, self.store))?;
         // TRUST-06: the hash of the plan that runs, taken before it is
         // consumed. Re-planning later could describe a different plan: the
         // planner reads statistics that move with the data.
@@ -861,7 +862,7 @@ impl<'a> MutQueryExecutor<'a> {
         // Plan the query (need immutable borrow temporarily)
         let mut plan = {
             let store_ref: &GraphStore = self.store;
-            self.planner.plan(query, store_ref)?
+            tracing::debug_span!("samyama.query.plan").in_scope(|| self.planner.plan(query, store_ref))?
         };
         // TRUST-06, as on the read executor.
         let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
