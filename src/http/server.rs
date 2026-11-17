@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use super::handler::{
-    query_handler, export_handler, import_parquet_handler, status_handler, memory_handler, metrics_handler, schema_handler, sample_handler,
+    query_handler, export_handler, import_parquet_handler, status_handler, changes_handler, memory_handler, metrics_handler, slowlog_handler, slowlog_reset_handler, schema_handler, sample_handler,
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
     set_enrich_policy_handler, enrich_handler, verify_handler,
@@ -197,9 +197,12 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::auth::Role {
     use crate::auth::Role;
     use axum::http::Method;
+    // The slow-query log holds query text from every tenant, literals
+    // included, so reading it is an operator's view, not a reader's (#2079).
     if path.starts_with("/api/tenants")
         || path == "/api/snapshot/import"
         || path == "/api/enrich/policy"
+        || path == "/api/slowlog"
     {
         return Role::Admin;
     }
@@ -385,6 +388,23 @@ async fn serve_tls(
 #[derive(Clone, Debug)]
 pub struct Subject(pub crate::auth::Credential);
 
+/// What `POST /api/query` tells the audit layer about the statement it ran
+/// (#2081): the layer never reads the body, so it cannot work these out.
+#[derive(Clone, Debug)]
+pub struct AuditedQuery {
+    pub tenant: String,
+    pub is_write: bool,
+    pub query_hash: String,
+}
+
+/// SHA-256 of a statement, hex. Enough to tell two writes apart or to match one
+/// against a known query, without the text, which carries the data. One
+/// function for both protocols, so the same statement hashes the same on each.
+pub fn query_hash(query: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(query.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Append-only record of every request that can change state (REL-08).
 ///
 /// One JSON object per line, flushed on every write. An audit log buffered in
@@ -414,16 +434,30 @@ impl AuditLog {
     /// Record one entry. Failures are reported and do not fail the request:
     /// a full disk must not become a denial of service on the API, and the
     /// warning is what says the log has a hole.
-    fn record(&self, subject: &str, method: &str, path: &str, status: u16) {
-        let line = format!(
-            "{{\"at\":\"{}\",\"protocol\":\"http\",\"subject\":{},\"method\":\"{}\",\"path\":{},\"status\":{}}}\n",
-            chrono::Utc::now().to_rfc3339(),
-            serde_json::to_string(subject).unwrap_or_else(|_| "\"?\"".into()),
-            method,
-            serde_json::to_string(path).unwrap_or_else(|_| "\"?\"".into()),
-            status,
-        );
-        self.append(&line);
+    /// `query` is what the query handler reported about the statement, or
+    /// `None` for a route that runs no statement or a request refused before
+    /// the handler ran. Its three fields are then `null`: unknown, which is not
+    /// the same as "not a write", and the entry is kept either way.
+    fn record(
+        &self,
+        subject: &str,
+        method: &str,
+        path: &str,
+        status: u16,
+        query: Option<&AuditedQuery>,
+    ) {
+        let entry = serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "protocol": "http",
+            "subject": subject,
+            "method": method,
+            "path": path,
+            "status": status,
+            "tenant": query.map(|q| q.tenant.as_str()),
+            "is_write": query.map(|q| q.is_write),
+            "query_hash": query.map(|q| q.query_hash.as_str()),
+        });
+        self.append(&format!("{entry}\n"));
     }
 
     /// Record one RESP write (#2081). `query_hash` is the SHA-256 of the
@@ -471,9 +505,11 @@ impl AuditLog {
 /// is added rather than the day someone remembers.
 ///
 /// The consequence, stated rather than hidden: a **read** submitted as
-/// `POST /api/query` is recorded too. Telling it apart means parsing Cypher in
-/// a middleware, and an audit log that occasionally over-records is worth more
-/// than one that occasionally misses a write.
+/// `POST /api/query` is recorded too, since an audit log that occasionally
+/// over-records is worth more than one that occasionally misses a write. It is
+/// recorded with `is_write: false`, which the query handler reports on the
+/// response along with the graph and the statement's hash (#2081), so a reader
+/// can filter the writes without this layer parsing Cypher.
 ///
 /// The body is never recorded. It carries the query, which carries the data.
 async fn audit(
@@ -499,7 +535,8 @@ async fn audit(
         .get::<Subject>()
         .map(|s| s.0.name.clone())
         .unwrap_or_else(|| "unauthenticated".to_string());
-    log.record(&subject, method.as_str(), &path, res.status().as_u16());
+    let query = res.extensions().get::<AuditedQuery>();
+    log.record(&subject, method.as_str(), &path, res.status().as_u16(), query);
     res
 }
 
@@ -518,6 +555,49 @@ fn is_loopback(host: &str) -> bool {
 /// the default. `CorsLayer::permissive()` was the previous behaviour and it
 /// accepts any origin with credentials-free requests — enough for a page on the
 /// open web to drive `/api/query`, which executes arbitrary Cypher (#1328).
+/// The request's id, as `request_context` settled it, for anything inside
+/// that wants to name the request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestId(pub String);
+
+/// Give every request an id and run it inside a `request` span (#2076).
+///
+/// The caller's `X-Request-Id` is kept when it is a plausible id, else one is
+/// made; either way it is returned in `X-Request-Id` on the response, so a
+/// caller can quote it, and every log event the request causes -- the
+/// slow-query warning included -- carries it.
+pub async fn request_context(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use crate::logging::{accept_request_id, new_request_id, request_span, REQUEST_ID_HEADER};
+    use tracing::Instrument;
+
+    let id = req
+        .headers()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(accept_request_id)
+        .map(str::to_string)
+        .unwrap_or_else(new_request_id);
+    let span = request_span(&id, "http");
+    // A caller's W3C `traceparent` makes this span part of its trace (#2077).
+    #[cfg(feature = "otel")]
+    crate::otel::continue_trace(&span, req.headers());
+    span.record("method", req.method().as_str());
+    span.record("path", req.uri().path());
+    req.extensions_mut().insert(RequestId(id.clone()));
+
+    let mut res = next.run(req).instrument(span).await;
+    // Accepted ids are ASCII letters, digits and four punctuation marks, and
+    // made ones are hex, so this cannot fail; if it ever did, the response
+    // goes out without the header rather than not at all.
+    if let Ok(v) = axum::http::HeaderValue::from_str(&id) {
+        res.headers_mut().insert(REQUEST_ID_HEADER, v);
+    }
+    res
+}
+
 fn cors_layer(origins: &[String]) -> CorsLayer {
     if origins.is_empty() {
         return CorsLayer::new();
@@ -536,6 +616,11 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
         .allow_origin(parsed)
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
+        // A browser hides response headers from script unless they are
+        // exposed; the request id is for the caller to read (#2076).
+        .expose_headers([axum::http::HeaderName::from_static(
+            crate::logging::REQUEST_ID_HEADER,
+        )])
 }
 
 /// The largest plain-text error body `json_error_body` reads. A framework
@@ -689,7 +774,14 @@ impl AppState {
         graph: &str,
         body: impl FnOnce(&mut GraphStore) -> T,
     ) -> T {
-        let mut store = self.store.write().await;
+        use tracing::Instrument;
+        // Stages of the request's trace (#2077): the wait for the writer's
+        // lock is where contention shows.
+        let mut store = self
+            .store
+            .write()
+            .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write"))
+            .await;
         if let Some(pm) = &self.persistence {
             store.enable_write_log();
             // The quota, resolved before the body runs. Checked here it is
@@ -701,6 +793,8 @@ impl AppState {
         let out = body(&mut store);
         if let Some(pm) = &self.persistence {
             let mutations = store.take_write_log();
+            let _persist =
+                tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64).entered();
             match pm.apply_mutations(graph, &store, &mutations) {
                 Ok(n) => tracing::debug!("persisted {n} entities from {} mutations", mutations.len()),
                 Err(e) => {
@@ -977,8 +1071,10 @@ impl HttpServer {
             .route("/api/verify", post(verify_handler))
             .route("/api/nlq", post(nlq_handler))
             .route("/api/status", get(status_handler))
+            .route("/api/changes", get(changes_handler))
             .route("/api/memory", get(memory_handler))
             .route("/metrics", get(metrics_handler))
+            .route("/api/slowlog", get(slowlog_handler).delete(slowlog_reset_handler))
             .route("/api/schema", get(schema_handler))
             .route("/api/algorithms/catalog", get(algorithm_catalog_handler))
             .route("/api/sample", post(sample_handler))
@@ -1069,7 +1165,9 @@ impl HttpServer {
             }));
         }
 
-        app
+        // Outside everything, the audit layer included, so a request refused
+        // for its credential still has an id and its log lines still carry it.
+        app.layer(axum::middleware::from_fn(request_context))
     }
 }
 
