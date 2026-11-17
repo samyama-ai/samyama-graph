@@ -1,9 +1,10 @@
 //! NLQ Client for LLM interactions
 
-use crate::persistence::tenant::{NLQConfig, LLMProvider};
 use crate::nlq::{NLQError, NLQResult};
-use serde::{Deserialize, Serialize};
+use crate::persistence::tenant::{LLMProvider, NLQConfig};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::time::{Duration, Instant};
 
 /// Tokens a model reports for one call (COST-07, #1790).
@@ -47,6 +48,250 @@ pub struct Completion {
     /// Wall-clock time of the call, from sending the request to having the
     /// parsed answer.
     pub latency: Duration,
+    /// Whether a requested [`ResponseSchema`] was actually sent to the
+    /// provider, so the answer is constrained by construction.
+    ///
+    /// `false` both when no schema was asked for and when one was asked for
+    /// and the provider cannot take it -- see [`supports_response_schema`].
+    /// A caller that needs the guarantee must read this rather than assume
+    /// it: asking for a schema and being handed free text is the case a
+    /// silent `Ok` would hide, and the answer still has to be validated.
+    pub schema_enforced: bool,
+}
+
+/// A JSON Schema an answer must satisfy, for schema-constrained decoding
+/// (`EVAL-09`, #1743; the runner that uses it is #2130).
+///
+/// The same schema is spelled three ways by the three HTTP providers, and
+/// **they do not accept the same dialect**:
+///
+/// | provider | field | dialect |
+/// |---|---|---|
+/// | OpenAI / vLLM | `response_format.json_schema` | JSON Schema, and `strict` requires `additionalProperties: false` with every property listed in `required` |
+/// | Ollama | `format` | JSON Schema |
+/// | Gemini | `generationConfig.responseSchema` | an OpenAPI 3.0 subset, which rejects `additionalProperties` among others |
+///
+/// Callers provide the common supported subset. The client closes objects
+/// and checks required fields for OpenAI strict mode, converts type names and
+/// drops unsupported keywords for Gemini, and passes the schema unchanged to
+/// Ollama. Unsupported constructs fail before a provider request is sent.
+#[derive(Clone, Debug)]
+pub struct ResponseSchema {
+    /// A short name for the schema. OpenAI requires one; the others ignore it.
+    pub name: String,
+    /// The JSON Schema itself.
+    pub schema: serde_json::Value,
+}
+
+/// Whether a provider can be asked for schema-constrained output at all.
+///
+/// The Claude Code CLI takes a prompt and returns text with no request body
+/// to carry a schema, and the mock calls no model, so for those two a
+/// requested schema is dropped and [`Completion::schema_enforced`] is
+/// `false`. They are not errors: a caller that can validate and repair its
+/// own output still works against them, which is why this reports a
+/// capability instead of refusing the call.
+pub fn supports_response_schema(provider: &LLMProvider) -> bool {
+    match provider {
+        LLMProvider::OpenAI | LLMProvider::Ollama | LLMProvider::Gemini => true,
+        LLMProvider::ClaudeCode | LLMProvider::Mock => false,
+        // Refused by `new`, so not reachable through a constructed client.
+        LLMProvider::AzureOpenAI | LLMProvider::Anthropic => false,
+    }
+}
+
+/// Convert the common signature schema subset to the dialect a provider
+/// accepts. OpenAI strict mode requires closed objects and every property to
+/// be required; Gemini uses uppercase OpenAPI types and rejects
+/// `additionalProperties`; Ollama accepts the JSON Schema as authored.
+fn provider_schema(schema: &Value, provider: &LLMProvider) -> NLQResult<Value> {
+    match provider {
+        LLMProvider::OpenAI => normalize_openai_schema(schema, "$"),
+        LLMProvider::Gemini => normalize_gemini_schema(schema, "$"),
+        LLMProvider::Ollama => Ok(schema.clone()),
+        _ => Ok(schema.clone()),
+    }
+    .map_err(|message| NLQError::ConfigError(format!("unsupported response schema: {message}")))
+}
+
+fn normalize_openai_schema(schema: &Value, path: &str) -> Result<Value, String> {
+    let source = schema
+        .as_object()
+        .ok_or_else(|| format!("{path} must be a schema object"))?;
+    let mut result = Map::new();
+    for key in source.keys() {
+        if !matches!(
+            key.as_str(),
+            "type"
+                | "properties"
+                | "required"
+                | "items"
+                | "enum"
+                | "const"
+                | "minimum"
+                | "maximum"
+                | "minLength"
+                | "maxLength"
+                | "minItems"
+                | "maxItems"
+                | "description"
+                | "additionalProperties"
+        ) {
+            return Err(format!("keyword `{key}` is not supported at {path}"));
+        }
+    }
+    if source
+        .get("additionalProperties")
+        .is_some_and(|value| value != &Value::Bool(false))
+    {
+        return Err(format!(
+            "{path}.additionalProperties must be false in OpenAI strict mode"
+        ));
+    }
+    for key in [
+        "type",
+        "enum",
+        "const",
+        "minimum",
+        "maximum",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "description",
+    ] {
+        if let Some(value) = source.get(key) {
+            result.insert(key.into(), value.clone());
+        }
+    }
+    match source.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let properties = source
+                .get("properties")
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("{path}.properties must be an object"))?;
+            let required: Vec<String> = source
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            if properties.keys().any(|name| !required.contains(name)) {
+                return Err(format!("{path} has optional fields; OpenAI strict mode requires every property in `required`"));
+            }
+            let mut normalized = Map::new();
+            for (name, property) in properties {
+                normalized.insert(
+                    name.clone(),
+                    normalize_openai_schema(property, &format!("{path}.properties.{name}"))?,
+                );
+            }
+            result.insert("properties".into(), Value::Object(normalized));
+            result.insert(
+                "required".into(),
+                Value::Array(required.into_iter().map(Value::String).collect()),
+            );
+            result.insert("additionalProperties".into(), Value::Bool(false));
+        }
+        Some("array") => {
+            let items = source
+                .get("items")
+                .ok_or_else(|| format!("{path}.items is required for arrays"))?;
+            result.insert(
+                "items".into(),
+                normalize_openai_schema(items, &format!("{path}.items"))?,
+            );
+        }
+        Some("string" | "integer" | "number" | "boolean" | "null") => {}
+        Some(other) => return Err(format!("unsupported type `{other}` at {path}")),
+        None => return Err(format!("{path}.type is required")),
+    }
+    Ok(Value::Object(result))
+}
+
+fn normalize_gemini_schema(schema: &Value, path: &str) -> Result<Value, String> {
+    let source = schema
+        .as_object()
+        .ok_or_else(|| format!("{path} must be a schema object"))?;
+    let mut result = Map::new();
+    for key in source.keys() {
+        if !matches!(
+            key.as_str(),
+            "type"
+                | "properties"
+                | "required"
+                | "items"
+                | "enum"
+                | "description"
+                | "nullable"
+                | "format"
+                | "additionalProperties"
+        ) {
+            return Err(format!(
+                "keyword `{key}` is not supported by Gemini at {path}"
+            ));
+        }
+    }
+    if source
+        .get("additionalProperties")
+        .is_some_and(|value| value != &Value::Bool(false))
+    {
+        return Err(format!(
+            "{path}.additionalProperties must be false when supplied"
+        ));
+    }
+    if let Some(kind) = source.get("type").and_then(Value::as_str) {
+        let upper = match kind {
+            "object" => "OBJECT",
+            "array" => "ARRAY",
+            "string" => "STRING",
+            "integer" => "INTEGER",
+            "number" => "NUMBER",
+            "boolean" => "BOOLEAN",
+            "null" => "NULL",
+            other => return Err(format!("unsupported type `{other}` at {path}")),
+        };
+        result.insert("type".into(), Value::String(upper.into()));
+    } else {
+        return Err(format!("{path}.type is required"));
+    }
+    for key in ["required", "enum", "description", "nullable", "format"] {
+        if let Some(value) = source.get(key) {
+            result.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(properties) = source.get("properties") {
+        let properties = properties
+            .as_object()
+            .ok_or_else(|| format!("{path}.properties must be an object"))?;
+        let mut normalized = Map::new();
+        for (name, property) in properties {
+            normalized.insert(
+                name.clone(),
+                normalize_gemini_schema(property, &format!("{path}.properties.{name}"))?,
+            );
+        }
+        result.insert("properties".into(), Value::Object(normalized));
+    }
+    if let Some(items) = source.get("items") {
+        result.insert(
+            "items".into(),
+            normalize_gemini_schema(items, &format!("{path}.items"))?,
+        );
+    }
+    Ok(Value::Object(result))
+}
+
+fn mock_structured_response(name: &str) -> String {
+    match name {
+        "smriti_tool_planner_v1" => r#"{"calls":[]}"#.into(),
+        "smriti_nlq_cypher_v1" => r#"{"cypher":"MATCH (n) RETURN n LIMIT 10"}"#.into(),
+        "smriti_gak_enrich_scalar_v1" => r#"{"value":"UNKNOWN"}"#.into(),
+        "smriti_gak_enrich_relationship_v1" => r#"{"targets":[]}"#.into(),
+        _ => "MATCH (n) RETURN n LIMIT 10".into(),
+    }
 }
 
 pub struct NLQClient {
@@ -75,6 +320,25 @@ pub fn check_implemented(provider: &LLMProvider) -> NLQResult<()> {
     }
 }
 
+/// Where requests for `config` go: `NLQ_API_BASE_URL` when set, the
+/// provider's public endpoint otherwise. Empty for a provider with no network
+/// endpoint (Claude Code, Mock) and for Azure, which has no default and must be
+/// configured. `samyama-cli doctor` reads this so it checks the address the
+/// server would call, not a copy of it (#2082).
+pub fn api_base_url(config: &NLQConfig) -> String {
+    config.api_base_url.clone().unwrap_or_else(|| {
+        match config.provider {
+            LLMProvider::OpenAI => "https://api.openai.com/v1".to_string(),
+            LLMProvider::Ollama => "http://localhost:11434".to_string(),
+            LLMProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            LLMProvider::AzureOpenAI => String::new(),
+            LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
+            LLMProvider::ClaudeCode => String::new(),
+            LLMProvider::Mock => String::new(),
+        }
+    })
+}
+
 impl NLQClient {
     pub fn new(config: &NLQConfig) -> NLQResult<Self> {
         check_implemented(&config.provider)?;
@@ -83,17 +347,7 @@ impl NLQClient {
             .build()
             .map_err(|e| NLQError::ConfigError(e.to_string()))?;
 
-        let api_base_url = config.api_base_url.clone().unwrap_or_else(|| {
-            match config.provider {
-                LLMProvider::OpenAI => "https://api.openai.com/v1".to_string(),
-                LLMProvider::Ollama => "http://localhost:11434".to_string(),
-                LLMProvider::Gemini => "https://generativelanguage.googleapis.com/v1beta".to_string(),
-                LLMProvider::AzureOpenAI => String::new(),
-                LLMProvider::Anthropic => "https://api.anthropic.com/v1".to_string(),
-                LLMProvider::ClaudeCode => String::new(),
-                LLMProvider::Mock => String::new(),
-            }
-        });
+        let api_base_url = api_base_url(config);
 
         Ok(Self {
             client,
@@ -113,17 +367,53 @@ impl NLQClient {
     /// ([`crate::nlq::metrics`]), so agent and enrichment calls through this
     /// client are counted as well as NLQ.
     pub async fn complete(&self, prompt: &str) -> NLQResult<Completion> {
+        self.complete_structured(prompt, None).await
+    }
+
+    /// The model's answer to `prompt`, asked to satisfy `schema`.
+    ///
+    /// When `schema` is `Some` and the provider can take one
+    /// ([`supports_response_schema`]), it is sent in that provider's own
+    /// field and the answer comes back constrained by construction, with
+    /// [`Completion::schema_enforced`] set. When the provider cannot take
+    /// one, the call still goes out unconstrained and `schema_enforced` is
+    /// `false` -- the caller is told rather than refused, because a caller
+    /// that validates its own output works either way.
+    ///
+    /// The answer is **not** validated against `schema` here. A provider can
+    /// return something that does not satisfy it (and Gemini and OpenAI
+    /// disagree about which schemas they will even accept), so validating
+    /// and repairing belongs to the caller. That is #2130's `SignatureRunner`;
+    /// this is the transport it needs.
+    pub async fn complete_structured(
+        &self,
+        prompt: &str,
+        schema: Option<&ResponseSchema>,
+    ) -> NLQResult<Completion> {
         let started = Instant::now();
+        let prepared_schema = schema
+            .filter(|_| supports_response_schema(&self.config.provider))
+            .map(|schema| {
+                Ok(ResponseSchema {
+                    name: schema.name.clone(),
+                    schema: provider_schema(&schema.schema, &self.config.provider)?,
+                })
+            })
+            .transpose()?;
+        let sent = prepared_schema.as_ref();
         let answer = match self.config.provider {
-            LLMProvider::OpenAI => self.openai_chat(prompt).await,
-            LLMProvider::Ollama => self.ollama_chat(prompt).await,
-            LLMProvider::Gemini => self.gemini_chat(prompt).await,
+            LLMProvider::OpenAI => self.openai_chat(prompt, sent).await,
+            LLMProvider::Ollama => self.ollama_chat(prompt, sent).await,
+            LLMProvider::Gemini => self.gemini_chat(prompt, sent).await,
             LLMProvider::ClaudeCode => self
                 .claude_code_generate(prompt)
                 .await
                 .map(|text| (text, TokenUsage::default())),
             LLMProvider::Mock => Ok((
-                "MATCH (n) RETURN n LIMIT 10".to_string(),
+                schema.map_or_else(
+                    || "MATCH (n) RETURN n LIMIT 10".to_string(),
+                    |schema| mock_structured_response(&schema.name),
+                ),
                 TokenUsage::default(),
             )),
             // Refused by `new`, so not reachable through a constructed client.
@@ -140,6 +430,7 @@ impl NLQClient {
                     text,
                     usage,
                     latency,
+                    schema_enforced: sent.is_some(),
                 })
             }
             Err(e) => {
@@ -149,7 +440,11 @@ impl NLQClient {
         }
     }
 
-    async fn openai_chat(&self, prompt: &str) -> NLQResult<(String, TokenUsage)> {
+    async fn openai_chat(
+        &self,
+        prompt: &str,
+        schema: Option<&ResponseSchema>,
+    ) -> NLQResult<(String, TokenUsage)> {
         #[derive(Serialize)]
         struct Message {
             role: String,
@@ -161,6 +456,30 @@ impl NLQClient {
             model: &'a str,
             messages: Vec<Message>,
             temperature: f32,
+            /// Omitted entirely when no schema was asked for, so a request
+            /// without one is byte-for-byte what it was before.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            response_format: Option<ResponseFormat<'a>>,
+        }
+
+        #[derive(Serialize)]
+        struct ResponseFormat<'a> {
+            #[serde(rename = "type")]
+            kind: &'static str,
+            json_schema: JsonSchema<'a>,
+        }
+
+        #[derive(Serialize)]
+        struct JsonSchema<'a> {
+            name: &'a str,
+            schema: &'a serde_json::Value,
+            /// `strict` is what makes the decode constrained rather than
+            /// merely requested, which is the point of `EVAL-09`. OpenAI
+            /// only accepts it for a schema with
+            /// `additionalProperties: false` and every property in
+            /// `required`; a schema without those is rejected with a 400
+            /// rather than silently relaxed.
+            strict: bool,
         }
 
         #[derive(Deserialize)]
@@ -187,29 +506,59 @@ impl NLQClient {
             content: String,
         }
 
-        let api_key = self.config.api_key.as_ref().ok_or_else(|| NLQError::ConfigError("OpenAI requires API key".to_string()))?;
-        let system_prompt = self.config.system_prompt.clone().unwrap_or_else(|| "You are a Cypher expert.".to_string());
+        let api_key = self
+            .config
+            .api_key
+            .as_ref()
+            .ok_or_else(|| NLQError::ConfigError("OpenAI requires API key".to_string()))?;
+        let system_prompt = self
+            .config
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| "You are a Cypher expert.".to_string());
 
         let url = format!("{}/chat/completions", self.api_base_url);
-        let resp = self.client.post(&url)
+        let resp = self
+            .client
+            .post(&url)
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&Request {
                 model: &self.config.model,
                 messages: vec![
-                    Message { role: "system".to_string(), content: system_prompt },
-                    Message { role: "user".to_string(), content: prompt.to_string() },
+                    Message {
+                        role: "system".to_string(),
+                        content: system_prompt,
+                    },
+                    Message {
+                        role: "user".to_string(),
+                        content: prompt.to_string(),
+                    },
                 ],
                 temperature: 0.0,
+                response_format: schema.map(|s| ResponseFormat {
+                    kind: "json_schema",
+                    json_schema: JsonSchema {
+                        name: &s.name,
+                        schema: &s.schema,
+                        strict: true,
+                    },
+                }),
             })
             .send()
             .await
             .map_err(|e| NLQError::NetworkError(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(NLQError::ApiError(format!("OpenAI error: {}", resp.status())));
+            return Err(NLQError::ApiError(format!(
+                "OpenAI error: {}",
+                resp.status()
+            )));
         }
 
-        let result: Response = resp.json().await.map_err(|e| NLQError::SerializationError(e.to_string()))?;
+        let result: Response = resp
+            .json()
+            .await
+            .map_err(|e| NLQError::SerializationError(e.to_string()))?;
         let usage = result.usage.map_or_else(TokenUsage::default, |u| {
             TokenUsage::from_counts(u.prompt_tokens, u.completion_tokens, u.total_tokens)
         });
@@ -221,13 +570,21 @@ impl NLQClient {
         Ok((text, usage))
     }
 
-    async fn ollama_chat(&self, prompt: &str) -> NLQResult<(String, TokenUsage)> {
+    async fn ollama_chat(
+        &self,
+        prompt: &str,
+        schema: Option<&ResponseSchema>,
+    ) -> NLQResult<(String, TokenUsage)> {
         #[derive(Serialize)]
         struct Request<'a> {
             model: &'a str,
             prompt: String,
             system: String,
             stream: bool,
+            /// Ollama takes the JSON Schema itself here, not a wrapper, and
+            /// has no name for it. Omitted when no schema was asked for.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            format: Option<&'a serde_json::Value>,
         }
 
         #[derive(Deserialize)]
@@ -239,25 +596,38 @@ impl NLQClient {
             eval_count: Option<u64>,
         }
 
-        let system_prompt = self.config.system_prompt.clone().unwrap_or_else(|| "You are a Cypher expert.".to_string());
-        
+        let system_prompt = self
+            .config
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| "You are a Cypher expert.".to_string());
+
         let url = format!("{}/api/generate", self.api_base_url);
-        let resp = self.client.post(&url)
+        let resp = self
+            .client
+            .post(&url)
             .json(&Request {
                 model: &self.config.model,
                 prompt: prompt.to_string(),
                 system: system_prompt,
                 stream: false,
+                format: schema.map(|s| &s.schema),
             })
             .send()
             .await
             .map_err(|e| NLQError::NetworkError(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(NLQError::ApiError(format!("Ollama error: {}", resp.status())));
+            return Err(NLQError::ApiError(format!(
+                "Ollama error: {}",
+                resp.status()
+            )));
         }
 
-        let result: Response = resp.json().await.map_err(|e| NLQError::SerializationError(e.to_string()))?;
+        let result: Response = resp
+            .json()
+            .await
+            .map_err(|e| NLQError::SerializationError(e.to_string()))?;
         let usage = TokenUsage::from_counts(result.prompt_eval_count, result.eval_count, None);
         Ok((result.response, usage))
     }
@@ -275,18 +645,25 @@ impl NLQClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(NLQError::ApiError(format!("Claude Code CLI failed: {}", stderr)));
+            return Err(NLQError::ApiError(format!(
+                "Claude Code CLI failed: {}",
+                stderr
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    async fn gemini_chat(&self, prompt: &str) -> NLQResult<(String, TokenUsage)> {
+    async fn gemini_chat(
+        &self,
+        prompt: &str,
+        schema: Option<&ResponseSchema>,
+    ) -> NLQResult<(String, TokenUsage)> {
         #[derive(Serialize)]
-        struct Request {
+        struct Request<'a> {
             contents: Vec<Content>,
             #[serde(rename = "generationConfig")]
-            generation_config: GenerationConfig,
+            generation_config: GenerationConfig<'a>,
         }
 
         #[derive(Serialize, Deserialize)]
@@ -301,8 +678,17 @@ impl NLQClient {
         }
 
         #[derive(Serialize)]
-        struct GenerationConfig {
+        struct GenerationConfig<'a> {
             temperature: f32,
+            /// Gemini constrains the decode only when *both* of these are
+            /// set: the schema alone is ignored without the MIME type.
+            /// Both are omitted when no schema was asked for.
+            #[serde(rename = "responseMimeType", skip_serializing_if = "Option::is_none")]
+            response_mime_type: Option<&'static str>,
+            /// An OpenAPI 3.0 schema subset, converted from the common
+            /// signature schema before this request is built.
+            #[serde(rename = "responseSchema", skip_serializing_if = "Option::is_none")]
+            response_schema: Option<&'a serde_json::Value>,
         }
 
         #[derive(Deserialize)]
@@ -325,25 +711,40 @@ impl NLQClient {
             content: Content,
         }
 
-        let api_key = self.config.api_key.as_ref().ok_or_else(|| NLQError::ConfigError("Gemini requires API key".to_string()))?;
-        let system_prompt = self.config.system_prompt.clone().unwrap_or_else(|| "You are a Cypher expert.".to_string());
-        
+        let api_key = self
+            .config
+            .api_key
+            .as_ref()
+            .ok_or_else(|| NLQError::ConfigError("Gemini requires API key".to_string()))?;
+        let system_prompt = self
+            .config
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| "You are a Cypher expert.".to_string());
+
         // Combine system prompt and user prompt because Gemini v1beta doesn't strictly have 'system' role in all endpoints
         // or effectively treats user/model turns.
         // A simple approach is prepending the system instruction.
         let full_prompt = format!("{}\n\nQuestion: {}", system_prompt, prompt);
 
-        let url = format!("{}/models/{}:generateContent?key={}", self.api_base_url, self.config.model, api_key);
-        
-        let resp = self.client.post(&url)
+        let url = format!(
+            "{}/models/{}:generateContent?key={}",
+            self.api_base_url, self.config.model, api_key
+        );
+
+        let resp = self
+            .client
+            .post(&url)
             .json(&Request {
-                contents: vec![
-                    Content {
-                        role: Some("user".to_string()),
-                        parts: vec![Part { text: full_prompt }],
-                    }
-                ],
-                generation_config: GenerationConfig { temperature: 0.0 },
+                contents: vec![Content {
+                    role: Some("user".to_string()),
+                    parts: vec![Part { text: full_prompt }],
+                }],
+                generation_config: GenerationConfig {
+                    temperature: 0.0,
+                    response_mime_type: schema.map(|_| "application/json"),
+                    response_schema: schema.map(|s| &s.schema),
+                },
             })
             .send()
             .await
@@ -354,7 +755,10 @@ impl NLQClient {
             return Err(NLQError::ApiError(format!("Gemini error: {}", text)));
         }
 
-        let result: Response = resp.json().await.map_err(|e| NLQError::SerializationError(e.to_string()))?;
+        let result: Response = resp
+            .json()
+            .await
+            .map_err(|e| NLQError::SerializationError(e.to_string()))?;
         let usage = result.usage_metadata.map_or_else(TokenUsage::default, |u| {
             TokenUsage::from_counts(
                 u.prompt_token_count,
@@ -375,7 +779,9 @@ impl NLQClient {
     }
 }
 
-#[cfg(test)] #[path = "client_cov_tests.rs"] mod cov_tests;
+#[cfg(test)]
+#[path = "client_cov_tests.rs"]
+mod cov_tests;
 
 #[cfg(test)]
 mod tests {
@@ -577,7 +983,10 @@ mod tests {
             system_prompt: None,
         };
         let client_gemini = NLQClient::new(&config_gemini).unwrap();
-        assert_eq!(client_gemini.api_base_url, "https://generativelanguage.googleapis.com/v1beta");
+        assert_eq!(
+            client_gemini.api_base_url,
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
 
         // ClaudeCode default (empty)
         let config_cc = NLQConfig {
@@ -630,7 +1039,9 @@ mod tests {
             model: "mock".to_string(),
             api_key: None,
             api_base_url: None,
-            system_prompt: Some("You are a graph database expert specialized in medical data.".to_string()),
+            system_prompt: Some(
+                "You are a graph database expert specialized in medical data.".to_string(),
+            ),
         };
         let client = NLQClient::new(&config);
         assert!(client.is_ok());
