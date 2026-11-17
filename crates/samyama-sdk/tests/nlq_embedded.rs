@@ -90,15 +90,17 @@ async fn mock_translation_comes_back_and_runs() {
 
 #[tokio::test]
 async fn the_model_is_sent_the_question_the_schema_the_model_and_the_key() {
-    let (base, seen) =
-        fake_openai("```cypher\nMATCH (p:Person) RETURN p.name ORDER BY p.name\n```").await;
+    let (base, seen) = fake_openai(
+        r#"{"cypher":"MATCH (p:Person) RETURN p.name ORDER BY p.name"}"#,
+    )
+    .await;
     let client = people().await;
 
     let cypher = client
         .nlq_with("Who are the people?", &openai(&base, "sk-test-2092", "gpt-test"))
         .await
         .expect("nlq");
-    // The fence is stripped, as it is on the server.
+    // The structured result carries the query without markdown parsing.
     assert_eq!(cypher, "MATCH (p:Person) RETURN p.name ORDER BY p.name");
 
     let seen = seen.lock().unwrap().clone();
@@ -119,7 +121,7 @@ async fn the_model_is_sent_the_question_the_schema_the_model_and_the_key() {
 
 #[tokio::test]
 async fn a_query_that_writes_is_refused_and_the_graph_is_untouched() {
-    let (base, _seen) = fake_openai("MATCH (n) DETACH DELETE n").await;
+    let (base, _seen) = fake_openai(r#"{"cypher":"MATCH (n) DETACH DELETE n"}"#).await;
     let client = people().await;
     let e = client
         .nlq_with("Delete everything", &openai(&base, "sk-test", "gpt-test"))
@@ -132,7 +134,7 @@ async fn a_query_that_writes_is_refused_and_the_graph_is_untouched() {
 
 #[tokio::test]
 async fn bad_settings_are_refused_before_any_model_call() {
-    let (base, seen) = fake_openai("MATCH (n) RETURN n").await;
+    let (base, seen) = fake_openai(r#"{"cypher":"MATCH (n) RETURN n"}"#).await;
     let client = people().await;
     let no_key = NlqSettings {
         provider: Some("openai".into()),

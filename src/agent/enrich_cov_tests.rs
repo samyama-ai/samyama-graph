@@ -276,7 +276,7 @@ fn parse_list_handles_star_and_bullet_markers_and_case_insensitive_unknown() {
 
 #[tokio::test]
 async fn fill_scalar_returns_trimmed_answer_with_provenance() {
-    let srv = MockHttp::serve(vec![ollama("  A cooling machine.  ")]);
+    let srv = MockHttp::serve(vec![ollama(r#"{"value":"  A cooling machine.  "}"#)]);
     let gap = GapEvent {
         node_id: 7,
         label: "Chiller".into(),
@@ -299,12 +299,23 @@ async fn fill_scalar_returns_trimmed_answer_with_provenance() {
     );
     assert!(out.targets.is_none() && out.materialize.is_none());
     let sent = srv.requests()[0].json();
-    assert_eq!(sent["prompt"], build_prompt("Chiller", "description", &ctx));
+    assert!(sent["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("Known properties:"));
+    assert!(sent["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("Return a JSON object"));
+    assert!(sent["format"]["properties"]["value"].is_object());
 }
 
 #[tokio::test]
 async fn fill_scalar_declines_on_unknown_or_empty_answer() {
-    let srv = MockHttp::serve(vec![ollama("unknown"), ollama("   ")]);
+    let srv = MockHttp::serve(vec![
+        ollama(r#"{"value":"UNKNOWN"}"#),
+        ollama(r#"{"value":"   "}"#),
+    ]);
     let w = worker(&srv.base_url);
     let gap = GapEvent {
         node_id: 1,
@@ -336,7 +347,7 @@ async fn fill_returns_none_when_the_model_call_fails() {
 
 #[tokio::test]
 async fn fill_relationship_parses_targets() {
-    let srv = MockHttp::serve(vec![ollama("- Fouling\n- Leak\n")]);
+    let srv = MockHttp::serve(vec![ollama(r#"{"targets":["Fouling","Leak"]}"#)]);
     let m = mat("FAILS_BY", "FailureMode");
     let gap = GapEvent {
         node_id: 3,
@@ -361,7 +372,10 @@ async fn fill_relationship_parses_targets() {
 
 #[tokio::test]
 async fn fill_relationship_declines_on_unknown_or_blank_list() {
-    let srv = MockHttp::serve(vec![ollama(" UNKNOWN "), ollama("-\n\n")]);
+    let srv = MockHttp::serve(vec![
+        ollama(r#"{"targets":[]}"#),
+        ollama(r#"{"targets":[]}"#),
+    ]);
     let w = worker(&srv.base_url);
     let gap = GapEvent {
         node_id: 3,
