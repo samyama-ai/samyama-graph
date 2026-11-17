@@ -298,7 +298,7 @@ mod tests {
         for token in &t {
             for (s, x) in parts
                 .iter_mut()
-                .zip(encode(&[token.clone()], Role::Query, &p).unwrap())
+                .zip(encode(std::slice::from_ref(token), Role::Query, &p).unwrap())
             {
                 *s += x as f64;
             }
