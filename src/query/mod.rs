@@ -81,6 +81,7 @@ pub mod csv_source;
 pub mod span;
 pub mod suggest;
 pub mod metrics;
+pub mod slowlog;
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
@@ -298,6 +299,7 @@ impl QueryEngine {
         elapsed: std::time::Duration,
         rows: usize,
         succeeded: bool,
+        is_write: bool,
     ) {
         let ms = elapsed.as_millis() as u64;
         let slow = self.slow_query_ms != 0 && ms >= self.slow_query_ms;
@@ -311,6 +313,9 @@ impl QueryEngine {
         if !slow {
             return;
         }
+        // Kept as well as logged, so `/api/slowlog` can answer what the log
+        // line says without access to the server's stderr (#2079).
+        crate::query::slowlog::record(query_str, ms, self.slow_query_ms, rows, !succeeded);
         // Truncated: a generated query can be megabytes, and a log line that
         // fills the disk is its own outage.
         let text: String = query_str.chars().take(512).collect();
@@ -318,6 +323,11 @@ impl QueryEngine {
             elapsed_ms = ms,
             rows,
             threshold_ms = self.slow_query_ms,
+            failed = !succeeded,
+            is_write,
+            // Groups repeats of one statement without reading 512 characters
+            // of each, and survives the truncation above (#2076).
+            query_hash = %query_hash(query_str),
             query = %text,
             "slow query"
         );
@@ -374,10 +384,15 @@ impl QueryEngine {
     /// promotion only; a caller that needs to change the query copies it
     /// after the lock is gone (#1672).
     fn cached_parse(&self, query_str: &str) -> Result<Arc<Query>, Box<dyn std::error::Error>> {
+        // A stage of the request's trace (#2077): debug, so it costs nothing
+        // unless trace export is on.
+        let span = tracing::debug_span!("samyama.query.parse", cache_hit = tracing::field::Empty);
+        let _parse = span.enter();
         let normalized = query_str.split_whitespace().collect::<Vec<_>>().join(" ");
 
         // Check cache (LruCache::get promotes to most-recently-used)
         let hit = self.ast_cache.lock().unwrap().get(&normalized).cloned();
+        span.record("cache_hit", hit.is_some());
         if let Some(cached) = hit {
             self.stats.record_hit();
             return Ok(cached);
@@ -407,7 +422,7 @@ impl QueryEngine {
     fn parse_to_run(&self, query_str: &str) -> Result<Arc<Query>, Box<dyn std::error::Error>> {
         let started = std::time::Instant::now();
         self.cached_parse(query_str).inspect_err(|_| {
-            self.log_if_slow(query_str, started.elapsed(), 0, false);
+            self.log_if_slow(query_str, started.elapsed(), 0, false, false);
         })
     }
 
@@ -513,7 +528,7 @@ impl QueryEngine {
             let mut own = (*query).clone();
             crate::query::dialect::apply(&mut own, dialect).map_err(|e| {
                 // Refused before it ran, like a parse error, and counted as one.
-                self.log_if_slow(query_str, parse_started.elapsed(), 0, false);
+                self.log_if_slow(query_str, parse_started.elapsed(), 0, false, false);
                 with_span(
                     Box::new(crate::query::ParseError::Coded {
                         code: e.code(),
@@ -539,11 +554,13 @@ impl QueryEngine {
         // for the slow-query log. Taking either alone would silently revert
         // the other -- two correct fixes at one call site.
         let started = std::time::Instant::now();
-        let outcome = executor
-            .with_row_budget(self.row_budget)
-            .with_plan_hash(self.plan_hash)
-            .with_params(params.clone())
-            .execute(&query);
+        let outcome = tracing::debug_span!("samyama.query.execute").in_scope(|| {
+            executor
+                .with_row_budget(self.row_budget)
+                .with_plan_hash(self.plan_hash)
+                .with_params(params.clone())
+                .execute(&query)
+        });
         // Logged before the `?`, so a query that ran for two minutes and then
         // failed is in the log. That one is usually the more interesting of
         // the two.
@@ -552,6 +569,7 @@ impl QueryEngine {
             started.elapsed(),
             outcome.as_ref().map(|b| b.records.len()).unwrap_or(0),
             outcome.is_ok(),
+            false,
         );
         let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 
@@ -610,11 +628,13 @@ impl QueryEngine {
 
         let started = std::time::Instant::now();
         let mut rows = 0usize;
-        let outcome = executor.execute_each(&query, chunk_rows, &mut |columns, records| {
-            rows += records.len();
-            sink(columns, records).map_err(executor::ExecutionError::RuntimeError)
+        let outcome = tracing::debug_span!("samyama.query.execute").in_scope(|| {
+            executor.execute_each(&query, chunk_rows, &mut |columns, records| {
+                rows += records.len();
+                sink(columns, records).map_err(executor::ExecutionError::RuntimeError)
+            })
         });
-        self.log_if_slow(query_str, started.elapsed(), rows, outcome.is_ok());
+        self.log_if_slow(query_str, started.elapsed(), rows, outcome.is_ok(), false);
         let (columns, plan_hash) = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
         Ok(StreamedResult { columns, rows, plan_hash })
     }
@@ -694,7 +714,7 @@ impl QueryEngine {
                 // A hit is a query answered, and it returned before anything
                 // was counted: `/metrics` showed fewer queries than were served
                 // and a latency histogram of misses only (#2080).
-                self.log_if_slow(query_str, started.elapsed(), hit.records.len(), true);
+                self.log_if_slow(query_str, started.elapsed(), hit.records.len(), true, false);
                 return Ok((hit.clone(), true));
             }
         }
@@ -850,7 +870,8 @@ impl QueryEngine {
         // for the slow-query log. Taking either alone would silently revert
         // the other -- two correct fixes at one call site.
         let started = std::time::Instant::now();
-        let outcome = store.atomically(|store| {
+        let execute = tracing::debug_span!("samyama.query.execute");
+        let outcome = execute.in_scope(|| store.atomically(|store| {
             let mut executor =
                 MutQueryExecutor::new(store, tenant_id.to_string()).with_params(params.clone());
             if let Some(deadline) = deadline {
@@ -860,7 +881,7 @@ impl QueryEngine {
                 .with_row_budget(self.row_budget)
                 .with_plan_hash(self.plan_hash)
                 .execute(&query)
-        });
+        }));
         // Logged before the `?`, so a query that ran for two minutes and then
         // failed is in the log. That one is usually the more interesting of
         // the two.
@@ -869,11 +890,29 @@ impl QueryEngine {
             started.elapsed(),
             outcome.as_ref().map(|b| b.records.len()).unwrap_or(0),
             outcome.is_ok(),
+            query.is_write(),
         );
         let result = outcome.map_err(|e| with_span(Box::new(e), query_str))?;
 
         Ok(result)
     }
+}
+
+/// A short, stable digest of a statement, for logs (#2076).
+///
+/// The first 16 hex digits of the SHA-256 of the whitespace-normalised text,
+/// the same normalisation the parse cache keys on, so two spellings of one
+/// statement that differ only in spacing hash alike. Stable across processes
+/// and releases, unlike `DefaultHasher`, so a hash read in one log can be
+/// searched for in another.
+pub fn query_hash(query_str: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized = query_str.split_whitespace().collect::<Vec<_>>().join(" ");
+    Sha256::digest(normalized.as_bytes())
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// An error carrying the message it had plus a caret pointing into the query.

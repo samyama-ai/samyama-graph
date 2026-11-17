@@ -565,6 +565,30 @@ pub async fn query_handler(
     subject: Option<Extension<Subject>>,
     headers: axum::http::HeaderMap,
     Json(payload): Json<QueryRequest>,
+) -> axum::response::Response {
+    // The graph is in the body, which the request layer never reads; name it
+    // on the request's span here so every event below carries it (#2076).
+    tracing::Span::current().record("tenant", crate::logging::loggable_name(&payload.graph));
+    // What the audit layer cannot see from outside: it never reads the body,
+    // so the statement's kind, graph and hash travel back on the response
+    // (#2081). A statement that does not parse counts as a write, as on RESP.
+    let audit = crate::http::server::AuditedQuery {
+        tenant: payload.graph.clone(),
+        is_write: state.engine.statement_is_write(&payload.query).unwrap_or(true),
+        query_hash: crate::http::server::query_hash(&payload.query),
+    };
+    let mut res = run_query(State(state), subject, headers, Json(payload))
+        .await
+        .into_response();
+    res.extensions_mut().insert(audit);
+    res
+}
+
+async fn run_query(
+    State(state): State<AppState>,
+    subject: Option<Extension<Subject>>,
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<QueryRequest>,
 ) -> impl IntoResponse {
     // Tenant binding and the statement's role (#1328). The route itself was
     // let through at Read by `require_credential`.
@@ -677,7 +701,11 @@ pub async fn query_handler(
         snapshot_version = version;
         (result, props)
     } else {
-        let store_guard = state.store.read().await;
+        let store_guard = {
+            use tracing::Instrument;
+            // A stage of the request's trace (#2077).
+            state.store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+        };
         // The result cache is keyed on the statement text, which does not say which
         // dialect it was read under, so a GQL request must not be served from it until
         // the key carries the dialect. Bypassing is the conservative half of that:
@@ -830,14 +858,28 @@ async fn stream_query(
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamMsg>(STREAM_CHANNEL_CHUNKS);
-    let guard = std::sync::Arc::clone(&state.store).read_owned().await;
+    let guard = {
+        use tracing::Instrument;
+        // A stage of the request's trace (#2077).
+        std::sync::Arc::clone(&state.store)
+            .read_owned()
+            .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read"))
+            .await
+    };
     let engine = std::sync::Arc::clone(&state.engine);
     let time_limit = state.query_time_limit(&payload.graph);
     let runtime = tokio::runtime::Handle::current();
     let stall = stream_stall_budget();
     let query = payload.query;
+    // A blocking thread inherits neither the caller's span nor its subscriber;
+    // carry both across, so a slow streamed query is logged under its request
+    // like any other, by the same subscriber (#2076).
+    let span = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(|d| d.clone());
 
     tokio::task::spawn_blocking(move || {
+        let _subscriber = tracing::dispatcher::set_default(&dispatch);
+        let _request = span.enter();
         // A send that waits at most `stall` for room in the channel.
         let send = |msg: StreamMsg| -> Result<(), String> {
             match runtime.block_on(tokio::time::timeout(stall, tx.send(msg))) {
@@ -1195,12 +1237,16 @@ fn render_query_result(
 pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
     let stats = state.engine.cache_stats();
+    // The one thing here that can stop being true of a running server: after a
+    // failed persist, every write is refused until a restart (#2082).
+    let degraded = crate::persistence::health::is_degraded();
     Json(json!({
-        "status": "healthy",
+        "status": if degraded { "degraded" } else { "healthy" },
         "version": crate::VERSION,
         "storage": {
             "nodes": store_guard.node_count(),
             "edges": store_guard.edge_count(),
+            "persistence_degraded": degraded,
         },
         "cache": {
             "hits": stats.hits(),
@@ -1208,6 +1254,56 @@ pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse 
             "size": state.engine.cache_len(),
         }
     }))
+}
+
+/// Query string for `GET /api/changes`.
+#[derive(Deserialize, Debug, Default)]
+pub struct ChangesParams {
+    /// The token from an earlier reply. Absent means "I have seen nothing".
+    pub since: Option<String>,
+}
+
+/// Names this server process in a change token. A restart starts the data
+/// counter again from zero, so without it a client holding `…-42` could see
+/// `…-42` again after a restart and forty-two writes of different data, and
+/// keep a stale view. Random, not the start time: two processes started in
+/// the same instant must still differ.
+fn process_token_prefix() -> &'static str {
+    static PREFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PREFIX.get_or_init(|| uuid::Uuid::new_v4().simple().to_string()[..16].to_string())
+}
+
+/// The change token for a store: this process, and how many times its data
+/// has changed. Opaque to clients; compared only for equality.
+pub fn change_token(store: &crate::graph::GraphStore) -> String {
+    format!("{}-{}", process_token_prefix(), store.data_changes())
+}
+
+/// `GET /api/changes[?since=<token>]` — has the graph's data changed? (#1771)
+///
+/// A view that wants to stay current polls this instead of re-running its
+/// query: `changed: false` means no node, relationship, label or property
+/// changed since `since` was issued, so the result it holds is still the
+/// answer. The token moves on every data change and on nothing else -- not on
+/// reads, not on cache or index housekeeping (`GraphStore::data_changes`).
+///
+/// It says *that* the graph changed, not *what* changed: any write moves it,
+/// as any write invalidates the result cache. It errs only towards
+/// "changed": a write that fails part-way can move it too, which costs a
+/// poller one re-run, never a stale view. A token from another server
+/// process, or one that does not parse, reads as changed; the safe answer to
+/// "is my copy current?" when we cannot tell is "no".
+pub async fn changes_handler(
+    State(state): State<AppState>,
+    Query(params): Query<ChangesParams>,
+) -> impl IntoResponse {
+    let token = change_token(&*state.store.read().await);
+    let changed = params.since.as_deref() != Some(token.as_str());
+    (
+        // A cached "unchanged" is the one wrong answer this route can give.
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(json!({ "token": token, "changed": changed })),
+    )
 }
 
 /// `GET /api/algorithms/catalog` — every algorithm `CALL algo.*` runs (#2013).
@@ -1320,6 +1416,25 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
         ));
     }
 
+    // Dead entries a vector index still walks through (#1972). A ratio that
+    // climbs towards a fifth means a rebuild is near; one that stays high
+    // means deletes are outpacing it.
+    out.push_str(
+        "# HELP samyama_vector_index_superseded Entries in a vector index's graph that no longer answer for a node.\n",
+    );
+    out.push_str("# TYPE samyama_vector_index_superseded gauge\n");
+    for i in &indexes {
+        if let Some(dead) = i.superseded {
+            out.push_str(&format!(
+                "samyama_vector_index_superseded{{label=\"{}\",property=\"{}\",name=\"{}\"}} {}\n",
+                i.label.replace('"', ""),
+                i.property.replace('"', ""),
+                i.name.as_deref().unwrap_or("").replace('"', ""),
+                dead
+            ));
+        }
+    }
+
     // Query latency last, because it is the part an operator opens this page
     // for. Everything above describes the graph; this describes what asking it
     // questions costs (REL-10).
@@ -1400,6 +1515,32 @@ pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse 
         },
         "tenants": state.tenant_manager.as_ref().map(|tm| tm.list_tenants().len()),
     }))
+}
+
+/// `?limit=N` on `GET /api/slowlog`.
+#[derive(Debug, Deserialize)]
+pub struct SlowlogParams {
+    limit: Option<usize>,
+}
+
+/// `GET /api/slowlog` — the most recent queries past `SLOW_QUERY_MS`, newest
+/// first (#2079). `limit` defaults to, and is capped at, the ring's size.
+///
+/// `samyama_slow_queries_total` said slow queries happened; this says which,
+/// without access to the server's stderr.
+pub async fn slowlog_handler(Query(params): Query<SlowlogParams>) -> impl IntoResponse {
+    use crate::query::slowlog;
+    let limit = params.limit.unwrap_or(slowlog::max_len()).min(slowlog::max_len());
+    Json(json!({
+        "len": slowlog::len(),
+        "max_len": slowlog::max_len(),
+        "entries": slowlog::recent(limit),
+    }))
+}
+
+/// `DELETE /api/slowlog` — empty the ring; reports how many entries it held.
+pub async fn slowlog_reset_handler() -> impl IntoResponse {
+    Json(json!({ "cleared": crate::query::slowlog::reset() }))
 }
 
 /// Handler for graph schema introspection
@@ -3680,6 +3821,8 @@ pub async fn nlq_handler(
                 "cypher": t.cypher,
                 "usage": t.usage,
                 "llm_latency_ms": t.llm_latency.as_secs_f64() * MILLIS_PER_SECOND,
+                // From the translation cache: no model call, no tokens (AI-13).
+                "cached": t.cached,
             })),
         )
             .into_response(),

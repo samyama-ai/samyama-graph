@@ -94,6 +94,7 @@ pub mod temporal;
 pub mod operator;
 pub mod budget;
 pub mod profile;
+mod plan_json;
 pub mod physical_planner;
 pub mod plan_enumerator;
 pub mod planner;
@@ -521,14 +522,20 @@ impl<'a> QueryExecutor<'a> {
             return whole(self.execute_union(query)?, sink);
         }
 
-        // Plan the query
-        let mut plan = self.planner.plan(query, self.store)?;
+        // Plan the query: a stage of the request's trace (#2077).
+        let mut plan = tracing::debug_span!("samyama.query.plan")
+            .in_scope(|| self.planner.plan(query, self.store))?;
         // TRUST-06: the hash of the plan that runs, taken before it is
         // consumed. Re-planning later could describe a different plan: the
         // planner reads statistics that move with the data.
         let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
 
         // Handle EXPLAIN - return plan description instead of executing
+        if query.explain && query.plan_json {
+            let diag = planner::PLAN_DIAGNOSTICS.with(|d| d.borrow_mut().take());
+            let doc = plan_json::explain(&mut plan.root, self.store, self.row_budget, diag);
+            return whole(plan_json::batch(doc, plan_hash), sink);
+        }
         if query.explain {
             let mut batch = Self::explain_plan_with_stats(&mut plan, Some(self.store), self.row_budget);
             batch.plan_hash = plan_hash;
@@ -567,6 +574,11 @@ impl<'a> QueryExecutor<'a> {
             use crate::graph::PropertyValue;
 
             let plan_text = plan.root.describe().format(0);
+            // Taken before the plan is instrumented and planned again: the
+            // re-plan below would overwrite the diagnostics, and instrumenting
+            // consumes the plan the hash describes.
+            let diag = planner::PLAN_DIAGNOSTICS.with(|d| d.borrow_mut().take());
+            let json_hash = query.plan_json.then(|| plan_json::plan_hash_of(&plan.root));
 
             let mut instrumented = plan;
             let nodes = profile::instrument_with_estimates(&mut instrumented.root, self.store);
@@ -578,6 +590,17 @@ impl<'a> QueryExecutor<'a> {
             let plain_start = std::time::Instant::now();
             let result = self.execute_plan(plain_plan)?;
             let plain_elapsed = plain_start.elapsed();
+
+            if let Some(json_hash) = json_hash {
+                let measured = plan_json::Measured {
+                    nodes: &nodes,
+                    instrumented: profiled_elapsed,
+                    plain: plain_elapsed,
+                    rows: result.records.len(),
+                };
+                let doc = plan_json::profile(json_hash, measured, self.row_budget, diag);
+                return whole(plan_json::batch(doc, plan_hash), sink);
+            }
 
             let stats = self.store.statistics();
             let profile_text = format!(
@@ -839,12 +862,18 @@ impl<'a> MutQueryExecutor<'a> {
         // Plan the query (need immutable borrow temporarily)
         let mut plan = {
             let store_ref: &GraphStore = self.store;
-            self.planner.plan(query, store_ref)?
+            tracing::debug_span!("samyama.query.plan").in_scope(|| self.planner.plan(query, store_ref))?
         };
         // TRUST-06, as on the read executor.
         let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
 
         // Handle EXPLAIN - return plan description instead of executing
+        if query.explain && query.plan_json {
+            let store_ref: &GraphStore = self.store;
+            let diag = planner::PLAN_DIAGNOSTICS.with(|d| d.borrow_mut().take());
+            let doc = plan_json::explain(&mut plan.root, store_ref, self.row_budget, diag);
+            return Ok(plan_json::batch(doc, plan_hash));
+        }
         if query.explain {
             let store_ref: &GraphStore = self.store;
             let mut batch = QueryExecutor::explain_plan_with_stats(&mut plan, Some(store_ref), self.row_budget);

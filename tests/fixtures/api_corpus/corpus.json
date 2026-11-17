@@ -2965,7 +2965,9 @@
       "columns": [
         "label",
         "property",
-        "type"
+        "type",
+        "superseded",
+        "supersededRatio"
       ],
       "edges": [],
       "engine_version": "<version>",
@@ -2976,7 +2978,9 @@
         [
           "Person",
           "name",
-          "BTREE"
+          "BTREE",
+          null,
+          null
         ]
       ],
       "snapshot_version": 27
@@ -6344,7 +6348,7 @@
       "query": "CALL algo.nope()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Procedure.UnknownAlgorithm] Unknown algorithm: algo.nope. Available: pageRank({config}), shortestPath(source, target), weightedPath(source, target, weightProperty), maxFlow(source, sink [, capacityProperty]), mst([weightProperty]), cdlp([label, edgeType, config]), lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})\n --> 1:6\n  |\n1 | CALL algo.nope()\n  |      ^^^^^^^^^"
+      "error": "[Samyama.ClientError.Procedure.UnknownAlgorithm] Unknown algorithm: algo.nope. Available: pageRank({config}), articleRank, personalizedPageRank, katz, hits, voteRank, degree, closeness, betweenness, harmonic, eigenvector, kCore, wcc(), scc(), cdlp([label, edgeType, config]), louvain, modularity, biconnectedComponents, kTruss, shortestPath(source, target), weightedPath(source, target, weightProperty), allShortestPaths, aStar, yens, bellmanFord, allPairsShortestPath, dagLongestPath, transitiveClosure, randomWalk, maxFlow(source, sink [, capacityProperty]), mst([weightProperty]), commonNeighbors, jaccard, adamicAdar, nodeSimilarity, overlap, cosine, topologicalSort, cycleDetection, bridges, articulationPoints, bipartite, maximalMatching, colouring, dominatingSet, effectiveSize, constraint, triangleCount(), lcc([label, edgeType]), squareClustering, eccentricity, diameter, radius, averageNeighborDegree, degreeAssortativity, wienerIndex, transitivity, globalEfficiency, richClub, reciprocity, temporalReachability, propagationRanking, temporalShortestPath, symptomExplanation, pca, fastRP, node2vec, or.solve({config}), negativeSampling, or.constrainedShortestPath (arguments and columns: GET /api/algorithms/catalog)\n --> 1:6\n  |\n1 | CALL algo.nope()\n  |      ^^^^^^^^^"
     },
     "status": 400
   },
@@ -6427,7 +6431,8 @@
       "status": "healthy",
       "storage": {
         "edges": 4,
-        "nodes": 8
+        "nodes": 8,
+        "persistence_degraded": false
       },
       "version": "<version>"
     },

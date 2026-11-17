@@ -3139,7 +3139,7 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
     "tostringornull", "toupper", "touppercase", "trim", "type", "valuetype",
     "vector.distance", "vector.similarity.cosine", "vector.similarity.euclidean",
-    "vector_distance",
+    "vector.similarity.maxsim", "vector.similarity.sparsedot", "vector_distance",
 ];
 
 /// Is `name` a function this engine implements?
@@ -3331,6 +3331,8 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("point.withinbbox", 3),
     ("vector.similarity.cosine", 2),
     ("vector.similarity.euclidean", 2),
+    ("vector.similarity.maxsim", 2),
+    ("vector.similarity.sparsedot", 2),
     ("vector.distance", 3),
     ("vector_distance", 3),
 ];
@@ -4878,6 +4880,54 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let metric = crate::vector::DistanceMetric::L2;
             Ok(Value::Property(PropertyValue::Float(metric.score(metric.distance(&a, &b)))))
         }
+        // Late-interaction (ColBERT) scoring over multi-vectors (#1978): for
+        // each query token, its best match among the document's tokens, summed.
+        // Not in Neo4j. Raw dot or cosine, not the [0, 1] rescale of the
+        // functions above: a MaxSim is a sum, so it has no fixed range anyway.
+        "vector.similarity.maxsim" => {
+            let who = "vector.similarity.maxSim";
+            let query = multi_vector_arg(&args[0], who)?;
+            let doc = multi_vector_arg(&args[1], who)?;
+            if query[0].len() != doc[0].len() {
+                return Err(ExecutionError::bad_argument(format!(
+                    "`{who}()` takes query and document tokens of the same dimension; \
+                     got {} and {}",
+                    query[0].len(),
+                    doc[0].len()
+                )));
+            }
+            let cosine = match args.get(2) {
+                None => false,
+                Some(Value::Property(PropertyValue::String(m))) => {
+                    match m.to_ascii_uppercase().as_str() {
+                        "DOT" => false,
+                        "COSINE" => true,
+                        other => {
+                            return Err(ExecutionError::bad_argument(format!(
+                                "`{who}()`: unknown metric '{other}'; expected DOT or COSINE"
+                            )))
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{who}()` takes the metric as a string, DOT or COSINE"
+                    )))
+                }
+            };
+            if cosine && query.iter().chain(&doc).any(|t| is_zero_vector(t)) {
+                // As `vector.similarity.cosine`: a zero token has no direction.
+                return Ok(Value::Null);
+            }
+            Ok(Value::Property(PropertyValue::Float(max_sim(&query, &doc, cosine))))
+        }
+        // The inner product of two sparse vectors (#1978), the scoring of
+        // learned sparse retrievers such as SPLADE. Not in Neo4j.
+        "vector.similarity.sparsedot" => {
+            let who = "vector.similarity.sparseDot";
+            let (a, b) = (sparse_vector_arg(&args[0], who)?, sparse_vector_arg(&args[1], who)?);
+            Ok(Value::Property(PropertyValue::Float(sparse_dot(&a, &b))))
+        }
         // A distance, lower is better, by the metric named in the third
         // argument -- Neo4j's `vector_distance`, under both spellings.
         "vector.distance" | "vector_distance" => {
@@ -5081,6 +5131,176 @@ fn vector_pair(a: &Value, b: &Value, who: &str) -> ExecutionResult<(Vec<f32>, Ve
 
 fn is_zero_vector(v: &[f32]) -> bool {
     v.iter().all(|x| *x == 0.0)
+}
+
+/// A multi-vector argument of `vector.similarity.maxSim` (#1978): a non-empty
+/// list of vectors (one per token), all of one dimension. Either a list
+/// literal of lists or a stored property holding one.
+fn multi_vector_arg(v: &Value, who: &str) -> ExecutionResult<Vec<Vec<f32>>> {
+    let bad = || {
+        ExecutionError::TypeError(format!(
+            "`{who}()` takes multi-vectors: non-empty lists of vectors, \
+             such as [[0.1, 0.2], [0.3, 0.4]]"
+        ))
+    };
+    let token = |t: Option<Vec<f32>>| match t {
+        Some(t) if !t.is_empty() && t.iter().all(|x| x.is_finite()) => Ok(t),
+        _ => Err(bad()),
+    };
+    let tokens = match v {
+        Value::List(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Property(pv) => token(pv.to_vector()),
+                Value::List(_) => vector_arg(item, who).map_err(|_| bad()),
+                _ => Err(bad()),
+            })
+            .collect::<ExecutionResult<Vec<_>>>()?,
+        Value::Property(PropertyValue::Array(items)) => items
+            .iter()
+            .map(|item| token(item.to_vector()))
+            .collect::<ExecutionResult<Vec<_>>>()?,
+        _ => return Err(bad()),
+    };
+    if tokens.is_empty() {
+        return Err(bad());
+    }
+    let dim = tokens[0].len();
+    if let Some(t) = tokens.iter().find(|t| t.len() != dim) {
+        return Err(ExecutionError::bad_argument(format!(
+            "`{who}()` takes tokens of the same dimension; got {dim} and {}",
+            t.len()
+        )));
+    }
+    Ok(tokens)
+}
+
+/// ColBERT's MaxSim: the sum over query tokens of the best dot product (or
+/// cosine) against any document token. In f64. No token may be zero when
+/// `cosine` is set; the caller checks.
+fn max_sim(query: &[Vec<f32>], doc: &[Vec<f32>], cosine: bool) -> f64 {
+    let dot = |a: &[f32], b: &[f32]| -> f64 {
+        a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum()
+    };
+    let norm = |a: &[f32]| dot(a, a).sqrt();
+    let doc_norms: Vec<f64> = doc.iter().map(|d| norm(d)).collect();
+    query
+        .iter()
+        .map(|q| {
+            let qn = norm(q);
+            doc.iter()
+                .zip(&doc_norms)
+                .map(|(d, dn)| if cosine { dot(q, d) / (qn * dn) } else { dot(q, d) })
+                .fold(f64::NEG_INFINITY, f64::max)
+        })
+        .sum()
+}
+
+/// A sparse vector argument of `vector.similarity.sparseDot` (#1978), as
+/// `(dimension, weight)` pairs sorted by dimension. Two spellings:
+///
+/// * `{indices: [3, 17], values: [0.5, 1.2]}` -- Qdrant's, parallel lists;
+/// * `{`3`: 0.5, `17`: 1.2}` -- a map from dimension to weight. Cypher map keys
+///   are strings, so each key must read as a non-negative integer.
+///
+/// Dimensions are non-negative integers, each at most once; weights are
+/// finite numbers. An empty map is the empty vector, whose product with
+/// anything is 0.
+fn sparse_vector_arg(v: &Value, who: &str) -> ExecutionResult<Vec<(u64, f64)>> {
+    let bad = |why: &str| {
+        ExecutionError::bad_argument(format!(
+            "`{who}()` takes sparse vectors, {{indices: [..], values: [..]}} or \
+             {{`<dimension>`: weight, ..}}; {why}"
+        ))
+    };
+    let entries: Vec<(String, Value)> = match v {
+        Value::Map(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        Value::Property(PropertyValue::Map(m)) => m
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::Property(v.clone())))
+            .collect(),
+        _ => return Err(bad("got something that is not a map")),
+    };
+    let weight = |w: &Value| match w {
+        Value::Property(PropertyValue::Float(f)) if f.is_finite() => Some(*f),
+        Value::Property(PropertyValue::Integer(i)) => Some(*i as f64),
+        _ => None,
+    };
+    let list = |l: &Value| -> Option<Vec<Value>> {
+        match l {
+            Value::List(items) => Some(items.clone()),
+            Value::Property(PropertyValue::Array(items)) => {
+                Some(items.iter().cloned().map(Value::Property).collect())
+            }
+            Value::Property(PropertyValue::Vector(items)) => Some(
+                items
+                    .iter()
+                    .map(|f| Value::Property(PropertyValue::Float(*f as f64)))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    };
+    let has = |k: &str| entries.iter().any(|(key, _)| key == k);
+    let mut pairs: Vec<(u64, f64)> = if entries.len() == 2 && has("indices") && has("values") {
+        let get = |k: &str| entries.iter().find(|(key, _)| key == k).map(|(_, v)| v).unwrap();
+        let indices = list(get("indices")).ok_or_else(|| bad("`indices` is not a list"))?;
+        let values = list(get("values")).ok_or_else(|| bad("`values` is not a list"))?;
+        if indices.len() != values.len() {
+            return Err(bad(&format!(
+                "`indices` has {} entries and `values` {}",
+                indices.len(),
+                values.len()
+            )));
+        }
+        indices
+            .iter()
+            .zip(&values)
+            .map(|(i, w)| {
+                let i = match i {
+                    Value::Property(PropertyValue::Integer(i)) if *i >= 0 => *i as u64,
+                    _ => return Err(bad("an index is not a non-negative integer")),
+                };
+                let w = weight(w).ok_or_else(|| bad("a value is not a finite number"))?;
+                Ok((i, w))
+            })
+            .collect::<ExecutionResult<_>>()?
+    } else {
+        entries
+            .iter()
+            .map(|(k, w)| {
+                let i = k.parse::<u64>().map_err(|_| {
+                    bad(&format!("key '{k}' is not a non-negative integer dimension"))
+                })?;
+                let w = weight(w).ok_or_else(|| {
+                    bad(&format!("the weight of '{k}' is not a finite number"))
+                })?;
+                Ok((i, w))
+            })
+            .collect::<ExecutionResult<_>>()?
+    };
+    pairs.sort_by_key(|(i, _)| *i);
+    if let Some(w) = pairs.windows(2).find(|w| w[0].0 == w[1].0) {
+        return Err(bad(&format!("dimension {} appears twice", w[0].0)));
+    }
+    Ok(pairs)
+}
+
+/// The inner product of two sparse vectors sorted by dimension: a merge.
+fn sparse_dot(a: &[(u64, f64)], b: &[(u64, f64)]) -> f64 {
+    let (mut i, mut j, mut sum) = (0, 0, 0.0);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                sum += a[i].1 * b[j].1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    sum
 }
 
 /// Helper: extract integer from Value
@@ -14615,6 +14835,19 @@ impl PhysicalOperator for IndexScanOperator {
     }
 }
 
+/// A vector search restricted to the reflexive subtree under one hierarchy
+/// root (#445): `CALL db.index.vector.queryNodes(...) YIELD node MATCH (r:L
+/// {k: v}) WHERE subsumes(node, r)`, with `r` pinned to one node.
+#[derive(Debug, Clone)]
+pub struct HierarchyScope {
+    /// The pinned root.
+    pub root: NodeId,
+    /// The hierarchy index that answers `subsumes(node, r)` for this root.
+    pub index: String,
+    /// The variable the root is bound to, for EXPLAIN.
+    pub anchor: String,
+}
+
 /// Vector search operator: CALL db.index.vector.queryNodes(...)
 pub struct VectorSearchOperator {
     /// Label to search in
@@ -14642,6 +14875,8 @@ pub struct VectorSearchOperator {
     /// index's default.
     ef: Option<usize>,
     plan: Option<crate::vector::strategy::FilterPlan>,
+    /// The hierarchy subtree the search is restricted to (#445).
+    scope: Option<HierarchyScope>,
     /// Search results
     results: Vec<(NodeId, f32)>,
     /// Current index in results
@@ -14669,6 +14904,7 @@ impl VectorSearchOperator {
             filter: None,
             ef: None,
             plan: None,
+            scope: None,
             results: Vec::new(),
             current: 0,
         }
@@ -14691,6 +14927,12 @@ impl VectorSearchOperator {
         self
     }
 
+    /// Search only the subtree under a hierarchy root (#445).
+    pub fn with_scope(mut self, scope: Option<HierarchyScope>) -> Self {
+        self.scope = scope;
+        self
+    }
+
     /// Bind the raw distance to this variable (`YIELD distance`, #1980).
     pub fn with_distance_var(mut self, distance_var: Option<String>) -> Self {
         self.distance_var = distance_var;
@@ -14705,7 +14947,28 @@ impl VectorSearchOperator {
         // missing metric here only means there is nothing to score.
         self.metric = store.vector_index.metric(&self.label, &self.property_key);
 
-        let Some(filter) = &self.filter else {
+        // The subtree, from the index named when the plan was made. An index
+        // that has since become unusable drops the restriction: the WHERE
+        // above still applies, so the rows stay right and only the k
+        // guarantee is lost, as it is without the scope.
+        let entry = self
+            .scope
+            .as_ref()
+            .and_then(|scope| store.hierarchy_index.usable_named(&scope.index).map(|e| (scope.root, e)));
+        let guard = entry.as_ref().map(|(root, e)| (*root, e.read().unwrap()));
+        let hierarchy = guard.as_ref().and_then(|(root, g)| {
+            let index = g.index.as_ref()?;
+            Some((index, index.poset().idx(*root)?))
+        });
+        let in_scope = |id: NodeId| match hierarchy {
+            Some((index, root)) => index
+                .poset()
+                .idx(id)
+                .is_some_and(|x| index.subsumes(x, root)),
+            None => true,
+        };
+
+        if self.filter.is_none() && hierarchy.is_none() {
             self.results = store
                 .vector_search_where(
                     &self.label,
@@ -14717,25 +14980,40 @@ impl VectorSearchOperator {
                 )
                 .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
             return Ok(());
-        };
+        }
         // The search asks about one node at a time and takes a yes or no, so
         // the first error is kept and raised after it: a predicate that fails
         // must fail the query, as it would above the search, not read as
         // "no match".
         let error = std::cell::RefCell::new(None);
-        let results = store
-            .vector_search_where_planned(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, self.plan.as_ref().map(|p| p.strategy), |id| {
-                if error.borrow().is_some() {
-                    return false;
-                }
-                let mut record = Record::new();
-                record.bind(self.node_var.clone(), Value::NodeRef(id));
-                eval_predicate_standalone(filter, &record, store).unwrap_or_else(|e| {
-                    *error.borrow_mut() = Some(e);
-                    false
-                })
+        let keep = |id: NodeId| {
+            if error.borrow().is_some() || !in_scope(id) {
+                return false;
+            }
+            let Some(filter) = &self.filter else { return true };
+            let mut record = Record::new();
+            record.bind(self.node_var.clone(), Value::NodeRef(id));
+            eval_predicate_standalone(filter, &record, store).unwrap_or_else(|e| {
+                *error.borrow_mut() = Some(e);
+                false
             })
-            .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
+        };
+        let strategy = self.plan.as_ref().map(|p| p.strategy);
+        let results = match hierarchy {
+            // Hierarchy-first: enumerate the subtree from the index and score
+            // only it.
+            Some((index, root)) if strategy == Some(crate::vector::strategy::FilterStrategy::Exact) => {
+                let candidates: Vec<NodeId> = index
+                    .descendants(root)
+                    .into_iter()
+                    .map(|i| index.poset().node_at(i))
+                    .collect();
+                store.vector_search_among(&self.label, &self.property_key, &self.query_vector, self.k, &candidates, keep)
+            }
+            // Vector-first: the graph search, with the subtree test as its filter.
+            _ => store.vector_search_where_planned(&self.label, &self.property_key, &self.query_vector, self.k, self.ef, strategy, keep),
+        }
+        .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
         if let Some(e) = error.into_inner() {
             return Err(e);
         }
@@ -14794,6 +15072,12 @@ impl PhysicalOperator for VectorSearchOperator {
         }
         if let Some(f) = &self.filter {
             details.push_str(&format!(", filter: {}", format_expression(f)));
+        }
+        if let Some(scope) = &self.scope {
+            details.push_str(&format!(
+                ", hierarchy: subsumes({}, {}) via {} (root id {})",
+                self.node_var, scope.anchor, scope.index, scope.root.as_u64()
+            ));
         }
         if let Some(plan) = &self.plan {
             details.push_str(&format!(", {}", plan.describe()));
@@ -16282,11 +16566,16 @@ impl PhysicalOperator for ShowIndexesOperator {
             // find out whether it had been created was to search it and read
             // an empty result -- which is what a correct index over no matching
             // data also returns.
-            let mut rows: Vec<(String, String, String)> = store
+            // The fourth field is a vector index's dead entries and its live
+            // ones (#1972); `None` for every other kind.
+            type Row = (String, String, String, Option<(usize, usize)>);
+            let mut rows: Vec<Row> = store
                 .property_index
                 .list_indexes()
                 .into_iter()
-                .map(|(label, property)| (label.as_str().to_string(), property, "BTREE".to_string()))
+                .map(|(label, property)| {
+                    (label.as_str().to_string(), property, "BTREE".to_string(), None)
+                })
                 .collect();
             rows.extend(
                 store
@@ -16296,12 +16585,15 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .map(|k| {
                         // With its HNSW parameters (#1971), in the bracket the
                         // other kinds use for their name.
-                        let params = store
-                            .vector_index
-                            .get_index(&k.label, &k.property_key)
-                            .map(|i| i.read().unwrap().params())
-                            .unwrap_or_default();
-                        (k.label, k.property_key, format!("VECTOR[{params}]"))
+                        let index = store.vector_index.get_index(&k.label, &k.property_key);
+                        let index = index.as_ref().map(|i| i.read().unwrap());
+                        let params = index.as_ref().map(|i| i.params()).unwrap_or_default();
+                        // Deleted and replaced vectors stay in the graph until
+                        // a fifth of it is dead and it is rebuilt (#1968), and a
+                        // search walks through them. How many there are is what
+                        // says how far from that rebuild the index is (#1972).
+                        let dead = index.as_ref().map(|i| (i.superseded(), i.len()));
+                        (k.label, k.property_key, format!("VECTOR[{params}]"), dead)
                     }),
             );
             // Full-text indexes too, or the only way to learn that one exists
@@ -16314,7 +16606,7 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .listing()
                     .into_iter()
                     .map(|(name, label, property)| {
-                        (label, property, format!("FULLTEXT[{name}]"))
+                        (label, property, format!("FULLTEXT[{name}]"), None)
                     }),
             );
             rows.extend(
@@ -16322,18 +16614,34 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .point_index
                     .listing()
                     .into_iter()
-                    .map(|(name, label, property)| (label, property, format!("POINT[{name}]"))),
+                    .map(|(name, label, property)| {
+                        (label, property, format!("POINT[{name}]"), None)
+                    }),
             );
             // Both registries are hash maps, so the listing order is otherwise
             // arbitrary and differs run to run.
             rows.sort();
 
             let mut records = Vec::new();
-            for (label, property, kind) in rows {
+            for (label, property, kind, dead) in rows {
                 let mut record = Record::new();
                 record.bind("label".to_string(), Value::Property(PropertyValue::String(label)));
                 record.bind("property".to_string(), Value::Property(PropertyValue::String(property)));
                 record.bind("type".to_string(), Value::Property(PropertyValue::String(kind)));
+                // `superseded`: entries still in a vector index's graph that no
+                // longer answer for a node. `supersededRatio`: their share of
+                // the graph, which triggers a rebuild at 0.2. Null for the
+                // kinds that delete in place.
+                let (superseded, ratio) = match dead {
+                    Some((dead, live)) => {
+                        let total = dead + live;
+                        let ratio = if total == 0 { 0.0 } else { dead as f64 / total as f64 };
+                        (PropertyValue::Integer(dead as i64), PropertyValue::Float(ratio))
+                    }
+                    None => (PropertyValue::Null, PropertyValue::Null),
+                };
+                record.bind("superseded".to_string(), Value::Property(superseded));
+                record.bind("supersededRatio".to_string(), Value::Property(ratio));
                 records.push(record);
             }
             self.results = Some(records.into_iter());
@@ -17931,17 +18239,43 @@ impl std::ops::Deref for AlgoView {
 }
 
 impl AlgorithmOperator {
-    /// Every algorithm this operator dispatches, with its calling convention.
+    /// Every algorithm this operator dispatches, read from the catalog.
     ///
     /// `Unknown algorithm: algo.bfs` gave the caller nothing to go on -- the
     /// name they wanted (`algo.shortestPath`) is not guessable from it, and
     /// the procedures do not share an argument shape either, so even the right
-    /// name fails on the first attempt. Listing both removes two rounds of
-    /// trial and error.
-    fn available() -> &'static str {
-        "pageRank({config}), shortestPath(source, target), weightedPath(source, target, weightProperty), \
-maxFlow(source, sink [, capacityProperty]), mst([weightProperty]), cdlp([label, edgeType, config]), \
-lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
+    /// name fails on the first attempt. The list used to be typed here by hand
+    /// and had fallen to 11 of the names that dispatch; reading the catalog
+    /// keeps it whole as algorithms are added. The argument shapes that list
+    /// carried are kept for those 11, and the endpoint has the rest.
+    fn available() -> String {
+        const SIGNATURES: &[(&str, &str)] = &[
+            ("pageRank", "pageRank({config})"),
+            ("shortestPath", "shortestPath(source, target)"),
+            ("weightedPath", "weightedPath(source, target, weightProperty)"),
+            ("maxFlow", "maxFlow(source, sink [, capacityProperty])"),
+            ("mst", "mst([weightProperty])"),
+            ("cdlp", "cdlp([label, edgeType, config])"),
+            ("lcc", "lcc([label, edgeType])"),
+            ("wcc", "wcc()"),
+            ("scc", "scc()"),
+            ("triangleCount", "triangleCount()"),
+            ("or.solve", "or.solve({config})"),
+        ];
+        let names: Vec<&str> = super::algorithm_catalog::ALGORITHM_CATALOG
+            .iter()
+            .map(|e| {
+                let name = e.name.strip_prefix("algo.").unwrap_or(e.name);
+                SIGNATURES
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(name, |(_, sig)| *sig)
+            })
+            .collect();
+        format!(
+            "{} (arguments and columns: GET /api/algorithms/catalog)",
+            names.join(", ")
+        )
     }
 
     /// Error for a procedure name that does not dispatch, naming what does.
@@ -18265,6 +18599,18 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
         (&["constraint", "burtconstraint"], "value"),
         (&["bellmanford"], "distance"),
     ];
+
+    /// Whether this algorithm can run on a named projection: not one of
+    /// [`Self::NOT_ON_A_PROJECTION`]. For the catalogue (#2013).
+    pub fn runs_on_projection(name: &str) -> bool {
+        let canonical = Self::canonical_name(name);
+        !Self::NOT_ON_A_PROJECTION.iter().any(|(n, _)| *n == canonical)
+    }
+
+    /// [`Self::write_back_column`] by procedure name, for the catalogue (#2013).
+    pub fn write_back_column_for(name: &str) -> Option<&'static str> {
+        Self::write_back_column(&Self::canonical_name(name))
+    }
 
     /// The column `writeProperty` stores for this canonical name, if any.
     fn write_back_column(canonical: &str) -> Option<&'static str> {
@@ -19478,6 +19824,75 @@ lcc([label, edgeType]), wcc(), scc(), triangleCount(), or.solve({config})"
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", id);
             rec.bind("step".to_string(), Value::Property(PropertyValue::Integer(i as i64)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.negativeSampling({strategy, count, k, seed})` yielding `node1,
+    /// node2`: pairs that are not edges, for training link prediction (ML-04,
+    /// #1725). See `samyama_graph_algorithms::negative_sampling` for the three
+    /// strategies and the rules every negative keeps.
+    ///
+    /// Each option is refused, not clamped, when it is out of range: a
+    /// `count` of 0 or a `k` of 1 is a mistake to report, and a silent
+    /// substitute would hand back a training set the caller did not ask for.
+    fn execute_negative_sampling(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        /// Strategies by the name a caller passes.
+        const STRATEGIES: [&str; 3] = ["random", "degree", "khop"];
+        const DEFAULT_COUNT: i64 = 100;
+        const DEFAULT_K: i64 = 2;
+        const DEFAULT_SEED: u64 = 42;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "negativeSampling",
+            &["count", "edgeType", "k", "label", "seed", "strategy"],
+        )?;
+        let (mut strategy, mut count, mut k, mut seed) =
+            ("random".to_string(), DEFAULT_COUNT, DEFAULT_K, DEFAULT_SEED);
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                if let Some(PropertyValue::String(v)) = m.get("strategy") {
+                    strategy = v.to_lowercase();
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("count") {
+                    count = *v;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("k") {
+                    k = *v;
+                }
+                if let Some(PropertyValue::Integer(v)) = m.get("seed") {
+                    seed = *v as u64;
+                }
+            }
+        }
+        if count < 1 {
+            return Err(ExecutionError::bad_argument(format!(
+                "algo.negativeSampling(): `count` must be at least 1, got {count}"
+            )));
+        }
+        let which = match strategy.as_str() {
+            "random" => crate::algo::NegativeStrategy::Random,
+            "degree" => crate::algo::NegativeStrategy::DegreeMatched,
+            "khop" if k >= 2 => crate::algo::NegativeStrategy::KHop(k as usize),
+            "khop" => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "algo.negativeSampling(): `k` must be at least 2 for the khop strategy, \
+                     got {k}; pairs 1 hop apart are edges"
+                )))
+            }
+            other => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "algo.negativeSampling(): unknown strategy `{other}`; use one of {}",
+                    STRATEGIES.map(|s| format!("`{s}`")).join(", ")
+                )))
+            }
+        };
+        let view = self.structural_view(store)?;
+        for (a, b) in crate::algo::negative_samples(&view, which, count as usize, seed) {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node1", a);
+            self.bind_node(store, &mut rec, "node2", b);
             self.results.push(rec);
         }
         Ok(())
@@ -21275,6 +21690,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,
@@ -21381,6 +21797,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,

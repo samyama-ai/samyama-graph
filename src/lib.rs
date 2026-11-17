@@ -2,7 +2,7 @@
 //!
 //! A high-performance graph database written in Rust with ~90% OpenCypher query support,
 //! RESP (Redis protocol) compatibility, multi-tenancy, HNSW vector search, natural language
-//! queries, and graph algorithms. Currently at v1.14.0.
+//! queries, and graph algorithms. Currently at v1.16.0.
 //!
 //! ## How a Graph Database Works
 //!
@@ -116,6 +116,9 @@
 #![warn(clippy::all)]
 
 pub mod auth;
+pub mod logging;
+#[cfg(feature = "otel")]
+pub mod otel;
 pub mod allocator;
 pub mod graph;
 pub mod query;
