@@ -1,14 +1,17 @@
 //! Natural Language Querying (NLQ)
-//! 
+//!
 //! Implements Text-to-Cypher translation using LLMs.
 
 pub mod cache;
 pub mod client;
 pub mod metrics;
-#[cfg(test)] #[path = "test_http_cov.rs"] pub(crate) mod test_http;
+#[cfg(test)]
+#[path = "test_http_cov.rs"]
+pub(crate) mod test_http;
 
-use thiserror::Error;
 use crate::persistence::tenant::{LLMProvider, NLQConfig};
+use serde::Deserialize;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum NLQError {
@@ -26,6 +29,43 @@ pub enum NLQError {
 
 pub type NLQResult<T> = Result<T, NLQError>;
 
+fn signature_error_to_nlq(error: crate::agent::AgentError) -> NLQError {
+    match error {
+        crate::agent::AgentError::ConfigError(message) => NLQError::ConfigError(message),
+        crate::agent::AgentError::LLMError(message) => {
+            for (prefix, map) in [
+                (
+                    "Network error: ",
+                    NLQError::NetworkError as fn(String) -> NLQError,
+                ),
+                (
+                    "Serialization error: ",
+                    NLQError::SerializationError as fn(String) -> NLQError,
+                ),
+                (
+                    "Configuration error: ",
+                    NLQError::ConfigError as fn(String) -> NLQError,
+                ),
+                (
+                    "Validation error: ",
+                    NLQError::ValidationError as fn(String) -> NLQError,
+                ),
+                (
+                    "LLM API error: ",
+                    NLQError::ApiError as fn(String) -> NLQError,
+                ),
+            ] {
+                if let Some(detail) = message.strip_prefix(prefix) {
+                    return map(detail.to_string());
+                }
+            }
+            NLQError::ApiError(message)
+        }
+        crate::agent::AgentError::ExecutionError(message) => NLQError::ValidationError(message),
+        crate::agent::AgentError::ToolError(message) => NLQError::ValidationError(message),
+    }
+}
+
 /// A question translated to Cypher, with what the model call cost.
 #[derive(Clone, Debug)]
 pub struct Translation {
@@ -38,6 +78,11 @@ pub struct Translation {
     /// Answered from the translation cache (AI-13): no model was called, so
     /// `usage` reports no tokens.
     pub cached: bool,
+}
+
+#[derive(Deserialize)]
+struct StructuredCypherOutput {
+    cypher: String,
 }
 
 pub struct NLQPipeline {
@@ -87,23 +132,45 @@ impl NLQPipeline {
             });
         }
 
-        let prompt = Self::build_prompt(question, schema_summary);
-
-        let completion = self.client.complete(&prompt).await?;
-
-        // Extract Cypher from LLM response — handle markdown fences and explanations
-        let cleaned_cypher = Self::extract_cypher(&completion.text);
+        let instruction = Self::build_prompt(question, schema_summary);
+        let signature = crate::agent::signature::SignatureSpec {
+            id: "smriti.nlq_cypher.v1",
+            instruction,
+            input_schema: serde_json::json!({"type":"object"}),
+            output_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"cypher":{"type":"string"}},
+                "required":["cypher"]
+            }),
+            demos: vec![],
+            invariants: vec![
+                crate::agent::signature::OutputInvariant::ValidCypherReadOnly {
+                    field: "cypher".into(),
+                },
+            ],
+        };
+        let outcome = crate::agent::signature::SignatureRunner::default()
+            .invoke_without_store::<_, StructuredCypherOutput>(
+                &self.client,
+                &signature,
+                &serde_json::json!({"question":question, "schema_summary":schema_summary}),
+            )
+            .await
+            .map_err(signature_error_to_nlq)?;
+        let cleaned_cypher = outcome.output.cypher.trim().to_string();
 
         if self.is_safe_query(&cleaned_cypher) {
             self.cache.put(key, cleaned_cypher.clone());
             Ok(Translation {
                 cypher: cleaned_cypher,
-                usage: completion.usage,
-                llm_latency: completion.latency,
+                usage: outcome.usage,
+                llm_latency: outcome.latency,
                 cached: false,
             })
         } else {
-            Err(NLQError::ValidationError("Generated query contains write operations or unsafe keywords".to_string()))
+            Err(NLQError::ValidationError(
+                "Generated query contains write operations or unsafe keywords".to_string(),
+            ))
         }
     }
 
@@ -121,7 +188,7 @@ impl NLQPipeline {
             - When a question involves two unrelated labels (e.g. Country + DiseaseCategory), join them through a shared node (e.g. Trial)\n\
             - Use property names from the Key Properties section\n\
             - To filter on aggregated values, use WITH to compute the aggregation first, then WHERE, then RETURN — never place WHERE after RETURN\n\
-            - Return ONLY the Cypher query, no markdown, no explanations\n\n\
+            - Return a JSON object with the Cypher query in its `cypher` string field\n\n\
             Question: \"{}\"",
             schema_summary,
             question
@@ -130,6 +197,7 @@ impl NLQPipeline {
 
     /// Extract a Cypher query from an LLM response that may contain markdown
     /// fences, explanations, or multiple code blocks.
+    #[cfg(test)]
     fn extract_cypher(response: &str) -> String {
         let trimmed = response.trim();
 
@@ -145,7 +213,8 @@ impl NLQPipeline {
 
         // No fences — take lines that look like Cypher (start with MATCH/RETURN/WITH/etc.)
         let cypher_keywords = ["MATCH", "RETURN", "WITH", "UNWIND", "CALL", "OPTIONAL"];
-        let lines: Vec<&str> = trimmed.lines()
+        let lines: Vec<&str> = trimmed
+            .lines()
             .filter(|line| {
                 let upper = line.trim().to_uppercase();
                 cypher_keywords.iter().any(|kw| upper.starts_with(kw))
@@ -320,7 +389,7 @@ pub fn config_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::tenant::{NLQConfig, LLMProvider};
+    use crate::persistence::tenant::{LLMProvider, NLQConfig};
 
     fn make_pipeline() -> NLQPipeline {
         NLQPipeline::new(NLQConfig {
@@ -330,9 +399,9 @@ mod tests {
             api_key: None,
             api_base_url: None,
             system_prompt: None,
-        }).unwrap()
+        })
+        .unwrap()
     }
-
 
     // --- config_for: the tenant's saved NLQConfig, else the environment (#438) ---
     //
@@ -417,12 +486,13 @@ mod tests {
 
     #[test]
     fn config_for_prefers_a_key_the_tenant_carries() {
-        let got = config_for(Some(saved(LLMProvider::OpenAI, Some("sk-from-tenant"))), |v| {
-            match v {
+        let got = config_for(
+            Some(saved(LLMProvider::OpenAI, Some("sk-from-tenant"))),
+            |v| match v {
                 "OPENAI_API_KEY" => Some("sk-from-env".to_string()),
                 _ => None,
-            }
-        })
+            },
+        )
         .expect("the tenant carries a key");
         assert_eq!(got.api_key.as_deref(), Some("sk-from-tenant"));
     }
@@ -453,10 +523,7 @@ mod tests {
         // and the request path must refuse it rather than build a client for it.
         let err = config_for(Some(saved(LLMProvider::Anthropic, Some("k"))), no_env)
             .expect_err("anthropic is not implemented");
-        assert!(
-            err.contains("not implemented"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("not implemented"), "unexpected error: {err}");
     }
 
     #[test]
@@ -567,13 +634,11 @@ mod tests {
     #[test]
     fn text_that_does_not_parse_is_not_safe() {
         let pipeline = make_pipeline();
-        for q in [
-            "MATCH (((",
-            "MATCH n RETURN",
-            "WITH",
-            "",
-        ] {
-            assert!(!pipeline.is_safe_query(q), "accepted unparseable text: {q:?}");
+        for q in ["MATCH (((", "MATCH n RETURN", "WITH", ""] {
+            assert!(
+                !pipeline.is_safe_query(q),
+                "accepted unparseable text: {q:?}"
+            );
         }
     }
 
@@ -588,7 +653,8 @@ mod tests {
 
     #[test]
     fn test_extract_cypher_markdown_fenced() {
-        let input = "Here is the query:\n```cypher\nMATCH (n:Person) RETURN n.name\n```\nHope this helps!";
+        let input =
+            "Here is the query:\n```cypher\nMATCH (n:Person) RETURN n.name\n```\nHope this helps!";
         let result = NLQPipeline::extract_cypher(input);
         assert_eq!(result, "MATCH (n:Person) RETURN n.name");
     }
@@ -903,5 +969,3 @@ mod tests {
         }
     }
 }
-
-
