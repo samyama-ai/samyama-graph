@@ -2178,8 +2178,8 @@ mod tests {
             // the shape the old prefix check let through (#1156).
             let srv = MockHttp::serve(vec![(
                 200,
-                r#"{"response": "MATCH (n) DETACH DELETE n"}"#.to_string(),
-            )]);
+                r#"{"response":"{\"cypher\":\"MATCH (n) DETACH DELETE n\"}"}"#.to_string(),
+            ); 3]);
             let r = handler
                 .translate_nlq(
                     "delete everything",
@@ -2188,7 +2188,7 @@ mod tests {
                 )
                 .await;
             assert!(err_text(&r).contains("write operations"), "{r:?}");
-            assert_eq!(srv.requests().len(), 1, "the model was asked once");
+            assert_eq!(srv.requests().len(), 3, "invalid structured output is repaired twice");
             assert_eq!(s.read().await.node_count(), 1, "nothing was deleted");
         }
 
