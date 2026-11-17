@@ -86,9 +86,22 @@ fn on_linux_the_binary_carries_every_probe() {
         }
         found.insert(name, args);
     }
+    // When nothing is found, say why: whether the binary has a
+    // `.note.stapsdt` section at all (the linker dropped it) or has one this
+    // parser does not read.
+    let evidence = || {
+        let sections = std::process::Command::new("readelf")
+            .args(["-S", "--wide", bin])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let named: Vec<&str> = sections.lines().filter(|l| l.contains("stapsdt") || l.contains(".probes")).collect();
+        let notes: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).take(40).collect();
+        format!("sections named stapsdt/.probes: {named:#?}\nfirst lines of readelf -n:\n{}", notes.join("\n"))
+    };
     for (name, args) in PROBES {
         let want = args.split(',').count();
         assert_eq!(found.get(*name), Some(&want),
-                   "samyama:{name} with {want} arguments is not in {bin}; readelf found {found:?}");
+                   "samyama:{name} with {want} arguments is not in {bin}; readelf found {found:?}\n{}", evidence());
     }
 }
