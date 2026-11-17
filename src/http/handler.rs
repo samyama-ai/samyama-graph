@@ -592,7 +592,11 @@ async fn run_query(
         snapshot_version = version;
         (result, props)
     } else {
-        let store_guard = state.store.read().await;
+        let store_guard = {
+            use tracing::Instrument;
+            // A stage of the request's trace (#2077).
+            state.store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+        };
         // The result cache is keyed on the statement text, which does not say which
         // dialect it was read under, so a GQL request must not be served from it until
         // the key carries the dialect. Bypassing is the conservative half of that:
@@ -745,7 +749,14 @@ async fn stream_query(
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamMsg>(STREAM_CHANNEL_CHUNKS);
-    let guard = std::sync::Arc::clone(&state.store).read_owned().await;
+    let guard = {
+        use tracing::Instrument;
+        // A stage of the request's trace (#2077).
+        std::sync::Arc::clone(&state.store)
+            .read_owned()
+            .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read"))
+            .await
+    };
     let engine = std::sync::Arc::clone(&state.engine);
     let time_limit = state.query_time_limit(&payload.graph);
     let runtime = tokio::runtime::Handle::current();
@@ -1134,6 +1145,56 @@ pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse 
             "size": state.engine.cache_len(),
         }
     }))
+}
+
+/// Query string for `GET /api/changes`.
+#[derive(Deserialize, Debug, Default)]
+pub struct ChangesParams {
+    /// The token from an earlier reply. Absent means "I have seen nothing".
+    pub since: Option<String>,
+}
+
+/// Names this server process in a change token. A restart starts the data
+/// counter again from zero, so without it a client holding `…-42` could see
+/// `…-42` again after a restart and forty-two writes of different data, and
+/// keep a stale view. Random, not the start time: two processes started in
+/// the same instant must still differ.
+fn process_token_prefix() -> &'static str {
+    static PREFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PREFIX.get_or_init(|| uuid::Uuid::new_v4().simple().to_string()[..16].to_string())
+}
+
+/// The change token for a store: this process, and how many times its data
+/// has changed. Opaque to clients; compared only for equality.
+pub fn change_token(store: &crate::graph::GraphStore) -> String {
+    format!("{}-{}", process_token_prefix(), store.data_changes())
+}
+
+/// `GET /api/changes[?since=<token>]` — has the graph's data changed? (#1771)
+///
+/// A view that wants to stay current polls this instead of re-running its
+/// query: `changed: false` means no node, relationship, label or property
+/// changed since `since` was issued, so the result it holds is still the
+/// answer. The token moves on every data change and on nothing else -- not on
+/// reads, not on cache or index housekeeping (`GraphStore::data_changes`).
+///
+/// It says *that* the graph changed, not *what* changed: any write moves it,
+/// as any write invalidates the result cache. It errs only towards
+/// "changed": a write that fails part-way can move it too, which costs a
+/// poller one re-run, never a stale view. A token from another server
+/// process, or one that does not parse, reads as changed; the safe answer to
+/// "is my copy current?" when we cannot tell is "no".
+pub async fn changes_handler(
+    State(state): State<AppState>,
+    Query(params): Query<ChangesParams>,
+) -> impl IntoResponse {
+    let token = change_token(&*state.store.read().await);
+    let changed = params.since.as_deref() != Some(token.as_str());
+    (
+        // A cached "unchanged" is the one wrong answer this route can give.
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(json!({ "token": token, "changed": changed })),
+    )
 }
 
 /// `GET /api/algorithms/catalog` — every algorithm `CALL algo.*` runs (#2013).
