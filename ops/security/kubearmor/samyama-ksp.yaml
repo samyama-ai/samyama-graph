@@ -60,6 +60,11 @@ spec:
       - dir: /sys/devices/system/cpu/
         recursive: true
         readOnly: true
+      # RocksDB reads queue/logical_block_size under the device's sysfs node,
+      # whose path depends on the machine
+      - dir: /sys/devices/
+        recursive: true
+        readOnly: true
       - dir: /sys/kernel/mm/transparent_hugepage/
         recursive: true
         readOnly: true

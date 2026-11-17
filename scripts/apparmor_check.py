@@ -167,9 +167,15 @@ def main() -> int:
     print(f"workload: writes, index, restart, snapshot export + import; {len(workload_denials)} denials")
 
     # 3: escapes, as root, so only AppArmor stands in the way.
+    # The kernel prints AppArmor denials through a rate limit (a burst, then
+    # silence for 5 s); start the escapes in a fresh window so their denials
+    # are not the ones suppressed.
+    time.sleep(6)
     escape_since = mark("escapes")
     open_shadow = sh("aa-exec", "-p", "samyama", "--", str(TARGET), "verify", "/etc/shadow", check=False)
-    unconfined = sh(str(TARGET), "verify", "/etc/shadow", check=False)
+    # The profile attaches by path, so the comparison runs the binary from where
+    # it was built, which no profile names.
+    unconfined = sh(str(Path(args.bin).resolve()), "verify", "/etc/shadow", check=False)
     if "ermission denied" not in open_shadow.stderr + open_shadow.stdout:
         problems.append(f"a confined root process read /etc/shadow: {open_shadow.stderr.strip()[:300]}")
     if "ermission denied" in unconfined.stderr + unconfined.stdout:

@@ -67,12 +67,19 @@ profile samyama /usr/{,local/}bin/samyama {
   @{PROC}/@{pid}/** r,
   @{PROC}/sys/vm/overcommit_memory r,
   @{PROC}/sys/kernel/osrelease r,
+  @{PROC}/sys/kernel/random/uuid r,
   @{PROC}/cpuinfo r,
   @{PROC}/meminfo r,
   @{PROC}/stat r,
   @{sys}/fs/cgroup/** r,
   @{sys}/devices/system/cpu/** r,
   @{sys}/kernel/mm/transparent_hugepage/** r,
+  # RocksDB reads the device's block size for direct and buffered I/O sizing
+  @{sys}/devices/**/queue/logical_block_size r,
+
+  # naming its own threads (glibc's pthread_setname_np on another thread of
+  # the process writes that thread's comm file)
+  owner @{PROC}/@{pid}/task/@{tid}/comm rw,
   /dev/urandom r,
   /dev/null rw,
 }

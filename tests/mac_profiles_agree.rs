@@ -20,6 +20,16 @@ const FROM_ABSTRACTIONS: &[&str] = &[
     "/etc/nsswitch.conf", "/lib", "/usr/lib",
 ];
 
+/// Profile rules the policy cannot carry, each with the reason. KubeArmor
+/// matches fixed paths and directories; it has no way to name a path that
+/// contains the process's own pid. Kept here, not dropped from the profile, so
+/// the difference is a line someone reads.
+const POLICY_CANNOT_NAME: &[(&str, &str)] = &[(
+    "/proc/PID/task/TID/comm",
+    "writing a sibling thread's name (glibc pthread_setname_np); under KubeArmor \
+     the write is refused and the thread is left unnamed, which nothing depends on",
+)];
+
 fn expand(path: &str, vars: &BTreeMap<String, Vec<String>>) -> Vec<String> {
     if let Some(start) = path.find("@{") {
         let end = start + path[start..].find('}').unwrap();
@@ -28,6 +38,7 @@ fn expand(path: &str, vars: &BTreeMap<String, Vec<String>>) -> Vec<String> {
             "PROC" => vec!["/proc".to_string()],
             "sys" => vec!["/sys".to_string()],
             "pid" => vec!["PID".to_string()],
+            "tid" => vec!["TID".to_string()],
             _ => vars.get(name).unwrap_or_else(|| panic!("@{{{name}}} is not defined")).clone(),
         };
         return values.iter().flat_map(|v| expand(&format!("{}{v}{}", &path[..start], &path[end + 1..]), vars)).collect();
@@ -97,6 +108,9 @@ fn every_path_the_profile_allows_the_policy_allows_the_same_way() {
     for (path, writable) in profile_paths() {
         if path.ends_with("bin/samyama") {
             assert!(procs.contains(&path), "the profile runs {path}; the policy's process list does not have it");
+            continue;
+        }
+        if POLICY_CANNOT_NAME.iter().any(|(p, _)| *p == path) {
             continue;
         }
         let path = path.replace("/PID", "");
