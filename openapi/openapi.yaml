@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Samyama Graph Database API
-  version: 1.14.0
+  version: 1.16.0
   description: |
     HTTP API for the Samyama high-performance distributed graph database.
     Supports OpenCypher queries, graph status, and CRUD operations.
@@ -766,11 +766,48 @@ paths:
                 $ref: '#/components/schemas/StatusResponse'
               example:
                 status: healthy
-                version: 1.14.0
+                version: 1.16.0
                 storage:
                   nodes: 2000
                   edges: 11000
                   persistence_degraded: false
+
+  /api/changes:
+    get:
+      operationId: getChanges
+      summary: Has the graph's data changed?
+      description: |
+        A change token for polling (#1771). Send back the token from the last
+        reply as `since`; `changed: false` means no node, relationship, label
+        or property changed in between, so a result fetched then is still
+        current and need not be re-run. The token moves on every data change
+        and on nothing else, except that a write which fails part-way may move
+        it too: it errs towards "changed", costing a re-run, never towards a
+        stale "unchanged". It says that the data changed, not what changed.
+        A token from another server process, or one that does not parse,
+        reads as changed. Opaque: compare it for equality only.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: The `token` from an earlier reply. Absent reads as changed.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The current token, and whether it differs from `since`
+          headers:
+            Cache-Control:
+              description: Always `no-store`; a cached "unchanged" would be wrong.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChangesResponse'
+              example:
+                token: 3f9c2a7be41d0c58-42
+                changed: false
 
   /api/tenants:
     get:
@@ -1713,6 +1750,16 @@ components:
           additionalProperties: true
           description: Edge properties
 
+    ChangesResponse:
+      type: object
+      required: [token, changed]
+      properties:
+        token:
+          type: string
+          description: Opaque. Send it back as `since` on the next poll.
+        changed:
+          type: boolean
+          description: True when `token` differs from `since`, or `since` was absent.
     StatusResponse:
       type: object
       properties:
@@ -1725,7 +1772,7 @@ components:
           type: string
           description: Server version
           examples:
-            - 1.14.0
+            - 1.16.0
         storage:
           type: object
           properties:
