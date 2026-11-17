@@ -1,9 +1,15 @@
-//! Costed routing between the two implemented filtered-search strategies.
+//! Costed routing between the three implemented filtered-search strategies.
 //! Work units are heuristic, not calibrated latency predictions (#1970).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterStrategy {
+    /// Score every node the predicate passes, exactly.
     Exact,
+    /// Search the graph without the predicate, filter what comes back, and
+    /// widen the search until `k` pass.
     Widen,
+    /// Search the graph with the predicate inside the walk, so the beam only
+    /// keeps passing nodes and one search returns `k` of them (#1999).
+    Inline,
 }
 #[derive(Debug, Clone)]
 pub struct FilterPlan {
@@ -11,6 +17,8 @@ pub struct FilterPlan {
     pub selectivity: f64,
     pub exact_work: f64,
     pub widen_work: f64,
+    /// Work of one graph search with the predicate in the walk (#1999).
+    pub inline_work: f64,
     /// Size of a candidate set the exact strategy enumerates instead of
     /// scanning every vector: a hierarchy subtree (#445). `None` when the
     /// exact strategy scans the whole index.
@@ -37,8 +45,9 @@ impl FilterPlan {
     /// there is none or it cannot be estimated.
     ///
     /// Exact (hierarchy-first) reads only the candidates and scores the ones
-    /// the filter passes; widening (vector-first) searches the graph with the
-    /// subtree test as its filter, at the combined selectivity.
+    /// the filter passes; widening and the in-filter search (vector-first)
+    /// search the graph with the subtree test as their filter, at the
+    /// combined selectivity.
     pub fn estimate_enumerated(
         n: usize,
         dimensions: usize,
@@ -65,34 +74,77 @@ impl FilterPlan {
         exact_work: f64,
         candidates: Option<usize>,
     ) -> Self {
+        let nf = n as f64;
+        let links = (2 * m) as f64;
+        let d = dimensions as f64;
         let fetch = if s == 0.0 {
-            n as f64
+            nf
         } else {
-            (k as f64 / s).ceil().min(n as f64)
+            (k as f64 / s).ceil().min(nf)
         };
-        let width = (ef as f64).max(2.0 * fetch).min(n as f64);
-        // Include layer-0 links, plus predicates on returned candidates.
-        let widen_work = width * (2 * m) as f64 * dimensions as f64 + fetch;
+        // Widening repeats the search, doubling what it fetches from `k`
+        // until `k` pass: each round is a search as wide as twice its fetch,
+        // and asks the predicate about every result. A predicate that passes
+        // one node in s needs about log2(1/s) rounds, priced here, not just
+        // the last one.
+        let mut widen_work = 0.0;
+        let mut round = (k as f64).min(fetch).max(1.0);
+        loop {
+            let width = (ef as f64).max(2.0 * round).min(nf);
+            // Include layer-0 links, plus predicates on returned candidates.
+            widen_work += width * links * d + round;
+            if round >= fetch {
+                break;
+            }
+            round = (2.0 * round).min(fetch);
+        }
+        // The in-filter search walks once, but keeps only passing nodes in
+        // its beam, so to fill a beam of `ef` it expands about `ef / s`
+        // nodes, each reading its layer-0 links; the predicate is asked once
+        // per node it reaches (#1999). Neither exceeds the index.
+        let beam = (ef.max(k) as f64).min(nf);
+        let expanded = if s == 0.0 { nf } else { (beam / s).min(nf) };
+        let inline_work = (expanded * links).min(nf) * d + expanded;
+        let strategy = if exact_work <= widen_work.min(inline_work) {
+            FilterStrategy::Exact
+        } else if inline_work < widen_work {
+            FilterStrategy::Inline
+        } else {
+            FilterStrategy::Widen
+        };
         Self {
-            strategy: if exact_work <= widen_work {
-                FilterStrategy::Exact
-            } else {
-                FilterStrategy::Widen
-            },
+            strategy,
             selectivity: s,
             exact_work,
             widen_work,
+            inline_work,
             candidates,
+        }
+    }
+    /// The name EXPLAIN prints for the strategy.
+    pub fn strategy_name(&self) -> &'static str {
+        match self.strategy {
+            FilterStrategy::Exact => "pre-exact",
+            FilterStrategy::Widen => "post-widen",
+            FilterStrategy::Inline => "in-filter",
         }
     }
     pub fn describe(&self) -> String {
         let order = match (self.candidates, self.strategy) {
             (Some(c), FilterStrategy::Exact) => format!(", order=hierarchy-first, subtree={c}"),
-            (Some(c), FilterStrategy::Widen) => format!(", order=vector-first, subtree={c}"),
+            (Some(c), FilterStrategy::Widen | FilterStrategy::Inline) => {
+                format!(", order=vector-first, subtree={c}")
+            }
             (None, _) => String::new(),
         };
-        format!("strategy={}{order}, selectivity={:.6}, exact_work={:.0}, widen_work={:.0}, reason=estimated predicate+distance work (uncalibrated)",
-            if self.strategy == FilterStrategy::Exact { "pre-exact" } else { "post-widen" }, self.selectivity, self.exact_work, self.widen_work)
+        format!(
+            "strategy={}{order}, selectivity={:.6}, exact_work={:.0}, widen_work={:.0}, inline_work={:.0}, reason=estimated predicate+distance work (uncalibrated)",
+            self.strategy_name(),
+            self.selectivity,
+            self.exact_work,
+            self.widen_work,
+            self.inline_work
+        )
     }
 }
 fn clamp_selectivity(selectivity: f64) -> f64 {
