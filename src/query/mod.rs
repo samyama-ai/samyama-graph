@@ -864,6 +864,9 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         let query = self.parse_to_run(query_str)?;
+        // The memory quota, once per write statement (#2225). Before the
+        // statement runs, so a refusal leaves nothing half-written.
+        store.admit_memory().map_err(executor::operator::write_error)?;
         let deadline = self.deadline(time_limit);
 
         // Both sides of this: the span on the error (#1358) and the timing

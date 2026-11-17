@@ -286,6 +286,7 @@ fn the_ceiling_counts_what_is_already_there_plus_what_this_statement_made() {
         max_nodes: Some(10),
         edges_used: 0,
         max_edges: None,
+        max_memory_bytes: None,
     }));
     assert!(store.admit_node().is_ok(), "8 of 10 used: there is room");
     store.create_node("N");

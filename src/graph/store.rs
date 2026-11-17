@@ -191,6 +191,10 @@ pub struct WriteAdmission {
     pub edges_used: u64,
     /// The edge ceiling, or `None` for no limit.
     pub max_edges: Option<u64>,
+    /// The memory ceiling in bytes, or `None` for no limit (#2225). Checked
+    /// against [`GraphStore::memory_in_use`] when a statement starts and
+    /// before a bulk import, not per row.
+    pub max_memory_bytes: Option<u64>,
 }
 
 /// Statistics about graph contents for **cost-based query optimization**.
@@ -1170,6 +1174,30 @@ struct SessionTxn {
     deleted_edges: Vec<Edge>,
 }
 
+/// A cached reading of the memory the store accounts for (#2225).
+///
+/// `memory_report` walks every node and property: 26 ms at 1M nodes in a
+/// release build, and linear in the graph, so reading it on every write would
+/// make the memory quota the slowest part of a write. The reading is kept and
+/// taken again only once the data has changed **and** at least ten times as
+/// long as the last reading took has passed, which bounds the time spent
+/// measuring to about a tenth of the time between readings.
+///
+/// So the quota is a soft ceiling: under a burst of writes the reading can lag
+/// by one interval, and the store can pass the limit by what was written in
+/// it before refusals start. A store whose data has not changed is never read
+/// again, and its reading is exact.
+#[derive(Debug, Default)]
+struct MemoryGauge {
+    bytes: u64,
+    /// `data_changes()` when `bytes` was read.
+    at_changes: u64,
+    at: Option<std::time::Instant>,
+    took: std::time::Duration,
+    /// How many times the graph was walked, for tests of the bound above.
+    readings: u64,
+}
+
 #[derive(Debug)]
 pub struct GraphStore {
     /// Node storage (Arena with versioning: NodeId -> [Versions])
@@ -1378,6 +1406,10 @@ pub struct GraphStore {
     /// the current statement. Charged against `admission`.
     admission_births: (u64, u64),
 
+    /// The last reading of [`GraphStore::memory_in_use`], so the memory
+    /// quota does not walk the whole graph on every write (#2225).
+    memory_gauge: std::sync::Mutex<MemoryGauge>,
+
     /// Next node ID
     next_node_id: u64,
 
@@ -1505,6 +1537,7 @@ impl GraphStore {
             write_log: None,
             admission: None,
             admission_births: (0, 0),
+            memory_gauge: std::sync::Mutex::new(MemoryGauge::default()),
             next_node_id: 1,
             next_edge_id: 1,
             catalog: GraphCatalog::new(),
@@ -1613,6 +1646,7 @@ impl GraphStore {
     /// refuse, and a limit reached on row 900 would leave 899 nodes behind.
     /// This asks the whole question once (#1495).
     pub fn admits_bulk(&self, nodes: u64, edges: u64) -> GraphResult<()> {
+        self.admit_memory()?;
         let Some(a) = self.admission else { return Ok(()) };
         if let Some(max) = a.max_nodes {
             let total = a
@@ -1631,6 +1665,51 @@ impl GraphStore {
             if total > max {
                 return Err(GraphError::QuotaExceeded(format!("edges ({total}/{max})")));
             }
+        }
+        Ok(())
+    }
+
+    /// Bytes the store accounts for: the graph's attributed bytes and its
+    /// indexes, what `/api/memory` reports as `attributed_bytes` and
+    /// `index_memory_bytes`. Read through the cache described on
+    /// [`MemoryGauge`], so it can lag a burst of writes by one interval.
+    pub fn memory_in_use(&self) -> u64 {
+        let mut g = self.memory_gauge.lock().unwrap_or_else(|e| e.into_inner());
+        let changes = self.data_changes();
+        let fresh = match g.at {
+            Some(at) => changes == g.at_changes || at.elapsed() < g.took * 10,
+            None => false,
+        };
+        if !fresh {
+            let started = std::time::Instant::now();
+            let index: usize = self.index_memory().iter().map(|i| i.bytes).sum();
+            g.bytes = (self.memory_report().attributed() + index) as u64;
+            g.took = started.elapsed();
+            g.at = Some(std::time::Instant::now());
+            g.at_changes = changes;
+            g.readings += 1;
+        }
+        g.bytes
+    }
+
+    /// How many times [`GraphStore::memory_in_use`] has walked the graph.
+    #[doc(hidden)]
+    pub fn memory_readings(&self) -> u64 {
+        self.memory_gauge.lock().unwrap_or_else(|e| e.into_inner()).readings
+    }
+
+    /// May a write statement start under the memory quota? (#2225)
+    ///
+    /// Refused once the store's memory is at or over the tenant's
+    /// `max_memory_bytes`, as the node and edge quotas refuse the row past
+    /// theirs. Asked once per statement rather than per row, because a reading
+    /// costs a walk of the graph; a statement admitted under the ceiling runs
+    /// to completion and the next one is refused. No ceiling, no reading.
+    pub fn admit_memory(&self) -> GraphResult<()> {
+        let Some(max) = self.admission.and_then(|a| a.max_memory_bytes) else { return Ok(()) };
+        let used = self.memory_in_use();
+        if used >= max {
+            return Err(GraphError::QuotaExceeded(format!("memory ({used}/{max} bytes)")));
         }
         Ok(())
     }

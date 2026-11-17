@@ -90,7 +90,7 @@ use ndarray::Array1;
 /// resource limits must not be classified two different ways.
 ///
 /// Everything else keeps the class it had.
-fn write_error(e: crate::graph::GraphError) -> ExecutionError {
+pub(crate) fn write_error(e: crate::graph::GraphError) -> ExecutionError {
     if matches!(e, crate::graph::GraphError::QuotaExceeded(_)) {
         return ExecutionError::Coded {
             code: crate::query::error_code::QUOTA_EXCEEDED,

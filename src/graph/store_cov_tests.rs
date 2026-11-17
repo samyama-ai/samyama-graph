@@ -115,6 +115,7 @@ fn write_admission_round_trips() {
         max_nodes: Some(10),
         edges_used: 1,
         max_edges: None,
+        max_memory_bytes: None,
     };
     store.set_write_admission(Some(a));
     assert_eq!(store.write_admission(), Some(a));
@@ -129,6 +130,7 @@ fn admit_node_refuses_at_the_ceiling_and_counts_births() {
         max_nodes: None,
         edges_used: 0,
         max_edges: None,
+        max_memory_bytes: None,
     }));
     assert!(store.admit_node().is_ok(), "no node ceiling");
 
@@ -137,6 +139,7 @@ fn admit_node_refuses_at_the_ceiling_and_counts_births() {
         max_nodes: Some(2),
         edges_used: 0,
         max_edges: None,
+        max_memory_bytes: None,
     }));
     assert!(store.admit_node().is_ok());
     store.create_node("A");
@@ -160,6 +163,7 @@ fn admit_edge_refuses_through_every_edge_creation_path() {
         max_nodes: None,
         edges_used: 0,
         max_edges: None,
+        max_memory_bytes: None,
     }));
     assert!(store.admit_edge().is_ok(), "no edge ceiling");
     store.set_write_admission(Some(WriteAdmission {
@@ -167,6 +171,7 @@ fn admit_edge_refuses_through_every_edge_creation_path() {
         max_nodes: None,
         edges_used: 4,
         max_edges: Some(5),
+        max_memory_bytes: None,
     }));
     store.create_edge(a, b, "R").unwrap();
     let err = store.create_edge(a, b, "R").unwrap_err();
@@ -190,6 +195,7 @@ fn with_write_admission_restores_the_ceiling_and_tally_it_found() {
         max_nodes: Some(2),
         edges_used: 0,
         max_edges: None,
+        max_memory_bytes: None,
     });
     store.set_write_admission(outer);
     store.create_node("Before");
@@ -199,6 +205,7 @@ fn with_write_admission_restores_the_ceiling_and_tally_it_found() {
         max_nodes: Some(1),
         edges_used: 0,
         max_edges: None,
+        max_memory_bytes: None,
     });
     let refused = store.with_write_admission(inner, |st| {
         // A tally of its own: the node created before does not count here.
@@ -225,6 +232,7 @@ fn admits_bulk_checks_nodes_and_edges_against_the_ceiling() {
         max_nodes: Some(10),
         edges_used: 7,
         max_edges: Some(10),
+        max_memory_bytes: None,
     }));
     assert!(
         store.admits_bulk(5, 3).is_ok(),
@@ -244,6 +252,7 @@ fn admits_bulk_checks_nodes_and_edges_against_the_ceiling() {
         max_nodes: None,
         edges_used: 0,
         max_edges: None,
+        max_memory_bytes: None,
     }));
     assert!(
         store.admits_bulk(u64::MAX, u64::MAX).is_ok(),
@@ -256,6 +265,7 @@ fn admits_bulk_checks_nodes_and_edges_against_the_ceiling() {
         max_nodes: Some(2),
         edges_used: 0,
         max_edges: None,
+        max_memory_bytes: None,
     }));
     store.create_node("A");
     assert!(store.admits_bulk(1, 0).is_ok());

@@ -44,6 +44,7 @@ fn store_admitting(max_nodes: Option<u64>, max_edges: Option<u64>, used: (u64, u
         max_nodes,
         edges_used: used.1,
         max_edges,
+        max_memory_bytes: None,
     }));
     s
 }

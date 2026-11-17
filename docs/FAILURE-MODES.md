@@ -127,7 +127,7 @@ is more misleading than one that admits it. Each is a test to write, tracked in
 |---|---|
 | **Disk full, or any IO error on a write path** | Only row 33 injects a real `io::Error` (a directory where the snapshot's tmp file goes). Nothing injects `ENOSPC` or a read-only directory on the WAL or RocksDB paths. The two commit-refused tests in row 16 call `pm.fail_next_apply_for_test()`: injection at the apply layer, not real IO. They pin the rollback, not what a filesystem error does on the way to it |
 | **Process killed mid-write, beyond one kill point** | Row 34 kills one server once per run, over RESP auto-commit, after about 150 acknowledged writes. A kill inside an HTTP transaction's COMMIT, a kill against a large store, and many kill points are the hand-run harness below (#1355), not a `cargo test` |
-| **Out of memory** | The memory quota checks a bookkeeping counter, not process memory, and no test exercises an allocation failure |
+| **Out of memory** | The memory quota (#2225) refuses write statements once the store's own attributed memory (graph + indexes, as `/api/memory` reports) reaches `max_memory_bytes`, read through a cached gauge, so it is a soft ceiling: a burst can pass it by one re-reading interval before refusals start. It is not process memory, and no test exercises an allocation failure |
 | **Replica lag, or a node losing leadership** | Neither exists to test: `RaftNode::write` applies locally and `initialize` makes the node leader unconditionally (#1309) |
 
 ### Measured outside the test suite: `kill -9` mid-write (REL-04, #1355)

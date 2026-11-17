@@ -184,7 +184,7 @@ impl PersistenceManager {
     /// is the "admit everything" case and costs the store nothing.
     pub fn write_admission(&self, tenant: &str) -> Option<crate::graph::WriteAdmission> {
         let quotas = self.tenants.get_tenant(tenant).ok()?.quotas;
-        if quotas.max_nodes.is_none() && quotas.max_edges.is_none() {
+        if quotas.max_nodes.is_none() && quotas.max_edges.is_none() && quotas.max_memory_bytes.is_none() {
             return None;
         }
         let usage = self.tenants.get_usage(tenant).ok()?;
@@ -193,6 +193,10 @@ impl PersistenceManager {
             max_nodes: quotas.max_nodes.map(|v| v as u64),
             edges_used: usage.edge_count as u64,
             max_edges: quotas.max_edges.map(|v| v as u64),
+            // Measured by the store, not tallied here: memory is a property of
+            // what the store holds, and the tally this used to keep was never
+            // fed (#2225).
+            max_memory_bytes: quotas.max_memory_bytes.map(|v| v as u64),
         })
     }
 

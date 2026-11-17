@@ -544,6 +544,7 @@ fn parquet_import_refuses_garbage_and_over_quota_files() {
         max_nodes: Some(1),
         edges_used: 0,
         max_edges: None,
+        max_memory_bytes: None,
     }));
     let err = import::parquet_to_nodes(&mut g, "default", "P", bytes).unwrap_err();
     assert!(matches!(err, ExportError::QuotaExceeded(_)), "{err:?}");
