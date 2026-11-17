@@ -25,6 +25,15 @@ ignore = [
     # bincode is unmaintained with no successor release. It is the snapshot and
     # WAL serialisation format, so replacing it is a format migration (#1099).
     { id = "RUSTSEC-2025-0141", reason = "bincode unmaintained, no fixed release; replacement is a storage-format change (#1099)" },
+    # chrono and chrono-tz are unmaintained as of 2026-11-03, with every version
+    # affected and no successor release (chronotope/chrono#1768). Neither is a
+    # vulnerability: the behaviour is what it was before the announcement.
+    # chrono is transitive through arrow 60, so dropping it is Arrow's to do.
+    # chrono-tz is ours and resolves IANA zones for temporal Cypher; replacing
+    # it with jiff or time is a migration, not a bump. Remove these when the
+    # crates find a maintainer or we complete that migration.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, all versions affected; transitive via arrow 60, no fixed release" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained, all versions affected; IANA zones for temporal Cypher, no fixed release" },
 ]
 
 [licenses]
