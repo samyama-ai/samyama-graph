@@ -454,6 +454,7 @@ impl FullTextIndexes {
                     property: i.property.clone(),
                     bytes,
                     entries,
+                    superseded: None,
                 }
             })
             .collect()

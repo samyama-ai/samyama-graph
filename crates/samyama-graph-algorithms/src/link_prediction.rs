@@ -49,7 +49,7 @@ pub enum LinkScore {
 /// needs intersection and union rather than iteration, and doing it on sorted
 /// slices for each of `n^2` pairs is the difference between a demo and
 /// something usable.
-fn neighbour_sets(view: &GraphView) -> Vec<HashSet<usize>> {
+pub(crate) fn neighbour_sets(view: &GraphView) -> Vec<HashSet<usize>> {
     (0..view.node_count)
         .map(|i| {
             let mut s: HashSet<usize> = view.successors(i).iter().copied().collect();

@@ -1,0 +1,144 @@
+//! Immutable, checksummed generations. CURRENT is the atomic publication point.
+//! Each holds every index's vector list and, where it could be written, its
+//! HNSW graph (#1973). The vector list is required; the graph is an
+//! accelerator, and a graph file that fails its checksum only costs a rebuild.
+use super::index::graph_io::GRAPH_SUFFIXES;
+use super::{VectorError, VectorResult};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{Read, Write},
+    path::{Component, Path},
+};
+
+#[derive(Serialize, Deserialize)]
+struct Manifest {
+    version: u32,
+    files: BTreeMap<String, String>,
+}
+fn bad(message: impl Into<String>) -> VectorError {
+    VectorError::IndexError(message.into())
+}
+fn filename(s: &str) -> VectorResult<()> {
+    let mut parts = Path::new(s).components();
+    if !matches!(parts.next(), Some(Component::Normal(_))) || parts.next().is_some() {
+        return Err(bad("checkpoint path must be one filename"));
+    }
+    Ok(())
+}
+fn digest(path: &Path) -> VectorResult<String> {
+    let mut input = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = input.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+/// Sync every dump and its manifest before the parent publishes the generation.
+pub(super) fn seal(path: &Path) -> VectorResult<()> {
+    let mut files = BTreeMap::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| bad("non-UTF8 checkpoint filename"))?;
+        filename(&name)?;
+        files.insert(name, digest(&entry.path())?);
+        // Opened for writing, not with `File::open`. `sync_all` is
+        // `FlushFileBuffers` on Windows, which needs a handle carrying write
+        // access and returns "Access is denied" (os error 5) without one --
+        // so the read-only handle this used to take failed every
+        // `checkpoint_all` on Windows, not only a republish (#1696). A
+        // read-only fsync is fine on Unix, which is why it survived here.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(entry.path())?
+            .sync_all()?;
+    }
+    let mut out = std::fs::File::create(path.join("manifest.json"))?;
+    serde_json::to_writer(&mut out, &Manifest { version: 1, files })
+        .map_err(|e| bad(e.to_string()))?;
+    out.flush()?;
+    out.sync_all()?;
+    // Unix only -- same reason as the sibling fsync in `manager`, and as
+    // `snapshot::persist` (#1696). This one is the directory, which Windows
+    // refuses to open at all; the per-file fsyncs above are files, and are
+    // portable now that they are taken on a writable handle.
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+/// Validate all bytes and metadata before any live index is replaced.
+/// Returns the graph files that passed; a graph file that failed is left
+/// out rather than failing the generation, since its index can be rebuilt
+/// from its vector list, which is never optional.
+pub(super) fn verify(path: &Path) -> VectorResult<BTreeSet<String>> {
+    let manifest: Manifest =
+        serde_json::from_reader(std::fs::File::open(path.join("manifest.json"))?)
+            .map_err(|e| bad(e.to_string()))?;
+    if manifest.version != 1 {
+        return Err(bad("unsupported vector checkpoint version"));
+    }
+    if !manifest.files.contains_key("metadata.json") {
+        return Err(bad("checkpoint has no metadata"));
+    }
+    let mut graphs = BTreeSet::new();
+    for (name, expected) in &manifest.files {
+        filename(name)?;
+        let graph = GRAPH_SUFFIXES.iter().any(|s| name.ends_with(s));
+        let matches = match digest(&path.join(name)) {
+            Ok(actual) => actual == *expected,
+            Err(_) if graph => false,
+            Err(e) => return Err(e),
+        };
+        if graph {
+            if matches {
+                graphs.insert(name.clone());
+            }
+        } else if !matches {
+            return Err(bad(format!("vector checkpoint checksum mismatch: {name}")));
+        }
+    }
+    let metadata: Vec<serde_json::Value> =
+        serde_json::from_reader(std::fs::File::open(path.join("metadata.json"))?)
+            .map_err(|e| bad(e.to_string()))?;
+    for item in metadata {
+        for field in ["label", "property_key", "filename"] {
+            if item[field].as_str().is_none() {
+                return Err(bad(format!("missing checkpoint field {field}")));
+            }
+        }
+        if item["dimensions"].as_u64().filter(|n| *n > 0).is_none() {
+            return Err(bad("invalid checkpoint dimensions"));
+        }
+        let file = item["filename"]
+            .as_str()
+            .ok_or_else(|| bad("missing filename"))?;
+        filename(file)?;
+        if GRAPH_SUFFIXES.iter().any(|s| file.ends_with(s)) {
+            return Err(bad("vector list named as a graph file"));
+        }
+        if !manifest.files.contains_key(file) {
+            return Err(bad("index file absent from manifest"));
+        }
+    }
+    Ok(graphs)
+}
+pub(super) fn generation(root: &Path) -> VectorResult<Option<std::path::PathBuf>> {
+    let current = root.join("CURRENT");
+    match std::fs::read_to_string(current) {
+        Ok(name) => {
+            filename(name.trim())?;
+            Ok(Some(root.join(name.trim())))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
