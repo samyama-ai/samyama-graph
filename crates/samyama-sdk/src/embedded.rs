@@ -479,24 +479,48 @@ fn value_to_json(
     }
 }
 
-fn is_write_query(cypher: &str) -> bool {
-    let upper = cypher.trim().to_uppercase();
-    upper.starts_with("CREATE")
-        || upper.starts_with("DELETE")
-        || upper.starts_with("SET")
-        || upper.starts_with("MERGE")
-        || upper.starts_with("CALL")
-        || upper.contains(" CREATE ")
-        || upper.contains(" DELETE ")
-        || upper.contains(" SET ")
-        || upper.contains(" MERGE ")
-        || upper.contains(" CALL ")
+/// The one graph an embedded client serves, as the servers spell it.
+const DEFAULT_GRAPH: &str = "default";
+
+/// Refuse a `graph` this client cannot honour.
+///
+/// The embedded client holds exactly one `GraphStore` and the read path has no
+/// tenant parameter, so there is nothing to scope a foreign name to. Ignoring
+/// the argument is the one option that is actually wrong: a caller asking for
+/// `analytics` was being served `default`'s rows and told nothing (#2139).
+///
+/// Refusing is what the HTTP server does (`reject_foreign_graph`,
+/// `src/http/handler.rs:100`) and what the RESP server does before
+/// `GRAPH.DELETE` (`src/protocol/command.rs:586`), for the reason #1110
+/// records: the name used to be parsed and thrown away, so
+/// `GRAPH.DELETE analytics` emptied `default`.
+fn reject_foreign_graph(graph: &str) -> SamyamaResult<()> {
+    if graph == DEFAULT_GRAPH {
+        return Ok(());
+    }
+    Err(SamyamaError::QueryError(format!(
+        "This build serves a single graph ('{DEFAULT_GRAPH}'); the requested graph \
+         '{graph}' does not exist and the argument cannot be honoured."
+    )))
 }
 
 #[async_trait]
 impl SamyamaClient for EmbeddedClient {
     async fn query(&self, graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
-        if is_write_query(cypher) {
+        reject_foreign_graph(graph)?;
+        // The AST decides, not the text. Matching strings disagreed with the
+        // servers and was whitespace-sensitive: `" MERGE "` does not occur in
+        // `MATCH (a:X)\nMERGE (b:X)`, so a write was routed to the read path
+        // and failed with WriteInReadTransaction (#2139, and #1111 for the
+        // same defect in the servers).
+        //
+        // A statement that does not parse is not classified; the caller gets
+        // the parse error, which is what it would have got a beat later.
+        let is_write = self
+            .engine
+            .statement_is_write(cypher)
+            .map_err(|e| SamyamaError::QueryError(e.to_string()))?;
+        if is_write {
             let mut store_guard = self.store.write().await;
             let batch = self.engine.execute_mut(cypher, &mut *store_guard, graph)
                 .map_err(|e| SamyamaError::QueryError(e.to_string()))?;
@@ -509,14 +533,18 @@ impl SamyamaClient for EmbeddedClient {
         }
     }
 
-    async fn query_readonly(&self, _graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
+    async fn query_readonly(&self, graph: &str, cypher: &str) -> SamyamaResult<QueryResult> {
+        reject_foreign_graph(graph)?;
         let store_guard = self.store.read().await;
         let batch = self.engine.execute(cypher, &*store_guard)
             .map_err(|e| SamyamaError::QueryError(e.to_string()))?;
         Ok(record_batch_to_query_result(&batch, &*store_guard))
     }
 
-    async fn delete_graph(&self, _graph: &str) -> SamyamaResult<()> {
+    async fn delete_graph(&self, graph: &str) -> SamyamaResult<()> {
+        // Was `_graph`, and cleared the whole store whatever name it was given
+        // -- #1110's defect, still live here after the servers fixed it.
+        reject_foreign_graph(graph)?;
         let mut store_guard = self.store.write().await;
         store_guard.clear();
         Ok(())
@@ -822,22 +850,88 @@ mod tests {
         assert_eq!(guard.node_count(), 1);
     }
 
-    #[test]
-    fn test_is_write_query_variants() {
-        assert!(is_write_query("CREATE (n:Person)"));
-        assert!(is_write_query("DELETE n"));
-        assert!(is_write_query("SET n.name = 'x'"));
-        assert!(is_write_query("MERGE (n:Person)"));
-        assert!(is_write_query("CALL db.something()"));
-        assert!(is_write_query("MATCH (n) CREATE (m)"));
-        assert!(is_write_query("MATCH (n) DELETE n"));
-        assert!(is_write_query("MATCH (n) SET n.x = 1"));
-        assert!(is_write_query("MATCH (n) MERGE (m)"));
-        assert!(is_write_query("MATCH (n) CALL db.x()"));
+    /// The classification the old string matcher got right, kept so the move
+    /// to the AST is not a regression. These all read as writes on one line.
+    #[tokio::test]
+    async fn a_write_on_one_line_still_routes_to_the_write_path() {
+        let client = EmbeddedClient::new();
+        for cypher in [
+            "CREATE (n:Person)",
+            "MATCH (n) CREATE (m:Person)",
+            "MERGE (n:Person {name: 'a'})",
+            "MATCH (n:Person) SET n.x = 1",
+            "MATCH (n:Person) DETACH DELETE n",
+        ] {
+            client
+                .query("default", cypher)
+                .await
+                .unwrap_or_else(|e| panic!("{cypher:?} was refused: {e}"));
+        }
+    }
 
-        assert!(!is_write_query("MATCH (n) RETURN n"));
-        assert!(!is_write_query("MATCH (n:Person) RETURN n.name"));
-        assert!(!is_write_query("RETURN 1 + 2"));
+    /// The reported failure. `" MERGE "` does not occur in these -- the newline
+    /// sits where the matcher wanted a space -- so each was classified as a
+    /// read, sent to the read path, and failed with
+    /// `Samyama.ClientError.Statement.WriteInReadTransaction`.
+    #[tokio::test]
+    async fn a_write_split_over_lines_is_not_mistaken_for_a_read() {
+        let client = EmbeddedClient::new();
+        for cypher in [
+            "MATCH (a:Person)\nMERGE (b:Person {name: 'b'})",
+            "MATCH (a:Person)\nCREATE (b:Person {name: 'b'})",
+            "UNWIND [1, 2] AS r\nMERGE (n:Row {v: r})",
+            "MATCH (a:Person)\n  SET a.seen = true",
+        ] {
+            client
+                .query("default", cypher)
+                .await
+                .unwrap_or_else(|e| panic!("{cypher:?} was treated as a read: {e}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_is_still_a_read() {
+        let client = EmbeddedClient::new();
+        for cypher in ["MATCH (n) RETURN n", "RETURN 1 + 2"] {
+            client.query("default", cypher).await.unwrap();
+            client.query_readonly("default", cypher).await.unwrap();
+        }
+    }
+
+    /// A statement that does not parse is not classified. The caller gets the
+    /// parse error rather than a guess about which path to take.
+    #[tokio::test]
+    async fn an_unparseable_statement_reports_its_parse_error() {
+        let client = EmbeddedClient::new();
+        assert!(client.query("default", "MATCH ((((").await.is_err());
+    }
+
+    /// Reads used to ignore `graph` entirely, so a caller asking for another
+    /// tenant was served `default`'s rows and told nothing.
+    #[tokio::test]
+    async fn a_foreign_graph_is_refused_on_every_surface() {
+        let client = EmbeddedClient::new();
+        client.query("default", "CREATE (n:Person {name: 'a'})").await.unwrap();
+
+        for graph in ["analytics", "DEFAULT", ""] {
+            assert!(
+                client.query(graph, "MATCH (n) RETURN n").await.is_err(),
+                "query({graph:?}) was served default's rows"
+            );
+            assert!(
+                client.query_readonly(graph, "MATCH (n) RETURN n").await.is_err(),
+                "query_readonly({graph:?}) was served default's rows"
+            );
+            assert!(
+                client.delete_graph(graph).await.is_err(),
+                "delete_graph({graph:?}) was accepted"
+            );
+        }
+
+        // The refusals left the one real graph alone -- #1110's defect was
+        // that a foreign name cleared it.
+        let rows = client.query("default", "MATCH (n) RETURN n").await.unwrap();
+        assert_eq!(rows.records.len(), 1, "a refused call still touched default");
     }
 
     #[tokio::test]
