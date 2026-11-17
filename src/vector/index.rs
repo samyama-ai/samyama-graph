@@ -983,6 +983,42 @@ impl VectorIndex {
         k: usize,
         ef: Option<usize>,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
+        self.search_graph(query, k, ef, None)
+    }
+
+    /// The `k` nearest among the nodes `keep` passes, by a graph search that
+    /// tests `keep` during the walk (#1999): the beam holds only current
+    /// entries that pass, so one search fills `k` without widening, while
+    /// the walk still passes through failing and dead entries to reach their
+    /// neighbours. `ef` is as for [`search_ef`](Self::search_ef).
+    ///
+    /// The answer is as an exact filtered search would report it -- same
+    /// distances, nearest first -- and has `k` rows whenever `k` nodes pass:
+    /// a walk that comes back short, which a graph the predicate cuts into
+    /// pieces can do, is answered by [`search_exact_where`](Self::search_exact_where).
+    /// `keep` can be asked about a node more than once; a caller whose
+    /// predicate is costly memoises it.
+    pub fn search_inline_where(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        keep: &dyn Fn(NodeId) -> bool,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        self.search_graph(query, k, ef, Some(keep))
+    }
+
+    /// The graph search behind [`search_ef`](Self::search_ef) and
+    /// [`search_inline_where`](Self::search_inline_where); `keep`, when
+    /// given, joins the liveness test inside the walk.
+    fn search_graph(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        keep: Option<&dyn Fn(NodeId) -> bool>,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        let pass = |id: NodeId| keep.is_none_or(|keep| keep(id));
         if query.len() != self.dimensions {
             return Err(VectorError::DimensionMismatch {
                 expected: self.dimensions,
@@ -1010,7 +1046,7 @@ impl VectorIndex {
         // vectors costs microseconds and is always right, so there is nothing to trade.
         const EXACT_SEARCH_MAX: usize = 128;
         if n <= EXACT_SEARCH_MAX {
-            return Ok(self.report(self.brute_force_search(query, k.min(n))));
+            return Ok(self.report(self.brute_force_where(query, k.min(n), &pass)));
         }
 
         // The graph still holds entries that no longer answer for a node
@@ -1032,10 +1068,19 @@ impl VectorIndex {
         if self.superseded > 0
             && ef_search.saturating_mul(self.params.m).saturating_mul(2) >= n
         {
-            return Ok(self.report(self.brute_force_search(query, want)));
+            return Ok(self.report(self.brute_force_where(query, want, &pass)));
         }
         let live = |id: &usize| self.is_current(*id);
-        let filter: Option<&dyn FilterT> = if self.superseded > 0 { Some(&live) } else { None };
+        // The predicate joins the liveness test inside the walk (#1999), so
+        // the beam keeps only current entries that pass.
+        let live_and_kept = |id: &usize| self.is_current(*id) && pass(NodeId::new(self.node_at(*id)));
+        let filter: Option<&dyn FilterT> = if keep.is_some() {
+            Some(&live_and_kept)
+        } else if self.superseded > 0 {
+            Some(&live)
+        } else {
+            None
+        };
         // hnsw_rs 0.2.1 can panic deep in search_layer (hnsw.rs:938,
         // `return_points.peek().unwrap()`) on certain graphs. A panic here would
         // unwind across the await point and take the whole server down, so a single
@@ -1064,7 +1109,7 @@ impl VectorIndex {
                     "[vector] HNSW search panicked on {}-vector index; using exact brute-force fallback",
                     n
                 );
-                return Ok(self.report(self.brute_force_search(query, k.min(n))));
+                return Ok(self.report(self.brute_force_where(query, k.min(n), &pass)));
             }
         };
 
@@ -1075,6 +1120,7 @@ impl VectorIndex {
             .into_iter()
             .filter(|res| self.is_current(res.d_id))
             .map(|res| (NodeId::new(self.node_at(res.d_id)), res.distance))
+            .filter(|(id, _)| keep.is_none() || pass(*id))
             .take(want)
             .collect();
 
@@ -1084,7 +1130,8 @@ impl VectorIndex {
         // (#1498). A query that IS a stored vector is the "more like this"
         // case, so answer it exactly: the stored copy is merged in at its true
         // distance and the list re-sorted, rather than trusting the graph.
-        let present = self.exact_matches(query);
+        let mut present = self.exact_matches(query);
+        present.retain(|(id, _)| pass(*id));
         if !present.is_empty() {
             neighbors.retain(|(id, _)| !present.iter().any(|(p, _)| p == id));
             let mut merged = present;
@@ -1099,11 +1146,15 @@ impl VectorIndex {
         // approximation — and unlike a panic it is silent. Fall back rather than report
         // "no matches" for data that is present. A short one is the same failure
         // when dead entries crowded out the live ones (#1968).
+        // With a predicate a short walk is expected when fewer than `k` nodes
+        // pass, and the exact scan is then the answer, so it is not reported.
         if neighbors.len() < k.min(n) {
-            eprintln!(
-                "[vector] HNSW returned no neighbours from a {n}-vector index; using exact fallback"
-            );
-            return Ok(self.report(self.brute_force_search(query, k.min(n))));
+            if keep.is_none() {
+                eprintln!(
+                    "[vector] HNSW returned no neighbours from a {n}-vector index; using exact fallback"
+                );
+            }
+            return Ok(self.report(self.brute_force_where(query, k.min(n), &pass)));
         }
 
         Ok(self.report(neighbors))
@@ -1160,14 +1211,6 @@ impl VectorIndex {
         f32s.chain(f16s)
             .filter(|(i, _)| self.is_current(*i))
             .map(|(_, sv)| sv)
-    }
-
-    /// Exact nearest-neighbour search by linear scan over stored vectors.
-    /// Used as a fallback when the HNSW index search panics. It ranks by the
-    /// index's own metric, so it matches the graph; non-finite distances are
-    /// skipped.
-    fn brute_force_search(&self, query: &[f32], k: usize) -> Vec<(NodeId, f32)> {
-        self.brute_force_where(query, k, &|_| true)
     }
 
     /// The `k` nearest among the nodes `keep` passes, by exact scan, with the
@@ -1238,6 +1281,10 @@ impl VectorIndex {
         Ok(self.report(scored))
     }
 
+    /// Exact nearest-neighbour search by linear scan over the current
+    /// entries `keep` passes. Small indexes, and the graph search when it
+    /// panics or comes back short, fall back to it. It ranks by the index's
+    /// own metric, so it matches the graph; non-finite distances are skipped.
     fn brute_force_where(
         &self,
         query: &[f32],
