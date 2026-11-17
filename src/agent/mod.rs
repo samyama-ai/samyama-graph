@@ -2,15 +2,17 @@
 //!
 //! Implements agents that can use tools to enrich the graph.
 
+pub mod enrich;
 pub mod executor;
 pub mod planner;
+pub mod signature;
 pub mod tools;
-pub mod enrich;
 
 use crate::graph::GraphStore;
 use crate::nlq::client::NLQClient;
 use crate::persistence::tenant::{AgentConfig, NLQConfig};
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,6 +35,18 @@ pub enum AgentError {
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;
+
+#[derive(Deserialize)]
+struct StructuredToolPlan {
+    calls: Vec<StructuredToolCall>,
+}
+
+#[derive(Deserialize)]
+struct StructuredToolCall {
+    tool: String,
+    args_json: String,
+    parallel_with_prev: bool,
+}
 
 /// Trait for agent tools
 #[async_trait]
@@ -98,11 +112,7 @@ impl AgentRuntime {
 
     /// Execute a pre-built plan against the registered tools, writing
     /// telemetry edges to the attached store.
-    pub async fn execute_plan(
-        &self,
-        prompt: &str,
-        plan: &ToolPlan,
-    ) -> AgentResult<PlanRunResult> {
+    pub async fn execute_plan(&self, prompt: &str, plan: &ToolPlan) -> AgentResult<PlanRunResult> {
         let store = self.store.as_ref().ok_or_else(|| {
             AgentError::ConfigError(
                 "AgentRuntime has no store; call with_store() before execute_plan".into(),
@@ -134,21 +144,65 @@ impl AgentRuntime {
                 })
             })
             .collect();
-        let planner_prompt = format!(
-            "You are a tool-call planner. Given the user prompt and a catalogue of tools, \
-output ONLY a JSON plan matching `{{\"calls\": [{{\"tool\": string, \"args\": object, \"parallel_with_prev\": bool}}]}}`. \
-Do not repeat a tool in a plan. Choose parallel_with_prev=true only when the call does not depend on the previous one.\n\n\
-Tools: {}\n\nContext: {}\n\nPrompt: {}",
-            serde_json::to_string(&tool_catalog).unwrap_or_default(),
-            context,
-            prompt,
-        );
-
-        let raw = client
-            .generate_cypher(&planner_prompt)
-            .await
-            .map_err(|e| AgentError::LLMError(e.to_string()))?;
-        let plan = ToolPlan::from_llm_json(&raw)?;
+        let allowed_tools = tool_catalog
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let signature = signature::SignatureSpec {
+            id: "smriti.tool_planner.v1",
+            instruction: "Choose registered tools for the user request. Return each call's arguments as a JSON object encoded in args_json. Use parallel_with_prev only when independent of the previous call. Do not repeat a tool.".into(),
+            input_schema: serde_json::json!({"type":"object"}),
+            output_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"calls":{"type":"array","items":{"type":"object","properties":{
+                    "tool":{"type":"string"},
+                    "args_json":{"type":"string"},
+                    "parallel_with_prev":{"type":"boolean"}
+                },"required":["tool","args_json","parallel_with_prev"]}}},
+                "required":["calls"]
+            }),
+            demos: vec![],
+            invariants: vec![
+                signature::OutputInvariant::RegisteredToolNamesOnly {
+                    field: "calls".into(),
+                    allowed: allowed_tools,
+                },
+                signature::OutputInvariant::ValidJsonObjectsInArray {
+                    field: "calls".into(),
+                    string_field: "args_json".into(),
+                },
+            ],
+        };
+        let runner = signature::SignatureRunner::default();
+        let structured = runner
+            .invoke_without_store::<_, StructuredToolPlan>(
+                &client,
+                &signature,
+                &serde_json::json!({
+                    "tools": tool_catalog,
+                    "context": context,
+                    "prompt": prompt,
+                }),
+            )
+            .await?;
+        let calls = structured
+            .output
+            .calls
+            .into_iter()
+            .map(|call| {
+                let args = serde_json::from_str(&call.args_json).map_err(|error| {
+                    AgentError::ExecutionError(format!(
+                        "validated tool arguments could not be decoded: {error}"
+                    ))
+                })?;
+                Ok(ToolCall {
+                    tool: call.tool,
+                    args,
+                    parallel_with_prev: call.parallel_with_prev,
+                })
+            })
+            .collect::<AgentResult<Vec<_>>>()?;
+        let plan = ToolPlan { calls };
         self.execute_plan(prompt, &plan).await
     }
 }
@@ -226,14 +280,23 @@ mod tests {
     async fn process_trigger_maps_llm_failures_to_llm_error() {
         let runtime = AgentRuntime::new(ollama_config(&dead_base_url()));
         let err = runtime.process_trigger("p", "c").await.unwrap_err();
-        assert!(matches!(err, AgentError::LLMError(ref m) if m.contains("Network error")), "{err:?}");
+        assert!(
+            matches!(err, AgentError::LLMError(ref m) if m.contains("Network error")),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
     async fn execute_plan_without_store_is_a_config_error() {
         let runtime = AgentRuntime::new(mock_agent_config());
-        let err = runtime.execute_plan("p", &ToolPlan::default()).await.unwrap_err();
-        assert!(matches!(err, AgentError::ConfigError(ref m) if m.contains("with_store")), "{err:?}");
+        let err = runtime
+            .execute_plan("p", &ToolPlan::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AgentError::ConfigError(ref m) if m.contains("with_store")),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
@@ -257,34 +320,44 @@ mod tests {
 
     #[tokio::test]
     async fn plan_and_execute_sends_tool_catalogue_and_runs_the_returned_plan() {
-        let plan = r#"```json
-{"calls": [{"tool": "web_search", "args": {"query": "samyama"}}]}
-```"#;
+        let plan = r#"{"calls":[{"tool":"web_search","args_json":"{\"query\":\"samyama\"}","parallel_with_prev":false}]}"#;
         let srv = MockHttp::serve(vec![ollama_says(plan)]);
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let mut runtime = AgentRuntime::new(ollama_config(&srv.base_url)).with_store(store.clone());
         runtime.register_tool(Arc::new(tools::WebSearchTool::new("k".into())));
 
-        let run = runtime.plan_and_execute("tell me about samyama", "ctx-123").await.unwrap();
+        let run = runtime
+            .plan_and_execute("tell me about samyama", "ctx-123")
+            .await
+            .unwrap();
         assert_eq!(run.records.len(), 1);
         assert_eq!(run.records[0].tool, "web_search");
         assert_eq!(run.records[0].args, serde_json::json!({"query": "samyama"}));
 
         let sent = srv.requests()[0].json();
         let prompt = sent["prompt"].as_str().unwrap();
-        assert!(prompt.contains("\"name\":\"web_search\""), "tool catalogue missing: {prompt}");
-        assert!(prompt.contains("Context: ctx-123"));
-        assert!(prompt.contains("Prompt: tell me about samyama"));
+        assert!(
+            prompt.contains("\"name\":\"web_search\""),
+            "tool catalogue missing: {prompt}"
+        );
+        assert!(prompt.contains("\"context\":\"ctx-123\""));
+        assert!(prompt.contains("\"prompt\":\"tell me about samyama\""));
+        assert!(
+            sent["format"]["properties"]["calls"]["items"]["properties"]["args_json"].is_object()
+        );
     }
 
     #[tokio::test]
     async fn plan_and_execute_rejects_an_unparseable_plan() {
-        let srv = MockHttp::serve(vec![ollama_says("I cannot help with that.")]);
+        let srv = MockHttp::serve(vec![ollama_says("I cannot help with that."); 3]);
         let runtime = AgentRuntime::new(ollama_config(&srv.base_url))
             .with_store(Arc::new(RwLock::new(GraphStore::new())));
         let err = runtime.plan_and_execute("p", "c").await.unwrap_err();
-        assert!(matches!(err, AgentError::ExecutionError(ref m) if m.contains("could not parse plan")), "{err:?}");
-        assert_eq!(srv.requests().len(), 1);
+        assert!(
+            matches!(err, AgentError::ExecutionError(ref m) if m.contains("failed after 3 attempt(s)")),
+            "{err:?}"
+        );
+        assert_eq!(srv.requests().len(), 3);
     }
 
     #[tokio::test]
@@ -296,9 +369,18 @@ mod tests {
 
     #[test]
     fn agent_error_messages_name_their_kind() {
-        assert_eq!(AgentError::ConfigError("a".into()).to_string(), "Configuration error: a");
-        assert_eq!(AgentError::ToolError("b".into()).to_string(), "Tool error: b");
+        assert_eq!(
+            AgentError::ConfigError("a".into()).to_string(),
+            "Configuration error: a"
+        );
+        assert_eq!(
+            AgentError::ToolError("b".into()).to_string(),
+            "Tool error: b"
+        );
         assert_eq!(AgentError::LLMError("c".into()).to_string(), "LLM error: c");
-        assert_eq!(AgentError::ExecutionError("d".into()).to_string(), "Execution error: d");
+        assert_eq!(
+            AgentError::ExecutionError("d".into()).to_string(),
+            "Execution error: d"
+        );
     }
 }
