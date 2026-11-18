@@ -123,8 +123,9 @@ pub(crate) fn candidates(view: &GraphView, u: usize, direction: Direction) -> Ve
     let mut out: Vec<(usize, f64)> = Vec::new();
     let weight_at = |pos: usize| view.weights.as_ref().map_or(1.0, |w| w[pos]);
     if matches!(direction, Direction::Out | Direction::Both) {
-        for pos in view.out_offsets[u]..view.out_offsets[u + 1] {
-            out.push((view.out_targets[pos], weight_at(pos)));
+        let start = view.out_offsets[u];
+        for (i, &v) in view.out_targets[start..view.out_offsets[u + 1]].iter().enumerate() {
+            out.push((v, weight_at(start + i)));
         }
     }
     if matches!(direction, Direction::In | Direction::Both) {
@@ -134,9 +135,10 @@ pub(crate) fn candidates(view: &GraphView, u: usize, direction: Direction) -> Ve
         sources.sort_unstable();
         sources.dedup();
         for s in sources {
-            for pos in view.out_offsets[s]..view.out_offsets[s + 1] {
-                if view.out_targets[pos] == u {
-                    out.push((s, weight_at(pos)));
+            let start = view.out_offsets[s];
+            for (i, &v) in view.out_targets[start..view.out_offsets[s + 1]].iter().enumerate() {
+                if v == u {
+                    out.push((s, weight_at(start + i)));
                 }
             }
         }
