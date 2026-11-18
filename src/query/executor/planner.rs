@@ -914,10 +914,16 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
     "db.schema.visualization",
 ];
 
+/// Named procedures outside `db.*`, offered as "did you mean" beside
+/// [`KNOWN_DB_PROCEDURES`] but not listed among the schema procedures when
+/// nothing is close (#2098).
+pub const KNOWN_OTHER_PROCEDURES: &[&str] = &["ai.rag.retrieve"];
+
 /// The refusal for a procedure name nothing dispatches: a likely intended
 /// name when there is one, and otherwise where the procedures are.
 pub fn unknown_procedure_message(name: &str) -> String {
-    match crate::query::suggest::closest(name, KNOWN_DB_PROCEDURES.iter().copied()) {
+    let known = KNOWN_DB_PROCEDURES.iter().chain(KNOWN_OTHER_PROCEDURES).copied();
+    match crate::query::suggest::closest(name, known) {
         Some(known) => format!("Unknown procedure: `{name}`. Did you mean `{known}`?"),
         None => format!(
             "Unknown procedure: `{name}`. The schema procedures are {}; graph \
@@ -4080,6 +4086,43 @@ impl QueryPlanner {
                 call_clause.arguments.clone(),
                 &yields,
             )?));
+        }
+
+        if call_clause.procedure_name == super::rag_ops::NAME {
+            // (label, property, queryVector, k, hops) (#2098). The first four
+            // are `db.index.vector.queryNodes`' own, planned by it, so the two
+            // read their arguments the same way and refuse the same mistakes.
+            let args = &call_clause.arguments;
+            if args.len() != 5 {
+                return Err(ExecutionError::PlanningError(format!(
+                    "{} takes (label, property, queryVector, k, hops)",
+                    super::rag_ops::NAME
+                )));
+            }
+            let hops = match super::operator::eval_expression(&args[4], &super::Record::new(), store) {
+                Ok(super::Value::Property(PropertyValue::Integer(h))) if h >= 0 => h as usize,
+                _ => {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "{}: hops must be a non-negative integer",
+                        super::rag_ops::NAME
+                    )))
+                }
+            };
+            let search = CallClause {
+                procedure_name: "db.index.vector.queryNodes".to_string(),
+                arguments: args[..4].to_vec(),
+                yield_items: ["node", "score"]
+                    .iter()
+                    .map(|n| crate::query::ast::YieldItem { name: n.to_string(), alias: None })
+                    .collect(),
+            };
+            let search = self.plan_call_filtered(&search, store, None, None)?;
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::rag_ops::RagRetrieveOperator::new(search, hops, &yields)?));
         }
 
         if call_clause.procedure_name == "db.index.vector.queryNodes" {
