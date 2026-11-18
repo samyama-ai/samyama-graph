@@ -6799,6 +6799,9 @@ NodeDeleted { id, .. } => {
             IndexDefinition::VectorParams { label, property, .. } => {
                 (5u8, label.clone(), property.clone(), String::new())
             }
+            IndexDefinition::VectorKind { label, property, .. } => {
+                (6u8, label.clone(), property.clone(), String::new())
+            }
         });
         IndexCatalog { definitions }
     }
@@ -6977,6 +6980,8 @@ NodeDeleted { id, .. } => {
         // Applied after every index is declared, so a record that comes before
         // its index's declaration still finds it (#1971).
         let mut vector_params = Vec::new();
+        // And its kind (#1975).
+        let mut vector_kinds = Vec::new();
 
         for def in &catalog.definitions {
             match def {
@@ -7006,6 +7011,9 @@ NodeDeleted { id, .. } => {
                 IndexDefinition::Point { name, label, property } => {
                     self.create_point_index(name, label, property);
                     report.point += 1;
+                }
+                IndexDefinition::VectorKind { label, property, kind } => {
+                    vector_kinds.push((label, property, *kind));
                 }
                 IndexDefinition::VectorParams { label, property, m, ef_construction, ef } => {
                     vector_params.push((
@@ -7052,6 +7060,19 @@ NodeDeleted { id, .. } => {
                 }
                 Err(e) => {
                     tracing::warn!("could not restore HNSW parameters on {label}.{property}: {e}");
+                    report.failed += 1;
+                }
+            }
+        }
+        for (label, property, kind) in vector_kinds {
+            match self.vector_index.set_kind(label, property, kind) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!("vector index kind for {label}.{property}, which has no vector index");
+                    report.failed += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("could not restore the vector index kind on {label}.{property}: {e}");
                     report.failed += 1;
                 }
             }
@@ -7232,7 +7253,7 @@ NodeDeleted { id, .. } => {
         quantization: crate::vector::index::Quantization,
         params: crate::vector::HnswParams,
     ) -> VectorResult<()> {
-        self.vector_index.create_index_with_params(
+        self.create_vector_index_with_kind(
             name,
             label,
             property_key,
@@ -7240,6 +7261,32 @@ NodeDeleted { id, .. } => {
             metric,
             quantization,
             params,
+            crate::vector::IndexKind::Hnsw,
+        )
+    }
+
+    /// Create a named vector index of the given kind (#1975).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_vector_index_with_kind(
+        &self,
+        name: Option<&str>,
+        label: &str,
+        property_key: &str,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: crate::vector::index::Quantization,
+        params: crate::vector::HnswParams,
+        kind: crate::vector::IndexKind,
+    ) -> VectorResult<()> {
+        self.vector_index.create_index_with_kind(
+            name,
+            label,
+            property_key,
+            dimensions,
+            metric,
+            quantization,
+            params,
+            kind,
         )?;
         self.mark_index_catalog_changed();
         Ok(())
