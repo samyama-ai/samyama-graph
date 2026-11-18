@@ -435,6 +435,18 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         LABEL,
         EDGE_TYPE,
     ]),
+    // Neighbour sampling (ML-02, #1717). `seeds` is one node id or a list.
+    // `batchSize` has no fixed default: left out, every seed is one batch.
+    ("algo.sample.neighbors", &[
+        pos("seeds", T::List, true),
+        Param { name: "fanout", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None },
+        key("direction", T::String, D::String("out")),
+        opt("weightProperty", T::String),
+        opt("batchSize", T::Integer),
+        key("seed", T::Integer, D::Integer(42)),
+        LABEL,
+        EDGE_TYPE,
+    ]),
 ];
 
 impl AlgorithmEntry {
