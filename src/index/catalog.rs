@@ -67,6 +67,14 @@ pub enum IndexDefinition {
         ef_construction: usize,
         ef: Option<usize>,
     },
+    /// The kind of the vector index on `label.property` when it is not HNSW,
+    /// with its IVF parameters (#1975). A record of its own and last, for
+    /// the reasons `VectorParams` is.
+    VectorKind {
+        label: String,
+        property: String,
+        kind: crate::vector::IndexKind,
+    },
 }
 
 /// Every index declaration a tenant has, as one record.
