@@ -97,7 +97,9 @@ where
 pub fn init(format: LogFormat) {
     use tracing_subscriber::util::SubscriberInitExt;
     #[cfg(feature = "otel")]
-    if let Some(provider) = crate::otel::from_env() {
+    let export = crate::otel::from_env();
+    #[cfg(feature = "otel")]
+    if let crate::otel::Startup::On { provider, endpoint } = &export {
         use tracing_subscriber::filter::LevelFilter;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::Layer;
@@ -112,13 +114,19 @@ pub fn init(format: LogFormat) {
         };
         tracing_subscriber::registry()
             .with(logs.with_filter(LevelFilter::INFO))
-            .with(crate::otel::layer(&provider))
+            .with(crate::otel::layer(provider))
             .init();
+        // Through the subscriber, so it is JSON under `--log-format json`.
+        tracing::info!(endpoint = %endpoint, "OpenTelemetry traces export started");
         return;
     }
     match format {
         LogFormat::Text => tracing_subscriber::fmt::init(),
         LogFormat::Json => json_subscriber(std::io::stderr).init(),
+    }
+    #[cfg(feature = "otel")]
+    if let crate::otel::Startup::Failed { endpoint, error } = &export {
+        tracing::warn!(endpoint = %endpoint, error = %error, "OpenTelemetry export not started");
     }
 }
 
