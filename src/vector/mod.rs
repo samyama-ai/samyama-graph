@@ -52,7 +52,7 @@ pub mod exact;
 pub mod index;
 pub mod manager;
 
-pub use index::{VectorIndex, DistanceMetric, HnswParams, VectorError, VectorResult};
+pub use index::{VectorIndex, DistanceMetric, HnswParams, IndexKind, IvfParams, VectorError, VectorResult};
 pub use manager::{VectorIndexManager, IndexKey};
 
 mod checkpoint;
