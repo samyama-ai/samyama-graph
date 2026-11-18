@@ -347,7 +347,8 @@ mod tests {
         let e = s.all_edges()[0].id;
         // Every kind of write: each must invalidate the memo, so the cached
         // hash always equals a fresh one.
-        let writes: Vec<Box<dyn Fn(&mut GraphStore)>> = vec![
+        type Write = Box<dyn Fn(&mut GraphStore)>;
+        let writes: Vec<Write> = vec![
             Box::new(move |s| s.set_node_property(T, a, "age", 40i64).unwrap()),
             Box::new(move |s| {
                 s.set_edge_property(e, "since", 1999i64).unwrap();
